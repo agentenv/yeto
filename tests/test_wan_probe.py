@@ -1,4 +1,4 @@
-"""S26 E3b: island link probe, its island hook, and the launcher's relaunch of
+"""Island link probe, its island hook, and the launcher's relaunch of
 an island whose probe rejected the container's link."""
 
 from __future__ import annotations

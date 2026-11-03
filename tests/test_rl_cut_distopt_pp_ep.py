@@ -3,8 +3,8 @@
 CPU protocol test, NOT GPU evidence. Every rank is simulated in one process
 with duck-typed Megatron DistOpt leaves (``gbuf_ranges``, main-param shards,
 Adam moments) and the REAL fork-M5 helpers (``dp_invariant_state`` at the
-Miles image pin and at the stage-1 branch s25-distopt, read from a local Miles
-checkout; skipped when absent).
+current Miles fork pin, read from a local Miles checkout; skipped when
+absent).
 save -> fresh rebuild -> restore -> re-export must be element-wise equal, and
 the full FP32 masters gathered for the republish (state_plugin.full_masters)
 must equal the pre-cut ones. A different DP/EP layout is refused.
@@ -26,16 +26,10 @@ from yeto.rl.adapters.miles import cut_plugin as cp
 from yeto.rl.adapters.miles import state_plugin as sp
 
 DPS_PATH = "miles/backends/megatron_utils/lora/dp_invariant_state.py"
-# The fork-M5 helpers at the Miles image pin, and at the stage-1 fork branch that
-# carries the CPU-offload (HybridDeviceOptimizer) state (S25 N7.1d, not pushed).
+# The fork helpers at the current Miles fork pin (side-effect-free reads plus
+# the CPU-offload state), read from a local Miles checkout.
 DPS_SOURCES = {
-    "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", os.path.expanduser("~/work/miles-m3")), "c35702e"),
-    "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", os.path.expanduser("~/work/miles-next")), "s25-distopt"),
-    # E1: + export_named_optimizer_state(device=None) on the image pin 44d41efd (not pushed)
-    "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", os.path.expanduser("~/work/miles-next")),
-                         "yeto/s26-e1-device-export"),
-    # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
-    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", os.path.expanduser("~/work/miles-s26-e6-fp8")), "ed5f64fd7"),
+    "fork-ed5f64fd7": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/nonexistent"), "ed5f64fd7"),
 }
 
 
@@ -281,7 +275,7 @@ def test_save_restore_reexport_is_elementwise_equal(tmp_path, layout):
 @needs_dps
 @pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
 def test_resume_manifest_samples_each_rank_own_ranges_and_survives_the_cut(tmp_path, layout):
-    # N7.6 under the sharded optimizer (N7.1d): every rank records the moments of the
+    # Resume state under the sharded optimizer: every rank records the moments of the
     # parameters it owns a range of, and the restored rank reproduces them exactly.
     from yeto.rl.engine.resume_manifest import OptimizerResumeState, restore_problems, ResumeManifest
 
@@ -363,7 +357,7 @@ def test_local_states_cover_with_fillers():
 
 
 # --------------------------------------------------------------------------
-# E1: background cuts copy their state device-to-device first
+# background cuts copy their state device-to-device first
 # --------------------------------------------------------------------------
 
 
@@ -403,7 +397,7 @@ def test_device_export_uses_the_fork_device_argument_when_it_has_one():
 @pytest.mark.parametrize("staged", [False, True], ids=["resident", "sleeps_after_cut"])
 @pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
 def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, staged, monkeypatch):
-    """Same shard (file bytes, digests, N7.6 resume state) from the device path as from the
+    """Same shard (file bytes, digests, resume state) from the device path as from the
     inline host path, although the trainer trains on before the writer copies to the host."""
     ranks = _world(layout)
     _train(ranks)
@@ -557,8 +551,8 @@ class _ManyParams(torch.nn.Module):
 
 
 def test_host_background_write_gives_the_host_copy_back(tmp_path, capsys):
-    """S27 G-EY: once a host background write is finished, its host copy is no
-    longer resident (s27-elastic-c: the donor container stayed at 692 of its
+    """Once a host background write is finished, its host copy is no
+    longer resident (in an elastic run the donor container stayed at 692 of its
     736 GiB peak after the snapshot). Heap-sized tensors need ``malloc_trim``,
     and ``torch.save`` before 2.13 holds the saved storages in a reference
     cycle; ``_release_capture`` handles both before the summary is ready."""
@@ -602,7 +596,7 @@ def test_host_background_write_gives_the_host_copy_back(tmp_path, capsys):
 
 
 def test_host_background_writes_the_inline_shard_from_one_host_copy(tmp_path):
-    """S27 G-EL peer snapshots (``background="host"``): the state is copied to the
+    """Peer snapshots (``background="host"``): the state is copied to the
     host at the step boundary and a thread of the rank writes it; the shard, its
     summary and its bytes equal the inline save's. ``poll_cut_shard`` never waits."""
     import time

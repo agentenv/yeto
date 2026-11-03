@@ -2,7 +2,7 @@
 # CPU-only identity check of a pushed yeto miles-ports image, without docker:
 # streams `crane export` of the image and extracts only the identity files,
 # then asserts the fork SHAs, the manifest and the sglang version.  Also
-# greps the Megatron-LM checkout for the mHC spec slot (M4 D2 risk).
+# greps the Megatron-LM checkout for the mHC spec slot (a known risk for the mHC port).
 #
 #   scripts/check_miles_ports_image.sh <image@sha256:...> <miles_sha> <sglang_sha> <sglang_version> [out_dir]
 #

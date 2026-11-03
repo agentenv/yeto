@@ -1,4 +1,4 @@
-"""S27 G-BG: a full-parameter synced group on Miles (dry run; no cloud, no Ray).
+"""A full-parameter synced group on Miles (dry run; no cloud, no Ray).
 
 Two trainer islands merged by the syncer (``--rl-sample-role trainer``,
 full-parameter asynchronous rounds) and two sampler islands of the same launch
@@ -180,7 +180,7 @@ def test_group_forwards_delta_releases_to_its_trainers_only():
     assert config.release_delta_full_every == 8 and config.store == f"{MOUNT}/trainer1"
 
 
-# ------------------------------------------------- how long the samplers run (S27 G-CA)
+# ------------------------------------------------- how long the samplers run
 @pytest.mark.parametrize(("follow", "trainers"), [("trainer", 1), ("merged", 2)])
 def test_samplers_run_until_the_trainers_they_feed_ended(capsys, follow, trainers):
     # the trainers run asynchronous rounds until the syncer stops them (H=2 local

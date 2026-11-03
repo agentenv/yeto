@@ -762,7 +762,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError("plan rl_engine must be 'ports'")
     _require_ports_plan(learner)
     if plan.get("secrlenv_daemon") is not None:
-        raise HarnessError("secrlenv daemon plans are no longer supported (S26 E0.5)")
+        raise HarnessError("secrlenv daemon plans are no longer supported")
     tms_patch = plan.get("tms_preload_patch")
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if learner.get("rl_offload_train"):
@@ -832,7 +832,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if sync_preset not in {"strict-avg", "decoupled"}:
         raise HarnessError("plan has an invalid learner sync_preset")
     if learner.get("evaluation") is not None or plan.get("eval_checkpoint") is not None:
-        # SSH evaluation ran only the SecRLEnv agent, removed in S26 E0.5.
+        # SSH evaluation ran only the SecRLEnv agent, since removed.
         raise HarnessError("SSH evaluation is restricted to the removed secrlenv agent")
     fragments = learner.get("fragments", 1)
     pipeline = learner.get("pipeline", 1)
@@ -1732,13 +1732,15 @@ def _syncer_runtime_identity_functions() -> str:
     return r"""# A syncer launched before its checkpoint existed runs without --resume;
 # both argv variants are the same process identity.
 syncer_argv_matches() {
-  local -n MATCH_ACTUAL=$1
-  local MATCH_START=$2
-  local -n MATCH_EXPECTED=$3
-  local MATCH_INDEX
-  [ "$((${#MATCH_ACTUAL[@]} - MATCH_START))" -eq "${#MATCH_EXPECTED[@]}" ] || return 1
-  for MATCH_INDEX in "${!MATCH_EXPECTED[@]}"; do
-    [ "${MATCH_ACTUAL[$((MATCH_START + MATCH_INDEX))]}" = "${MATCH_EXPECTED[$MATCH_INDEX]}" ] || return 1
+  # $1 and $3 name arrays; indirect expansion instead of local -n (bash 4.3+),
+  # which an older bash rejects and would leave both arrays empty (a match)
+  local MATCH_START=$2 MATCH_INDEX=0 MATCH_ACTUAL_N MATCH_EXPECTED_N MATCH_A MATCH_E
+  eval "MATCH_ACTUAL_N=\${#$1[@]}; MATCH_EXPECTED_N=\${#$3[@]}"
+  [ "$((MATCH_ACTUAL_N - MATCH_START))" -eq "$MATCH_EXPECTED_N" ] || return 1
+  while [ "$MATCH_INDEX" -lt "$MATCH_EXPECTED_N" ]; do
+    eval "MATCH_A=\${$1[$((MATCH_START + MATCH_INDEX))]}; MATCH_E=\${$3[$MATCH_INDEX]}"
+    [ "$MATCH_A" = "$MATCH_E" ] || return 1
+    MATCH_INDEX=$((MATCH_INDEX + 1))
   done
 }
 
@@ -2946,7 +2948,7 @@ def _event_path(artifacts: Path, learner_id: int) -> Path:
 def _run_algorithm_provenance(
     plan: dict[str, Any], artifacts: Path
 ) -> tuple[str | None, tuple[str, ...]]:
-    """The ports run's algorithm for export (rl-algorithm-capabilities D9).
+    """The ports run's algorithm for export.
 
     Taken from what the islands actually ran: every island's
     ``rl_engine_selected`` events must carry one and the same canonical

@@ -1,4 +1,4 @@
-"""Island-entry wiring of DeepSeek V4 expert-full on ports (P0 1.7b.2). No Miles, no GPU."""
+"""Island-entry wiring of DeepSeek V4 expert-full on ports. No Miles, no GPU."""
 
 from __future__ import annotations
 

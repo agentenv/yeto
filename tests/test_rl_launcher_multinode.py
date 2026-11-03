@@ -47,7 +47,7 @@ def test_min_nodes_from_recipe_and_flag():
     assert launcher.rl_min_nodes(SimpleNamespace(rl_placement="colocated", rl_min_nodes_per_learner=0), spec) == 1
     with pytest.raises(ValueError, match="does not fit"):
         launcher.rl_min_nodes(_args(rollout_num_gpus_per_engine=16), spec)
-    # Q1/Q3 ruling 2026-10-04: smallest replica tp*cp*ep*pp may span nodes
+    # Smallest replica tp*cp*ep*pp may span nodes
     (four,) = parse_gpu_spec("nebius:4x8xh100")
     # EP shares ranks with TP x DP (etp = 1): tp2 pp2 ep4 -> 2*2*max(1, 4/2) = 8 trainer GPUs (+ engine 8)
     assert launcher.rl_min_nodes(_args(pipeline_parallel=2, expert_parallel=4), four) == 2
@@ -62,12 +62,12 @@ def test_min_nodes_from_recipe_and_flag():
         launcher.rl_min_nodes(_args(tensor_parallel=2, pipeline_parallel=3, expert_parallel=4), four)  # replica 12
 
 
-# ---- 1.6 task level (D1/D6) and 1.8 teardown (D10)
+# ---- 1.6 task level and 1.8 teardown
 
 def test_multinode_env_prelude():
     assert launcher.multinode_env_prelude("nebius", 1) == ""
     nebius = launcher.multinode_env_prelude("nebius", 2)
-    assert "/sys/class/net" in nebius and "GLOO_SOCKET_IFNAME=\"$YETO_IFACE\"" in nebius  # D6: detected on the node (Nebius NIC is network-interface-0)
+    assert "/sys/class/net" in nebius and "GLOO_SOCKET_IFNAME=\"$YETO_IFACE\"" in nebius  # detected on the node (Nebius NIC is network-interface-0)
     assert "NCCL_IB_DISABLE" in nebius
     assert "SOCKET_IFNAME" not in launcher.multinode_env_prelude("aws", 2)
 
@@ -90,12 +90,12 @@ def test_two_node_island_task(monkeypatch):
     task = launcher.make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert task.num_nodes == 2 and task.resources.network_tier == "best"
     assert "--actor-num-nodes 1 --actor-num-gpus-per-node 8 --rl-island-gpus-per-node 8" in task.run
-    assert "/sys/class/net" in task.run and 'GLOO_SOCKET_IFNAME="$YETO_IFACE"' in task.run  # D6: detected on the node
+    assert "/sys/class/net" in task.run and 'GLOO_SOCKET_IFNAME="$YETO_IFACE"' in task.run  # detected on the node
     head, _, worker = task.run.partition("\nelse\n")
     assert "ray start --head" in head
-    # G1 (2026-10-03): the dashboard/state API must be reachable from worker nodes
+    # The dashboard/state API must be reachable from worker nodes
     assert "--include-dashboard=true" in head and "--dashboard-host=0.0.0.0" in head
-    # G1 (2026-10-03): worker nodes fetch the pinned model snapshot before joining the Ray
+    # Worker nodes fetch the pinned model snapshot before joining the Ray
     assert "snapshot_download" in worker and "a" * 40 in worker and "exit 1" in worker
     assert worker.index("snapshot_download") < worker.index("ray start --address")
     assert worker.index("trap stop_miles_ray EXIT") < worker.index('ray start --address="$MASTER_ADDR:6379"')
@@ -178,7 +178,7 @@ def test_teardown_two_nodes_probe_failure_is_false():
 
 
 def test_network_tier_best_only_where_the_cloud_honors_it():
-    # G1 (2026-10-03): Nebius rejects network_tier=best for anything but H100:8/H200:8
+    # Nebius rejects network_tier=best for anything but H100:8/H200:8
     # ("Catalog does not contain any instances"), so a 2x1xL40S island asks for none.
     assert launcher.multinode_network_tier("nebius", "H100", 8) == "best"
     assert launcher.multinode_network_tier("nebius", "L40S", 1) is None
@@ -187,7 +187,7 @@ def test_network_tier_best_only_where_the_cloud_honors_it():
 
 
 def test_failure_path_teardown_verifies_every_node(monkeypatch):
-    """rl-multinode-island D10 (s1-mn-20261004d G4): FleetController._down -> SkySDKOps.down
+    """rl-multinode-island teardown: FleetController._down -> SkySDKOps.down
     must take the island's node count, not the single-node default."""
     seen = {}
 
@@ -202,7 +202,7 @@ def test_failure_path_teardown_verifies_every_node(monkeypatch):
     assert seen == {"isl-l0": 2, "other": 1}
 
 
-# ---- Q2 (2026-10-04 ruling): rollout/trainer mixed on one node, trainer shape from the cfg placement
+# ---- rollout/trainer mixed on one node, trainer shape from the cfg placement
 
 _GPU_DIR = Path(__file__).resolve().parent / "multinode_gpu"
 
@@ -364,7 +364,7 @@ def test_learner_parses_bundle_map_into_the_run_config_layout():
 
 
 def test_island_task_forwards_the_dp_optimizer(monkeypatch):
-    # S27 G-BE: --rl-dp-optimizer reaches the island; the default (auto) adds nothing.
+    # --rl-dp-optimizer reaches the island; the default (auto) adds nothing.
     import sys
     import types
 

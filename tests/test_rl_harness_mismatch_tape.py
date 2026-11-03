@@ -1,4 +1,4 @@
-"""S14-M1: per-record TITO session mismatches reach the tape as ``rl_harness_mismatch``
+"""Per-record TITO session mismatches reach the tape as ``rl_harness_mismatch``
 (observe only). No Ray: the hook is exercised on fake samples and the driver on FakeEngine."""
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from yeto.rl.adapters.miles import rollout_meta_hook as hook
 from yeto.rl.adapters.miles.rollout import handle_from_metadata
 
 # Where upstream Miles imports, the hook takes the real Ray path and starts Ray here
-# (S15, 10-07: dozens of workers). Run only with --run-ray-local.
+# (dozens of workers). Run only with --run-ray-local.
 pytestmark = pytest.mark.ray_local
 
 KEY = hook.TITO_SESSION_MISMATCH_KEY

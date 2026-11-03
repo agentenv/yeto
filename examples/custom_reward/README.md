@@ -1,10 +1,17 @@
-# 自定义奖励示例
+# Custom reward example
 
-`reward.py` 是一个最小的中立奖励：输入中立轨迹（`yeto.rl.rewards.types.Trajectory`），返回奖励结果（`RewardResult`），不 import 任何训练框架。
+`reward.py` is a minimal neutral reward: it takes a neutral trajectory
+(`yeto.rl.rewards.types.Trajectory`), returns a reward result (`RewardResult`)
+and imports no training framework.
 
-- 按名称：`import examples.custom_reward.reward` 后名称 `ends_with_label` 已注册。
-- 按引用：`examples.custom_reward.reward:ends_with_label`。
-- Miles 下取 `--custom-rm-path` 的值：`yeto.rl.adapters.miles.rewards.miles_custom_rm_path(<名称或引用>)`；名称未注册时报错并列出已注册名称。
-- 加载时记录插件身份（模块、函数名、源码文件 sha256，见 `yeto.rl.rewards.registry.load_reward`），改源码身份即变。
+- By name: after `import examples.custom_reward.reward`, the name
+  `ends_with_label` is registered.
+- By reference: `examples.custom_reward.reward:ends_with_label`.
+- Value for Miles' `--custom-rm-path`:
+  `yeto.rl.adapters.miles.rewards.miles_custom_rm_path(<name or reference>)`; an
+  unregistered name is an error that lists the registered names.
+- Loading records the plugin identity (module, function name, sha256 of the
+  source file; see `yeto.rl.rewards.registry.load_reward`), so editing the source
+  changes the identity.
 
-测试：`python -m pytest examples/custom_reward/test_reward.py`。
+Test: `python -m pytest examples/custom_reward/test_reward.py`.

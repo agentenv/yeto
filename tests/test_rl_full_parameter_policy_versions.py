@@ -1,4 +1,4 @@
-"""S27 R-1: policy versions of an island under full-parameter asynchronous rounds.
+"""Policy versions of an island under full-parameter asynchronous rounds.
 
 No Ray. Covered here:
 
@@ -254,7 +254,7 @@ def test_full_parameter_synced_trainer_plan(monkeypatch):
               "--rl-checkpoint-store", "modal-volume://yeto-r1/run-a", "--rl-sample-wait-s", "900",
               "--cluster-prefix", "r1-synced",
               "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json")
-    # store-fed trainers start no engine: no fixed partition (S27 G-BG)
+    # store-fed trainers start no engine: no fixed partition
     full = ("--rl-sync-preset", "full-parameter", "--rl-parameter-layout-sha256", "e" * 64,
             "--fragments", "4")
     gpu = "modal:2xh100,modal:2xh100"

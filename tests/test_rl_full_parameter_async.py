@@ -1,4 +1,4 @@
-"""S27 P2: full-parameter asynchronous sharded rounds. No Ray.
+"""Full-parameter asynchronous sharded rounds. No Ray.
 
 ``--rl-sync-full-parameter-rounds async`` replaces the strict policy sweep
 (fixed roster, equal weights, no momentum) with ordinary syncer fragment
@@ -911,7 +911,7 @@ def test_real_syncer_keeps_depth_rounds_open_and_merges_like_the_reference(
     assert "push rejected" not in log
 
 
-# -- S27 G-AA: island wait timeouts, pipeline 60, terminal retire ---------------
+# -- island wait timeouts, pipeline 60, terminal retire ---------------
 
 
 def _timed_pairing(*streams, wait_timeout, total=6, fragments=2, depth=2):
@@ -938,7 +938,7 @@ class _ArrivingRole(_PairedRole):
 
 
 def test_a_broadcast_that_arrived_before_the_check_is_not_a_timeout():
-    # s27-gr-d island 0: step 8's broadcast arrived while the island pushed
+    # A GPU run's island 0: step 8's broadcast arrived while the island pushed
     # its next round; the check ran before the apply and failed the island.
     actor = _ArrivingRole("actor", [_candidate("actor", 1)], [])
     pairing = _timed_pairing(actor, wait_timeout=1.0)
@@ -1060,7 +1060,7 @@ def test_the_island_passes_the_wait_timeout_to_its_role_stream():
 
 
 def test_whole_round_fixed_roster_plan_is_accepted():
-    """The s27-gr-f options: one boundary pushes all 60 fragments to a fixed
+    """The whole-round options: one boundary pushes all 60 fragments to a fixed
     roster syncer (quorum 2 of 2, no grace, exact base)."""
     extra = ("--fragments", "60", "--rl-sync-full-parameter-rounds", "async", "--total-steps", "1",
              "--rl-sync-fragment-pipeline", "60", "--rl-sync-quorum", "2", "--rl-sync-grace-ms", "0",
@@ -1080,7 +1080,7 @@ def test_whole_round_fixed_roster_plan_is_accepted():
 @needs_cargo
 @pytest.mark.usefixtures("_hmac_key")
 def test_real_fixed_roster_syncer_merges_a_whole_60_fragment_round_at_once(syncer_binary, tmp_path, monkeypatch):
-    """s27-gr-f: ``--total-steps 1 --rl-sync-fragment-pipeline 60`` with a fixed
+    """``--total-steps 1 --rl-sync-fragment-pipeline 60`` with a fixed
     roster (quorum 2 of 2, grace 0, max base lag 0). Both learners hold every
     push until all 60 PULLs are open, so the run finishes only if the syncer
     opens the whole round at once; then every step merges both learners, no

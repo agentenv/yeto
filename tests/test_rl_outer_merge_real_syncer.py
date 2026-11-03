@@ -1,4 +1,4 @@
-"""S27 P1: the outer-merge options against the real Rust syncer (CPU, no Ray).
+"""The outer-merge options against the real Rust syncer (CPU, no Ray).
 
 The syncer runs the exact command the launcher builds for
 ``--rl-sync-preset decoupled`` plus the ``--rl-sync-*`` options. Two or three

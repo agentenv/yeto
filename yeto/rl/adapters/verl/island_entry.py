@@ -67,13 +67,13 @@ def parse_args(argv):
     p.add_argument("--seq-len", type=int, required=True)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--wan-streams", type=int, default=4)
-    # S26 E3: bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
+    # bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
     p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
-    # S27 G-EQ2: the launcher passes this to every island; the verl island used to
+    # the launcher passes this to every island; the verl island used to
     # ignore it, so a model whose HF support ships with the checkpoint could not load
     p.add_argument("--trust-remote-code", action="store_true")
-    # S27 G-EQ2: FSDP2 host-memory offload (npu1: 64 GiB cards, 30B full parameters)
+    # FSDP2 host-memory offload (e.g. 64 GiB Ascend cards with 30B full parameters)
     p.add_argument("--rl-fsdp-offload", choices=("none", "param", "optimizer", "both"),
                    default="none")
     p.add_argument("--rl-algorithm-spec", default=None)
@@ -82,34 +82,34 @@ def parse_args(argv):
     p.add_argument("--rl-sync-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
-    # S27 G-EV (VERL-PARITY #10): the separate-mode island generates one batch ahead
+    # the separate-mode island generates one batch ahead
     p.add_argument("--rl-rollout-ahead", type=int, default=0)
-    # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
+    # a trainer island over the sample buffer (sample_roles; the sampler is
     # the engine sampler island, yeto.rl.engine.engine_sampler). --rl-resume-store
-    # names the buffer's store there, and the round-cut store otherwise (N7.6b)
+    # names the buffer's store there, and the round-cut store otherwise
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
-    # S27 G-EQ3: staged bf16 delta releases on a full-parameter buffer trainer
+    # staged bf16 delta releases on a full-parameter buffer trainer
     # (sample_roles._check_release_delta; 0 turns them off)
     p.add_argument("--rl-release-delta-full-every", type=int, default=0)
-    # S28 G-120C: a memory / MFU measurement run on a buffer trainer writes no policy
+    # a memory / MFU measurement run on a buffer trainer writes no policy
     # release (one 120B release is about 225 GB and a dozen minutes per round)
     p.add_argument("--rl-measure-no-release", action="store_true")
-    # S29: a measurement run also skips the full policy hash of the first and the last
+    # a measurement run also skips the full policy hash of the first and the last
     # round (about 480 GB of FP32 masters, ~30 min each on the 120B island); needs
     # --rl-measure-no-release and --rl-verify-every (train_options.verify_plan)
     p.add_argument("--rl-measure-no-verify", action="store_true")
-    # S28 G-120C: release only these policy versions (comma-separated), e.g. "2": a
+    # release only these policy versions (comma-separated), e.g. "2": a
     # multi-step run trains on the samples it has and releases once for the samplers
     p.add_argument("--rl-release-only-versions", default=None,
                    type=lambda text: [int(v) for v in text.split(",") if v.strip()])
-    # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
+    # the pair flags the launcher forwards per island (sample_roles.island_flags);
     # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
     p.add_argument("--rl-sampler-node", default=None)
     p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
     p.add_argument("--rl-sampler-data-slot", default=None)
-    # S27 P4: a sampler island claims its rows from the task dispenser (the launcher
+    # a sampler island claims its rows from the task dispenser (the launcher
     # sets these; yeto.rl.engine.task_dispense.DispensedPrompts)
     p.add_argument("--rl-data-dispense", action="store_true", default=False)
     p.add_argument("--rl-dispense-addr", default=None)
@@ -117,40 +117,40 @@ def parse_args(argv):
     p.add_argument("--rl-dispense-mix", default=None)
     p.add_argument("--rl-dispense-by-label", action="store_true", default=False)
     p.add_argument("--rl-dispense-labels", default=None)
-    # S27 G-FS (VERL-PARITY #33): the rollout runs Harbor trials; the rows select
+    # the rollout runs Harbor trials; the rows select
     # yeto's agent loop (``agent_name: yeto_harbor``).
     p.add_argument("--rl-agentic-harbor", action="store_true", default=False)
-    # S27 task assignment: this training island's row slot of --data (data_split)
+    # task assignment: this training island's row slot of --data (data_split)
     p.add_argument("--rl-data-slot", default=None)
     p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
     p.add_argument("--rl-sampler-min-round-seconds", type=float, default=None)
-    # S25 C3: a synced trainer island (syncer, learner m of N) reads lane m of the
+    # a synced trainer island (syncer, learner m of N) reads lane m of the
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
     p.add_argument("--rl-sample-lanes", type=int, default=None)
-    # S27 G-EV: a relay trainer (spot samplers through the head's sample relay,
+    # a relay trainer (spot samplers through the head's sample relay,
     # .relay_trainer) and the layout board for the spot subscribers (island 0)
     p.add_argument("--rl-sample-relay", action="store_true")
     p.add_argument("--rl-sample-relay-prefetch", type=int, default=None)
     p.add_argument("--rl-spot-subscribers", type=int, default=0)
-    # N7.6b round cuts (same flags as the Miles island)
+    # round cuts (same flags as the Miles island)
     p.add_argument("--rl-resume-state-dir", default=None)
     p.add_argument("--rl-cut-every", type=int, default=None)
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
-    # S27 G-ED: island cuts of a synced island (S27 R-2) and the timed cut interval
+    # island cuts of a synced island and the timed cut interval
     p.add_argument("--rl-island-cut-store", default=None)
     p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
     p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
-    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
+    # rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
-    # S27 G-DC: the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
+    # the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);
     # --parameter-mode comes from add_island_flags below (choices lora/full, default lora)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
     p.add_argument("--expert-parallel", type=int, default=None)
-    # S28 G-CPW: the launcher's neutral --context-parallel (rl_island_task forwards it
+    # the launcher's neutral --context-parallel (rl_island_task forwards it
     # when > 1); parse_known_args used to drop it, so the island trained at CP=1
     p.add_argument("--context-parallel", type=int, default=1)
     p.add_argument("--actor-num-nodes", type=int, default=1)
@@ -161,45 +161,44 @@ def parse_args(argv):
     p.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
     p.add_argument("--sglang-mem-fraction-static", type=float, default=None)
     p.add_argument("--rl-max-tokens-per-gpu", type=int, default=None)
-    # S27 G-FL: the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
+    # the Ascend recipe's plugin stack (yeto.rl.ascend_plugin_stack), Megatron only
     p.add_argument("--rl-ascend-plugin-stack", default=None)
-    # S29: which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
+    # which recipe's plugin list to load; the 18.60 list adds five numerics-changing plugins
     p.add_argument("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"))
-    # S27 G-FL: Megatron's per-bucket non-finite gradient check is on unless this says otherwise
+    # Megatron's per-bucket non-finite gradient check is on unless this says otherwise
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
-    # S27 G-FN: host share of the Megatron optimizer state (the engine-neutral flag the
+    # host share of the Megatron optimizer state (the engine-neutral flag the
     # launcher already forwards; megatron_engine.optimizer_memory_overrides maps it)
     p.add_argument("--rl-optimizer-offload-fraction", type=float, default=0.0)
-    # S28 G-RCP: precision-aware optimizer on the card, bf16 Adam moments, FP32 master
+    # precision-aware optimizer on the card, bf16 Adam moments, FP32 master
     p.add_argument("--rl-megatron-bf16-moments", action="store_true")
-    # S28 G-120: uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
+    # uneven pipeline stages and full-layer recompute (megatron_engine.MegatronShape)
     p.add_argument("--rl-megatron-first-stage-layers", type=int, default=None)
     p.add_argument("--rl-megatron-last-stage-layers", type=int, default=None)
     p.add_argument("--rl-megatron-recompute-full-layers", type=int, default=None)
-    # S28 G-120C: verl's fused log-prob kernels. Off unless asked for: on this model
-    # they are 47.8% of the activation per token, and the Ascend blockers are in
-    # infra-drafts/SESSION28/report/FCE-PLAN.md.
+    # verl's fused log-prob kernels. Off unless asked for: on the 120B model they
+    # are 47.8% of the activation per token, and they do not yet run on Ascend.
     p.add_argument("--rl-megatron-fused-logprob-kernels", action="store_true")
-    # S29: the SFT recipe's communication overlap (args.json: overlap_grad_reduce,
+    # the SFT recipe's communication overlap (args.json: overlap_grad_reduce,
     # overlap_param_gather, tp_comm_overlap all true); verl's DDP default is off
     p.add_argument("--rl-megatron-comm-overlap", action="store_true")
-    # S28 G-120C: verl's old-log-prob pass computes the token entropy only for the
+    # verl's old-log-prob pass computes the token entropy only for the
     # "actor/entropy" metric; it is that pass's memory peak (megatron_engine.MegatronShape)
     p.add_argument("--rl-no-old-logprob-entropy", action="store_true")
-    # S29 MFU-C: skip the old-log-prob recompute when old == current (onpolicy_old_logprob;
+    # skip the old-log-prob recompute when old == current (onpolicy_old_logprob;
     # refused unless one optimizer step per round). measure = keep it, log the difference
     p.add_argument("--rl-onpolicy-old-logprob", choices=("off", "on", "measure"), default=None)
-    # S27 G-FL: PP > 1 in a full-parameter session is refused unless this lifts the gate
+    # PP > 1 in a full-parameter session is refused unless this lifts the gate
     p.add_argument("--rl-allow-pipeline-parallel-sync", action="store_true")
     p.add_argument("--use-rollout-routing-replay", action="store_true")
     p.add_argument("--rl-lr-schedule", default=None)
     p.add_argument("--rl-export-hf-rounds", default=None)
     p.add_argument("--rl-export-hf-store", default=None)
-    # S27 B10: a full-parameter island and its outer sync (Miles island spellings)
+    # a full-parameter island and its outer sync (Miles island spellings)
     from .full_parameter_stream import add_island_flags
 
     add_island_flags(p)
-    # S27 G-EN: the Miles island's heldout eval flags (VERL-PARITY #34, .eval_port)
+    # the Miles island's heldout eval flags (.eval_port)
     from .eval_port import add_island_flags as add_eval_flags
 
     add_eval_flags(p)
@@ -208,7 +207,7 @@ def parse_args(argv):
 
 
 def algorithm_options(spec_dict: dict | None) -> dict:
-    """Mapped AlgorithmSpec fields -> verl options; anything unmapped is refused (D11)."""
+    """Mapped AlgorithmSpec fields -> verl options; anything unmapped is refused."""
     if not spec_dict:
         return {"correction": "none", "tis_upper": 2.0}
     from yeto.rl.engine.algorithm import AlgorithmSpec
@@ -232,13 +231,13 @@ def algorithm_options(spec_dict: dict | None) -> dict:
     correction = spec.correction
     method = (correction.method or "none") if correction is not None else "none"
     out = {"correction": method, "tis_upper": 2.0,
-           # S27 G-DC: mapped by the Megatron island (megatron_engine.build_overrides)
+           # mapped by the Megatron island (megatron_engine.build_overrides)
            "eps_clip": loss.eps_clip, "eps_clip_high": loss.eps_clip_high}
     if method == "tis":
         out["tis_upper"] = float(correction.tis_clip if correction.tis_clip is not None else 2.0)
         out["tis_lower"] = float(correction.tis_clip_low or 0.0)
     if problems:
-        raise vconf.VerlConfigError("verl 后端未映射的算法字段: " + ", ".join(problems))
+        raise vconf.VerlConfigError("algorithm fields not mapped by the verl backend: " + ", ".join(problems))
     return out
 
 
@@ -247,7 +246,7 @@ def runtime_manifest(learner_id: int, device_family: str | None = None, engine: 
 
     ``device_family`` None reads the family from this node's accelerator, so an
     Ascend island asserts the NPU pins and runs ``npu-smi`` instead of
-    ``nvidia-smi`` (tasks 3.6, 3.14). The NVIDIA manifest keeps its old shape
+    ``nvidia-smi``. The NVIDIA manifest keeps its old shape
     and its ``nvidia_smi`` key.
     """
     import importlib.metadata as md
@@ -256,7 +255,7 @@ def runtime_manifest(learner_id: int, device_family: str | None = None, engine: 
     from yeto.hw.catalog import runtime_versions
 
     family = device_family if device_family is not None else detect_device_family()
-    # S27 G-DC: the Megatron engine island also asserts the Megatron stack (pins)
+    # the Megatron engine island also asserts the Megatron stack (pins)
     expected = expected_versions_for_engine(engine, family)
     versions = {}
     for name in expected:
@@ -317,7 +316,7 @@ def _threshold_card(manifest: dict) -> str:
 
 
 def agentic_rows(frame: Any) -> bool:
-    """True when the data file already holds verl agentic rows (S27 G-FS).
+    """True when the data file already holds verl agentic rows.
 
     ``task_lists.verl_rows`` writes the format verl's agent loop reads:
     ``agent_name`` selects the loop and ``extra_info.agent_task`` is the
@@ -331,13 +330,13 @@ def agentic_rows(frame: Any) -> bool:
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64,
                  slot: Any = None, number_rows: bool = False) -> tuple[str, str]:
     """``data``'s train and test splits as verl parquet files. ``slot``
-    (``data_split.DataSlot``, S27 task assignment): the train file keeps only the
+    (``data_split.DataSlot``, task assignment): the train file keeps only the
     slot's rows, in data order, each with its row number in the unsplit data as
     ``extra_info["yeto_data_row"]``; the validation rows stay whole.
-    ``number_rows`` (the task dispenser, S27 G-EU): every train row keeps its row
+    ``number_rows`` (the task dispenser): every train row keeps its row
     number, and ``root/train-dispense.jsonl`` (``task_dispense.write_rows_file``)
     is written for the dispenser's row count and fingerprint.
-    S27 G-FS: a file of agentic rows (:func:`agentic_rows`) is written through
+    A file of agentic rows (:func:`agentic_rows`) is written through
     unchanged -- the rows are already in verl's schema."""
     import pandas as pd
     from huggingface_hub import hf_hub_download
@@ -348,13 +347,13 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     out = {}
     local = Path(os.path.expanduser(data))
     for split in ("train", "test"):
-        if local.is_file():  # S27 G-DC: a local JSONL task file (one file: train; its head: test)
+        if local.is_file():  # a local JSONL task file (one file: train; its head: test)
             # parsed with json, not pd.read_json: pandas would turn a label "34" into 34.0
             frame = pd.DataFrame([json.loads(line) for line in local.read_text().splitlines() if line.strip()])
         else:
             src = hf_hub_download(data, f"{split}.parquet", repo_type="dataset", revision=revision)
             frame = pd.read_parquet(src)
-        if agentic_rows(frame):  # S27 G-FS: already verl's schema, keep every field
+        if agentic_rows(frame):  # already verl's schema, keep every field
             rows = [{**row, "extra_info": {**(row["extra_info"] or {}), "split": split, "index": int(i)}}
                     for i, row in frame.iterrows()]
         else:
@@ -367,7 +366,7 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
             } for i, row in frame.iterrows()]
         if split == "test":
             rows = rows[:val_rows]
-        elif number_rows:  # S27 G-EU: the dispenser hands out rows by number
+        elif number_rows:  # the dispenser hands out rows by number
             if slot is not None and not slot.whole:
                 raise ValueError("a data slot and the task dispenser exclude each other")
             from .task_dispense import ROWS_FILE, write_rows_file
@@ -384,9 +383,9 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     return out["train"], out["test"]
 
 
-# --------------------------------------------------------------------------- agentic (S27 G-FS)
+# --------------------------------------------------------------------------- agentic
 #
-# VERL-PARITY #33. The pieces already existed and are not rewritten here:
+# The pieces already existed and are not rewritten here:
 # ``harbor_agent_loop.HarborAgentLoop`` (the loop), ``rollout_engine`` (the records
 # proxy over verl's own rollout servers) and ``task_lists.verl_rows`` (the row
 # format). What was missing is this island's wiring: the loop's registry entry,
@@ -432,7 +431,7 @@ def agentic_run_fields(args: Any, *, out_dir: str) -> dict:
     # LIST of entries, each a mapping with ``name`` and ``_target_``
     # (agent_loop.py:554-556: ``for c in configs: registry[c.name] = c``).  A
     # top-level mapping iterates over its keys and fails with
-    # "'str' object has no attribute 'name'" -- S27 G-FS run s27-fs-2 died there.
+    # "'str' object has no attribute 'name'".
     # Written by hand: two scalar fields, and the island image guarantees no yaml dumper.
     path.write_text(f"- name: {VERL_AGENT_LOOP}\n  _target_: {AGENT_LOOP_TARGET}\n")
     return {"agentic": True, "agent_loop_config": str(path),
@@ -472,8 +471,8 @@ def agentic_records_env(run: Any, *, model_path: str, card: str) -> dict[str, st
     # (--modal-env YETO_RECORDS_TEMPLATE=...); there is no safe default.
     template = os.environ.get(records_env.TEMPLATE_ENV, "").strip()
     if template not in TEMPLATES:
-        raise SystemExit(f"agentic verl 岛要 {records_env.TEMPLATE_ENV}=<chat template>"
-                         f"（已知：{sorted(TEMPLATES)}），收到 {template!r}")
+        raise SystemExit(f"an agentic verl island needs {records_env.TEMPLATE_ENV}=<chat template>"
+                         f" (known: {sorted(TEMPLATES)}), got {template!r}")
     sampling = {"temperature": run.temperature, "top_p": run.top_p, "top_k": run.top_k,
                 "max_tokens": run.max_response_len}
     return {
@@ -529,10 +528,10 @@ def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None
     """Cards of this single-node island: the island-local Ray's accelerator
     resource (the launcher starts it with every card of the container), else 1.
 
-    S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
-    trained on one rank (e9-g3-a); every card now joins the FSDP2 group.
+    The sync island used ``n_gpus=1`` always, so a 2-card container trained on
+    one rank; every card now joins the FSDP2 group.
 
-    S27 G-EQ2 (npu1): the resource is named ``GPU`` on CUDA and ``NPU`` on
+    The resource is named ``GPU`` on CUDA and ``NPU`` on
     Ascend (``catalog.ray_accelerator_resource``), so an 8-card Ascend island
     used to read 1 here and train on one rank. Either key is read, so a node
     whose Ray reports the other name still gives its cards."""
@@ -549,7 +548,7 @@ def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     """verl needs more Ray CPU slots than a small container reports.
 
-    S17 V2 a: the island-local Ray the launcher starts saw 8 CPUs on one Modal host
+    The island-local Ray the launcher starts saw 8 CPUs on one Modal host
     and 24 on another; with 8, verl's transfer-queue storage units took every slot and
     the trainer workers never scheduled (GPU 0/1 used, no error).  Ray CPUs are only
     scheduling tokens here, so when the cluster reports fewer than ``min_cpus`` the
@@ -569,10 +568,10 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
         return info
     host, _, port = address.rpartition(":")
     temp = os.path.expanduser("~/miles-ray")
-    # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself (V2 b).
+    # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself.
     # Inside a Modal container the launcher's island Ray is the only Ray on the node.
     info["stop_rc"] = subprocess.run(["ray", "stop", "--force"], timeout=180).returncode
-    # S27 G-EQ2: the cards come back under this node's own resource name; on an
+    # the cards come back under this node's own resource name; on an
     # Ascend node that is --resources '{"NPU": n}', not --num-gpus (catalog).
     from yeto.hw.catalog import ray_accelerator_resource, ray_start_accelerator_flag
 
@@ -588,14 +587,14 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
-    run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
-    if getattr(args, "rl_onpolicy_old_logprob", None):  # S29 MFU-C: forwarded to Ray (YETO_)
+    run_config_rules.refuse_agentic_argv(ignored)  # never ignore agentic flags
+    if getattr(args, "rl_onpolicy_old_logprob", None):  # forwarded to Ray (YETO_)
         from .onpolicy_old_logprob import ENV as _OPLP_ENV
 
         os.environ[_OPLP_ENV] = args.rl_onpolicy_old_logprob
         print(f"[yeto-verl] {_OPLP_ENV}={args.rl_onpolicy_old_logprob}", flush=True)
-    buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
-    spot_env = spot_rollout_env(args, buffer_section)  # S27 G-EV: relay trainer / layout board
+    buffer_section = sample_buffer_section(args)  # refused roles stop before any work
+    spot_env = spot_rollout_env(args, buffer_section)  # relay trainer / layout board
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
@@ -622,7 +621,7 @@ def main(argv=None) -> int:
         return 2
     from yeto.rl.engine import sample_roles
 
-    if sample_roles.sample_role(args) == sample_roles.SAMPLER:  # S26 E9.4: no verl trainer here
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:  # no verl trainer here
         from .sampler_entry import SamplerIslandError, run_sampler_island
 
         try:
@@ -640,15 +639,14 @@ def main(argv=None) -> int:
     from .task_dispense import DispenseIslandError, dispense_section, island_dispense
     from .train_options import debug_plan, refuse_unmapped_argv, verify_plan
 
-    try:  # S27 G-EU (VERL-PARITY #31, #25, #26): refused paths stop before any model or data work
+    try:  # refused paths stop before any model or data work
         dispense = island_dispense(args, engine=engine, buffer_trainer=buffer_section is not None)
         full_mode = args.parameter_mode == vconf.FULL_PARAMETER_MODE or engine == megatron_engine.ENGINE_MEGATRON
         refuse_unmapped_argv(ignored, full=full_mode)
         verify = {**verify_plan(args, full=full_mode), **debug_plan(args)}
     except ValueError as error:
         raise SystemExit(str(error)) from None
-    # S27 G-EQ2 (s27-verl-pool-profile): a directory on this node is used as is
-    # (npu1's n2-n4 have no route to the hub)
+    # a directory on this node is used as is (on-prem nodes may have no route to the hub)
     model_path = island_model_path(args.model, args.model_revision)
     work = Path(os.path.expanduser("~/yeto-verl"))
     train_file, val_file = prepare_data(args.data, args.data_revision, work / "data",
@@ -666,11 +664,11 @@ def main(argv=None) -> int:
     # path the row's prompt is only a label: what verl receives as the prompt is
     # the joined agent conversation, which is tens of thousands of tokens, so the
     # cap comes from the sequence budget as it does on the Megatron path
-    # (:func:`megatron_island_plan`). S27 G-FS run s27-fs-3 hit this: with the 512
+    # (:func:`megatron_island_plan`). With the 512
     # cap every one of 8 trajectories was ABORTED with prompt_exceeds_prompt_length
     # (the agent's own n_input_tokens were 7 585 to 64 960), the batch then had no
     # trainable token, and verl refused the training step.
-    # A spot relay trainer (S29 spot run) holds the same agentic rows: the spot
+    # A spot relay trainer holds the same agentic rows: the spot
     # islands that wrote them are agentic, the trainer has no --rl-agentic-harbor of
     # its own, and a 512 cap refused the first group (prompt 7940 tokens,
     # BufferFeedError). Other buffer trainers keep the 512 default.
@@ -679,25 +677,25 @@ def main(argv=None) -> int:
     ahead, limit = rollout_ahead_of(args)  # limit: the fully_async path's (0 with rollout ahead)
     full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     pools = None
-    if engine == megatron_engine.ENGINE_MEGATRON:  # S27 G-DC: verl Megatron island
+    if engine == megatron_engine.ENGINE_MEGATRON:  # verl Megatron island
         megatron = megatron_island_plan(
             args, model_path=model_path, train_file=train_file, val_file=val_file, out_dir=str(work / "out"),
             algo=algo, chat=chat, ray_info=ray_info, reward_path=str(Path(__file__).with_name("reward_fn.py")),
             reward_name=function_for(args.reward_function),
-            buffer_trainer=buffer_section is not None)  # S27 G-FN (B1-B3)
+            buffer_trainer=buffer_section is not None)
         run, overrides = megatron["run"], megatron["overrides"]
     else:
         megatron = None
-        ascend_plugin_stack_section(args, engine=engine)  # S27 G-FL: refuses the flag here
+        ascend_plugin_stack_section(args, engine=engine)  # refuses the flag here
         if full and args.rl_rollout_quant_tier:
-            raise SystemExit("verl 全参数岛不支持 --rl-rollout-quant-tier")
-        pools = fsdp_separate_pools(args, ray_info)  # S27 G-EK: None = colocated
-        if pools is not None and buffer_section is not None:  # S27 G-EW: no rollout on a buffer trainer
-            raise SystemExit("verl 全参数缓冲训练岛（--rl-sample-role trainer）不接 --rl-placement fixed-partition："
-                             "它没有 rollout 卡，采样岛生成")
-        if full and limit and buffer_section is None and pools is None:  # S27 G-EV (VERL-PARITY #11)
-            raise SystemExit("verl 全参数 fully_async 岛（--rl-max-policy-age > 0）需要 --rl-placement fixed-partition "
-                             "--rl-rollout-gpus N：rollouter 在自己的卡上生成")
+            raise SystemExit("a verl full-parameter island does not support --rl-rollout-quant-tier")
+        pools = fsdp_separate_pools(args, ray_info)  # None = colocated
+        if pools is not None and buffer_section is not None:  # no rollout on a buffer trainer
+            raise SystemExit("a verl full-parameter buffer trainer island (--rl-sample-role trainer) does not take "
+                             "--rl-placement fixed-partition: it has no rollout cards, the sampler islands generate")
+        if full and limit and buffer_section is None and pools is None:
+            raise SystemExit("a verl full-parameter fully_async island (--rl-max-policy-age > 0) needs --rl-placement "
+                             "fixed-partition --rl-rollout-gpus N: the rollouter generates on its own cards")
         run, overrides = fsdp_island_run(args, model_path=model_path, train_file=train_file,
                                          val_file=val_file, out_dir=str(work / "out"), algo=algo, chat=chat,
                                          ray_info=ray_info, max_prompt=max_prompt, limit=limit, pools=pools)
@@ -717,9 +715,9 @@ def main(argv=None) -> int:
         raise SystemExit(str(exc)) from exc
     full_plan: dict = {}
     if full and (megatron is None or sync != "none"
-                 or buffer_section is not None):  # S27 B10: model identity, and the outer
-        # full-parameter sync when synced (S27 G-FG: a synced Megatron island too).
-        # S27 G-FN (B4): a Megatron buffer trainer runs on the fully_async ports, and
+                 or buffer_section is not None):  # model identity, and the outer
+        # full-parameter sync when synced (a synced Megatron island too).
+        # A Megatron buffer trainer runs on the fully_async ports, and
         # their identity is this section's too (``fully_async_full.full_parameter_hashes``
         # reads ``plan["model_config_sha256"]``); only the synchronous Megatron island
         # takes its identity from ``megatron_ports.config_hash`` instead.
@@ -737,13 +735,13 @@ def main(argv=None) -> int:
     asserted_keys = vconf.ASSERTED_KEYS
     store_note = None
     if megatron is not None:
-        asserted_keys = megatron["asserted_keys"]  # S27 G-FN: without a rollout pool, fewer keys
+        asserted_keys = megatron["asserted_keys"]  # without a rollout pool, fewer keys
         resume, store_note = megatron_resume(args, resume)
-    elif pools is not None and not limit:  # S27 G-EK: the FSDP2 island in verl's separate mode
+    elif pools is not None and not limit:  # the FSDP2 island in verl's separate mode
         from .separate import ASSERTED_KEYS as SEPARATE_ASSERTED_KEYS
 
         asserted_keys = (*vconf.ASSERTED_KEYS, *SEPARATE_ASSERTED_KEYS)
-    if full and megatron is None:  # S27 G-EC: the Miles training options verl can express (.train_options);
+    if full and megatron is None:  # the Miles training options verl can express (.train_options);
         # the Megatron island maps its own (megatron_engine.build_overrides)
         from .train_options import apply_training_options
 
@@ -753,7 +751,7 @@ def main(argv=None) -> int:
                 max_response_len=args.rollout_max_response_len)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-    try:  # S27 G-EN: heldout eval through verl's _validate (.eval_port); the sync trainer only
+    try:  # heldout eval through verl's _validate (.eval_port); the sync trainer only
         from . import eval_port
 
         if megatron is not None or limit or buffer_section is not None:
@@ -771,17 +769,17 @@ def main(argv=None) -> int:
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
-    if limit:  # agentic-rollout-utilization 6.4b: fully_async path
+    if limit:  # fully_async path
         before = asserted_keys
-        # pools (G-EV) and trainer_cards (G-EZ2) never both apply: a buffer trainer with
-        # fixed-partition pools is refused above (G-EW), so pools is None whenever
+        # pools and trainer_cards never both apply: a buffer trainer with
+        # fixed-partition pools is refused above, so pools is None whenever
         # buffer_section is not None.
         overrides, asserted_keys = fully_async_plan(
             limit, overrides, spec_dict, args, sync, pools=pools,
             trainer_cards=run.n_gpus if buffer_section is not None else None)
-        if full:  # S27 G-EV: a full-parameter island keeps its training options' asserted keys
+        if full:  # a full-parameter island keeps its training options' asserted keys
             asserted_keys = tuple(dict.fromkeys((*asserted_keys, *before)))
-        pools = None  # S27 G-EV: the fully_async path places its own pools; not verl's separate mode
+        pools = None  # the fully_async path places its own pools; not verl's separate mode
         append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
@@ -791,7 +789,7 @@ def main(argv=None) -> int:
         if int(island) == lid:
             exit_after = int(version)
     readback = work / "readback"
-    onpolicy_old_logprob_static_check(args, overrides)  # S29 MFU-C: before verl starts
+    onpolicy_old_logprob_static_check(args, overrides)  # before verl starts
     plan = {
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
@@ -805,26 +803,26 @@ def main(argv=None) -> int:
         "engine": engine,
         **({"megatron": megatron["shape"], "hf_exports": megatron["hf_exports"],
             "store_note": store_note} if megatron is not None else {}),
-        # S29 MFU-B: the measurement switches in effect (absent when none is set)
+        # the measurement switches in effect (absent when none is set)
         **({"experiment_env": megatron["experiment_env"]}
            if megatron is not None and megatron.get("experiment_env") else {}),
-        # S27 G-FL: absent unless --rl-ascend-plugin-stack asked for it
+        # absent unless --rl-ascend-plugin-stack asked for it
         **({"ascend_plugin_stack": megatron["ascend_plugin_stack"]}
            if megatron is not None and megatron["ascend_plugin_stack"] else {}),
-        **({"separate": pools.to_dict()} if pools is not None else {}),  # S27 G-EK
+        **({"separate": pools.to_dict()} if pools is not None else {}),
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_sync_island_lease_s,
         "test_exit_after_version": exit_after,
-        # S27 task assignment (rl_driver_start); "dispense": the rows come from the dispenser (G-EU)
+        # task assignment (rl_driver_start); "dispense": the rows come from the dispenser
         "data_slot": "dispense" if dispense_plan else args.rl_data_slot,
         **({"dispense": dispense_plan} if dispense_plan else {}),
-        **verify,  # S27 G-EU: verify_every / verify_every_round / debug_dump (absent when off)
-        # S27 G-FS: the driver and every Ray worker register yeto_grpo, and the
+        **verify,  # verify_every / verify_every_round / debug_dump (absent when off)
+        # the driver and every Ray worker register yeto_grpo, and the
         # Harbor environment is forwarded to the agent-loop workers (verl_main).
         "agentic": bool(run.agentic),
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": int(args.rl_max_policy_age or 0), "fully_async": bool(limit),
-        **({"rollout_ahead": ahead} if ahead else {}),  # S27 G-EV: separate.wire_rollout_ahead
+        **({"rollout_ahead": ahead} if ahead else {}),  # separate.wire_rollout_ahead
         "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
@@ -844,7 +842,7 @@ def main(argv=None) -> int:
 
         env[ECHO_ENV] = "1"
     env["YETO_VERL_READBACK_DIR"] = str(readback)
-    if run.agentic:  # S27 G-FS: the recorder environment the agent-loop workers read
+    if run.agentic:  # the recorder environment the agent-loop workers read
         env.update(agentic_records_env(run, model_path=model_path, card=_threshold_card(manifest)))
         # Names only, never values: the tunnel's path secret and the boat token are
         # in this environment. One line says whether the tunnel reached the island,
@@ -865,7 +863,7 @@ def main(argv=None) -> int:
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
     stop_releaser = threading.Event()
-    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # S26 E6 tier 2: BF16 releases -> FP8 releases
+    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # tier 2: BF16 releases -> FP8 releases
         start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
     try:
         with log.open("a") as handle:
@@ -882,7 +880,7 @@ def main(argv=None) -> int:
 
 
 def onpolicy_old_logprob_static_check(args, overrides) -> None:
-    """S29 MFU-C: the batch-independent checks of ``onpolicy_old_logprob.check_config``
+    """The batch-independent checks of ``onpolicy_old_logprob.check_config``
     on the island's own overrides, so a refused configuration fails at plan time, not
     at the first training step. The trainer still runs the full check every step."""
     if getattr(args, "rl_onpolicy_old_logprob", None) not in ("on", "measure"):
@@ -896,7 +894,7 @@ def onpolicy_old_logprob_static_check(args, overrides) -> None:
 
 
 def rollout_ahead_of(args) -> tuple[int, int]:
-    """S27 G-EV (VERL-PARITY #10): ``(--rl-rollout-ahead, the fully_async limit)``.
+    """``(--rl-rollout-ahead, the fully_async limit)``.
 
     Rollout ahead runs verl's separate mode with its synchronous trainer: the
     rollout servers generate round r+1 with the published policy r while the
@@ -923,7 +921,7 @@ def rollout_ahead_of(args) -> tuple[int, int]:
     if args.rl_sample_role:
         problems.append("no --rl-sample-role")
     if problems:
-        raise SystemExit("verl 岛的 --rl-rollout-ahead 需要：" + "; ".join(problems))
+        raise SystemExit("--rl-rollout-ahead on a verl island needs: " + "; ".join(problems))
     return ahead, 0
 
 
@@ -931,16 +929,16 @@ def island_model_path(model: str, revision: str | None) -> str:
     """This island's model directory: a hub repo id at the pinned revision, or a
     directory that already exists on this node.
 
-    S27 G-EQ2 (npu1): an on-prem cluster stages the weights itself and its nodes
-    may have no route to the hub at all (npu1's n2-n4 do not), so a directory is
+    An on-prem cluster stages the weights itself and its nodes may have no
+    route to the hub at all, so a directory is
     used as is. The pinned revision then cannot be checked -- the plan keeps the
     flag's value and the island's identity still fingerprints ``config.json`` of
     the files actually loaded (``full_parameter_stream.plan_section``)."""
     local = Path(os.path.expanduser(model))
     if local.is_dir():
         if not (local / "config.json").is_file():
-            raise SystemExit(f"--model {model} 是本机目录但没有 config.json")
-        print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} 未校验)", flush=True)
+            raise SystemExit(f"--model {model} is a local directory without config.json")
+        print(f"[yeto-verl] model from this node: {local} (--model-revision {revision} not verified)", flush=True)
         return str(local)
     from huggingface_hub import snapshot_download
 
@@ -967,16 +965,16 @@ def model_supports_gradient_checkpointing(model_path: str, *, trust_remote_code:
 
 
 def gradient_checkpointing_for(args, model_path: str) -> bool:
-    """Whether this island recomputes activations (S27 G-EQ2).
+    """Whether this island recomputes activations.
 
     Default on, as before. Turned off only when this model's implementation says
     it cannot: verl's FSDP2 engine calls ``gradient_checkpointing_enable()``
     unconditionally, and a model that refuses takes the island down after the
-    whole model is built (npu1: HF NemotronH of transformers 5.3 sets
+    whole model is built (on Ascend: HF NemotronH of transformers 5.3 sets
     ``supports_gradient_checkpointing = False``). ``--rl-activation-recompute``
     is an explicit request, so it is refused instead of silently dropped.
 
-    S27 G-EQ4: a false answer here no longer means the island stores every
+    A false answer here no longer means the island stores every
     activation. transformers' NemotronH has no recompute hook at all (its source
     never mentions ``gradient_checkpointing``), so an Ascend island installs one
     itself -- :mod:`yeto.rl.nemotron_h_recompute` wraps the block forward, which
@@ -987,16 +985,17 @@ def gradient_checkpointing_for(args, model_path: str) -> bool:
     requested = bool(getattr(args, "rl_activation_recompute", False))
     if supported is False:
         if requested:
-            raise SystemExit(f"--rl-activation-recompute：{model_path} 的 transformers 实现不支持"
-                             "重算激活（supports_gradient_checkpointing = False）")
-        print(f"[yeto-verl] activation recompute off (verl 的开关): {model_path} 的 transformers 实现不支持；"
-              "昇腾岛改由 yeto.rl.nemotron_h_recompute 自己装重算钩子", flush=True)
+            raise SystemExit(f"--rl-activation-recompute: the transformers implementation of {model_path} "
+                             "cannot recompute activations (supports_gradient_checkpointing = False)")
+        print(f"[yeto-verl] activation recompute off (verl's switch): the transformers implementation of "
+              f"{model_path} does not support it; an Ascend island installs its own hook "
+              "(yeto.rl.nemotron_h_recompute)", flush=True)
         return False
     return True
 
 
 def fsdp_separate_pools(args, ray_info: dict):
-    """S27 G-EK (VERL-PARITY #13): the trainer and rollout pools of a full-parameter
+    """The trainer and rollout pools of a full-parameter
     FSDP2 island with ``--rl-placement fixed-partition`` (verl's separate mode,
     :mod:`.separate`), None for a colocated island. A LoRA island's fixed partition
     is the fully_async path (``fully_async_plan``), not this one."""
@@ -1004,20 +1003,20 @@ def fsdp_separate_pools(args, ray_info: dict):
 
     if args.parameter_mode != vconf.FULL_PARAMETER_MODE or (args.rl_placement or "colocated") != FIXED_PARTITION:
         return None
-    return pools_from_args(args, island_gpus(ray_info), what="verl FSDP2 分离岛")
+    return pools_from_args(args, island_gpus(ray_info), what="verl FSDP2 separate island")
 
 
 def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
                     chat: dict, ray_info: dict, max_prompt: int, limit: int, pools=None):
-    """The FSDP2 island's ``VerlRunConfig`` and Hydra overrides (unchanged by S27 G-DC,
+    """The FSDP2 island's ``VerlRunConfig`` and Hydra overrides (unchanged by the Megatron island,
     except that a spec clip range is refused: only the Megatron island maps it).
-    ``pools`` (:func:`fsdp_separate_pools`, S27 G-EK): the trainer trains on its own
+    ``pools`` (:func:`fsdp_separate_pools`): the trainer trains on its own
     cards and the rollout runs on standalone vLLM servers (``separate.with_separate_pools``)."""
     offload = getattr(args, "rl_fsdp_offload", "none") or "none"
     clips = [name for name in ("eps_clip", "eps_clip_high") if algo.get(name) is not None]
     if clips:
-        raise SystemExit("verl FSDP2 岛未映射 " + ", ".join(clips) + "（只有 Megatron 岛映射）")
-    full = args.parameter_mode == vconf.FULL_PARAMETER_MODE  # S27 B10
+        raise SystemExit("the verl FSDP2 island does not map " + ", ".join(clips) + " (only the Megatron island does)")
+    full = args.parameter_mode == vconf.FULL_PARAMETER_MODE
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,
         parameter_mode=args.parameter_mode,
@@ -1026,7 +1025,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
         max_prompt_len=max_prompt, max_response_len=args.rollout_max_response_len, seed=args.seed,
         total_rounds=args.global_rounds, correction=algo["correction"],
         # limit > 0: the correction is mapped by offpolicy_correction in
-        # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
+        # fully_async_plan (lower > 0 warns there); the sync path keeps its check.
         tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
         gpu_memory_utilization=(float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")) if pools is None
                                 else pools.gpu_memory_utilization),
@@ -1047,7 +1046,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
 
         overrides = with_separate_pools(overrides, pools)
     overrides += [
-        # S27 G-FS: the agentic island keeps the worker count its run config fixed
+        # the agentic island keeps the worker count its run config fixed
         # (one records proxy per worker, one tunnelled port), so it is not raised here.
         f"actor_rollout_ref.rollout.agent.num_workers={run.agent_loop_workers if run.agentic else 2}",
         "reward.num_workers=2",
@@ -1055,13 +1054,13 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
     from yeto.hw.catalog import device_family
 
     if device_family() == "ascend":
-        # S27 G-EQ2 (npu1): verl compiles the entropy/log-prob helpers with
+        # verl compiles the entropy/log-prob helpers with
         # torch.compile by default (actor.use_torch_compile, actor.yaml:110).
         # An Ascend image carries triton-ascend, which has no inductor backend:
         # the first training step dies in dynamo with "cannot import name
         # 'Language' from 'triton.backends.compiler'" (it even tried to load
         # triton's AMD backend). Eager is correct, only slower.
-        # S27 G-EQ3: the *engine* workers read their own key
+        # the *engine* workers read their own key
         # (``FSDPEngineConfig.use_torch_compile``, engine/fsdp/transformer_impl.py:183),
         # and the generated config hardcodes it to true instead of selecting the
         # actor's value, so the actor key alone left compute_log_prob compiling.
@@ -1074,7 +1073,7 @@ def fsdp_island_run(args, *, model_path: str, train_file: str, val_file: str, ou
 
 def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
     """What an Ascend FSDP2 island changes to fit a step into a 64 GiB card
-    (S27 G-EQ3, npu1; the NVIDIA reference card has 141 GiB).
+    (the NVIDIA reference card has 141 GiB).
 
     The first backward of Nemotron Nano 30B-A3B died with "NPU out of memory.
     Tried to allocate 5.04 GiB (60.96 GiB total capacity; 50.30 GiB already
@@ -1096,14 +1095,14 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
     the entropy knobs (the recompute already bounds the head), so they are only
     added when it is off.
 
-    S27 G-EQ4 checked the first bullet instead of assuming it: the fork holds two
+    The first bullet was checked instead of assuming it: the fork holds two
     engine config classes, and only the VeOmni one takes ``mixed_precision`` as a
     bool (``workers/config/engine.py:418``), while the FSDP one takes the dict
     (:282). ``FSDPActorConfig.__post_init__`` sets ``engine = fsdp_config``, so the
     override does arrive -- composed and converted, the engine reports
     ``mixed_precision = {'param_dtype': 'bf16', 'reduce_dtype': 'bf16',
     'buffer_dtype': 'fp32'}`` and FSDP2's policy is ``reduce_dtype=torch.bfloat16``
-    (``tools/probe_mp.py`` on npu1). The bf16 reduce was therefore **already** in
+    (measured on an Ascend island). The bf16 reduce was therefore **already** in
     force through every out-of-memory attempt, and it is not the missing saving.
     What was missing is activation recompute, which this implementation cannot do
     at all: see :mod:`yeto.rl.nemotron_h_recompute`, installed in the worker.
@@ -1113,14 +1112,14 @@ def ascend_memory_overrides(gradient_checkpointing: bool) -> list[str]:
     of the first MoE layer -- ``activation_offload.tensor_push`` asserts that a
     saved tensor's tag is new, and ``transformers``' NemotronH router saves the
     same tensor twice (``route_tokens_to_experts``: ``.topk(2, dim=-1)[0]``),
-    which trips that assertion (S27 G-EQ3, measured on npu1).
+    which trips that assertion (measured on an Ascend island).
     """
     # the key is absent from the generated config (fsdp_config.mixed_precision defaults
     # to None in the dataclass), so it is added, not overridden: hydra needs the "+".
     overrides = ["+actor_rollout_ref.actor.fsdp_config.mixed_precision="
                  "{param_dtype: bf16, reduce_dtype: bf16, buffer_dtype: fp32}"]
-    # One sample per micro-batch instead of packing up to the token budget (S27 G-EQ3,
-    # npu1): with packing, what fits depends on which samples a round draws -- the same
+    # One sample per micro-batch instead of packing up to the token budget: with
+    # packing, what fits depends on which samples a round draws -- the same
     # island did a step with the groups at buffer position 0..3 and ran out of memory on
     # the groups after them (8.50 GiB short of 60.96 GiB). verl requires the actor and
     # the log-prob pass to agree on this, so both are switched.
@@ -1143,7 +1142,7 @@ def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
 
     given = [_flag(n) for n in RESUME_FLAGS if getattr(args, n, None) is not None]
     if given:
-        raise SystemExit("verl Megatron 岛没有接切点：" + ", ".join(given))
+        raise SystemExit("round cuts are not wired for the verl Megatron island: " + ", ".join(given))
     if resume is None:
         return None, None
     note = (f"--rl-resume-store {resume['store']}: round cuts are not wired for the verl Megatron "
@@ -1155,36 +1154,36 @@ def megatron_resume(args, resume: dict | None) -> tuple[None, str | None]:
 def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: str, out_dir: str, algo: dict,
                          chat: dict, ray_info: dict, reward_path: str, reward_name: str,
                          buffer_trainer: bool = False) -> dict:
-    """S27 G-DC: the Megatron island (``megatron_engine``): full parameters, trainer and
-    rollout pools apart, age 0, no outer sync (S27 G-FG: or the full-parameter
+    """The Megatron island (``megatron_engine``): full parameters, trainer and
+    rollout pools apart, age 0, no outer sync (or the full-parameter
     outer sync, ``megatron_engine.sync_problems``). Returns run, overrides, the keys the
     island re-reads and the plan sections ``megatron`` (the shape) and ``hf_exports``;
     every flag the island cannot honour is refused here, before verl starts.
 
-    ``buffer_trainer`` (S27 G-FN, blockers B1-B3): the island runs as a buffer trainer
+    ``buffer_trainer``: the island runs as a buffer trainer
     (``--rl-sample-role trainer``): it consumes samples from the store and publishes
     its weights there, and it holds no rollout engine. Three requirements of the
     separate mode are then lifted, because each of them exists only to place a rollout
-    pool: the fixed partition (B3, ruled by the main agent 07:4xZ), the policy age of 0
-    (B2: a buffer trainer is on the fully_async path and needs age >= 1) and the
-    refusal of ``--rl-sample-role`` itself (B1). ``--rl-rollout-quant-tier`` stays
+    pool: the fixed partition, the policy age of 0 (a buffer trainer is on the
+    fully_async path and needs age >= 1) and the refusal of ``--rl-sample-role``
+    itself. ``--rl-rollout-quant-tier`` stays
     refused on both roles. Every card the island's Ray reports is a training card."""
     from .megatron_engine import MegatronShape, asserted_keys, build_overrides
 
     problems = []
     if (args.parameter_mode or "lora") != "full":
         problems.append("--tuning full (parameter mode full)")
-    synced = not args.rl_single_island_no_sync  # S27 G-FG: the full-parameter outer sync
+    synced = not args.rl_single_island_no_sync  # the full-parameter outer sync
     if synced:
         problems += megatron_engine.sync_problems(args)
     placement = args.rl_placement or "colocated"
     if buffer_trainer:
-        # S27 G-FN (B3): no rollout cards, so nothing to keep apart from the training
+        # no rollout cards, so nothing to keep apart from the training
         # cards; a fixed partition would carve a rollout pool out of the training cards.
         if placement != "colocated":
-            problems.append("--rl-placement colocated（缓冲训练角色没有 rollout 卡，不分池）")
+            problems.append("--rl-placement colocated (the buffer trainer role has no rollout cards, no pool split)")
         if int(args.rl_max_policy_age or 0) < 1:
-            problems.append("--rl-max-policy-age >= 1（缓冲训练角色走 fully_async 路径）")
+            problems.append("--rl-max-policy-age >= 1 (the buffer trainer role is on the fully_async path)")
     else:
         if placement != "fixed-partition":
             problems.append("--rl-placement fixed-partition (trainer and rollout pools apart)")
@@ -1198,27 +1197,27 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     if args.rl_data_slot and not synced:
         problems.append("no --rl-data-slot (one island)")
     if problems:
-        raise SystemExit("verl Megatron 岛需要：" + "; ".join(problems))
+        raise SystemExit("the verl Megatron island needs: " + "; ".join(problems))
     from .separate import pools_from_args, trainer_only_pools
 
     cards = island_gpus(ray_info)
-    # S27 G-EK: shared with the FSDP2 separate island; S27 G-FN: the buffer trainer
+    # shared with the FSDP2 separate island; the buffer trainer
     # role takes every card as a training card (no rollout pool to carve out).
-    pools = (trainer_only_pools(args, cards, what="verl Megatron 缓冲训练岛") if buffer_trainer
-             else pools_from_args(args, cards, what="verl Megatron 岛"))
+    pools = (trainer_only_pools(args, cards, what="verl Megatron buffer trainer island") if buffer_trainer
+             else pools_from_args(args, cards, what="verl Megatron island"))
     trainer_gpus = pools.trainer_gpus
     with open(Path(model_path) / "config.json") as handle:
         model_config = json.load(handle)
     num_experts = model_config.get("n_routed_experts")
-    # S27 G-FN (B12): a hybrid model that declares no MTP layers must say so, or the
+    # a hybrid model that declares no MTP layers must say so, or the
     # bridge builds its MTP branch from a default pattern and dies
     # (megatron_engine.MTP_OFF_PATTERN)
     close_mtp = bool(model_config.get("hybrid_override_pattern")) and not any(
         key in model_config for key in megatron_engine.MTP_CONFIG_KEYS)
-    # S28 G-CPW: a Mamba model needs seq_idx in verl's THD packing; probe the verl this
+    # a Mamba model needs seq_idx in verl's THD packing; probe the verl this
     # process imports (the workers probe their own at start, megatron_ports)
     mamba = megatron_engine.has_mamba(model_config)
-    # S29 MFU-B: measurement switches are logged, recorded in the plan, and refused on
+    # measurement switches are logged, recorded in the plan, and refused on
     # a run that publishes releases
     try:
         experiment = megatron_engine.check_experiment_env(
@@ -1263,7 +1262,7 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
     try:
         engine_overrides = build_overrides(run, shape, eps_clip=algo.get("eps_clip"),
                                            eps_clip_high=algo.get("eps_clip_high"))
-    except megatron_engine.ExperimentEnvError as error:  # S29 MFU-B: a refused YETO_S29_TCFG_EXTRA item
+    except megatron_engine.ExperimentEnvError as error:  # a refused TCFG_EXTRA item
         raise SystemExit(str(error)) from None
     overrides = engine_overrides + [
         "actor_rollout_ref.rollout.agent.num_workers=8",
@@ -1278,14 +1277,14 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
                                                                   learner_id=int(args.learner_id))}
                if rounds else None)
     if args.rl_lr_schedule not in (None, "constant"):
-        raise SystemExit(f"verl Megatron 岛只接 --rl-lr-schedule constant（得到 {args.rl_lr_schedule}）")
+        raise SystemExit(f"the verl Megatron island takes only --rl-lr-schedule constant (got {args.rl_lr_schedule})")
     return {"run": run, "overrides": overrides, "shape": shape.to_dict(), "hf_exports": exports,
             "asserted_keys": asserted_keys(shape), "experiment_env": experiment,
             "ascend_plugin_stack": ascend_plugin_stack_section(args, engine=megatron_engine.ENGINE_MEGATRON)}
 
 
 def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
-    """S27 G-FL: the plan's ``ascend_plugin_stack`` section; None without the flag.
+    """The plan's ``ascend_plugin_stack`` section; None without the flag.
 
     Only an island with model parallelism takes it: those plugins patch Megatron-Core
     (and the model code), which the FSDP2 island does not use."""
@@ -1296,8 +1295,8 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
             raise SystemExit("--rl-ascend-plugin-recipe needs --rl-ascend-plugin-stack")
         return None
     if engine != megatron_engine.ENGINE_MEGATRON:
-        raise SystemExit("--rl-ascend-plugin-stack 只接有模型并行的 verl 岛（TP/PP/EP > 1）："
-                         "那组插件改的是 Megatron-Core，FSDP2 岛用不上")
+        raise SystemExit("--rl-ascend-plugin-stack needs a verl island with model parallelism (TP/PP/EP > 1): "
+                         "those plugins patch Megatron-Core, which the FSDP2 island does not use")
     from yeto.rl import ascend_plugin_stack
 
     try:
@@ -1307,7 +1306,7 @@ def ascend_plugin_stack_section(args, *, engine: str) -> dict | None:
 
 
 def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:
-    """S26 E6: rollout quantization on a verl island; returns the vLLM overrides (none) and
+    """Rollout quantization on a verl island; returns the vLLM overrides (none) and
     the plan record. Tier 1 on a colocated island is refused before verl starts
     (``tiers.VERL_TIER1_REFUSAL``: LoRA syncs never re-quantize the base). On a buffer
     trainer the rollout runs on the sampler island, so nothing is added; tier 2 starts
@@ -1323,7 +1322,7 @@ def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> 
 
 def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template_dir: Path,
                            stop: threading.Event) -> threading.Thread:
-    """S26 E6 tier 2 on a buffer trainer: convert every BF16 release of the store into an
+    """Tier 2 on a buffer trainer: convert every BF16 release of the store into an
     FP8 release (``yeto.rl.quant.release.scoped_releaser``) in a thread of this process."""
     from yeto.rl.engine.resume import store_for
     from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
@@ -1337,7 +1336,7 @@ def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template
 
 
 def sample_buffer_section(args) -> dict | None:
-    """The plan's ``sample_buffer`` section of a buffer trainer (S25 C2); None for
+    """The plan's ``sample_buffer`` section of a buffer trainer; None for
     role ``both``. A verl island is never a sampler: a sampler island runs the
     engine sampler (``python -m yeto.rl.engine.engine_sampler``) on any engine."""
     from yeto.rl.engine import sample_roles
@@ -1359,7 +1358,7 @@ def sample_buffer_section(args) -> dict | None:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
-            # S27 G-EQ3: staged bf16 delta releases (0: the release goes into the store whole)
+            # staged bf16 delta releases (0: the release goes into the store whole)
             "release_delta_full_every": int(config.release_delta_full_every or 0),
             **({"no_release": True} if getattr(args, "rl_measure_no_release", False) else {}),
             **({"release_only": list(args.rl_release_only_versions)}
@@ -1368,7 +1367,7 @@ def sample_buffer_section(args) -> dict | None:
 
 
 def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
-    """S27 G-EV (SPOT-ROLLOUT.md §12.9 item 1): the environment of the spot-rollout
+    """The environment of the spot-rollout
     channel on a verl island ({} when off; ``YETO_`` variables reach verl's Ray actors).
 
     * ``--rl-spot-subscribers N``: island 0 publishes its fragment layout on the relay
@@ -1381,7 +1380,8 @@ def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
         from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV
 
         if args.parameter_mode != vconf.FULL_PARAMETER_MODE or args.rl_single_island_no_sync:
-            raise SystemExit("--rl-spot-subscribers 需要同步的 verl 全参数岛（订阅者收合并后的全参数分片）")
+            raise SystemExit("--rl-spot-subscribers needs a synced verl full-parameter island "
+                             "(subscribers receive the merged full-parameter shards)")
         env[PUBLISH_ENV] = "1"
     if getattr(args, "rl_sample_relay", False):
         from yeto.rl.spot_rollout.relay_buffer import trainer_relay_env
@@ -1391,11 +1391,11 @@ def spot_rollout_env(args, buffer_section: dict | None) -> dict[str, str]:
 
         if (buffer_section is None or args.parameter_mode != vconf.FULL_PARAMETER_MODE
                 or args.rl_single_island_no_sync or not args.syncer):
-            raise SystemExit("--rl-sample-relay 只接同步的 verl 全参数缓冲训练岛（--rl-sample-role trainer，"
-                             "全参数，有 syncer）")
+            raise SystemExit("--rl-sample-relay needs a synced verl full-parameter buffer trainer island "
+                             "(--rl-sample-role trainer, full parameters, a syncer)")
         addresses = syncer_addresses(args.syncer)
         if len(addresses) != 1:
-            raise SystemExit("--rl-sample-relay 需要不分片的 syncer（--syncer-shards 1）")
+            raise SystemExit("--rl-sample-relay needs an unsharded syncer (--syncer-shards 1)")
         buffer_section[RELAY_SECTION_KEY] = {"channel": int(args.learner_id)}
         env.update(trainer_relay_env(addresses[0], int(args.learner_id), groups_per_round=int(args.groups_per_round),
                                      prefetch=args.rl_sample_relay_prefetch))
@@ -1408,13 +1408,13 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
     and a TIS correction) so a wrong spec fails before verl starts.
 
-    ``trainer_cards`` (S27 G-EZ2): a buffer trainer's island cards; its trainer
+    ``trainer_cards``: a buffer trainer's island cards; its trainer
     pool is all of them over ``--actor-num-nodes`` nodes
     (``fully_async_round.buffer_trainer_shape``). None keeps the in-island
     rollout split (one rollout card, one trainer card).
 
     The ``algorithm.rollout_correction`` overrides come from the correction
-    mapping (rl-offpolicy-correction-passthrough D2/D3): decoupled PPO with
+    mapping: decoupled PPO with
     ``bypass_mode=False`` written over the fully_async yaml default; a
     forbidden setting is refused here."""
     from yeto.rl.engine.algorithm import AlgorithmSpec
@@ -1430,21 +1430,21 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     profile = execution_profile_for(spec, limit, groups_per_round=args.groups_per_round,
                                     samples_per_group=args.samples_per_group, sync=sync)
     check_algorithm_contract(profile, spec)
-    # S27 G-EV (VERL-PARITY #11): a full-parameter island's pools from the launcher's
+    # a full-parameter island's pools from the launcher's
     # fixed-partition flags (separate.pools_from_args); a LoRA island keeps 1 + 1.
-    # S27 G-EZ2: a buffer trainer has no rollout pool, so its trainer takes every card
+    # a buffer trainer has no rollout pool, so its trainer takes every card
     # of the island over --actor-num-nodes nodes (buffer_trainer_shape). An island never
     # reaches here with both -- fixed-partition pools on a buffer trainer are refused
-    # (G-EW) -- and when both are passed anyway, trainer_cards wins whole: the role with
-    # no rollout pool claims no rollout cards (G-FN, test_s27_verl_megatron_buffer.py).
+    # -- and when both are passed anyway, trainer_cards wins whole: the role with
+    # no rollout pool claims no rollout cards.
     sizes = {} if pools is None else {"rollout_gpus": pools.rollout_gpus, "trainer_gpus": pools.trainer_gpus}
-    if trainer_cards is not None:  # S27 G-EZ2: a buffer trainer has no rollout pool
+    if trainer_cards is not None:  # a buffer trainer has no rollout pool
         try:
             nodes, per_node = buffer_trainer_shape(trainer_cards, getattr(args, "actor_num_nodes", 1),
                                                    getattr(args, "actor_num_gpus_per_node", None))
         except VerlTranslationError as exc:
             raise SystemExit(str(exc)) from exc
-        # S27 G-FN: no rollouter on this role, so no weight-transport backend either
+        # no rollouter on this role, so no weight-transport backend either
         sizes = {"trainer_gpus": per_node, "trainer_nodes": nodes, "rollouter": False}
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds, **sizes)
@@ -1453,16 +1453,15 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
 
     if device_family() == "ascend":
         # fully_async_ppo_trainer.yaml defaults trainer.device=cuda; on an NPU
-        # node its resource pools then ask Ray for "GPU" and never schedule
-        # (S20 ModelArts 2x910B4, runBA_try2_gpures).
+        # node its resource pools then ask Ray for "GPU" and never schedule.
         out = [o for o in out if not o.startswith("trainer.device=")] + ["trainer.device=npu"]
     return out, tuple(vconf.ASSERTED_KEYS) + FULLY_ASYNC_ASSERTED_KEYS
 
 
 def append_correction_record(args, spec_dict: dict | None) -> None:
-    """rl-offpolicy-correction-passthrough D8 (as Miles' island entry): the island
+    """As in the Miles island entry, the island
     tape records the full correction group, the verl values and ``prox_anchor``.
-    A field verl cannot map refuses the start (phase 2, L6b.2), after the record
+    A field verl cannot map refuses the start, after the record
     and its ``correction_config_warning`` events are on the tape."""
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.events import append_tape_event
@@ -1488,14 +1487,12 @@ def append_correction_record(args, spec_dict: dict | None) -> None:
 def _override_value(overrides, key):
     """The value yeto wrote for ``key``, or None when it wrote no override for it.
 
-    S28 G-120C: Hydra's "add this key" prefixes (``+``, ``++``) are part of the
+    Hydra's "add this key" prefixes (``+``, ``++``) are part of the
     override string but not part of the config path, so a plain ``startswith``
     never matched an asserted key written through one. Every asserted key under
     ``override_transformer_config`` therefore read back with ``want: null``, and
     ``check_asserted`` skips a None -- the key was re-read but never compared
-    (S28 G-120 handoff section 6 item 12 saw this on
-    ``gradient_accumulation_fusion`` and called it "a read-back, not an
-    assertion"). Strip the prefix before comparing so those keys assert.
+    (seen on ``gradient_accumulation_fusion``). Strip the prefix before comparing so those keys assert.
     """
     for item in overrides:
         if item.lstrip("+").startswith(key + "="):
@@ -1506,5 +1503,5 @@ def _override_value(overrides, key):
 if __name__ == "__main__":
     from yeto.island_credential_guard import check_island_credentials
 
-    check_island_credentials()  # secret-handling-hardening D4
+    check_island_credentials()
     sys.exit(main())

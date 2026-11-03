@@ -1,4 +1,4 @@
-"""Join recorded model calls into one prompt/response/mask stream (S25 N10.3).
+"""Join recorded model calls into one prompt/response/mask stream.
 
 A Harbor agent talks OpenAI text protocol; the token recorder in front of the
 sampler sees each call as (rendered prompt ids, completion ids, logprobs).  A

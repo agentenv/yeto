@@ -2,9 +2,8 @@
 rl-algo-seq-and-adv (tasks 2.1, 2.2, 2.3, 3.1, 3.2, 3.6, 4.1, 4.4, 5.1, 5.5, 6.1, 6.2).
 
 The fake-driver GSPO tests need ``TrainStepMetrics.masked_fraction`` and the
-driver calling ``AlgorithmSpec.expects_gradient`` (P0 4.2,
-infra-drafts/p0-driver.patch, INFRA-owned driver.py); they skip until that
-lands.
+driver calling ``AlgorithmSpec.expects_gradient``; they skip until the driver
+provides both.
 """
 
 from __future__ import annotations
@@ -38,9 +37,9 @@ from yeto.rl.adapters.miles.entry import miles_capabilities  # noqa: E402
 load_extensions()
 NAME = "base_model.model.layer.lora_A.weight"
 DRIVER_USES_SPEC_RULE = "masked_fraction" in getattr(TrainStepMetrics, "__dataclass_fields__", {})
-needs_p0_driver = pytest.mark.skipif(
+needs_spec_rule_driver = pytest.mark.skipif(
     not DRIVER_USES_SPEC_RULE,
-    reason="needs P0 4.2 driver patch (TrainStepMetrics.masked_fraction + expects_gradient)",
+    reason="needs the driver spec rule (TrainStepMetrics.masked_fraction + expects_gradient)",
 )
 DISPATCHER = None
 
@@ -159,14 +158,14 @@ def _gspo_caps():
                              features={"eps_clip", "clip_higher"})
 
 
-@needs_p0_driver
+@needs_spec_rule_driver
 def test_fake_driver_gspo_fully_clipped_zero_grad_passes(tmp_path):
     _, driver = _driver(tmp_path, gspo(), _gspo_caps(), zero_grad_rounds={1},
                         masked_fraction_rounds={1: 1.0})
     assert driver.run().policy_version == 2
 
 
-@needs_p0_driver
+@needs_spec_rule_driver
 @pytest.mark.parametrize("fractions", [{}, {1: 0.5}])
 def test_fake_driver_gspo_zero_grad_fails_unless_fully_clipped(tmp_path, fractions):
     _, driver = _driver(tmp_path, gspo(), _gspo_caps(), zero_grad_rounds={1},
@@ -238,8 +237,8 @@ def test_rpp_family_whiten_rules(estimator):
     unwhitened = AlgorithmSpec(advantage={"estimator": estimator})
     assert any("[rpp_requires_whiten]" in p for p in unwhitened.rejections())
     # the Miles adapter: refused until the estimator is declared (7.5); once
-    # declared, the mandated whiten is claimed by the estimator (P0
-    # ESTIMATOR_COMPANIONS, alignment §7b) and the spec is accepted
+    # declared, the mandated whiten is claimed by the estimator
+    # (ESTIMATOR_COMPANIONS) and the spec is accepted
     caps = miles_capabilities("sha256:" + "0" * 64)
     check = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
     if estimator in MILES_2A_DECLARED:
@@ -264,7 +263,7 @@ def test_rpp_expects_gradient_rule():
     assert sa.expects_gradient(rpp(), flat_diff) is True
     unknown = _batch(SimpleNamespace(reward_std=None, reward_mean=None))
     assert sa.expects_gradient(no_kl, unknown) is True  # unreadable -> expect gradient
-    # P0 hook (relax-only) agrees wherever the default already expects a gradient
+    # the spec hook (relax-only) agrees wherever the default already expects a gradient
     assert no_kl.expects_gradient(varied) is True and no_kl.expects_gradient(flat_same) is False
 
 
@@ -383,7 +382,7 @@ def test_gdpo_expects_gradient():
     assert sa.expects_gradient(spec, _batch(_group(0.0), nonzero_advantages=3)) is True
     assert sa.expects_gradient(spec, _batch(_group(0.5), nonzero_advantages=0)) is False
     assert sa.expects_gradient(spec, _batch(_group(0.0))) is True  # unreadable -> expect
-    # P0 hook: relaxes when the dispatcher reports no non-zero advantage
+    # the spec hook relaxes when the dispatcher reports no non-zero advantage
     assert spec.expects_gradient(_batch(_group(0.5), nonzero_advantages=0)) is False
     assert spec.expects_gradient(_batch(_group(0.5), nonzero_advantages=2)) is True
     assert spec.expects_gradient(_batch(_group(0.5))) is True
@@ -452,7 +451,7 @@ def test_fake_declaration_launches_each_mechanism(tmp_path, name):
 MILES_2A_DECLARED = {"maxrl", "mapo", "gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline", "gdpo"}
 
 
-def test_miles_adapter_declarations_follow_g1():
+def test_miles_adapter_declarations_follow_gpu_verification():
     """7.5: exactly MILES_2A_DECLARED of this change is declared; the rest refused."""
 
     caps = miles_capabilities("sha256:" + "0" * 64)
@@ -481,8 +480,8 @@ def test_default_spec_unchanged():
     assert af.algorithm_argv(spec) == []
 
 
-def test_p0_hook_tightens_for_gdpo_and_rpp():
-    """D8 via the P0 hook (True verdicts require a gradient the R0 rule misses)."""
+def test_spec_hook_tightens_for_gdpo_and_rpp():
+    """Zero-gradient rule via the spec hook (True verdicts require a gradient the R0 rule misses)."""
 
     flat = _batch(_group(0.0), _group(0.0))
     assert rpp().expects_gradient(flat) is False  # reward KL alone: no verdict (round 0 KL = 0)
@@ -602,7 +601,7 @@ def test_trainer_reads_gspo_clipfrac_through_seq_adv():
 
 @pytest.mark.parametrize("name", ["gspo", "rpp", "rpp_baseline", "maxrl", "mapo", "gdpo"])
 def test_example_specs_are_current(name):
-    """G1 uses these files: their plugin hashes must match the current sources."""
+    """GPU runs use these files: their plugin hashes must match the current sources."""
 
     from pathlib import Path
 

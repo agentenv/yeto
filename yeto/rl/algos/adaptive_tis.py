@@ -1,4 +1,4 @@
-"""Adaptive truncated importance sampling (S26 E2, opt-in, default off).
+"""Adaptive truncated importance sampling (opt-in, default off).
 
 A Miles ``--custom-tis-function-path`` function (same call shape as Miles'
 ``vanilla_tis_function``) that sets the strength of the rollout/trainer

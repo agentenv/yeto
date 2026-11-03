@@ -1,4 +1,4 @@
-"""Distributed re-quantization: each trainer rank quantizes the weights it holds (S25 N8.2, option R3).
+"""Distributed re-quantization: each trainer rank quantizes the weights it holds.
 
 No rank gathers the whole BF16 model. Each rank gives the source tensors it
 holds as :class:`SourceSlice` items (per-expert source names of the target
@@ -27,7 +27,7 @@ Part file: ``<part_dir>/part-<rank>.safetensors``; tensor key
 Status: CPU tests (2 gloo ranks, both schemes, byte-equal to the single-process
 output; tests/test_rl_quant_shards.py). Inside a real Miles trainer (2xH100,
 glm5_next 4-layer mini, TP2/EP2, through the Miles adapter): byte-equal for both
-schemes (T-G3, 2026-10-20). Not run inside verl.
+schemes. Not run inside verl.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Fold JSONL tapes into the dashboard views (design D1/D5).
+"""Fold JSONL tapes into the dashboard views.
 
 The reducer is the single source of the numbers shown by both the live
 server and the static export. It is incremental: ``feed`` takes one record
@@ -16,7 +16,7 @@ Streams understood (classified per record, not per file):
   and ``cost_tick``
 
 Anything else is passed through to the events view. Missing values stay
-``None`` (rendered as "无数据"), never 0.
+``None`` (rendered as "no data"), never 0.
 """
 
 from __future__ import annotations
@@ -51,9 +51,9 @@ METRICS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("kl", "KL", ("mean_kl", "train_metrics.ppo_kl", "train_metrics.kl_loss", "train/train_rollout_kl")),
     ("entropy", "entropy", ("entropy", "train_metrics.entropy", "train_metrics.entropy_loss")),
     ("grad_norm", "grad_norm", ("grad_norm", "train_metrics.grad_norm", "train/grad_norm")),
-    ("clip", "clip 总", ("clip_fraction", "train_metrics.pg_clipfrac", "train/pg_clipfrac")),
-    ("clip_lo", "clip 低侧", ("train_metrics.pg_clipfrac_lower", "train_metrics.pg_clipfrac_low")),
-    ("clip_hi", "clip 高侧", ("train_metrics.pg_clipfrac_upper", "train_metrics.pg_clipfrac_high")),
+    ("clip", "clip total", ("clip_fraction", "train_metrics.pg_clipfrac", "train/pg_clipfrac")),
+    ("clip_lo", "clip low side", ("train_metrics.pg_clipfrac_lower", "train_metrics.pg_clipfrac_low")),
+    ("clip_hi", "clip high side", ("train_metrics.pg_clipfrac_upper", "train_metrics.pg_clipfrac_high")),
     ("resp_len", "response len", ("resp_len_mean",)),
     ("tok_s", "tok/s", ("tok_per_s",)),
 )
@@ -131,9 +131,9 @@ HOST_SAMPLE_EVENT = "modal_host_sample"
 STOP_SLACK_S = 5.0
 NODE_SERIES_MAX = 20000
 NODE_SERIES_POINTS = 300
-# rl_timeline_span task -> page phase: R 推理生成 / T 训练 / S 训练后同步 / P 发布
+# rl_timeline_span task -> page phase: R rollout / T training / S post-train sync / P publish
 SPAN_PHASES = {"generate": "R", "train": "T", "outer_sync": "S", "publish": "P"}
-# agentic-rollout-utilization 7 (dashboard): rl_rollout_cutoff fields shown per round
+# rl_rollout_cutoff fields shown per round
 CUTOFF_KEYS = ("submitted_groups", "target_groups", "filtered_groups", "discarded_groups",
                "discarded_trajectories", "discarded_tokens", "discarded_unknown_groups", "mechanism")
 # rl_trajectory_reward phase fields -> page names (generation / tool / judge / sandbox start)
@@ -148,15 +148,15 @@ DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_
 
 
 def _fmt_override_value(value: Any) -> str:
-    return "无" if value is None else str(value)
+    return "n/a" if value is None else str(value)
 
 
 def negative_test_label(overrides: Any) -> dict:
-    """``rl_island_override`` -> the island badge: "负例岛：学习率调度 linear→constant"."""
+    """``rl_island_override`` -> the island badge: "Negative-test island: learning-rate schedule linear→constant"."""
     rows = [o for o in (overrides or []) if isinstance(o, dict)]
     parts = [f"{o.get('name') or o.get('key')} {_fmt_override_value(o.get('old'))}→"
              f"{_fmt_override_value(o.get('new'))}" for o in rows]
-    return {"label": "负例岛：" + "，".join(parts) if parts else "负例岛",
+    return {"label": "Negative-test island: " + ", ".join(parts) if parts else "Negative-test island",
             "overrides": [{k: o.get(k) for k in ("key", "name", "old", "new")} for o in rows]}
 
 
@@ -197,9 +197,9 @@ def _new_island(iid: str) -> dict:
         # rounds each launch trained (rid -> [ts...]) and the cuts saved
         "resumes": [], "trained_ts": {}, "cuts": [],
 
-        # fleet-dashboard 8.4: startup sub-steps {step: {"seconds", "step_s", "ts"}}
+        # startup sub-steps {step: {"seconds", "step_s", "ts"}}
         "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
-        # agentic-rollout-utilization 7: cutoff per round, per-trajectory timing, load samples
+        # cutoff per round, per-trajectory timing, load samples
         "cutoffs": {}, "trajs": [], "load": deque(maxlen=NODE_SERIES_MAX),
         # launch-preflight-guards 3.5: rl_island_override (negative-test island)
         "negative_test": None,
@@ -235,7 +235,7 @@ class Reducer:
         self.operator_stops: list[dict] = []  # our own stop of the run (sources.operator_stops_near)
         self._run_meta_cache: tuple | None = None
         self.label: str | None = None  # display label when compared (7.6)
-        self.compare: list["Reducer"] = []  # agentic-rollout-utilization 7.6
+        self.compare: list["Reducer"] = []  #
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -457,7 +457,7 @@ class Reducer:
             if isl["source_lost"]:
                 isl["source_lost"]["recovered"] = True
         if event in SYNCER_ISLAND_EVENTS:
-            # S17 M1: elastic islands carry the syncer's version explicitly; a re-JOINed
+            # Elastic islands carry the syncer's version explicitly; a re-JOINed
             # island's local policy_version runs ahead of it, so it must not key the merge.
             step = r.get("sync/outer_version", r.get("global_step", r.get("step", r.get("policy_version"))))
             if isinstance(step, int):
@@ -479,7 +479,7 @@ class Reducer:
         isl["spans"].append({"phase": task, "rollout_id": r.get("rollout_id"), "start": a + off, "end": b + off})
 
     def round_records(self, isl: dict) -> list[dict]:
-        """Per-round record for the page (tasks 9.4): metrics + phase spans + time split.
+        """Per-round record for the page: metrics + phase spans + time split.
         A publish span has no rollout_id: it belongs to the round whose sync it follows
         (it publishes policy rollout_id+1). Missing values stay None."""
         rounds: dict[int, dict] = {}
@@ -543,7 +543,7 @@ class Reducer:
         return out
 
     def utilization(self, isl: dict, rounds: list[dict] | None = None) -> dict | None:
-        """agentic-rollout-utilization 7: per-round cutoff tally, completion times inside the
+        """per-round cutoff tally, completion times inside the
         generation span, four-phase time split, load (KV / queue) series and stage-2
         carry-over. None when the tape has none of these events (older tapes)."""
         if not (isl["cutoffs"] or isl["trajs"] or isl["load"]):
@@ -620,7 +620,7 @@ class Reducer:
         view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
                 "label": self.label, "spot": list(self.spot)}
         if self.compare:
-            # agentic-rollout-utilization 7.6: other runs, utilization only (side by side / overlay)
+            # other runs, utilization only (side by side / overlay)
             view["compare"] = [{"label": c.label, "run": c.run_name()[0],
                                 "util": {i: c.utilization(c.islands[i]) for i in c.island_ids()}}
                                for c in self.compare]
@@ -702,7 +702,7 @@ class Reducer:
                 isl["cells"] = [{"cell": uuid, "role": role, "gpus": 1,
                                  "state": "accepted" if r.get("accepted") else "rejected"}
                                 for uuid, role in sorted(r["roles"].items())]
-                isl["cells_source"] = "journal gpu_pool（派生）"
+                isl["cells_source"] = "journal gpu_pool (derived)"
         elif kind == "node_lost" and isl["cells"]:
             for c in isl["cells"]:
                 c.setdefault("note", "node_lost: " + str(r.get("error") or ""))
@@ -925,10 +925,10 @@ class Reducer:
     def ray_embed(self, isl: dict, index: int) -> dict:
         cloud = (isl["cloud"] or "").lower()
         if not cloud:
-            return {"mode": "unknown", "note": "无数据：fleet.jsonl 未记录该岛 cloud"}
+            return {"mode": "unknown", "note": "no data: fleet.jsonl has no cloud for this island"}
         if cloud == "modal":
-            return {"mode": "none", "note": "不可嵌入：Modal 容器无稳定入站端口"}
-        if cloud in ("local", "本地"):
+            return {"mode": "none", "note": "cannot embed: Modal containers have no stable inbound port"}
+        if cloud in ("local", "\u672c\u5730"):
             return {"mode": "direct", "port": 8265, "command": None}
         port = 18265 + index
         host = isl["name"] or isl["id"]
@@ -949,17 +949,17 @@ class Reducer:
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
         if not cards:
-            global_status = {"level": "muted", "text": "无数据"}
+            global_status = {"level": "muted", "text": "no data"}
         elif stop and all(c["status"] in ("stopped", "done") for c in cards):
-            global_status = {"level": "muted", "text": f"已停止（我方停机：{stop.get('cause')}）"}
+            global_status = {"level": "muted", "text": f"stopped (stopped by us: {stop.get('cause')})"}
         elif n_bad:
-            global_status = {"level": "bad", "text": f"{n_bad} 岛异常"}
+            global_status = {"level": "bad", "text": f"{n_bad} islands unhealthy"}
         elif sev0:
-            global_status = {"level": "bad", "text": f"{sev0} 条严重告警"}
+            global_status = {"level": "bad", "text": f"{sev0} critical alerts"}
         elif alerts:
-            global_status = {"level": "warn", "text": f"{len(alerts)} 条告警"}
+            global_status = {"level": "warn", "text": f"{len(alerts)} alerts"}
         else:
-            global_status = {"level": "ok", "text": "全部健康"}
+            global_status = {"level": "ok", "text": "all healthy"}
         run, inferred = self.run_name()
         return {
             "run": run, "run_inferred": inferred, "operator_stop": stop, "run_kind": self.run_kind(),
@@ -1108,7 +1108,7 @@ _SUMMARY_KEYS = ("phase", "rollout_id", "local_round_id", "policy_version", "rew
 
 
 def _traj(r: dict) -> dict:
-    """Compact per-trajectory record (agentic-rollout-utilization 1.3 fields). Missing = None."""
+    """Compact per-trajectory record. Missing = None."""
     out = {"rid": r.get("rollout_id") if isinstance(r.get("rollout_id"), int) else None,
            "id": r.get("trajectory_id"), "task": r.get("task_id"),
            "start": finite(r.get("trajectory_started_at")), "end": finite(r.get("trajectory_ended_at")),

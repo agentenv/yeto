@@ -397,7 +397,7 @@ def test_preempted_island_is_relaunched_with_the_same_learner_id_then_abandoned(
 
 
 def test_a_relaunch_into_a_stopped_app_abandons_the_island_at_once(monkeypatch, capsys):
-    """S27 G-AO: after a teardown stopped the app, the launcher kept relaunching the
+    """After a teardown stopped the app, the launcher kept relaunching the
     trainer island for the whole recovery timeout ("App ... not found"). A relaunch
     that fails because the app is stopped (or no longer listed) is not retried."""
     from yeto.launcher import ABANDONED, FleetController
@@ -435,7 +435,7 @@ def test_a_relaunch_into_a_stopped_app_abandons_the_island_at_once(monkeypatch, 
 
 
 def test_the_island_container_moves_ephemeral_ports_off_the_miles_port_range(tmp_path):
-    """gVisor starts with ephemeral ports 16000-65535 (Modal CPU probe, S27 G-AT);
+    """gVisor starts with ephemeral ports 16000-65535 (measured with a Modal CPU probe);
     the island narrows them to Linux's default before Ray and Miles start."""
     proc = tmp_path / "ip_local_port_range"
     proc.write_text("16000\t65535\n")
@@ -545,7 +545,7 @@ def test_tape_sync_copies_changed_files_and_commits(tmp_path):
 
 
 def test_tape_sync_mirrors_trajectory_evidence_outside_the_tape_dir(tmp_path):
-    # P0-1.11 run 20261014b: the full-parameter evidence stayed in a private
+    # On a GPU run the full-parameter evidence stayed in a private
     # directory of a stopped container and could not be read back.
     src, dst = tmp_path / "out", tmp_path / "vol" / "rank0"
     src.mkdir()

@@ -1,4 +1,4 @@
-"""rl-multinode-island, user ruling 2026-10-04 v2 (MULTINODE-GAP-S8.md §8):
+"""rl-multinode-island, placement rules v2:
 TP-in-node is a default preference with explicit opt-ins (trainer tp*cp / rollout engine TP),
 cross-node engines scale as whole replicas, mixed placement never overlaps, GPU uuid rebind
 is guarded against duplicate occupation / role conflict / stale re-entry."""
@@ -177,12 +177,29 @@ def test_rollout_edge_scales_by_whole_engine_replicas():
     assert mn.engine_replica_delta_rejection(8, 16, 8) is None
     why = mn.engine_replica_delta_rejection(8, 4, 8)
     assert why and "single node of it cannot be removed" in why
-    import inspect
 
-    from yeto.rl.engine import controller
 
-    src = inspect.getsource(controller.IslandController.plan)
-    assert "engine_replica_delta_rejection(src.rollout, dst.rollout, src.rollout_engine_gpus)" in src
+
+def test_controller_plan_refuses_a_partial_engine_replica_edge(tmp_path):
+    """IslandController.plan applies the whole-replica rule to a rollout-only edge."""
+    from test_rl_reconfig_controller import FP, MODES, _profile
+
+    from yeto.rl.elastic_benchmark.capabilities import Attestation, ResourceConfig
+    from yeto.rl.engine.controller import IslandController, Rejected
+
+    configs = {name: ResourceConfig(name, 8, r, 24 - r, rollout_engine_gpus=8)
+               for name, r in (("R8", 8), ("R16", 16), ("R4", 4))}
+    edges = frozenset((s, t, "rollout-only") for s, t in (("R8", "R16"), ("R8", "R4")))
+    ctl = IslandController(state_dir=tmp_path, configs=configs, initial_config="R8",
+                           runtime_fingerprint=FP, profile=_profile(),
+                           attestation=Attestation(FP, frozenset(MODES), edges, frozenset(), False, True))
+    try:
+        plan = ctl.plan("R16", 0, deadline_s=60)  # whole replicas: 1 -> 2 engines
+        assert (plan.source_engines, plan.target_engines) == (1, 2)
+        with pytest.raises(Rejected, match="R8->R4: target rollout 4 GPUs .*single node of it cannot be removed"):
+            ctl.plan("R4", 0, deadline_s=60)
+    finally:
+        ctl.close()
 
 
 def test_bind_members_refuses_a_partial_node_cross_node_cell():

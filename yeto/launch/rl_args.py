@@ -52,12 +52,12 @@ def _default_session_server_port(args) -> None:
 
     Unset, Miles picks each session server port dynamically in the 20000+
     range, where the engine's other ports (NCCL, dist-init, ...) are also
-    picked; S18 ARU-3 lost 1 of 4 launches to 20012 "address already in use"
+    picked; one test series lost 1 of 4 launches to 20012 "address already in use"
     (which process took it is not known). A fixed base outside that range and
     below the Linux ephemeral range (32768+) avoids the shared range; Miles
     adds the instance index and starts each server on that static port.
     Miles checks each static port is free when it allocates it, but the server
-    binds later; s19-compaction-g1-20261010f lost 31809 in that window. Under
+    binds later; one run lost port 31809 in that window. Under
     gVisor (Modal) the ephemeral range is 16000-65535 (gvisor
     pkg/tcpip/ports: firstEphemeral = 16000), so 31801+ was inside it. The base
     now sits below every shared range: gVisor/Linux ephemeral ports, Ray worker
@@ -99,7 +99,7 @@ def _adopt_contract_settings(args, adopted: dict, *, source: str) -> None:
 
 
 def _prepare_sao_streaming(args, *, num_islands: int) -> None:
-    """sao-streaming-full (P0-1.7b.3): actor and critic full-parameter streams.
+    """sao-streaming-full: actor and critic full-parameter streams.
 
     The contract bundle freezes the syncer semantic profile; the launcher
     adopts it, starts one syncer per role with exactly that profile and checks
@@ -166,8 +166,8 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
 
 def _synced_learners(args, specs) -> int:
     """Islands that join the syncer, the roster every quorum and membership
-    check counts: a synced group's sampler islands do not (S26 e9b-sync-b:
-    quorum 3 over --learners 2 made the syncer exit)."""
+    check counts: a synced group's sampler islands do not (a
+    quorum of 3 over --learners 2 made the syncer exit)."""
     from ..rl.engine.sample_roles import syncer_learner_count
 
     return syncer_learner_count(args, len(specs))
@@ -197,7 +197,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
 
 
 def _refuse_full_parameter_sync_options(args) -> None:
-    """The S26 E3 sync options exist only for the full-parameter preset
+    """The sync options exist only for the full-parameter preset
     (the bf16 downlink also for strict-avg, see ``_check_bcast_delta``)."""
     for dest, default, option in _FULL_PARAMETER_SYNC_DEFAULTS:
         if getattr(args, dest, default) != default:
@@ -205,7 +205,7 @@ def _refuse_full_parameter_sync_options(args) -> None:
 
 
 def _check_bcast_delta(args) -> None:
-    """S26 E3 bf16 downlink: a legacy-scheduled strict-avg or full-parameter
+    """bf16 downlink: a legacy-scheduled strict-avg or full-parameter
     syncer only (the elastic server and SAO have no downlink anchors)."""
     full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
     if full_every == 0:
@@ -220,7 +220,7 @@ def _check_bcast_delta(args) -> None:
                          "pool options) and no --experimental-rl-sync")
 
 
-# S27 P2: asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
+# Asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
 # fragment rounds in flight by default and at most
 # FULL_PARAMETER_ASYNC_MAX_PIPELINE (60); both live in rl.engine.run_flags.
 
@@ -252,7 +252,7 @@ def _eval_checkpoint_problems(args, *, async_rounds: bool, checkpoint_every: int
 
 
 def _full_parameter_backend(args):
-    """S27 G-DN: the selected backend's ``launch_flags`` module when it gives the
+    """The selected backend's ``launch_flags`` module when it gives the
     full-parameter preset its own shape (``full_parameter_problems``), else None
     (Miles: the preset's fixed-partition shape, unchanged)."""
     flags = _rl_backend_module(args, "launch_flags")
@@ -265,11 +265,11 @@ def _full_parameter_backend_problems(args) -> list[str] | None:
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
-    """full-parameter preset (P0-D8): one actor role synced as whole-model fragments.
+    """full-parameter preset: one actor role synced as whole-model fragments.
 
     ``--rl-sync-full-parameter-rounds sweep`` (default, the control) is the
     syncer's strict policy-sweep profile: every island per round, no grace,
-    serial rounds, plain averaging. ``async`` (S27 P2) is asynchronous:
+    serial rounds, plain averaging. ``async`` is asynchronous:
     the syncer runs ordinary fragment rounds (H local RL rounds per fragment,
     at most two rounds in flight, the decoupled preset's outer Nesterov), and
     the outer-merge options (quorum K, grace, weights, base lag, RDA) apply.
@@ -280,7 +280,7 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     GPUs (``--rl-placement fixed-partition``). Synced trainers that read their
     samples from the store (``--rl-sample-role trainer``) start no engine, so they
     take no placement (their sampler islands are their own engine partitions).
-    A backend that gives the preset its own shape (S27 G-DN, verl: colocated
+    A backend that gives the preset its own shape (verl: colocated
     islands) replaces this placement rule with its own problems."""
     from ..rl.engine.sample_roles import is_synced_trainer
 
@@ -397,7 +397,7 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     if async_rounds:
         from ..rl.engine.run_flags import local_training_steps_line
 
-        print(local_training_steps_line(args.total_steps, args.fragments), flush=True)  # S29 D7
+        print(local_training_steps_line(args.total_steps, args.fragments), flush=True)
         # The decoupled preset's outer step; the outer-merge options override.
         args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
         args.outer_lr = 0.7
@@ -502,7 +502,7 @@ def _apply_rl_sync_mode(args) -> None:
 
 
 def _warn_async_mode_off(args) -> None:
-    """S27 G-CD: ``--rl-sync-mode async`` (the default) that does not apply to a
+    """``--rl-sync-mode async`` (the default) that does not apply to a
     synced run: name the mode in effect and the final cut, which a one-island
     full-parameter run otherwise only sees as an f32 download of the whole model
     (120B: about 494 GB per island, GBC-120B-STAGEB §3)."""
@@ -521,7 +521,7 @@ def _warn_async_mode_off(args) -> None:
           f"(rl_sync_mode_effective strict){final}", file=sys.stderr)
 
 
-# S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
+# (dest, option, preset-keeping default) of the outer-merge options.
 _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_quorum", "--rl-sync-quorum", None),
     ("rl_sync_grace_ms", "--rl-sync-grace-ms", None),
@@ -572,21 +572,21 @@ def _peer_recovery_applies(args) -> bool:
         return False
     backend = _full_parameter_backend(args)
     if backend is not None and not getattr(backend, "FULL_PARAMETER_PEER_RECOVERY", True):
-        return False  # S27 G-DN: the backend's stream has no peer recovery (verl)
+        return False  # the backend's stream has no peer recovery (verl)
     applies = getattr(backend, "full_parameter_peer_recovery", None)
     if callable(applies) and not applies(args):
-        return False  # S27 G-FG: not for this run's engine (verl Megatron islands rejoin by catch-up)
+        return False  # not for this run's engine (verl Megatron islands rejoin by catch-up)
     from .peer_recovery import snapshot_store_path
 
     return snapshot_store_path(args) is not None
 
 
 def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
-    """S27 P1: override the outer-merge settings the preset just fixed.
+    """Override the outer-merge settings the preset just fixed.
 
     Every option left at its default keeps the preset's value, so the syncer
     command and semantic profile are unchanged. The full-parameter preset takes
-    them only with asynchronous rounds (S27 P2; the sweep keeps its strict
+    them only with asynchronous rounds (the sweep keeps its strict
     roster); SAO and --experimental-rl-sync take no overrides."""
     changed = [option for dest, option, default in _RL_OUTER_MERGE_OPTIONS
                if getattr(args, dest, default) != default]
@@ -647,7 +647,7 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
 
 
 def spot_rollout_run(args) -> bool:
-    """S29: a spot rollout run (relay trainers fed by spot sampler islands)."""
+    """A spot rollout run (relay trainers fed by spot sampler islands)."""
     return bool(getattr(args, "rl_sample_relay", False)) and int(getattr(args, "rl_spot_subscribers", 0) or 0) > 0
 
 
@@ -674,7 +674,7 @@ def _spot_pool_off_reason(args, num_islands: int) -> str | None:
 
 
 def _default_spot_island_pool(args) -> None:
-    """S29 D11: a spot rollout run (``--rl-sample-relay`` with
+    """A spot rollout run (``--rl-sample-relay`` with
     ``--rl-spot-subscribers``) is elastic, so it runs an island pool by default:
     ``--rl-sync-island-lease-s`` 150 (``DEFAULT_ISLAND_LEASE_S``), which makes a
     restarted trainer island rejoinable. Any explicit membership option keeps the
@@ -790,7 +790,7 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int,
         or bool(getattr(args, "rl_island_sample_role", None)),
         elastic=bool(getattr(args, "rl_elastic", False)),
         # a single-island store is the resume store (ledger and cuts) unless it holds
-        # only the HF exports (--rl-checkpoint-store-export-only, S27 G-CO)
+        # only the HF exports (--rl-checkpoint-store-export-only)
         island_cuts=(any(getattr(args, name, None) is not None
                          for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"))
                      or (bool(getattr(args, "rl_single_island_no_sync", False))
@@ -822,10 +822,10 @@ def _prepare_rl_args(
 
     from yeto.rl.quant.tiers import validate_launch as _validate_quant_tier
 
-    _validate_quant_tier(args)  # S26 E6: refused before any cloud spend
+    _validate_quant_tier(args)  # refused before any cloud spend
     _prepare_node_inventory(args)
     _apply_rl_sync_mode(args)
-    _default_spot_island_pool(args)  # S29 D11
+    _default_spot_island_pool(args)
     _default_peer_recovery(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
@@ -954,22 +954,22 @@ def _prepare_rl_args(
         _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
     if callable(over_sampling_check):
         over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
-    # S27 G-EF: island environment options the backend's colocated placement cannot run
+    # Island environment options the backend's colocated placement cannot run
     env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_island_env", None)
     if callable(env_check):
         for iargs in rl_island_placement_args(args):
             env_check(placement=getattr(iargs, "rl_placement", "colocated"),
                       env_pairs=getattr(args, "modal_env", None) or ())
-    # S25 N10.4: a backend without the Miles agentic wiring refuses its flags.
+    # A backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):
         agentic_check(args)
-    # S27 G-DC: a backend whose engine depends on the parallel shape (verl: TP/PP/EP > 1
+    # A backend whose engine depends on the parallel shape (verl: TP/PP/EP > 1
     # -> the Megatron island) refuses a shape that engine cannot run.
     engine_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_engine_shape", None)
     if callable(engine_check):
         engine_check(args)
-    # S27 G-EN: a backend whose eval hook covers only some of its paths refuses the rest.
+    # A backend whose eval hook covers only some of its paths refuses the rest.
     eval_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_eval", None)
     if callable(eval_check):
         eval_check(args)
@@ -997,7 +997,7 @@ def _prepare_rl_args(
             )
 
     # The signed stock-Codex and SecRLEnv agents these flags configured were
-    # removed in S26 E0.5 (tag s26-pre-harness-removal); refuse them.
+    # removed; refuse them.
     for flag, attr in (
         ("--codex-reasoning-effort", "codex_reasoning_effort"),
         ("--codex-backend-profile", "codex_backend_profile"),
@@ -1006,7 +1006,7 @@ def _prepare_rl_args(
     ):
         if getattr(args, attr, None) not in (None, False):
             raise ValueError(f"{flag} requires a signed Codex agent; the signed Codex and "
-                             "SecRLEnv agents were removed (S26 E0.5)")
+                             "SecRLEnv agents were removed")
     agent_max_seq_len = getattr(args, "agent_max_seq_len", None)
     if agent_max_seq_len is not None:
         if custom_agent is None:
@@ -1103,7 +1103,7 @@ def _prepare_rl_args(
             iargs.tensor_parallel * iargs.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
         )
         if getattr(iargs, "rl_placement", "colocated") == "fixed-partition":
-            # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
+            # The node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
             if spec.num_nodes == 1 and rl_actor_gpus_per_node(iargs, spec) < 1:
                 raise ValueError(

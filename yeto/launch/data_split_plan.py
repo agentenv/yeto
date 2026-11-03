@@ -1,4 +1,4 @@
-"""The data split plan of a launch (S27 task assignment P1 / P2).
+"""The data split plan of a launch (task assignment).
 
 Kept apart from ``island_tasks`` (the launch checks) so that the syncer
 command builder (``syncer``) can read the plan without importing the checks,
@@ -35,7 +35,7 @@ def data_split_plan(args):
 
 
 def sampler_dispense(args) -> tuple[list[int], str | None]:
-    """S27 P4: ``(sampler islands that would claim rows, why the launch cannot
+    """``(sampler islands that would claim rows, why the launch cannot
     dispense to samplers or None)``. A synced group's actor syncer dispenses to
     its sampler islands; a launch of synced trainers only dispenses to sampler
     launches that join it (``--rl-dispense-addr``); a sampler launch of its own
@@ -104,7 +104,7 @@ def island_backends(args) -> set[str]:
 
 
 def dispense_blockers(args) -> list[str]:
-    """Why this launch cannot use the task dispenser (S27 P2); empty: it can.
+    """Why this launch cannot use the task dispenser; empty: it can.
     ``--rl-data-split auto`` falls back to the row slots (stride) on any of
     these; an explicit ``dispense`` is refused on them (``island_tasks``)."""
 
@@ -113,7 +113,7 @@ def dispense_blockers(args) -> list[str]:
     out = []
     if getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET:
         out.append(f"--rl-sync-preset {SAO_STREAMING_SYNC_PRESET} (no GPU check with the dispenser)")
-    # S27 G-EU (VERL-PARITY #31): verl training islands of the synchronous trainer take
+    # verl training islands of the synchronous trainer take
     # their rows from the dispenser (adapters/verl/task_dispense.py), as Miles islands do;
     # the fully_async rule below covers verl's fully_async path as well
     backends = island_backends(args)
@@ -138,7 +138,7 @@ def dispense_blockers(args) -> list[str]:
     if (getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_peer_recovery", False)
             and not getattr(args, "rl_export_hf_rounds", None)
             and str(getattr(args, "rl_sync_preset", "")) in FULL_PARAMETER_SYNC_PRESETS):
-        # S27 G-DS catch-up: the store keeps only the islands' data positions, which the
+        # Catch-up: the store keeps only the islands' data positions, which the
         # dispenser would make unused (the launch would then refuse the store)
         out.append("--rl-checkpoint-store kept for the islands' data positions (catch-up without "
                    "peer recovery)")
@@ -146,7 +146,7 @@ def dispense_blockers(args) -> list[str]:
 
 
 def dispense_syncer_flags(args) -> str:
-    """The actor syncer's ``--dispense`` flags (S27 P2); empty without the dispenser."""
+    """The actor syncer's ``--dispense`` flags; empty without the dispenser."""
 
     plan = data_split_plan(args)
     if not plan.dispense or getattr(args, "rl_dispense_addr", None):

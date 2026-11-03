@@ -1,4 +1,4 @@
-"""Prefix hash chains and multi-chain bookkeeping (design D5 / R-D5a, task 4.2).
+"""Prefix hash chains and multi-chain bookkeeping.
 
 One ``Chain`` = one session-server session = one training sample.  A request is
 located against the chains of its trajectory by longest matching message-hash
@@ -98,7 +98,7 @@ def _only_reasoning_dropped(stored: dict[str, Any], incoming: dict[str, Any]) ->
 
 
 class ChainRegistry:
-    """Chains of one trajectory plus the D5 counters."""
+    """Chains of one trajectory plus the chain counters."""
 
     def __init__(self, *, allowed_append_roles: tuple[str, ...] = ("user", "tool"), keeps_history_reasoning: bool = True):
         self.allowed_append_roles = tuple(allowed_append_roles)

@@ -19,7 +19,7 @@ from yeto.rl.agentic import TrialVerdict
 from yeto.rl.engine import engine_sampler_entry as entry
 from yeto.rl.engine.sampler_resume import RECLAIM_MARKER_ENV
 
-from test_s29_streaming_agentic import Prompts, _entries, _round
+from test_agentic_round_streaming import Prompts, _entries, _round
 
 
 class BlockingSandboxHarness:

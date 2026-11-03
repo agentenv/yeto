@@ -1,10 +1,9 @@
-"""Opt-in launcher/learner switches for rl-infra-spec 2.3 (--rl-overlap-eval)
+"""Opt-in launcher/learner switches (--rl-overlap-eval)
 and 3.x (--rl-elastic). Off by default: the default launch command, learner
 args and miles_args are unchanged; when given they reach entry.py."""
 
 from __future__ import annotations
 
-import inspect
 import json
 from types import SimpleNamespace
 
@@ -93,15 +92,134 @@ def test_entry_builds_elastic_wiring_from_miles_args(monkeypatch):
                     "declared_cells": ("x",)}
 
 
-def test_run_ports_island_wires_elastic_before_ray_and_into_compose():
-    stage = inspect.getsource(entry.preflight_stage)  # IR-1: pre-Ray checks live here
-    built = stage.index("elastic = elastic_wiring_for(")
-    assert stage.index("preflight(") < built < stage.index("hook(miles_args, launch)")
-    source = inspect.getsource(entry.run_ports_island)
-    assert source.index("preflight_stage(") < source.index("connect_island_ray()")
-    assert "elastic=elastic," in source[source.index("compose_island("):]
-    ports = inspect.getsource(learner._run_ports)
-    assert ports.index("apply_ports_infra_switches(") < ports.index("run_ports_island(")
+class _ComposeReached(Exception):
+    pass
+
+
+def drive_run_ports_island(monkeypatch, *, topology=None, elastic="ELASTIC"):
+    """Run :func:`entry.run_ports_island` over stubbed Miles until it composes the
+    island; returns (ordered call names, compose_island kwargs)."""
+    import sys
+    import types
+
+    from yeto.rl.adapters.miles import eval_wiring
+    from yeto.rl.adapters.miles import rollout as miles_rollout
+    from yeto.rl.adapters.miles import state as miles_state
+
+    calls, composed = [], {}
+
+    def record(name, result=None):
+        return lambda *a, **kw: calls.append(name) or result
+
+    profile = SimpleNamespace(execution_mode="partitioned-serial")
+    monkeypatch.setattr(miles_state, "require_run_plugin", record("require_run_plugin"))
+    monkeypatch.setattr(entry, "publish_member_cell", lambda *a, **kw: None)
+    monkeypatch.setattr(entry, "preflight_stage",
+                        record("preflight_stage", ("FP", "CAPS", profile, elastic)))
+    monkeypatch.setattr(eval_wiring, "eval_guard_preflight", lambda *a, **kw: None)
+    monkeypatch.setattr(entry, "append_tape_event", lambda *a, **kw: None)
+    monkeypatch.setattr(entry, "selection_event", lambda **kw: {})
+    for name in ("connect_island_ray", "refuse_partial_island_preflight",
+                 "reconcile_gpu_pool_preflight", "pin_placement_group_to_head",
+                 "prewarm_remote_code", "wait_island_nodes"):
+        monkeypatch.setattr(entry, name, record(name))
+    monkeypatch.setattr(entry, "trainer_actor_import_done_unix", lambda: 1.0)
+    monkeypatch.setattr(entry, "build_sync", lambda *a, **kw: ("SYNC", None))
+    monkeypatch.setattr(miles_rollout, "RayMetadataSink", lambda: "SINK")  # needs a live Ray
+
+    def compose(**kw):
+        calls.append("compose_island")
+        composed.update(kw)
+        raise _ComposeReached
+
+    monkeypatch.setattr(entry, "compose_island", compose)
+
+    class _Actor:
+        async def run_plugin(self, *a, **kw):
+            return None
+
+    async def create_rollout_components(args):
+        return "CONTROLLER", "EXECUTOR", None
+
+    async def create_training_models(args, executor):
+        return _Actor(), None
+
+    class Disposer:
+        def add(self, *items):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    modules = {
+        "miles.ray.placement_group": dict(create_rollout_components=create_rollout_components,
+                                          create_training_models=create_training_models),
+        "miles.ray.rollout.eval_dispatch": dict(
+            EvalDispatcher=lambda *a: SimpleNamespace(drain=lambda: None)),
+        "miles.utils.async_utils": dict(Disposer=Disposer),
+        "miles.utils.orchestration_utils": dict(init_orchestration_script=lambda *a, **kw: None),
+    }
+    for name in ("miles", "miles.ray", "miles.ray.rollout", "miles.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    for name, attrs in modules.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, module)
+    algorithm = SimpleNamespace(execution=SimpleNamespace(needs_critic=False))
+    launch = SimpleNamespace(placement=SimpleNamespace(kind="fixed-partition", topology=topology))
+    with pytest.raises(_ComposeReached):
+        entry.run_ports_island(SimpleNamespace(), launch, algorithm, learner_id=0,
+                               base_model_revision="r", lora_config_hash="h", layout_hash="l",
+                               yeto_policy_sync=False)
+    return calls, composed
+
+
+def test_preflight_stage_builds_elastic_after_the_contract_preflight_and_before_the_hook(monkeypatch):
+    """IR-1: the elastic wiring is built (and can fail) after the contract preflight
+    and before the harness preflight hook, all inside the pre-Ray stage."""
+    calls = []
+
+    def record(name, result=None):
+        return lambda *a, **kw: calls.append(name) or result
+
+    monkeypatch.setattr(entry, "publish_member_cell", lambda *a, **kw: None)
+    monkeypatch.setattr(entry, "ports_runtime_fingerprint", lambda launch: "FP")
+    monkeypatch.setattr(entry, "miles_capabilities", lambda *a, **kw: "CAPS")
+    monkeypatch.setattr(entry, "with_partitioned_serial", lambda caps: caps)
+    monkeypatch.setattr(entry, "execution_profile_for", record("execution_profile_for", "PROFILE"))
+    monkeypatch.setattr(entry, "expected_algorithm_sha256", lambda args: None)
+    monkeypatch.setattr(entry, "preflight", record("preflight"))
+    monkeypatch.setattr(entry, "elastic_wiring_for", record("elastic_wiring_for", "W"))
+    monkeypatch.setattr(entry, "check_harness_reward_scope", lambda scope: None)
+    out = entry.preflight_stage(SimpleNamespace(), SimpleNamespace(), "ALG", yeto_policy_sync=True,
+                                harness_preflight=record("harness_preflight"))
+    assert out == ("FP", "CAPS", "PROFILE", "W")
+    assert calls == ["execution_profile_for", "preflight", "elastic_wiring_for", "harness_preflight"]
+
+
+def test_run_ports_island_wires_elastic_before_ray_and_into_compose(monkeypatch):
+    calls, composed = drive_run_ports_island(monkeypatch)
+    assert calls.index("preflight_stage") < calls.index("connect_island_ray")
+    assert composed["elastic"] == "ELASTIC"  # the preflight stage's wiring, not rebuilt
+    assert calls[-1] == "compose_island"
+
+
+def test_learner_applies_infra_switches_before_the_island_runs(monkeypatch):
+    calls = []
+    monkeypatch.setattr(learner, "apply_ports_infra_switches",
+                        lambda args, miles_args: calls.append("switches") or setattr(miles_args, "switched", True))
+    monkeypatch.setattr(learner, "_run_test_debug_rollout_replay", lambda args, miles_args: False)
+    monkeypatch.setattr(entry, "run_ports_island",
+                        lambda miles_args, *a, **kw: calls.append(("island", miles_args.switched)))
+    args = SimpleNamespace(event_tape="/t", learner_id=0, model_revision="r")
+    miles_args = SimpleNamespace(yeto_rl_parameter_mode="full", yeto_rl_lora_config_hash="h",
+                                 yeto_rl_layout_hash="l")
+    learner._run_ports(args, miles_args, SimpleNamespace(), SimpleNamespace(), specs=(),
+                       canonical_targets=(), yeto_policy_sync=False)
+    assert calls == ["switches", ("island", True)]
 
 
 def test_launcher_forwards_switches(monkeypatch, tmp_path):
@@ -237,7 +355,7 @@ def test_ports_lora_training_eval_resolves(tmp_path):
 
 
 def test_training_eval_on_a_single_island_without_outer_sync(tmp_path):
-    # S27 G-DA: the no-sync island owns its policy versions, so its driver can eval;
+    # The no-sync island owns its policy versions, so its driver can eval;
     # an island of a synced run without the external boundary still cannot.
     from yeto.rl.engine.run_config import _resolve_eval
 
@@ -272,10 +390,37 @@ def test_shared_check_still_refuses_known_eval_values(miles, message):
                            eval_interval=miles["eval_interval"])
 
 
-def test_launcher_and_island_share_the_overlap_eval_check():
-    source = inspect.getsource(launcher._check_ports_infra_switches)
-    assert "check_overlap_eval(" in source and "check_elastic_placement(" in source
-    assert "check_overlap_eval(" in inspect.getsource(entry)
+def test_launcher_and_island_share_the_overlap_eval_check(monkeypatch, tmp_path):
+    """Both sides run the one shared check (spied), and an overlap-eval request on a
+    colocated placement fails with the same error on the launcher and the island."""
+    from yeto.rl.engine import execution_profile as ep
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    calls = []
+
+    def spy(name):
+        real = getattr(ep, name)
+        return lambda *a, **kw: calls.append((name, a, kw)) or real(*a, **kw)
+
+    for name in ("check_overlap_eval", "check_elastic_placement"):
+        monkeypatch.setattr(ep, name, spy(name))
+    with pytest.raises(ep.ProfileError) as on_launcher:
+        launcher._check_ports_infra_switches(_cli(("--rl-overlap-eval",)))
+    assert [c[0] for c in calls] == ["check_overlap_eval"]
+    assert calls[0][2]["placement_kind"] == "colocated"
+    calls.clear()
+    miles_args = SimpleNamespace(yeto_rl_overlap_eval=True, eval_interval=5)
+    launch = SimpleNamespace(placement=SimpleNamespace(kind="colocated"))
+    with pytest.raises(ep.ProfileError) as on_island:
+        entry.execution_profile_for(miles_args, launch, AlgorithmSpec(), yeto_policy_sync=True)
+    assert [c[0] for c in calls] == ["check_overlap_eval"]
+    assert calls[0][2] == {"placement_kind": "colocated", "eval_uses_snapshots": False, "eval_interval": 5}
+    assert str(on_island.value) == str(on_launcher.value)
+    calls.clear()
+    res, _ = _elastic_files(tmp_path)
+    with pytest.raises(ep.ProfileError, match="fixed-partition"):
+        launcher._check_ports_infra_switches(_elastic_cli(res, "--rl-elastic-initial-config", "c0"))
+    assert ("check_elastic_placement", ("colocated",), {}) in calls
 
 
 def _elastic_cli(res, *extra):

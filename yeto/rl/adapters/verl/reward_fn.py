@@ -1,4 +1,4 @@
-"""verl ``compute_score`` wrappers over yeto's neutral reward functions (design D11).
+"""verl ``compute_score`` wrappers over yeto's neutral reward functions.
 
 verl loads ``reward.custom_reward_function.path`` / ``.name`` in its reward
 workers; the function computes yeto's reward (``yeto.rl.rewards.builtin``),
@@ -13,7 +13,7 @@ REWARDS = {
     "gsm8k_reward:score": "compute_score_gsm8k",
     "yeto.rl.gsm8k_reward:score": "compute_score_gsm8k",
     "yeto.rl.gsm8k_reward.score": "compute_score_gsm8k",
-    # S27 G-DC: DAPO-Math rows (one-number labels), the reward of the Miles Nemotron runs
+    # DAPO-Math rows (one-number labels), the reward of the Miles Nemotron runs
     "numeric_answer_reward:score": "compute_score_numeric_answer",
     "yeto.rl.numeric_answer_reward:score": "compute_score_numeric_answer",
     "yeto.rl.numeric_answer_reward.score": "compute_score_numeric_answer",
@@ -43,7 +43,7 @@ def compute_score_rlf(data_source, solution_str, ground_truth=None, extra_info=N
 
 REWARDS["yeto.rlf"] = "compute_score_rlf"
 
-# S27 G-FS (VERL-PARITY #33): the agentic path's reward is the Harbor verdict the
+# VERL-PARITY #33: the agentic path's reward is the Harbor verdict the
 # agent loop already put on the sample (``AgentLoopOutput.reward_score`` ->
 # ``rm_scores``); verl's reward manager then returns that tensor and never calls a
 # custom function (fork acad9875, workers/reward_manager/batch.py:82-84).  The
@@ -73,7 +73,7 @@ def function_for(reward_function: str) -> str:
     try:
         return REWARDS[reward_function]
     except KeyError:
-        raise UnmappedReward(f"verl 后端未映射奖励函数 {reward_function!r}（已映射：{sorted(REWARDS)}）") from None
+        raise UnmappedReward(f"the verl backend does not map reward function {reward_function!r} (mapped: {sorted(REWARDS)})") from None
 
 
 def compute_score_gsm8k(data_source, solution_str, ground_truth, extra_info=None, **_kwargs):

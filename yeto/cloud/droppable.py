@@ -1,6 +1,6 @@
-"""Phase 2 of rl-spot-cost-saving: one on-demand anchor island + droppable spot islands.
+"""One on-demand anchor island + droppable spot islands (rl-spot-cost-saving).
 
-User decision 2026-10-09 (tasks 5.x, design D8). ``--rl-island-role ISLAND:ROLE``
+``--rl-island-role ISLAND:ROLE``
 (repeatable, ROLE = anchor | droppable). An island without a role is an anchor.
 
 * The anchor island runs on-demand. It keeps the latest weights (its contributions
@@ -13,7 +13,7 @@ User decision 2026-10-09 (tasks 5.x, design D8). ``--rl-island-role ISLAND:ROLE`
 * If every droppable island is gone at once, the anchor alone still closes rounds:
   admission requires ``--rl-sync-q-min`` <= number of anchors.
 
-Admission (task 5.1, spec "推理型岛的定义"): elastic only (legacy refused), at least
+Admission (spec "definition of an inference island"): elastic only (legacy refused), at least
 one anchor, no anchor on a cloud whose GPUs are always preemptible (Modal), no global
 ``--spot`` (billing comes from the role), a droppable island only on a cloud whose
 spot support is known in the capability table, and an anchor on Verda must not keep its cut on a local
@@ -34,7 +34,7 @@ from yeto.cloud import capabilities
 ROLE_ENV = "YETO_ISLAND_ROLE"   # JSON {"role", "cloud", "region"} on every island of a role run
 ANCHOR, DROPPABLE = "anchor", "droppable"
 ROLES = (ANCHOR, DROPPABLE)
-LEGACY_REFUSED = "可丢弃岛只在岛池下支持 (droppable islands need island pool options, e.g. --rl-sync-island-lease-s)"
+LEGACY_REFUSED = "droppable islands need island pool options, e.g. --rl-sync-island-lease-s"
 
 
 def parse_roles(items, num_islands: int) -> dict[int, str]:

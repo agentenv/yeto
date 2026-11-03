@@ -1,9 +1,9 @@
-"""Node-aware island topology (rl-multinode-island D2-D5, D7, D8). Pure Python.
+"""Node-aware island topology Pure Python.
 
 A logical bundle ``p`` of a ``gpus_per_node = G`` island lives on node
-``p // G`` as local GPU ``p % G`` (design D3; Miles' PACK placement group
+``p // G`` as local GPU ``p % G`` (Miles' PACK placement group
 sorted by (node, gpu) yields exactly this blocking, asserted at startup by
-``StartupBundles``). Node 0 is the Ray head (D3 head pin, 2026-10-03 ruling):
+``StartupBundles``). Node 0 is the Ray head (head pin):
 block 0 of the placement group requests a sliver of the head's node resource
 (:func:`head_pinned_bundles`), the fork's (node, gpu) sort puts the head first
 (:func:`head_first_sort_key`), and :func:`assert_head_block` rejects any other
@@ -40,7 +40,7 @@ def node_parallel_of(dims: Mapping[str, int]) -> int:
 
 
 def trainer_replica_gpus(dims: Mapping[str, int]) -> int:
-    """GPUs of the smallest trainer model replica (D8 min_nodes):
+    """GPUs of the smallest trainer model replica (min_nodes):
     ``tp*cp*pp*max(1, ceil(ep*etp / tp))``. Megatron's expert parallel does not
     add ranks of its own: the EP group is carved out of the attention TP x DP
     ranks (expert tensor parallel ``etp`` defaults to 1), so ``ep*etp <= tp``
@@ -48,7 +48,7 @@ def trainer_replica_gpus(dims: Mapping[str, int]) -> int:
     replicas of the dense ``tp*cp*pp`` group (the old ``tp*cp*ep*pp``
     over-estimated by a factor of up to tp). Megatron-Core carves the expert
     group out of TP x CP x DP (ETP x EP x EDP = TP x CP x DP), so with context
-    parallelism ``ep*etp <= tp*cp`` needs no extra GPU either (S27 G-AC)."""
+    parallelism ``ep*etp <= tp*cp`` needs no extra GPU either."""
     tp, cp, pp, ep, etp = (max(1, int(dims.get(dim, 1) or 1)) for dim in ("tp", "cp", "pp", "ep", "etp"))
     return tp * cp * pp * max(1, -(-ep * etp // (tp * cp)))
 
@@ -109,7 +109,7 @@ def topology_of(resources: Mapping[str, Any]) -> Topology | None:
 
 def check_pool_topology(resources: Mapping[str, Any], topology: Topology) -> None:
     """A resolved ``resources.gpus`` pool must cover exactly nodes x gpus_per_node
-    with each node's ``index`` running 0..G-1 (design D2)."""
+    with each node's ``index`` running 0..G-1."""
     gpus = resources.get("gpus") or []
     if not gpus:
         return
@@ -359,7 +359,7 @@ def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | N
                              allow_cross_node_tp: bool = False,
                              allow_cross_node_engine: bool = False,
                              gpus_per_node: int | None = None) -> str | None:
-    """Design D4 rules on a normalized placement; None when legal.
+    """Placement rules on a normalized placement; None when legal.
 
     1. each rollout engine on one node -- the DEFAULT preference; with
     ``allow_cross_node_engine`` (cfg ``parallel.allow_cross_node_engine_tp`` /
@@ -408,7 +408,7 @@ def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | N
         # dense group tp*pp*cp is ``model_parallel`` and tp*cp is ``np_`` (cp*pp =
         # model_parallel / tp; with tp unknown here cp is folded into np_, which is
         # exact for cp=1 and conservative otherwise). Consistent with
-        # ``trainer_replica_gpus`` (D8 min_nodes); EP groups may span nodes.
+        # ``trainer_replica_gpus`` (min_nodes); EP groups may span nodes.
         mp = max(1, int(model_parallel))
         pp = max(1, mp // np_)
         attn_ranks = len(trainer) // pp
@@ -421,7 +421,7 @@ def node_placement_rejection(slots: Mapping[str, Any], *, node_parallel: int | N
 def chunk_by_node(bundles: Sequence[int], topology: Topology | None, per: int,
                   *, allow_cross_node: bool = False) -> tuple[list[list[int]], list[int]]:
     """Split a role's logical bundles into engine runs of ``per`` that never
-    cross a node (design D7). Returns ``(runs, leftover)``; without a topology
+    cross a node. Returns ``(runs, leftover)``; without a topology
     this is the legacy consecutive split. With ``allow_cross_node`` (ruling
     2026-10-04 v2) and ``per`` larger than a node, a run is ``per // gpus_per_node``
     consecutive WHOLE nodes (each fully owned by this role); partial nodes stay
@@ -465,7 +465,7 @@ def chunk_by_node(bundles: Sequence[int], topology: Topology | None, per: int,
 def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int,
               gpus_per_node: int, node_parallel: int | None = None,
               allow_cross_node_tp: bool = False, allow_cross_node_engine: bool = False) -> int:
-    """Design D8: the smallest island (whole nodes) that fits one trainer model
+    """The smallest island (whole nodes) that fits one trainer model
     replica (``trainer_min_gpus`` = :func:`trainer_replica_gpus`, which may span
     nodes when it exceeds a node: Q1/Q3 ruling), one rollout engine and the standby
     reservation. A replica larger than a node must be a whole number of nodes;
@@ -501,7 +501,7 @@ def min_nodes(*, trainer_min_gpus: int, rollout_min_gpus: int, standby_gpus: int
 
 
 def assert_node_blocks(node_ids: Sequence[Any], gpus_per_node: int) -> tuple[Any, ...]:
-    """Design D3 startup assertion: the placement group's bundle -> node sequence
+    """Startup assertion: the placement group's bundle -> node sequence
     (logical order) must be whole blocks of ``gpus_per_node`` with one distinct
     node per block. Returns the node id per block."""
     ids = list(node_ids)
@@ -526,7 +526,7 @@ def head_pinned_bundles(num_gpus: int, gpus_per_node: int, *, head_resource: str
                         share: float = HEAD_SHARE) -> list[dict[str, float]]:
     """Startup placement-group bundles with logical block 0 pinned to the Ray
     head: the first ``gpus_per_node`` bundles also request ``share`` of
-    ``head_resource`` so Ray cannot place them anywhere else (D3 head pin)."""
+    ``head_resource`` so Ray cannot place them anywhere else (head pin)."""
     if gpus_per_node <= 0 or num_gpus <= 0 or num_gpus % gpus_per_node:
         raise TopologyError(f"{num_gpus} GPUs are not whole {gpus_per_node}-GPU nodes")
     if gpus_per_node * share > 1.0:
@@ -550,14 +550,14 @@ def head_first_sort_key(head_ip: Any, base_key: Any) -> Any:
 
 
 def assert_head_block(node_blocks: Sequence[Any], head_node: Any) -> None:
-    """D3 head pin: logical node 0 (block 0 of :func:`assert_node_blocks`) must be
+    """Head pin: logical node 0 (block 0 of :func:`assert_node_blocks`) must be
     the Ray head node; anything else is a startup error (fail closed)."""
     blocks = list(node_blocks)
     if not blocks:
         raise TopologyError("no node blocks")
     if str(blocks[0]) != str(head_node):
         raise TopologyError(f"logical node 0 is {blocks[0]!r}, not the Ray head {head_node!r} "
-                            "(D3: head = node 0 = trainer)")
+                            "(head = node 0 = trainer)")
 
 
 # ------------------------------------------------------------ GPU UUID reconciliation (Q6)
@@ -747,7 +747,7 @@ def stale_incarnation_rejection(baseline_flat: Sequence[str] | None, observed_fl
     return None
 
 
-# S27 G-DI two-cluster island (yeto.launch.engine_cluster): the engine cluster's nodes
+# Two-cluster island (yeto.launch.engine_cluster): the engine cluster's nodes
 # join the trainer cluster's Ray head after both clusters finished setup, possibly long
 # after the driver started. With this variable (seconds) the driver waits for every
 # island node before the head pin, the remote-code prewarm and the placement group.

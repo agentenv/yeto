@@ -57,7 +57,7 @@ def gsm8k_reward(traj: Trajectory) -> RewardResult:
 # -- numeric final answer (DAPO-Math-17k style "Answer: \boxed{N}") ------------
 #
 # ``gsm8k_grade`` above stays byte-identical (golden samples, bare-arm copy in
-# tools/eval/efficiency/eff_reward.py).  This grader is for rows whose label is
+# yeto/rl/eval/efficiency/eff_reward.py).  This grader is for rows whose label is
 # one number and whose prompt asks for "Answer: \boxed{...}" on the last line.
 # Differences from gsm8k_grade:
 #   * grades only the text after the last ``</think>``;
@@ -71,7 +71,7 @@ def gsm8k_reward(traj: Trajectory) -> RewardResult:
 #     the last number of an expression (``\boxed{2\sqrt{3}}`` is not 3).
 
 _BOXED = re.compile(r"\\(?:boxed|fbox)\s*\{")
-_ANSWER_LINE = re.compile(r"answer\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_ANSWER_LINE = re.compile(r"answer\s*[:\uff1a]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
 _TEXT_CMD = re.compile(r"\\(?:text|textbf|textrm|textit|mathrm|mathbf|mathit|bf|mbox|operatorname|answer)"
                        r"\s*\{([^{}]*)\}")

@@ -1,4 +1,4 @@
-"""verl buffer trainer: the ports that differ from the fully_async path (S25 C2).
+"""verl buffer trainer: the ports that differ from the fully_async path.
 
 :func:`install_buffer_ports` turns a :class:`~.fully_async_ports.FullyAsyncIsland`
 into a trainer island over the sample buffer (``--rl-sample-role trainer``):
@@ -17,13 +17,13 @@ The base policy (version 0, LoRA B all zero: the merged weights are the base)
 is not released: the samplers start on the base weights as version 0. A
 version-0 state with any non-zero B is released like any other version.
 
-What a release writes comes from the publisher's ``weights`` (S27 G-EK, VERL-PARITY
+What a release writes comes from the publisher's ``weights`` (VERL-PARITY
 #14): :func:`lora_release_weights` (the default: the adapter merged into the
 base) or :func:`full_release_weights` (a full-parameter trainer: its FP32 masters
 in the model's dtype, written by the island's HF writer, ``hf_export``; version
 0 is the base checkpoint itself and is not released).
 
-Synced trainers (S25 C3, ``yeto.rl.engine.merged_release``; the same rules as
+Synced trainers (``yeto.rl.engine.merged_release``; the same rules as
 the Miles trainer island): every island records, at each publication, the
 merged version (``merged_version``: the syncer's outer version of the applied
 base) it first applied (:class:`~.buffer_feed.MergedVersions`; the feed turns a
@@ -35,7 +35,7 @@ merge (elastic: several local rounds per merge) releases nothing: its weights
 are not a merged policy. The driver is bound after it is built
 (:meth:`BufferReleasePublisher.bind`).
 
-Delta releases (S27 G-EQ3, ``--rl-release-delta-full-every N`` on a
+Delta releases (``--rl-release-delta-full-every N`` on a
 full-parameter trainer): the release is written into a staging directory on the
 island's local disk and published with
 :meth:`~yeto.rl.engine.policy_release.PolicyReleaseStore.release_staged`, which
@@ -47,7 +47,7 @@ update sends only the words one optimizer step moved instead of the whole
 checkpoint (Nemotron Nano: 63 GB). It needs the export to write the base's own
 file names and sizes, which :mod:`.hf_export` does.
 
-Relaunch (S27 G-EQ5, gap 22, ``resume_versions``): a buffer trainer without an
+Relaunch (``resume_versions``): a buffer trainer without an
 outer sync counts its policy versions itself, so a new process of it continues
 the account above the releases its store already holds
 (:class:`~yeto.rl.engine.merged_release.ResumedReleases`): the driver's rounds
@@ -104,7 +104,7 @@ def is_base_adapter(version: int, tensors: Mapping[str, Any]) -> bool:
 
 
 class ReleaseWeights:
-    """The weights one publication would release (S27 G-EK): ``write(directory)``
+    """The weights one publication would release: ``write(directory)``
     writes them as a HF checkpoint and returns a summary; ``is_base(version)``: the
     released policy would be the base checkpoint the samplers start on (nothing to
     release); ``fallback_bytes``: the payload size reported when nothing is released."""
@@ -134,8 +134,8 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
     """A :class:`DeltaChain` for this trainer, started from the release the store
     already holds when that release's files are readable in the store (module
     doc, delta releases); None when ``full_every`` is 0 (deltas off). A release
-    that is itself a delta is rebuilt first when the store has a mirror
-    (S27 G-EQ3, gap 20), so a restarted island's next release stays a delta."""
+    that is itself a delta is rebuilt first when the store has a mirror,
+    so a restarted island's next release stays a delta."""
     from yeto.rl.engine.policy_release import DeltaChain
     from yeto.rl.engine.release_delta import ReleaseDeltaError
 
@@ -148,7 +148,7 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
             emit("rl_policy_release_delta_base", adopted=False, rebuilt=False,
                  reason="the store holds no release")
         return chain
-    # A delta release is rebuilt first (S27 G-EQ3, gap 20): its own directory holds
+    # A delta release is rebuilt first: its own directory holds
     # ``.ydelta`` files, which are no base, but ``PolicyReleaseStore.resolve`` with a
     # mirror rebuilds it on local disk (Nemotron Nano: about 1 min) -- far cheaper than
     # the whole-checkpoint upload the alternative costs (63 GB, about 2.3 h on this link).
@@ -180,7 +180,7 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
 
 
 def full_release_weights(writer: Callable[[int, Path], None]):
-    """A full-parameter trainer's releases (S27 G-EK): ``writer`` is the island's HF
+    """A full-parameter trainer's releases: ``writer`` is the island's HF
     writer (``hf_export.VerlHfWriter`` over the trainer workers); version 0 is the
     base checkpoint. Fallback payload: the policy's own payload size."""
 
@@ -195,7 +195,7 @@ def full_release_weights(writer: Callable[[int, Path], None]):
 def release_weights_for(island: FullyAsyncIsland, plan: Mapping[str, Any]):
     """What a release of this buffer trainer writes (:class:`ReleaseWeights`):
     None for a LoRA trainer (the publisher's default: the adapter merged into the
-    base); for a full-parameter trainer (S27 G-EW, VERL-PARITY #14) the trainer's
+    base); for a full-parameter trainer (VERL-PARITY #14) the trainer's
     own weights, written by the island's HF writer over its full-parameter group
     (``hf_export.VerlHfWriter``; ``island.full_group`` is set by
     ``fully_async_full.full_parameter_ports`` before the ports are installed)."""
@@ -208,7 +208,7 @@ def release_weights_for(island: FullyAsyncIsland, plan: Mapping[str, Any]):
     if island.full_group is None:
         raise RuntimeError("a full-parameter buffer trainer installs its ports after its policy state")
     if plan.get("engine") == megatron_engine.ENGINE_MEGATRON:
-        # S28 G-120: a Megatron island's weights are written by its trainer ranks through
+        # A Megatron island's weights are written by its trainer ranks through
         # Megatron-Bridge (the HF boundary exports whole files and serves no single HF
         # tensor to the driver, so VerlHfWriter's export_parameters raises there). Same
         # ReleaseWeights contract, so the store, the delta chain and staging are unchanged.
@@ -234,14 +234,14 @@ class BufferReleasePublisher:
                  staging: str | Path | None = None, delta: Any = None,
                  resumed: ResumedReleases | None = None, no_release: bool = False,
                  release_only: Iterable[int] | None = None) -> None:
-        """``no_release`` (S28 G-120C, ``--rl-measure-no-release``): a measurement run
+        """``no_release`` (``--rl-measure-no-release``): a measurement run
         (memory, MFU) writes no policy release at all. One release of the 120B is about
         225 GB written and a dozen minutes per round, which answers nothing such a run
         asks; every skipped round is logged as ``rl_policy_release_skipped`` with reason
         ``measurement_no_release``, so a sampler never silently misses a release it
         was meant to get. Refused on a synced trainer (its peers wait for the release).
 
-        ``release_only`` (S28 G-120C, ``--rl-release-only-versions``): release only these
+        ``release_only`` (``--rl-release-only-versions``): release only these
         policy versions and skip the others the same way (reason ``not_a_release_version``).
         A multi-step run then trains several rounds on the samples it has and releases once,
         so the samplers load one new policy -- each 120B release costs about an hour of
@@ -279,7 +279,7 @@ class BufferReleasePublisher:
         version account is wired into it here, module doc "relaunch")."""
         self.driver = driver
         if self.resumed is not None:
-            # S27 G-EQ5 (gap 22): the island's rounds and publications continue at vK,
+            # The island's rounds and publications continue at vK,
             # and the versions published below it are restored with the hashes the
             # store recorded, so a group inside the policy-age window is trained.
             resume_at = getattr(driver.sync, "resume_at", None)
@@ -302,17 +302,17 @@ class BufferReleasePublisher:
         the first time this island applies it (module doc)."""
         local = int(state.policy_version)
         if self.lane is None:
-            if self.no_release:  # S28 G-120C: a measurement run (see __init__)
+            if self.no_release:  # A measurement run (see __init__)
                 self.island.emit("rl_policy_release_skipped", policy_version=local,
                                  reason="measurement_no_release")
                 return None
             if self.release_only is not None and local not in self.release_only and local > 0:
-                # S28 G-120C: only the listed versions are released (see __init__)
+                # Only the listed versions are released (see __init__)
                 self.island.emit("rl_policy_release_skipped", policy_version=local,
                                  reason="not_a_release_version", release_versions=sorted(self.release_only))
                 return None
             if self.resumed is not None and local <= self.resumed.base_version:
-                # S27 G-EQ5 (gap 22): the first publication of a relaunched trainer is
+                # The first publication of a relaunched trainer is
                 # the version its store already holds and nothing is trained yet, so
                 # releasing it would write a second release with that version number
                 # and other weights. The first trained round releases vK+1.
@@ -366,7 +366,7 @@ class BufferReleasePublisher:
         return release
 
     def _origin(self, state: Any) -> dict[str, Any] | None:
-        # S28 G-120C: a release whose policy hash is an identity label (an unverified round
+        # A release whose policy hash is an identity label (an unverified round
         # under --rl-verify-every N) says so in the release record itself, the one thing a
         # sampler or a later trainer reads; a verified release keeps the record unchanged.
         unverified = {"policy_hash": "unverified-identity"} if not bool(getattr(state, "verified", True)) else {}
@@ -382,7 +382,7 @@ class BufferReleasePublisher:
         isl.vmap.record(param_version, version)  # raises on contradiction / regression
         if isl.consume_map is not isl.vmap:
             # the version the samplers stamp on the groups of this release is the
-            # outer version itself (S27 G-EQ5); idempotent when it is already seeded
+            # outer version itself; idempotent when it is already seeded
             isl.consume_map.record(version, version)
         digest = state.policy_tensor_hash()
         weights = (self.weights or lora_release_weights(self.base_dir, self.merge))(state)
@@ -402,7 +402,7 @@ class BufferReleasePublisher:
                 release = self.releases.release(released, digest, write, buffer_selected=position,
                                                 buffer_shards=shards, weights=FULL,
                                                 origin=self._origin(state))
-        # S28 G-120C: under --rl-verify-every N a round the driver does not verify carries
+        # Under --rl-verify-every N a round the driver does not verify carries
         # an identity label (policy_digest.unverified_identity), not a content hash. Say
         # which one this is, so nothing downstream takes the label for the weights' hash.
         verified = bool(getattr(state, "verified", True))
@@ -467,7 +467,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     ``delta_full_every`` > 0 (``--rl-release-delta-full-every``) publishes the
     releases from ``staging`` as bf16 deltas (module doc, delta releases).
 
-    ``resume_versions`` (S27 G-EQ5, gap 22): this island counts its policy
+    ``resume_versions``: this island counts its policy
     versions itself (no outer sync), so it continues the account above the
     releases its store already holds (``merged_release.ResumedReleases``) --
     its round counter, its version map and its published policies all start at

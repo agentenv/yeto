@@ -53,7 +53,7 @@ class ResourceConfig:
     parallel: tuple[tuple[str, int], ...] = ()  # fixed TP/PP/CP/EP, default all 1
     rollout_engine_gpus: int = 1
     placement: dict[str, Any] | None = None  # explicit GPU uuids per role
-    # rl-multinode-island D2: the same placement as (node, local_gpu) slots when
+    # The same placement as (node, local_gpu) slots when
     # the manifest declares a node topology; None on a legacy single-node cfg.
     placement_slots: dict[str, Any] | None = None
     gradient_accumulation_declared: int | None = None
@@ -218,7 +218,7 @@ def parse_configs(resources: dict[str, Any]) -> dict[str, ResourceConfig]:
 
 
 def _manifest_topology(resources: dict[str, Any]):
-    """rl-multinode-island D2: ``Topology`` when ``nodes``/``gpus_per_node`` are
+    """``Topology`` when ``nodes``/``gpus_per_node`` are
     declared (pool checked against it), None for a legacy cfg (unchanged path)."""
     from yeto.rl.engine.multinode import TopologyError, check_pool_topology, topology_of
 

@@ -1,5 +1,5 @@
 """The engine sampler island: ``SamplerLoop`` over a ``SamplerEngine`` adapter
-(rl-hetero-sampler-engines D1, S25 N2.3).
+(rl-hetero-sampler-engines).
 
 The Miles sampler island (``adapters.miles.sampler_island``) lets Miles drive
 SGLang. This island drives any engine behind the port instead, so the same
@@ -16,7 +16,7 @@ vllm-ascend on 910B. Per round (:class:`EngineRound`):
    (:class:`~.sampler_engine.Provenance`) in the index entry;
 6. write ``rl_sampler_engine_round`` (finish reasons, tokens, provenance key).
 
-Replacement (S25 G1C, the engine-sampler side of C1's :mod:`.sampler_resume`):
+Replacement (the engine-sampler side of C1's :mod:`.sampler_resume`):
 each group's sample id carries the incarnation, the round and the prompt row,
 so a new incarnation never writes an earlier one's payload name; each index
 entry carries a :class:`~.sampler_resume.SamplerRound` record; a round already
@@ -77,7 +77,7 @@ Reward = Callable[[PromptItem, Completion], float]
 
 
 def dispense_position(item: PromptItem) -> int | None:
-    """The task-dispenser position of a prompt's row (S27 P4), None without one."""
+    """The task-dispenser position of a prompt's row, None without one."""
     spot = item.metadata.get(DISPENSE_POSITION_KEY)
     return spot if isinstance(spot, int) and not isinstance(spot, bool) else None
 
@@ -156,7 +156,7 @@ class EngineRound:
                             data_cursor=cursor, last=last, dispense_position=position).record()
 
     def _written(self, rollout_id: int, positions: list[int], keep: Sequence[int] = ()) -> None:
-        """S27 P4: prompts from the task dispenser learn which groups are in the buffer.
+        """Prompts from the task dispenser learn which groups are in the buffer.
         ``keep``: positions still generating (a streaming round), not released."""
         written = getattr(self.prompts, "written", None)
         if callable(written):
@@ -296,7 +296,7 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     ``should_stop``: the loop starts no new round. ``reclaimed``: also stop
     writing the current round's groups (default: ``should_stop``). ``make_round``:
     builds the round instead of :class:`EngineRound` with the same arguments
-    (S28 G-120: :class:`~.agentic_round.AgenticRound`, bound to its own settings).
+    (:class:`~.agentic_round.AgenticRound`, bound to its own settings).
     A round with ``streams`` True (trials run across the loop's rounds)
     sets the follower's ``live_update`` (its ``live``), holds loads while its
     trials run (``holds_weights``) and reads pending releases (``release_pending``)."""

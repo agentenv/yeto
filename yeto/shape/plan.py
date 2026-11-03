@@ -441,7 +441,7 @@ def build_shape(
         qk = quota_keys[(off, nodes)]
         if qk is None:
             # Every AWS shape must land in a known quota bucket; treating an
-            # unmapped type as unlimited once planned 16 P5 islands against a
+            # unmapped type as unlimited once planned 16 p5 islands against a
             # 128-vCPU quota. (Uncapped buckets are reserved for on-prem.)
             rejections.append(Rejection(key, f"no quota mapping for {off.instance_type}"))
             continue

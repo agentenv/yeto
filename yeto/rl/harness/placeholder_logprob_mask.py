@@ -1,6 +1,6 @@
-"""Mask stop tokens whose generation logprob is an exact 0.0 placeholder (S19 #8).
+"""Mask stop tokens whose generation logprob is an exact 0.0 placeholder.
 
-Problem (s19-agentic5-r-20261010d round 1, 65 tokens): the agentic trajectory
+Problem (seen in an agentic run, 65 tokens in one round): the agentic trajectory
 contains ``<|endoftext|>`` (Qwen3.5 id 248044) with generation logprob exactly
 ``0.0`` and ``loss_mask == 1``; the trainer's current logprob for the same token
 is -14 to -19.5.  The 0.0 is not a sampled probability:

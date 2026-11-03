@@ -1,4 +1,4 @@
-"""Island-side timing of one sync boundary (rl-trainer-start-stop D10, L5.6).
+"""Island-side timing of one sync boundary.
 
 The boundary is split into three parts so a run can tell transfer from wait:
 
@@ -53,7 +53,7 @@ def upload_fields(
     timing: SyncTiming,
     stalls: int,
 ) -> dict[str, object]:
-    """Per-boundary upload diagnostics of one island (S26 E3b).
+    """Per-boundary upload diagnostics of one island.
 
     ``window`` is a :class:`yeto.wan_streams.UploadWindow` covering this
     boundary. ``sync/upload_stream_mbps`` lists each data stream's rate over

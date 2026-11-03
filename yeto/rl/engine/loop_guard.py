@@ -1,4 +1,4 @@
-"""Cut repeating completions instead of penalising repetition (A-INF 5.5, D11).
+"""Cut repeating completions instead of penalising repetition.
 
 A repetition penalty changes the behavior distribution, so rollouts do not use
 one (``SamplingParams.check``). A completion that falls into a loop is cut at

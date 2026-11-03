@@ -1,4 +1,4 @@
-//! Local-init startup (S27, `MSG_INIT_DIGEST` / `MSG_INIT_CONFIRM`).
+//! Local-init startup (`MSG_INIT_DIGEST` / `MSG_INIT_CONFIRM`).
 //!
 //! Every island loads the same base checkpoint, so all of them already hold
 //! the version-0 cut. Instead of learner 0's INIT followed by a full

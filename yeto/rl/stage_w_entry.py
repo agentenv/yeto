@@ -11,7 +11,7 @@ and the ports driver forwards it to every actor through
 ``megatron.core`` / ``megatron.training``, so the stage-W critic's
 ``get_model`` -> ``from megatron.post_training.checkpointing import ...``
 (taken whenever nvidia-modelopt is importable) failed with
-``ModuleNotFoundError`` (s13-g1-modal-20261007b).  This entry connects to
+``ModuleNotFoundError``.  This entry connects to
 the island's Ray exactly like the ports driver, then runs ``train.py``.
 """
 

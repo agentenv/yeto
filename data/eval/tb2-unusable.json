@@ -1,7 +1,7 @@
 {
  "schema": "yeto.tb2-unusable/v1",
  "benchmark": "tb2",
- "source": "S17 G3 official-solution positive control on the Modal prebaked reward env (76/89 scored 1); evidence s1-runs/s17-g3-reward-env/pos-all.jsonl, openspec/changes/rl-agentic-reward-env/progress.md",
+ "source": "official-solution positive control on the Modal prebaked reward env (76/89 scored 1); evidence: the reference-solution run pos-all.jsonl",
  "rule": "a task whose official solution does not score 1 in our judge environment is excluded from both the training set and the hold-out pool",
  "items": [
   {"task_id": "adaptive-rejection-sampler", "category": "timeout", "reason": "official solve.sh hits the task agent timeout on the default CPU allotment"},

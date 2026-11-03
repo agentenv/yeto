@@ -1,6 +1,6 @@
-"""S27 G-DI design v2: the rollout engines go away and come back, the trainer stays.
+"""The rollout engines go away and come back, the trainer stays.
 
-CPU only, FakeEngine driver (as tests/test_s27_rollout_ahead.py) + a fake recovery port."""
+CPU only, FakeEngine driver (as tests/test_rollout_ahead.py) + a fake recovery port."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import torch
 
 from yeto.rl.engine.engine_outage import EngineOutage, EnginesLost, OutageTimeout, outage_budget_s
 
-from test_s27_rollout_ahead import NAME, _calls, _driver
+from test_rollout_ahead import NAME, _calls, _driver
 
 
 class _Port:

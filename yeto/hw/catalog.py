@@ -1,10 +1,10 @@
 """Card-type catalog and island compatibility group
-(yeto-framework-decoupling 7.7a, design D9a-1).
+(yeto-framework-decoupling).
 
 ``compat_group`` is ``"<vendor>-<card>"`` in lower case, e.g. ``nvidia-h100``.
-With the HBM size (S25 N2.1) it is ``"<vendor>-<card>-<N>g"``, e.g.
-``ascend-910b4-64g``: the 910B4 ships with 32 GiB and with 64 GiB (the user's
-cluster changed from one to the other on 2026-10-16), and the two must not
+With the HBM size it is ``"<vendor>-<card>-<N>g"``, e.g.
+``ascend-910b4-64g``: the 910B4 ships with 32 GiB and with 64 GiB (a cluster
+can change from one to the other), and the two must not
 merge. The vendor names the device family one to one
 (:data:`DEVICE_FAMILY_BY_VENDOR`; a PPU is ``thead``), so the group always
 carries the device family.
@@ -36,15 +36,14 @@ CARD_VENDOR: Mapping[str, str] = {
     # "910B" stays as the family-level name earlier code already used.
     "910B": "ascend", "910B4": "ascend", "910B2": "ascend", "910B3": "ascend",
     "910C": "ascend",
-    # Alibaba T-Head PPU (rl-ssh-node-pool D2). torch reports device type
-    # "cuda" on these cards, so the vendor comes from the card name only
-    # (infra-drafts/SESSION24/T-PPU-gaps.md 2.1).
+    # Alibaba T-Head PPU (rl-ssh-node-pool). torch reports device type
+    # "cuda" on these cards, so the vendor comes from the card name only.
     "810E": "thead", "M890": "thead",
 }
 
 # Nominal HBM sizes (GiB) a card ships with. Read from our machines: 910B4
-# 64 GiB (inventory, 2026-10-16) and 32 GiB (ModelArts), M890 144 GiB
-# (ppu-smi 147456 MiB, SESSION25/N0.1-ppu-survey.md). The others are public
+# 64 GiB (node inventory) and 32 GiB (ModelArts), M890 144 GiB
+# (ppu-smi 147456 MiB). The others are public
 # product figures, not read on our nodes. 810E: not known, so any reported
 # size is used as is (rounded).
 CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
@@ -81,7 +80,7 @@ def device_family(device_type: str | None = None) -> str:
     return DEVICE_FAMILY_BY_DEVICE_TYPE.get(device_type, "nvidia")
 
 
-# Ray's accelerator resource name per identity device family (S27 G-EQ2, npu1).
+# Ray's accelerator resource name per identity device family.
 # Ray counts CUDA cards in its own built-in "GPU" resource, so a CUDA island
 # reads cluster_resources()["GPU"] and starts Ray with --num-gpus. An Ascend
 # node's cards are the custom resource "NPU" instead: cluster_resources() has
@@ -225,8 +224,7 @@ def compat_refusal(local: str | None, peer: str | None) -> str | None:
         return None
     if local is not None and peer is not None and frozenset((local, peer)) in CARD_PAIR_TOLERANCE:
         return None
-    return (f"兼容组不同：{local or '未声明'} 对 {peer or '未声明'}，容差未标定 "
-            f"(compat_group differs: {local} vs {peer}, tolerance not calibrated)")
+    return f"compat_group differs: {local or 'undeclared'} vs {peer or 'undeclared'}, tolerance not calibrated"
 
 
 def check_compat_group(local: str | None, peer: str | None) -> None:
@@ -298,7 +296,7 @@ def runtime_versions(device_family_name: str | None = None) -> dict[str, str | N
 
     The NVIDIA keys stay exactly as before. On an Ascend island
     (``device_family_name="ascend"``, or auto-detected) three NPU keys are
-    added: Ascend driver, CANN and torch_npu (task 3.6)."""
+    added: Ascend driver, CANN and torch_npu."""
     if device_family_name is None:
         device_family_name = device_family()
     out: dict[str, str | None] = {"driver_version": None, "cuda_version": None}

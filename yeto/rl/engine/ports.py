@@ -1,10 +1,10 @@
-"""Role-based engine ports (design D1). Import-light: no torch/ray/miles.
+"""Role-based engine ports. Import-light: no torch/ray/miles.
 
 yeto's driver talks to an RL engine only through these roles. Return types
 reuse ``yeto.rl.contracts``. Engine-internal units (cells, CellStatus) never
-appear here. E1-E3 verbs (design D9, rl-infra-spec island-elastic-
-reconfiguration) are NOT part of the R0 protocol. The E1 verbs (tasks 3.4a/3.4/
-3.5) are defined as separate optional protocols (:class:`ElasticRolloutPool`,
+appear here. The elastic-reconfiguration verbs (rollout membership, trainer
+cut, role transfer) are NOT part of the R0 protocol. The rollout-membership
+verbs are defined as separate optional protocols (:class:`ElasticRolloutPool`,
 :class:`MemberPublisher`, :class:`ReconfigurablePlacement`) so R0 adapters keep
 satisfying the base protocols; an adapter advertises a verb via
 ``EngineCapabilities.port_verbs`` only once it implements it (3.4a).
@@ -24,7 +24,7 @@ from .capabilities import EngineCapabilities
 from .trainable_state import TrainableState
 
 class PublicationCause(str, Enum):
-    """Why a (member) publication was refused (A4 E1-B): journaled in REBUILD_OLD /
+    """Why a (member) publication was refused: journaled in REBUILD_OLD /
     REBUILT_OLD and on the tape's ``rl_reconfiguration`` error."""
 
     PAYLOAD_MISMATCH = "payload_mismatch"  # engine read-back differs from the published payload
@@ -61,7 +61,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class GroupMetadata:
-    """Per-group metadata extracted inside the rollout process (design D3)."""
+    """Per-group metadata extracted inside the rollout process."""
 
     group_id: str
     sample_ids: tuple[str, ...]
@@ -70,7 +70,7 @@ class GroupMetadata:
     reward_std: float
     token_count: int
     # Samples of this kept group masked out of the loss by a spec-selected
-    # sample filter (rl-algo-grpo-knobs D7; ledger terminal state
+    # sample filter (rl-algo-grpo-knobs; ledger terminal state
     # ``filtered``, alignment A2/F5). None: no sample filter configured.
     filtered_samples: int | None = None
     # agentic-rollout-utilization 2.3/3.1: the policy versions that generated
@@ -106,10 +106,10 @@ class RolloutBatchHandle:
     # Groups a sample-buffer reader passed over this round as older than
     # max_policy_age (consumed, never trained); None = not a buffer reader.
     buffer_stale_groups: int | None = None
-    # S27 P4: the task-dispenser positions of those groups (row runs,
+    # The task-dispenser positions of those groups (row runs,
     # ``data_split.row_runs``); None when no stale group had one.
     buffer_stale_positions: list[list[int]] | None = None
-    # rl-infra-spec 1.7: summed non-generation (tool) time of the rollout's
+    # Summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None
     # Groups drawn from the data source (over-sampling included) and those
@@ -125,7 +125,7 @@ class RolloutBatchHandle:
     # Engine mechanism that aborted them, recorded in the ledger's
     # ``engine_discarded`` entry (adapter-supplied, decoupling 2.7/E18).
     abort_mechanism: str | None = field(default=None, compare=False)
-    # rl-infra-spec 4.2 CutContext.data: the rollout data source position
+    # CutContext.data: the rollout data source position
     # after this rollout drew its prompts ({sample_offset, epoch_id,
     # sample_group_index, sample_index}) and its reuse-buffer length (0 on the
     # ports path, cut-audit §3). None = not reported.
@@ -134,7 +134,7 @@ class RolloutBatchHandle:
     # IR-3: samples whose actual weight_version(s) differed from the driver's
     # expected_policy_version (ABORTED on the rollout side). None = not reported.
     policy_age_violation: int | None = None
-    # S19 #8: trained stop tokens whose generation logprob was an exact 0.0
+    # Trained stop tokens whose generation logprob was an exact 0.0
     # placeholder (grammar-forced), loss_mask set to 0. None = not reported / 0.
     placeholder_logprob_tokens: int | None = None
     # fleet-dashboard 1.3: trained-batch summary (adv_mean/adv_std,
@@ -144,7 +144,7 @@ class RolloutBatchHandle:
     # batch ({bucket: {n, reward_mean, success_rate, truncated_frac,
     # resp_len_mean}}); None = rows carry no difficulty / not reported.
     batch_summary_by_bucket: Mapping[str, Mapping[str, Any]] | None = field(default=None, compare=False)
-    # S14-M1 (observe only): per-record TITO session mismatches
+    # Per-record TITO session mismatches
     # (rollout_meta_hook.harness_mismatch_records, truncated/capped); None = not
     # reported (default path). The driver tapes them as ``rl_harness_mismatch``.
     tito_session_mismatch_records: tuple[Mapping[str, Any], ...] | None = field(
@@ -153,7 +153,7 @@ class RolloutBatchHandle:
     # (rollout_meta_hook.trajectory_reward_records: task_id/trajectory_id/reward/
     # success); None = not reported. The driver tapes them as ``rl_trajectory_reward``.
     trajectory_rewards: tuple[Mapping[str, Any], ...] | None = field(default=None, compare=False)
-    # S27 task assignment (observe only): every --data row the round trained,
+    # Every --data row the round trained,
     # ``{"samples": n, "rows": data_split.row_runs(...)}``, not capped like the
     # reward records; None = not reported. The driver tapes it as ``rl_round_data_rows``.
     round_data_rows: Mapping[str, Any] | None = field(default=None, compare=False)
@@ -168,12 +168,12 @@ class RolloutBatchHandle:
     # (:data:`OVER_SAMPLING_KEYS`: submit batch sizes, refill calls, filtered /
     # kept / surplus groups, groups in flight at the end). None = not reported.
     over_sampling: Mapping[str, int] | None = field(default=None, compare=False)
-    # rl-offpolicy-correction-passthrough L6.11: the engine backend that built
+    # The engine backend that built
     # this batch ("miles", "verl", ...), set by the adapter; it labels the
     # driver's ``offpolicy_gate`` event. None = not reported ("unknown").
     backend: str | None = field(default=None, compare=False)
 
-    # S27 G-EM relay mode: (merged version, policy-age limit) the driver checked the
+    # Relay mode: (merged version, policy-age limit) the driver checked the
     # groups' external merged cuts against (``external_policy``); None off relay mode.
     external_cut: tuple[int, int] | None = field(default=None, compare=False)
 
@@ -219,12 +219,12 @@ class RolloutPool(Protocol):
     #     start the batch with the published policy and return while it generates;
     #   def finish_generate(self, pending) -> RolloutBatchHandle: wait for it (the
     #     engines are idle afterwards); def cancel_generate(self, pending) -> None.
-    # E1 verbs (3.4/3.4a): see ElasticRolloutPool below.
+    # Rollout-membership verbs: see ElasticRolloutPool below.
 
 
 @runtime_checkable
 class ElasticRolloutPool(RolloutPool, Protocol):
-    """E1 rollout membership verbs (rl-infra-spec 3.4, design D1/D6).
+    """Rollout membership verbs (island elastic reconfiguration).
 
     ``epoch`` is the membership epoch the caller (yeto controller journal, the
     single authority, 3.3a) expects the engine to be at; a mismatch is refused
@@ -254,14 +254,14 @@ class TrainerGroup(Protocol):
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt: ...
     def onload(self) -> None: ...
     def offload(self) -> None: ...
-    # E2/E3 verbs are optional: see :class:`CuttableTrainer` (advertised via
+    # Trainer-cut and role-transfer verbs are optional: see :class:`CuttableTrainer` (advertised via
     # EngineCapabilities.port_verbs, not part of the R0 protocol so R0 fakes
     # stay conforming).
 
 
 @runtime_checkable
 class CuttableTrainer(TrainerGroup, Protocol):
-    """Optional trainer verbs for cuts and resharding (rl-infra-spec 4.2/4.6; decoupling 2.2).
+    """Optional trainer verbs for cuts and resharding (decoupling 2.2).
 
     Types are core types: :class:`~yeto.rl.engine.cut.CutContext`,
     :class:`~yeto.rl.engine.cut.RestoreExpectation`,
@@ -305,7 +305,7 @@ class Publisher(Protocol):
 
 @runtime_checkable
 class MemberPublisher(Publisher, Protocol):
-    """Member-scoped publication (3.5, design D6).
+    """Member-scoped publication.
 
     Publishes ``state`` to exactly ``members`` at membership ``epoch``; every
     other member keeps its weights and version. New members stay out of
@@ -331,11 +331,11 @@ class Placement(Protocol):
 
 @runtime_checkable
 class ReconfigurablePlacement(Placement, Protocol):
-    """``Placement.reconfigure(plan, epoch)`` (design D1; moved from E3 to E1 by 3.4a).
+    """``Placement.reconfigure(plan, epoch)`` (a rollout-membership verb).
 
     ``plan`` is the target :class:`PlacementDescription`; ``epoch`` is the
-    config epoch the new placement is committed as (current + 1). E1 accepts
-    only plans that keep the trainer GPUs; role transfer is E3 (4.7).
+    config epoch the new placement is committed as (current + 1). Only plans
+    that keep the trainer GPUs are accepted; role transfer is a separate verb.
     """
 
     def reconfigure(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription: ...

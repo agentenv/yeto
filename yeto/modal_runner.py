@@ -96,10 +96,10 @@ MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB":
 # and commits them; the launcher pulls them back into the local run dir.
 TAPE_MOUNT = "/yeto-tape"
 TAPE_SOURCE_DIR = "/root/yeto-output"
-# The Miles ports image's interpreter (the one Ray and Miles run), as the S26
-# E0.4 Miles Harbor layer used it.
+# The Miles ports image's interpreter (the one Ray and Miles run), as the
+# Miles Harbor layer uses it.
 HARBOR_LAYER_PYTHON = "$(command -v python)"
-# S27 G-FS: engine images Modal builds itself can carry the Harbor layer too; the
+# engine images Modal builds itself can carry the Harbor layer too; the
 # backend's ``image`` module names its own interpreter (``HARBOR_LAYER_PYTHON``).
 HARBOR_LAYER_BACKENDS = ("verl",)
 HARBOR_RELAY_SECRET_PATH = "/root/.yeto-harbor-relay-secret"
@@ -109,7 +109,7 @@ TAPE_SYNC_INTERVAL_S = 30.0
 # in a private mkdtemp directory under ~/yeto-rl that ends with the container.
 TAPE_MIRROR_GLOBS = (
     "/root/yeto-rl/trajectory-evidence-*/rollout-*.json",
-    # Harbor agent trials (HARBOR_TRIALS_DIR under the tape directory, S27 G-DA):
+    # Harbor agent trials (HARBOR_TRIALS_DIR under the tape directory):
     # the trial result (verifier reward, timings, exception) and Codex's output.
     f"{TAPE_SOURCE_DIR}/harbor-trials/*/result.json",
     f"{TAPE_SOURCE_DIR}/harbor-trials/*/agent/codex.txt",
@@ -220,7 +220,7 @@ class ModalIslandConfig:
     # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
     # container at start-up unless nvidia-smi reports that type.
     gpu_exact: bool = False
-    # E1: fail the container at start-up unless every GPU nvidia-smi reports is this
+    # fail the container at start-up unless every GPU nvidia-smi reports is this
     # model ("NVIDIA A10" refuses "NVIDIA A10G": Modal "A10G" containers are either,
     # and the A10G trains about 12 % slower); None: any card of type `gpu`.
     gpu_name: str | None = None
@@ -232,7 +232,7 @@ class ModalIslandConfig:
     registry_creds: dict[str, str] | None = None
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
-    # None: ship no local tree (release mode, L9.12: the image holds the code and
+    # None: ship no local tree (release mode: the image holds the code and
     # links CONTAINER_WORKDIR to it).
     workdir: str | None = str(REPO_ROOT)
     python_version: str = "3.12"
@@ -267,7 +267,7 @@ class ModalIslandConfig:
     # outside Modal (boat) reach the Miles session server.
     harbor_layer: bool = False
     harbor_relay_port: int | None = None
-    # S27 G-FS: which environment names the tunnel writes back. Miles' gate relay
+    # which environment names the tunnel writes back. Miles' gate relay
     # (the default when unset) or verl's records proxy; ``harness_env``'s
     # ``harbor_callback_*_env`` chooses them from the run's flags.
     harbor_port_env: str | None = None
@@ -306,10 +306,10 @@ class ModalIslandConfig:
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
                 )
-        # S27 G-FS: the layer goes on a Miles registry image or on an engine image
+        # the layer goes on a Miles registry image or on an engine image
         # Modal builds itself whose backend has a Harbor layer recipe
         # (``harbor.image_layer.BACKENDS``; ``docker/harbor-layer/versions.json``
-        # carries the per-backend constraint decisions). Before G-FS this refused
+        # carries the per-backend constraint decisions). Earlier this refused
         # every engine-built image, which is exactly the verl one.
         if self.harbor_layer:
             if self.training_mode != "rl":
@@ -367,7 +367,7 @@ class ModalIslandConfig:
 # ``<backend>-build:<40-hex commit>``: an engine image Modal builds from the
 # backend's own recipe (``yeto.rl.engine.backends`` role ``image``), pinned by the
 # engine commit and the engine's lock file; there is no registry digest.
-# ``<backend>-build:<commit>`` or ``<backend>-<variant>-build:<commit>`` (S27 G-DC:
+# ``<backend>-build:<commit>`` or ``<backend>-<variant>-build:<commit>`` (e.g.
 # ``verl-megatron-build``, the verl image with the Megatron engine layers)
 ENGINE_BUILT_IMAGE_RE = re.compile(
     r"(?P<backend>[a-z][a-z0-9]*)(?:-(?P<variant>[a-z][a-z0-9]*))?-build:(?P<commit>[0-9a-f]{40})")
@@ -818,7 +818,7 @@ class HangStackDumper:
     writes a flight-recorder file (``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` +
     rank) on a collective timeout when ``TORCH_NCCL_DUMP_ON_TIMEOUT=1``.
     The rank that timed out then aborts, but a peer stuck on the host side
-    (S24 L1.1: TP rank 1 never enqueued the reduce-scatter) prints nothing.
+    (TP rank 1 never enqueued the reduce-scatter) prints nothing.
     This thread polls for the flight-recorder file and, on its first
     appearance, runs ``py-spy dump`` on every Python process in the
     container, twice (``repeat_s`` apart, to tell a hang from slow
@@ -913,8 +913,8 @@ def allow_any_ptracer(env=None) -> bool | None:
     A Modal (gVisor) container runs with Yama ptrace_scope=1 and without
     CAP_SYS_PTRACE.  py-spy started by the runner is a sibling of the island
     driver, not its ancestor, so it gets EACCES ("Failed to copy Py_Version
-    symbol"; S27 G-CQ on CPU, T4 and 1xH200 containers).  After the target calls
-    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY), py-spy dumps it (G-CQ: a
+    symbol"; seen on CPU, T4 and 1xH200 containers).  After the target calls
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY), py-spy dumps it (a
     400-thread process in 0.1-0.3 s).  The island entry calls this at start.
     Returns None when sampling is off, else whether the prctl succeeded."""
     if stack_sample_interval_s(os.environ if env is None else env) is None:
@@ -936,7 +936,7 @@ class PeriodicStackSampler:
     line contains ``match`` (default: the island driver) into a ring of
     ``keep`` files in the tape dir, and append one index line per round.
 
-    S27 RAY-SEGV: the 120B island driver died of SIGSEGV in many threads at
+    Motivation: a 120B island driver died of SIGSEGV in many threads at
     once; neither Ray's Abseil handler nor faulthandler finished printing, so
     the only stacks left are those sampled before the crash.  Opt-in via env
     ``YETO_STACK_SAMPLE_S`` (seconds; unset or 0 = off).  Other env:
@@ -944,7 +944,7 @@ class PeriodicStackSampler:
     ``YETO_STACK_SAMPLE_KEEP`` (ring size, default 20),
     ``YETO_STACK_SAMPLE_NATIVE=1`` (add ``--native``),
     ``YETO_STACK_SAMPLE_NONBLOCKING=1`` (add ``--nonblocking``: the target is
-    not paused; default py-spy pauses it, G-CQ: 0.1-0.3 s for 400 threads).
+    not paused; default py-spy pauses it, measured 0.1-0.3 s for 400 threads).
     The target must allow the ptrace first (``allow_any_ptracer``).  Files:
     ``stack-samples-rank<R>-<slot>.txt`` and ``stack-samples-rank<R>.jsonl``
     (round, slot, time, pids, return codes, seconds: the newest round is the
@@ -1032,13 +1032,13 @@ class PeriodicStackSampler:
         self._stop.set()
 
 
-# S27 RAY-SEGV: a gVisor process that touches more than about 2**22 non-adjacent
-# pages gets SIGSEGV (host mapping limit; G-CM/G-CQ: 4,063,232-4,194,304 pages on
+# a gVisor process that touches more than about 2**22 non-adjacent
+# pages gets SIGSEGV (host mapping limit; measured 4,063,232-4,194,304 pages on
 # Modal CPU, T4 and 1xH200 containers, all "4.19.0-gvisor").  Multi-container
 # islands report "5.15.0-gvisor" and could not be probed without a 16-GPU run.
 # This child touches every other page of a PROT_NONE reservation (each touched
 # page is its own mapping) and prints progress, so its last line brackets the
-# limit; it uses ~4 KiB of memory per page and only kills itself.
+# limit; it uses one page of memory (4 KiB on x86) per page and only kills itself.
 HOST_MAP_PROBE_SCRIPT = r"""
 import ctypes, faulthandler, mmap, sys, time
 faulthandler.enable()
@@ -1047,7 +1047,7 @@ libc = ctypes.CDLL(None, use_errno=True)
 libc.mmap.restype = ctypes.c_void_p
 libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
 libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
-page = 4096
+page = mmap.PAGESIZE  # 16 KiB on Apple Silicon: mprotect needs page-aligned addresses
 base = libc.mmap(None, 2 * n * page, 0, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS, -1, 0)
 if base in (None, ctypes.c_void_p(-1).value):
     print("MAPPROBE mmap_failed errno=%d" % ctypes.get_errno(), flush=True)
@@ -1115,7 +1115,7 @@ def island_main(cfg_json: str) -> int:
         rank, ips, all_ips = 0, ["127.0.0.1"], {}
     env = {**os.environ, **cfg.envs, **skypilot_env(rank, ips, cfg.gpus_per_node), "HOME": "/root"}
     # rl-resume-from-checkpoint: the learner's own Python cannot import the Modal client
-    # (G2 A: "No module named 'grpclib'"); it commits the store Volume through this
+    # ("No module named 'grpclib'"); it commits the store Volume through this
     # runner's interpreter and import path instead.
     env["YETO_MODAL_PYTHON"] = sys.executable
     env["YETO_MODAL_SYSPATH"] = os.pathsep.join(p for p in sys.path if p)
@@ -1177,7 +1177,7 @@ def harbor_relay_tunnel(cfg: ModalIslandConfig, rank: int, env: dict, forward=No
     from yeto.rl.harness.gateway.relay_env import (
         RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_SECRET_FILE_ENV)
 
-    # S27 G-FS: the verl islands tunnel the records proxy instead of the gate
+    # the verl islands tunnel the records proxy instead of the gate
     # relay; the config names which environment the tunnel writes back.
     port_env = cfg.harbor_port_env or RELAY_PORT_ENV
     base_env = cfg.harbor_base_env or RELAY_PUBLIC_BASE_ENV
@@ -1203,7 +1203,7 @@ EPHEMERAL_PORT_RANGE = "/proc/sys/net/ipv4/ip_local_port_range"
 # which covers the ports Miles hands to engines, routers and the trainer master
 # (20000+) after probing them free: a connection opened in between (NCCL, torch
 # c10d, a health check) can take one, and the engine's later bind fails with
-# "[Errno 98] address already in use" (S27 G-AT s27-at-a: 3 of 3 sampler island
+# "[Errno 98] address already in use" (seen on 3 of 3 sampler island
 # starts; CPU probe: about 1.5% of outgoing connections got a port in 20000-20999).
 LINUX_EPHEMERAL_PORTS = (32768, 60999)
 
@@ -1279,7 +1279,7 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
 
     sig = signal_mod or _signal
     if not _is_droppable(env):
-        # in-flight save (4.1) and sampler islands (S25 C1, the launcher sets the marker
+        # in-flight save (4.1) and sampler islands (the launcher sets the marker
         # path) both turn the reclaim signal into the marker file
         if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR") or env.get("YETO_SPOT_RECLAIM_MARKER"):
             return _run_forwarding_to_learner(cmd, env, popen=popen, sig=sig)
@@ -1309,7 +1309,7 @@ def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=t
     rank, node_ips = _node_rank_and_ips(env)
     relay = None
     if rank == 0 and len(node_ips) > 1:
-        # S26 E9.1: the driver runs on rank 0; a reclaim of a rank>0 container reaches
+        # the driver runs on rank 0; a reclaim of a rank>0 container reaches
         # it only through this relay (the peer runner sends its signal over the cluster net)
         relay = ReclaimRelay(lambda num, peer: _write_reclaim_marker(path, num, clock, from_rank=peer),
                              port=reclaim_relay_port(env)).start()
@@ -1450,7 +1450,7 @@ class ModalOps:
             variant = {"variant": built["variant"]} if built["variant"] else {}
             image_module = backends.module("image", built["backend"])
             image = image_module.modal_image(modal, built["commit"], **variant)
-            if cfg.harbor_layer:  # S27 G-FS: the same layer as on the Miles image
+            if cfg.harbor_layer:  # the same layer as on the Miles image
                 from yeto.rl.harness.harbor.image_layer import modal_harbor_layer
 
                 image = modal_harbor_layer(image, built["backend"], image_module.HARBOR_LAYER_PYTHON)
@@ -1666,7 +1666,7 @@ class ModalOps:
     def stream_container_logs(self, container_id: str):
         """The log lines of one container (``modal container logs``; follows while it
         runs). The function-call stream of :meth:`stream_logs` does not deliver the
-        lines of a container that Modal started after a reschedule (S25 C1)."""
+        lines of a container that Modal started after a reschedule."""
         proc = subprocess.Popen([sys.executable, "-m", "modal", "container", "logs", str(container_id)],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
@@ -1722,19 +1722,16 @@ class ContainerIdGuard:
                     self.on_change(msg)
 
 
-# S27 s27-ch-d0a: two extra containers of the island function appeared beside the two
-# claimed ones, which kept training; they printed no island line. How long such extra
-# containers may stay listed while every claimed container is still listed.
-# (S27 G-EO, EXTRA-CONTAINER.md: in 10 runs of 10-21..10-25 each extra container was a
-# container of a running island's own function that got no input -- its Modal log has
-# no function call id, only the image banner -- while the island's input kept running.)
+# How long extra containers may stay listed while every claimed container is still
+# listed. Modal can start idle extra containers of a running island's function that
+# get no input (no function call id in their log, only the image banner) while the
+# claimed containers keep training.
 EXTRA_CONTAINER_GRACE_S = 600.0
 
 
 class ContainerSetPoller:
-    """Second container guard, independent of the log stream (S19 run
-    s19-agentic5-b-20261010b: after ``modal container stop`` Modal rescheduled the
-    input on a new container -- by design, see ``modal container stop --help`` --
+    """Second container guard, independent of the log stream (after ``modal container stop``
+    Modal rescheduled the input on a new container -- by design, see ``modal container stop --help`` --
     and the function-call log stream never delivered the new container's lines, so
     :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
 
@@ -1745,13 +1742,13 @@ class ContainerSetPoller:
     Every ``interval_s`` it lists the app's started containers. ``expected`` is the
     number of (island, rank) slots. A slot is taken once a container printed its line
     for it. A listed container that no island claimed yet may be the late first
-    container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
+    container of a free slot (an island can wait ~40 min for an H200);
     that is not a change. When the listed unclaimed containers outnumber the free
     slots, at least one of them is an extra container:
 
     * a claimed container is no longer listed: a replacement of a taken slot (the
-      S19 case, s27-gr-h). The guard trips (``on_change(message)`` once) at once;
-    * every claimed container is still listed (s27-ch-d0a: two extra containers
+      reschedule case above). The guard trips (``on_change(message)`` once) at once;
+    * every claimed container is still listed (e.g. two extra containers
       that never ran island code beside two training ones): a warning names the
       extra containers, and the guard trips only when extra containers stay
       listed for more than ``grace_s``. A replacement that does run island code
@@ -1760,9 +1757,8 @@ class ContainerSetPoller:
 
     ``finished()`` returns the claimed container ids whose island already logged
     ``rl_learner_finalized``. Such a container leaves the list at the island's normal
-    end; it is not "no longer listed" (s27-ek-b: island 1 finished, its container
-    left while an idle extra container of island 1's function was listed, and the
-    guard failed a completed run with exit 7).
+    end; it is not "no longer listed" (otherwise an idle extra container of a
+    finished island's function would make the guard fail a completed run).
 
     An unclaimed container that left the list never ran island code (as far as the
     logs show) and is not counted. A failed list is skipped (never trips)."""
@@ -1856,11 +1852,11 @@ class ContainerSetPoller:
 
 
 class ContainerLogFollower:
-    """Follows the logs of the Modal containers the call log streams miss (S26 E9.3).
+    """Follows the logs of the Modal containers the call log streams miss.
 
     After ``modal container stop`` (or a real reclaim) Modal runs the island's
     input again in a new container, and the function-call log stream never
-    delivers that container's lines (S19, S25 C1), so the launcher showed only
+    delivers that container's lines, so the launcher showed only
     the first container. Every ``interval_s`` this lists the app's running
     containers; the first ``expected`` ids are the baseline (the call streams
     show them); for every later id it prints one launcher warning and streams

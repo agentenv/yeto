@@ -1,8 +1,8 @@
-"""Peer recovery of a Miles full-parameter island (S27 E-3b).
+"""Peer recovery of a Miles full-parameter island.
 
 The engine-neutral exchange is :mod:`yeto.rl.peer_recovery`, and the rank
 list, the layout tag, the digest check and the stream island are in
-:mod:`yeto.rl.engine.stream_recovery` (S27 G-ED, shared with the verl island);
+:mod:`yeto.rl.engine.stream_recovery` (shared with the verl island);
 this module is the Miles trainer behind them (the ``cut_plugin`` verbs).
 
 Snapshot content. Every Megatron rank writes one cut shard through
@@ -17,7 +17,7 @@ entry also keeps the cut summary digests (state, RNG, LR scheduler position);
 after the restore every rank must re-export exactly those, as the
 single-island cut restore checks, else the restore fails.
 
-Donor write (S27 G-EL). At the safe point every rank only copies its state to
+Donor write. At the safe point every rank only copies its state to
 host memory (``cut_plugin`` ``background="host"``) and writes its shard on a
 thread of its own while training goes on; later safe points only ask whether
 the writes finished (``MilesRankShards.captures``; the stream island is the
@@ -94,7 +94,7 @@ class MilesRankShards(RankShardSnapshot):
 
     schema = RANKS_SCHEMA
     tag_prefix = TAG_PREFIX
-    captures = True  # S27 G-EL: cut_plugin background="host"
+    captures = True  # cut_plugin background="host"
 
     def __init__(self, group: Any, parameter_layout_hash: str, **kwargs: Any) -> None:
         super().__init__(parameter_layout_hash, **kwargs)
@@ -116,7 +116,7 @@ class MilesRankShards(RankShardSnapshot):
             raise SnapshotRefused("rank refused the peer snapshot: " + "; ".join(refused))
         return results
 
-    # -- S27 G-EL: copy at the safe point, write while training goes on ----------
+    # -- copy at the safe point, write while training goes on ----------
     async def start_ranks(self, directory: Path) -> None:
         """Every rank copies its state to host memory now and writes its shard on a
         thread of its own (cut_plugin ``background="host"``); returns at once."""

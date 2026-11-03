@@ -1,4 +1,4 @@
-"""Re-quantization of trained BF16 weights for W4A8 samplers (S25 N8, rl-hetero-sampler-engines D5-D7).
+"""Re-quantization of trained BF16 weights for W4A8 samplers.
 
 The trainer trains full parameters in BF16; the sampler serves a W4A8 checkpoint.
 After each trainer release, this package turns the BF16 weights back into the
@@ -14,7 +14,7 @@ quantization; its per-layer factors are stored next to the checkpoint
 (``awq-scales/<smooth_layer>.pt``), so option R2 reads them instead of
 deriving them.
 
-A second target (N8.5) is the MXFP4 experts artefact
+A second target is the MXFP4 experts artefact
 ``yetalabs/apex-flash-1-mxfp4-experts@70e86a0``: compressed-tensors
 ``mxfp4-pack-quantized``, routed experts only, ``weight_packed`` (U8, two FP4
 E2M1 codes per byte) + ``weight_scale`` (U8 E8M0, one per 32 inputs), RTN
@@ -33,7 +33,7 @@ Modules:
 * :mod:`.shards`: per-rank quantization into part files and their merge (R3).
 * :mod:`.release`: the side process that turns BF16 releases into quantized ones.
 
-S26 E6 (quantized rollout tiers) adds:
+Quantized rollout tiers add:
 
 * :mod:`.scope`: which linears a quantized rollout may quantize (dense FFN, MoE
   routed experts; router, lm_head, embeddings, norms, attention stay BF16);

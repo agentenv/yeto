@@ -54,7 +54,7 @@ def _island_checkpoint_config(args) -> dict[str, Any]:
         "dynamic_sampling_max_replacements": getattr(
             args, "yeto_rl_dynamic_sampling_max_replacements", None
         ),
-        # The SecRLEnv and Codex agents left in S26 E0.5; the keys stay (None)
+        # The SecRLEnv and Codex agents were removed; the keys stay (None)
         # so island checkpoints written before that still resume.
         "secrlenv_max_infrastructure_replacements": None,
         "rl_offload_train": bool(getattr(args, "offload_train", False)),

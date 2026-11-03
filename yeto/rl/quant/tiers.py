@@ -1,4 +1,4 @@
-"""Rollout quantization tiers: one backend-neutral setting, two engine plans (S26 E6).
+"""Rollout quantization tiers: one backend-neutral setting, two engine plans.
 
 ``--rl-rollout-quant-tier N`` picks the precision the sampler generates with.
 The trainer always trains in its own precision (BF16 weights); the off-policy
@@ -104,11 +104,11 @@ def release_scheme(tier: int) -> str:
 
 
 VERL_BACKEND = "verl"
-# H100 runs 2026-10-21 (SESSION26/logs/E6): vLLM 0.29 given verl's FP8 config
+# Measured on H100: vLLM 0.29 given verl's FP8 config
 # (hf_overrides, quant_method fp8) on a BF16 checkpoint treats the weights as FP8
 # serialized and generates garbage (512-token answers, NaN log-probs) until verl's
 # weight sync re-quantizes the base; yeto verl is LoRA-only and a LoRA sync never sends
-# the base (e6-t1-verl-a-r2, e6-vllm-fp8-probe). Plain vLLM online FP8 works with LoRA
+# the base. Plain vLLM online FP8 works with LoRA
 # but has no ignore list: it quantizes attention, which failed the gate as SGLang
 # online FP8 of every linear (p99 |diff| 0.60, limit 0.5).
 VERL_TIER1_REFUSAL = (f"{FLAG} 1 is not available on verl: verl's FP8 rollout needs a base-weight "
@@ -118,7 +118,7 @@ VERL_TIER1_REFUSAL = (f"{FLAG} 1 is not available on verl: verl's FP8 rollout ne
 
 # Backends whose tier 1 defaults to the trainer FP8 source (framework-native block FP8
 # with the ignore list): its H100 gate margin is larger than the engine's online FP8
-# (p99 |diff| 0.43 vs 0.46-0.49, limit 0.5; SESSION26 E6 round 2).
+# (p99 |diff| 0.43 vs 0.46-0.49, limit 0.5).
 TRAINER_SOURCE_BACKENDS = frozenset({"miles"})
 
 

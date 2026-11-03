@@ -41,7 +41,7 @@ Two consequences:
 may span DP when the Miles pin has data-parallel replicas). The island's
 fragment layout can be computed offline (:mod:`.nemotron_h_layout`).
 
-Training defaults (:func:`train_flags`, S27 G-AN on 8 x H200, Nemotron-3 Nano,
+Training defaults (:func:`train_flags`, measured on 8 x H200, Nemotron-3 Nano,
 real RL samples): selective recompute of the MoE and layernorm modules, a
 dynamic micro batch of 8192 tokens per GPU at TP1, and the DeepEP flex
 dispatcher with permute fusion when the image has DeepEP (else all-to-all with
@@ -67,7 +67,7 @@ from yeto.rl.hybrid_params import VL_ARCHITECTURE
 
 MILES_BRIDGE_PLUGINS = "miles_plugins.megatron_bridge"
 KEEP_MTP_ENV = "MILES_NEMOTRONH_KEEP_MTP"
-# Miles commit that adds MilesNemotronHLanguageOnlyBridge (branch yeto/s27-120b-prep).
+# Miles commit that adds MilesNemotronHLanguageOnlyBridge .
 MILES_VL_BRIDGE_COMMIT = "b7868074c"
 
 
@@ -167,16 +167,16 @@ def model_flags(provider: Any) -> tuple[str, ...]:
     return tuple(flags)
 
 
-# G-AN (SESSION27/MFU-INVESTIGATION.md §3.1, §5): 8192 tokens per GPU was the
+# Measured: 8192 tokens per GPU was the
 # fastest micro batch at TP1 (16384: -5%); TP2 at 16384 matched it.
 TOKENS_PER_GPU_PER_TP = 8192
 SELECTIVE_RECOMPUTE_MODULES = ("moe", "layernorm")
 # Below this many samples per optimizer step the fixed per-step costs
 # (optimizer step, log-prob pass, weight update) dominate: 128 -> 512 samples
-# raised training throughput by 22% at TP1/EP8/DP8 (E4 -> E4L).
+# raised training throughput by 22% at TP1/EP8/DP8.
 MIN_SAMPLES_PER_STEP = 256
 # A full optimizer offload on one node: 2 GPUs spent 16.3 s of a 24.6 s actor
-# step in the CPU optimizer (Y1); 8 GPUs ran 4.6x slower than without (Xoff).
+# step in the CPU optimizer; 8 GPUs ran 4.6x slower than without.
 FEW_TRAINER_GPUS = 8
 
 
@@ -227,11 +227,11 @@ def train_warnings(*, samples_per_step: int, optimizer_offload_fraction: float, 
     if samples_per_step < MIN_SAMPLES_PER_STEP:
         warnings.append(
             f"each optimizer step trains {samples_per_step} samples; below {MIN_SAMPLES_PER_STEP} the fixed "
-            "per-step costs (optimizer step, log-prob pass, weight update) dominate (S27 G-AN: 128 -> 512 "
+            "per-step costs (optimizer step, log-prob pass, weight update) dominate (measured: 128 -> 512 "
             "samples per step raised training throughput by 22%)")
     if optimizer_offload_fraction >= 1.0 and trainer_gpus <= FEW_TRAINER_GPUS:
         warnings.append(
             f"the whole optimizer state is offloaded to the host on {trainer_gpus} trainer GPU(s); the CPU "
-            "optimizer step dominates (S27 G-AN: 16.3 s of a 24.6 s actor step on 2 GPUs; 4.6x slower than "
+            "optimizer step dominates (measured: 16.3 s of a 24.6 s actor step on 2 GPUs; 4.6x slower than "
             "no offload on 8 GPUs): prefer more trainer GPUs without --rl-optimizer-offload-fraction")
     return tuple(warnings)

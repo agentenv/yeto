@@ -10,7 +10,7 @@ Reward 1.0 / 0.0; ``sample.metadata["success"]`` records the same flag as
 
 Launch as ``--reward-function yeto.rl.numeric_answer_reward:score``, or copy
 this file next to the launcher as ``numeric_answer_reward.py`` and use
-``--reward-function numeric_answer_reward:score`` (the s27-gr run.sh pattern).
+``--reward-function numeric_answer_reward:score`` (a run.sh next to the launcher).
 ``yeto.rl.gsm8k_reward`` is unchanged.
 """
 

@@ -1,11 +1,11 @@
-"""S27 L11: a relaunched synced trainer (sample buffer lane) resumes.
+"""A relaunched synced trainer (sample buffer lane) resumes.
 
 * its buffer lane cursor log, not the data source, holds its data position:
   the restart restores no data cursor;
 * it learns the versions an earlier publisher process released (the store's
   policy releases), so groups generated with them pass the policy-age check.
 
-S27 G-EQ5 (gap 22) adds the same for a buffer trainer that counts its versions
+The same holds for a buffer trainer that counts its versions
 itself (no syncer): :class:`~yeto.rl.engine.merged_release.ResumedReleases`
 continues the version account above the store's releases, and
 :meth:`~yeto.rl.engine.bridges.LocalOnlySync.resume_at` starts its rounds there.
@@ -103,7 +103,7 @@ def test_wiring_a_synced_trainer_sets_the_lane_owner_and_the_release_history(tmp
         assert driver.published_policy_history() == [(1, "h1"), (2, "h2")]
 
 
-# -------------------------------------------- S27 G-EQ5 (gap 22): a trainer without a syncer
+# -------------------------------------------- a trainer without a syncer
 def test_the_account_continues_above_every_release_the_store_holds(tmp_path):
     store = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
     assert resumed_releases(store, 2) is None  # a run that starts here

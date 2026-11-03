@@ -38,13 +38,13 @@ def test_supported_r0_combinations_pass():
     ],
 )
 def test_sao_runs_on_ports(kwargs):
-    # P0-1.7b.3: SAO streaming is the two-role full-parameter sync; the SAO
+    # SAO streaming is the two-role full-parameter sync; the SAO
     # flags are algorithm-spec flags the Miles translation absorbs.
     assert ports_rejections(**kwargs) == []
 
 
 def test_deepseek_v4_expert_full_runs_on_the_full_parameter_sync():
-    # P0 1.7b.2: attention LoRA + clone experts as one full-parameter LoRA hybrid.
+    # Attention LoRA + clone experts as one full-parameter LoRA hybrid.
     assert ports_rejections(
         sync_preset="full-parameter",
         expert_full_count=4,
@@ -582,7 +582,7 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
     publications = [e for e in events if e["event"] == "rl_publication"]
     tokens = [e["rl/policy_token"] for e in publications]
     assert [t.split(":")[1] for t in tokens] == ["0", "1", "2"]
-    # P0-S: the engine carries the plain version of the driver's token
+    # the engine carries the plain version of the driver's token
     assert controller.engine.version == tokens[-1].split(":")[1]
     assert hook.current_policy_token() == tokens[-2]
     assert all(e["sync/publication_members"] == ["engine:c0"] for e in publications)
@@ -591,7 +591,7 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
 
 
 def test_explicit_fixed_partition_is_a_ports_combination():
-    # rl-infra-spec 2.1: allowed only when placement is requested explicitly
+    # Allowed only when placement is requested explicitly
     assert ports_rejections(placement="fixed-partition", rollout_num_gpus=2) == []
     assert "needs --rollout-num-gpus" in " ".join(ports_rejections(placement="fixed-partition"))
     assert ports_rejections(placement="elastic")
@@ -616,6 +616,6 @@ def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypa
     [dict(sync_preset="full-parameter", parameter_mode="full"), dict(tuning="full", parameter_mode="full")],
 )
 def test_full_parameter_training_runs_on_ports(kwargs):
-    """P0-D8: full-parameter training has one ports sync (FullParameterSync)."""
+    """Full-parameter training has one ports sync (FullParameterSync)."""
 
     assert ports_rejections(**kwargs) == []

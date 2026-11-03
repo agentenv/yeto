@@ -1,12 +1,10 @@
 """Offline comparison of IS corrections (TIS / IcePop / M2PO) on saved logprobs.
 
-rl-inter-island-scheduling, tasks 0.10.
-
 Input: dump files (torch .pt dicts) each holding, for one batch of samples,
 ``rollout_log_probs`` (behaviour policy) and ``old_log_probs`` (training-side
 policy) of shape [B, T] plus ``response_mask``.  The lag between the two
 policies is supplied by the caller (``--lag``); the verl dumps found so far
-(s16-verl-mismatch) are lag 0 (train/inference mismatch only).
+are lag 0 (train/inference mismatch only).
 
 Corrections (ratio r = exp(train - behaviour), token level):
   tis    : w = clamp(r, lo, hi)                 (project default lo=0, hi=2.0)

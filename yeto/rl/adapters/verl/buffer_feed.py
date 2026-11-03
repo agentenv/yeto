@@ -1,4 +1,4 @@
-"""verl trainer island over the durable sample buffer: the feed (S25 C2).
+"""verl trainer island over the durable sample buffer: the feed.
 
 A verl *buffer trainer* trains on groups that a separate sampler island wrote
 to the sample buffer (``yeto.rl.engine.sample_buffer``; the engine sampler
@@ -23,7 +23,7 @@ data, without verl or Ray:
   ``param_version``). A version that map does not hold becomes None and the
   collector discards the group as unknown; at a relaunch the map is seeded from
   the store's release records, so the versions an earlier process published are
-  known (S27 G-EQ5, ``buffer_ports`` module doc, "relaunch");
+  known (``buffer_ports`` module doc, "relaunch");
 * ``keep``: the group's padded rows (:func:`group_rows`) go to the trainer actor
   (``add_group``), which wraps them as a verl ``RolloutSample``;
 * ``drop``: nothing reaches the actor; the group stays consumed.
@@ -32,11 +32,11 @@ Every pulled group is recorded once (``record``) with its buffer position, so a
 run can show that no group was consumed twice. The buffer positions are those of
 the trainer's read cursor (``FileSampleBuffer.select``).
 
-Synced trainers (S25 C3, ``yeto.rl.engine.merged_release``): the buffer is a
+Synced trainers (``yeto.rl.engine.merged_release``): the buffer is a
 lane reader (positions ``p % N == m`` only) and the feed keeps the lane cursor
 (``cursor_log``): it continues after the last recorded round.
 
-**What a relaunch reads again** (S27 G-EQ4 changed this). ``close_round`` holds the
+**What a relaunch reads again** (changed by the commit-after-step fix). ``close_round`` holds the
 round's positions as a *pending* record and ``commit_round`` writes it only after
 the train call returns, so:
 
@@ -46,12 +46,12 @@ the train call returns, so:
   a full-parameter island ("again, the rows of the round that was running when the
   process stopped").
 
-Until G-EQ4 the record was written when collection ended, *before* the round
+Before that fix the record was written when collection ended, *before* the round
 trained. That guaranteed "trained at most once" but **lost** a round's groups
 whenever the island stopped between collection and the optimizer step: measured on
 npu1, a kill during round 4 left the record ``cursor 32, positions [28, 29, 30, 31]``
-for a round that never trained, and the relaunch started at 32 (S27 G-EQ4,
-VERL-ASCEND-RL.md section 36).
+for a round that never trained, and the relaunch started at 32
+(VERL-ASCEND-RL.md section 36).
 
 The remaining window is the opposite one and is **not** closed here: if the process
 stops between the train call returning and the record reaching the store, the
@@ -187,7 +187,7 @@ def group_rows(samples: Sequence[Mapping[str, Any]], *, uid: str, param_versions
         attention = [0] * left + [1] * (len(prompt) + length) + [0] * right
         tensors["prompts"].append([pad] * left + prompt)
         tensors["responses"].append(response + [pad] * right)
-        # S28 G-120: a multi-turn (agentic) sample carries its response mask (tool output
+        # A multi-turn (agentic) sample carries its response mask (tool output
         # and template tokens are 0); a single-turn sample trains every response token
         mask = sample.get("loss_mask")
         mask = [1] * length if mask is None else [int(m) for m in mask]
@@ -217,7 +217,7 @@ def group_rows(samples: Sequence[Mapping[str, Any]], *, uid: str, param_versions
 
 def oversized(samples: Sequence[Mapping[str, Any]], shape: RowShape,
               tokenize: Callable[[str], Sequence[int]] | None = None) -> str | None:
-    """S29 D21: why one sample of the group does not fit ``shape`` (None: all fit)."""
+    """Why one sample of the group does not fit ``shape`` (None: all fit)."""
     for sample in samples:
         sample = complete_prompt_tokens(sample, tokenize)
         length = int(sample.get("response_length") or 0)
@@ -354,7 +354,7 @@ class BufferFeed:
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
         # the closed round's cursor record, written only once that round has trained
-        # (:meth:`commit_round`, S27 G-EQ4)
+        # (:meth:`commit_round`)
         self._pending: tuple[int, list[int], int] | None = None
         if cursor_log is not None:
             self.buffer.reset_to(cursor_log.last_cursor())
@@ -414,7 +414,7 @@ class BufferFeed:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
             too_long = oversized(samples, self.shape, self.tokenize)
             if too_long is None and self.group_size is not None and len(samples) != self.group_size:
-                # S29 D22: an agentic group keeps >= min_samples trials, so it can be short;
+                # An agentic group keeps >= min_samples trials, so it can be short;
                 # verl's update splits the round into mini-batches of groups x n samples and
                 # asserted (run s29r120-d: 15 % 16). A short group is dropped and recorded.
                 reason = "short_group"
@@ -424,7 +424,7 @@ class BufferFeed:
             if too_long is None:
                 self._accepted()
                 break
-            # S29 D21: a group with a sample wider than the rows (an agentic prompt past
+            # A group with a sample wider than the rows (an agentic prompt past
             # max_prompt_length, a response past max_response_length) is dropped and recorded,
             # not fatal: before, group_rows raised in keep() and the island left INFRA_FAILED
             # (run s29r120-b: prompt 8200 > 8192). RL never truncates a trajectory.
@@ -516,7 +516,7 @@ class BufferFeed:
     def commit_round(self) -> tuple[int, list[int], int] | None:
         """Write the pending cursor record: the round trained, so a relaunch must not
         read its groups again. Returns the record written, or None when there is none
-        (a round that never closed, or one already committed). S27 G-EQ4."""
+        (a round that never closed, or one already committed)."""
         pending, self._pending = self._pending, None
         if pending is None or self.cursor_log is None:
             return pending
@@ -546,7 +546,7 @@ class BufferCall:
     being collected; its collection ends at the assemble call, where the feed
     closes the round (:meth:`BufferFeed.close_round`), and the feed writes that
     round's cursor record after the train call returns
-    (:meth:`BufferFeed.commit_round`, S27 G-EQ4)."""
+    (:meth:`BufferFeed.commit_round`)."""
 
     def __init__(self, feed: BufferFeed, actor_call: Callable[..., Any],
                  round_id: Callable[[], int] | None = None) -> None:

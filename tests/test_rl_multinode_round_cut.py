@@ -4,7 +4,7 @@ Island A trains, cuts at the round-boundary safe point (round cut in the store's
 ``round-cuts``, pointer in the state dir, store synced); its machines are gone (empty
 local state dir); island B restores the store, loads the cut into a FRESH trainer
 (different initial weights) and continues at the cut's rollout id. The Miles pieces
-are E2's CPU rank fakes (real ``MilesTrainerGroup.save_cut/restore_cut`` + manifest
+are the CPU rank fakes (real ``MilesTrainerGroup.save_cut/restore_cut`` + manifest
 verification); Megatron loading of the same shards is GPU-only (M4 real run).
 """
 
@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from test_rl_reconfig_recovery import _ctl, _island
-from test_rl_trainer_rebuild_e1 import ARGS, RankGroup
+from test_rl_trainer_rebuild import ARGS, RankGroup
 
 from tests.rl_cut_fakes import make_rank, params, train_step
 from yeto.rl.engine.bridges import LocalOnlySync

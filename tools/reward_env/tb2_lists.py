@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""TB2 task lists on the Harbor path (S26 E9.5; module ``yeto.rl.harness.harbor.task_lists``).
+"""TB2 task lists on the Harbor path (module ``yeto.rl.harness.harbor.task_lists``).
 
     # hold-out + training split (data/eval/tb2-holdout.json, tb2-train.json shapes)
-    python tools/reward_env/tb2_lists.py split --tasks ~/work/tb21-data --out-dir out/
+    python tools/reward_env/tb2_lists.py split --tasks <tasks-dir> --out-dir out/
 
     # curriculum stages of a training split
-    python tools/reward_env/tb2_lists.py curriculum --tasks ~/work/tb21-data \
+    python tools/reward_env/tb2_lists.py curriculum --tasks <tasks-dir> \
         --train out/tb2-train.json --out out/tb2-curriculum.json \
         [--reference pos-all.jsonl] [--pass-rates baseline.json --require-signal]
 
     # dataset rows (Miles jsonl + verl jsonl) of a training list or curriculum stages
-    python tools/reward_env/tb2_lists.py rows --tasks ~/work/tb21-data \
+    python tools/reward_env/tb2_lists.py rows --tasks <tasks-dir> \
         --list out/tb2-curriculum.json [--through s1-short] --out-prefix out/tb2.1-s1
 
     # sha256 manifest of written files, with their sources
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     s.add_argument("--version", help="benchmark_version override (default: from the checkout)")
     s.add_argument("--unusable", help="unusable-task table (default data/eval/tb2-unusable.json)")
     s.add_argument("--no-unusable", action="store_true")
-    s.add_argument("--no-smoke6", action="store_true", help="keep the S15 smoke-6 in the hold-out pool")
+    s.add_argument("--no-smoke6", action="store_true", help="keep the smoke-6 tasks in the hold-out pool")
     s.set_defaults(run=_split)
     c = sub.add_parser("curriculum", help="ordered stages of a training list")
     c.add_argument("--tasks", required=True)

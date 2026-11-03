@@ -1,4 +1,4 @@
-"""The ``yeto_grpo`` advantage estimator: verl GRPO without placeholder rows (S25 N10.3b).
+"""The ``yeto_grpo`` advantage estimator: verl GRPO without placeholder rows.
 
 verl cannot drop one sample of a batch, so ``HarborAgentLoop`` returns an
 ABORTED trajectory as a placeholder: one token with loss mask 0 and reward 0.

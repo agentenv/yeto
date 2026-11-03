@@ -311,7 +311,7 @@ def test_score_ask_budget_caps_queries(fake_env, monkeypatch):
 
 def test_unmapped_quota_code_fails_closed(fake_env):
     # An instance type with no quota mapping must be rejected, not treated
-    # as unlimited (the bug that once planned 16 P5 islands on 128 vCPUs).
+    # as unlimited (the bug that once planned 16 p5.48xlarge islands on 128 vCPUs).
     codes = {k: v for k, v in CODES.items() if k != "p5.48xlarge"}
     fake = FakeAws(QUOTAS, SCORES, codes)
     result = _shape(fake, budget=500.0, gpus=["H100"])

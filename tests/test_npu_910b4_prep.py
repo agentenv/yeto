@@ -3,7 +3,7 @@
 No NPU is needed: ``torch_npu`` is a stub module, ``npu-smi`` output is a
 captured string, and the accelerator family is monkeypatched. Same approach as
 tests/test_accel.py. What these tests cannot cover is listed in
-infra-drafts/S19-NPU-910B4-BRINGUP.md ("to verify on hardware").
+the 910B4 bring-up notes ("to verify on hardware").
 """
 
 from __future__ import annotations
@@ -230,7 +230,7 @@ def test_threshold_key_separates_npu_from_gpu():
     assert _threshold_card({"device_family": "nvidia", "nvidia_smi": "NVIDIA H100 80GB"}) == "H100"
 
 
-# --- S20 ModelArts bring-up: the container sees one card with a non-zero ID --
+# --- ModelArts bring-up: the container sees one card with a non-zero ID --
 NPU_SMI_LIST_ID4 = "\tTotal Count                    : 1\n\n\tNPU ID                         : 4\n\tChip Count                     : 1\n"
 
 
@@ -311,7 +311,7 @@ def test_fully_async_plan_sets_trainer_device_npu_on_ascend(monkeypatch):
     assert not any(o.startswith("trainer.device=") for o in out)
 
 
-# --- S27 G-EQ2 (npu1): Ray's accelerator resource is "NPU", not "GPU" -----------
+# --- Ascend host: Ray's accelerator resource is "NPU", not "GPU" -----------
 def test_ray_accelerator_resource_per_device_family():
     assert catalog.ray_accelerator_resource("nvidia") == "GPU"
     assert catalog.ray_accelerator_resource("ascend") == "NPU"
@@ -338,7 +338,7 @@ def test_island_gpus_reads_the_npu_resource_on_ascend():
 
 
 def test_runtime_env_forwards_hccl_but_never_the_visible_card_list(monkeypatch):
-    """S27 G-EQ2: a Ray worker of an already-running cluster inherits the raylet's
+    """a Ray worker of an already-running cluster inherits the raylet's
     environment, so HCCL settings have to travel in the runtime env; the per-worker
     card list must not, or every worker would bind the same card."""
     import types
@@ -368,7 +368,7 @@ def test_runtime_env_forwards_hccl_but_never_the_visible_card_list(monkeypatch):
 
 
 def test_verl_root_is_resolved_not_assumed(monkeypatch, tmp_path):
-    """S27 G-EQ2: verl's fully_async config search path is relative to the verl
+    """verl's fully_async config search path is relative to the verl
     checkout, so the island must find that directory in a vendor image too."""
     monkeypatch.delenv(pins.VERL_ROOT_ENV, raising=False)
     monkeypatch.setattr(pins, "VERL_ROOT", str(tmp_path / "absent"))
@@ -390,25 +390,49 @@ def test_verl_root_is_resolved_not_assumed(monkeypatch, tmp_path):
     assert pins.verl_root() == str(vendor)
 
 
-def test_sync_trainer_is_required_only_by_the_sync_island():
-    """S27 G-EQ2: a vendor verl build has no verl.trainer.ppo.v1; the buffer
-    trainer island does not need it, the sync island says so clearly. Source
-    check: importing the module needs verl itself (it is the trainer subclass)."""
-    source = (importlib.resources.files("yeto.rl.adapters.verl") / "trainer.py").read_text()
-    assert "def require_sync_trainer" in source
-    # the v1 import is optional, and the sync trainer subclass is defined only with it
-    assert "except ImportError as error:" in source and "SYNC_TRAINER_IMPORT_ERROR" in source
-    # run_island asks for it before touching verl's sync internals
-    body = source.split("def run_island(", 1)[1]
-    assert body.index("require_sync_trainer()") < body.index("SkipManager")
-    # the buffer trainer path never asks
-    buffer_body = source.split("def run_fully_async_island(", 1)[1]
-    assert "require_sync_trainer()" not in buffer_body
+def _vendor_verl_trainer(monkeypatch):
+    """Import the verl trainer module against a stub vendor verl build: it has
+    ``verl.trainer.ppo.core_algos`` but no fork-only ``verl.trainer.ppo.v1``."""
+    import types
+
+    core_algos = types.ModuleType("verl.trainer.ppo.core_algos")
+    core_algos.register_adv_est = lambda name: (lambda fn: fn)
+    ppo = types.ModuleType("verl.trainer.ppo")  # no __path__: ``ppo.v1`` cannot be imported
+    ppo.core_algos = core_algos
+    for name, module in (("verl", types.ModuleType("verl")), ("verl.trainer", types.ModuleType("verl.trainer")),
+                         ("verl.trainer.ppo", ppo), ("verl.trainer.ppo.core_algos", core_algos)):
+        monkeypatch.setitem(sys.modules, name, module)
+    package = importlib.import_module("yeto.rl.adapters.verl")
+    for name in ("trainer", "advantage"):
+        monkeypatch.delitem(sys.modules, f"yeto.rl.adapters.verl.{name}", raising=False)
+        monkeypatch.setattr(package, name, None, raising=False)  # undone on teardown
+    trainer = importlib.import_module("yeto.rl.adapters.verl.trainer")
+    return trainer
+
+
+def test_sync_trainer_is_required_only_by_the_sync_island(monkeypatch):
+    """a vendor verl build has no verl.trainer.ppo.v1; the module still imports,
+    the sync island refuses clearly before touching verl's sync internals, and
+    the buffer trainer island never asks for the sync trainer."""
+    trainer = _vendor_verl_trainer(monkeypatch)
+    assert isinstance(trainer.SYNC_TRAINER_IMPORT_ERROR, ImportError)
+    with pytest.raises(SystemExit, match="verl.trainer.ppo.v1"):
+        trainer.require_sync_trainer()
+    # run_island refuses before importing verl.utils.skip (absent from the stub)
+    with pytest.raises(SystemExit, match="sync island needs it"):
+        trainer.run_island(object(), object(), {}, {})
+    # the fully_async / buffer trainer island does not call require_sync_trainer
+    asked = []
+    monkeypatch.setattr(trainer, "require_sync_trainer", lambda: asked.append(True))
+    with pytest.raises(Exception) as caught:  # an empty plan fails later, in its own code
+        trainer.run_fully_async_island(lambda *a: None, lambda: None, {}, {})
+    assert not isinstance(caught.value, SystemExit)
+    assert asked == []
 
 
 def test_island_takes_a_staged_model_directory(tmp_path, monkeypatch):
-    """S27 G-EQ2: an on-prem island loads weights already on the node (npu1's
-    n2-n4 cannot reach the hub); a repo id still goes through the hub."""
+    """an on-prem island loads weights already on the node (the Ascend
+    worker nodes cannot reach the hub); a repo id still goes through the hub."""
     from yeto.rl.adapters.verl import island_entry
 
     staged = tmp_path / "nano"
@@ -425,7 +449,7 @@ def test_island_takes_a_staged_model_directory(tmp_path, monkeypatch):
 
 
 def test_trust_remote_code_reaches_the_verl_overrides():
-    """S27 G-EQ2: the checkpoint's own modeling code is what supports gradient
+    """the checkpoint's own modeling code is what supports gradient
     checkpointing for nemotron_h (the Ascend image's transformers 5.3 sets
     supports_gradient_checkpointing = False), so the island has to ask for it."""
     from yeto.rl.adapters.verl import config as vconf
@@ -456,7 +480,7 @@ def test_the_island_parses_trust_remote_code():
 
 
 def test_activation_recompute_follows_the_model_implementation(monkeypatch):
-    """S27 G-EQ2: verl's FSDP2 engine enables gradient checkpointing itself, so a
+    """verl's FSDP2 engine enables gradient checkpointing itself, so a
     model whose implementation refuses it has to be known before the island runs."""
     import types
 
@@ -509,7 +533,7 @@ def test_gradient_checkpointing_reaches_the_overrides():
 
 
 def test_fsdp_offload_is_selectable(monkeypatch):
-    """S27 G-EQ2: without param offload verl puts the whole model on the card
+    """without param offload verl puts the whole model on the card
     before FSDP2 shards it, which a 64 GiB Ascend card cannot hold for 30B."""
     from yeto.rl.adapters.verl import config as vconf, island_entry
 
@@ -538,7 +562,7 @@ def test_fsdp_offload_is_selectable(monkeypatch):
 
 
 def test_verl_auto_class_patch_prefers_the_architecture_task():
-    """S27 G-EQ2: verl walks the checkpoint's auto_map and takes the first key that
+    """verl walks the checkpoint's auto_map and takes the first key that
     mentions architectures[0]. Nemotron-3 Nano maps AutoModel to its CausalLM class,
     so verl built the base model and the first training step raised
     "'BaseModelOutputWithPast' object has no attribute 'logits'"."""
@@ -571,9 +595,9 @@ def test_verl_auto_class_patch_prefers_the_architecture_task():
 
 
 def test_verl_meta_init_patch_builds_non_zero_ranks_without_weights():
-    """S27 G-EZ2: under accelerate.init_empty_weights, transformers 5.x
+    """under accelerate.init_empty_weights, transformers 5.x
     from_pretrained still read the weights, so every FSDP2 rank held a whole FP32
-    model in host memory (npu1: 120B on 16 ranks, 1432 -> 125 GiB available)."""
+    model in host memory (Ascend host: 120B on 16 ranks, 1432 -> 125 GiB available)."""
     import contextlib
 
     import torch
@@ -621,8 +645,8 @@ def test_verl_meta_init_patch_builds_non_zero_ranks_without_weights():
 
 
 def test_verl_rank0_source_patch_loads_the_checkpoint_dtype_once(monkeypatch):
-    """S27 G-EZ2: after the eighth patch rank 0 still read a whole FP32 model
-    (npu1 n2: 864 GiB in one process for the 120B text model). Opt-in: rank 0
+    """after the eighth patch rank 0 still read a whole FP32 model
+    (one Ascend node: 864 GiB in one process for the 120B text model). Opt-in: rank 0
     reads the checkpoint's own dtype as the broadcast source only, and every
     rank's training module is built on meta in the training dtype."""
     import os
@@ -695,7 +719,7 @@ def test_verl_rank0_source_patch_loads_the_checkpoint_dtype_once(monkeypatch):
 
 
 def test_ascend_island_turns_torch_compile_off(monkeypatch):
-    """S27 G-EQ2: triton-ascend has no inductor backend, so verl's default
+    """triton-ascend has no inductor backend, so verl's default
     torch.compile of the entropy/log-prob helpers kills the first training step."""
     from types import SimpleNamespace as NS
 
@@ -722,14 +746,14 @@ def test_ascend_island_turns_torch_compile_off(monkeypatch):
         return overrides
 
     ascend = run_for("ascend")
-    # the engine workers read fsdp_config.use_torch_compile, not the actor's (G-EQ3)
+    # the engine workers read fsdp_config.use_torch_compile, not the actor's
     assert all(f"{key}=False" in ascend for key in keys)
     nvidia = run_for("nvidia")
     assert not [o for o in nvidia if o.split("=")[0] in keys]  # NVIDIA unchanged
 
 
 def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
-    """S27 G-EQ3: the fp32 unsharded gradient of a stacked MoE expert tensor and
+    """the fp32 unsharded gradient of a stacked MoE expert tensor and
     the entropy of a 131072-wide log-prob head do not fit next to the rest."""
     from yeto.rl.adapters.verl.island_entry import ascend_memory_overrides
 
@@ -743,7 +767,7 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
     assert "actor_rollout_ref.actor.entropy_checkpointing=True" in without
     assert "actor_rollout_ref.actor.entropy_from_logits_with_chunking=True" in without
     # verl's activation offload is NOT used: it trips an assertion in the backward of
-    # transformers' NemotronH router (G-EQ3, measured on npu1)
+    # transformers' NemotronH router (measured on the Ascend host)
     assert not [o for o in without if "enable_activation_offload" in o]
     # one sample per micro-batch: with packing, what fits depends on the round's samples
     for key in ("actor_rollout_ref.actor.use_dynamic_bsz=False",
@@ -756,7 +780,7 @@ def test_an_ascend_island_fits_the_step_into_a_64_gib_card(monkeypatch):
 
 
 def test_ascend_plugin_stack_disables_dynamo_in_every_ray_worker(monkeypatch, tmp_path):
-    """S28 G-120: with the Ascend plugin stack on, every Ray worker must get
+    """with the Ascend plugin stack on, every Ray worker must get
     TORCHDYNAMO_DISABLE.
 
     The stack pulls in paths that go through mcore's ``@jit_fuser``, which is

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""A records-proxy model endpoint on Modal for Harbor agent trials (S25 N10.7 smoke).
+"""A records-proxy model endpoint on Modal for Harbor agent trials (smoke test).
 
 One GPU container runs the SGLang server adapter (``SGLangServerEngine``, TP1)
-on a checkpoint from a Modal Volume and the N10.5 records proxy in front of it
+on a checkpoint from a Modal Volume and the records proxy in front of it
 (``RecordsProxy``: Responses -> Chat, token / loss mask / log-prob records).
 The proxy is reachable from outside through a Modal tunnel, under a secret path
 prefix only (``/k/<secret>/...``; the proxy itself has no authentication).  The
@@ -55,7 +55,7 @@ DEFAULTS: dict[str, Any] = {
 # Model presets: the Modal Volume holding the checkpoint and the DEFAULTS keys that differ.
 MODELS: dict[str, dict[str, Any]] = {
     "qwen38-27b": {"volume": MODELS_VOLUME, "config": {}},
-    # S25 N10.9: full-parameter agentic RL model.  Sampling is the trainer's
+    # The full-parameter agentic RL model.  Sampling is the trainer's
     # (temperature 1, no top-p / top-k truncation), so the pass rate measured
     # here is the one the RL rollouts see.
     "qwen3-4b-2507": {"volume": "yeto-fn-models", "config": {

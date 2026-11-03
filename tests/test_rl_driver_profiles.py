@@ -1,4 +1,4 @@
-"""rl-infra-spec 1.4/1.7/2.2: IslandDriver execution profiles and opt-in observation (CPU)."""
+"""IslandDriver execution profiles and opt-in observation (CPU)."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
-# Always emitted since the 1b/2a request and P4 3.1 (not observation events);
+# Always emitted since the 1b/2a request (not observation events);
 # the R0 comparison removes exactly these events and nothing else.
 ACCOUNTING_EVENTS = {"rl_round_trained", "rl_round_wall"}
 
@@ -158,7 +158,7 @@ def test_overlap_mode_and_placement_mismatch_are_refused(tmp_path):
     overlap = _profile("partitioned-overlap")
     engine = _engine(placement_kind="fixed-partition")
     driver, _ = _driver(engine, tmp_path, profile=overlap)
-    with pytest.raises(DriverError, match="2.3"):
+    with pytest.raises(DriverError, match="not runnable"):
         driver.run()
     engine = _engine()  # colocated placement
     driver, _ = _driver(engine, tmp_path, "m.jsonl", profile=_profile("partitioned-serial"))

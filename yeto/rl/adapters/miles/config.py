@@ -1,4 +1,4 @@
-"""RLRunConfig + AlgorithmSpec -> upstream Miles argv (task 3.1, design D5/D7/D8).
+"""RLRunConfig + AlgorithmSpec -> upstream Miles argv .
 
 Rules enforced here, all *before* any GPU process exists:
 
@@ -89,7 +89,7 @@ FAULT_TOLERANCE_FLAGS = frozenset(
 )
 # Session server timeout for its upstream model calls (Miles --miles-router-timeout,
 # default None: no limit). Without a limit a call to a dead engine hangs until the
-# router's own limit (14400 s) instead of failing (S27 G-EB section 7.1). 600 s is
+# router's own limit (14400 s) instead of failing (see the router's timeout). 600 s is
 # above one turn's longest generation (4096 tokens at about 70 tokens/s per sequence
 # under a large batch is about 60 s, plus queueing) and below Codex's stream idle
 # timeout (1800 s, codex_provider), so the session server answers 502 first and the
@@ -123,15 +123,15 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--trainer-controller-addrs",
         "--eval-num-gpus",
         "--external-policy-sync-path",  # legacy fork only; the driver owns sync
-        # rl-infra-spec 2.1 (fixed partition): the transfer mode and the
+        # Fixed partition: the transfer mode and the
         # fork-M1 role->bundle map are decided by the placement translation.
         "--update-weight-transfer-mode",
         "--yeto-placement-map",
         # LR schedule is decided by RLRunConfig.algorithm.lr_schedule
         # (legacy rejects the same LR_SCHEDULE_FLAGS in learner.py).
         *LR_SCHEDULE_FLAGS,
-        # Every objective-changing algorithm flag (rl-algorithm-capabilities
-        # D3): mapped ones only enter through absorption into AlgorithmSpec,
+        # Every objective-changing algorithm flag (rl-algorithm-capabilities):
+        # mapped ones only enter through absorption into AlgorithmSpec,
         # unmapped ones are refused.
         *OBJECTIVE_FLAGS,
         # agentic-rollout-utilization 2.4: derived from --rl-max-policy-age
@@ -182,7 +182,7 @@ class MilesLaunchArgs:
     # ``algorithm_sha256``) and the absorbed flags ({flag: argv value}).
     algorithm: AlgorithmSpec | None = None
     absorbed_flags: Mapping[str, Any] = field(default_factory=dict)
-    # P0-S: generation keeps running while the trainer trains (Miles
+    # Overlap: generation keeps running while the trainer trains (Miles
     # fully_async, bounded by --max-weight-staleness = the policy-age limit).
     rollout_overlap: bool = False
 
@@ -313,7 +313,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.tensor_parallel": _ok,
     "parallel.pipeline_parallel": _ok,
     "parallel.expert_parallel": _ok,
-    "parallel.context_parallel": _ok,  # S27 G-AC: --context-parallel-size (translate_run_config)
+    "parallel.context_parallel": _ok,  # --context-parallel-size (translate_run_config)
     # Derived by Megatron from world size / TP / PP; consumed, not passed.
     "parallel.data_parallel": _ok,
     "parallel.rollout_num_gpus_per_engine": _ok,
@@ -324,7 +324,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.uneven_pipeline_layers": _ok,
     "parallel.standby_gpus": _ok,
     "parallel.rollout_cell_names": _ok,
-    # ruling 2026-10-04 v2: placement-only opt-ins consumed by yeto (PlacementRequest), no Miles flag
+    # placement-only opt-ins consumed by yeto (PlacementRequest), no Miles flag
     "parallel.allow_cross_node_tp": _ok,
     "parallel.allow_cross_node_engine_tp": _ok,
     "trainable.parameter_mode": _check_parameter_mode,
@@ -398,8 +398,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
     "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
-    "serving.rollout_quant_tier": _ok,  # S26 E6: SGLang flags in translate_run_config
-    "serving.rollout_quant_fp8_source": _ok,  # S26 E6: tier 1 engine vs trainer (Miles block FP8)
+    "serving.rollout_quant_tier": _ok,  # SGLang flags in translate_run_config
+    "serving.rollout_quant_fp8_source": _ok,  # tier 1 engine vs trainer (Miles block FP8)
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -439,7 +439,7 @@ LEAF_POLICY: dict[str, _Check] = {
     # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
     "edge_costs_path": _ok,
     "elastic_window_s": _ok,
-    # L4.6: the buffer rollout functions (translate_run_config); the island
+    # The buffer rollout functions (translate_run_config); the island
     # environment and the sampler loop read the rest.
     "sample_buffer": _ok,
     # translated below (Megatron full recompute / Miles dynamic batching)
@@ -533,7 +533,7 @@ def placement_request(config) -> PlacementRequest:
         standby_gpus=int(getattr(parallel, "standby_gpus", 0) or 0),
         rollout_cell_names=tuple(getattr(parallel, "rollout_cell_names", ()) or ()),
         gpus_per_node=getattr(parallel, "island_gpus_per_node", None),
-        # Q1/Q3 ruling 2026-10-04: in-node group = tp*cp (TP stays in a node);
+        # in-node group = tp*cp (TP stays in a node);
         # EP/PP may span nodes. model_parallel keeps the dense world group.
         model_parallel=int(parallel.tensor_parallel) * int(parallel.pipeline_parallel) * _cp,
         expert_parallel=int(getattr(parallel, "expert_parallel", 1) or 1),
@@ -543,7 +543,7 @@ def placement_request(config) -> PlacementRequest:
         allow_cross_node_engine_tp=bool(getattr(parallel, "allow_cross_node_engine_tp", False)),
     )
     if request.topology is not None:
-        # rl-multinode-island Q2: the trainer rectangle the placement rules derive
+        # The trainer rectangle the placement rules derive
         # must be the actor shape Miles is told (fail closed before any Ray work).
         shape = request.trainer_shape()
         told = (int(parallel.actor_num_nodes), int(parallel.actor_num_gpus_per_node))
@@ -571,7 +571,7 @@ def reject_fault_tolerance_flags(tokens: Sequence[str]) -> None:
 
 
 def _refuse_decoupled_ppo_breakers(tokens: Sequence[str]) -> None:
-    """rl-offpolicy-correction-passthrough D2: flags that remove pi_prox or mask
+    """Flags that remove pi_prox or mask
     tokens by version are refused, with the flag named."""
     from .offpolicy_correction import refuse_forbidden_argv
     from yeto.rl.engine.offpolicy_correction import CorrectionConfigError
@@ -614,7 +614,7 @@ def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None 
 
 
 def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
-    """rl-algo-critic-family D5: ``--critic-load`` of the ports main stage.
+    """rl-algo-critic-family: ``--critic-load`` of the ports main stage.
 
     A copied critic with a warm-up (``critic.init='copy_actor_backbone'``,
     ``warmup_steps > 0``) loads the warm-up stage product given by the run
@@ -635,7 +635,7 @@ def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
             raise MilesConfigError(
                 f"critic.warmup_steps={spec.warmup_steps}: the main stage loads the warm-up "
                 "stage product (run config algorithm.critic.critic_load); run the warm-up "
-                "stage first (rl-algo-critic-family design D5)"
+                "stage first (rl-algo-critic-family)"
             )
         return ["--critic-load", critic.critic_load]
     if given:
@@ -690,15 +690,15 @@ def translate_run_config(
     0 adds nothing; N > 0 needs an algorithm tolerating N
     (``execution.max_policy_staleness``). A colocated island appends Miles'
     partial rollout (carry-over at the cut-off); a partitioned island overlaps
-    rollout with training through Miles' fully_async (P0-S), so the
+    rollout with training through Miles' fully_async, so the
     all-samples metadata hook and the carry-over buffer filter are not set:
     the trained-groups hook reports the round instead.
 
-    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): K >= 1 sets the
+    ``async_buffer_rounds`` (--rl-async-buffer-rounds): K >= 1 sets the
     fully_async buffer to K rounds of groups (``--async-data-buffer-capacity-factor
     K``); None (default) uses K = ``max_policy_age``, not Miles' own default 2,
     which at age 1 dropped about half of the generated groups as too old
-    (SESSION26 E2). Only with overlap.
+    Only with overlap.
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
@@ -780,7 +780,7 @@ def translate_run_config(
     from .buffer_rollout import CONVERTIBLE
 
     if sample_buffer is not None and sample_buffer.role == CONVERTIBLE:
-        # L7.5: trainer and engines share the GPUs; the converted node loads its own
+        # Trainer and engines share the GPUs; the converted node loads its own
         # trained weights into its engines (no release through the store)
         if trainable.parameter_mode != "lora" or request.kind != "colocated":
             raise MilesConfigError("--rl-sample-role convertible needs LoRA on a colocated island")
@@ -903,19 +903,19 @@ def translate_run_config(
         "--over-sampling-batch-size", str(batch.over_sampling_batch_size),
         "--num-steps-per-rollout", str(batch.optimizer_steps),
         "--global-batch-size", str(batch.global_batch),
-        # E3 DP certification refuses --balance-data (reshard.reshard_problems):
+        # DP-change certification refuses --balance-data (reshard.reshard_problems):
         # dropped only when trainer DP-change edges are enabled.
         *(() if getattr(config, "trainer_dp_edges", False) else ("--balance-data",)),
         "--rollout-max-context-len", str(batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
-        # D3: metadata is extracted inside the rollout process
+        # metadata is extracted inside the rollout process
         "--rollout-sample-filter-path", TRAINED_GROUPS_HOOK_PATH,
         *(() if rollout_overlap else (
             "--rollout-all-samples-process-path", ROLLOUT_META_HOOK_PATH,
             "--buffer-filter-path", POLICY_BUFFER_FILTER_PATH,
         )),
         "--custom-rm-path", _dotted_callable(config.algorithm.reward_function),
-        # algorithm (D7): the only place AlgorithmSpec becomes Miles args
+        # algorithm: the only place AlgorithmSpec becomes Miles args
         "--advantage-estimator", algorithm.advantage_estimator,
         "--lr", str(config.algorithm.lr),
         # bf16 gradient buffers (--rl-grad-reduce-bf16, or the bf16 main grads of
@@ -965,7 +965,7 @@ def translate_run_config(
                 max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
                 overlap=rollout_overlap))
     if async_buffer_rounds is None and rollout_overlap:
-        async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
+        async_buffer_rounds = max_policy_age  # default: buffer depth = A_hard
     if async_buffer_rounds is not None:
         if not rollout_overlap:
             raise MilesConfigError(
@@ -1010,7 +1010,7 @@ def translate_run_config(
         values.append("--sglang-enable-deterministic-inference")
     if getattr(serving, "rollout_quant_tier", 0) == TIER_ONLINE_FP8 and \
             getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) == FP8_SOURCE_ENGINE:
-        # S26 E6 tier 1: SGLang quantizes the in-scope linears itself; the ignore list
+        # tier 1: SGLang quantizes the in-scope linears itself; the ignore list
         # travels in the workers' environment (entry.connect_island_ray). The trainer
         # source needs no SGLang flag: the FP8 checkpoint's config carries the method.
         values.extend(sglang_online_argv())
@@ -1047,7 +1047,7 @@ def translate_run_config(
         )
     values.extend(train_memory_argv(config.train_memory))
     if getattr(config, "deterministic_trainer", False):
-        values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
+        values.append("--deterministic-mode")  # Megatron deterministic kernels
     if config.data.chat_template_kwargs:
         values.extend(
             (
@@ -1151,7 +1151,7 @@ def translate_run_config(
         for name, value in geometry.mla_dims:
             values.extend((f"--{name.replace('_', '-')}", str(value)))
     if recipe.name == RECIPE_QWEN3_8_NEXT:
-        # G1: the native Flash-Next recipe replaces the Bridge-geometry model and
+        # the native Flash-Next recipe replaces the Bridge-geometry model and
         # LoRA flags with the launcher's (profiles/qwen3_8_next.py).
         from yeto.rl.profiles import qwen3_8_next as q
 
@@ -1191,7 +1191,7 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
-            # S26 E6: only a quantized tier adds the attribute (tier 0 keeps the argv golden)
+            # only a quantized tier adds the attribute (tier 0 keeps the argv golden)
             **({"yeto_rollout_quant_tier": int(serving.rollout_quant_tier)}
                if getattr(serving, "rollout_quant_tier", 0) else {}),
             **({"yeto_rollout_quant_fp8_source": serving.rollout_quant_fp8_source}
@@ -1227,8 +1227,8 @@ OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
 # --rl-precision-aware-optimizer (no-sync islands only): bf16 main grads and bf16
 # Adam moments on the device; Megatron keeps the FP32 masters as 16-bit remainders
-# of the bf16 params (store_param_remainders, its default). G-DF T1 job H4 measured
-# exactly these flags on 8 x H100 80 GB (Nemotron-3 Nano TP1/EP8/DP8, 8192 tokens
+# of the bf16 params (store_param_remainders, its default). A measurement job
+# ran exactly these flags on 8 x H100 80 GB (Nemotron-3 Nano TP1/EP8/DP8, 8192 tokens
 # per GPU: PyTorch peak 64.6 GiB allocated, actor MFU 16.7%).
 PRECISION_AWARE_ARGV = ("--use-precision-aware-optimizer", "--main-grads-dtype", "bf16",
                         "--exp-avg-dtype", "bf16", "--exp-avg-sq-dtype", "bf16")
@@ -1249,7 +1249,7 @@ def megatron_moe_layer_freq(layer_freq: Any) -> str:
 
     Megatron's ``moe_freq_type`` accepts a list only as a pattern of digits,
     commas, brackets, ``+``, ``*`` and parentheses (``_eval_pattern``): no
-    spaces. ``str([0, 1])`` has spaces and is rejected (s27-aw-a, Nemotron-H
+    spaces. ``str([0, 1])`` has spaces and is rejected (Nemotron-H
     120B: ``invalid moe_freq_type value``), so a mask is written ``[0,1,...]``.
     """
     if isinstance(layer_freq, (list, tuple)):
@@ -1257,7 +1257,7 @@ def megatron_moe_layer_freq(layer_freq: Any) -> str:
     return str(layer_freq)
 
 
-# S27 G-Y: trainer-speed flags for MFU measurement on the Nemotron-H recipe, from the
+# Trainer-speed flags for MFU measurement on the Nemotron-H recipe, from the
 # island environment (launcher --modal-env). Only allow-listed Megatron flags pass;
 # none of them changes the parallel layout (TP/EP/PP/CP/DP).
 TRAIN_EXTRA_ENV = "YETO_MILES_TRAIN_EXTRA_ARGV"
@@ -1266,8 +1266,8 @@ TRAIN_EXTRA_FLAGS = frozenset({
     "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
     "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
     "--moe-flex-dispatcher-backend",
-    # S27 G-EF: Miles computes the loss log-probabilities over the sequence in chunks
-    # of N tokens instead of one fp32 full-vocabulary block (s27-ef-c1 ran out of
+    # Miles computes the loss log-probabilities over the sequence in chunks
+    # of N tokens instead of one fp32 full-vocabulary block (a full block ran out of
     # memory there on a long agentic sample: 11.94 GiB for one block)
     "--log-probs-chunk-size",
 })
@@ -1346,10 +1346,10 @@ def harbor_rollout_argv(agent_function: str, *, sample_buffer: Any = None) -> tu
 
 
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
-    """L4.6: a sampler writes the buffer and builds no trainer model
+    """A sampler writes the buffer and builds no trainer model
     (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
     a trainer reads the buffer and can export HF snapshots for its releases; a
-    convertible node (L7.5) does both with one switchable rollout function, and
+    convertible node does both with one switchable rollout function, and
     releases what it trains too (the other nodes load the releases)."""
     from .buffer_rollout import SAMPLER, rollout_argv
 
@@ -1392,9 +1392,9 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
       a Miles image at or after :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT`;
       DP=1 only (at DP>1 a distributed-optimizer master is a partial range).
 
-    A no-sync trainer island (samples from the store, L4.6) has no such reader:
+    A no-sync trainer island (samples from the store) has no such reader:
     it keeps Miles' distributed optimizer, so DP replicas shard the optimizer
-    state, and its cuts carry each rank's owned ranges (``cut_plugin``, N7.1d).
+    state, and its cuts carry each rank's owned ranges (``cut_plugin``).
     """
 
     if trainable.parameter_mode != "full" or not full_parameter_sync:
@@ -1430,7 +1430,7 @@ def _dp_optimizer_attrs(choice: str, data_parallel: int) -> dict[str, Any]:
     FP32 range of every parameter and the sync reads and writes those ranges
     (needs ``run_config_rules.full_parameter_dp_sharded_master_gap`` to be
     None). ``replicated``: the non-distributed optimizer, whole FP32 masters
-    on every rank (the S27 G-AX replica path). ``auto``: distributed when the
+    on every rank (the replica path). ``auto``: distributed when the
     pin supports it. Both give the same synced values (Miles CPU tests); the
     distributed one keeps 1/DP of the masters and Adam moments per rank."""
 
@@ -1501,7 +1501,7 @@ def validate_parsed_args(
     if cells != 1:
         raise SingleCellError(f"actor TrainGroup would have {cells} cells; ports require exactly 1")
     if SAMPLER_ONLY_FLAG in launch.argv:
-        # A sampler island (L4.6) asked for --debug-rollout-only: Miles places the
+        # A sampler island asked for --debug-rollout-only: Miles places the
         # rollout engines only and builds no trainer, so the trainer partition of the
         # request is unused by design, not rewritten.
         return

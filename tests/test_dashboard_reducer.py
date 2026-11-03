@@ -1,4 +1,4 @@
-"""fleet-dashboard 3.1/3.2/5.3: reducer views over real and constructed tapes."""
+"""Reducer views over real and constructed tapes."""
 
 import json
 
@@ -23,13 +23,13 @@ def test_real_ports_tape_views():
     assert card["status"] == "recovery"
     s = o["series"]["0"]
     assert [p[0] for p in s["reward"]] == [1, 2] and len(s["grad_norm"]) == 2
-    assert s["loss"] == [] and s["pg_loss"] == []  # None on the ports path -> no points (无数据)
+    assert s["loss"] == [] and s["pg_loss"] == []  # None on the ports path -> no points (no data)
     assert s["tok_s"]  # derived from action_tokens / (rollout+train seconds)
     assert card["heartbeat_seen"] is False and card["gpu_util_pct"] is None
     assert card["staleness"] is None  # no syncer tape
 
 
-def test_real_journal_feeds_cells_and_e1_panel_and_severe_alert():
+def test_real_journal_feeds_cells_and_elastic_panel_and_severe_alert():
     r = real_reducer()
     v = r.island_view("0")
     assert [c["role"] for c in v["cells"]] == ["trainer", "rollout"]
@@ -123,7 +123,7 @@ def test_round_view_without_expected_falls_back_to_pushes():
     r.feed({"step": 1, "fragment": 0, "responders": [], "sync/responders": 2, "time_unix": T0 + 1})
     (row,) = r.rounds()
     assert row["expected"] == 3 and row["responded"] == 2 and row["missed"] == ["2"]
-    assert row["quorum_ms"] is None  # old syncer record: 无数据, not 0
+    assert row["quorum_ms"] is None  # old syncer record: no data, not 0
 
 
 def test_events_endpoint_filters_and_cursor():

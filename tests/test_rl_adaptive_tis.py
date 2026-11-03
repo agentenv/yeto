@@ -1,4 +1,4 @@
-"""S26 E2: adaptive TIS (AIS) as a Miles custom TIS function."""
+"""Adaptive TIS (AIS) as a Miles custom TIS function."""
 
 from argparse import Namespace
 

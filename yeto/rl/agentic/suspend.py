@@ -1,4 +1,4 @@
-"""Suspend agentic trajectories between model turns across a round boundary (S26 E9.5).
+"""Suspend agentic trajectories between model turns across a round boundary.
 
 A round's cut-off can find trajectories in the middle of an episode.  Instead
 of aborting them (their sandbox, agent session and recorded tokens would be

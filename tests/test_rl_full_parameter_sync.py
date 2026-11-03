@@ -711,10 +711,10 @@ def test_miles_build_sync_selects_full_parameter_sync_for_a_full_parameter_islan
         )
 
 
-def test_close_defaults_to_the_p5_finished_code():
+def test_close_defaults_to_the_finished_code():
     import inspect
 
-    # P5 code table: 0 is FINISHED (LeaveReason.FINISHED once P5 merges).
+    # Leave-reason code table: 0 is FINISHED (LeaveReason.FINISHED).
     assert inspect.signature(FullParameterSync.close).parameters["reason"].default == 0
 
 
@@ -735,7 +735,7 @@ def test_layout_stream_role_splits_only_role_lane_algorithms():
     ("sao", "critic", "critic"),
 ])
 def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algorithm, role, expected):
-    # P0-1.11 G3-fp probe: the dense (grpo) actor stream passed stream_role="actor",
+    # A GPU probe found it: the dense (grpo) actor stream passed stream_role="actor",
     # which ParameterLayout.create refuses for non-SAO algorithms.
     from yeto.rl.adapters.miles.full_parameter import role_stream as module
     from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
@@ -769,7 +769,7 @@ def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algori
 
 
 def test_initial_cut_wait_leaves_the_event_loop_to_the_other_role(monkeypatch):
-    # s23-g3-sao-main-20261014a: the actor stream of island 0 and the critic
+    # Seen on a GPU run: the actor stream of island 0 and the critic
     # stream of island 1 each blocked the event loop while waiting for their
     # initial cut, so neither island connected its other role: deadlock.
     from yeto.rl.adapters.miles.full_parameter import role_stream as module
@@ -834,7 +834,7 @@ def test_initial_cut_wait_leaves_the_event_loop_to_the_other_role(monkeypatch):
 
 
 def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch, capsys):
-    # P0-1.11 run 20261014c: the initial cut timed out after 900 s with no
+    # On a GPU run the initial cut timed out after 900 s with no
     # sign of how much INIT_PARAMS had left the island; the wait now reports it.
     from yeto.protocol import SendProgress
     from yeto.rl.adapters.miles.full_parameter import role_stream as module

@@ -1,4 +1,4 @@
-"""S25 N7.6: verl/FSDP2 cut save + restore with the resume assertions. CPU only.
+"""verl/FSDP2 cut save + restore with the resume assertions. CPU only.
 
 A verl round is ``K`` optimizer steps (PPO mini-batches) and one LR-scheduler
 step, as in verl's ``update_actor``. Checked:
@@ -107,17 +107,20 @@ def _free_port() -> int:
 
 def _fsdp2_worker(rank: int, world: int, port: int, root: str) -> None:
     import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import fully_shard
 
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
     dist.init_process_group("gloo", rank=rank, world_size=world)
+    # an explicit CPU mesh: the default one follows the host accelerator (MPS on macOS)
+    mesh = init_device_mesh("cpu", (world,))
     try:
         def build() -> TrainHandles:
             model = _model()
             for layer in model:
                 if isinstance(layer, torch.nn.Linear):
-                    fully_shard(layer)
-            fully_shard(model)
+                    fully_shard(layer, mesh=mesh)
+            fully_shard(model, mesh=mesh)
             return _handles(model)
 
         def gathered(value):
@@ -273,11 +276,11 @@ class _Cfg(dict):
     __getattr__ = dict.__getitem__
 
 
-# ---------------------------------------------------------------- N7.6c: digest over the stepped state
+# ---------------------------------------------------------------- digest over the stepped state
 
 
 def test_restore_whose_optimizer_steps_a_stale_snapshot_is_refused(tmp_path, monkeypatch):
-    """Inject the T-G3 bug shape: after the load the module holds the cut's weights, but the
+    """Inject the known bug shape: after the load the module holds the cut's weights, but the
     optimizer steps a snapshot taken when the fresh trainer was built. The restore digest
     reads the stepped tensors, so the restore is refused (a module-side digest would match)."""
     import torch.distributed.checkpoint.state_dict as dcp_sd
@@ -314,7 +317,7 @@ def test_digest_reads_the_tensors_the_optimizer_steps():
 
 def test_frozen_base_weights_are_not_in_the_cut_and_do_not_block_the_restore(tmp_path):
     """LoRA shape: frozen base weights are skipped at save; a strict load would report
-    them missing (GPU T-C4 a, 2026-10-20)."""
+    them missing (seen on GPU)."""
 
     def frozen_model():
         model = _model()
@@ -345,7 +348,7 @@ def test_frozen_base_weights_are_not_in_the_cut_and_do_not_block_the_restore(tmp
 
 
 def test_a_requires_grad_parameter_outside_the_optimizer_is_not_in_the_cut(tmp_path):
-    """S26 E9.2: verl's state dict carries ``lm_head.weight`` (requires_grad, not in the
+    """verl's state dict carries ``lm_head.weight`` (requires_grad, not in the
     optimizer: 865 MB per rank file on GPU T-C4). Only the optimizer's parameters are
     saved; the restore needs nothing else and continues bit for bit."""
 

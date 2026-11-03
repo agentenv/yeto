@@ -171,7 +171,7 @@ def test_tis_translation_explicit_values():
     ]
 
 
-def test_tis_with_rollout_logprobs_still_rejected_by_p0():
+def test_tis_with_rollout_logprobs_still_rejected():
     problems = tis(use_rollout_logprobs=True).rejections()
     assert any("tis_with_rollout_logprobs" in p for p in problems)
 
@@ -193,7 +193,7 @@ def test_icepop_translation_and_hash():
         "--custom-tis-function-path", mc.ICEPOP_PATH, "--get-mismatch-metrics",
     ]
     assert s.correction.function.sha256 == mc.ICEPOP_SOURCE_SHA256
-    assert icepop(low=0.4).sha256() != s.sha256()  # L6b.1: the bounds are hashed
+    assert icepop(low=0.4).sha256() != s.sha256()  # the bounds are hashed
 
 
 @pytest.mark.parametrize(
@@ -230,7 +230,7 @@ def test_two_corrections_in_extra_argv_conflict(argv, flags):
 
 
 def test_tis_plus_custom_function_in_argv_is_one_custom_correction():
-    # P0 absorption: --use-tis + --custom-tis-function-path = method custom;
+    # Argv absorption: --use-tis + --custom-tis-function-path = method custom;
     # observe-only then refuses the TIS clip values.
     spec, _, _ = absorb_extra_argv(AlgorithmSpec(), [
         "--use-tis", "--tis-clip", "2", "--tis-clip-low", "0", "--get-mismatch-metrics",
@@ -310,7 +310,7 @@ def test_opsm_source_identity():
     trainer, rollout = opsm(), opsm(source="rollout")
     assert trainer.correction.opsm_old_logprob_source == "trainer"
     assert opsm(source="trainer").sha256() == trainer.sha256()
-    assert trainer.sha256() != rollout.sha256()  # L6b.1: the group is hashed
+    assert trainer.sha256() != rollout.sha256()  # the group is hashed
     assert json.loads(rollout.canonical_json())["correction"]["opsm_old_logprob_source"] == "rollout"
     # Not selecting OPSM: the field (at its default) does not affect the hash.
     assert spec(opsm_old_logprob_source="trainer").sha256() == AlgorithmSpec().sha256()
@@ -358,7 +358,7 @@ def test_mis_translation():
         "tis_lower_bound": 0.999, "tis_mode": "mask", "tis_upper_bound": 1.001, "use_rs": False,
     }
     assert s.correction.function.sha256 == PluginRef.from_path(mc.MIS_PATH).sha256
-    # L6b.1: MIS fields are hashed
+    # MIS fields are hashed
     assert mis(mode="clip", low=0.5).sha256() != mis(mode="mask", low=0.5).sha256()
 
 
@@ -406,13 +406,13 @@ def test_fake_declaration_admits_every_mechanism():
         caps.check(**CHECK, algorithm=build())
 
 
-MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "opsm_rollout", "mismatch_observe", "icepop", "mis_mask", "mis"}  # opsm_rollout: rl-algo-supplement 4.6 on 64b591a4b; G1 + effect evidence (7.3, integ-decl; mis 2026-10-08-mis-trigger)
+MILES_DECLARED = {"none", "tis", "opsm", "opsm_trainer", "opsm_rollout", "mismatch_observe", "icepop", "mis_mask", "mis"}  # opsm_rollout: rl-algo-supplement 4.6 on 64b591a4b, declared with effect evidence
 # mismatch_metrics under a use_tis correction is claimed by that correction
-# (P0 CORRECTION_COMPANIONS, alignment §7b), so icepop/observe are accepted.
+# (CORRECTION_COMPANIONS), so icepop/observe are accepted.
 ACCEPTED_BY_MILES = {"tis", "opsm_trainer", "opsm_rollout", "mis_mask", "mis", "icepop", "mismatch_observe"}
 
 
-def test_miles_adapter_declares_exactly_g1_passed_corrections():
+def test_miles_adapter_declares_exactly_gpu_verified_corrections():
     assert miles_capabilities(FINGERPRINT).corrections == MILES_DECLARED
 
 
@@ -481,7 +481,7 @@ def test_named_function_does_not_require_generic_custom(name):
 
 
 def test_icepop_is_claimed_by_its_own_mechanism_not_generic_custom():
-    # integ-decl: P0 accepts miles. built-ins as named correction functions,
+    # The algorithm module accepts miles. built-ins as named correction functions,
     # so IcePop is declared as ("corrections", "icepop") alone.
     pairs = icepop().required_mechanisms()
     assert ("corrections", "icepop") in pairs
@@ -494,7 +494,7 @@ def test_opsm_source_always_in_canonical_json():
     assert "opsm_old_logprob_source" not in json.loads(tis().canonical_json())["correction"]
 
 
-# -- 6.3 documentation examples through the P0 dry run --------------------------
+# -- 6.3 documentation examples through the dry run -----------------------------
 
 
 def _doc_examples():

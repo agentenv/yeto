@@ -1,4 +1,4 @@
-"""Training-time heldout eval on a verl island (S27 G-EN, VERL-PARITY #34).
+"""Training-time heldout eval on a verl island (VERL-PARITY #34).
 
 The launcher sends the Miles island's eval flags to every island
 (``--rl-eval-*`` -> ``--eval-interval --eval-data --eval-data-sha256
@@ -205,7 +205,7 @@ class VerlValidate:
         self.section = section
         # verl files the reward mean under val-core, or under val-aux when the reward
         # function also reports "acc" (the reward loop adds it for a float score:
-        # experimental/reward_loop/reward_manager/naive.py); s27-en-s1 met the second.
+        # experimental/reward_loop/reward_manager/naive.py); both happen.
         tail = f"/{section['data_source']}/reward/mean@{int(section['samples_per_prompt'])}"
         self.mean_keys = ("val-core" + tail, "val-aux" + tail)
 

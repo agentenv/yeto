@@ -1,13 +1,13 @@
-"""BF16 checkpoint -> quantized checkpoint in the layout of a reference artefact (S25 N8.1, N8.5).
+"""BF16 checkpoint -> quantized checkpoint in the layout of a reference artefact.
 
 The target layout is taken from the reference checkpoint, not hard-coded:
 :class:`CheckpointLayout` records every tensor's name, dtype, shape and output
 shard. The ``format`` of its ``quantization_config`` selects the scheme:
 
-* ``int-quantized`` -> :data:`W4A8_INT4_CHANNEL` (N8.1, :mod:`.int4`): a module
+* ``int-quantized`` -> :data:`W4A8_INT4_CHANNEL` (:mod:`.int4`): a module
   is quantized exactly when the layout has ``<module>.weight`` as ``I8`` with a
   ``<module>.weight_scale`` next to it.
-* ``mxfp4-pack-quantized`` -> :data:`MXFP4_G32_RTN` (N8.5, :mod:`.mxfp4`): a
+* ``mxfp4-pack-quantized`` -> :data:`MXFP4_G32_RTN` (:mod:`.mxfp4`): a
   module is quantized exactly when the layout has ``<module>.weight_packed`` as
   ``U8`` with a ``<module>.weight_scale``; the BF16 source provides
   ``<module>.weight``. Use it without AWQ smoothing (RTN).
@@ -25,9 +25,9 @@ do not need the 300 GB original.
 Work split: :func:`requantize_checkpoint` takes a subset of output shards, so
 several workers can each write their own shards. :func:`transform_tensor`
 works on any row slice of a 2-D weight with the same result rows, which is the
-basis for quantizing on the trainer ranks (D7, task N8.2, :mod:`.shards`).
+basis for quantizing on the trainer ranks (:mod:`.shards`).
 The source may be per-expert (HF checkpoint) or the trainer's stacked native
-layout (:mod:`.stacked`, task N8.5b).
+layout (:mod:`.stacked`).
 
 Status: W4A8 transform rules checked bit for bit against the original artefact
 on layer 30 (router, shared experts, norm, one routed expert); MXFP4 rules
@@ -106,7 +106,7 @@ class QuantScheme:
     The quantized data lives in ``<module><data_suffix>`` (dtype ``data_dtype``)
     and its scale in ``<module>.weight_scale``; the BF16 source tensor is
     ``<module>.weight``. ``name`` is the scheme tag written into release records
-    (N8.3 readers compare it).
+    (readers compare it).
     """
 
     name: str
@@ -175,7 +175,7 @@ class _Mxfp4Group32(QuantScheme):
 
 
 class _Fp8Channel(QuantScheme):
-    """FP8 E4M3 weights per output channel, dynamic per-token FP8 activations (W8A8, S26 E6 tier 2)."""
+    """FP8 E4M3 weights per output channel, dynamic per-token FP8 activations (W8A8, tier 2)."""
 
     name = FP8_NAME
     rtn_only = True
@@ -623,7 +623,7 @@ def finalize_checkpoint(template_dir: Path, out_dir: Path) -> None:
 
 
 def compare_checkpoints(a_dir: Path, b_dir: Path, names: Iterable[str] | None = None) -> dict[str, Any]:
-    """Compare two checkpoints of one layout tensor by tensor (N8.1 and N8.5 acceptance).
+    """Compare two checkpoints of one layout tensor by tensor (the acceptance check).
 
     Reports the share of equal int values over all I8 tensors, the largest
     relative error of the float weight scales, the share of equal FP4 codes

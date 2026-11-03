@@ -1,4 +1,4 @@
-"""Cloud capability table (rl-spot-cost-saving D2, task 1.1 / 1.8).
+"""Cloud capability table (rl-spot-cost-saving).
 
 One static table, ``capabilities.json`` next to this file, one row per cloud.
 Every field carries ``status``: ``checked`` (with ``source`` link and
@@ -43,7 +43,7 @@ class CapabilityTableError(ValueError):
 
 
 def validate(table: dict[str, Any]) -> None:
-    """Raise if any field breaks the D2 rules (unchecked has a value; checked lacks a source)."""
+    """Raise if any field breaks the table rules (unchecked has a value; checked lacks a source)."""
     for cloud, row in table["clouds"].items():
         for name in FIELDS:
             cell = row.get(name)

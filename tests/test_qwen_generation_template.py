@@ -1,12 +1,13 @@
 """Qwen3 / Qwen3.5 official templates gain exact native assistant masks.
 
-Uses tokenizers from the local Hugging Face cache only; each case skips when
+Uses tokenizers from the local Hugging Face cache only (tests/hf_assets.py); each case skips when
 its tokenizer is not cached, so the test never needs the network.
 """
 
 from __future__ import annotations
 
 import pytest
+from hf_assets import require_hf_repo
 
 from yeto.data import (
     ExactAssistantMaskError,
@@ -48,10 +49,7 @@ ROW = {
 
 def _cached_tokenizer(name):
     transformers = pytest.importorskip("transformers")
-    try:
-        return transformers.AutoTokenizer.from_pretrained(name, local_files_only=True)
-    except Exception as exc:  # not in the local cache
-        pytest.skip(f"{name} tokenizer not cached: {exc}")
+    return transformers.AutoTokenizer.from_pretrained(require_hf_repo(name), local_files_only=True)
 
 
 @pytest.mark.parametrize("name", ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"])

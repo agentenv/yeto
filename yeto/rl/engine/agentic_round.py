@@ -1,4 +1,4 @@
-"""Agentic rounds of the engine sampler island (S28 G-120).
+"""Agentic rounds of the engine sampler island.
 
 The engine sampler (:mod:`.engine_sampler`) writes one buffer group per prompt.
 An agentic round writes one group per *task*: ``sampling.n`` agent trials of

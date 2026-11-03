@@ -17,7 +17,7 @@ exports on the island:
 * the store credentials, :data:`CREDENTIAL_ENVS`, and optionally
   :data:`ENDPOINT_ENV` / :data:`REGION_ENV`. They are copied from the launcher's
   environment, never from its cloud credential files: an island must not hold
-  cloud credentials (secret-handling-hardening D4), so the store credential is a
+  cloud credentials (secret-handling-hardening), so the store credential is a
   separate one, limited to the store's bucket by its issuer. The island never
   falls back to the default AWS credential chain.
 

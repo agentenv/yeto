@@ -1,4 +1,4 @@
-"""S27 G-EM: relay-mode policy identity (external merged cuts).
+"""Relay-mode policy identity (external merged cuts).
 
 A relay trainer trains on groups that spot samplers generated with merged cuts
 of the syncer, not with the island's own publications. The driver counts their
@@ -96,7 +96,7 @@ def test_relay_driver_accepts_groups_named_by_merged_versions(tmp_path):
 
 
 def test_the_same_groups_fail_the_local_identity_check(tmp_path):
-    """The failure G-EE predicted (SPOT-ROLLOUT.md 11.1 item 3): without relay
+    """The predicted failure: without relay
     mode a merged version is read as a local version."""
     driver = _driver(tmp_path, 1)
     _relay_groups(driver, lambda rid: 7)
@@ -286,7 +286,7 @@ def test_relay_gate_set_before_the_reader_exists_reaches_the_first_take():
 
 
 def test_miles_trainer_check_applies_the_merged_rule_to_a_relay_batch():
-    """Run s27-ea-b1 (10-25 15:27Z): the Miles trainer's own token check refused the
+    """In a GPU run the Miles trainer's own token check refused the
     groups the driver had accepted (they name merged versions, not publications)."""
     from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, require_policy_tokens
     from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle

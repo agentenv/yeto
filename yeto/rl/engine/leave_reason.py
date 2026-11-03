@@ -1,4 +1,4 @@
-"""Island departure -> LEAVE reason code (rl-island-graceful-leave design D7).
+"""Island departure -> LEAVE reason code.
 
 The driver is the only place that knows why an island stops, so it picks the
 code here and hands it to ``sync.close(reason)``; a bridge only sends it.
@@ -10,7 +10,7 @@ The table names exception classes by ``(module, class)`` and looks them up in
 raised, so nothing is imported here (no cycle with ``driver``, no torch).
 Order matters: the first matching row wins, so subclasses come before their
 bases (``IslandRecoveryRequired`` before the generic ``DriverError``).
-Anything unmatched is ``INFRA_FAILED`` (D7 Q2: OOM, Ray, network).
+Anything unmatched is ``INFRA_FAILED`` (OOM, Ray, network).
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
         (_E + "controller", "TransactionFailed"),
         (_E + "controller", "RebuildRefused"),
         (_E + "trainer_transition", "TrainerTransitionFailed"),
-        # storage / resume state (D7 Q4)
+        # storage / resume state
         (_E + "cut", "CutError"),
         (_E + "journal", "JournalError"),
         (_E + "resume", "StoreIntegrityError"),

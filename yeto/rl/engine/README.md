@@ -1,35 +1,118 @@
-# yeto/rl/engine：核心与适配层的约定
+# yeto/rl/engine: core and adapter conventions
 
-本目录是 yeto RL 引擎。约定（yeto-framework-decoupling，design D2/D4）：**`engine/` 下除适配层（`miles_adapter/`，以后的 `yeto/rl/adapters/<后端>/`）以外都是核心**。核心只认 `ports.py` 定义的五个角色端口（`RolloutPool`、`TrainerGroup`、`PolicyState`、`Publisher`、`Placement`）与中立数据（批次句柄不透明、`TrainableState`、`AlgorithmSpec`、`ExecutionProfile`），不碰具体训练框架。
+This directory is the yeto RL engine. Everything here is **core**: it knows only
+the five role ports defined in `ports.py` (`RolloutPool`, `TrainerGroup`,
+`PolicyState`, `Publisher`, `Placement`) and neutral data (opaque batch handles,
+`TrainableState`, `AlgorithmSpec`, `ExecutionProfile`). It never touches a
+concrete training framework. Framework code lives in the backend adapters under
+`yeto/rl/adapters/<backend>/`.
 
-## 边界规则（由 `tests/test_import_boundaries.py` 自动检查）
+## Boundary rules (checked by `tests/test_import_boundaries.py`)
 
-1. 中立核心——`yeto/rl/engine/`（适配层除外）、`yeto/rl/rewards/`、`yeto/rl/harness/`、`yeto/rl/algos/`，以及暂时还放在 `yeto/rl/` 下的奖励/过滤/算法扩展/harness 文件（清单见测试中的 `CORE_FILES`）——不得 import：
-   - 训练或推理框架：`miles`、`miles_plugins`、`megatron`、`sglang`、`verl`、`vllm`、`torch_npu`；
-   - 后端适配层：`yeto.rl.adapters.miles`、`yeto.rl.adapters.*`；
-   - Miles 补丁与入口模块：`yeto.rl.adapters.miles.overlay`、`yeto.rl.adapters.miles.overlays`、`yeto.rl.adapters.miles.island_entry`、`yeto.rl.adapters.miles.models.full_parameter*` 等；
-   - 云库：`sky`、`modal`、`yeto.modal_runner`、`yeto.shape.providers`。
-2. 各后端适配层之间不得互相 import。
-3. 云层/启动层（`launcher.py`、`modal_runner.py`、`cli.py`、`stage_w_entry.py`、`yeto/shape/`、以后的 `yeto/cloud/`）不得 import 后端适配层。
+1. The neutral core — `yeto/rl/engine/`, `yeto/rl/rewards/`, `yeto/rl/harness/`,
+   `yeto/rl/algos/`, plus the reward / filter / algorithm-extension / harness files
+   that still live directly under `yeto/rl/` (listed in `CORE_FILES` in the test) —
+   must not import:
+   - training or inference frameworks: `miles`, `miles_plugins`, `megatron`,
+     `sglang`, `verl`, `vllm`, `torch_npu`;
+   - backend adapters: `yeto.rl.adapters.miles`, `yeto.rl.adapters.*`;
+   - Miles patch and entry modules: `yeto.rl.adapters.miles.overlay`,
+     `yeto.rl.adapters.miles.overlays`, `yeto.rl.adapters.miles.island_entry`,
+     `yeto.rl.adapters.miles.models.full_parameter*`, and so on;
+   - cloud libraries: `sky`, `modal`, `yeto.modal_runner`, `yeto.shape.providers`.
+2. Backend adapters must not import each other.
+3. The cloud / launch layer (`launcher.py`, `modal_runner.py`, `cli.py`,
+   `stage_w_entry.py`, `yeto/shape/`) must not import a backend adapter.
 
-检查只做语法树分析：函数内的延迟 import、相对 import、字面量 `importlib.import_module(...)` 都算。
+The check is a syntax-tree scan: imports inside functions, relative imports and
+literal `importlib.import_module(...)` calls all count.
 
-## 现有违规与白名单
+## Existing violations and the allowlist
 
-现有违规列在 `tests/import_boundary_allowlist.txt`（文件 + 被禁模块 + 审计编号），**只减不增**：
+Existing violations are listed in `tests/import_boundary_allowlist.txt` (file,
+forbidden module, note). The list **only shrinks**:
 
-- 新增一条违规 → 测试失败，打印文件、行号、被禁模块；
-- 修掉一条违规但白名单没删 → 测试失败，提示"请删白名单条目"；
-- 白名单条数必须等于测试里的 `ALLOWLIST_CAP`，删条目时同步调小。
+- a new violation fails the test, which prints the file, line and forbidden module;
+- a fixed violation whose allowlist entry was not removed fails the test with a
+  request to delete the entry;
+- the number of entries must equal `ALLOWLIST_CAP` in the test; lower the cap
+  when you delete an entry.
 
-需要后端能力时，正确做法是：在端口或能力声明（`capabilities.py`）里加中立的可选方法/字段，由适配层实现；不要从核心直接 import 适配层。
+When the core needs a backend capability, add a neutral optional method or field
+to a port or to the capability declaration (`capabilities.py`) and implement it in
+the adapter. Do not import the adapter from the core.
 
-## 标准样本
+## Golden samples
 
-去耦合各阶段合并前，`tests/test_decoupling_golden.py` 必须通过：典型配置下的 Miles 命令行、`AlgorithmSpec.sha256()`、`ExecutionProfile.contract_hash`、插件源码哈希、strict/decoupled 进度内容与假引擎 tape 片段与 `tests/golden/decoupling/` 逐字一致。哈希的有意变更记录已归档到仓库外。
+`tests/test_decoupling_golden.py` must pass: for typical configurations the Miles
+command line, `AlgorithmSpec.sha256()`, `ExecutionProfile.contract_hash`, plugin
+source hashes, strict/decoupled progress content and fake-engine tape excerpts
+must match `tests/golden/decoupling/` byte for byte. An intentional hash change
+regenerates the golden files in the same change.
 
-## 阶段 4 之后（yeto-framework-decoupling，2026-10-08）
+## Backends
 
-- Miles 适配层在 `yeto/rl/adapters/miles/`。旧版 Miles 引擎（`adapters/miles/legacy/`）已删除（rl-code-quality-cleanup 1.10），任何文件都不得再 import 它（`test_removed_legacy_engine_is_never_imported`）。
-- 核心、启动层、CLI 要用后端模块时，一律经 `yeto/rl/engine/backends.py` 的注册表按"角色"取（`backends.module("entry")` 等），不静态 import 适配层。当前后端：`--rl-backend`（启动器）或环境变量 `YETO_RL_BACKEND`（推理进程、codex 子进程），都没设时为 `miles`。
-- 推理进程里的策略令牌/本轮计数走 `yeto/rl/engine/rollout_meta.py`；动态采样过滤器用中立名，后端在 `binding` 角色里翻译并在启动前做三项绑定核对（design D6a）。
+- The core, the launch layer and the CLI reach backend modules only through the
+  registry in `yeto/rl/engine/backends.py`, by role (`backends.module("entry")`
+  and so on); they never import an adapter statically. The backend is
+  `--rl-backend` (launcher) or the `YETO_RL_BACKEND` environment variable
+  (inference processes and subprocesses); with neither set it is `miles`.
+- The old Miles engine is removed; no file may import or name it
+  (`test_removed_legacy_engine_is_never_imported`,
+  `test_removed_legacy_engine_is_never_named`).
+- Policy tokens and round counters inside inference processes go through
+  `yeto/rl/engine/rollout_meta.py`. Dynamic sampling filters use neutral names; a
+  backend translates them in its `binding` role and runs the binding checks before
+  launch.
+
+## Miles adapter (`yeto/rl/adapters/miles/`)
+
+Connects the five core ports to the pinned Miles commit (`MILES_NEXT_COMMIT` in
+`yeto/rl/adapters/miles/pins.py`). This directory may import
+Miles / Megatron / SGLang / Ray; the core may not import it.
+
+What it translates:
+
+- Run config to Miles argv: `config.py` (`translate_run_config`) turns
+  `RLRunConfig` + `AlgorithmSpec` into upstream Miles argv and returns
+  `MilesLaunchArgs` (argv, placement request, algorithm hash, runtime
+  attributes). Every config leaf is either translated or refused.
+- Algorithm fields to Miles flags: `algorithm_flags.py` (`algorithm_argv`,
+  `absorb_extra_argv`, including the `--dry-run` check entry).
+- Port implementations: `rollout.py` (RolloutPool), `trainer.py` (TrainerGroup),
+  `state.py` + `state_plugin.py` (PolicyState, exported and applied inside each
+  Megatron rank), `publish.py` (Publisher, over `update_weights`), `placement.py`
+  (placement description and rewrite detection).
+- Composition root: `entry.py` (capability declaration, execution profile, island
+  assembly and the Ray connection).
+- Elasticity and cut points: `elastic_*`, `cut_plugin.py`, `round_cut.py`,
+  `trainer_rebuild.py`, `trainer_resize.py`, `rebuild_wiring.py`, `reshard.py`,
+  `bundles.py`.
+- Metadata hook inside the Miles rollout process: `rollout_meta_hook.py`.
+- Remote-code prewarm before engine start: `remote_code_prewarm.py` (after the
+  island's Ray is up and before Miles starts any engine, one subinterpreter per
+  machine fills the transformers module cache from the model directory's `*.py`
+  under a file lock and runs AutoConfig / AutoTokenizer / AutoProcessor /
+  AutoImageProcessor once; a failure only logs a warning).
+- Miles patches: `overlay.py`, served to the launch layer through the registry's
+  `overlay` role; the patch files are in `overlays/`.
+
+What it declares:
+
+- Capabilities: `entry.miles_capabilities()` and `MILES_DECLARED`; some
+  mechanisms depend on the Miles commit (`MILES_DECLARED_PINS`). An undeclared
+  mechanism is refused before launch unless `--rl-allow-unverified-mechanism` is
+  given.
+- Execution profile: `entry.execution_profile_for()` (colocated-serial,
+  partitioned-serial, partitioned-overlap), bound to the algorithm hash the
+  launcher computed.
+- Runtime fingerprint: `entry.ports_runtime_fingerprint()`.
+
+What it does not support:
+
+- A config item with no translation raises `UnmappedConfigError`.
+- Miles fault-tolerance semantics, more than one cell per trainer group, and a
+  placement rewritten by Miles are refused (`FaultToleranceArgsError`,
+  `SingleCellError`, placement rewrite detection).
+- NVIDIA CUDA only (the determinism environment `cut_plugin.DETERMINISM_ENV` is
+  CUDA-specific).

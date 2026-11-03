@@ -1,4 +1,4 @@
-"""The Ascend recipe's Megatron plugin stack, installed outside ms-swift (S27 G-FL).
+"""The Ascend recipe's Megatron plugin stack, installed outside ms-swift.
 
 The user's Nemotron SFT recipe ``18.44pct-lay_r29_clip_buf64_m6_20261024`` reaches
 its throughput with a set of environment switches and a list of plugin files that
@@ -14,20 +14,20 @@ and reports one line per plugin.  It is **opt-in and off by default**
 (``--rl-ascend-plugin-stack <dir>``); without the flag nothing is set or imported.
 
 What this module deliberately does **not** do, and why (every reason read from the
-recipe or from the plugin source, S27 G-FL):
+recipe or from the plugin source):
 
 * ``clamp`` never reaches ``STACK_REWRITES``, and the step that keeps it out is the
-  **write**, not the refusal (S27 G-FW, read off the delivery on npu1 n3).
+  **write**, not the refusal (read off the delivery on a node).
   :func:`install` puts ``STACK_REWRITES=cumsum,squeeze`` into the worker environment
   **before it imports the first plugin**, because the delivery's own default is the
   opposite value.  ``ascend_mamba2_kernels.apply`` delegates to
-  ``/data/work/kern-stack/mamba2_stack.py`` whenever that directory exists on the node,
+  ``<kern-stack>/mamba2_stack.py`` (a fixed directory in the delivery) whenever it exists on the node,
   and calls ``mamba2_stack.apply(stages=...)`` with no ``rewrites=`` argument, so the
   items come from that module's line 87:
   ``REWRITES = os.environ.get("STACK_REWRITES", "cumsum,squeeze,clamp")``.  An unset
   variable therefore **asks for** the clamp rewrite.
   That rewrite deletes the decay clamp in ``ssd_recompute_patch._ddAcs``.  With the
-  clamp gone the margin is zero: S27 G-FR measured about 1.1e5x over the overflow
+  clamp gone the margin is zero: a measurement found about 1.1e5x over the overflow
   bound, independent of the token distribution (a full-vocabulary sweep of layer 0 put
   a single ``'</'`` token 5x over), so the overflow is certain, not unlikely.
   Two further layers stand behind the write: :func:`check_env` refuses any value that
@@ -39,7 +39,7 @@ recipe or from the plugin source, S27 G-FL):
 * :func:`setup_worker` -- Ray's ``worker_process_setup_hook`` -- **never imports a
   plugin itself**.  It only arms :func:`install_when_rank_known`, because one plugin
   binds a card at import time and the hook runs before this process has one
-  (S27 G-FY; the reason and the measurement are under :func:`install_when_rank_known`).
+  (the reason and the measurement are under :func:`install_when_rank_known`).
 * three plugins are left out (:data:`EXCLUDED`): two import ms-swift at module
   level and cannot be imported without it, one does so under its own switch.  Each
   carries the file and line that says so.
@@ -80,7 +80,7 @@ RANK_ENV = "LOCAL_RANK"
 # ``init_model`` builds the model, which is the deadline the plugins have to meet.
 VERL_WORKER = ("verl.single_controller.base.worker", "Worker")
 
-# The one-variable switch of the S28 G-PIN contrast. The delivery's
+# The one-variable switch of the set_device contrast. The delivery's
 # ``ascend_mamba2_kernels.apply`` calls ``torch.npu.set_device(_local_device())`` on its
 # kern-stack path (``plugins/ascend_mamba2_kernels.py:352-356``) and again before its
 # prewarm (``:290``). Those calls run inside ``Worker.__init__`` once the install is
@@ -92,7 +92,7 @@ VERL_WORKER = ("verl.single_controller.base.worker", "Worker")
 SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 
 # Two names that narrow the list of plugins this process imports, so a failing island
-# can be bisected without editing the delivery or this table (S28 G-PIN: the island
+# can be bisected without editing the delivery or this table (measured: the island
 # dies at 507033 with the stack on and builds its model with the stack off, and the
 # cause is not the plugins' own set_device call). Both take a comma separated list of
 # file names. ONLY wins when both are set, and an unknown name is reported, not
@@ -105,7 +105,7 @@ SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 # constructor. "after_init_model" installs when that call returns, that is, after
 # Megatron has built the model and initialised the device. It patches functions, so a
 # patch installed afterwards still reaches the next forward and backward; a patch that
-# had to change how a module was constructed does not. S28 G-PIN measured that a single plugin import in the constructor is
+# had to change how a module was constructed does not. A measurement showed that a single plugin import in the constructor is
 # enough to make Megatron's first LazySetDevice fail with 507033, with the plugins'
 # own set_device call bypassed and the prewarm off, so where the import happens is
 # the next thing to vary.
@@ -197,7 +197,7 @@ PLUGINS: tuple[str, ...] = (
     "ascend_clip_nosync.py",
 )
 
-# S29: the 18.60pct recipe (pkg/nemotron-18.60pct-20261028, envs.txt EXTRA_PLUGINS_ADD)
+# The tuned recipe (its envs.txt EXTRA_PLUGINS_ADD)
 # loads these after the layer recompute policy (its ascend_stage_timer.py sits between
 # and is EXCLUDED here). They change the numerics path, so they are opt-in:
 # ``--rl-ascend-plugin-recipe 18.60`` loads them, the default (18.44) does not. Each
@@ -241,7 +241,7 @@ EXCLUDED: dict[str, str] = {
     "ascend_stage_timer.py": "imports ms-swift at module level when ASCEND_STAGE_TIMER is set (line 20); "
                              "a measurement probe",
     "optimizer_phase_timing_inject.py": "lives outside the recipe's plugin directory "
-                                        "(/data/work/mfu-agents/opt_pipeline) and only times the optimizer",
+                                        "(a separate probe directory) and only times the optimizer",
 }
 
 
@@ -458,7 +458,7 @@ def _install_once(root: str, *, log=None) -> dict[str, Any] | None:
         return None
     if not rank_is_known():
         say(f"[yeto-ascend-stack] NOT installed: no {RANK_ENV} in this process, so a plugin that "
-            f"binds a card at import time would bind card 0 (S27 G-FW: eight ranks on card 0)")
+            f"binds a card at import time would bind card 0 (eight ranks were seen on card 0)")
         return None
     say(f"[yeto-ascend-stack] installing with {RANK_ENV}={os.environ.get(RANK_ENV)} "
         f"ASCEND_RT_VISIBLE_DEVICES={os.environ.get('ASCEND_RT_VISIBLE_DEVICES', '<unset>')} "
@@ -491,8 +491,7 @@ def _wrap_worker_init(worker_cls: Any, root: str) -> bool:
 def arm_without_importing(root: str, *, log=None) -> str:
     """Wait for verl's base Worker **without importing verl here**.
 
-    This is what Ray's hook uses, and the reason is measured (S28 G-PIN, npu1 n4,
-    cards 6 and 7, Qwen2.5-1.5B, TP1/PP2): a hook that imports verl -- and through it
+    This is what Ray's hook uses, and the reason is measured (two cards, Qwen2.5-1.5B, TP1/PP2): a hook that imports verl -- and through it
     torch and torch_npu -- in the Ray worker process makes Megatron's first device
     allocation fail with ``507033`` / ``rtSetDevice ... device retain error`` later in
     that same process, and the island never builds its model. With the hook importing
@@ -538,7 +537,7 @@ def arm_without_importing(root: str, *, log=None) -> str:
     watching_import._yeto_ascend_stack = root
     builtins.__import__ = watching_import
     say(f"[yeto-ascend-stack] root={root} waiting for this worker to import "
-        f"{module_name}.{class_name}; nothing is imported by this hook (S28 G-PIN: a hook "
+        f"{module_name}.{class_name}; nothing is imported by this hook (measured: a hook "
         f"that imports verl here makes Megatron's first device allocation fail with 507033)")
     return "deferred"
 
@@ -546,8 +545,8 @@ def arm_without_importing(root: str, *, log=None) -> str:
 def install_when_rank_known(root: str, *, log=None) -> str:
     """Arrange for :func:`install` to run at the first moment this process owns a card.
 
-    **Why the install cannot happen in Ray's setup hook** (S27 G-FW, measured on npu1
-    n2 with 8 x 910B3): ``ascend_mamba2_kernels.apply`` calls
+    **Why the install cannot happen in Ray's setup hook** (measured on a node
+    with 8 x 910B3): ``ascend_mamba2_kernels.apply`` calls
     ``torch.npu.set_device(_local_device())`` on its kern-stack path
     (``plugins/ascend_mamba2_kernels.py:352-356``), and ``_local_device`` returns **0**
     when :data:`RANK_ENV` is unset (``:62``).  Ray runs
@@ -645,7 +644,7 @@ def setup_worker() -> None:
     if when == "never":
         # A diagnostic position: arm nothing and import nothing, while the island still
         # passes the flag and Ray still runs this hook. It separates "what the hook
-        # imports" from "what the plugins do" (S28 G-PIN).
+        # imports" from "what the plugins do".
         print(f"[yeto-ascend-stack] {INSTALL_AT_ENV}=never: nothing armed, nothing imported",
               flush=True)
         return

@@ -1,4 +1,4 @@
-"""CPU tests of the boat sandbox labels and orphan sweeps (S29 D15), on a fake boat client."""
+"""CPU tests of the boat sandbox labels and orphan sweeps, on a fake boat client."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from test_harbor_boat import SPEC, FakeBoat, _no_sleep
 
 
 class LabelBoat(FakeBoat):
-    """FakeBoat with names and a listing (the D15 surface)."""
+    """FakeBoat with names and a listing (the labelling surface)."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -52,9 +52,9 @@ def box(sandbox_id: str, run: str, island: str, inc: str, state: str = "running"
 
 
 def test_name_round_trip_and_sanitizing():
-    name = labelled_name(Labels("s29/run 1", "s29-spot-0", "ab12cd34"), "task__x__env")
-    assert name == "ytl1.s29-run-1.s29-spot-0.ab12cd34.task__x__env"
-    assert parse_labels(name) == Labels("s29-run-1", "s29-spot-0", "ab12cd34")
+    name = labelled_name(Labels("demo/run 1", "spot-0", "ab12cd34"), "task__x__env")
+    assert name == "ytl1.demo-run-1.spot-0.ab12cd34.task__x__env"
+    assert parse_labels(name) == Labels("demo-run-1", "spot-0", "ab12cd34")
     long = labelled_name(Labels("r" * 80, "i" * 80, "c" * 80), "b" * 200)
     assert len(long) == 120 and parse_labels(long) == Labels("r" * 32, "i" * 32, "c" * 32)
     for foreign in ("", None, "task__x__env", "ytl1", "ytl1..a.b", "ytl2.r.i.c.x", "my.ytl1.r.i.c"):
@@ -94,7 +94,7 @@ def test_sweep_survives_a_failed_delete():
 
 def test_a_sandbox_is_named_after_run_island_incarnation(monkeypatch):
     monkeypatch.setenv("YETO_BOAT_RUN_ID", "r1")
-    monkeypatch.setenv("YETO_BOAT_ISLAND", "s29-spot-0")
+    monkeypatch.setenv("YETO_BOAT_ISLAND", "spot-0")
     monkeypatch.setenv("YETO_BOAT_INCARNATION", "c0ffee")
     fake = LabelBoat()
     from yeto.rl.harness.harbor.boat_sandbox import BoatSandbox
@@ -106,7 +106,7 @@ def test_a_sandbox_is_named_after_run_island_incarnation(monkeypatch):
         return dict(fake.names)
 
     names = asyncio.run(go())
-    assert names == {"bx_1": "ytl1.r1.s29-spot-0.c0ffee.task__abc__env"}
+    assert names == {"bx_1": "ytl1.r1.spot-0.c0ffee.task__abc__env"}
     asyncio.run(sandbox.close())
 
 
@@ -132,19 +132,19 @@ def test_sampler_start_labels_the_process_and_sweeps_earlier_incarnations(monkey
     from yeto.rl.spot_rollout.sampler import label_boat_sandboxes
 
     fake = LabelBoat()
-    fake.extra = [box("pre-1", "r1", "s29-spot-0", "inc0"), box("pre-2", "r1", "s29-spot-0", "inc0"),
-                  box("peer", "r1", "s29-spot-1", "incP"), box("foreign", "r9", "s29-spot-0", "inc0")]
+    fake.extra = [box("pre-1", "r1", "spot-0", "inc0"), box("pre-2", "r1", "spot-0", "inc0"),
+                  box("peer", "r1", "spot-1", "incP"), box("foreign", "r9", "spot-0", "inc0")]
     monkeypatch.setattr(boat_labels, "_default_client", lambda: fake)
     for key in ("YETO_BOAT_ISLAND", "YETO_BOAT_INCARNATION"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("YETO_BOAT_RUN_ID", raising=False)
-    assert label_boat_sandboxes({"sampler_id": "s29-spot-0"}, "inc1") == []  # no run id: off
+    assert label_boat_sandboxes({"sampler_id": "spot-0"}, "inc1") == []  # no run id: off
     assert fake.list_calls == 0
     monkeypatch.setenv("YETO_BOAT_RUN_ID", "r1")
-    assert label_boat_sandboxes({"sampler_id": "s29-spot-0"}, "inc1") == ["pre-1", "pre-2"]
+    assert label_boat_sandboxes({"sampler_id": "spot-0"}, "inc1") == ["pre-1", "pre-2"]
     import os
 
-    assert os.environ["YETO_BOAT_ISLAND"] == "s29-spot-0" and os.environ["YETO_BOAT_INCARNATION"] == "inc1"
+    assert os.environ["YETO_BOAT_ISLAND"] == "spot-0" and os.environ["YETO_BOAT_INCARNATION"] == "inc1"
 
 
 def test_sampler_start_sweep_errors_do_not_stop_the_sampler(monkeypatch):
@@ -262,22 +262,17 @@ def test_idle_vm_ttl_default_is_ten_minutes():
 
 
 def test_spot_plan_env_sets_labels_and_short_ttls():
-    import importlib.util
-    from pathlib import Path
+    from yeto.rl.spot import spot_plan as plan
 
-    path = Path(__file__).resolve().parents[1] / "tools/probes/s29_spot/spot_plan.py"
-    spec = importlib.util.spec_from_file_location("spot_plan_d15", path)
-    plan = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(plan)
     env = plan.env(data="/d", public_ip="1.2.3.4", run_id="r1", island=0)
-    assert env["YETO_BOAT_RUN_ID"] == "r1" and env["YETO_BOAT_ISLAND"] == "s29-spot-0"
+    assert env["YETO_BOAT_RUN_ID"] == "r1" and env["YETO_BOAT_ISLAND"] == "spot-0"
     assert env["YETO_BOAT_POOL_IDLE_VM_TTL_S"] == "600"
     assert int(env["YETO_BOAT_POOL_IDLE_TTL_S"]) < 600
     assert "YETO_BOAT_RUN_ID" not in plan.env(data="/d", public_ip="1.2.3.4")
 
 
-def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
-    """S29 D16: maybe_start_relay_pump gave the watchdog no emitter, so
+def test_the_relay_pump_watchdog_prints_its_deletions(capsys):
+    """maybe_start_relay_pump gave the watchdog no emitter, so
     rl_boat_orphans_deleted never reached the trainer log."""
     import json
 
@@ -288,7 +283,7 @@ def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
     class _Client:
         def __init__(self):
             from yeto.rl.harness.harbor.boat_labels import SandboxInfo
-            self.boxes = [SandboxInfo("bx_1", "ytl1.r1.s29-spot-1.aaa.t", "running")]
+            self.boxes = [SandboxInfo("bx_1", "ytl1.r1.spot-1.aaa.t", "running")]
             self.deleted = []
 
         def list_sandboxes(self):
@@ -300,7 +295,7 @@ def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
     now = [0.0]
     dog = OrphanWatchdog.from_env({"YETO_BOAT_RUN_ID": "r1", "YETO_BOAT_ORPHAN_LEASE_S": "10"},
                                   emit=pump_event_printer(1), client_factory=_Client, clock=lambda: now[0])
-    dog.observe("s29-spot-1", "aaa")
+    dog.observe("spot-1", "aaa")
     now[0] = 11.0
     assert dog.poll() == ["bx_1"]
     line = [l for l in capsys.readouterr().out.splitlines() if l.startswith(PREFIX)][0]
@@ -309,8 +304,8 @@ def test_d16_the_relay_pump_watchdog_prints_its_deletions(capsys):
     assert record["sandboxes"] == ["bx_1"] and record["reason"] == "island lease expired"
 
 
-def test_d19_an_engine_sampler_labels_its_incarnation(monkeypatch):
-    """S29 D19: the release-store engine sampler (120B spot island) labels and sweeps
+def test_an_engine_sampler_labels_its_incarnation(monkeypatch):
+    """The release-store engine sampler (120B spot island) labels and sweeps
     with its own incarnation; before, its sandboxes were named ytl1.<run>.<island>.. ."""
     from yeto.rl.engine import engine_sampler_entry as entry
     from yeto.rl.spot_rollout import sampler
@@ -330,7 +325,7 @@ def test_d19_an_engine_sampler_labels_its_incarnation(monkeypatch):
     assert seen == []
 
 
-def test_d19_the_operator_sweep_deletes_a_run_island_including_unlabelled_incarnations(monkeypatch, capsys):
+def test_the_operator_sweep_deletes_a_run_island_including_unlabelled_incarnations(monkeypatch, capsys):
     from yeto.rl.harness.harbor import boat_labels as bl
 
     class _C:

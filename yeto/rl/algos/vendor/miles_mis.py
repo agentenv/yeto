@@ -1,5 +1,5 @@
 # Vendored copy of Miles examples/infra_features/train_infer_mismatch_helper/mis.py
-# (change rl-algo-mismatch-correction, design D6 / task 5.2).
+# (change rl-algo-mismatch-correction).
 #
 #   source repository : https://github.com/radixark/miles (via michaellchung/miles yeto/ports)
 #   source commit     : 9e4260de047a704208535c0e90c531929879ab40 (upstream); identical at yeto/ports 0394715083c91182b5eb0c526eeee4196ac694b9
@@ -8,8 +8,8 @@
 #   modifications     : none (this header only; no import changes were needed)
 #
 # Reason: yeto plugins must live in the yeto./miles. namespaces (PluginRef,
-# rl-algorithm-capabilities D7). The runtime image can import the original as
-# examples.infra_features.train_infer_mismatch_helper.mis (task 5.1), but that
+# rl-algorithm-capabilities). The runtime image can import the original as
+# examples.infra_features.train_infer_mismatch_helper.mis, but that
 # namespace is not an allowed plugin namespace.
 # Do not edit below this line; re-copy on Miles upgrades (docs/MILES_RL.md).
 from typing import Any

@@ -1,4 +1,4 @@
-"""Round cuts on the verl fully_async path (S26 E9.2; S25 C4 refused them).
+"""Round cuts on the verl fully_async path (earlier versions refused them).
 
 The cut itself is the sync path's (:mod:`.cut`: one yeto file per FSDP rank of
 the trainer actor's worker group, reached through ``yeto_call_workers``). What

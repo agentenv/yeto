@@ -1,4 +1,4 @@
-"""Miles / SGLang pins, bundle and image constants (yeto-framework-decoupling 5.3, audit L4).
+"""Miles / SGLang pins, bundle and image constants.
 
 Moved from ``yeto/rl/__init__.py``; ``yeto.rl`` re-exports every name so
 ``from yeto.rl import MILES_NEXT_IMAGE`` keeps working.
@@ -28,7 +28,7 @@ MILES_PEFT_VERSION = "0.20.0"
 # commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
 MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
 # Earlier homes of the fork that pinned images may still carry as their
-# /root/miles origin. Empty while the S27 commits (d1616ba12 and its lineage)
+# /root/miles origin. Empty while the newer commits (d1616ba12 and its lineage)
 # live only on michaellchung/miles; the move to agentenv/miles lists the
 # michaellchung URL here.
 MILES_NEXT_FORMER_REPOSITORIES: tuple[str, ...] = ()
@@ -37,78 +37,78 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # --worker-dynamic-port-start, the elastic M1-M6 changes and the LoRA bridge
 # calculate_per_token_loss fix on top of the base, plus (5c1b49eb) the 2b
 # loss variants: --policy-loss-variant {policy_loss,cispo,sapo,gmpo},
-# --sapo-tau-{pos,neg}, --gmpo-log-clip-{low,high}; plus (2f23a0fc) F-R1:
+# --sapo-tau-{pos,neg}, --gmpo-log-clip-{low,high}; plus (2f23a0fc) cell declaration:
 # placement map rollout_cells, deferred/unbound cells, describe_cells,
 # public slice_pg_info, bundle-free check before any cell starts; plus
 # (fb04d6ff) M5: LoRA DP-invariant restore no longer drops DistOpt exp_avg/exp_avg_sq,
 # and (e3a11ab3) its cross-optimizer error text/docstring and tests.
 # image-m3a27b (c35702e = merge of m3-qwen4exp-lora ab904f43a [Qwen3.8-Next LoRA layout]
 # + fork-a27-worker-loss 857fc9592 [workers_lost cells, bounded weight-update group
-# rendezvous --update-weight-group-timeout-s; A27-2 ExternalFailureError /
+# rendezvous --update-weight-group-timeout-s; ExternalFailureError /
 # RolloutEngineJoinError: an engine-side failure no longer kills the trainer]
 # on yeto/ports e3a11ab38).
-# s16-raw-lora-disagg (8bc52237a = c35702e + broadcast LoRA gathers the adapter across PP onto one sender,
-# actor allows --megatron-to-hf-mode raw for non-colocated LoRA; MILES-RAW-LORA-DISAGG-S16.md plan A).
-# s18-abort-discard-stats (efbbc63ea = 8bc52237a + rollout abort tallies discarded
-# groups/samples/response tokens without partial rollout; S18 agentic-rollout-util).
+# raw-lora-disagg (8bc52237a = c35702e + broadcast LoRA gathers the adapter across PP onto one sender,
+# actor allows --megatron-to-hf-mode raw for non-colocated LoRA).
+# abort-discard-stats (efbbc63ea = 8bc52237a + rollout abort tallies discarded
+# groups/samples/response tokens without partial rollout).
 # 2f7871fb2 = efbbc63ea + the same tally on the train path actually in use
 # (inference_rollout_train.abort; efbbc63ea only patched sglang_rollout.abort) and a
-# failed surplus group no longer fails the abort (S17 N17 A/B).
-# s19-critic-algosup (64b591a4b = ddce20992 + critic family + algo-supplement metrics; S19 #1,
+# failed surplus group no longer fails the abort.
+# critic-algosup (64b591a4b = ddce20992 + critic family + algo-supplement metrics,
 # local fork branch, not pushed; built into the image from the local clone).
-# s23-full-parameter-rpc (56068bd56 = 64b591a4b + full-parameter shard state,
+# full-parameter-rpc (56068bd56 = 64b591a4b + full-parameter shard state,
 # transport and TrainerController methods ported from agentenv/miles e25048edd;
-# P0-1.7b.1, needed by full-parameter DiLoCo on the ports engine).
-# s23-sao-streaming-roles (386ae3b07 = 56068bd56 + LoRA-hybrid full-parameter
-# transport (95533a0cd, 5f7ac4e32, 587bd258a; P0-1.7b.2) + SAO streaming
+# needed by full-parameter DiLoCo on the ports engine).
+# sao-streaming-roles (386ae3b07 = 56068bd56 + LoRA-hybrid full-parameter
+# transport (95533a0cd, 5f7ac4e32, 587bd258a) + SAO streaming
 # primitives ported from agentenv/miles d5eb5e82a: content identity, per-role
-# chunks, critic group RPC (P0-1.7b.3)).
-# s24-miles-import2 (44d41efd0 = 17aeb5cb5 + the megatron_utils package
-# import stays light, so RayWorkerManager no longer loads megatron.bridge
-# (rl-trainer-cold-start-cost L2.2)).  17aeb5cb5 = 386ae3b07 + light Ray actors
-# stay off megatron_utils (L2.1) + the master port is held until use (S23 defect 9).
-# s27-distopt-fp (56190a5a8 = ed5f64fd7 + full-parameter sync reads DP=1
-# distributed-optimizer masters, incl. CPU offload; S27 G-B); cc693c693 = + the
-# Adam proof leaves the hybrid optimizer's master_param mirror out (S27 IMG2);
-# a477bcbe0 = + one parameter may span several fragments via flat ranges (S27);
+# chunks, critic group RPC).
+# miles-import2 (44d41efd0 = 17aeb5cb5 + the megatron_utils package
+# import stays light, so RayWorkerManager no longer loads megatron.bridge).
+# 17aeb5cb5 = 386ae3b07 + light Ray actors
+# stay off megatron_utils + the master port is held until use.
+# distopt-fp (56190a5a8 = ed5f64fd7 + full-parameter sync reads DP=1
+# distributed-optimizer masters, incl. CPU offload); cc693c693 = + the
+# Adam proof leaves the hybrid optimizer's master_param mirror out;
+# a477bcbe0 = + one parameter may span several fragments via flat ranges;
 # 0b64b40c1 = + rebase_full_parameter_scheduler_anchor for peer-snapshot recovery;
-# b13c170ce = + a chunked apply skips fragments the masters already hold (S27 G-X);
+# b13c170ce = + a chunked apply skips fragments the masters already hold;
 # aa6b887d8 = + deferred export with on-demand materialize, faster finite/hash
-# checks, hybrid R3 layer mapping (S27 G-AA);
+# checks, hybrid R3 layer mapping;
 # d1616ba12 = + THD packs carry a per-sample seq_idx, so Mamba conv/SSM state
-# restarts per sample (S27 G-AL);
+# restarts per sample;
 # 8edea35a7 = + full-parameter chunks stored in Ray as numpy buffers (zero-copy
-# get, one-copy put) (S27 G-AP);
-# yeto/s27-closing (ebc6519af = merge of 8edea35a7 + 921cde8c7 full-parameter
-# data-parallel replicas (S27 G-AX) + d78bf39e4 HybridDeviceOptimizer CPU FP32
-# masters in pinned memory (S27 G-AX), and b7868074c = d1616ba12 + the
-# language-only bridge of the Nemotron-H VL checkpoint (S27 G-AQ); S27 G-AZ);
+# get, one-copy put);
+# yeto/closing (ebc6519af = merge of 8edea35a7 + 921cde8c7 full-parameter
+# data-parallel replicas + d78bf39e4 HybridDeviceOptimizer CPU FP32
+# masters in pinned memory, and b7868074c = d1616ba12 + the
+# language-only bridge of the Nemotron-H VL checkpoint);
 # 59aea07f9 = merge of ebc6519af + 63cb372b3 per-fragment full-parameter round
-# boundary (lazy export, partial commit; S27 G-AY) (yeto/s27-closing, S27 G-AZ2);
+# boundary (lazy export, partial commit) (yeto/closing);
 # 7402a53d5 = 59aea07f9 + acb798c7b sharded FP32 masters (distributed optimizer
-# at DP>1; S27 G-BE) merged with 76a84963c set MoE runtime flags copied onto the
-# bridge provider (S27 G-BH2) (yeto/s27-eff, S27 G-CA);
+# at DP>1) merged with 76a84963c set MoE runtime flags copied onto the
+# bridge provider (yeto/eff);
 # 697fb2000 = 7402a53d5 + training step without host syncs in R3 replay, loss
 # logging, THD packing and Megatron's DeepEP multihot (runtime patch; same
 # values bit for bit, MILES_HOST_SYNC_FREE=0 restores the old paths)
-# (yeto/s27-sync-free, S27 G-CI);
+# (yeto/sync-free);
 # b6662508e = 7402a53d5 + 102672760 stored broadcast fragments verified ahead of
-# the apply (transport feature verified_apply; S27 G-CG) merged with 697fb2000
-# (yeto/s27-e3, S27 G-CN);
+# the apply (transport feature verified_apply) merged with 697fb2000
+# (yeto/e3);
 # 8d03f386a = 7402a53d5 + shape-free layout support: partition reports,
 # installed owner maps, free-order owner plans (transport feature
-# shape_free_layout; yeto/s27-shape-free-layout, S27 G-DD); 3f6760f2b = + a
-# gated linear_fc1 reports its gate and up blocks (S27 G-DD);
-# 8faa7fccc = b6662508e merged with 3f6760f2b (yeto/s27-next, S27 G-DV);
+# shape_free_layout; yeto/shape-free-layout); 3f6760f2b = + a
+# gated linear_fc1 reports its gate and up blocks;
+# 8faa7fccc = b6662508e merged with 3f6760f2b (yeto/next);
 # ddd416167 = b6662508e + the commit reads its chunks ahead of the copy and
 # casts the model on the master's device (same bits), e9410717a = + the
-# read-ahead runs on Miles' hashing pool (yeto/s27-sync-commit, S27 G-DZ);
-# 970807006 = 8faa7fccc merged with e9410717a (yeto/s27-next, S27 G-DV);
+# read-ahead runs on Miles' hashing pool (yeto/sync-commit);
+# 970807006 = 8faa7fccc merged with e9410717a (yeto/next);
 # e99e2a168 = 7402a53d5 + the session server records OpenAI Responses calls
-# (Codex) and logs failed model calls (cherry-picks of the S26 E9.5 commits
+# (Codex) and logs failed model calls (cherry-picks of
 # f01bc24cd, 1773afaa1) + a Nemotron-3 Nano Codex trajectory test
-# (yeto/s27-agentic-nemotron, S27 G-DA);
-# 28bc6cc24 = 970807006 merged with e99e2a168 (yeto/s27-next2, S27 G-ER).
+# (yeto/agentic-nemotron);
+# 28bc6cc24 = 970807006 merged with e99e2a168 (yeto/next2).
 MILES_NEXT_COMMIT = "28bc6cc245e6a45c8ca2d36b632efa479f4f7a14"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
@@ -118,7 +118,7 @@ SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
 # m3-qwen4exp-lora (4e4148f1b = a1240c530 + Qwen4ExpForConditionalGeneration LoRA hooks).
 # n17-qwen3coder-single-call (2fa880182 = 4e4148f1b + qwen3_coder honors
-# parallel_tool_calls=false under tool_choice=auto: at most one tool call; S17 N17).
+# parallel_tool_calls=false under tool_choice=auto: at most one tool call).
 SGLANG_NEXT_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
 # Fork lineage on michaellchung/miles yeto/ports, oldest first; the single
 # source for every "this fork commit carries X" set (rl-code-quality-cleanup
@@ -132,165 +132,165 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     # 5c1b49eb: fast-forward of 0af62f4d with the 2b loss variants
     # (--policy-loss-variant, --sapo-tau-*, --gmpo-log-clip-*).
     "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
-    "2f23a0fca9b80f6a7300da401703c343014b03c0",  # + F-R1 (placement/worker files only)
+    "2f23a0fca9b80f6a7300da401703c343014b03c0",  # + cell declaration (placement/worker files only)
     "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # + M5 (LoRA dp_invariant_state.py only)
     "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # + M5 error text/docstring/tests
-    # 1023269 = e3a11ab3 + M3 (Qwen3.8-Next LoRA layout) + A27 (worker loss / bounded
-    # weight-update group); no loss_hub file.
+    # 1023269 = e3a11ab3 + Qwen3.8-Next LoRA layout + worker loss / bounded
+    # weight-update group; no loss_hub file.
     "1023269412bf4e54a1d95c8d2deaee795871aa72",
-    # c35702e = + A27-2 (857fc9592) engine-failure propagation; no loss path.
+    # c35702e = + 857fc9592 engine-failure propagation; no loss path.
     "c35702eefcf2862cee155e46870e6ad30568d2c6",
-    # 8bc52237a = + s16-raw-lora-disagg; no loss path.
+    # 8bc52237a = + raw-lora-disagg; no loss path.
     "8bc52237a1102306abd8f89a2ea2090aa2df6850",
-    # efbbc63ea = + s18-abort-discard-stats; rollout bookkeeping only.
+    # efbbc63ea = + abort-discard-stats; rollout bookkeeping only.
     "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
     # 2f7871fb2 = + inference_rollout_train.abort tally; rollout bookkeeping only.
     "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
-    # ddce20992 = + s18-agentic-suspend; rollout scheduling only.
+    # ddce20992 = + agentic-suspend; rollout scheduling only.
     "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
-    # 64b591a4b = + critic family + rl-algo-supplement metrics (S19 #1); new flags
+    # 64b591a4b = + critic family + rl-algo-supplement metrics; new flags
     # default off, loss bitwise unchanged with defaults.
     "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
-    # 56068bd56 = + full-parameter shard state and transport (P0-1.7b.1); no loss path.
+    # 56068bd56 = + full-parameter shard state and transport; no loss path.
     "56068bd561df6658e929fe1b2ca051b5385d3d9b",
     # 95533a0cd / 5f7ac4e32 / 587bd258a = + LoRA actor opt-in to the full-parameter
-    # transport, base-weight publish for a LoRA hybrid (P0-1.7b.2); no loss path.
+    # transport, base-weight publish for a LoRA hybrid; no loss path.
     "95533a0cd2097175980afa4a9c43a817512ebca6",
     "5f7ac4e32ba3131ebf92a77bd6571c467bfa6220",
     "587bd258a350cc4757e3e774436eb48085d808cc",
-    # 386ae3b07 = + SAO streaming primitives (P0-1.7b.3); no loss path.
+    # 386ae3b07 = + SAO streaming primitives; no loss path.
     "386ae3b07138ccd45ce4a07fc0383587f7968a3a",
-    # 17aeb5cb5 = + lazy imports for light actors, master port held (S24 L2.1); no loss path.
+    # 17aeb5cb5 = + lazy imports for light actors, master port held; no loss path.
     "17aeb5cb51635b9ba6ef4ca10db95762695c7e03",
-    # 44d41efd0 = + megatron_utils runtime patches moved out of the package init (S24 L2.2); no loss path.
+    # 44d41efd0 = + megatron_utils runtime patches moved out of the package init; no loss path.
     "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9",
-    # 9462de532 = + FP8 rollout honors the FP8 ignore list, --rollout-hf-checkpoint (S26 E6); no loss path.
+    # 9462de532 = + FP8 rollout honors the FP8 ignore list, --rollout-hf-checkpoint; no loss path.
     "9462de532f747cf688e090bbaf6b24f80e378fe8",
-    # ed5f64fd7 = + DP-invariant state export/restore carries the CPU-offload optimizer state (S26 E6 B8); no loss path.
+    # ed5f64fd7 = + DP-invariant state export/restore carries the CPU-offload optimizer state; no loss path.
     "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b",
     # 56190a5a8 = + full-parameter sync reads DP=1 distributed-optimizer masters,
-    # incl. the HybridDeviceOptimizer's offloaded FP32 copies (S27 G-B); no loss path.
+    # incl. the HybridDeviceOptimizer's offloaded FP32 copies; no loss path.
     "56190a5a86d14f1eb96d592038d76a9ad8651b0c",
     # cc693c693 = + the optimizer-state proof skips the HybridDeviceOptimizer's
-    # master_param mirror, which a global apply overwrites (S27 IMG2); no loss path.
+    # master_param mirror, which a global apply overwrites; no loss path.
     "cc693c6930be178f411f711f55c3d334a087c097",
     # a477bcbe0 = + FullParameterFragmentPlan.flat_ranges: a parameter above the
-    # fragment bound spans several fragments (S27); plans without ranges keep their hash.
+    # fragment bound spans several fragments; plans without ranges keep their hash.
     "a477bcbe04bc6278bfed017cf8931ae90bb8e3e3",
     # 0b64b40c1 = + rebase_full_parameter_scheduler_anchor after a peer snapshot
-    # restore (S27); no loss path.
+    # restore; no loss path.
     "0b64b40c15fa972d20bd1393aca6067dfd2492a4",
     # b13c170ce = + per-fragment full-parameter apply: a chunked apply skips
-    # fragments the masters already hold (S27 G-X).
+    # fragments the masters already hold.
     "b13c170ce7611104aee28e38ed01c188e95417a2",
     # 23d4de975 = + deferred full-parameter export with on-demand materialize,
-    # faster finite/hash checks, hybrid R3 layer mapping (S27 G-AA).
+    # faster finite/hash checks, hybrid R3 layer mapping.
     "23d4de975b18f76e35f2f3d1093ad774a3a68086",
-    # aa6b887d8 = + push checks small chunks inline (S27 G-AA); no loss path.
+    # aa6b887d8 = + push checks small chunks inline; no loss path.
     "aa6b887d8387d5c575f7485ad6008c0f503423a8",
     # d1616ba12 = + THD packs carry a per-sample seq_idx (total_tokens in
-    # PackedSeqParams), so Mamba state restarts per sample (S27 G-AL).
+    # PackedSeqParams), so Mamba state restarts per sample.
     "d1616ba1203f7b70b372d60803c0f740561e5b38",
-    # 8edea35a7 = + full-parameter chunks travel through Ray as numpy buffers
-    # (S27 G-AP); same values, no loss path.
+    # 8edea35a7 = + full-parameter chunks travel through Ray as numpy buffers;
+    # same values, no loss path.
     "8edea35a76026d83e0a819038baf09d88bd448d9",
     # b7868074c = d1616ba12 + MilesNemotronHLanguageOnlyBridge: trains the language
-    # model of the Nemotron-H VL checkpoint, vision frozen (not built) (S27 G-AQ);
+    # model of the Nemotron-H VL checkpoint, vision frozen (not built);
     # no loss path. A side branch (not after 8edea35a7), listed before the DP
     # replica commit because it has none; merged at ebc6519af.
     "b7868074ca1e081581aba3290b48738734ab5600",
     # 63cb372b3 = 8edea35a7 + per-fragment full-parameter round boundary: lazy
     # export (no master read or hash at the cut), materialize returns fragment
-    # descriptors, a commit writes only the parameters it received (S27 G-AY);
+    # descriptors, a commit writes only the parameters it received;
     # no loss path. A side branch, listed before the DP replica commit
     # because it has none; merged at 59aea07f9.
     "63cb372b3900e66f9ce1e90b3b5ddff5f29c7224",
-    # ccd85ec73 = + unused test imports dropped (S27 G-AY); tests only.
+    # ccd85ec73 = + unused test imports dropped; tests only.
     "ccd85ec73eec71720d28aa3a5e621a10798c79b1",
     # 921cde8c7 = 8edea35a7 + full-parameter data-parallel replicas (DP>1, EP
     # spanning DP): one owner rank per replica group exports, the replicas apply
-    # the owner's bytes (S27 G-AX); no loss path.
+    # the owner's bytes; no loss path.
     "921cde8c7fe7657471bb2be255a4af9bf3653c3d",
     # d78bf39e4 = + HybridDeviceOptimizer CPU FP32 masters in pinned memory
-    # (cherry-pick of 2d3aaf949, S27 G-AX); same values, no loss path.
+    # (cherry-pick of 2d3aaf949); same values, no loss path.
     "d78bf39e4d51db5ea7b241e996bcc37a0b854c55",
-    # ebc6519af = merge of d78bf39e4 and b7868074c (yeto/s27-closing, S27 G-AZ).
+    # ebc6519af = merge of d78bf39e4 and b7868074c (yeto/closing).
     "ebc6519af7c19c0f4b3ba82f109fd19072647a8c",
-    # 59aea07f9 = merge of ebc6519af and ccd85ec73 (yeto/s27-closing, S27 G-AZ2).
+    # 59aea07f9 = merge of ebc6519af and ccd85ec73 (yeto/closing).
     "59aea07f9a1e48b6fcb9fed03c70964a00275a40",
     # 76a84963c = 59aea07f9 + set MoE runtime flags copied onto the bridge
     # provider, router fusion refused with routing replay, --cuda-graph-impl
-    # refused in bridge mode (S27 G-BH2); no loss path. A side branch without
+    # refused in bridge mode; no loss path. A side branch without
     # sharded masters, listed before them; merged at 7402a53d5.
     "76a84963cf48916c4768523408dcacfa7dae671e",
     # d50fb04dd = 59aea07f9 + sharded FP32 masters: full-parameter sync at DP>1
-    # on Megatron's distributed optimizer (S27 G-BE); same synced values.
+    # on Megatron's distributed optimizer; same synced values.
     "d50fb04dd2111f4a7c6022e82ef256a0dee0d696",
-    # acb798c7b = + several distributed-optimizer instances refused (S27 G-BE).
+    # acb798c7b = + several distributed-optimizer instances refused.
     "acb798c7b74f32004ad7ba4c5c07a4e69a82911a",
-    # 7402a53d5 = merge of acb798c7b and 76a84963c (yeto/s27-eff, S27 G-CA).
+    # 7402a53d5 = merge of acb798c7b and 76a84963c (yeto/eff).
     "7402a53d58dfcccd57ad6b59c0408127158f5704",
     # 102672760 = 7402a53d5 + verify_stored_fragment_chunks; prepare skips the
-    # fragments the caller already verified (transport feature verified_apply)
-    # (S27 G-CG); same applied bytes, no loss path. A side branch without the
+    # fragments the caller already verified (transport feature verified_apply);
+    # same applied bytes, no loss path. A side branch without the
     # host-sync-free commits, listed before them; merged at b6662508e.
     "102672760a31c86697972a06b060c05d4efaeb60",
     # daeb98903 = 7402a53d5 merged with 102672760 (same tree as 102672760;
-    # yeto/s27-e3, S27 G-CN).
+    # yeto/e3).
     "daeb98903779df2a470249d4142d97b610ad96c1",
     # 17841205b = + no host syncs in R3 replay copies, loss_function logging
-    # tensors, THD cu_seqlens/max_seqlen and Mamba seq_idx (S27 G-CI); loss
+    # tensors, THD cu_seqlens/max_seqlen and Mamba seq_idx; loss
     # values unchanged bit for bit.
     "17841205b19fde01279fd9585711cb610bad67a8",
     # 697fb2000 = + host-sync-free DeepEP _indices_to_multihot, a runtime patch
-    # of Megatron a84b10547 (S27 G-CI); no loss path.
+    # of Megatron a84b10547; no loss path.
     "697fb2000182955cbaa265345cd507924a1178a7",
-    # b6662508e = merge of daeb98903 and 697fb2000 (yeto/s27-e3, S27 G-CN).
+    # b6662508e = merge of daeb98903 and 697fb2000 (yeto/e3).
     "b6662508e77e2e351cac668f392d1c747921a1c2",
-    # 8d03f386a = 7402a53d5 + shape-free layout support (S27 G-DD);
+    # 8d03f386a = 7402a53d5 + shape-free layout support;
     # canonical-order plans keep their hashes and bytes. A side branch without
-    # the E3 commits above, listed after them; merged at 8faa7fccc.
+    # the verified-apply commits above, listed after them; merged at 8faa7fccc.
     "8d03f386a72c82a07af60dab9dd13d44c0a0fc5b",
-    # 3f6760f2b = + a gated linear_fc1 reports two TP blocks (S27 G-DD).
+    # 3f6760f2b = + a gated linear_fc1 reports two TP blocks.
     "3f6760f2bd7885a71b1bdd30a70956da88f775c0",
-    # 8faa7fccc = merge of b6662508e and 3f6760f2b (yeto/s27-next, S27 G-DV).
+    # 8faa7fccc = merge of b6662508e and 3f6760f2b (yeto/next).
     "8faa7fccc31625bfc4cc62ff3f34aed741ca62fe",
     # ddd416167 = b6662508e + commit chunk read-ahead (page mapping off the
     # copying thread) and the device-side model cast of sharded masters, a
-    # sample of every write checked bit for bit against the host cast (S27
-    # G-DZ); same committed bits, no loss path. A side branch without the
+    # sample of every write checked bit for bit against the host cast;
+    # same committed bits, no loss path. A side branch without the
     # shape-free commits, listed after them; merged at 970807006.
     "ddd416167698741085b2544faf28004481be3991",
-    # e9410717a = + the read-ahead reuses the two-thread hashing pool (S27 G-DZ).
+    # e9410717a = + the read-ahead reuses the two-thread hashing pool.
     "e9410717aa7a44bf830872c4403497c1e4daf522",
-    # 970807006 = merge of 8faa7fccc and e9410717a (yeto/s27-next, S27 G-DV).
+    # 970807006 = merge of 8faa7fccc and e9410717a (yeto/next).
     "970807006ed0b9a958a2167039e046cae52ffdd0",
     # 212da6791 = 7402a53d5 + session server route /v1/responses (Codex), recorded
-    # through the chat-completions path (cherry-pick of f01bc24cd; S27 G-DA); no
-    # training path. A side branch without the E3 / shape-free / sync-commit
+    # through the chat-completions path (cherry-pick of f01bc24cd); no
+    # training path. A side branch without the verified-apply / shape-free / sync-commit
     # commits, listed after them; merged at 28bc6cc24.
     "212da67914cf02f2fc2e0b7ee8f3455b79359ed8",
     # babe2adca = + one log line per failed session model call (cherry-pick of 1773afaa1).
     "babe2adca3aee101ae9960af693cf0fcda689d28",
-    # e99e2a168 = + test only (Nemotron-3 Nano Codex trajectory; yeto/s27-agentic-nemotron).
+    # e99e2a168 = + test only (Nemotron-3 Nano Codex trajectory; yeto/agentic-nemotron).
     "e99e2a168e3c53f6d930b6c08138702bda349618",
-    # 28bc6cc24 = merge of 970807006 and e99e2a168 (yeto/s27-next2, S27 G-ER).
+    # 28bc6cc24 = merge of 970807006 and e99e2a168 (yeto/next2).
     "28bc6cc245e6a45c8ca2d36b632efa479f4f7a14",
 )
 
 # First Miles commit whose full-parameter sync reads distributed-optimizer
 # masters (and the HybridDeviceOptimizer's offloaded FP32 copies) at DP=1
-# (S27 G-B; fork branch yeto/s27-distopt-fp on ed5f64fd7, in the image since
+# (fork branch yeto/distopt-fp on ed5f64fd7, in the image since
 # 56190a5-2fa8801; the image pin is cc693c6-2fa8801).
 MILES_DISTOPT_FULL_PARAMETER_COMMIT = "56190a5a86d14f1eb96d592038d76a9ad8651b0c"
 
 
 # First Miles commit whose full-parameter sync supports data-parallel replicas
 # (DP>1, EP spanning DP): one rank of each replica group owns and exports a
-# parameter, the other ranks apply the owner's bytes (S27 G-AX; fork branch
-# yeto/s27-dp-sync on 8edea35a7, whose head d78bf39e4 also pins the
+# parameter, the other ranks apply the owner's bytes (fork branch
+# yeto/dp-sync on 8edea35a7, whose head d78bf39e4 also pins the
 # HybridDeviceOptimizer CPU masters).  In the image since ebc6519-2fa8801
-# (yeto/s27-closing); a pin before it refuses a full-parameter sync at DP>1.
+# (yeto/closing); a pin before it refuses a full-parameter sync at DP>1.
 MILES_DP_REPLICA_FULL_PARAMETER_COMMIT = "921cde8c7fe7657471bb2be255a4af9bf3653c3d"
 
 
@@ -298,8 +298,8 @@ MILES_DP_REPLICA_FULL_PARAMETER_COMMIT = "921cde8c7fe7657471bb2be255a4af9bf3653c
 # distributed optimizer (each rank keeps one FP32 range of each parameter):
 # the replicas contribute their ranges to the owner's export, an apply writes
 # the whole model and the local range; same layout and bytes as the replica
-# path (S27 G-BE; fork branch yeto/s27-dp-distopt on 59aea07f9).  In the image
-# since 7402a53-2fa8801 (yeto/s27-eff); with a pin before it
+# path (fork branch yeto/dp-distopt on 59aea07f9).  In the image
+# since 7402a53-2fa8801 (yeto/eff); with a pin before it
 # ``--rl-dp-optimizer auto`` keeps the non-distributed optimizer at DP>1.
 MILES_DP_SHARDED_MASTER_COMMIT = "d50fb04dd2111f4a7c6022e82ef256a0dee0d696"
 
@@ -338,16 +338,11 @@ MILES_NEXT_BASE_IMAGE = (
 # SGLANG_NEXT_COMMIT at /sgl-workspace/sglang, both the base's editable
 # installs (pure-Python overlay, scripts/build_miles_ports_image.sh;
 # docker/miles-ports/Dockerfile).  /opt/yeto/image-manifest.json records
-# every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
-# pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
-# --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 28bc6cc-2fa8801; (S27 G-ER: Miles 28bc6cc24 = 970807006 merged with e99e2a168 (session server records Codex Responses calls, G-DA); previous 9708070-2fa8801 @sha256:d639e258... and, on s27-agentic-nemotron, e99e2a1-2fa8801 @sha256:97495106... (build record 2026-10-25-e99e2a1-2fa8801/); build record tests/fixtures/openspec_evidence/ports-image-28bc6cc-2fa8801/). Earlier: tag 9708070-2fa8801; (S27 G-DV: Miles 970807006 = 8faa7fccc merged with e9410717a (commit read-ahead and device-side cast, G-DZ); previous 8faa7fc-2fa8801 @sha256:a7b9ab22... and, on s27-sync-commit, e941071-2fa8801 @sha256:dbf4a617... (build records 2026-10-25-e941071-2fa8801/, 2026-10-25-ddd4161-2fa8801/); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-9708070-2fa8801/). Earlier: tag 8faa7fc-2fa8801; (S27 G-DV: Miles 8faa7fccc = b6662508e (E3) merged with 3f6760f2b (shape-free layout, G-DD); previous b666250-2fa8801 @sha256:92b5055b... and, on s27-shape-free-layout, 3f6760f-2fa8801 @sha256:87dc8b02... (build records 2026-10-25-3f6760f-2fa8801/, 2026-10-25-8d03f38-2fa8801/); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-8faa7fc-2fa8801/). Earlier: tag b666250-2fa8801; (S27 G-CN: Miles b6662508e = 7402a53d5 + verify-ahead apply 102672760 (G-CG) + training step without host syncs 697fb2000 (G-CI); previous 697fb20-2fa8801 @sha256:498cac04...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-25-b666250-2fa8801/). Earlier: tag 697fb20-2fa8801; (S27 G-CI: Miles 697fb2000 = 7402a53d5 + training step without host syncs (R3 replay, loss logging, THD packing, DeepEP multihot runtime patch); previous 7402a53-2fa8801 @sha256:f0087fb1...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-697fb20-2fa8801/). Earlier: tag 7402a53-2fa8801; (S27 G-CA: Miles 7402a53d5 = 59aea07f9 + sharded FP32 masters at DP>1 acb798c7b (G-BE) + bridge MoE runtime flags 76a84963c (G-BH2); previous 59aea07-2fa8801 @sha256:d54dd445... (acb798c-2fa8801 @sha256:2bc602db... built but voided before the merge); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-7402a53-2fa8801/). Earlier: tag 59aea07-2fa8801; (S27 G-AZ2: Miles 59aea07f9 = ebc6519af + per-fragment full-parameter round boundary 63cb372b3 (lazy export, partial commit; G-AY); previous ebc6519-2fa8801 @sha256:1151c59a...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-59aea07-2fa8801/). Earlier: tag ebc6519-2fa8801; (S27 G-AZ: Miles ebc6519af = 8edea35a7 + DP replicas 921cde8c7 + pinned HybridDeviceOptimizer masters d78bf39e4 + Nemotron-H VL language-only bridge b7868074c; previous 8edea35-2fa8801 @sha256:6cc7b51d... (and b786807-2fa8801 @sha256:618e6c5b... for the 120B probe); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-ebc6519-2fa8801/). Earlier: tag b786807-2fa8801; (S27 G-AS: Miles b7868074c = d1616ba12 + language-model-only bridge for the Nemotron-H VL checkpoint (G-AQ); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-b786807-2fa8801/). Earlier: tag 8edea35-2fa8801; (S27 G-AP: Miles 8edea35a7 = d1616ba12 + zero-copy full-parameter chunks in Ray; previous d1616ba-2fa8801 @sha256:0b251d82...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-24-8edea35-2fa8801/). Earlier: tag d1616ba-2fa8801; (S27 IMG6: Miles d1616ba12 = aa6b887d8 + per-sample seq_idx for THD packs, Mamba state restarts per sample (G-AL); previous aa6b887-2fa8801 @sha256:2c4bd1db...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-d1616ba-2fa8801/). Earlier: tag aa6b887-2fa8801; (S27 IMG5: Miles aa6b887d8 = b13c170ce + deferred full-parameter export, on-demand materialize, faster checks, hybrid R3 layers (G-AA); previous b13c170-2fa8801 @sha256:814a7e27...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-aa6b887-2fa8801/). Earlier: tag b13c170-2fa8801; (S27 IMG4: Miles b13c170ce = 0b64b40c1 + per-fragment full-parameter apply (G-X); previous 0b64b40-2fa8801 @sha256:2b8c36f6...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-23-b13c170-2fa8801/). Earlier: tag 0b64b40-2fa8801; (S27 IMG3: Miles 0b64b40c1 = cc693c693 + flat-range fragment split + scheduler anchor rebase; previous cc693c6-2fa8801 @sha256:2011cbf9... (a477bcb-2fa8801 built but voided); build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-0b64b40-2fa8801/). Earlier: tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
-# Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
-# build record openspec/changes/rl-infra-spec/evidence/ports-image/
-# 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
-# lazy-modelopt Megatron-Bridge __init__ in the layer; previous 386ae3b-2fa8801
-# @sha256:bcd5ffd3...; build record openspec/changes/rl-infra-spec/evidence/
-# ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
+# every SHA.  A private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER}
+# or --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
+# Tag 28bc6cc-2fa8801; Miles 28bc6cc24 = 970807006 merged with e99e2a168 (the
+# session server records Codex Responses calls); build record
+# tests/fixtures/openspec_evidence/ports-image-28bc6cc-2fa8801/. linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
     "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2"

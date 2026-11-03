@@ -1,9 +1,8 @@
-"""Trainer DP change and in-pool role transfer (rl-infra-spec 4.7; E3). Import-light.
+"""Trainer DP change and in-pool role transfer. Import-light.
 
-The E1 :class:`~yeto.rl.engine.controller.IslandController` owns the
+The :class:`~yeto.rl.engine.controller.IslandController` owns the
 transaction, the journal and the epochs; it hands ``trainer-dp`` and
-``role-transfer`` edges to this module (interface in
-``infra-drafts/patches/infra-e3-controller-v3.patch``):
+``role-transfer`` edges to this module:
 
 * :func:`plan_trainer_edge` -- pure validation, called from
   ``IslandController.plan``: the edge must be certified in the attestation
@@ -12,7 +11,7 @@ transaction, the journal and the epochs; it hands ``trainer-dp`` and
   pass the trainer's ``reshard_problems`` (:class:`~yeto.rl.engine.ports.CuttableTrainer`;
   Miles: ``miles_adapter.reshard.reshard_problems``). Nothing is written.
 * :class:`TrainerTransition` -- executed at a quiescent safe point, phases of
-  design D4 recorded through the controller's journal::
+  recorded through the controller's journal::
 
       QUIESCING      (rollout->trainer only) fence + drain the engines on the moved GPUs
       CUT            save_cut at the old layout; ``trainer_cut`` record (cut id, manifest digest)
@@ -207,7 +206,7 @@ def members_on_gpus(member_gpus: Mapping[str, Any] | None, gpus: tuple[str, ...]
 
 
 class TrainerOps(Protocol):
-    """What the transition needs from the trainer side (E2/E3 adapters)."""
+    """What the transition needs from the trainer side (engine adapters)."""
 
     def save_cut(self, *, epoch: int, cut_id: str) -> str: ...  # quiescent cut at the current layout
     # rebuild on the target (fallback: old shape from the same cut); returns RebuildResult-like
@@ -237,7 +236,7 @@ class TrainerTransition:
 
     ``record(kind, **fields)`` appends to the controller's journal;
     ``fork_call(op, members, fn)`` is the controller's fork-mirrored
-    membership call (``fn(epoch)``); ``pool``/``publisher`` are the E1 ports.
+    membership call (``fn(epoch)``); ``pool``/``publisher`` are the controller's ports.
     """
 
     def __init__(self, *, plan: TrainerEdgePlan, tx_id: str, epoch: int, trainer: TrainerOps,
@@ -295,7 +294,7 @@ class TrainerTransition:
         try:
             if removed:
                 self._fork_call("stop", removed, lambda e: self.pool.remove_engines(removed, epoch=e))
-                # fork F-R1 order (rollout->trainer): drain -> stop_cells -> unbind_cell ->
+                # fork order (rollout->trainer): drain -> stop_cells -> unbind_cell ->
                 # trainer M6; the stopped cells release their bundles to the trainer.
                 self._removed_gpus = {m: tuple(g) for m, g in (again_gpus or {}).items()
                                       if m in removed}
@@ -322,7 +321,7 @@ class TrainerTransition:
                 if plan.kind == "role-transfer":
                     # The new engines run on the GPUs the trainer released: bind the stopped,
                     # startup-declared cells to them first (fork-M6 set_pg_view + rebind_cell;
-                    # E1 pool verb, see evidence/infra-e3/plan.md section 5).
+                    # pool verb).
                     if not callable(bind):
                         raise TrainerTransitionFailed("INITIALIZING", "pool cannot bind engines to freed GPUs")
                     bind(added, plan.moved_gpus)
@@ -409,7 +408,7 @@ def recovery_decision(records: list[Mapping[str, Any]], committed_config: str | 
 
     * no open trainer tx -> ``none``;
     * open tx without ``trainer_cut`` -> ``resume_old`` (nothing destructive: the
-      trainer was never disposed; drained engines are undrained by E1 replay);
+      trainer was never disposed; drained engines are undrained by controller replay);
     * ``trainer_cut`` recorded, epochs not committed by this tx -> ``restore_old``:
       rebuild the SOURCE layout and restore that cut exactly;
     * epochs committed by this tx (COMMITTED, crash before SUCCEEDED) ->
@@ -421,10 +420,10 @@ def recovery_decision(records: list[Mapping[str, Any]], committed_config: str | 
     Boundaries: this is a HINT, not an automatic recovery. It assumes the journal
     is complete up to the crash (records are fsynced before each step) and that
     no training ran on the new layout (true: training resumes only after
-    SUCCEEDED). It does not reconcile the outer protocol (D5: if accepted
+    SUCCEEDED). It does not reconcile the outer protocol (if accepted
     PUSH/BCAST and the cut cannot be matched uniquely, the whole run recovers
     globally), does not check that the cut files still exist, and does not
-    undo a half-done fork start/stop (E1 journal replay owns that). ``cut_epoch``
+    undo a half-done fork start/stop (controller journal replay owns that). ``cut_epoch``
     is the config epoch the cut was saved at; restore with it.
     """
     terminal = {"SUCCEEDED", "CANCELLED", "REBUILT_OLD", "RECOVERY_REQUIRED"}

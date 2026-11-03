@@ -1,4 +1,4 @@
-"""Miles source overlay for the critic family (rl-algo-critic-family, S13).
+"""Miles source overlay for the critic family (rl-algo-critic-family).
 
 The ports image ships Miles c35702e (``yeto.rl.MILES_NEXT_COMMIT``) installed
 editable at ``/root/miles`` (= ``~/miles``) and records that commit in
@@ -8,7 +8,7 @@ critic-family commits rebased onto c35702e.  Instead of a push + new image,
 the island setup applies ``c35702e..CRITIC_C357_RESULT_COMMIT`` as a
 ``git apply`` patch shipped inside the frozen code snapshot (the workdir).
 
-Safety and honesty rules (progress "S13 fork rebase c35702e + overlay"):
+Safety and honesty rules:
 
 * the overlay is refused unless ``~/miles`` is the image's own checkout of
   c35702e (HEAD == c35702e, no refresh by the setup, image manifest naming
@@ -19,7 +19,7 @@ Safety and honesty rules (progress "S13 fork rebase c35702e + overlay"):
   and flag that the image manifest (and ``git rev-parse HEAD``) no longer
   describe the running code.
 
-S19 #1 (2026-10-09): the pinned image now ships Miles 64b591a4b, which already
+The pinned image now ships Miles 64b591a4b, which already
 contains these commits (cherry-picked onto ddce20992); ``auto`` therefore never
 applies the overlay and ``critic-c357`` is refused.  The code stays for old
 records and for a re-pin to c35702e.
@@ -99,7 +99,7 @@ def resolve_overlay(args) -> str | None:
                 f"image ships {MILES_NEXT_COMMIT[:7]}, which already contains the critic-family flags")
         return CRITIC_C357
     if MILES_NEXT_COMMIT != CRITIC_C357_BASE_COMMIT:
-        return None  # S19 #1: the pinned image has the fork-only flags built in
+        return None  # the pinned image has the fork-only flags built in
     return CRITIC_C357 if spec_fork_flags(getattr(args, "rl_algorithm_spec_json", None)) else None
 
 

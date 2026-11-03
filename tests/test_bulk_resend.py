@@ -1,6 +1,6 @@
-"""S27 G-EL: a slow receiver of a whole-model resend against the real syncer (CPU, no Ray).
+"""A slow receiver of a whole-model resend against the real syncer (CPU, no Ray).
 
-Run s27-elastic-a (Nemotron Nano): after a degraded recovery the syncer sent
+In a Nemotron Nano run, after a degraded recovery the syncer sent
 all 126 GB of fragments from its scheduler, waiting on the island's link for
 8.8 min. No heartbeat was read meanwhile, so both islands' 150 s leases
 expired and both were removed from the pool. Now a forwarder task per learner
@@ -13,7 +13,7 @@ a gate is closed, so the syncer's writer queue and the socket buffers fill.
 The model (256 fragments of 256 KiB) is larger than the 128-frame writer
 queue plus the socket buffers.
 
-S27 G-EY: in run s27-elastic-c the replay then never ended. With one island
+In a later run the replay then never ended. With one island
 merging, versions were published about as fast as the link to the recovering
 island took them, so the forwarder's pending map almost never emptied, and
 "empty" was the tail condition. The last test reads the recovering island's
@@ -376,7 +376,7 @@ def test_slow_receiver_of_a_rejoin_catch_up_does_not_stall_rounds_or_leases(tmp_
     assert a.final_manifest is not None and a.final_manifest == b.final_manifest
 
 
-# S27 G-EY: island 0 alone merges about 40 fragments of 256 KiB per second
+# island 0 alone merges about 40 fragments of 256 KiB per second
 # here (about 10 MiB/s); the recovering island reads 8 MiB/s.
 SLOW_LINK = 8 * 1024 * 1024
 # The old tail condition ("nothing pending") was not met in 63 s at this rate

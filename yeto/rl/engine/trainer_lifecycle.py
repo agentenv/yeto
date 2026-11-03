@@ -1,6 +1,6 @@
 """Trainer start/stop: the lifecycle, the durable sample buffer, the scheduler.
 
-rl-trainer-start-stop design D1/D2. Mechanism and policy are separate:
+Mechanism and policy are separate:
 
 * :class:`TrainerLifecycle` does what it is told (start, run, drain and cut, stop);
 * :class:`TrainerScheduler` decides ``Start`` / ``Stop`` / ``Hold`` from backlog
@@ -8,11 +8,10 @@ rl-trainer-start-stop design D1/D2. Mechanism and policy are separate:
 * :class:`DurableSampleBuffer` holds the samples across trainer stops.
 
 A trainer that starts once is the special case: a scheduler that holds until the
-data ends, then stops with ``FINISHED`` (:class:`AlwaysOnScheduler`). Scheduler S1
+data ends, then stops with ``FINISHED`` (:class:`AlwaysOnScheduler`). The ski-rental scheduler
 (start on backlog, ski-rental stop) is in :mod:`.trainer_scheduler`.
 
-:class:`DriverLifecycle` is the lifecycle over the existing :class:`IslandDriver`
-(D2). Each start builds a fresh driver (new trainer ports, new sync session) for a
+:class:`DriverLifecycle` is the lifecycle over the existing :class:`IslandDriver`. Each start builds a fresh driver (new trainer ports, new sync session) for a
 new incarnation, so ``IslandDriver.rebuild_trainer`` (a same-driver rebuild) is
 never needed across starts. The driver runs on its own thread; the lifecycle
 wraps its sync session to observe the states and to hold the driver after a
@@ -25,7 +24,7 @@ publication until it is told to train on or to drain:
   ``TRAINING`` and waits for :meth:`DriverLifecycle.run`;
 * a drain ends the driver where it waits: the final cut takes the
   trigger of the stop reason (``STOPPED`` -> ``SCHEDULED``) and LEAVE carries the
-  P5 reason code (``Membership.leave``).
+  departure reason code (``Membership.leave``).
 
 This module is neutral core: it knows ports and the LEAVE code, no backend.
 """
@@ -75,7 +74,7 @@ def allowed_transition(old: LifecycleState, new: LifecycleState) -> bool:
     return _ORDER.index(new) == _ORDER.index(old) + 1
 
 
-# Trigger of the final cut for each stop reason (D3): a scheduler stop is SCHEDULED,
+# Trigger of the final cut for each stop reason: a scheduler stop is SCHEDULED,
 # a spot reclaim PREEMPT, the end of the data (or a user stop) MANUAL.
 CUT_TRIGGER_FOR_REASON: Mapping[LeaveReason, str] = {
     LeaveReason.STOPPED: recovery.SCHEDULED,
@@ -91,7 +90,7 @@ CUT_TRIGGER_FOR_REASON: Mapping[LeaveReason, str] = {
 class CutRef:
     """A committed cut a later start can restore. ``policy_version`` is the
     published version at the cut (the next start publishes it again first);
-    ``watermark`` is the consumed buffer watermark in the same record (D4)."""
+    ``watermark`` is the consumed buffer watermark in the same record."""
 
     cut_id: str
     trigger: str
@@ -132,20 +131,20 @@ class RunReceipt:
 @dataclass(frozen=True)
 class SampleIndexEntry:
     """One sample in the durable buffer: its id, the policy version that produced it
-    (behavior version, P0-S schema 4) and where its payload is. One sample per
+    (behavior version, sample schema 4) and where its payload is. One sample per
     entry; the cross-island group index is ``sample_pool.SampleIndexEntry``.
 
     ``provenance``: the source of the sample (``sampler_engine.Provenance``
     record: device family, card, engine and version, precision, quantization
     scheme, topology); None for entries written before it existed or by a
     sampler that does not set it (read as ``unknown``). Data only: it never
-    enters a hash or the version gate (rl-hetero-sampler-engines D3).
+    enters a hash or the version gate.
 
     ``sampler_round``: which sampler round wrote the entry
     (``sampler_resume.SamplerRound`` record: sampler, incarnation, rollout id,
     last group of the round, data cursor after the round); None for entries
     written before it existed. A replacement sampler island reads it to resume
-    after the last complete round (S25 C1)."""
+    after the last complete round."""
 
     sample_id: str
     behavior_version: int
@@ -222,8 +221,8 @@ class TrainerScheduler(Protocol):
 
 @runtime_checkable
 class Membership(Protocol):
-    """JOIN / LEAVE toward the coordinator (D2: the elastic client's ``Join`` with a
-    new incarnation per start, ``Leave`` with the P5 reason code). ``join`` returns
+    """JOIN / LEAVE toward the coordinator (the elastic client's ``Join`` with a
+    new incarnation per start, ``Leave`` with the departure reason code). ``join`` returns
     the coordinator's base version, or None when there is no coordinator."""
 
     def join(self, incarnation: int) -> int | None: ...
@@ -249,12 +248,12 @@ class TrainerLifecycle(Protocol):
 
 
 class AlwaysOnScheduler:
-    """"Start once" (D1): start while the trainer is cold, hold while it trains,
+    """"Start once": start while the trainer is cold, hold while it trains,
     stop with ``FINISHED`` when the data ended and the backlog is empty."""
 
     def decide(self, backlog: BacklogStats, lifecycle_state: LifecycleState,
                prices: Mapping[str, float] | None = None) -> Decision:
-        del prices  # S1 and this scheduler ignore prices
+        del prices  # the ski-rental scheduler and this one ignore prices
         if lifecycle_state is LifecycleState.COLD:
             return Start()
         if backlog.data_ended and backlog.samples == 0:
@@ -343,7 +342,7 @@ class _LifecycleSync:
 
     The driver waits for the next verb right after each publication (the restored
     policy, then every trained version), so the samplers already hold the newest
-    version while the trainer waits (D5). A drain there finishes the inner session
+    version while the trainer waits. A drain there finishes the inner session
     (final cut, with the trigger of the stop reason) and ends the driver."""
 
     def __init__(self, inner: Any, handle: TrainerHandle, membership: Membership | None) -> None:
@@ -373,10 +372,10 @@ class _LifecycleSync:
         return start
 
     def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
-        """The inner session's E1 cut preparation, except before a park. A prepared cut
+        """The inner session's cut preparation, except before a park. A prepared cut
         holds the store's writer guard until its safe point, and on a Modal Volume that
         guard skips every reload of the container: a trainer parked after this
-        publication never sees its next command in the store (GPU run s27-eg-a1, a
+        publication never sees its next command in the store (seen on a GPU run, a
         convertible node). Before a park the safe point cuts the usual way."""
         if self.handle.wants_park():
             driver.emit("rl_cut_prepare_skipped", rollout_id=int(rollout_id), reason="park")
@@ -406,7 +405,7 @@ class _LifecycleSync:
         out = self.inner.boundary(driver, rollout_id=rollout_id, stats=stats)
         h = self.handle
         commit = getattr(driver.rollout, "commit_round", None)
-        if callable(commit):  # the round is trained: its samples are consumed (D4)
+        if callable(commit):  # the round is trained: its samples are consumed
             commit(rollout_id)
         with h._cond:
             h.rounds += 1
@@ -416,7 +415,7 @@ class _LifecycleSync:
         return out
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
-        """The driver's departure code (P5) unless the driver ended cleanly or by
+        """The driver's departure code unless the driver ended cleanly or by
         our own stop: then the reason the lifecycle was given."""
         code = LeaveReason(reason)
         if (code is LeaveReason.FINISHED or self.drained) and self.handle.requested_reason is not None:

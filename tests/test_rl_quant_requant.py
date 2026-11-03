@@ -1,4 +1,4 @@
-"""Re-quantization BF16 -> W4A8 (S25 N8.1): int4 round trip, AWQ R2/R1, layout fidelity.
+"""Re-quantization BF16 -> W4A8: int4 round trip, AWQ R2/R1, layout fidelity.
 
 The "original artefact" here is a tiny checkpoint built by an independent,
 literal reading of the rules observed on the real artefact (FP64 smoothing,

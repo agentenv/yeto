@@ -1,4 +1,4 @@
-"""Convertible nodes (rl-trainer-start-stop L7.1–L7.3) with fake engines."""
+"""Convertible nodes with fake engines."""
 
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def _node(name="c0", clock=None, **gpu):
     return ConvertibleNode(NodeSpec(name, NodeClass.CONVERTIBLE), FakeGpu(clock, **gpu), clock=clock)
 
 
-# ---------------------------------------------------------------- L7.1 classes
+# ---------------------------------------------------------------- classes
 def test_convertible_spot_or_low_precision_is_refused_by_name():
     with pytest.raises(NodeClassError, match="node c1: a spot node cannot be convertible"):
         validate_nodes([NodeSpec("c1", NodeClass.CONVERTIBLE, spot=True)], trainer_precision="bf16")
@@ -138,14 +138,14 @@ def test_launcher_refuses_convertible_on_a_spot_run():
     ok = _launch_args(["--on-demand", "--rl-node-class", "island1=convertible",
                        "--rl-node-class", "island2=rollout:spot:fp8"])
     assert [s.spot for s in launch_loop.node_specs(ok)] == [False, True]
-    # L7.5: a declared convertible island makes a convertible pool, which needs every
+    # A declared convertible island makes a convertible pool, which needs every
     # island convertible (a rollout-only node would need a LoRA sampler release)
     ok.gpu, ok.rl_checkpoint_store = "modal:1xh100,modal:1xh100,modal:1xh100", "modal-volume://v/p"
     with pytest.raises(SystemExit, match="every --gpu island convertible"):
         launch_loop.check(ok)
 
 
-# ---------------------------------------------------------------- L7.2 cut rule
+# ---------------------------------------------------------------- cut rule
 def test_cut_rule_returns_finished_segments_and_drops_unfinished():
     buf = Buffer()
     out = apply_cut_rule([
@@ -159,7 +159,7 @@ def test_cut_rule_returns_finished_segments_and_drops_unfinished():
     assert {e.behavior_version for e in buf.entries} == {3}  # behavior version kept
 
 
-# ---------------------------------------------------------------- L7.2 both directions
+# ---------------------------------------------------------------- both directions
 def test_both_directions_in_order_with_timing_and_mid_conversion_trajectories():
     inflight = [InflightTrajectory("t0", finished=(_entry("t0.s0"),))]
     node = _node(inflight=inflight)
@@ -207,7 +207,7 @@ def test_only_convertible_class_gets_a_node():
         ConvertibleNode(NodeSpec("r", NodeClass.ROLLOUT), FakeGpu(Clock()))
 
 
-# ---------------------------------------------------------------- L7.3 capacity and guard
+# ---------------------------------------------------------------- capacity and guard
 def _pool(clock, *, rollout=1, convertible=2, capacity=1.0):
     specs = [NodeSpec(f"r{i}", NodeClass.ROLLOUT, spot=True) for i in range(rollout)]
     specs.append(NodeSpec("t0", NodeClass.TRAINER))
@@ -499,5 +499,5 @@ def test_miles_conversion_port_wires_publisher_pool_and_trainer():
                    ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
                    "trainer.offload", ("onload", ("weights",)), "update_weights",
                    "start_update_weights", "end_update_weights", "onload_kv",
-                   # the LoRA warm-up generates: only with the KV cache back (G-L7.4)
+                   # the LoRA warm-up generates: only with the KV cache back
                    ("lora_warmup", "http://e0"), ("admission", True)]

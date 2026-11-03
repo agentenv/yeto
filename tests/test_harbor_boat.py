@@ -1,4 +1,4 @@
-"""CPU tests of the boat sandbox provider (S25 N10.8) with a fake boat client."""
+"""CPU tests of the boat sandbox provider with a fake boat client."""
 
 from __future__ import annotations
 

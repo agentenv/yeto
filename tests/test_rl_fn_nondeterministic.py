@@ -1,4 +1,4 @@
-"""S11 try26: the Flash-Next recipe (FlashInfer GDN prefill) must run non-deterministic SGLang inference."""
+"""The Flash-Next recipe (FlashInfer GDN prefill) must run non-deterministic SGLang inference."""
 import os
 import subprocess
 import sys

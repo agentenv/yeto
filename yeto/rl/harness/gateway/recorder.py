@@ -1,4 +1,4 @@
-"""The records proxy as a :class:`~yeto.rl.agentic.TokenRecorder` (S25 N10.5, N10.3).
+"""The records proxy as a :class:`~yeto.rl.agentic.TokenRecorder`.
 
 verl's ``HarborAgentLoop`` asks a token recorder for one OpenAI base URL per
 sample and, after the trial, for the sample's model calls.
@@ -20,7 +20,7 @@ session whose trainer sampling parameters differ from them is refused
 (:class:`~yeto.rl.agentic.HarnessConfigError`) instead of sampling with other
 settings than the trainer assumes.
 
-CompactionRL is refused here (S26 E9.5): a records backend built with a
+CompactionRL is refused here: a records backend built with a
 ``compaction`` config writes one training sample per compaction segment, but
 a verl agent-loop sample is one token stream, so every compacted trajectory
 would be ABORTED by the join.  The recorder fails at construction instead.

@@ -1,4 +1,4 @@
-"""S29 MFU-C: on-policy reuse of the old log-probs (skip verl's old_log_prob recompute).
+"""On-policy reuse of the old log-probs (skip verl's old_log_prob recompute).
 
 **What verl does** (decoupled PPO, ``algorithm.rollout_correction.bypass_mode=False``):
 before ``update_actor`` the trainer saves the model to the host and runs a forward-only

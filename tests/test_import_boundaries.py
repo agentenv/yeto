@@ -1,7 +1,7 @@
-"""Static import-boundary check (yeto-framework-decoupling task 1.2, design D4).
+"""Static import-boundary check (yeto-framework-decoupling).
 
 Pure ``ast``: the checked modules are never imported, nothing is started.
-Rules follow spec ``rl-framework-neutral-core`` (requirement 静态边界检查); the
+Rules follow spec ``rl-framework-neutral-core`` (requirement "static boundary check"); the
 convention is written down in ``yeto/rl/engine/README.md``.
 
   * neutral core -- ``yeto/rl/engine/`` (adapter excluded), ``yeto/rl/rewards/``,
@@ -29,8 +29,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
-# Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 5  # S26 E0.5: Codex harness removed; rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
+# Upper bound of allowlist entries; may only go down.
+ALLOWLIST_CAP = 5  # Codex harness removed; rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
 ADAPTERS = ("yeto.rl.adapters",)
@@ -60,10 +60,10 @@ CORE_FILES = (
     "yeto/rl/critic_warmup.py", "yeto/rl/teacher_forcing.py", "yeto/rl/grad_audit.py",
     # harness test workload (audit R14)
     "yeto/rl/tool_wait_workload.py",
-    # S27 G-FG: Megatron masters and the HF-named boundary (they act on the objects
+    # Megatron masters and the HF-named boundary (they act on the objects
     # the backend hands them; no framework import)
     "yeto/rl/megatron_masters.py", "yeto/rl/megatron_hf_boundary.py",
-    # S27 G-FL: the Ascend recipe's plugin table (imports the user's plugin files by
+    # The Ascend recipe's plugin table (imports the user's plugin files by
     # path at install time; no framework import of its own) and Megatron's gradient
     # check (reads attributes off the DDP config the backend hands it)
     "yeto/rl/ascend_plugin_stack.py", "yeto/rl/megatron_grad_checks.py",
@@ -157,14 +157,14 @@ def scan(root: Path = REPO) -> list[Violation]:
                     found.setdefault((rel, prefix, line), v)
 
     for rel in _files(root, CORE_DIRS, CORE_FILES, CORE_EXCLUDED_DIRS):
-        check(rel, CORE_FORBIDDEN, "中立核心")
+        check(rel, CORE_FORBIDDEN, "neutral core")
     for name, dirs in ADAPTER_DIRS.items():
         others = tuple(p for other, ds in ADAPTER_DIRS.items() if other != name for p in ds)
         others = tuple(p.replace("/", ".") for p in others)
         for rel in _files(root, dirs):
-            check(rel, others, f"适配层 {name} 互相 import")
+            check(rel, others, f"adapter {name} imports another adapter")
     for rel in _files(root, CLOUD_DIRS, CLOUD_FILES):
-        check(rel, ADAPTERS, "云层/启动层 import 适配层")
+        check(rel, ADAPTERS, "cloud/launch layer imports an adapter")
     return sorted(found.values(), key=lambda v: (v.file, v.module, v.line))
 
 
@@ -185,16 +185,16 @@ def problems(violations: list[Violation], allowlist: dict, cap: int) -> list[str
     keys = {v.key for v in violations}
     for v in violations:
         if v.key not in allowlist:
-            out.append(f"新增违规 [{v.rule}] {v.file}:{v.line} import {v.imported} "
-                       f"(被禁模块 {v.module})；规则见 {README}")
+            out.append(f"new violation [{v.rule}] {v.file}:{v.line} import {v.imported} "
+                       f"(forbidden module {v.module}); rules in {README}")
     for key in sorted(set(allowlist) - keys):
-        out.append(f"白名单条目已不存在于代码：{key[0]}\t{key[1]} —— 请删白名单条目"
-                   f"（{ALLOWLIST.relative_to(REPO)}），并把 ALLOWLIST_CAP 减一；见 {README}")
+        out.append(f"allowlist entry no longer in the code: {key[0]}\t{key[1]} -- delete the allowlist entry "
+                   f"({ALLOWLIST.relative_to(REPO)}) and lower ALLOWLIST_CAP by one; see {README}")
     if len(allowlist) > cap:
-        out.append(f"白名单 {len(allowlist)} 条超过上限 {cap}：白名单只减不增（{README}）")
+        out.append(f"allowlist has {len(allowlist)} entries, above the cap {cap}: the allowlist may only shrink ({README})")
     elif len(allowlist) < cap:
-        out.append(f"白名单已减到 {len(allowlist)} 条：请把 ALLOWLIST_CAP 从 {cap} 改为 "
-                   f"{len(allowlist)}（只减不增）")
+        out.append(f"allowlist is down to {len(allowlist)} entries: change ALLOWLIST_CAP from {cap} to "
+                   f"{len(allowlist)} (it may only go down)")
     return out
 
 
@@ -311,16 +311,16 @@ def test_adapters_and_cloud_layer_rules(tmp_path):
 
 def test_fixed_violation_still_listed_asks_to_delete_the_entry(tmp_path):
     root = _tree(tmp_path, {"yeto/rl/engine/driver.py": "import json\n"})
-    stale = {("yeto/rl/engine/driver.py", "yeto.rl.miles"): "# E3"}
+    stale = {("yeto/rl/engine/driver.py", "yeto.rl.miles"): "# stale"}
     found = problems(scan(root), stale, 1)
-    assert len(found) == 1 and "请删白名单条目" in found[0]
+    assert len(found) == 1 and "delete the allowlist entry" in found[0]
 
 
 def test_allowlist_cap_only_goes_down(tmp_path):
     root = _tree(tmp_path, {"yeto/rl/engine/driver.py": "import miles\n"})
     entry = {("yeto/rl/engine/driver.py", "miles"): ""}
     assert problems(scan(root), entry, 1) == []
-    assert any("超过上限" in p for p in problems(scan(root), entry, 0))
+    assert any("above the cap" in p for p in problems(scan(root), entry, 0))
     assert any("ALLOWLIST_CAP" in p for p in problems(scan(root), entry, 2))
 
 
@@ -330,7 +330,7 @@ def test_allowlist_entries_carry_a_note():
 
 
 # ------------------------------------------------- one import path per module
-# rl-code-quality-cleanup 0.5/0.6 (spec "模块只有一个正式引用路径"): the 46
+# rl-code-quality-cleanup 0.5/0.6 (spec "one official import path per module"): the 46
 # forwarding stubs are gone; no file may import an old path.
 OLD_PATHS = ("yeto.rl.engine.miles_adapter",) + tuple(m for m in LEGACY if m != "yeto.rl.overlays")
 OLD_PATH_SCOPES = ("yeto", "tests", "scripts", "tools")
@@ -358,8 +358,6 @@ def test_no_file_imports_an_old_forwarding_path():
 def test_forwarding_stubs_are_gone():
     assert not (REPO / "yeto/rl/engine/miles_adapter").exists()
     for old in OLD_PATHS:
-        if old == "yeto.rl.learner":
-            continue  # command-line entry only (python -m), not importable
         assert not (REPO / (old.replace(".", "/") + ".py")).exists(), old
 
 
@@ -369,11 +367,3 @@ def test_old_path_import_is_reported(tmp_path):
     found = scan_old_paths(root)
     assert len(found) == 2 and "tests/t.py:1" in found[0] and "tools/u.py:1" in found[1]
 
-
-def test_learner_entry_is_not_importable():
-    import importlib
-
-    import pytest
-
-    with pytest.raises(ImportError, match="command-line entry only"):
-        importlib.import_module(".".join(("yeto", "rl", "learner")))

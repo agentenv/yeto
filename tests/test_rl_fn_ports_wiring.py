@@ -1,4 +1,4 @@
-"""G2: on the real ports path the ExecutionProfile is ``miles-lora-partitioned-serial``;
+"""On the real ports path the ExecutionProfile is ``miles-lora-partitioned-serial``;
 Flash-Next full must still get its declared edges (by model fingerprint), and
 "declared AND certified (rollout-only)" stays the only way an edge is kept."""
 from types import SimpleNamespace

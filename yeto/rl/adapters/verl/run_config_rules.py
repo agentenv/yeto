@@ -1,9 +1,9 @@
-"""verl-only checks of the neutral run config (decoupling 4.2 role; rl-verl-backend).
+"""verl-only checks of the neutral run config.
 
 Two training engines (``megatron_engine.engine_for``):
 
 * FSDP2: TP = PP = EP = 1, data parallel over the island's cards;
-* Megatron (S27 G-DC, V8): TP / PP / EP > 1; the run then trains full
+* Megatron: TP / PP / EP > 1; the run then trains full
   parameters on the Megatron engine island (``megatron_engine``).
 
 No Megatron reference checkpoint either way (verl loads the HF model).
@@ -25,11 +25,10 @@ def check_trainer_parallel(actor_gpus: int, tensor_parallel: int, pipeline_paral
         raise ValueError("verl backend: TP*PP must divide the trainer GPUs (TP/PP > 1: Megatron engine)")
 
 
-# S26 E7 had refused EP > 1 (no verl Megatron engine in this adapter). S27 G-DC
-# wires the Megatron engine island (megatron_engine): EP > 1 trains there.
-EP_NEEDS_MEGATRON = ("verl 后端的专家并行（EP>1）只在 Megatron 引擎岛上（megatron_engine）："
-                     "要求全参数、--rl-single-island-no-sync 或 --rl-sync-preset full-parameter、"
-                     "--rl-placement fixed-partition")
+# EP > 1 trains on the Megatron engine island (megatron_engine).
+EP_NEEDS_MEGATRON = ("verl backend expert parallelism (EP>1) only runs on the Megatron engine island "
+                     "(megatron_engine): it requires full parameters, --rl-single-island-no-sync or "
+                     "--rl-sync-preset full-parameter, --rl-placement fixed-partition")
 
 
 def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
@@ -46,7 +45,7 @@ def megatron_problems(args) -> list[str]:
     """Why a run with TP/PP/EP > 1 cannot run on the verl Megatron island ([] when it can);
     the island refuses the same combinations at start (``island_entry.megatron_island_plan``).
 
-    S27 G-FG: one island without an outer sync (``--rl-single-island-no-sync``), or
+    One island without an outer sync (``--rl-single-island-no-sync``), or
     islands in a full-parameter session (``--rl-sync-preset full-parameter``,
     ``megatron_engine.sync_problems``)."""
     from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SYNC_PRESET_ALIASES
@@ -65,7 +64,7 @@ def megatron_problems(args) -> list[str]:
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition")
     if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0 and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
-        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1")  # S27 G-EV: rollout ahead
+        problems.append("--rl-max-policy-age 0, or --rl-rollout-ahead 1")  # Rollout ahead
     return problems
 
 
@@ -75,7 +74,7 @@ def check_engine_shape(args) -> None:
         return
     problems = megatron_problems(args)
     if problems:
-        raise ValueError(f"{EP_NEEDS_MEGATRON}；缺：" + ", ".join(problems))
+        raise ValueError(f"{EP_NEEDS_MEGATRON}; missing: " + ", ".join(problems))
 
 
 def megatron_run(args) -> bool:
@@ -89,21 +88,21 @@ def megatron_run(args) -> bool:
 
 
 def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) -> None:
-    """agentic-rollout-utilization 6.2: the pinned verl fork has no usable
+    """The pinned verl fork has no usable
     over-sample cut-off in synchronous mode (``rollout.over_sample_rate`` is
     defined but never used), so over-sampling is refused, not ignored."""
     if over_sampling_batch_size != rollout_batch_size:
         raise ValueError(
-            "verl 后端尚未实现多发截止（阶段 0，任务 6.2b）：--over-sampling-batch-size "
-            f"{over_sampling_batch_size} 必须等于 --rollout-batch-size {rollout_batch_size}")
+            "the verl backend does not implement the over-sampling cut-off: --over-sampling-batch-size "
+            f"{over_sampling_batch_size} must equal --rollout-batch-size {rollout_batch_size}")
 
 
-# S25 N10.3b: the advantage estimator the verl agentic path needs
+# The advantage estimator the verl agentic path needs
 # (``algorithm.adv_estimator``; registered by ``.advantage`` in the trainer process).
 AGENTIC_ADV_ESTIMATOR = "yeto_grpo"
 
 
-# S25 N10.4: the Miles agentic wiring has no verl spelling.  The verl agentic
+# The Miles agentic wiring has no verl spelling.  The verl agentic
 # path is the yeto ``HarborAgentLoop`` (agent loop ``yeto_harbor``), selected per
 # data row, not these flags; passing them used to be ignored without a word.
 AGENTIC_FLAGS = (
@@ -122,24 +121,24 @@ AGENTIC_FLAGS = (
 
 def check_agentic(args) -> None:
     """Refuse Miles agentic options on the verl backend instead of ignoring them,
-    and refuse a ``--rl-agentic-harbor`` shape the island cannot run (S27 G-FS)."""
+    and refuse a ``--rl-agentic-harbor`` shape the island cannot run."""
     given = [flag for attr, flag in AGENTIC_FLAGS if getattr(args, attr, None) not in (None, False, [], "")]
     if given:
         raise ValueError(
-            "verl 后端不支持 Miles agentic 参数：" + ", ".join(given)
-            + "。verl 的 agentic 路径是 yeto HarborAgentLoop（agent loop 名 yeto_harbor，"
-            "由数据行 agent_name 选择）")
+            "the verl backend does not support Miles agentic options: " + ", ".join(given)
+            + ". The verl agentic path is the yeto HarborAgentLoop (agent loop yeto_harbor, "
+            "selected by each data row's agent_name)")
     if getattr(args, "rl_agentic_harbor", False):
         problems = agentic_problems(args)
         if problems:
-            raise ValueError("--rl-agentic-harbor 在 verl 后端只覆盖同步共置训练岛（S27 G-FS 第一次上卡的形状）；缺："
+            raise ValueError("--rl-agentic-harbor on the verl backend only covers the synchronous colocated training island; missing: "
                              + ", ".join(problems))
 
 
 def agentic_problems(args) -> list[str]:
     """Why ``--rl-agentic-harbor`` cannot run on this verl shape ([] when it can).
 
-    Covered (S27 G-FS): the synchronous training island that both generates and
+    Covered: the synchronous training island that both generates and
     trains (``trainer.py`` + ``AgentLoopManagerTQ``, the records proxy over its
     own rollout servers).  Not covered, and refused rather than ignored: the
     Megatron engine island (its own round loop, ``megatron_ports``), the
@@ -149,13 +148,13 @@ def agentic_problems(args) -> list[str]:
     """
     problems = []
     if megatron_run(args):
-        problems.append("TP=PP=EP=1（Megatron 引擎岛没有 agent loop 管理器）")
+        problems.append("TP=PP=EP=1 (the Megatron engine island has no agent loop manager)")
     if int(getattr(args, "rl_max_policy_age", 0) or 0) and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
-        problems.append("--rl-max-policy-age 0（fully_async 的 rollouter 会改写每行的 agent_name）")
+        problems.append("--rl-max-policy-age 0 (the fully_async rollouter rewrites every row's agent_name)")
     if (getattr(args, "rl_sample_role", None) or "both") != "both" or getattr(args, "rl_island_sample_role", None):
-        problems.append("不分采样岛 / 缓冲训练岛")
+        problems.append("no sampler / buffer-trainer split")
     if getattr(args, "rl_eval_interval", None) is not None:
-        problems.append("不开 --rl-eval-interval（评测集也要跑 trial，未接）")
+        problems.append("no --rl-eval-interval (the eval rows would need trials too; not wired)")
     return problems
 
 
@@ -164,13 +163,13 @@ def refuse_agentic_argv(ignored: list[str]) -> None:
     flags = {flag for _, flag in AGENTIC_FLAGS}
     given = sorted({token.split("=", 1)[0] for token in ignored} & flags)
     if given:
-        raise ValueError("verl 后端不支持 Miles agentic 参数：" + ", ".join(given))
+        raise ValueError("the verl backend does not support Miles agentic options: " + ", ".join(given))
 
 
 def hf_export_supported(args) -> bool:
     """``--rl-export-hf-rounds`` on verl (``launch.rl_ports._check_hf_export_launch_flags``):
-    the Megatron island (S27 G-DC) and synced full-parameter islands (S27 G-DS,
-    ``hf_export.VerlHfWriter``)."""
+    the Megatron island and synced full-parameter islands
+    (``hf_export.VerlHfWriter``)."""
     from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET
 
     return megatron_run(args) or (getattr(args, "training_mode", "sft") == "rl"
@@ -178,10 +177,10 @@ def hf_export_supported(args) -> bool:
 
 
 def check_eval(args) -> None:
-    """``--rl-eval-interval`` on verl (S27 G-EN, ``eval_port``): the synchronous
+    """``--rl-eval-interval`` on verl (``eval_port``): the synchronous
     trainer runs verl's ``_validate`` behind the driver's evaluate hook; the
-    fully_async and buffer-trainer paths and the Megatron island (S27 G-DC,
-    ``megatron_ports.run_megatron_island``) have no such hook, so they refuse the
+    fully_async and buffer-trainer paths and the Megatron island
+    (``megatron_ports.run_megatron_island``) have no such hook, so they refuse the
     eval before launch (the island refuses it again)."""
     if getattr(args, "rl_eval_interval", None) is None:
         return
@@ -189,7 +188,7 @@ def check_eval(args) -> None:
         raise ValueError("--rl-eval-interval on verl does not cover the Megatron island "
                          "(TP/PP/EP > 1): it has no evaluate hook")
     if int(getattr(args, "rl_max_policy_age", 0) or 0) > 0 and not int(getattr(args, "rl_rollout_ahead", 0) or 0):
-        # S27 G-EV: rollout ahead keeps the synchronous trainer; the evaluation runs after
+        # Rollout ahead keeps the synchronous trainer; the evaluation runs after
         # the publication, while no batch generates (the driver joined it before)
         raise ValueError("--rl-eval-interval on verl needs --rl-max-policy-age 0 (or --rl-rollout-ahead 1): "
                          "verl's _validate runs on the synchronous trainer; the fully_async path has no "

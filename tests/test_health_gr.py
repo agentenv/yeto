@@ -1,7 +1,7 @@
-"""tools/eval/health_gr.py: the merge-boundary reward check reads the whole batch
+"""yeto/rl/health/miles.py: the merge-boundary reward check reads the whole batch
 (Miles rollout/raw_reward), not the island tape's trajectory records, which stop at
-256 of 512 samples per round (s27-bb-a1 island 1 round 146: half batch 0.72 -> 0.31,
-FAIL; whole batch 0.51 -> 0.34, GBB-CLOSING.md 5.4)."""
+256 of 512 samples per round (observed: half batch 0.72 -> 0.31,
+FAIL; whole batch 0.51 -> 0.34)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import json
 
 import pytest
 
-from tools.eval import health_gr as hg
+from yeto.rl.health import miles as hg
 
-RUN = "s27-test"
+RUN = "health-test"
 
 
 def _line(island: int, text: str) -> str:
@@ -65,7 +65,7 @@ def test_the_merge_boundary_check_uses_the_whole_batch_reward(tmp_path):
     assert jump["acc"] == (0.55, 0.48) and jump["d_acc"] == pytest.approx(-0.07)
     assert jump["half_batch_acc"] == (0.9, 0.3)  # the old check failed here (drop 0.6 > 0.35)
     assert check["status"] == "PASS" and jump["status"] == "PASS"
-    assert "全批次 raw_reward 1 个边界，半批次 acc 0 个边界" in check["value"]
+    assert "whole-batch raw_reward 1 boundaries, half-batch acc 0 boundaries" in check["value"]
 
 
 def test_a_whole_batch_drop_past_the_threshold_still_fails(tmp_path):
@@ -78,7 +78,7 @@ def test_without_raw_reward_the_boundary_falls_back_to_the_half_batch(tmp_path):
     raw = {0: 0.50, 1: 0.52, 2: None, 3: 0.48, 4: 0.50, 5: 0.51}
     check, (jump,) = _merge_jump(_write_run(tmp_path, raw, HALF))
     assert jump["acc_source"] == "acc" and jump["acc"] == (0.9, 0.3)
-    assert check["status"] == "FAIL" and "半批次 acc 1 个边界" in check["value"]
+    assert check["status"] == "FAIL" and "half-batch acc 1 boundaries" in check["value"]
 
 
 def test_the_cli_writes_the_json_outside_the_run_dir(tmp_path, capsys):

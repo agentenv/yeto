@@ -1,4 +1,4 @@
-"""FP8 E4M3 per-channel quantization (S26 E6 tier 2): rule, error bound, reference."""
+"""FP8 E4M3 per-channel quantization (tier 2): rule, error bound, reference."""
 
 from __future__ import annotations
 

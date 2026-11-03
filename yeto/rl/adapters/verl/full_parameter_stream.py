@@ -1,4 +1,4 @@
-"""verl binding of the full-parameter role stream (S27 B10 phase 2, V4/V5).
+"""verl binding of the full-parameter role stream .
 
 The engine-neutral stream (:class:`yeto.rl.engine.full_parameter_stream.
 FullParameterRoleStream`) answers the unified syncer's PULL permits, stages its
@@ -25,7 +25,7 @@ Differences from the Miles binding, all deliberate:
   rank 0 builds the fragment's flat payload, checks it finite and hashes it,
   and the payload reaches the driver as a numpy array (Ray stores numpy out of
   band; torch tensors would go through ``torch.save`` pickling).  A local
-  round's capture is lazy (S27 G-EC, the engine's lazy capture): it reads
+  round's capture is lazy (the engine's lazy capture): it reads
   nothing, and only the fragments a push needs are read, at materialize time,
   while the trainer still holds them; every
   ``YETO_FULL_PARAMETER_FULL_CHECK_EVERY``-th round and the version-0 cut read
@@ -38,10 +38,10 @@ Differences from the Miles binding, all deliberate:
   optimizer proof is off (``_optimizer_states`` returns None);
 * not offered: sync/train overlap and MoE expert token weights (refused at
   configuration);
-* peer recovery (S27 G-ED): the engine-neutral stream island
+* peer recovery: the engine-neutral stream island
   (:mod:`yeto.rl.engine.stream_recovery`) over the FSDP2 rank files of
   :mod:`.cut` (:mod:`.peer_recovery`);
-* bf16 broadcast deltas (``--bcast-delta``, S27 G-DS) need nothing here: the
+* bf16 broadcast deltas (``--bcast-delta``) need nothing here: the
   ``SyncerClient`` decodes them into the f32 fragment before the inbound sink
   sees a byte (``yeto.downlink`` module doc), so the sink stays f32-only.
 """
@@ -114,7 +114,7 @@ def refuse_unsupported(config: RoleStreamConfig) -> None:
     if config.algorithm != "grpo" or config.role != "actor":
         refused.append(f"{config.algorithm}/{config.role} (verl trains the GRPO actor only)")
     if refused:
-        raise ValueError("verl 全参数岛不支持: " + "; ".join(refused))
+        raise ValueError("the verl full-parameter island does not support: " + "; ".join(refused))
 
 
 # ----------------------------------------------------------------------------- cuts and fragments
@@ -146,7 +146,7 @@ class VerlFullParameterCut:
     fragment, held in the island driver.  The tensors are never written after
     the cut is made (cuts and stored fragments share them).
 
-    A lazy cut (S27 G-EC, :meth:`VerlChunkedFullParameterAdapter.capture`)
+    A lazy cut (:meth:`VerlChunkedFullParameterAdapter.capture`)
     reads nothing: every fragment's entry in ``fragments`` is ``None`` and its
     hash in ``fragment_hashes`` is a label, unique to this capture
     (``lazy_ids``).  :meth:`VerlChunkedFullParameterAdapter.materialize` reads
@@ -402,7 +402,7 @@ class VerlRoundEvidence:
     persisted trajectory evidence): the round, the policy that sampled it and
     the exact trained batch.
 
-    ``generated_by`` (S27 G-EV, rollout ahead): set by :meth:`bound_to_round_policy`
+    ``generated_by`` (rollout ahead): set by :meth:`bound_to_round_policy`
     to the policy that generated a batch one version before the round's own."""
 
     rollout_id: int
@@ -466,7 +466,7 @@ class VerlFullParameterGroup:
     async def release_memory(self, host: bool = True) -> list[dict]:
         """Free the workers' cached device blocks (:func:`.full_parameter.remote_release_memory`);
         the island calls it after an export, whose gathers leave large blocks cached.
-        ``host``: also trim the host heap when ``YETO_HOST_MEMORY=trim`` (S27 G-EZ3)."""
+        ``host``: also trim the host heap when ``YETO_HOST_MEMORY=trim``."""
 
         return await asyncio.to_thread(self.island.call_workers, fp.remote_release_memory, host)
 
@@ -503,7 +503,7 @@ class VerlFullParameterGroup:
         arrays = {name: tensor.contiguous().numpy() for name, tensor in tensors.items()}
         return await asyncio.to_thread(self._apply_on_workers, arrays)
 
-    # The worker calls of a fragment read and an apply (S27 G-FG: the Megatron
+    # The worker calls of a fragment read and an apply (the Megatron
     # engine island's group, .megatron_full_parameter, replaces these two).
     def _export_on_workers(self, units: list, numel: int, payload: bool, sha256: bool) -> list[dict]:
         return self.island.call_workers(fp.remote_export_flat, units, numel, payload, sha256)
@@ -562,7 +562,7 @@ class VerlChunkedFullParameterAdapter:
         # The group's trained-round count when ``resident`` was established: a
         # lazy fragment is read from the trainer only while it is unchanged.
         self.resident_rounds: int | None = None
-        # S27 G-EC: the time split of the last export, materialize and apply
+        # The time split of the last export, materialize and apply
         # (the stream prints it as a rank-stats line).
         self.last_stats: dict[str, dict[str, Any]] = {}
 
@@ -646,7 +646,7 @@ class VerlChunkedFullParameterAdapter:
 
     async def fragment_digests(self, group: VerlFullParameterGroup) -> tuple[str, ...]:
         """The content hash of every fragment, hashed on the reading rank: no
-        payload crosses Ray and the driver keeps nothing (S27 G-EZ2). The hashes
+        payload crosses Ray and the driver keeps nothing. The hashes
         are the ones :meth:`capture` gets from the same worker call."""
 
         stats = _Stats("digest", lazy=False)
@@ -666,7 +666,7 @@ class VerlChunkedFullParameterAdapter:
                       lazy: bool = False) -> VerlFullParameterCut:
         """Cut the trainer's current parameters.
 
-        ``lazy`` (with ``defer_payload``; S27 G-EC, the engine's lazy capture):
+        ``lazy`` (with ``defer_payload``; the engine's lazy capture):
         read nothing; every fragment carries a fresh label instead of a content
         hash, and :meth:`materialize` reads the fragments a push needs.
         Otherwise read and hash every fragment on the workers.  A deferred
@@ -957,7 +957,7 @@ class VerlFullParameterRoleStream(FullParameterRoleStream):
         return session_contract_hash(layout_hash, self.config,
                                      backend_identity_sha256=self.backend_identity_sha256)
 
-    # S27 G-EC: the engine's deferred and lazy capture.  The verl adapter reads
+    # The engine's deferred and lazy capture.  The verl adapter reads
     # every fragment from the trainer on demand (no store to defer into), so
     # both follow only their switches.
     def _supports_deferred_capture(self) -> bool:
@@ -979,7 +979,7 @@ class VerlFullParameterRoleStream(FullParameterRoleStream):
                   f"{json.dumps({phase: stats}, sort_keys=True)}", file=sys.stderr, flush=True)
 
     def _recovery_island(self, group, adapter, *, recovering: bool):
-        """S27 G-ED: peer recovery over the FSDP2 rank files (:mod:`.peer_recovery`)."""
+        """Peer recovery over the FSDP2 rank files (:mod:`.peer_recovery`)."""
         from yeto.rl.engine.stream_recovery import recovery_island
 
         from .peer_recovery import VerlRankShards
@@ -1081,7 +1081,7 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
         bcast_delta=bool(section.get("bcast_delta", False)),
         peer_recovery=PeerRecoveryOptions.from_plan(section.get("peer_recovery")),
         **({"island_lease_s": float(pool["lease_s"]), "syncer_epoch": int(pool["syncer_epoch"])} if pool
-           # S27 G-ED: a fixed roster with peer recovery names the syncer epoch in its HELLO
+           # A fixed roster with peer recovery names the syncer epoch in its HELLO
            else {"syncer_epoch": int(section["syncer_epoch"])} if "syncer_epoch" in section else {}),
     )
 
@@ -1113,10 +1113,10 @@ def build_full_parameter_sync(island: Any, plan: Mapping[str, Any], *, backend_i
 
 def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_identity_sha256: str,
                           group: VerlFullParameterGroup | None = None):
-    """``(sync, policy state)`` of a full-parameter verl island (S27 B10), for every
+    """``(sync, policy state)`` of a full-parameter verl island, for every
     trainer that holds the FSDP2 actor workers behind ``island.call_workers``: the
     synchronous trainer (``trainer._full_parameter_ports``) and the fully_async and
-    buffer trainers (:mod:`.fully_async_full`, S27 G-EW).
+    buffer trainers (:mod:`.fully_async_full`).
 
     Sets ``island.full_group`` (the trainer port records each round on it). With an
     outer sync (``plan["full_parameter"]``): the engine-neutral ``FullParameterSync``
@@ -1124,7 +1124,7 @@ def full_parameter_policy(island: Any, plan: Mapping[str, Any], *, backend_ident
     local-only sync over :class:`VerlFullParameterLocalState`, whose layout hash
     becomes ``island.layout_hash``.
 
-    ``group`` (S27 G-FG): the trainer group to read and write through; the
+    ``group``: the trainer group to read and write through; the
     Megatron engine island passes its own (``.megatron_full_parameter``), the
     FSDP2 islands keep the default :class:`VerlFullParameterGroup`."""
     from yeto.rl.engine.bridges import LocalOnlySync
@@ -1159,11 +1159,11 @@ class VerlFullParameterLocalState:
     (``--rl-single-island-no-sync``): every export hashes the whole trainer on
     its reading rank and returns a trainer-resident handle (no tensors leave).
 
-    S27 G-EZ2: the export used to be a whole :meth:`~VerlChunkedFullParameterAdapter.capture`,
+    The export used to be a whole :meth:`~VerlChunkedFullParameterAdapter.capture`,
     which brings every fragment's FP32 payload into the island driver only to
     hash it, and keeps it there as the adapter's resident cut. For the 120B
     text model that is 449 GiB in the driver process on the head node, on top of
-    that node's share of the training state (npu1 n3: the driver's RSS reached
+    that node's share of the training state (on one node the driver's RSS reached
     374 GiB before the first step). The digest is the same content hash, taken
     from the same worker call without the payload."""
 
@@ -1180,7 +1180,7 @@ class VerlFullParameterLocalState:
         self.adapter: VerlChunkedFullParameterAdapter | None = None
         self.runner = _LoopRunner()
         self.policy_version = 0
-        # S28 G-LHASH: a group that can hash its shards in place (the Megatron group)
+        # A group that can hash its shards in place (the Megatron group)
         # gets the light digest on the rounds the driver does not fully verify;
         # YETO_RL_LIGHT_DIGEST=0 (or light_digest=False) keeps the full check every round.
         wanted = local_digest.enabled() if light_digest is None else bool(light_digest)
@@ -1196,7 +1196,7 @@ class VerlFullParameterLocalState:
     def _adapter(self) -> VerlChunkedFullParameterAdapter:
         if self.adapter is None:
             manifests = self.runner.run(self.group.manifests())
-            # S27 G-EQ3: a persistent buffer is not sharded, so a rank whose copy did
+            # A persistent buffer is not sharded, so a rank whose copy did
             # not come from the checkpoint computes wrong log-probs with perfectly
             # fine parameters; this raises before any training happens.
             digests = fp.agree_on_buffers(manifests)
@@ -1210,7 +1210,7 @@ class VerlFullParameterLocalState:
             self.adapter = VerlChunkedFullParameterAdapter(layout, max_chunk_bytes=self.max_chunk_bytes)
         return self.adapter
 
-    # S27 G-EU (VERL-PARITY #26): --rl-verify-every N turns this on (allow_unverified_rounds);
+    # --rl-verify-every N turns this on (allow_unverified_rounds);
     # the rounds the driver does not verify publish export_identity (no whole cut, no hash)
     supports_unverified_rounds = False
 
@@ -1220,7 +1220,7 @@ class VerlFullParameterLocalState:
 
         version = self.policy_version if policy_version is None else int(policy_version)
         adapter = self._adapter()
-        # S27 G-EZ2 (s27-verl-pool-profile): hash every fragment on its reading rank
+        # Hash every fragment on its reading rank
         # instead of capturing the whole cut into the island driver, which for the 120B
         # text model is 449 GiB of FP32 payload in the driver process. Same content hash.
         hashes = self.runner.run(adapter.fragment_digests(self.group))
@@ -1261,7 +1261,7 @@ class VerlFullParameterLocalState:
         return state
 
     def allow_unverified_rounds(self) -> None:
-        """S27 G-EU (``--rl-verify-every N``, as Miles' S27 C5): publications the driver
+        """Publications the driver
         does not verify use :meth:`export_identity` (no whole cut, no SHA-256)."""
         self.supports_unverified_rounds = True
 
@@ -1279,7 +1279,7 @@ class VerlFullParameterLocalState:
         if last is None:
             return None
         mark = self._mark()
-        # S29 --rl-measure-no-verify: no release reads the light digest either, and it
+        # --rl-measure-no-verify: no release reads the light digest either, and it
         # reads every shard (~45 s a round on the 120B island)
         if self.light and not getattr(self, "measure_no_verify", False):
             return self._export_light(int(policy_version), last, mark)
@@ -1294,7 +1294,7 @@ class VerlFullParameterLocalState:
             materialize_fn=_never_materialize, weights_mark=mark, holds_fn=self._holds, verified=False)
 
     def _measurement_base(self, policy_version: int):
-        """S29 --rl-measure-no-verify: the base an unverified publication refers to,
+        """--rl-measure-no-verify: the base an unverified publication refers to,
         built from the layout alone. ``layout_hash`` comes from the manifests and the
         payload size from the parameter count, so no fragment is exported or hashed --
         :meth:`export` would read and hash all of them (about 480 GB on the 120B
@@ -1314,7 +1314,7 @@ class VerlFullParameterLocalState:
             verified=False)
 
     def _export_light(self, policy_version: int, last, mark: dict):
-        """S28 G-LHASH: the resident state of a round that is not fully verified, with
+        """The resident state of a round that is not fully verified, with
         the light digest (:mod:`.local_digest`) as its content hash.  ``verified`` stays
         False: the light digest depends on the TP/PP/EP split and is not the
         HF-canonical hash, so nothing compares it with the full check's."""
@@ -1362,7 +1362,7 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
     parser.add_argument("--rl-sync-matrix-merge", choices=("avg", "rda"), default="avg")
-    # S27 G-DN: the rest of the launcher's full-parameter island flags
+    # The rest of the launcher's full-parameter island flags
     # (launch.rl_island_task._rl_trainable_island_flags), so none is ignored:
     # engine-neutral push and transport options go to the stream config; the
     # options the verl stream does not offer are parsed only to be refused.
@@ -1377,30 +1377,30 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--sweep-overlap", action="store_true")
     parser.add_argument("--sweep-expert-token-weights", action="store_true")
     parser.add_argument("--rl-peer-recovery-store", default=None)
-    # S27 G-ED: peer recovery (launch.peer_recovery.island_flags; Miles island spellings)
+    # Peer recovery (launch.peer_recovery.island_flags; Miles island spellings)
     parser.add_argument("--rl-peer-recovery-ttl-s", type=float, default=None)
     parser.add_argument("--rl-peer-recover", action="store_true")
     parser.add_argument("--rl-peer-recovery-staging", default=None)
-    # S27 G-EL (neutral since the s27-next2 merge, engine.stream_recovery): the
+    # The
     # MANIFEST re-read wait; the donor write mode (no capture on verl: inline either way)
     parser.add_argument("--rl-peer-recovery-manifest-wait-s", type=float, default=None)
     parser.add_argument("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None)
-    # S27 G-DS: the island's HF exports and data position (Miles island spellings;
+    # The island's HF exports and data position (Miles island spellings;
     # see full_parameter_extras). Added only when the island parser has none yet:
-    # the verl Megatron island (S27 G-DC) parses the export flags itself.
+    # the verl Megatron island parses the export flags itself.
     for flag in ("--rl-export-hf-rounds", "--rl-export-hf-store", "--rl-data-position-store"):
         if flag not in parser._option_string_actions:
             parser.add_argument(flag, default=None)
-    # S27 G-EC: the Miles training and observation options verl can express.
+    # The Miles training and observation options verl can express.
     from .train_options import add_island_flags as add_train_option_flags
 
     add_train_option_flags(parser)
 
 
 def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
-    """S27 G-DS: the plan keys of a full-parameter island's HF exports and data
+    """The plan keys of a full-parameter island's HF exports and data
     position, both absent when off (the plans of other runs are unchanged);
-    S27 G-EC: also the observation keys of :func:`.train_options.observation_plan`.
+    Also the observation keys of :func:`.train_options.observation_plan`.
 
     * ``hf_exports`` (``--rl-export-hf-rounds`` with ``--rl-export-hf-store``,
       ``yeto.rl.engine.hf_export``): ``{"rounds", "store"}`` with the island's
@@ -1430,7 +1430,7 @@ def full_parameter_extras(args: Any, *, sync: str) -> dict[str, Any]:
         if sync == "none":
             raise ValueError("--rl-data-position-store belongs to a synced full-parameter island")
         out["data_position_store"] = str(store)
-    from .train_options import observation_plan  # S27 G-EC: absent when off
+    from .train_options import observation_plan  # Absent when off
 
     out.update(observation_plan(args))
     return out
@@ -1473,7 +1473,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         from yeto.rl.engine.run_flags import local_training_steps_line
 
         print(local_training_steps_line(args.global_rounds, args.fragments,
-                                        who=f"yeto-verl island {args.learner_id}"), flush=True)  # S29 D7
+                                        who=f"yeto-verl island {args.learner_id}"), flush=True)
     if not _sha256_hex(args.parameter_layout_sha256) or not _sha256_hex(args.syncer_profile_sha256):
         raise ValueError("a synced full-parameter island needs --parameter-layout-sha256 and "
                          "--syncer-profile-sha256 (64 lowercase hex)")
@@ -1484,7 +1484,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         ("--sweep-expert-token-weights", getattr(args, "sweep_expert_token_weights", False)),
     ) if on]
     if refused:
-        raise ValueError("verl 全参数岛不支持: " + ", ".join(refused))
+        raise ValueError("the verl full-parameter island does not support: " + ", ".join(refused))
     lead = getattr(args, "sweep_max_local_rounds_ahead", None)
     if lead is not None and not async_rounds:
         raise ValueError("--sweep-max-local-rounds-ahead needs --full-parameter-rounds async")
@@ -1526,9 +1526,9 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
         "matrix_merge": args.rl_sync_matrix_merge,
         "island_pool": pool,
     }
-    if getattr(args, "bcast_delta", False):  # S27 G-DS: absent when off (plans unchanged)
+    if getattr(args, "bcast_delta", False):  # Absent when off (plans unchanged)
         out["full_parameter"]["bcast_delta"] = True
-    if recovery is not None:  # S27 G-ED: absent when off (plans unchanged)
+    if recovery is not None:  # Absent when off (plans unchanged)
         if not async_rounds or getattr(args, "bcast_delta", False):
             raise ValueError("--rl-peer-recovery-store needs --full-parameter-rounds async without "
                              "--bcast-delta (the syncer resends whole fragments)")
@@ -1539,7 +1539,7 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
 
 
 def _peer_recovery(args: Any, *, sync: str):
-    """S27 G-ED: the island's peer recovery options (``--rl-peer-recovery-*``,
+    """The island's peer recovery options (``--rl-peer-recovery-*``,
     and the launcher's relaunch marker), or None; refused on an island
     without an outer sync."""
     from yeto.rl.engine.stream_recovery import peer_recovery_options

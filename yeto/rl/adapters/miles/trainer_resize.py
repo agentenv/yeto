@@ -1,12 +1,11 @@
-"""Miles implementation of :class:`~yeto.rl.engine.trainer_transition.TrainerOps` (rl-infra-spec 4.7; E3).
+"""Miles implementation of :class:`~yeto.rl.engine.trainer_transition.TrainerOps`.
 
 Glue only: ``save_cut`` -> :meth:`MilesTrainerGroup.save_cut` with the
 driver-supplied :class:`CutContext`; ``resize`` -> :func:`rebuild_resharded`
 (fork-M6 rebuild on the target bundle view with resized args, resharded
 restore, one fallback to the old shape); ``restore_source`` -> the same
 rebuild in the source shape with an exact restore. The driver/entry
-(INFRA-E1) supplies the callables below; see
-the interface request in ``evidence/infra-e3/plan.md`` §5 (no entry patch yet).
+supplies the callables below.
 """
 
 from __future__ import annotations

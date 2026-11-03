@@ -1,4 +1,4 @@
-"""rl-infra-spec task 1.7 (pure accounting part)."""
+"""Execution timeline (pure accounting part)."""
 
 from __future__ import annotations
 

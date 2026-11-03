@@ -7,7 +7,7 @@ copied or skipped, seconds; ``commit`` also has ``copy_seconds``, so
 propagation, the master-to-model copy, the model/master check and the weights
 backup).  :func:`report_rank_stats` reads them through ``run_plugin`` after an
 island operation and prints one ``[yeto-full-parameter] rank stats`` line per
-rank (S27 G-AP: the evidence for where a boundary's time goes on the trainer).
+rank (the evidence for where a boundary's time goes on the trainer).
 
 Best effort: a group without ``run_plugin``, a Miles without the stats or a
 failed call prints why and never fails the island.

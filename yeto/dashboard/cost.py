@@ -1,11 +1,11 @@
-"""Cost estimate (design D7): price table x (GPU + CPU + memory) x wall clock.
+"""Cost estimate: price table x (GPU + CPU + memory) x wall clock.
 
-Host CPU/memory (tasks 8.2) are priced from ``host_prices`` ({cloud:
+Host CPU/memory are priced from ``host_prices`` ({cloud:
 {cpu_core_h, mem_gib_h}}) times the island's requested ``cpus`` /
-``memory_gib``; when either side is unknown the row is marked "仅 GPU".
+``memory_gib``; when either side is unknown the row is marked "GPU only".
 
 Every number here is an estimate, not a bill. An island whose price key is
-not in the table is "未定价" (``None``), never $0; local islands cost $0 and
+not in the table is "unpriced" (``None``), never $0; local islands cost $0 and
 are excluded from the efficiency ranking.
 """
 
@@ -15,13 +15,13 @@ import json
 from pathlib import Path
 
 EXAMPLE_PRICES = Path(__file__).with_name("prices.example.json")
-LOCAL_CLOUDS = ("local", "本地")
+LOCAL_CLOUDS = ("local", "\u672c\u5730")  # "local" in Chinese, as older tapes wrote it
 
 
 def load_prices(path: str | None) -> dict:
     p = Path(path) if path else EXAMPLE_PRICES
     data = json.loads(p.read_text(encoding="utf-8"))
-    data["_source"] = str(p) if path else "示例价目表（内置，非账单）"
+    data["_source"] = str(p) if path else "example price table (built in, not billing data)"
     return data
 
 
@@ -117,6 +117,6 @@ def cost_view(reducer, now: float) -> dict:
             "budget_pct": pct, "hours_to_cap": hours_to_cap,
             "unpriced": [r["id"] for r in rows if not r["priced"]],
             "gpu_only": [r["id"] for r in rows if r.get("gpu_only")],
-            "note": "估算：价目表 ×（GPU + CPU + 内存）× 墙钟；非账单"
-                    + ("；部分岛缺 CPU/内存规格，仅 GPU" if any(r.get("gpu_only") for r in rows) else ""),
+            "note": "estimate: price table x (GPU + CPU + memory) x wall clock; not billing data"
+                    + ("; some islands lack CPU/memory specs, GPU only" if any(r.get("gpu_only") for r in rows) else ""),
             "prices_source": reducer.prices.get("_source")}

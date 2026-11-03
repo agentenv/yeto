@@ -1,4 +1,4 @@
-"""The Harbor layer of the Miles and verl engine images (S26 E0.4).
+"""The Harbor layer of the Miles and verl engine images.
 
 Harbor is imported in-process by both backends (verl ``HarborAgentLoop``,
 Miles' Harbor example and ``records_generate``), so it cannot live in its own

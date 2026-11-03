@@ -1,4 +1,4 @@
-"""S19 small fixes: session server default port; syncer --resume only with a checkpoint."""
+"""Small fixes: session server default port; syncer --resume only with a checkpoint."""
 
 import subprocess
 from types import SimpleNamespace
@@ -115,7 +115,7 @@ def test_start_script_launches_fresh_without_checkpoint(tmp_path, monkeypatch):
 
 
 def test_session_server_port_block_avoids_shared_ranges():
-    """s19-compaction-g1-20261010f lost 31809 between Miles' free-port check and
+    """A GPU run lost port 31809 between Miles' free-port check and
     the server bind. The 32-port block (Miles default --session-server-workers)
     must stay out of every range another process may take a port from at any time:
     gVisor ephemeral 16000-65535 (Modal), Linux ephemeral 32768-60999,

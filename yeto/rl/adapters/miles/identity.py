@@ -1,4 +1,4 @@
-"""Backend identity of the Miles adapter (yeto-framework-decoupling 6.1, design D7).
+"""Backend identity of the Miles adapter (yeto-framework-decoupling 6.1).
 
 Fixed values: engine ``miles``, the pinned Miles commit (``MILES_NEXT_COMMIT``),
 device family ``nvidia`` (the only family Miles runs on here), and the hash of

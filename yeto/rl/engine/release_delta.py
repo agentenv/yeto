@@ -1,9 +1,9 @@
-"""bf16 delta releases: send the sampler only the weight words that changed (S27 G-BG).
+"""bf16 delta releases: send the sampler only the weight words that changed.
 
 A full-weight release is a whole HF checkpoint (Nemotron Nano: 63 GB). Between two
 policy versions most bf16 words do not change: at lr 1e-6 an Adam step moves a
-weight by about 1e-6, below half a bf16 step for most weights (CPU simulation,
-``s1-runs/s27-bg/delta_sim.py``: 0.9-1.5 % of the words per version). A *delta
+weight by about 1e-6, below half a bf16 step for most weights (a CPU
+simulation: 0.9-1.5 % of the words per version). A *delta
 release* therefore stores, for each weight file, the words that differ from the
 same file of the previous release; the sampler rebuilds the new file from its
 copy of the previous one. Lossless: the rebuilt file must have the sha256 the

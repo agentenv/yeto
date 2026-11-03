@@ -1,4 +1,4 @@
-"""Client of the syncer's sample relay (S27 G-EA; syncer ``sample_relay.rs``).
+"""Client of the syncer's sample relay (syncer ``sample_relay.rs``).
 
 The relay is a small in-memory queue on the head. Sampler islands on any
 cloud PUT rollout groups into the channel of a training island; that island
@@ -47,7 +47,7 @@ island member table retired this producer's member (a newer incarnation of
 the sampler joined on any channel, or its lease expired): fatal, the process
 does not come back under the same incarnation (:class:`RelayFenced`).
 
-Head gone (S27 G-EM): producers and consumers retry a broken link, but give
+Head gone: producers and consumers retry a broken link, but give
 up with :class:`RelayGone` once no request succeeded for ``gone_s`` seconds
 (default :data:`DEFAULT_GONE_S`); a producer's ``should_stop()`` ends the
 retries at once with :class:`RelayStopped`.

@@ -1,4 +1,4 @@
-"""Which island reads which rows of ``--data`` (S27 task assignment, P0/P1).
+"""Which island reads which rows of ``--data``.
 
 Plain rules (row ``i`` = the 0-based number of a row in ``--data``, in the
 order the rows are read, before any split):
@@ -15,12 +15,12 @@ order the rows are read, before any split):
   ``k`` reads the slot ``k/N``, where ``N`` is the number of those islands at
   launch (the launch log names why the dispenser does not apply). ``--rl-island-tasks`` replaces the slots
   with the user's task lists. ``--rl-data-split shared`` gives every island
-  every row, in the same order (the behaviour before S27 G-AV); it is for
+  every row, in the same order (the original behaviour); it is for
   controlled experiments only and the launch warns.
 * Sampler islands keep their own slots: sampler ``k`` of ``S`` samplers reads
   the slot ``k/S`` (``sample_roles.island_args``). Trainers that read the
   sample buffer read buffer lanes (``merged_release.BufferLane``), not data.
-  With ``--rl-data-split dispense`` (S27 P4) a synced group's sampler islands
+  With ``--rl-data-split dispense`` a synced group's sampler islands
   claim their rows from the group's actor syncer instead, and so does a
   sampler launch that joins the group (``--rl-dispense-addr``).
 * Passes: when an island has read every row of its slot, it starts pass 1,
@@ -33,16 +33,16 @@ order the rows are read, before any split):
 * Elastic membership: the slots are fixed at launch; ``N`` never changes. A
   replacement, relaunched or re-joined island keeps its learner id and so its
   slot, and its data position counts rows of that slot only. Known limits
-  until a central dispenser exists (P2): the rows of an island that left are
+  without the dispenser: the rows of an island that left are
   read by no island, a fast island starts its next pass while a slow island is
   still in its first, and an island added after the launch gets no slot.
-* Dispenser (``--rl-data-split dispense``, S27 P2, :mod:`.task_dispense`):
+* Dispenser (``--rl-data-split dispense``, :mod:`.task_dispense`):
   the actor syncer hands out the rows. Every training island reads every row
   of ``--data`` but trains only the rows it claims, a block per round; a fast
   island claims more often, the rows of an island that leaves go to the
   others, a relaunched or added island just claims, and passes after the
   first are reshuffled (:func:`pass_order` over the whole data). The
-  default (``auto``) since its GPU checks (S27 G-DH: 0.6B and Nano, two
+  default (``auto``) since its GPU checks (0.6B and Nano, two
   islands each); ``--rl-data-split stride`` keeps the slots.
 * Resume and relaunch: every data cursor counts rows of the island's own slot,
   so a resumed or relaunched island with the same slot continues at the same
@@ -128,9 +128,9 @@ def pass_order(count: int, *, seed: int, data_pass: int, stream: int = 0) -> lis
 
     Pass 0 is data order. Pass ``p >= 1`` is a shuffle seeded by ``seed`` and
     ``p``; the seed goes through SHA-256, so every host and Python version gets
-    the same order. ``stream`` (the task dispenser's streams, S27 P3): stream
+    the same order. ``stream`` (the task dispenser's streams): stream
     ``s >= 1`` mixes ``s`` into the seed, so two streams of the same size do
-    not share one order; stream 0 is the order of P1/P2."""
+    not share one order; stream 0 is the order of the stride split."""
     order = list(range(int(count)))
     if int(data_pass) <= 0:
         return order
@@ -155,7 +155,7 @@ class DataSplitPlan:
     requested: str
     islands: tuple[int, ...] = ()
     reason: str = ""
-    # S27 P4: the sampler islands (island index in --gpu) that claim rows from the
+    # the sampler islands (island index in --gpu) that claim rows from the
     # dispenser; a dispense plan with sample roles and no samplers serves sampler
     # launches that join it
     samplers: tuple[int, ...] = ()
@@ -245,7 +245,7 @@ def plan_data_split(requested: str | None, *, islands: Sequence[int], tasks: boo
     ``tasks``: ``--rl-island-tasks`` is given; ``sample_roles``: the islands have
     sampler/trainer roles; ``external_learners``: islands of other launches that
     join the same syncer (their data is not this launch's to split);
-    ``samplers`` / ``sampler_blocker`` (S27 P4): the sampler islands that claim
+    ``samplers`` / ``sampler_blocker`` the sampler islands that claim
     rows with ``dispense``, or why the launch cannot dispense to samplers;
     ``dispense_blockers``: why this launch's training islands cannot use the
     dispenser (empty: they can; None: not checked, so ``auto`` keeps the slots)."""

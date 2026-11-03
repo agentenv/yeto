@@ -1,4 +1,4 @@
-"""One object per running asyncio event loop (S25 N10.8c).
+"""One object per running asyncio event loop.
 
 The agentic path keeps process-wide guards (the admission gate, the boat
 quota) that hold asyncio primitives.  An ``asyncio.Semaphore`` or ``Lock``

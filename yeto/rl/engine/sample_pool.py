@@ -2,7 +2,7 @@
 
 Only the index and the interface. Samples themselves live in an object store
 (S3, Modal Volume or Nebius Object Storage); the coordinator (syncer) keeps
-only these index entries (design D-S4 SAMPLE_INDEX). No transfer is
+only these index entries (SAMPLE_INDEX). No transfer is
 implemented here: :class:`CrossIslandSampleSource` is the shape the driver
 will call once the transfer exists.
 

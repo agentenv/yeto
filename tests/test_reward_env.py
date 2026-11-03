@@ -1,7 +1,7 @@
 """CPU tests for the benchmark-neutral reward-env helpers (rl-agentic-reward-env).
 
 The TB2 adapter and its prebake / judge tests left with the self-written Codex
-harness (S26 E0.5).
+harness.
 """
 
 from __future__ import annotations

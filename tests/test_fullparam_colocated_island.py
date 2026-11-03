@@ -1,4 +1,4 @@
-"""S27 G-EF (CPU, no Ray, no GPU): full-parameter trainer and engines colocated on one island.
+"""CPU, no Ray, no GPU: full-parameter trainer and engines colocated on one island.
 
 A full-parameter island without outer sync (``--rl-single-island-no-sync``) may
 place its engines on the trainer GPUs (``--rl-placement colocated``, no

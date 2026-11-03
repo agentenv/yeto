@@ -1,4 +1,4 @@
-"""yeto-framework-decoupling phase 0 (task 1.1): golden samples must not move.
+"""Decoupling golden samples must not move.
 
 Recomputes every sample in ``tests/golden/decoupling/`` with the current code
 (CPU only, see ``tests/decoupling_golden.py``) and compares the text byte for

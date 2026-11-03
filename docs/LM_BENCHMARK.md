@@ -130,7 +130,7 @@ Selection reasons:
 - large enough for the 500k-token benchmark without making dataset download or
   held-out evaluation dominate the run.
 
-The pinned dataset revision used when this recommendation was made is:
+The pinned dataset revision is:
 
 ```text
 f423949d2726f5a5633ea10ac45bc1ea1e0de6e7
@@ -162,8 +162,7 @@ and the number of optimization targets per raw token. They are workload
 profiles, not DiLoCo algorithm arms, and must not be mixed inside one paired
 comparison.
 
-Use the historical `512`-token profile when reproducing the existing
-gemma4/Lean result. For a production decision, run a separate benchmark with
+The `512`-token profile above is the reference profile. For a production decision, run a separate benchmark with
 the actual production sequence length, chat template, `--train-on` mode,
 assistant-mask mode, LoRA targets, and batch recipe. Compare arms only within
 a profile.
@@ -354,9 +353,3 @@ The harness covers LoRA causal-LM fine-tuning with masked cross entropy. Full
 parameter synchronization, multi-node launch orchestration, WAN fault
 injection, task-suite evaluation, and checkpoint-time learning curves are
 separate experiments.
-
-## Results
-
-Completed Qwen3.6 benchmark results, including aggregate and per-seed
-quality, execution, and synchronization tables, are archived outside the
-repository.

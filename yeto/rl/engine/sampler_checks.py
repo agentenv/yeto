@@ -1,5 +1,5 @@
 """Load a release through the ``SamplerEngine`` port and check what the engine
-serves before it may generate (S25 N2.3; rl-hetero-sampler-engines D9; A-INF §3).
+serves before it may generate.
 
 A load that returns without error does not prove that the engine serves the
 right weights: the reports list loads that skip expert weights or misread them
@@ -11,7 +11,7 @@ silently (A-INF items 1, 2, 3, 5). :class:`PortReleaseLoader` is the
    the engine keeps its version);
 2. counts the routed-expert matrices in the release index and compares them
    with the expected count (release record, else the check config);
-   an FP8 release (``fp8-w8a8-channel``, S26 E6 tier 2) must quantize only the
+   an FP8 release (``fp8-w8a8-channel``, scoped tier) must quantize only the
    in-scope linears (:func:`yeto.rl.quant.tiers.check_release_scope`);
 3. loads the release (``engine.load``; a retry after a failed check restarts
    the engine with ``engine.start``);
@@ -59,8 +59,7 @@ from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
 from .policy_release import PolicyRelease, ReleaseNotLoaded
 from .sampler_engine import SamplerEngine, SamplerEngineError, SamplingParams
 
-# Routed-expert matrices of GLM5.3-Flash as the inference report counts them
-# (SESSION25/reports/glm-inference-ppu-910b.md, A-INF §3 item 1).
+# Routed-expert matrices of GLM5.3-Flash as the GLM inference report counts them.
 GLM53_FLASH_EXPERT_MATRICES = 36_288
 # Names of routed-expert weight tensors in an HF / compressed-tensors index:
 # "...mlp.experts.<e>.<gate|up|down>_proj.weight" or ".weight_packed".
@@ -178,7 +177,7 @@ class PostLoadChecks:
             return {"name": "expert_count", "passed": int(loaded) == int(expected),
                     "loaded": int(loaded), "expected": int(expected)}
         if int(expected) == 0:
-            # S26 E6: a dense model has no routed experts; the release index count (0) was
+            # a dense model has no routed experts; the release index count (0) was
             # compared before the load, so there is nothing an engine report could add.
             return {"name": "expert_count", "passed": True, "expected": 0,
                     "detail": "no routed experts (dense model); release index count checked"}
@@ -334,7 +333,7 @@ class PortReleaseLoader:
                 self._refuse(version, "release_expert_count",
                              {"in_release": in_release, "expected": expected})
         if directory is not None and self.scheme == FP8_FFN_CHANNEL:
-            # S26 E6 tier 2: only in-scope linears may be FP8 (yeto.rl.quant.scope)
+            # only in-scope linears may be FP8 (yeto.rl.quant.scope)
             from yeto.rl.quant.scope import QuantScopeError
             from yeto.rl.quant.tiers import check_release_scope
 

@@ -1,4 +1,4 @@
-"""``ContextProvider`` (design D8, task 7.2): the hook CompactionRL will use to swap context between segments.
+"""``ContextProvider``: the hook CompactionRL will use to swap context between segments.
 
 The default is the identity mapping; the gateway sends exactly the messages the
 harness supplied, so TITO prefix reuse is unaffected.

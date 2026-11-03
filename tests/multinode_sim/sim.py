@@ -113,7 +113,7 @@ def startup_bundles(shuffle=False):
         order = order[::2] + order[1::2]
     pool_gpus = tuple(f"p{i}" for i in range(2 * G))
     view = _Info(pg, order, [b % G for b in order])
-    # D3 head pin (2026-10-03 ruling): a multi-node StartupBundles needs the Ray head's node id; block 0 must be it
+    # Head pin: a multi-node StartupBundles needs the Ray head's node id; block 0 must be it
     head = next(nid for nid, v in nodes.items() if v["label"] == "yeto_node:0")
     sb = StartupBundles(pool_gpus=pool_gpus, views={"actor": view}, placement_map=None,
                         gpus_per_node=G, head_node=head,
@@ -150,7 +150,7 @@ def case_pg_blocks():
 # ------------------------------------------------------------------ 2.3
 def case_cells_bind():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import test_rl_e3_wiring_e1 as e3
+    import test_rl_miles_membership_wiring as e3
 
     from yeto.rl.adapters.miles.placement import PlacementRequest
     from yeto.rl.adapters.miles.rollout import MembershipPlanError, MilesRolloutPool
@@ -427,7 +427,7 @@ def case_mixed_pp2():
         StartupBundles(pool_gpus=tuple(f"p{i}" for i in range(4)), views=views, placement_map=roles,
                        gpus_per_node=2, node_resolver=resolver, head_node=worker)
     except BundleMapError as exc:
-        log("block 0 != head refused (D3 head pin):", exc)
+        log("block 0 != head refused (head pin):", exc)
     else:
         raise AssertionError("head pin accepted the worker as node 0")
     ray.util.remove_placement_group(pg)

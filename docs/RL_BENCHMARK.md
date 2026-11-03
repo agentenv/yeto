@@ -1,41 +1,41 @@
 # Miles RL LM Benchmark
 
-`scripts/benchmark_rl.py` compares native Miles with the strict Yeto RL path
-on one GPU host. It trains real causal language models with real Miles
-rollouts and the selected reward callable; it does not inject trajectories,
-use synthetic optimizer steps, or provision cloud resources.
+`scripts/benchmark_rl.py` compares one Yeto RL island with federated and
+decoupled Yeto RL on one GPU host. It trains real causal language models with
+real Miles rollouts and the selected reward callable; it does not inject
+trajectories, use synthetic optimizer steps, or provision cloud resources.
 
 ## Comparison
 
 For a benchmark size `M` and `G` GPUs per federated island, the harness runs
-three arms:
+up to three arms:
 
 | arm | topology | purpose |
 | --- | --- | --- |
-| `native-miles-mM` | one native Miles island on `M*G` GPUs | reference with optimizer state preserved across rounds and no Yeto policy hook |
-| `yeto-single-mM` | one Yeto+Miles island on `M*G` GPUs | isolates the Yeto hook, strict checkpoint/apply contract, and LoRA optimizer reset |
+| `yeto-single-mM` | one Yeto+Miles island on `M*G` GPUs | reference: the Yeto hook, strict checkpoint/apply contract, and LoRA optimizer reset without any island split |
 | `yeto-federated-mM` | `M` Yeto+Miles islands on `G` GPUs each | measures fixed-roster exact-base averaging and the multi-island split |
+| `yeto-decoupled-mM` | `M` Yeto+Miles islands on `G` GPUs each, decoupled sync | measures fragment-pipelined sync (`--fragments`, `--pipeline`, `--local-horizon`) against the strict arms |
 
-`native -> yeto-single` measures the synchronization contract itself.
 `yeto-single -> yeto-federated` measures island partitioning and averaging.
-`native -> yeto-federated` is the end-to-end product comparison.
+`yeto-federated -> yeto-decoupled` measures the decoupled synchronization
+schedule on the same topology.
 
 The single-island Yeto average is an identity operation on LoRA weights, but
-it is not equivalent to native Miles: every committed global apply clears the
-LoRA optimizer state while preserving LR scheduler progress.
+every committed global apply clears the LoRA optimizer state while preserving
+LR scheduler progress.
 
 ## Work Accounting
 
 Let `K` be `--groups-per-island`, `N` be `--samples-per-group`, and `R` be
 `--global-rounds`.
 
-- Each federated island processes `K` prompt groups per round; the native and
-  Yeto-single arms process `M*K` groups per round.
+- Each federated or decoupled island processes `K` prompt groups per round;
+  the single arm processes `M*K` groups per round.
 - Every arm owns `M*G` GPUs and processes `R*M*K*N` trajectories.
 - `K*N` must divide `optimizer_steps*G`, which gives every rank the same Miles
-  batch for all three arms.
+  batch in every arm.
 - Expert parallelism is one by default. An explicit `--expert-parallel` must
-  divide `G` and is held fixed across all three arms, including MoE models.
+  divide `G` and is held fixed across all arms, including MoE models.
 - The maximum action-token budget is identical. Actual response tokens are
   recorded because learned policies can terminate at different lengths.
 
@@ -79,12 +79,9 @@ python scripts/benchmark_rl.py \
   --trust-remote-code
 ```
 
-`--arms` selects a comma-separated subset of `native`, `single`, and
-`federated`. For example, `--arms native --rl-engine legacy` runs the direct
-Miles reference without building or starting the Yeto syncer. The default RL
-engine is `ports`, which has no `native` arm: without `--arms` it runs the Yeto
-arms only, and the example above compares against native Miles only with
-`--rl-engine legacy` (see `docs/MILES_RL.md`, "Engine selection").
+`--arms` selects a comma-separated subset of `single`, `federated`, and
+`decoupled` (default: all three). For example, `--arms single,federated` runs
+only the strict arms. `--learner-budget-steps` requires `--arms decoupled`.
 
 With `G=2`, this example uses `4` total GPUs for every `M=2` arm and `8`
 total GPUs for every `M=4` arm. Use `--dry-run` to inspect every topology and
@@ -112,12 +109,8 @@ corresponding Miles environment evaluator rather than this Transformers
 generation path.
 
 Yeto artifacts are always exported from the authoritative syncer checkpoint.
-They are never taken from one island's local adapter. Native Miles uses its
-own final LoRA save. The harness validates its complete tensor layout against
-the model's PEFT contract and adds the PEFT wrapper prefix omitted by Miles;
-tensor values are not changed. Miles performs the native save inside the
-measured job, while Yeto checkpoint export follows the measured training job.
-Results report both `train_wall_s` and the comparable `artifact_ready_s`; each
+They are never taken from one island's local adapter. The checkpoint export
+follows the measured training job. Results report both `train_wall_s` and the comparable `artifact_ready_s`; each
 arm's adapter preparation duration is also retained as `artifact_s`.
 
 ## Outputs And Resume
@@ -132,7 +125,7 @@ The default output directories are `rl-benchmark-work/` and
 - `summary.json` contains aggregates across training seeds.
 - `report.md` contains quality deltas and systems measurements.
 - Each arm directory retains Miles logs, real rollout captures, evaluation
-  samples, and either the native adapter or authoritative Yeto export.
+  samples, and the authoritative Yeto export.
 
 Use `--resume` with unchanged inputs and arguments to skip completed records.
 The harness refuses changed data, implementation, arms, or workload settings.
@@ -140,6 +133,4 @@ Use `--overwrite` only when intentionally starting a new result set.
 
 Systems fields include training and artifact-ready wall time, trajectories/s,
 action tokens/s, GPU-hours, estimated cost, Yeto synchronization time and
-bytes, and KL when emitted by the Yeto hook. Native Miles does not pass through
-that hook, so hook-only diagnostics are intentionally absent for the native
-arm.
+bytes, and KL when emitted by the Yeto hook.

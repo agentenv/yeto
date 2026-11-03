@@ -88,7 +88,7 @@ def test_driver_switch_turns_the_fast_path_off(monkeypatch):
 
 
 def test_worker_digest_with_the_staged_export_equals_the_full_export():
-    """E1: the worker stages its LoRA in one host buffer for the digest; the digest
+    """The worker stages its LoRA in one host buffer for the digest; the digest
     and the bf16 send checksum equal those of the full export, round after round."""
     from types import SimpleNamespace
 

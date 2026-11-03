@@ -2,7 +2,7 @@
 
 ``yeto launch --rl-island-tasks`` gives each training island its own subset of
 the tasks in ``--data``. The launcher filters the ``--data`` JSONL file on the
-launching machine (P3-Q1), writes one prompt file per island and sends each
+launching machine, writes one prompt file per island and sends each
 island its own file with that file's SHA256; the island checks the SHA256
 before it trains and records its task list in ``rl_driver_start``.
 
@@ -208,7 +208,7 @@ def plan_island_tasks(
 
 
 def task_count_warning(plan: Mapping[int, IslandTaskData], *, flag: str) -> str | None:
-    """The launch warning for unequal per-island task counts (P3-Q2), or None."""
+    """The launch warning for unequal per-island task counts, or None."""
 
     counts = {island: len(data.task_ids) for island, data in sorted(plan.items())}
     if len(set(counts.values())) <= 1:

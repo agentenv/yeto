@@ -1,11 +1,11 @@
 """Reclaim (spot preemption) notices: one event shape, one handling order.
 
-rl-spot-cost-saving tasks 1.3-1.7, design D3. Every cloud feeds the same
+rl-spot-cost-saving. Every cloud feeds the same
 :class:`ReclaimNotice`; :func:`handle_notice` then runs the fixed order
 
     remaining time -> save if it fits -> leave -> write ``spot_reclaim`` event
 
-Rules (spec "回收通知处理顺序"):
+Rules (spec "reclaim notice handling order"):
 
 * save only if ``remaining_s > last_save_s + margin_s``;
 * no measured save time -> not enough time (skip the save, write the reason);
@@ -35,7 +35,7 @@ from yeto.cloud import capabilities
 
 RECLAIM_EVENT = "spot_reclaim"
 DEFAULT_MARGIN_S = 10.0
-MODAL_HANDLER_CAP_S = 25.0   # 30 s Modal grace - 5 s margin (D3)
+MODAL_HANDLER_CAP_S = 25.0   # 30 s Modal grace - 5 s margin
 AWS_POLL_S = 5.0
 AWS_ACTION_URL = "http://169.254.169.254/latest/meta-data/spot/instance-action"
 AWS_TOKEN_URL = "http://169.254.169.254/latest/api/token"
@@ -271,7 +271,7 @@ class AwsMetadataPoller:
         self._stop.set()
 
 
-# --- summary for cost scoring (task 1.6) -----------------------------------------
+# --- summary for cost scoring ------------------------------------------------
 
 
 def summarize(events: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str | None], dict[str, Any]]:
@@ -295,12 +295,12 @@ def summarize(events: Iterable[Mapping[str, Any]]) -> dict[tuple[str, str | None
     return out
 
 
-# --- training-island spot admission (task 1.7) ------------------------------------
+# --- training-island spot admission -------------------------------------------
 
 
 def training_spot_admission(cloud: str, *, measured_save_s: float | None,
                             margin_s: float = DEFAULT_MARGIN_S) -> tuple[bool, str]:
-    """Spec "训练岛默认不用 spot": allow only if notice checked, save+margin < notice,
+    """Spec "training islands do not use spot by default": allow only if notice checked, save+margin < notice,
     and the cloud has a durable store."""
     notice = capabilities.notice_seconds(cloud)
     if notice is None:

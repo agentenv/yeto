@@ -1,4 +1,4 @@
-"""S27 G-BG: bf16 delta releases (trainer encodes, sampler rebuilds). CPU only, no Ray."""
+"""Bf16 delta releases (trainer encodes, sampler rebuilds). CPU only, no Ray."""
 
 from __future__ import annotations
 
@@ -251,7 +251,7 @@ def test_staged_publisher_releases_deltas_in_the_background(tmp_path, monkeypatc
                                  mirror=rd.DeltaMirror(tmp_path / "mirror"))
     rebuilt = sampler.resolve(sampler.latest())
     assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
-    # S27 G-CD: the chain's full release carries each file's sha256, the deltas do not
+    # The chain's full release carries each file's sha256, the deltas do not
     records = sorted(sampler.records(), key=lambda r: r.seq)
     assert records[0].file_sha256 == {
         "model.safetensors": hashlib.sha256(words[0].astype("<u2").tobytes()).hexdigest()}
@@ -297,7 +297,7 @@ def test_delta_flag_reaches_the_trainer_config_and_command():
     ({"rl_release_inline": True}, "staged releases"),
     ({"tuning": "lora"}, "full-weight releases"),
     ({"rl_rollout_quant_tier": 2}, "quant-tier"),
-    # S27 G-EQ3: verl is allowed, but only for a full-parameter island
+    # Verl is allowed, but only for a full-parameter island
     ({"rl_backend": "verl", "parameter_mode": "lora"}, "--parameter-mode full on a verl island"),
     ({"rl_backend": "torchtitan"}, "--rl-backend miles or verl"),
 ])
@@ -309,7 +309,7 @@ def test_delta_flag_refusals(kw, message):
 
 
 def test_a_verl_full_parameter_trainer_takes_the_delta_flag():
-    """S27 G-EQ3: its export writes the base checkpoint's own files, so the first
+    """Its export writes the base checkpoint's own files, so the first
     delta against the base stays small (adapters/verl/hf_export)."""
     from yeto.rl.engine import sample_roles
 
@@ -422,7 +422,7 @@ def test_a_sampler_two_versions_behind_rebuilds_once(tmp_path, monkeypatch):
     assert [p.name for p in (tmp_path / "mirror").iterdir()] == [sampler.latest().path]
 
 
-# ---------------------------------------------------------------- rebuild failures (S27 G-CD)
+# ---------------------------------------------------------------- rebuild failures
 def _flip_first_word(path: Path) -> None:
     """Change the file's bytes, not its size (size checks pass, the digest does not)."""
     data = bytearray(path.read_bytes())

@@ -221,7 +221,7 @@ def test_baseline_learner_argv_has_own_state_and_cold_spec():
 
 
 def test_stage_w_entry_pins_island_ray_before_running_train_py(tmp_path, monkeypatch):
-    """s13-g1-modal-20261007b: stage W connects like the ports driver (job
+    """Stage W connects like the ports driver (job
     runtime_env with the learner's PYTHONPATH) before plain train.py runs."""
 
     import sys

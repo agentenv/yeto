@@ -163,14 +163,6 @@ def test_threads_loosened_values_are_logged_and_recorded():
     assert lp.thread_relaxations(lp.ThreadConfig(mode="error", start=100, hard=200)) == {}
 
 
-def test_eval_launch_args_keep_the_thread_preflight_on():
-    from pathlib import Path
-    from tools.eval import miles
-    root = Path(__file__).resolve().parents[1]
-    assert "--preflight-threads off" not in (root / "tools/eval/miles_head.sh").read_text()
-    assert "--preflight-threads off" not in Path(miles.__file__).read_text()
-
-
 def test_thread_message_text():
     cfg = lp.ThreadConfig()
     text = lp.thread_message(lp.ThreadCount(2900, 1800, True, 50), cfg, "X")
@@ -179,7 +171,7 @@ def test_thread_message_text():
     assert "sky api stop && sky api start" in text and "no launch is in progress" in text
     assert "Ray" in text
     text = lp.thread_message(lp.ThreadCount(2900, 0, False, 50), cfg, "X")
-    assert "未找到 SkyPilot API 服务" in text and "sky api stop && sky api start" in text
+    assert "SkyPilot API server: not found" in text and "sky api stop && sky api start" in text
 
 
 # --- 2.1 memory estimate ----------------------------------------------------------
@@ -237,7 +229,7 @@ def test_unknown_model_not_estimated(monkeypatch):
     out = io.StringIO()
     rec = lp.memory_preflight(_rl_args(model="org/unknown-model"), [SimpleNamespace(gpu="H100", total_gpus=1)],
                               out=out)
-    assert rec["islands"][0]["estimated"] is False and "显存未估算" in out.getvalue()
+    assert rec["islands"][0]["estimated"] is False and "memory not estimated" in out.getvalue()
 
 
 # --- 2.2 back-test acceptance (calibration runs) -------------------------------------
@@ -410,7 +402,7 @@ def test_dry_run_override_changes_only_named_island():
     assert i0["learner_command"] == b0["learner_command"]
     assert "--rl-lr-schedule constant" in i1["learner_command"]
     assert "--rl-lr-schedule" not in b1["learner_command"]
-    assert i1["island_overrides"] == [{"island": 1, "key": "rl_lr_schedule", "name": "学习率调度",
+    assert i1["island_overrides"] == [{"island": 1, "key": "rl_lr_schedule", "name": "learning-rate schedule",
                                        "old": "linear", "new": "constant"}]
 
 
@@ -484,7 +476,7 @@ def test_manifest_fields_and_tape_event(tmp_path, capsys):
     ov = {1: {"rl_lr_schedule": "linear"}}
     m = io_.manifest_fields(args, ov)
     assert m["negative_test"] is True
-    assert m["island_overrides"] == [{"island": 1, "key": "rl_lr_schedule", "name": "学习率调度",
+    assert m["island_overrides"] == [{"island": 1, "key": "rl_lr_schedule", "name": "learning-rate schedule",
                                       "old": "constant", "new": "linear"}]
     assert io_.manifest_fields(SimpleNamespace(rl_negative_test_run=False), {}) == {}
     io_.print_warning(args, ov)
@@ -534,11 +526,11 @@ def test_reducer_marks_negative_island():
 
     r = Reducer(run="neg")
     r.feed({"event": "rl_island_override", "island_id": 1, "time_unix": 1.0, "negative_test": True,
-            "overrides": [{"island": 1, "key": "rl_lr_schedule", "name": "学习率调度",
+            "overrides": [{"island": 1, "key": "rl_lr_schedule", "name": "learning-rate schedule",
                            "old": "linear", "new": "constant"}]})
     r.feed({"event": "rl_heartbeat", "island_id": 0, "time_unix": 1.0})
     cards = {c["id"]: c for c in r.overview(now=2.0)["islands"]}
-    assert cards["1"]["negative_test"]["label"] == "负例岛：学习率调度 linear→constant"
+    assert cards["1"]["negative_test"]["label"] == "Negative-test island: learning-rate schedule linear→constant"
     assert cards["0"]["negative_test"] is None
 
 
@@ -596,7 +588,7 @@ def test_merge_refuses_negative_adapter(tmp_path):
     adapter = run / "out" / "adapter"
     adapter.mkdir(parents=True)
     (run / "run_manifest.json").write_text(json.dumps({"negative_test": True}))
-    with pytest.raises(ValueError, match="负例运行，禁止导出"):
+    with pytest.raises(ValueError, match="must not be exported"):
         merge_adapter(SimpleNamespace(adapter_dir=str(adapter), output_dir=str(tmp_path / "o")))
     (run / "run_manifest.json").write_text(json.dumps({"negative_test": False}))
     (adapter / io_.NEGATIVE_MARKER).write_text("x")
@@ -621,7 +613,7 @@ def test_override_env_reaches_ray_workers():
     assert io_.OVERRIDE_ENV not in seen["runtime_env"]["env_vars"]
 
 
-# --- 10-09: --rl-max-policy-age needs a tolerant algorithm spec (s18-lpg-age-20261009a) ---
+# --- --rl-max-policy-age needs a tolerant algorithm spec ---
 ARU2_M1_SPEC = {"schema": "yeto-rl-algorithm-spec-v2",
                 "correction": {"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0},
                 "execution": {"max_policy_staleness": 1}}

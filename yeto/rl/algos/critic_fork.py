@@ -1,4 +1,4 @@
-"""Miles fork pin for the critic family (rl-algo-critic-family, S13 fork merge).
+"""Miles fork pin for the critic family (rl-algo-critic-family).
 
 ``yeto-critic-family`` on michaellchung/miles (local commit, not pushed, not in an
 image) merges the critic-family fork branches onto yeto/ports 039471508:
@@ -23,9 +23,9 @@ image) merges the critic-family fork branches onto yeto/ports 039471508:
 * 5182e37f0 -- SAO: with ``sao_dis`` the critic re-runs a forward after its
   update so the shipped values are post-update (agentenv/miles 16a9bea4).
 
-S13 rebase (progress "S13 fork rebase c35702e + overlay"): the seven commits
+Rebase: the seven commits
 above were cherry-picked onto the image's Miles c35702e as branch
-``yeto-critic-c357`` (local, not pushed); HEAD 6e7365b60. S13 tied fix:
+``yeto-critic-c357`` (local, not pushed); HEAD 6e7365b60. Tied-weights fix:
 6574a9c82 on ``yeto-critic-c357-tied`` (critic value head replaces
 ``language_model.output_layer`` of multimodal bridge wrappers, so tied
 Qwen3.5 critics need no ``lm_head.weight``) is the pin. The
@@ -38,7 +38,7 @@ against :data:`FORK_COMMITS` (the loss_variants precedent). The ports image
 still ships ``yeto.rl.MILES_NEXT_COMMIT`` (c35702e); a run gets the pinned code
 only through the island-setup overlay (:mod:`yeto.rl.adapters.miles.overlay`, patch
 c35702e..pin, sha256-checked, recorded as "image c35702e + overlay <sha256>").
-The mechanisms stay undeclared (``--rl-allow-unverified-mechanism``) until GPU G1.
+The mechanisms stay undeclared (``--rl-allow-unverified-mechanism``) until a GPU run verifies them.
 """
 
 from __future__ import annotations

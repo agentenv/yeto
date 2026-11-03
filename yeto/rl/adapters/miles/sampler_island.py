@@ -1,4 +1,4 @@
-"""Sampler and trainer islands over the sample buffer on Miles (L4.6).
+"""Sampler and trainer islands over the sample buffer on Miles.
 
 * :func:`run_sampler_island`: the sampler island's entry. Miles runs with
   ``--debug-rollout-only`` (rollout components only: no trainer model, no
@@ -13,7 +13,7 @@
   (several islands and a syncer): only learner 0 releases, with the merged
   version (:mod:`yeto.rl.engine.merged_release`).
 
-  Staged full releases (S27 G-AT, the default on a trainer island; off with
+  Staged full releases (the default on a trainer island; off with
   ``--rl-release-inline``): the trainer exports into a local staging directory
   (every rank writes a share of the files, ``release_plugin.write_full_checkpoint``)
   and goes on training while a background thread uploads it to the store
@@ -44,7 +44,7 @@ aborts the lock. The rollout executor then takes the version as its current one.
   (:attr:`EngineReleaseLoader.last_checksum`); they must equal the trainer's
   (``PolicyRelease.engine_checksum``) when the release carries it.
 
-LoRA staging (S26 E5): the adapter is copied to local disk before the update
+LoRA staging: the adapter is copied to local disk before the update
 lock. With ``fused_stage`` (``--rl-sampler-fused-stage``, default off) the copy
 also computes the release digest, so the release is read from the store once
 instead of twice (the follower's check, then the copy); a digest mismatch fails
@@ -140,7 +140,7 @@ def _quant_tier(miles_args: Any) -> int:
 
 
 def prepare_quantized_base(miles_args: Any, work_dir: Path) -> Path:
-    """S26 E6 tier 2, sampler side: the engines start on the FP8 conversion of the BF16
+    """FP8 rollout (tier 2), sampler side: the engines start on the FP8 conversion of the BF16
     base (``miles_args.hf_checkpoint``), so later FP8 releases load into FP8 parameters
     of the same layout. The conversion is checked against the scope rule. Returns the
     converted directory, which replaces ``miles_args.hf_checkpoint``."""
@@ -159,7 +159,7 @@ def prepare_quantized_base(miles_args: Any, work_dir: Path) -> Path:
 
 def scope_checked(load: Callable[[PolicyRelease, Path], None]) -> Callable[[PolicyRelease, Path], None]:
     """A ``PolicyFollower`` load hook that refuses an FP8 release outside the scope rule
-    before the engines are touched (S26 E6 tier 2 post-load check, step one)."""
+    before the engines are touched (the tier-2 post-load check, step one)."""
     def hook(release: PolicyRelease, directory: Path) -> None:
         try:
             check_release_scope(Path(directory))
@@ -393,7 +393,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                        sleep: Callable[[float], None] = time.sleep) -> int:
     """Run the sampler island to its data end; returns the rounds generated.
 
-    A replacement incarnation (S25 C1) continues after the newest round its
+    A replacement incarnation continues after the newest round its
     island has in the buffer (``sampler_resume``), loads the newest policy
     release before its first round, and writes ``rl_sampler_join`` / a member
     record. On the reclaim marker (Modal SIGINT/SIGTERM, written by the Modal
@@ -459,7 +459,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
         prepare_quantized_base(miles_args, Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
     connect_island_ray(miles_args=miles_args)
-    # S27 G-CK: fill the remote-code module cache on every node before any engine starts
+    # Fill the remote-code module cache on every node before any engine starts
     prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
     # The rollout process's metadata hook pushes each round's group records to this
     # named actor (on a trainer island the driver creates it and consumes them).
@@ -502,7 +502,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     dispense = {"installed": False}
 
     def close_dispense() -> None:
-        """S27 P4: give the rows this sampler holds back to the dispenser now
+        """Give the rows this sampler holds back to the dispenser now
         (a reclaimed sampler, a finished one), not at the end of its lease."""
         if not dispense["installed"]:
             return
@@ -515,7 +515,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     try:
         controller, executor = runner.run(init())
         if getattr(miles_args, "yeto_rl_data_dispense", None):
-            # S27 P4: before the first round, the data source claims its rows
+            # Before the first round, the data source claims its rows
             from yeto.protocol import island_hmac_key_from_env
 
             installed = _in_executor(executor, runner.run, "install",
@@ -529,7 +529,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         if not lora:  # LoRA: no adapter is served before the first release (require_release)
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
         scheme = release_scheme(_quant_tier(miles_args))
-        # S27 G-EA: with YETO_SPOT_SYNCER the releases come from the syncer (a
+        # With YETO_SPOT_SYNCER the releases come from the syncer (a
         # receive-only subscriber), not the store; the follower and loader are the same.
         from yeto.rl.spot_rollout.release_store import spot_release_store
 
@@ -540,7 +540,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         spot_finished = (lambda: False) if releases is None else releases.finished
         spot = releases is not None
         if spot and hasattr(buffer, "cut_of"):
-            # S27 G-EM: every relay item names the cut that generated it
+            # Every relay item names the cut that generated it
             buffer.cut_of = releases.cut_identity
         if releases is None:
             releases = release_store(config, environ, scheme=scheme, mirror=default_mirror(environ, store=str(config.store)))
@@ -600,7 +600,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
 def _in_executor(executor: Any, run: Callable[[Any], Any], name: str, *fn_args: Any) -> Any:
     """Run ``adapters.miles.task_dispense.<name>(executor, ...)`` inside the rollout
     executor's process (``__ray_call__``), as ``MilesRolloutPool`` does for a
-    training island (S27 P4)."""
+    training island."""
     from . import task_dispense
     from .rollout import _awaited, _executor_target
 
@@ -761,7 +761,7 @@ class ReleasingPublisher:
         def upload() -> None:
             kept = False
             try:
-                # S27 G-CD: the full releases of a delta chain carry each file's sha256
+                # The full releases of a delta chain carry each file's sha256
                 release = self.releases.release_staged(version, policy_hash, staged,
                                                        position=positions, delta_base=base,
                                                        digest_full=self.delta is not None, **fields)
@@ -862,10 +862,10 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV
 
     if env.get(RELAY_ADDR_ENV) and config.role == TRAINER:
-        # S27 G-EA: the samplers subscribe to the syncer and send groups through the
+        # The samplers subscribe to the syncer and send groups through the
         # relay; the trainer releases nothing and gates on the merged version (the
         # version the subscribers stamp on their samples), also on its own lane.
-        # S27 G-EM: the driver names the groups' policies as external merged cuts
+        # The driver names the groups' policies as external merged cuts
         # (yeto.rl.engine.external_policy) and counts their age in merged versions.
         from yeto.rl.engine.external_policy import ExternalMergedCuts
         from yeto.rl.engine.merged_release import merged_version as merged_policy_version
@@ -892,7 +892,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         def on_gap(previous: int, version: int) -> None:
             driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
 
-        # S27 L11: the lane cursor log resumes a relaunched synced trainer, not
+        # The lane cursor log resumes a relaunched synced trainer, not
         # the data source; and it accepts groups made with the versions the
         # store's releases name (a publisher of an earlier process released them).
         driver.data_position_owner = "buffer_lane"
@@ -947,7 +947,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
 
 
 def start_trainer_releaser(miles_args: Any, config: Any, environ: Any = None) -> Any:
-    """S26 E6 tier 2, trainer side: a thread of this driver converts every BF16 release
+    """FP8 rollout (tier 2), trainer side: a thread of this driver converts every BF16 release
     into an FP8 release (``yeto.rl.quant.release.scoped_releaser``) for the sampler islands."""
     import threading
 

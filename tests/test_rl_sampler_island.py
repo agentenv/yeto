@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L4.6 (CPU, no Ray, no Miles): sampler / trainer islands over
+"""CPU, no Ray, no Miles: sampler / trainer islands over
 the durable sample buffer -- sample roles and launch flags, policy releases through
 the store, the sampler loop (release loading, backlog cap, trainer stopped), the
 engine weight load order, the releasing publisher and the group renumbering."""
@@ -223,7 +223,7 @@ def test_miles_argv_of_a_lora_sampler_and_trainer():
 
 
 def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_rollout():
-    """L7.5: a convertible node keeps the colocated LoRA argv (trainer and engines on
+    """A convertible node keeps the colocated LoRA argv (trainer and engines on
     the same GPUs); the rollout function changes, and the release exporter is on
     (the node releases what it trains for the other nodes)."""
     from tests.test_rl_miles_adapter_config import flag_value, make_config, sub
@@ -343,7 +343,7 @@ class _Sampler:
 
 
 def test_a_sampler_without_fixed_rounds_runs_until_its_trainer_ended(tmp_path):
-    # S27 G-CA: a full-parameter synced group's sampler (num_rollouts None) covers
+    # A full-parameter synced group's sampler (num_rollouts None) covers
     # every round its trainer trains, then stops when the trainer's end record
     # appears; it marks no data end (the trainer ended on the syncer's final)
     from yeto.rl.engine.sampler_resume import stop_when_trainers_ended, write_trainer_end
@@ -811,7 +811,7 @@ def test_groups_from_restarted_samplers_get_unique_buffer_identities(tmp_path):
 
 
 def test_sampler_debug_rollout_only_is_not_a_placement_rewrite():
-    """L5.4 GPU run s24-l54-pair-20261014e: a fixed-partition sampler island asked
+    """Seen on a GPU run: a fixed-partition sampler island asked
     for --debug-rollout-only and was refused as a rewritten placement."""
     import dataclasses
 
@@ -889,7 +889,7 @@ def test_wire_policy_releases_on_a_convertible_node(tmp_path):
 def test_convertible_nodes_get_a_backlog_cap_at_least_one_start_wave():
     node = SimpleNamespace(rl_sample_role="convertible", rl_resume_store="/mnt/store",
                            rl_max_policy_age=3)
-    # default: max(4, a_hard + 2) rounds; S1 starts at up to a_hard + 1 rounds
+    # default: max(4, a_hard + 2) rounds; the start rule fires at up to a_hard + 1 rounds
     assert sample_roles.resolve(node, groups_per_round=4).max_backlog_groups == 20
     node.rl_max_policy_age = 1
     assert sample_roles.resolve(node, groups_per_round=4).max_backlog_groups == 16

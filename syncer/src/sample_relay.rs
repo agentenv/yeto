@@ -1,4 +1,4 @@
-//! Sample relay (S27 G-EA): a small store-and-forward queue on the head that
+//! Sample relay: a small store-and-forward queue on the head that
 //! carries rollout samples from receive-only sampler islands (any cloud) to a
 //! training island, so the samplers need no shared volume or object store.
 //!
@@ -52,7 +52,7 @@ pub const MSG_RELAY_TAKE: u8 = 64;
 pub const MSG_RELAY_ITEMS: u8 = 65;
 pub const MSG_RELAY_STATUS: u8 = 66;
 
-/// 2: RELAY_HELLO carries the producer stream (S27 dispatch merge).
+/// 2: RELAY_HELLO carries the producer stream.
 pub const RELAY_VERSION: u16 = 2;
 /// Prefix of the ERROR that closes a retired producer's connection.
 pub const FENCED_PREFIX: &str = "fenced: relay";

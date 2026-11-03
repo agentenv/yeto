@@ -1,4 +1,4 @@
-"""S26 E5 (CPU, no Ray, no Miles): the phase timings of a policy release (trainer
+"""CPU, no Ray, no Miles: the phase timings of a policy release (trainer
 side and sampler side) and the fused LoRA stage (``--rl-sampler-fused-stage``)."""
 
 from __future__ import annotations
@@ -349,7 +349,7 @@ def test_reload_latest_flag_is_trainer_only_and_reaches_the_release_store(tmp_pa
     assert sample_roles.island_args(pair, 1, 2).rl_release_reload_latest is True
 
 
-# ---------------------------------------------------------------- staged releases (S27 G-AT)
+# ---------------------------------------------------------------------------- staged releases
 class _UploadVolume:
     """A Modal Volume fake: ``batch_upload`` copies into ``backend`` (the Volume
     contents other containers see after a reload); the island's mount is not written."""
@@ -447,5 +447,5 @@ def test_a_store_root_outside_the_mount_writes_through_the_mount(tmp_path):
     assert commits == [1]
     built = store_from_env("/root/yeto-checkpoint-store/run", environ={"YETO_RL_STORE_MODAL_VOLUME": "v"})
     assert built.mount == MODAL_CHECKPOINT_STORE_MOUNT and built.put_mode == "mount"
-    # S27 G-DR: without a Modal client here the puts go through the mount (as before)
+    # Without a Modal client here the puts go through the mount (as before)
     assert not built.puts_bypass_mount

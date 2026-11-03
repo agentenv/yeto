@@ -50,7 +50,7 @@ def test_critic_layout_hash_is_separate_and_shape_sensitive():
 
 
 def test_critic_layout_hash_scalar_head_is_pinned_and_bins_are_identity():
-    # [1, hidden] payload must stay byte-for-byte (G1 PASS critic hashes must not drift).
+    # [1, hidden] payload must stay byte-for-byte (recorded critic hashes must not drift).
     pinned = [("embed.weight", [4, 4], "bf16"), ("output_layer.weight", [1, 4], "bf16")]
     expected = "5939fb770a1c4a440b1c1f7d8d0da7cadd03f2104979f151226e6ebb16c72868"
     assert critic_layout_hash(pinned, value_head="output_layer.weight") == expected

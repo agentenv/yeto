@@ -37,7 +37,7 @@ CUT_KEY = "consistent_cut"
 # InFlightSaver.rehearse and RoundCutCheckpoint.save(final=False) -> PERIODIC;
 # RoundCutCheckpoint.save(final=True) (last round or our own stop) -> MANUAL;
 # RoundCutCheckpoint.save(final=True, trigger=SCHEDULED) (a stop the trainer
-# scheduler ordered, rl-trainer-start-stop D3) -> SCHEDULED.
+# scheduler ordered, rl-trainer-start-stop) -> SCHEDULED.
 # Resume treats every trigger alike: a committed cut is complete.
 PREEMPT = "preempt"
 PERIODIC = "periodic"
@@ -57,7 +57,7 @@ class ConsistentCut:
     of prompt groups already consumed and ``completed_groups_digest`` their sorted
     sha256 (``resume.consumed_digest``). ``checkpoint_id`` names the payload.
     ``buffer_watermark`` is the consumed position of the durable sample buffer
-    (rl-trainer-start-stop D4; None = the run does not read a sample buffer, and
+    (rl-trainer-start-stop; None = the run does not read a sample buffer, and
     the record then has no such key)."""
 
     checkpoint_id: str

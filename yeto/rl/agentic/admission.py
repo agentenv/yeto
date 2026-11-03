@@ -1,4 +1,4 @@
-"""Admission gate and harness metrics of the agentic outer layer (S25 N10.2; was L10).
+"""Admission gate and harness metrics of the agentic outer layer.
 
 One trajectory holds one sandbox for its whole life, so the number of
 trajectories in flight is the number of live sandboxes.  The gate bounds it

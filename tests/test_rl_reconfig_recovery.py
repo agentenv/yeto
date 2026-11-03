@@ -1,15 +1,14 @@
-"""rl-infra-spec 3.7 restart recovery (E1-D §7 ruling (b); design in
-evidence/infra-e1/recovery-design.md) -- CPU fault tests F1-F13.
+"""Restart recovery -- CPU fault tests F1-F13.
 
 After a learner restart the fork comes back at its startup shape; the
 controller rebuilds the committed membership (epochs.json) at ``open()``,
 the driver's first full publication covers the rebuilt members and
 ``confirm_recovery`` verifies before admission reopens. Every failure is
 RECOVERY_REQUIRED and nothing is consumed. The fakes below follow the real
-fork more closely than test_rl_reconfig_e1's where it matters here: a
+fork more closely than test_rl_reconfig_controller's where it matters here: a
 started cell is a member (``Running`` = PendingWeights | Serving) before it
 is published, and a full publication marks every member serving. CPU
-stand-ins only: the GPU acceptance of E1-D ⑤⑥⑦ is not claimed here.
+stand-ins only: the GPU acceptance of these recovery cases is not claimed here.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ import json
 
 import pytest
 import torch
-from test_rl_reconfig_e1 import (
+from test_rl_reconfig_controller import (
     CONFIGS,
     FP,
     MODES,
@@ -197,7 +196,7 @@ class _Driver:
 
 # ------------------------------------------------------------- ⑤ / general recovery
 def test_restart_after_commit_recovers_committed_members(tmp_path):
-    """E1-D ⑤ in general (the committed config differs from the startup shape):
+    """Recovery in general (the committed config differs from the startup shape):
     the restarted learner rebuilds the 4 committed members, publishes to all of
     them, verifies and trains on."""
     clock = _commit_four(tmp_path)
@@ -225,7 +224,7 @@ def test_restart_after_commit_recovers_committed_members(tmp_path):
     ev = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
     assert [e["result"] for e in ev] == [SUCCEEDED, "RECOVERED"]
     assert ev[1]["members"] == sorted(FOUR) and ev[1]["recovery_id"] == rid
-    # S14/A19 (FINAL-REPORT-S7 §6.1): the recovered epoch's membership view is on
+    # the recovered epoch's membership view is on
     # this incarnation's tape too, with the same fields a COMMITTED tx writes.
     mem = [e for e in _events(tmp_path) if e["event"] == "rl_membership"]
     assert [m["kind"] for m in mem] == ["up", "recovered"]  # "up" is the first incarnation's
@@ -267,7 +266,7 @@ def test_committed_equals_startup_shape_needs_no_recovery(tmp_path):
 
 
 def test_restart_in_quiescing_is_cancelled_without_recovery(tmp_path):
-    """E1-D ⑥: killed before release -> CANCELLED; members already match."""
+    """Killed before release -> CANCELLED; members already match."""
     clock = {"t": 1000.0}
     _, ctl, *_ = _island(tmp_path, clock=clock)
     ctl.request("r", "T4R4S0", 0, 60)
@@ -280,7 +279,7 @@ def test_restart_in_quiescing_is_cancelled_without_recovery(tmp_path):
 
 
 def test_epoch0_member_loss_is_recovered(tmp_path):
-    """E1-D ⑦ shape: no transaction yet, the fork restarted at epoch 0 and one of
+    """No transaction yet, the fork restarted at epoch 0 and one of
     the two committed members is missing -> it is started again."""
     clock = {"t": 1000.0}
     _, ctl, *_ = _island(tmp_path, clock=clock)
@@ -295,7 +294,7 @@ def test_epoch0_member_loss_is_recovered(tmp_path):
 
 
 def test_restart_after_release_rebuilds_old_members(tmp_path):
-    """D1: a down released (stop done) and killed before its CAS -> the restart
+    """A down released (stop done) and killed before its CAS -> the restart
     rebuilds the committed (old, 4) members and ends the transaction REBUILT_OLD."""
     clock = _commit_four(tmp_path)
     _, ctl, fork, pool, *_ = _island(tmp_path, clock=clock, running=C)
@@ -321,7 +320,7 @@ def test_restart_after_release_rebuilds_old_members(tmp_path):
 
 
 def test_restart_after_release_of_trainer_edge_stays_recovery_required(tmp_path):
-    """D1 limit: a trainer edge released before its CAS is not recovered (hint only)."""
+    """Limit: a trainer edge released before its CAS is not recovered (hint only)."""
     clock = {"t": 1000.0}
     _, ctl, *_ = _island(tmp_path, clock=clock)
     ctl.journal.append("request", request_id="rt", tx_id="tx-rt", body={"target": "T2R6S0", "kind": "role-transfer",
@@ -595,7 +594,7 @@ def test_miles_pool_member_states_from_describe_cells():
 def test_no_sync_restart_hits_the_ledger_and_the_restart_loop_is_bounded(tmp_path):
     """A ``--rl-single-island-no-sync`` island restarts through LocalOnlySync, i.e. at rollout 0 with a freshly
     initialised policy: with the persisted ledger the restarted driver fails in ledger.rebase(0) (LedgerError:
-    outer-recorded rollouts behind the restart point) before publishing or generating -- every restart, so E1-D
+    outer-recorded rollouts behind the restart point) before publishing or generating -- every restart, so
     ⑤⑥⑦ cannot run under no-sync (recovery-design.md; ruling: strict-avg + syncer). The learner's restart loop
     (launcher RESTART_LOOP_FN) only bounds the retries: it returns the last exit code after N attempts and journals
     no RECOVERY_REQUIRED (recorded here, not changed)."""

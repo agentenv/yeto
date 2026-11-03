@@ -1,6 +1,6 @@
 """Nebius preemptible reclaim notice: host SIGTERM -> learner in the sky container.
 
-rl-spot-cost-saving (S19 real-spot experiment, option C). Nebius docs: a
+rl-spot-cost-saving. Nebius docs: a
 preemptible VM gets SIGTERM 60 s before it is stopped (ACPI shutdown of the VM),
 then SIGKILL. The learner runs inside sky's docker container (``sky_container``,
 PID 1 is an interactive bash), so the VM shutdown never reaches it as a signal:
@@ -17,7 +17,7 @@ Path (two halves):
   ``on_notice`` once (``droppable.install_reclaim_listener`` -> ``handle_notice`` ->
   LEAVE -> ``spot_reclaim``), then writes the ack file.
 
-Unverified on a real VM until the S19 stop drill: whether ``nebius compute
+Unverified on a real VM yet: whether ``nebius compute
 instance stop`` takes the same SIGTERM path, and the end-to-end latency.
 """
 
@@ -107,7 +107,7 @@ def install_command(container: str = CONTAINER, notice: str = NOTICE_FILE, ack: 
 
 
 def spot_sampler_env() -> dict[str, str]:
-    """The environment of a spot sampler island on Nebius (S25 C1b): the sampler's
+    """The environment of a spot sampler island on Nebius: the sampler's
     reclaim marker is the notice file the host unit writes, and the sampler
     writes the ack file once its LEAVE is stored. The two env names of this
     module also tell :func:`wants_host_hook` to install the unit."""

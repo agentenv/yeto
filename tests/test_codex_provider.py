@@ -1,4 +1,4 @@
-"""S26 R3: yeto's Codex model provider (idle timeout above the gate relay's hold)."""
+"""yeto's Codex model provider (idle timeout above the gate relay's hold)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def test_timeout_env_default_and_override():
 
 
 def test_retry_env_default_override_and_bounds():
-    # S27 G-EF: explicit retry counts, so a short 502/503 does not end the trial
+    # Explicit retry counts, so a short 502/503 does not end the trial
     for name in (cp.REQUEST_MAX_RETRIES_ENV, cp.STREAM_MAX_RETRIES_ENV):
         assert cp.max_retries_from_env(name, {}) == 8
         assert cp.max_retries_from_env(name, {name: "0"}) == 0

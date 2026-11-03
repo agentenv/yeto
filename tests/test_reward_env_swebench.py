@@ -116,8 +116,8 @@ def test_timeout_is_not_resolved(synthetic):
 
 def _real_adapter():
     pytest.importorskip("swebench")
-    path = os.environ.get("YETO_TEST_SWEV_DATA", os.path.expanduser("~/work/swebench-data/swev-78f471bf.parquet"))
-    if not Path(path).is_file():
+    path = os.environ.get("YETO_TEST_SWEV_DATA", "")
+    if not path or not Path(path).is_file():
         pytest.skip("pinned SWE-bench Verified parquet not available")
     return sv.SwebenchVerified(path)
 

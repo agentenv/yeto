@@ -1,10 +1,11 @@
-"""S25 stage 1, gaps 3-6 (T-GAPS): the engine sampler process entry, the
+"""Stage 1 gaps: the engine sampler process entry, the
 glm5_next Miles recipe, SSH trainer islands on docker nodes from the inventory,
 and the head's OSS access through a relay node. CPU only, no SSH."""
 
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -154,7 +155,7 @@ def test_full_parameter_layout_rule_is_shared(monkeypatch):
         sample_role="trainer")
     # A multi-node island (--rl-island-gpus-per-node): the trainer rectangle spans
     # nodes, engines stay dedicated (120B Nemotron: 4 trainer nodes + 1 engine node;
-    # S27 closing: 1 trainer node at DP 8 + 2 engine nodes).
+    # closing run: 1 trainer node at DP 8 + 2 engine nodes).
     assert "one node (or a multi-node island" in full_parameter_layout_problem(
         data_parallel=1, actor_num_nodes=4, rollout_gpus=8, rollout_gpus_per_engine=4)
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=4, rollout_gpus=8,
@@ -212,6 +213,7 @@ def test_docker_run_script_uses_inventory_addresses_and_the_container_is_removed
         start_script(spec, 0, {}, paths)
 
 
+@pytest.mark.skipif(shutil.which("setsid") is None, reason="setsid not installed (the node script needs it)")
 def test_run_script_mode_runs_locally_with_the_sky_variables(tmp_path):
     spec = SshTrainerSpec(nodes=(_node(runtime="rootfs", docker_args=(), host="127.0.0.1"),), run_id="r",
                           workdir=str(tmp_path), run_script=f'echo "$SKYPILOT_NUM_NODES $SKYPILOT_NODE_IPS" > {tmp_path}/o\nexit 4')

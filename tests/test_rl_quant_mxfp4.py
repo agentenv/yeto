@@ -1,4 +1,4 @@
-"""Re-quantization BF16 -> MXFP4 experts, group 32, RTN (S25 N8.5).
+"""Re-quantization BF16 -> MXFP4 experts, group 32, RTN.
 
 Codec rules (E8M0 rounding, FP4 ties, nibble order, sign of zero) are checked
 against a literal float re-statement of compressed-tensors 0.18, written

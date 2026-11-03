@@ -83,7 +83,7 @@ class StoredAuthoritativeFragment:
     descriptor: Any
     refs: list[object | None]
     wire_payload_hash: str
-    # S27 G-CG verify-ahead: the off-trainer check of these chunks (a future
+    # Verify-ahead: the off-trainer check of these chunks (a future
     # of Miles' verify_stored_fragment_chunks), None when none was started.
     verification: Any = field(default=None, compare=False, repr=False)
 
@@ -109,7 +109,7 @@ class StoredAuthoritativeFragment:
 
 
 class StoredFragmentVerifier:
-    """Verify-ahead (S27 G-CG): run the trainer prepare's check of a stored
+    """Verify-ahead: run the trainer prepare's check of a stored
     broadcast (Miles ``verify_stored_fragment_chunks``: finite FP32 chunks,
     chunk hashes, fragment digest) on one background thread as soon as the
     fragment is stored, so the apply at the next boundary can name it in
@@ -210,7 +210,7 @@ class AuthoritativeFragmentSink:
 
         Local init: the island's version-0 anchors are exactly its exported
         version-0 cut. Sharing the cut's Ray refs keeps one model-sized copy
-        in the object store instead of two (s27-gh-a: 27B spilled ~165 GB
+        in the object store instead of two (a 27B run spilled ~165 GB
         before the first round and later filled the container disk). The
         anchor holds its own ref list, so releasing either side leaves the
         other intact."""
@@ -485,7 +485,7 @@ class MilesChunkedFullParameterAdapter:
             raise RuntimeError(
                 "a parameter exceeds the fragment byte bound and this Miles "
                 "cannot split it (needs FullParameterFragmentPlan.flat_ranges, "
-                "Miles s27-fragbound-split)"
+                "a Miles with fragment-bound splitting)"
             )
         manifests_by_owner = {}
         for manifest in ordered:
@@ -507,7 +507,7 @@ class MilesChunkedFullParameterAdapter:
                     continue
                 slices = layout.fragment_slices(fragment_id)
                 # Only a fragment holding part of a parameter names flat
-                # ranges (Miles s27-fragbound-split); unsplit plans keep
+                # ranges (Miles fragment-bound splitting); unsplit plans keep
                 # their plan hash and install on older Miles images.
                 ranges = (
                     {}
@@ -562,7 +562,7 @@ class MilesChunkedFullParameterAdapter:
         ):
             raise RuntimeError(
                 "a shape-free full-parameter layout needs a Miles with the "
-                "shape_free_layout transport feature (yeto/s27-shape-free-layout)"
+                "shape_free_layout transport feature"
             )
         reports = tuple(sorted(await group.full_parameter_partition_reports(), key=lambda value: value.topology))
         plan = plan_shape_free_layout(
@@ -1420,7 +1420,7 @@ VERIFY_AHEAD_ENV = "YETO_FULL_PARAMETER_VERIFY_AHEAD"
 
 
 def verified_apply_supported(group: Any) -> bool:
-    """Verify-ahead (S27 G-CG): a broadcast's stored chunks are checked off
+    """Verify-ahead: a broadcast's stored chunks are checked off
     the trainer as soon as they arrive, and the apply names them so the
     trainer's prepare reads none of them.  Needs the Miles ``verified_apply``
     transport (``verify_stored_fragment_chunks``).
@@ -1463,7 +1463,7 @@ def skip_resident_supported(group: Any) -> bool:
     The production group is Miles' ``RayWorkerHandle`` around the
     TrainerController actor: its ``__getattr__`` returns a generic
     ``call(*args, **kwargs)`` that forwards to the remote method, so its
-    signature says nothing (s27-gr-c ran the whole-model apply for this
+    signature says nothing (a GPU run applied the whole model for this
     reason). A forwarding signature is then decided by the Miles installed in
     this process, which is the trainer's Miles (same image):
     ``full_parameter_transport.apply_chunked_cut`` must name the parameter.
@@ -1563,7 +1563,7 @@ def _metadata_only_reference(reference: ReferencedPolicyCut) -> ReferencedPolicy
     )
 
 
-# -- S27 G-AG diagnostics: one line per Miles trainer-group call ---------------
+# -- Diagnostics: one line per Miles trainer-group call --------------------------
 
 OP_TIMING_ENV = "YETO_FULL_PARAMETER_OP_TIMING"
 

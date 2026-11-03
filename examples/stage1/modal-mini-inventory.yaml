@@ -1,7 +1,9 @@
-# Stage-1 mini rehearsal on Modal (S25 T-G1): one trainer container with
+# Stage-1 mini rehearsal on Modal: one trainer container with
 # 2 x H100 and one sampler container with 1 x H100. "host" is a label only:
-# the Modal driver (tools/s25_g1/modal_app.py) starts the containers,
+# the Modal driver (tools/stage1_mini/modal_app.py) starts the containers,
 # not SSH. /data/models and /data/store are Modal Volumes in each container.
+# <owner> in the images is a placeholder for the registry namespace that
+# hosts the ports image.
 nodes:
   - name: modal-trainer
     host: modal-trainer
@@ -13,7 +15,7 @@ nodes:
     hbm_gib: 80
     host_memory_gib: 400
     mounts: {/data: /data}
-    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    image: ghcr.io/<owner>/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
     runtime: docker
     roles: [trainer]
   - name: modal-sampler
@@ -26,6 +28,6 @@ nodes:
     hbm_gib: 80
     host_memory_gib: 100
     mounts: {/data: /data}
-    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    image: ghcr.io/<owner>/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
     runtime: docker
     roles: [sampler]

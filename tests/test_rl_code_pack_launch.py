@@ -1,4 +1,4 @@
-"""rl-identity-tiering L9.4-L9.6: the launcher side of the run code pack (fake sky/Modal,
+"""The launcher side of the run code pack (fake sky/Modal,
 directory checkpoint store; no cloud)."""
 
 from __future__ import annotations
@@ -166,7 +166,7 @@ RELEASE_IMAGE = "docker:ghcr.io/x/yeto-release@sha256:" + "d" * 64
 
 
 def test_release_mode_ships_no_local_tree(launch):
-    """L9.12: the image digest is the pack; no upload, no island workdir."""
+    """The image digest is the pack; no upload, no island workdir."""
 
     args, manifest = launch("--rl-code-pack", "release", "--rl-image", RELEASE_IMAGE)
     pack = manifest["code_pack"]

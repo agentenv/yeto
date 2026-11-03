@@ -1,4 +1,4 @@
-"""Start check of a yeto engine image from Python (S26 E0.4).
+"""Start check of a yeto engine image from Python.
 
 A Docker image runs ``docker/image-assert/entrypoint.sh`` before its
 command. Modal does not run the image entrypoint, so the Harbor-layer images

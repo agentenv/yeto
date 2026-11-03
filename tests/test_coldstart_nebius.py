@@ -1,4 +1,4 @@
-"""COLDSTART-PLAN #3/#4: Nebius baked VM image (pre-pulled docker layers) and
+"""Nebius baked VM image (pre-pulled docker layers) and
 the cloud-local model store (``--model-store nebius-fs://...``)."""
 
 from __future__ import annotations
@@ -20,10 +20,10 @@ from yeto.launcher import (
 from tests.test_rl_engine_selection import _cli, _island_task
 from yeto.launcher import _prepare_rl_args
 
-D1 = "sha256:" + "1" * 64
-D2 = "sha256:" + "2" * 64
-IMG1 = "docker:ghcr.io/o/r@" + D1
-BAKED = {D1: {"eu-north1": "computeimage-aaa"}}
+DIGEST1 = "sha256:" + "1" * 64
+DIGEST2 = "sha256:" + "2" * 64
+IMG1 = "docker:ghcr.io/o/r@" + DIGEST1
+BAKED = {DIGEST1: {"eu-north1": "computeimage-aaa"}}
 
 
 def test_baked_image_used_only_on_exact_digest_and_region(capsys):
@@ -43,10 +43,10 @@ def test_baked_image_used_only_on_exact_digest_and_region(capsys):
 
 
 def test_stale_bake_falls_back_with_warning(capsys):
-    img2 = "docker:ghcr.io/o/r@" + D2
+    img2 = "docker:ghcr.io/o/r@" + DIGEST2
     assert nebius_baked_image_id(img2, "nebius", "eu-north1", BAKED) == img2
     out = capsys.readouterr().out
-    assert "WARNING" in out and D1[:19] in out and "bake_nebius_image.sh" in out
+    assert "WARNING" in out and DIGEST1[:19] in out and "bake_nebius_image.sh" in out
 
 
 def test_island_task_uses_baked_image_dict(monkeypatch):

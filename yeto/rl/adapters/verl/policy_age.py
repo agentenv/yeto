@@ -11,7 +11,7 @@ policy-age terms is :mod:`.fully_async_translate` (pure functions, unit tested);
 6.4b wires it into the fully_async adapter path (``fully_async_round`` /
 ``fully_async_ports`` / ``fully_async_runner``): stage 2, limit up to 1.
 
-S27 G-EV (VERL-PARITY #10): ``--rl-rollout-ahead 1`` with a limit >= 1 keeps the
+Rollout ahead (VERL-PARITY #10): ``--rl-rollout-ahead 1`` with a limit >= 1 keeps the
 synchronous trainer of verl's separate mode (full parameters, trainer and
 rollout cards apart: the FSDP2 island with ``--rl-placement fixed-partition``,
 or the Megatron island) and lets the rollout servers generate the next batch
@@ -25,10 +25,10 @@ from __future__ import annotations
 from yeto.rl.engine.policy_age import PolicyAgeSupport, validate_limit
 
 # 6.4b (10-09): stage 2 through the fully_async path (rollouter + trainer on
-# separate GPUs).  rl-offpolicy-correction-passthrough L6.9: the cap was 1;
+# separate GPUs).  The cap was 1;
 # decoupled PPO needs A_hard >= 2. verl has no upper bound of its own
 # (staleness_threshold = N, fully_async_translate.staleness_threshold_for);
-# 4 matches the Miles cap. Limits above 1 are not yet run on GPU (L6.10).
+# 4 matches the Miles cap. Limits above 1 are not yet run on GPU.
 SUPPORT = PolicyAgeSupport(backend="verl", stage=2, max_policy_age=4)
 # --rl-rollout-ahead: whole batches the separate-mode island generates ahead of its
 # trainer (VerlRolloutPool.start_generate; yeto.rl.engine.rollout_ahead).

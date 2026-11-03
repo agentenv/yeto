@@ -32,14 +32,14 @@ class PlacementRequest:
     trainer_gpus: int
     rollout_gpus: int
     gpus_per_engine: int
-    # rl-infra-spec 2.1/2.1a: reserved standby GPUs (fixed partition only) and
+    # Reserved standby GPUs (fixed partition only) and
     # an optional explicit logical-bundle map {"trainer","rollout","standby"}.
     standby_gpus: int = 0
     bundle_map: Mapping[str, tuple[int, ...]] | None = None
-    # fork F-R1: yeto names of the rollout engine cells declared to the fork
-    # (placement map "rollout_cells"); needs a Miles fork with F-R1.
+    # Yeto names of the rollout engine cells declared to the fork
+    # (placement map "rollout_cells"); needs a Miles fork with cell declaration.
     rollout_cell_names: tuple[str, ...] = ()
-    # rl-multinode-island D3-D5: GPUs per island node (None = single node, no
+    # GPUs per island node (None = single node, no
     # node rules) and the trainer parallel sizes the node rules need.
     # Q1/Q3 ruling 2026-10-04: the in-node group is ``node_parallel`` = tp*cp
     # (TP stays inside a node); EP/PP groups may span nodes. ``model_parallel``
@@ -191,7 +191,7 @@ class PlacementRequest:
     @property
     def placement_map_arg(self) -> dict[str, Any] | None:
         """The ``--yeto-placement-map`` JSON: the role map plus, when cell names
-        are given, the fork-F-R1 ``rollout_cells`` declaration (forces a map).
+        are given, the fork ``rollout_cells`` declaration (forces a map).
 
         Layout (in name order): the first rollout/gpus_per_engine cells start on
         consecutive runs of the rollout role; the next ones are stopped and bound

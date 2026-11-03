@@ -1,4 +1,4 @@
-"""Launcher end-to-end wiring of --rl-sync-preset sao-streaming-full (P0-1.7b.3). No Ray.
+"""Launcher end-to-end wiring of --rl-sync-preset sao-streaming-full. No Ray.
 
 The final contract bundle freezes the syncer semantic profile.  The launcher
 starts one syncer per role (actor, critic) with exactly that profile and
@@ -91,7 +91,7 @@ def _flag(command: str, flag: str) -> str:
 def test_head_controller_reloads_the_contract_bundle(tmp_path, monkeypatch):
     """The head replays the launch args as JSON, which drops the loaded
     bundle; the head must reload it to render the role syncers
-    (s23-g3-sao-probe-20261014a: AttributeError rl_sao_manifest)."""
+    (a GPU probe failed with AttributeError rl_sao_manifest)."""
     from yeto import cli, launcher
 
     args, plan = _plan(tmp_path)
@@ -309,7 +309,7 @@ def test_dry_run_locks_the_complete_sao_commands(tmp_path):
 
 
 def test_run_d_lora_sao_flags_still_launch(tmp_path):
-    """P0-1.2上卡 run d (s23-g1-ports-sao-20261013d): single-island ports SAO
+    """GPU run: single-island ports SAO
     with LoRA, the critic spec and --rl-lr-schedule constant must keep the
     LoRA island command; the streaming preset must not leak into it."""
     from yeto.launcher import _prepare_rl_args, dry_run_plan

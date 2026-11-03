@@ -1,4 +1,4 @@
-"""Critic state contract (change ``rl-algo-critic-family``, design D4).
+"""Critic state contract (change ``rl-algo-critic-family``).
 
 The critic is a second trainable role next to the actor:
 
@@ -78,7 +78,7 @@ def critic_layout_hash(
     1 output for a scalar (MSE) critic, ``value_num_bins`` for a classification
     (HL-Gauss / two-hot) critic. The bins count is part of the identity;
     ``value_bins=1`` keeps the historical payload (and hash) byte-for-byte.
-    ``lora`` is the reserved D9 shape (rank / alpha / target modules) and is
+    ``lora`` is the reserved shape (rank / alpha / target modules) and is
     part of the identity once ``param_mode='lora'`` exists.
     """
 

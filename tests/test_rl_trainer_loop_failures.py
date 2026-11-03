@@ -1,6 +1,6 @@
-"""T-FPUB: the trainer loop stops after too many failed incarnations in a row.
+"""The trainer loop stops after too many failed incarnations in a row.
 
-GPU run s24-l54-pair-20261014i: every trainer incarnation failed at its first
+On a GPU run every trainer incarnation failed at its first
 publish and the scheduler started a new one about 15 s later, with no limit.
 Now ``max_consecutive_failures`` (default 3) failed incarnations with no trained
 round between them stop the loop: it releases the trainer, journals
@@ -60,7 +60,7 @@ class _Cuts:
 
 class _Lifecycle:
     """``outcomes``: per incarnation, "start_error" (start raises), "train_error"
-    (the first run fails, as the L5.4 publish), or "ok" (each run trains a round)."""
+    (the first run fails, as the sampler/trainer pair publish), or "ok" (each run trains a round)."""
 
     def __init__(self, outcomes) -> None:
         self.outcomes = list(outcomes)

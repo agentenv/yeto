@@ -1,4 +1,4 @@
-"""Trainer-native stacked expert layout -> per-expert source names (S25 N8.5b).
+"""Trainer-native stacked expert layout -> per-expert source names.
 
 The quantization layout (:mod:`.requant`) names one BF16 source matrix per
 routed expert, as the HF per-expert checkpoint does::

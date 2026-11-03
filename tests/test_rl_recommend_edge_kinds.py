@@ -1,4 +1,4 @@
-"""G3: candidate edges are filtered by kind; trainer-dp only after 4.6/4.7 (A4)."""
+"""Candidate edges are filtered by kind; trainer-dp only after 4.6/4.7 (A4)."""
 import dataclasses
 from types import SimpleNamespace as NS
 

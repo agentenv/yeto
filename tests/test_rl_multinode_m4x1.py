@@ -1,7 +1,7 @@
-"""M4 2x1 variant (m4a1/m4b1): g3 topology (fixed-partition resources-2x1.json T1R1S0,
+"""M4 2x1 variant (m4a1/m4b1): fault-case topology (fixed-partition resources-2x1.json T1R1S0,
 trainer n0:0, rollout n1:0), TP1 PP1, + checkpoint store.
 
-CPU checks: s1run dry-run argv (A/B identical except --rl-elastic-accept-rebind and the
+CPU checks: multinode_run dry-run argv (A/B identical except --rl-elastic-accept-rebind and the
 instance type, steps 8, GPU spec switch), the launcher's pre-provision validation accepts
 both argvs, and the m4 judge's 2-uuid rule."""
 
@@ -25,13 +25,13 @@ A_ITYPE, B_ITYPE = "gpu-l40s-a_1gpu-16vcpu-64gb", "gpu-l40s-d_1gpu-16vcpu-96gb"
 
 
 def _dry(case, **env):
-    out = subprocess.run(["bash", str(GPU_DIR / "s1run.sh"), case, f"p-{case}", "100"], capture_output=True, text=True,
+    out = subprocess.run(["bash", str(GPU_DIR / "multinode_run.sh"), case, f"p-{case}", "100"], capture_output=True, text=True,
                          env={**os.environ, "DRY": "1", "IMAGE": "docker:x", "STORE": "s3://b/x", **env},
                          check=True).stdout.splitlines()
     return out[0], shlex.split(out[1])
 
 
-def test_s1run_m4x1_argv_identical_except_rebind_and_itype():
+def test_multinode_run_m4x1_argv_identical_except_rebind_and_itype():
     ha, a = _dry("m4a1", ITYPE=A_ITYPE, M4B_ITYPE=B_ITYPE)
     hb, b = _dry("m4b1", ITYPE=A_ITYPE, M4B_ITYPE=B_ITYPE)
     assert "nodes=2" in ha and "case=m4b1" in hb
@@ -52,12 +52,12 @@ def test_s1run_m4x1_argv_identical_except_rebind_and_itype():
     assert strip(a) == strip(b)
 
 
-def test_s1run_m4x1_h100_and_store_required():
+def test_multinode_run_m4x1_h100_and_store_required():
     _, b = _dry("m4b1", M4X1_GPU="nebius:2x1xh100@eu-north1")
     spec = b[b.index("--gpu") + 1]
     assert [(s.num_nodes, s.gpus_per_node, s.gpu) for s in parse_gpu_spec(spec)] == [(2, 1, "H100")]
     assert "--learner-instance-type" not in b
-    r = subprocess.run(["bash", str(GPU_DIR / "s1run.sh"), "m4a1", "p", "1"], capture_output=True, text=True,
+    r = subprocess.run(["bash", str(GPU_DIR / "multinode_run.sh"), "m4a1", "p", "1"], capture_output=True, text=True,
                        env={k: v for k, v in {**os.environ, "DRY": "1", "IMAGE": "docker:x"}.items() if k != "STORE"})
     assert r.returncode == 66
 
@@ -102,7 +102,7 @@ def _fake(tmp, *, b_uuids, b_case="m4b1"):
 
 
 def _judge(a, b):
-    subprocess.run([sys.executable, str(GPU_DIR / "s1judge.py"), str(a), "m4", str(b)], capture_output=True, text=True)
+    subprocess.run([sys.executable, str(GPU_DIR / "multinode_judge.py"), str(a), "m4", str(b)], capture_output=True, text=True)
     return json.loads((b / "judgment-m4.json").read_text())
 
 

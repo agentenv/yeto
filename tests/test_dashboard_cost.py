@@ -1,4 +1,4 @@
-"""fleet-dashboard 3.4 / 2.3: cost view (v7 arithmetic) and the head fleet.jsonl."""
+"""Cost view (v7 arithmetic) and the head fleet.jsonl."""
 
 import json
 
@@ -33,12 +33,12 @@ def test_v7_cost_arithmetic_and_efficiency():
     assert neb["usd_per_1m_tok"] == pytest.approx(28.8 / (6100 * 3600 / 1e6))
     assert neb["reward_per_usd"] == pytest.approx(0.3 / 74.88) and neb["ranked"]
     assert rows["3"]["cost_usd"] == 0 and rows["3"]["local"] and not rows["3"]["ranked"]
-    assert rows["2"]["cost_usd"] is None and not rows["2"]["priced"]  # 未定价, never 0
+    assert rows["2"]["cost_usd"] is None and not rows["2"]["priced"]  # unpriced, never 0
     assert c["unpriced"] == ["2"]
     assert c["total_usd"] == pytest.approx(74.88) and c["burn_usd_h"] == pytest.approx(28.8)
     assert c["budget_pct"] == pytest.approx(74.88 / 3)
     assert c["hours_to_cap"] == pytest.approx((300 - 74.88) / 28.8)
-    assert "非账单" in c["note"]
+    assert "not billing data" in c["note"]
 
 
 def test_relaunch_intervals_accrue_only_ready_time():
@@ -113,7 +113,7 @@ def test_island_id_and_task_meta():
 
 
 def test_meta_from_modal_island_config_shape():
-    # real Modal runs (s13-fnsmoke/g1) logged cloud/gpu/gpus = null before this
+    # real Modal runs logged cloud/gpu/gpus = null before this
     class Cfg:
         gpu = "H200"
         gpus_per_node = 8

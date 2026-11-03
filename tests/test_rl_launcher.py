@@ -34,7 +34,7 @@ from yeto.rl.codex_backend import (
 from yeto.rl.adapters.miles.revision import miles_execution_source_sha256, verify_miles_revision
 
 
-# DeepSeek V4 expert-full rides the full-parameter strict sweep (P0 1.7b.2);
+# DeepSeek V4 expert-full rides the full-parameter strict sweep;
 # its accepted launch is in test_rl_launcher_dense_full.py.
 _FULL_PARAMETER_SWEEP = (
     "--gpu", "modal:16xh200,modal:16xh200",
@@ -934,7 +934,7 @@ def _island_run(extra):
 
 
 def test_island_ray_head_store_and_preallocation_reach_only_the_head():
-    """S27 RAY-SEGV R1: head-only store size and RAY_* prefix on the head's ray start."""
+    """Ray segfault fix: head-only store size and RAY_* prefix on the head's ray start."""
     run, head, worker = _island_run(("--rl-island-ray-object-store-gib", "1000",
                                      "--rl-island-ray-head-object-store-gib", "700",
                                      "--rl-island-ray-head-preallocate",
@@ -1438,7 +1438,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         learner_zero_args, learner_zero_argv, model_config_sha256=config_sha256
     )
-    # P3: each island may train on its own task list; the data stays out.
+    # Each island may train on its own task list; the data stays out.
     other_data_args = argparse.Namespace(**vars(learner_zero_args))
     other_data_args.data, other_data_args.data_revision = "org/other", "e" * 40
     other_data_argv = list(learner_zero_argv)
@@ -1446,7 +1446,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         other_data_args, other_data_argv, model_config_sha256=config_sha256
     )
-    # P3-Q3: eval runs on the eval island; an island's eval settings stay out (v6).
+    # Eval runs on the eval island; an island's eval settings stay out (v6).
     eval_args = argparse.Namespace(**vars(learner_zero_args))
     eval_args.eval_interval, eval_args.eval_data = 2, "/heldout.jsonl"
     eval_argv = learner_zero_argv + [
@@ -1457,7 +1457,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         eval_args, eval_argv, model_config_sha256=config_sha256
     )
-    # P4: placement flags stay in a uniform launch's contract (different GPU
+    # Placement flags stay in a uniform launch's contract (different GPU
     # splits refused) and leave it only with per-island placement.
     colocated_argv = list(learner_zero_argv)
     rollout = colocated_argv.index("--rollout-num-gpus")
@@ -1521,7 +1521,7 @@ def _dense_sweep_args(**overrides):
         ({"total_fragment_steps": 5}, "rounds\\*fragments"),
         ({"syncer_profile_sha256": None}, "--syncer-profile-sha256"),
         ({"eval_only": True}, "eval-only"),
-        # P0-S lifts this for every full-parameter preset.
+        # Round-cut resume lifts this for every full-parameter preset.
         ({"rl_max_policy_age": 1}, "--rl-max-policy-age"),
     ],
 )
@@ -1531,7 +1531,7 @@ def test_dense_full_sweep_rejections(overrides, message):
 
 
 def test_dense_full_sweep_accepts_any_generation_roster():
-    # P0-D7: no generation-0 / version-0 Milestone-1 limit any more.
+    # No generation-0 / version-0 Milestone-1 limit any more.
     rl_learner._check_dense_full_sweep(_dense_sweep_args(), yeto_policy_sync=True)
 
 
@@ -1829,7 +1829,7 @@ def test_nebius_island_caps_the_ray_object_store_at_dev_shm(tmp_path):
         out = subprocess.run(["bash", "-c", f"echo {word}"], capture_output=True, text=True,
                              env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, check=True)
         assert out.stdout.strip() == f"--object-store-memory={want}"
-    # s27-next: a head-only size (S27 RAY-SEGV) on a Nebius island is capped the same way on node 0;
+    # A head-only Ray store size on a Nebius island is capped the same way on node 0;
     # the workers keep the island size, also capped
     both = _args(("--gpu", "nebius:2x4xh100@eu-north1", "--rl-island-ray-object-store-gib", "600",
                   "--rl-island-ray-head-object-store-gib", "300"))

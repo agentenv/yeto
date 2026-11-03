@@ -2372,7 +2372,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--custom-generate-function-path",
         default=None,
         help="Miles custom generate callable for every island (e.g. "
-        "yeto.rl.teacher_forcing.replay_generate for equivalence teacher forcing)",
+        "yeto.rl.teacher_forcing.replay_generate for teacher forcing)",
     )
     parser.add_argument("--optimizer-steps", type=int, default=1)
     parser.add_argument("--gpus-per-island", type=int, default=1)

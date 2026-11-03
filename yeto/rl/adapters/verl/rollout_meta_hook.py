@@ -24,4 +24,4 @@ def expected_policy_version(sample: Any = None) -> str | None:
 
 
 def record_round_metadata(args: Any, round_id: Any, **counters: int) -> None:
-    raise NotImplementedError("verl 后端的推理侧计数尚未接入（rl-verl-backend 2.4 之后）")
+    raise NotImplementedError("inference-side counts are not wired on the verl backend yet (after rl-verl-backend 2.4)")

@@ -79,7 +79,7 @@ _BARE_LOCAL_ROUND_ALIASES = {
     "rl/reward_mean": ("reward_mean",),
     "rl/pass_rate": ("pass_rate",),
 }
-# ``train_metrics{}`` (Miles loss dict round means, fleet-dashboard D4) keys
+# ``train_metrics{}`` (Miles loss dict round means) keys
 # become ``train/<key>``: plain metric-name keys with finite scalar values only.
 _TRAIN_METRIC_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,63}$")
 _TRAIN_STEP_ALIASES = (TRAIN_STEP_KEY, "train_step")
@@ -116,7 +116,7 @@ def _non_negative_step(event: dict[str, Any], aliases: tuple[str, ...]) -> int |
     return None
 
 
-# S26 E3b: per-sweep sync diagnostics of a full-parameter island, on the
+# Per-sweep sync diagnostics of a full-parameter island, on the
 # global policy-version axis (rl/step).
 _SYNC_ROUND_OUTPUTS = (
     "sync/sync_wait_seconds",

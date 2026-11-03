@@ -1,4 +1,4 @@
-"""S27 G-DC (V8/V10): the verl Megatron engine island, CPU checks.
+"""The verl Megatron engine island, CPU checks.
 
 * ``megatron_engine``: engine choice, shape rules, Hydra overrides (FSDP2 keys
   replaced, data / sampling / correction keys kept, D0 shape);
@@ -52,12 +52,12 @@ def test_engine_is_megatron_exactly_when_a_model_parallel_size_is_above_one():
 
 
 @pytest.mark.parametrize("change,match", [
-    (dict(cp=2, mamba=True), "没有查过"),  # S28 G-CPW: was a blanket CP>1 refusal
+    (dict(cp=2, mamba=True), "nobody checked"),  # was a blanket CP>1 refusal
     (dict(etp=2), "ETP=1"),
     (dict(tp=3), "TP\\*PP\\*CP=3"),
-    (dict(tp=16, trainer_nodes=2), "跨节点"),
+    (dict(tp=16, trainer_nodes=2), "spans nodes"),
     (dict(ep=3), "EP\\*ETP=3"),
-    (dict(num_experts=100), "专家数"),
+    (dict(num_experts=100), "expert count"),
     (dict(rollout_tp=3), "rollout TP=3"),
     (dict(rollout_engine="sglang"), "vLLM"),
     (dict(dispatcher="flex"), "DeepEP"),
@@ -80,7 +80,7 @@ def test_d0_shape_is_valid_and_reports_its_sizes():
 
 
 def test_megatron_island_is_full_parameter_only():
-    with pytest.raises(me.MegatronShapeError, match="全参数"):
+    with pytest.raises(me.MegatronShapeError, match="full parameters only"):
         me.build_overrides(_run(parameter_mode="lora", lora_rank=32, lora_alpha=32), D0)
 
 
@@ -175,7 +175,7 @@ def _plan(tmp_path, **kw):
         reward_name="compute_score_numeric_answer")
 
 
-def test_island_plan_of_the_d0_flags(tmp_path):
+def test_island_plan_of_the_baseline_flags(tmp_path):
     plan = _plan(tmp_path)
     assert plan["shape"]["trainer_gpus"] == 8 and plan["shape"]["rollout_gpus"] == 8
     assert plan["shape"]["router_replay"] == "R3" and plan["shape"]["gpu_memory_utilization"] == 0.8
@@ -187,7 +187,7 @@ def test_island_plan_of_the_d0_flags(tmp_path):
 
 
 def test_the_gradient_nan_check_is_on_by_default_and_can_be_turned_off(tmp_path):
-    """S27 G-FL: verl's DDP config leaves Megatron's check_for_nan_in_grad at False, and
+    """verl's DDP config leaves Megatron's check_for_nan_in_grad at False, and
     with it off a NaN gradient is scaled into every parameter by clip_grads instead of
     raising. The island asks for it through override_ddp_config unless told not to."""
     from yeto.rl import megatron_grad_checks
@@ -208,7 +208,7 @@ def test_the_gradient_nan_check_is_on_by_default_and_can_be_turned_off(tmp_path)
 
 
 def test_the_island_refuses_a_trainer_without_the_gradient_nan_check():
-    """S27 G-FL: the flag is read back off the DDP wrappers, so an override Hydra
+    """The flag is read back off the DDP wrappers, so an override Hydra
     dropped fails at island start instead of running unguarded."""
     from types import SimpleNamespace
 
@@ -238,14 +238,14 @@ def test_the_island_refuses_a_trainer_without_the_gradient_nan_check():
 
 
 def test_the_ascend_plugin_stack_is_off_unless_the_flag_asks_for_it(tmp_path):
-    """S27 G-FL: no flag, no section; with the flag the plan carries the switches, the
+    """No flag, no section; with the flag the plan carries the switches, the
     plugin order and the reasons, and never the clamp rewrite."""
     from yeto.rl import ascend_plugin_stack
 
     assert _plan(tmp_path)["ascend_plugin_stack"] is None
-    section = _plan(tmp_path, extra=["--rl-ascend-plugin-stack", "/data/work/sft-run/plugins"]
+    section = _plan(tmp_path, extra=["--rl-ascend-plugin-stack", "/opt/sft-run/plugins"]
                     )["ascend_plugin_stack"]
-    assert section["root"] == "/data/work/sft-run/plugins"
+    assert section["root"] == "/opt/sft-run/plugins"
     assert section["env"]["STACK_REWRITES"] == "cumsum,squeeze"
     assert [row["plugin"] for row in section["plugins"]] == list(ascend_plugin_stack.PLUGINS)
     assert section["excluded"] and section["unset"]
@@ -261,12 +261,12 @@ def test_island_plan_with_the_hf_export(tmp_path):
 
 @pytest.mark.parametrize("change,match", [
     (dict(parameter_mode="lora"), "--tuning full"),
-    # S27 G-FG: a synced Megatron island is allowed; what its outer sync cannot run is refused
+    # a synced Megatron island is allowed; what its outer sync cannot run is refused
     (dict(rl_single_island_no_sync=False, rl_peer_recovery_store="modal-volume://v/p"), "no peer recovery"),
     (dict(rl_placement="colocated"), "fixed-partition"),
     (dict(rl_max_policy_age=1), "--rl-max-policy-age 0"),
     (dict(rl_sample_role="trainer"), "--rl-sample-role"),
-    (dict(rollout_num_gpus=4), "!= 岛内 Ray 的 16 卡"),
+    (dict(rollout_num_gpus=4), "!= the island Ray's 16 cards"),
     (dict(rl_lr_schedule="cosine"), "constant"),
     (dict(rl_export_hf_rounds="final"), "go together"),
 ])
@@ -441,7 +441,7 @@ def test_publisher_uses_the_nccl_engine_with_the_policy_version(tmp_path):
         mp.MegatronPublisher(island).publish(state)
 
 
-@pytest.mark.parametrize("spec_file", [None, "tools/eval/efficiency/algo-eff-miles.json"])
+@pytest.mark.parametrize("spec_file", [None, "examples/rl_algorithms/algo-eff-miles.json"])
 def test_driver_runs_rounds_over_the_megatron_ports(tmp_path, spec_file):
     from yeto.rl.adapters.verl import megatron_ports as mp
     from yeto.rl.adapters.verl.entry import verl_capabilities
@@ -551,7 +551,7 @@ def test_megatron_image_layers_and_pins():
     expected = pins.expected_versions_for_engine("megatron")
     assert expected["mamba_ssm"] == pins.MAMBA_SSM_VERSION and expected["vllm"] == pins.EXPECTED_VERSIONS["vllm"]
     assert pins.expected_versions_for_engine("fsdp2") == pins.EXPECTED_VERSIONS
-    # S27 G-FN: an Ascend Megatron island asserts MindSpeed's stack, not the CUDA
+    # an Ascend Megatron island asserts MindSpeed's stack, not the CUDA
     # image's; nothing here builds that environment, so a mismatch is a recorded
     # problem (YETO_VERL_ALLOW_UNPINNED waives it) rather than a refusal to start
     npu = pins.expected_versions_for_engine("megatron", "ascend")
@@ -567,10 +567,10 @@ def test_megatron_image_layers_and_pins():
         image.modal_image(object(), variant="sglang")
 
 
-VERL_FORK = Path(os.path.expanduser("~/work/verl-fork-acad9875"))
+VERL_FORK = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent"))
 
 
-@pytest.mark.skipif(not (VERL_FORK / "verl/models/mcore/util.py").is_file(), reason="no verl fork checkout")
+@pytest.mark.skipif(not (VERL_FORK / "verl/models/mcore/util.py").is_file(), reason="no verl fork checkout (set YETO_VERL_SRC)")
 def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     import shutil
 
@@ -586,7 +586,7 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     assert util.count("**_yeto_seq_idx_args(cp_size, seqlens_in_batch_padded_cpu)") == 2
     assert util.count("def _yeto_seq_idx_args(") == 1
     compile(util, "util.py", "exec")
-    # S28 G-120D: one pinned host copy in copy_megatron_model_to_cpu, applied once
+    # one pinned host copy in copy_megatron_model_to_cpu, applied once
     utils = (tmp_path / patch_verl.PINNED_COPY_TARGET).read_text()
     assert utils.count("def _yeto_pinned_host_copy(") == 1
     assert utils.count("_yeto_pinned_host_copy(") == 4
@@ -595,14 +595,14 @@ def test_megatron_patch_profile_sets_seq_idx_and_leaves_lora_wire_out(tmp_path):
     engine = (tmp_path / patch_verl.ZMQ_TARGET).read_text()  # one SUB socket per publisher
     assert engine.count("_yeto_sub_key") == 2 and engine.count("time.sleep(1.0)  # yeto") == 1
     compile(engine, "nccl_checkpoint_engine.py", "exec")
-    # S27 G-EQ2: the auto-class fix applies on both profiles and stays valid python
+    # the auto-class fix applies on both profiles and stays valid python
     model = (tmp_path / patch_verl.AUTO_CLASS[0]).read_text()
-    assert model.count("yeto S27 G-EQ2") == 1 and patch_verl.AUTO_CLASS[1] not in model
+    assert model.count("yeto auto-class") == 1 and patch_verl.AUTO_CLASS[1] not in model
     compile(model, "model.py", "exec")
-    # S28 FCE: the chunked log-prob hook sits once inside _maybe_enable_fused_kernels,
+    # the chunked log-prob hook sits once inside _maybe_enable_fused_kernels,
     # around verl's own patch loop (the anchor itself is kept)
     impl = (tmp_path / patch_verl.CHUNKED_LOGPROB_TARGET).read_text()
-    assert impl.count("yeto S28 FCE") == 1 and impl.count(patch_verl.CHUNKED_LOGPROB_ANCHOR) == 1
+    assert impl.count("yeto chunked log-prob") == 1 and impl.count(patch_verl.CHUNKED_LOGPROB_ANCHOR) == 1
     fused = impl[impl.index("    def _maybe_enable_fused_kernels(self):"):impl.index("    def _build_optimizer(self):")]
     assert fused.index("_yeto_chunked_logprob.install()") < fused.index("patch_fused_forward(model)") \
         < fused.index("_yeto_chunked_logprob.check_installed(self.module)")
@@ -631,7 +631,7 @@ def test_v10_roles_are_registered_for_verl():
     with pytest.raises(ValueError, match="standby"):
         placement.PlacementRequest(kind="fixed-partition", trainer_gpus=8, rollout_gpus=8,
                                    standby_gpus=8).trainer_shape()
-    with pytest.raises(ValueError, match="rollout-inject|启动延迟"):
+    with pytest.raises(ValueError, match="rollout-inject|start-delay"):
         backends.module("rollout", "verl").INJECT_START_DELAY_ENV
     with pytest.raises(ValueError, match="update-weights-block"):
         backends.module("publish", "verl").INJECT_UPDATE_BLOCK_ENV
@@ -689,7 +689,7 @@ def test_master_ports_are_drawn_at_random_below_the_ephemeral_range():
 
 
 def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(tmp_path, monkeypatch):
-    """--rl-export-hf-rounds on the Megatron island (s27-dc-train1 round 3 failed with "the writer
+    """--rl-export-hf-rounds on the Megatron island (a GPU run's round 3 failed with "the writer
     left no .complete"): rank 0 of the real ``remote_hf_export`` writes the round, leaves the
     marker after every rank finished, and ``HfRoundExports`` puts it into the store; another
     rank only joins the collective write."""
@@ -734,7 +734,7 @@ def test_hf_export_on_the_trainer_ranks_leaves_the_marker_and_reaches_the_store(
     assert not (joined / ".complete").exists() and not (joined / "config.json").exists()
 
 
-# ------------------------------------------------- S28 G-120C: fused log-prob kernels
+# ------------------------------------------------- fused log-prob kernels
 def test_fused_logprob_kernels_are_off_by_default_and_written_from_the_shape():
     off = me.build_overrides(_run(), D0)
     assert _value(off, "actor_rollout_ref.model.use_fused_kernels") == "False"
@@ -749,7 +749,7 @@ def test_fused_logprob_kernels_key_is_asserted():
 
 
 def test_override_value_sees_through_hydras_add_prefix():
-    # S28 G-120 handoff section 6 item 12: every asserted key written with "++" read
+    # every asserted key written with "++" read
     # back as want:null, so check_asserted skipped it -- a read-back, not an assertion
     from yeto.rl.adapters.verl.island_entry import _override_value
 
@@ -770,14 +770,14 @@ def test_every_asserted_key_of_a_megatron_island_gets_a_want(tmp_path):
     assert nulls == []
 
 
-def test_island_plan_records_and_gates_the_s29_measurement_switches(tmp_path, monkeypatch):
-    """S29 MFU-B: the measurement switches land in the plan, a bad ETP is a clear
+def test_island_plan_records_and_gates_the_measurement_switches(tmp_path, monkeypatch):
+    """The measurement switches land in the plan, a bad ETP is a clear
     exit, and a release run refuses the switches that bypass a check."""
     for name in me.EXPERIMENT_ENVS:
         monkeypatch.delenv(name, raising=False)
     assert not _plan(tmp_path)["experiment_env"]
     monkeypatch.setenv(me.ETP_ENV, "x")
-    with pytest.raises(SystemExit, match="YETO_S29_ETP must be an integer"):
+    with pytest.raises(SystemExit, match="YETO_VERL_MEGATRON_ETP must be an integer"):
         _plan(tmp_path)
     monkeypatch.delenv(me.ETP_ENV)
     monkeypatch.setenv(me.TCFG_EXTRA_ENV, "moe_expert_capacity_factor=1.25")

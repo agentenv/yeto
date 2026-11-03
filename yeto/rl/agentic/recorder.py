@@ -1,4 +1,4 @@
-"""Token recorder port: the OpenAI endpoint an agent calls, with token bookkeeping (S25 N10.3).
+"""Token recorder port: the OpenAI endpoint an agent calls, with token bookkeeping.
 
 A Harbor installed agent (codex) calls the model over OpenAI text protocol
 from inside the sandbox and records no tokens.  A token-in/token-out trainer
@@ -7,7 +7,7 @@ front of the sampler: it renders the prompt, generates with the session's
 sampling parameters, and keeps (prompt ids, completion ids, logprobs) per call.
 
 Miles already has one (its session server).  For verl the implementation is
-N10.5 (in front of SGLang / vllm-ascend); this module only fixes the port.
+the records proxy (in front of SGLang / vllm-ascend); this module only fixes the port.
 """
 
 from __future__ import annotations

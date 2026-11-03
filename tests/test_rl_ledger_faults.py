@@ -1,4 +1,4 @@
-"""rl-infra-spec 3.6 fault evidence (T36-REVIEW §3.3 C1/C2/C3'), CPU.
+"""Ledger fault evidence (T36-REVIEW §3.3 C1/C2/C3'), CPU.
 
 C2  real ``rollout_meta_hook.record_trained_groups`` -> ``extract_rollout_metadata``
     -> ``handle_from_metadata`` -> ``BatchLedger.prepare`` reconciliation with a
@@ -37,7 +37,7 @@ from yeto.rl.adapters.miles import rollout_meta_hook as hook
 from yeto.rl.adapters.miles.rollout import handle_from_metadata, policy_token
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
-from test_rl_reconfig_e1 import NAME, _setup
+from test_rl_reconfig_controller import NAME, _setup
 
 H = "c" * 64
 

@@ -65,16 +65,16 @@ MSG_FINAL_MANIFEST = 11
 MSG_FINAL_ACK = 12
 MSG_FINAL_FRAGMENT = 13
 MSG_BUDGET_DONE = 14
-# S26 E3b: link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
+# link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
 MSG_BW_PROBE = 26
 # An island leaves the pool: u32 learner_id | u8 reason (yeto.rl.pool_client.LeaveReason).
 MSG_LEAVE = 27
-# Local-init startup (S27): the island's per-fragment INIT digests, and the
+# Local-init startup: the island's per-fragment INIT digests, and the
 # syncer's confirmation that every island holds the same version 0 (see
 # syncer/src/local_init.rs).
 MSG_INIT_DIGEST = 28
 MSG_INIT_CONFIRM = 29
-# S27 G-EA: receive-only subscriber (syncer subscriber.rs); 60-66 are the
+# receive-only subscriber (syncer subscriber.rs); 60-66 are the
 # sample relay (yeto.rl.spot_rollout.relay, syncer sample_relay.rs).
 MSG_SUBSCRIBE = 67
 SUBSCRIBER_ID_BIT = 0x8000_0000
@@ -99,19 +99,19 @@ DTYPE_BF16 = 2
 # base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
 # (see bulk_dtype and docs/PROTOCOL.md v4).
 DTYPE_Q4 = 3
-# Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16; INIT_PARAMS,
+# Session dtype 4: PUSH_FRAGMENT deltas travel as bf16; INIT_PARAMS,
 # BCAST_FRAGMENT and FINAL stay exact f32. Callers still hand the client f32
 # delta bytes; the client rounds them (round-to-nearest-even, as the syncer's
 # ``half::bf16::from_f32``) on the way out.
 DTYPE_F32_PUSH_BF16 = 4
-# Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled int8
+# Session dtype 5: PUSH_FRAGMENT deltas travel as block-scaled int8
 # (``f32_bytes_to_i8``); INIT/BCAST/FINAL stay f32. Callers hand f32 bytes.
 DTYPE_F32_PUSH_I8 = 5
-# Session dtype 6 (S27 P3): PUSH_FRAGMENT deltas travel in the dtype-3 q4
+# Session dtype 6: PUSH_FRAGMENT deltas travel in the dtype-3 q4
 # block codec (``f32_bytes_to_q4``); INIT/BCAST/FINAL stay f32. Callers hand
 # f32 bytes; only the outer gradient is quantized.
 DTYPE_F32_PUSH_Q4 = 6
-# Session dtype 7 (S27 P3): PUSH_FRAGMENT deltas travel as linear symmetric
+# Session dtype 7: PUSH_FRAGMENT deltas travel as linear symmetric
 # int4 with a per-block absmax scale (``f32_bytes_to_i4``); INIT/BCAST/FINAL
 # stay f32. Callers hand f32 bytes.
 DTYPE_F32_PUSH_I4 = 7
@@ -123,10 +123,10 @@ FULL_PARAMETER_PUSH_DTYPES = {
     "int4": DTYPE_F32_PUSH_I4,
     "int4-log": DTYPE_F32_PUSH_Q4,
 }
-# Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
+# Session-dtype flag: BCAST_FRAGMENT carries bf16 downlink deltas
 # between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
 DTYPE_FLAG_BCAST_DELTA = 0x80
-# Session-dtype flag (S27): quantization blocks of PUSH_FRAGMENT deltas
+# Session-dtype flag: quantization blocks of PUSH_FRAGMENT deltas
 # restart at every tensor boundary of the fragment, so a tensor replicated on
 # several ranks quantizes the same whatever its neighbours are. Only on the
 # block-quantized push dtypes (int8, int4, int4-log). Sessions without it
@@ -298,13 +298,13 @@ def _block_aligned_chunks(
     for part in parts:
         # Zero-copy: chunks are read-only views of the part.  Slicing bytes
         # here copied the rest of the part at every segment cut, quadratic in
-        # the segments per part (S27 G-AA: ~14 s/GiB with 10 MiB tensors).
+        # the segments per part (~14 s/GiB with 10 MiB tensors).
         data = memoryview(part).cast("B")
         start = 0
         if carry:
             # A carried partial block (under one block) is completed from the
             # head of this part and sent alone; only those bytes are copied
-            # (S27 G-AP: joining the carry to the whole part copied ~2 parts
+            # (joining the carry to the whole part copied ~2 parts
             # per part boundary).
             if left == 0:
                 raise ValueError("f32 push delta is longer than its tensor segments")
@@ -606,7 +606,7 @@ def read_frame(
 HELLO_MAC_DOMAIN = b"yeto-hello-mac-v1\0"
 ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
 
-# Test-only (S27 G-EY): a client started with ``recover=True`` reads its data
+# Test-only: a client started with ``recover=True`` reads its data
 # streams at most this many bytes per second (all streams together) until its
 # initial cut has arrived (``mark_initial_cut_received``: the recovery replay
 # and the versions RECOVERY_DONE names are applied). It puts a link slower
@@ -645,13 +645,13 @@ class _ReadRate:
         time.sleep(delay)
 
 
-# Test-only (S27 G-FE): a slow downlink while a learner runs normally (it is
+# Test-only: a slow downlink while a learner runs normally (it is
 # not recovering). Value "LEARNER:BPS:FROM_STEP:SECONDS": the client of
 # learner LEARNER reads its data streams at most BPS bytes per second (all
 # streams together) for SECONDS seconds, from the first PULL it gets for a
 # syncer step >= FROM_STEP. Other learners read at full speed. The control
 # stream (PULLs) is never limited. Unset or empty: no limit.
-# S27 G-FH: FROM_STEP "connect" opens the window when the client starts (its
+# FROM_STEP "connect" opens the window when the client starts (its
 # initial cut is then slow), and several comma-separated specs may name
 # different learners (at most one each), e.g. "1:3e6:connect:240,0:1.5e6:60:600".
 DOWNLINK_READ_LIMIT_ENV = "YETO_SYNC_TEST_DOWNLINK_READ_LIMIT"
@@ -682,7 +682,7 @@ class _DownlinkWindow:
                              f"{why} (learner {self.learner_id})")
 
     def see_connect(self) -> None:
-        """S27 G-FH: FROM_STEP "connect": start the window as the client starts."""
+        """FROM_STEP "connect": start the window as the client starts."""
         if self.from_step is None and self._started is None:
             self._open("from connect")
 
@@ -1133,7 +1133,7 @@ class SyncerClient:
     forever); once exhausted, check_health raises.
     """
 
-    # push_fragment_parts takes ``timings`` (S27 G-AG push time split).
+    # push_fragment_parts takes ``timings`` (push time split).
     push_timings_supported = True
     # First frame and its MAC domain; a receive-only subscriber
     # (yeto.rl.spot_rollout.subscriber) replaces both.
@@ -1145,7 +1145,7 @@ class SyncerClient:
         incarnation trailer); empty for a learner, whose HELLO is unchanged."""
         return b""
 
-    # Transport defaults (S26 E3b); __init__ overrides them per client.
+    # Transport defaults; __init__ overrides them per client.
     stream_schedule: str = "rr"
     stream_stall_timeout: float | None = None
 
@@ -1215,7 +1215,7 @@ class SyncerClient:
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
-        # S27 P4b: the fragments this connection's syncer shard owns (all of
+        # the fragments this connection's syncer shard owns (all of
         # them unsharded). INIT and PUSH for other fragments are refused, and
         # finalization waits only for these (yeto/syncer_shards.py).
         self.owned_fragments = owned_fragments
@@ -1229,11 +1229,11 @@ class SyncerClient:
             import numpy as np  # noqa: PLC0415 - keep the protocol import light
 
             self._push_i4_rng = np.random.default_rng(push_i4_stochastic_seed)
-        # S26 E3: f32 anchors of a bf16-downlink session (yeto/downlink.py).
+        # f32 anchors of a bf16-downlink session (yeto/downlink.py).
         self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
         self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
         self.num_streams = num_streams
-        # S26 E3b: chunk placement over the data streams and the per-stream
+        # chunk placement over the data streams and the per-stream
         # no-progress timeout (None = off, the historical behaviour).
         self.stream_schedule = stream_schedule
         self.stream_stall_timeout = stream_stall_timeout
@@ -1242,18 +1242,18 @@ class SyncerClient:
         self._meters = [StreamMeter() for _ in range(num_streams + 1)]
         self._upload_drained_at: float | None = None
         self._stalls = 0
-        # S26 E3b: set once the initial cut arrived. Before that a redial must
+        # set once the initial cut arrived. Before that a redial must
         # replay INIT_PARAMS (learner 0), and TCP_USER_TIMEOUT stays unset:
         # the multi-GB INIT upload and initial broadcast must not be reset by
-        # the kernel on a slow link (s26-e3b-p06-C32a).
+        # the kernel on a slow link.
         self._initial_cut_received = threading.Event()
-        # Test-only (S27 G-EY, RECOVERY_READ_BPS_ENV): a slow link under the
+        # Test-only (RECOVERY_READ_BPS_ENV): a slow link under the
         # recovery replay of this client.
         bps = recovery_read_bps_from_env() if recover else None
         self._recovery_read_rate = (
             None if bps is None else _ReadRate(bps, lambda: not self._initial_cut_received.is_set())
         )
-        # Test-only (S27 G-FE, DOWNLINK_READ_LIMIT_ENV): a slow downlink in
+        # Test-only (DOWNLINK_READ_LIMIT_ENV): a slow downlink in
         # normal running. A recovery limit of this client takes precedence.
         self._downlink_window = downlink_read_limit_from_env(learner_id)
         self._downlink_read_rate = (
@@ -1371,7 +1371,7 @@ class SyncerClient:
             except OSError as e:  # syncer may not be up yet
                 last = e
                 waited = time.monotonic() - t0
-                if waited >= next_report:  # s13-g3b: a silent 900 s redial looked like a hang
+                if waited >= next_report:  # a silent 900 s redial looks like a hang
                     _connect_log(f"syncer {self.addr[0]}:{self.addr[1]} not reachable yet "
                                  f"(attempt {attempts}, {waited:.0f}s): {type(e).__name__}: {e}")
                     next_report = waited + 30.0
@@ -1788,12 +1788,12 @@ class SyncerClient:
     ) -> bool:
         """Stream one PUSH_FRAGMENT from bounded contiguous byte parts.
 
-        ``timings`` (S27 G-AG diagnostics): when given, ``produce_s`` gets the
+        ``timings`` (diagnostics): when given, ``produce_s`` gets the
         seconds spent producing the wire parts (the caller's ``tensor_parts``
         plus the wire encoding) and ``push_s`` the whole call; the rest of
         ``push_s`` is framing and enqueueing.  The bytes do not change.
 
-        ``encoded`` (S27 G-AG): wire parts :meth:`encode_push_parts` already
+        ``encoded``: wire parts :meth:`encode_push_parts` already
         produced for this fragment (``tensor_parts`` must then be empty); the
         frame is byte-identical to streaming the same deltas.
 
@@ -1887,7 +1887,7 @@ class SyncerClient:
         *,
         timings: dict[str, float] | None = None,
     ) -> EncodedPush:
-        """Encode one fragment's f32 deltas to wire parts now (S27 G-AG).
+        """Encode one fragment's f32 deltas to wire parts now.
 
         Pure: reads only the layout and codec settings, so another thread may
         encode the next fragments while this one sends.  ``timings`` gets
@@ -3055,9 +3055,9 @@ _RECOVERY_DECODERS = {
 }
 
 
-# TCP keepalive for syncer connections (rl-infra-spec pause-audit: without it
+# TCP keepalive for syncer connections (pause audit: without it
 # a NAT/LB that drops an idle flow leaves the learner blocked on recv forever;
-# seen in the 2.4 T2R2 s29 run). Probes start after KEEPIDLE s of silence and a
+# seen in practice). Probes start after KEEPIDLE s of silence and a
 # dead peer is detected after KEEPIDLE + KEEPINTVL*KEEPCNT = 120 s, well below
 # common NAT idle timeouts (>= 300 s); the socket then errors, the supervisor
 # records the failure and check_health() raises (max_reconnects=0) instead of

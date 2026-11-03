@@ -1,21 +1,21 @@
-"""S27 G-FD: one island's slow downlink must not stall the other islands (real syncer, CPU, no Ray).
+"""One island's slow downlink must not stall the other islands (real syncer, CPU, no Ray).
 
-Run s27-fa-r1 (Qwen3-0.6B, 2 verl islands, quorum 1): the syncer's send to
+A GPU run (Qwen3-0.6B, 2 verl islands, quorum 1): the syncer's send to
 island 1 fell to about 0.14 MB/s after 637 MB. The scheduler sent each merged
 fragment to every island itself and waited for each island's send queue
 (``publish_round``), so the second merge waited about 6 min on island 1's link:
 no PULL went out, no push was merged, and both islands only trained locally.
 
 Now a broadcast that does not fit in an island's send queues at once goes to a
-forwarder task of that island (``BulkResends::spill``, the G-EL/G-EY resend
+forwarder task of that island (``BulkResends::spill``, the background resend
 forwarder); the newest version of a fragment replaces an older pending one.
 The other islands keep merging and every island keeps getting PULLs. Once
 nothing is pending, the island's broadcasts are sent inline again.
 ``--inline-broadcast`` keeps the old behavior; that case shows the stall.
 
 The syncer lease (60 s) is longer than the test's slow phase: under the old
-behavior a short lease ends the stall by removing the slow island (G-EL's
-test_bulk_resend covers leases; the s27-fa-r1 syncer log shows no lease
+behavior a short lease ends the stall by removing the slow island (the
+test_bulk_resend covers leases; that run's syncer log shows no lease
 expiry), and the 64 MiB INIT
 at startup must not lapse one either. Here the stall itself is measured.
 
@@ -213,7 +213,7 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
 
 
 def test_env_downlink_limit_names_one_learner_and_opens_at_its_pull_step(monkeypatch):
-    """S27 G-FE: the test-only downlink limit for GPU runs (``--modal-env``)
+    """The test-only downlink limit for GPU runs (``--modal-env``)
     applies to the named learner only, starts at its first PULL for a step
     >= FROM_STEP and ends SECONDS later. Unset: no limit."""
     import struct
@@ -258,7 +258,7 @@ ENV_FROM_STEP = 400
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("inline", [False, True], ids=["forwarder", "inline-old-behavior"])
 def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, inline):
-    """S27 G-FE: the env limit (the GPU run's mechanism) on a plain client
+    """The env limit (the GPU run's mechanism) on a plain client
     reproduces the slow downlink of the test above: the syncer sends island
     1's broadcasts through its forwarder, island 0 keeps merging, and island
     1 is merged again after the window. With ``--inline-broadcast`` (the old

@@ -374,7 +374,7 @@ def test_load_sampler_first_sample_before_interval_and_survives_probe_error():
 
 
 def test_load_sampler_emits_terminal_probe_after_generate(tmp_path):
-    """S15 evidence-window lesson: after generate returns, one final probe is
+    """Evidence-window lesson: after generate returns, one final probe is
     emitted with ``terminal=True`` even when the interval never ticked."""
     import json
 

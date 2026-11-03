@@ -180,7 +180,7 @@ def _two_trajectory_batch(behavior_policy_of=None):
 
 
 def test_schema4_records_every_trajectory_policy_and_round_trips(tmp_path):
-    """P0-S: a trajectory continued from an older policy carries that policy."""
+    """A trajectory continued from an older policy carries that policy."""
     policies = iter(((4, OLDER_HASH), (5, ROUND_HASH)))
     evidence = _two_trajectory_batch(lambda segments: next(policies))
 

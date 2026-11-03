@@ -82,7 +82,7 @@ binding. Every later HELLO must match them exactly,
 and learner IDs must lie in the configured `0..M` launch set. The learner ID
 repeated inside PUSH and HEARTBEAT must match the connected group.
 
-## HELLO authentication (secret-handling-hardening)
+## HELLO authentication
 
 When the syncer has an island HMAC key (`YETO_ISLAND_HMAC_KEY`; required
 unless `--allow-unauthenticated-islands`), the HELLO payload is:
@@ -106,7 +106,7 @@ mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
 - `--expected-island-contract <hex32>`: the session contract must equal
   `sha256(b"yeto-rl-session-contract-v2\0" | layout_fingerprint | pinned)`.
 
-## Card-type compatibility group (yeto-framework-decoupling 7.7)
+## Card-type compatibility group
 
 - Every RL island declares `compat_group` = `"<vendor>-<card>"` in lower case,
   for example `nvidia-h100`, `nvidia-h200`, `ascend-910b`. The value comes from
@@ -116,20 +116,21 @@ mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
 - The group is a field of `BackendIdentity` (schema v2), so it is inside the
   identity hash and the HELLO session contract.
 - The group is also sent in clear text as the HELLO trailer above. The syncer
-  pins the first admitted group. A HELLO with another group gets ERROR
-  `兼容组不同：<a> 对 <b>，容差未标定` on that connection only. The syncer does not
+  pins the first admitted group. A HELLO with another group gets an ERROR
+  naming both groups and stating that no tolerance is calibrated between them,
+  on that connection only. The syncer does not
   exit and the admitted islands keep running. H100 and H200 are different groups.
-- Phase 1 rule: groups must be identical. `CARD_PAIR_TOLERANCE` in the catalog is
-  the key for calibrated card-pair tolerances (phase 2); it is empty now.
+- Groups must be identical. `CARD_PAIR_TOLERANCE` in the catalog is the key for
+  calibrated card-pair tolerances; it is empty now.
 - Driver version and CUDA version are recorded only: island log line
   `[yeto-island] compat_group=...`, event `rl_island_hardware`, dashboard island
-  row. They never cause a refusal (user decision 2026-10-09). Reason: the checks
+  row. They never cause a refusal. Reason: the checks
   that run during training compare sha256 hashes only and do not depend on the
   hardware; recompute comparisons run only in tests.
-- Version boundary: a syncer without this change refuses the HELLO trailer and
+- Version boundary: a syncer without compatibility groups refuses the HELLO trailer and
   the longer JOIN; this syncer refuses a JOIN without the field.
 
-### What the syncer exchanges (7.7d)
+### What the syncer exchanges
 
 The syncer only exchanges deltas in a neutral format: flat f32 or bf16 tensors
 (q4 only as a wire compression of the same flat tensor), laid out by the HELLO
@@ -137,7 +138,7 @@ fragment layout, which is built from the canonical parameter names
 (`yeto.rl.core` canonical specs; each backend maps its own names through its
 parameter-name map, whose hash is in the identity). No engine-specific layout,
 sharding or device format crosses the syncer. This is the precondition for
-phase 2 (merging different card types after the tolerance is calibrated).
+merging different card types once a tolerance is calibrated.
 
 ## Striping
 
@@ -241,7 +242,7 @@ island applies such a jump at once (alpha = 0).
 
 Bulk resends (a catch-up, or the replay of a peer recovery below) go out on a
 forwarder task per learner, at the pace of its link, while rounds keep merging
-(`--inline-resend`: the scheduler sends them itself and waits on the link).
+(deprecated `--inline-resend`: the scheduler sends them itself and waits on the link).
 Versions published meanwhile go to the same forwarder, and the newest version
 of a fragment replaces an older pending one. The versions owed when the
 resend starts are sent first; once each of them (or a newer version of that
@@ -251,7 +252,7 @@ pulls, a recovery sends RECOVERY_DONE. The learner then joins rounds again;
 its broadcasts stay on the forwarder until nothing is pending and are sent
 inline after that, so one learner never has two senders.
 
-Slow downlinks (S27 G-FD). The scheduler sends a merged fragment inline to a
+Slow downlinks. The scheduler sends a merged fragment inline to a
 learner only if the learner's send queues take the whole frame now (every
 chunk's slot is reserved first); it never waits on a learner's link.
 Otherwise the learner is handed to the same kind of forwarder (no tail: it
@@ -263,10 +264,10 @@ it cannot reach and catches up with the newest versions. On a bf16-downlink
 session (`--bcast-delta-full-every`) the forwarder sends every version as a
 FULL carrying the shared anchor (digest as in a resend), because the learner
 may have skipped deltas; once inline again, the next delta applies on that
-anchor. `--inline-broadcast` restores the old behavior (each broadcast waits
+anchor. The deprecated `--inline-broadcast` restores the old behavior (each broadcast waits
 for every learner's queue; one slow link stalls every merge and PULL).
 
-The other bulk sends do not wait on one learner's link either (S27 G-FH):
+The other bulk sends do not wait on one learner's link either:
 
 - Initial cut: a learner whose send queues cannot take a fragment of the
   initial (or resumed) cut gets that fragment and the rest of the cut from its
@@ -292,7 +293,8 @@ The other bulk sends do not wait on one learner's link either (S27 G-FH):
   goes through the forwarder.
 
 `--inline-broadcast` restores the in-turn initial and final cuts too;
-`--inline-resend` keeps catch-ups inline on every session.
+`--inline-resend` keeps catch-ups inline on every session. Both flags are
+deprecated: the syncer and the launcher print a warning when one is set.
 
 With any membership option the fragment-round server starts its first round
 once the launch quorum (K, or `q_min` of a capacity quorum) is connected and
@@ -406,7 +408,7 @@ only those (other fragments are stored with numel 0 at version 0).
 Dtype 4 keeps INIT, BCAST and FINAL exact f32 and sends only PUSH deltas as
 bf16 (round-to-nearest-even). The syncer decodes and negates them like dtype 2
 and keeps f32 masters and momentum. The full-parameter policy sweep accepts
-dtype 1 or 4 (S26 E3, `--rl-sync-push-dtype bf16`).
+dtype 1 or 4 (`--rl-sync-push-dtype bf16`).
 
 ## int8 pushes over an f32 session (dtype 5)
 
@@ -787,7 +789,7 @@ pins both.
 | 4 | INFRA_FAILED | node or trainer lost, reconfiguration or storage failure, any unmapped error |
 | 5 | TRAINING_FAILED | a training check failed (publication, policy identity, optimizer step, non-finite values) |
 | 6 | CONFIG_MISMATCH | incompatible configuration |
-| 7 | FENCED | the member is no longer part of this run: superseded by a newer incarnation, or a fresh syncer replaced the run it joined (S29 D4); an older syncer records `unknown_7` |
+| 7 | FENCED | the member is no longer part of this run: superseded by a newer incarnation, or a fresh syncer replaced the run it joined; an older syncer records `unknown_7` |
 
 The exception table is `yeto/rl/engine/leave_reason.py`. An island sends at
 most one LEAVE: a reclaim listener's PREEMPTED is not overwritten by the
@@ -804,7 +806,7 @@ process against the same syncer address with the same `--rl-syncer-epoch`,
 the same HMAC key and a compatible backend identity and compat group (and an
 id below `--max-learners`). It is caught up to the current base.
 
-## Task dispenser (S27 P2, `--dispense`)
+## Task dispenser (`--dispense`)
 
 The actor syncer can hand out the rows of `--data` that the training islands
 train (`syncer/src/dispense.rs`, launcher `--rl-data-split dispense`). An
@@ -818,7 +820,7 @@ and the data fingerprint; a later island with other values is refused.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; or with streams (S27 P3) version:u16 (=2), learner_id:u32, incarnation:u64, fingerprint:[u8;32], n:u16 (1..256), n × (rows:u64, weight:u64 (1..2^62), name_len:u16 (≤ 64), name:utf-8), m:u16, m × stream:u16 (m = 0: every stream); then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
+| 50 | TASK_HELLO | island → syncer | version:u16 (=1), learner_id:u32, incarnation:u64, rows:u64, fingerprint:[u8;32]; or with streams version:u16 (=2), learner_id:u32, incarnation:u64, fingerprint:[u8;32], n:u16 (1..256), n × (rows:u64, weight:u64 (1..2^62), name_len:u16 (≤ 64), name:utf-8), m:u16, m × stream:u16 (m = 0: every stream); then HMAC-SHA256(key, `b"yeto-task-hello-mac-v1\0"` \| body) when the syncer has an island HMAC key |
 | 51 | TASK_WELCOME | syncer → island | version:u16 (the TASK_HELLO's), lease_ms:u64, passes:u64 (0 = unlimited), max_block:u32, reconnect:u8, superseded:u8, superseded_incarnation:u64, reclaimed:u64, next:u64 |
 | 52 | TASK_CLAIM | island → syncer | seq:u64, count:u32 |
 | 53 | TASK_GRANT | syncer → island | status:u8 (0 grant, 1 wait, 2 end), block:u64, retry_ms:u32, n:u32, n × (start:u64, end:u64) |
@@ -826,7 +828,7 @@ and the data fingerprint; a later island with other values is refused.
 | 55 | TASK_ACK | syncer → island | settled:u64, requeued:u64, exhausted:u64 |
 | 56 | TASK_HEARTBEAT | island → syncer | empty (answered with TASK_ACK) |
 
-Streams (S27 P3, `--data-mix` and `--rl-island-task-labels`): the rows may be
+Streams (`--data-mix` and `--rl-island-task-labels`): the rows may be
 split into streams, one per (source data set, task label). A position then
 carries its stream in bits 40 and up: position `(s << 40) | k` is the `k`-th
 position of stream `s`, row `rows_s[pass_order(len(rows_s), seed, k //
@@ -842,11 +844,11 @@ Queued positions of the accepted streams come first, in stream order.
 `--dispense-passes N` counts per stream. A claim that finds nothing gets WAIT
 while a live holder still holds a position of one of the claimer's streams,
 END once all of them are exhausted and reported. One stream with weight 1 and
-an empty name, accepted by every island, is the P2 dispenser: the island then
+an empty name, accepted by every island, is the single-stream dispenser: the island then
 speaks version 1 and positions are row sequence numbers.
 
-Sampler members (S27 P4; shared with the spot rollout subscribers and sample
-relay of S27 G-EA, `syncer/src/members.rs`): every head service that keeps
+Sampler members (shared with the spot rollout subscribers and the sample
+relay, `syncer/src/members.rs`): every head service that keeps
 per-process state for islands outside the learner session uses one membership
 rule.
 
@@ -882,7 +884,7 @@ rule.
   incarnation (the task source does; a fenced subscriber or relay producer
   ends its process, whose relaunch has a new incarnation).
 
-Sampler islands (S27 P4) claim like training islands; their `learner_id` is
+Sampler islands claim like training islands; their `learner_id` is
 `2^31` plus 31 bits of SHA-256 of their sampler id (buffer shard name), so a
 relaunched sampler supersedes its old process and the ids never meet a
 training island's learner id. A sampler reports a position trained once its
@@ -915,7 +917,7 @@ Semantics:
   block whose positions are all reported is retired, so the state grows with
   the blocks in flight, not with the rows.
 - A position is generated at least once and reported trained at most once.
-- Checkpoint (record `YDS2` with the stream table; a P2 `YDS1` record still
+- Checkpoint (record `YDS2` with the stream table; a single-stream `YDS1` record still
   restores as one stream): the dispenser record is written to `<checkpoint>.dispense`
   at every checkpoint cut, before the checkpoint itself. `--resume` restores
   the record of that cut: every holder of the record is retired and its
@@ -928,8 +930,8 @@ Semantics:
   `_report`, `_block_done`, `_reclaim` with the reason `lease_expired` or
   `superseded`, `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
   every holder of the record inside `_restore`).
-  `python -m tools.eval.dispense_check` replays it.
-## Receive-only subscribers (S27 G-EA, `--max-subscribers N`)
+  `python -m yeto.launch.checks.dispense_check` replays it.
+## Receive-only subscribers (`--max-subscribers N`)
 
 A sampler island on any cloud can follow the global weights without being a
 learner. It opens the usual connection group, but its control socket's first
@@ -962,11 +964,11 @@ cut, no SHUTDOWN, no event-tape or status record. It is a sampler member
 ("Sampler members"): HEARTBEAT renews the member lease, LEAVE is ignored,
 and a retired member gets ERROR `fenced: subscriber ...`. When the run ends every subscriber gets ERROR
 `subscriber: run finished`; the syncer closes the connections about 500 ms
-after sending it (S27 G-EM), and a client honours the notice on any
+after sending it, and a client honours the notice on any
 connection generation. Refusals are ERRORs that start with
 `subscriber refused:`. Unsharded syncers only.
 
-## Sample relay (S27 G-EA, `--sample-relay`)
+## Sample relay (`--sample-relay`)
 
 A small in-memory store-and-forward queue for rollout groups, on the syncer
 port, so a sampler on another cloud needs no shared volume or store
@@ -1003,7 +1005,7 @@ learner session and never touches merge state (not in the profile hash).
   publishes its fragment layout on board 1 for the subscribers.
 - Items live only in head memory; a head restart gives a new `relay_epoch`
   and the clients reset their cursors. Refusals: ERROR `relay refused:`.
-- Clients (Python, S27 G-EM): a producer or consumer that has had no
+- Clients (Python): a producer or consumer that has had no
   successful request for `gone_s` (default 900 s) gives up (`RelayGone`).
 - Item payload (application level, `yeto.rl.spot_rollout.relay_buffer`):
   `YRG1 | u32 header length | header JSON | group payload`. The header's

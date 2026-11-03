@@ -1,8 +1,8 @@
-"""Miles Harbor path with the records proxy as the token recorder (S25 N10.9).
+"""Miles Harbor path with the records proxy as the token recorder.
 
 Miles' own Harbor example records tokens through Miles' session server, which
 speaks Chat Completions only; Harbor's codex agent (0.145.0) speaks Responses
-only (T-G2).  On this path the yeto records proxy (N10.5) is the recorder, as
+only.  On this path the yeto records proxy is the recorder, as
 on verl:
 
 * ``--custom-generate-function-path yeto.rl.adapters.miles.records_generate.generate``:

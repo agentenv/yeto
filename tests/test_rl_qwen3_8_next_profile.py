@@ -23,7 +23,7 @@ from yeto.rl.profiles import qwen3_8_next as q
 ROOT = Path(__file__).resolve().parents[1]
 CONVERT_SH = ROOT / "scripts" / "convert_qwen3_8_next.sh"
 LAUNCH_SH = ROOT / "scripts" / "run_qwen3_8_next_4layer_lora.sh"
-MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", os.path.expanduser("~/work/miles-m3")))
+MILES_CHECKOUT = Path(os.environ.get("YETO_MILES_CHECKOUT", "/nonexistent"))
 
 # Regenerate only when a command change is intended:
 #   YETO_Q38N_SNAPSHOT_PRINT=1 python -m pytest -q -s tests/test_rl_qwen3_8_next_profile.py
@@ -84,7 +84,7 @@ def test_profile_rejects_invalid_shapes_and_ranks():
         q.Qwen38NextLoraProfile(variant="8layer")
     full = q.Qwen38NextLoraProfile(variant="full", num_nodes=8, num_gpus_per_node=4)
     assert full.parallel["pp"] == 8 and full.parallel["ep"] == 4
-    # 2x8 formal shape (2026-10-07): 16 GPUs -> PP4, the torch_dist conversion split
+    # 2x8 formal shape: 16 GPUs -> PP4, the torch_dist conversion split
     full16 = q.Qwen38NextLoraProfile(variant="full", num_nodes=2)
     assert full16.parallel["pp"] == 4 == full16.parallel["ep"] and full16.parallel["tp"] == 2
     assert full16.parallel["rollout_num_gpus_per_engine"] == 8
@@ -129,7 +129,7 @@ def test_expected_trainable_params_formula():
 
 
 def test_expected_rank_trainable_matches_t2_review():
-    # T2-S7 §2.1: per-rank `trainable=` log values (single QSA A, TP2/PP2/EP=n/2)
+    # per-rank `trainable=` log values (single QSA A, TP2/PP2/EP=n/2)
     assert q.expected_rank_trainable_4layer(32, 8, 4) == (31_492_096, 30_833_664)
     assert q.expected_rank_trainable_4layer(32, 8, 8) == (17_074_176, 16_415_744)
     # global single-A view = HF formula minus the two extra q/k/v A copies
@@ -203,7 +203,7 @@ def test_launch_command_snapshot_and_lora_flags():
     cmd = p.launcher_command()
     _maybe_print("launch_4layer", cmd)
     assert cmd[:2] == ["python3", "/root/miles/scripts/run_qwen3_8_next.py"]
-    assert "train" not in cmd  # single typer command is flattened; `train` is rejected (G3 attempt 1)
+    assert "train" not in cmd  # single typer command is flattened; `train` is rejected (seen on a GPU attempt)
     assert "--no-check-weight-update-equal" in cmd
     assert "--no-skip-saving" in cmd and "--enable-r3" in cmd
     extra = shlex.split(cmd[cmd.index("--extra-args") + 1])
@@ -218,7 +218,7 @@ def test_launch_command_snapshot_and_lora_flags():
     assert "--experts-shared-outer-loras" not in extra  # per-expert layout
     assert "--check-lora-weight-equal" in extra and "--lora-base-cpu-backup" in extra
     assert "--sglang-lora-strict-loading" in extra
-    assert flags["--offload-train-target"] == "cpu"  # T2-S7 F5: never disk-offload in a container
+    assert flags["--offload-train-target"] == "cpu"  # never disk-offload in a container
     assert p.launcher_env()["MILES_SCRIPT_EXTERNAL_RAY"] == "1"
     assert p.launcher_env()["RAY_DEDUP_LOGS"] == "0"
     assert _digest(cmd) == GOLDEN["launch_4layer"]
@@ -288,7 +288,7 @@ def test_launch_script_dry_run_prints_rendered_steps():
     for script in (CONVERT_SH, LAUNCH_SH):
         assert os.access(script, os.X_OK)
         assert "set -euo pipefail" in script.read_text()
-    # T2-S7 F1: the hard timeout must reclaim the ray job, not just the launcher
+    # the hard timeout must reclaim the ray job, not just the launcher
     text = LAUNCH_SH.read_text()
     assert "trap cleanup EXIT INT TERM" in text and "ray job stop" in text and "ray stop --force" in text
     out4 = _run(["bash", str(LAUNCH_SH), "--dry-run", "--yeto-root", str(ROOT)], env={"YETO_Q38N_NUM_GPUS_PER_NODE": "4"})
@@ -309,7 +309,7 @@ def test_launch_script_dry_run_prints_rendered_steps():
     modal_py = (ROOT / "scripts" / "modal_qwen3_8_next_4layer_lora.py").read_text()
     assert 'f"H100:{NUM_GPUS}"' in modal_py and 'f"/root/ckpt/gpus{NUM_GPUS}"' in modal_py
     assert "fn.remote(step, command, timeout_s, run_id, LOCAL_CTX)" in modal_py  # env shipped as args, not re-read in container
-    assert "from yeto" not in modal_py  # re-imported in the container without yeto on sys.path (G0 attempt 1, A and B)
+    assert "from yeto" not in modal_py  # re-imported in the container without yeto on sys.path
 
 
 # ------------------------------------------------------------- log judge

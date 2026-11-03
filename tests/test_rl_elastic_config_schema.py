@@ -1,4 +1,4 @@
-"""rl-infra-spec task 1.6: config / edge schema pure rejections (no GPU)."""
+"""Config / edge schema pure rejections (no GPU)."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ def test_dense_full_dp_above_one_needs_the_replica_pin(monkeypatch):
 
     m = _formal()
     m["profile"]["parameter_mode"] = "full"
-    assert _reject(m, "P62") is None  # the pinned Miles has data-parallel replicas (S27 closing)
+    assert _reject(m, "P62") is None  # the pinned Miles has data-parallel replicas 
     monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "8edea35a76026d83e0a819038baf09d88bd448d9")
     assert "DP=1" in _reject(m, "P62")
 

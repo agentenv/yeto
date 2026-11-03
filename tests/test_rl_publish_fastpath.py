@@ -150,13 +150,28 @@ def test_apply_and_restore_paths_bump_the_version():
     assert sp.current_weights_version()["version"] == before + 2  # one per rank
     with pytest.raises(WeightsChanged, match="weights version"):
         resident.check_holds()
-    import inspect
 
+
+
+@pytest.mark.parametrize("restore", ["restore_cut_shard", "restore_resharded_shard"])
+def test_cut_restore_bumps_the_version_before_it_writes(monkeypatch, restore):
+    """A restore writes trainable weights: the version moves before the first write,
+    so a resident digest taken earlier is stale even when the restore fails midway."""
     from yeto.rl.adapters.miles import cut_plugin
 
-    for fn in (cut_plugin.restore_cut_shard, cut_plugin.restore_resharded_shard, sp.apply_state):
-        assert "bump_weights_version()" in inspect.getsource(fn)
-    assert "bump_weights_version()" in inspect.getsource(sp.install_grad_norm_recorder)
+    class _Stop(Exception):
+        pass
+
+    def stop(actor):
+        raise _Stop
+
+    monkeypatch.setattr(cut_plugin, "install_grad_norm_recorder", lambda: None)
+    monkeypatch.setattr(cut_plugin, "forget_full_parameter_resident", stop)  # first step after the bump
+    before = sp.current_weights_version()["version"]
+    kwargs = {"source_dp": 1} if restore == "restore_resharded_shard" else {}
+    with pytest.raises(_Stop):
+        getattr(cut_plugin, restore)(object(), directory="/nowhere", files=[], cut_id="c", **kwargs)
+    assert sp.current_weights_version()["version"] == before + 1
 
 
 def test_wrapped_train_one_step_bumps_even_when_it_raises(monkeypatch):
@@ -259,7 +274,7 @@ def test_resident_state_type_guards():
         TrainerResidentState("full", REV, CFG, "c" * 64, 0, d, lambda v: None)
 
 
-# E1: the digest path stages the tensors in one reusable host buffer
+# The digest path stages the tensors in one reusable host buffer
 def _mixed_tensors(seed=0):
     g = torch.Generator().manual_seed(seed)
     return {
@@ -313,7 +328,7 @@ def test_export_digest_is_stable_across_rounds_with_the_reused_buffer():
         ps.export(policy_version=2).policy_tensor_hash()
 
 
-# E1: sync colocated mode hashes the staged policy while the trainer offloads
+# Sync colocated mode hashes the staged policy while the trainer offloads
 def test_deferred_digest_is_the_eager_digest_and_is_collected_once():
     ranks, group, ps = make()
     for r in ranks:
@@ -364,7 +379,7 @@ def test_the_driver_defers_only_for_a_colocated_offloading_trainer(monkeypatch):
     assert defer_digest(driver) is False
 
 
-# E1: which publications are verified (policy hash + engine read-back)
+# Which publications are verified (policy hash + engine read-back)
 def _verify_driver(ps, *, every, published, cut_due=lambda v: False, all_rounds=False):
     from yeto.rl.engine import driver as driver_mod
 

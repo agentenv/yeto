@@ -1,6 +1,6 @@
-"""Strict in-place restart resumes the rollout data source (rl-infra-spec 3.6/3.7), CPU.
+"""Strict in-place restart resumes the rollout data source, CPU.
 
-GPU evidence a4s8-2r2 r6 (2026-10-02): the learner was killed at QUIESCING with the
+GPU evidence: the learner was killed at QUIESCING with the
 syncer at version 2; every restart attempt rebased the ledger to 2 correctly but the
 restarted rollout process drew its prompts from offset 0 again, so rollout 2 came back
 with Miles' group ids ``g0..g3`` and ``BatchLedger.prepare`` refused it (``were already
@@ -30,7 +30,7 @@ from yeto.rl.adapters.miles.rollout import MilesRolloutPool, seek_executor_curso
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
-from test_rl_reconfig_e1 import NAME, _setup
+from test_rl_reconfig_controller import NAME, _setup
 
 
 class DataSourceState:
@@ -270,7 +270,7 @@ def test_miles_pool_seeks_a_local_executor():
         MilesRolloutPool.seek_data_cursor(SimpleNamespace(_executor=object()), cursor)
 
 
-# --- S17 N16: strict relaunch with NO ledger (verl V2 island 1, new container) -------
+# --- strict relaunch with NO ledger (verl V2 island 1, new container) -------
 
 def test_strict_relaunch_without_ledger_skips_trained_rounds(tmp_path):
     """V2: island 1 left after v2 and was relaunched (same id, new container, no
@@ -319,7 +319,7 @@ def test_strict_fresh_start_without_ledger_does_not_seek(tmp_path):
     _close(driver, ctl)
 
 
-# ------------------------------------------------- P0-S: resume from a round cut
+# ------------------------------------------------------ resume from a round cut
 _CUT = {"sample_offset": 35, "epoch_id": 0, "sample_group_index": 35, "sample_index": 280}
 
 
@@ -343,7 +343,7 @@ def _cut_resume_driver(*, ledger_cursor, landed_shift=0):
 
 
 def test_round_cut_resume_seeks_to_the_cut_cursor_without_a_ledger_cursor():
-    """GPU s23-g3-ps-b-20261014a: under fully_async the ledger recorded no cursor for
+    """A GPU run: under fully_async the ledger recorded no cursor for
     rollout 2 and the resume was refused; the cut's own cursor is the resume point."""
     restore, fake, seeks, events = _cut_resume_driver(ledger_cursor=None)
     restore(fake, 3)

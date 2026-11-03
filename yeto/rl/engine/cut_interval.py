@@ -1,14 +1,14 @@
-"""When a round cut is due: every N rounds, or by wall time (S27 R-2).
+"""When a round cut is due: every N rounds, or by wall time.
 
 :class:`FixedCutInterval` is ``--rl-cut-every N``.
 
-The default (neither flag; S27 G-AT) is a timed interval with a prior MTBF of
+The default (neither flag) is a timed interval with a prior MTBF of
 :data:`DEFAULT_MTBF_S` and a cost cap: a cut costs at most
 :data:`DEFAULT_MAX_COST_SHARE` of the wall time, so the gap is at least
 ``C / share`` (a 30B trainer whose cut costs about 400 s cuts about every
 8000 s, not every round). Its first cut waits :data:`DEFAULT_FIRST_CUT_S` after
-the first safe point (S27 G-CD: a cut at the first safe point saves one round;
-on s27-bb-b1 it cost a Nano DP8 trainer 144 s on the round, then 529 s of
+the first safe point (a cut at the first safe point saves one round;
+on one run it cost a Nano DP8 trainer 144 s on the round, then 529 s of
 store sync and a store commit that timed out after 600 s). ``--rl-cut-every`` and ``--rl-cut-auto-mtbf-s`` replace it.
 
 :class:`AutoCutInterval` (``--rl-cut-auto-mtbf-s``) is a timed
@@ -25,7 +25,7 @@ length: the decision is by elapsed time, taken once per safe point.
 ``C`` of one cut is its critical-path seconds (:meth:`AutoCutInterval.record_cut`)
 plus, once its background part is done, the seconds of that part: collecting
 the trainer's shards, the store sync and the store commit
-(:meth:`AutoCutInterval.add_cost`, S27 G-CD; s27-bb-b1, a 473 GB cut: 144 s on
+(:meth:`AutoCutInterval.add_cost`; e.g. a 473 GB cut: 144 s on
 the round, 529 s of store sync, then a commit that timed out after 600 s). A periodic cut is
 also skipped while the previous one still commits (``RoundCutCheckpoint._commit_busy``),
 which is the plan's lower bound ``k >= write time / round time``.
@@ -191,8 +191,8 @@ def cut_interval_for(*, every: int | None, auto_mtbf_s: float | None,
                                            else float(max_interval_s)))
 
 
-# ----------------------------------------------------------------------------- island cut store (S27 R-2)
-# Shared by the Miles and the verl island entries (S27 G-ED).
+# ----------------------------------------------------------------------------- island cut store
+# Shared by the Miles and the verl island entries.
 def cut_auto_options(args) -> dict[str, float]:
     """The timed cut interval flags of an island (empty: every N rounds)."""
     mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)

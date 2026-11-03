@@ -1,6 +1,6 @@
-"""Alert rule table (design D6). Pure functions over the reducer state.
+"""Alert rule table. Pure functions over the reducer state.
 
-Severity: 0 严重 / 1 警告 / 2 提示. Every alert carries a locate target
+Severity: 0 critical / 1 warning / 2 info. Every alert carries a locate target
 (``island``, ``round``, ``metric``) the page uses to focus the chart, the
 round table and the island drill-down. Thresholds are configurable through
 ``merged_thresholds`` (CLI ``--thresholds file.json``).
@@ -72,9 +72,9 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
             step_age = c.get("startup_step_age_s")
             if step_age is not None and step_age > th["startup_step_warn_s"] and age <= th["startup_warn_s"]:
                 pending = _next_startup_step(c.get("startup_step"))
-                out.append(_alert(1, "startup_step", f"岛 {c['id']} 启动子步骤过慢",
-                                  f"等待 {pending} 已 {step_age:.0f}s（上一步 {c.get('startup_step') or '开始'}；"
-                                  f"阈值 {th['startup_step_warn_s']:.0f}s）", island=c["id"]))
+                out.append(_alert(1, "startup_step", f"island {c['id']} startup step slow",
+                                  f"waiting for {pending} for {step_age:.0f}s (previous step {c.get('startup_step') or 'start'}; "
+                                  f"threshold {th['startup_step_warn_s']:.0f}s)", island=c["id"]))
             warn, severe = th["startup_warn_s"], th["startup_severe_s"]
             if age > severe:
                 sev = 0
@@ -82,9 +82,9 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
                 sev = 1
             else:
                 continue
-            out.append(_alert(sev, "startup", f"岛 {c['id']} 启动阶段无事件",
-                              f"仍在启动（未见 rl_driver_start），最后事件 {age:.0f}s 前"
-                              f"（启动阈值 {warn:.0f}s/{severe:.0f}s）", island=c["id"], metric="reward"))
+            out.append(_alert(sev, "startup", f"island {c['id']} no events during startup",
+                              f"still starting (no rl_driver_start yet), last event {age:.0f}s ago"
+                              f" (startup threshold {warn:.0f}s/{severe:.0f}s)", island=c["id"], metric="reward"))
             continue
         if age > th["heartbeat_severe_s"]:
             sev = 0
@@ -92,10 +92,10 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
             sev = 1
         else:
             continue
-        what = "心跳" if c["heartbeat_seen"] else "事件（无心跳事件，按最后事件计）"
-        out.append(_alert(sev, "heartbeat", f"岛 {c['id']} 心跳超时",
-                          f"最后{what} {age:.0f}s 前（阈值 {th['heartbeat_warn_s']:.0f}s/"
-                          f"{th['heartbeat_severe_s']:.0f}s）", island=c["id"], round=c["round"],
+        what = "heartbeat" if c["heartbeat_seen"] else "event (no heartbeat events, using the last event)"
+        out.append(_alert(sev, "heartbeat", f"island {c['id']} heartbeat timeout",
+                          f"last {what} {age:.0f}s ago (threshold {th['heartbeat_warn_s']:.0f}s/"
+                          f"{th['heartbeat_severe_s']:.0f}s)", island=c["id"], round=c["round"],
                           metric="reward"))
     return out
 
@@ -121,8 +121,8 @@ def consecutive_missed(rounds: list[dict], th: dict) -> list[dict]:
             sev = 1
         else:
             continue
-        out.append(_alert(sev, "missed", f"岛 {iid} 连续 missed",
-                          f"round {rs[0]}–{rs[-1]} 连续 {n} 轮未响应", island=iid,
+        out.append(_alert(sev, "missed", f"island {iid} missed consecutive rounds",
+                          f"rounds {rs[0]}–{rs[-1]}: no response for {n} rounds in a row", island=iid,
                           round=rs[0], metric="reward"))
     return out
 
@@ -137,9 +137,9 @@ def quorum(rounds: list[dict], th: dict) -> list[dict]:
     if base <= 0 or recent < th["quorum_factor"] * base:
         return []
     resends = sum(r["resend"] for r in rounds[-k:])
-    return [_alert(1, "quorum", "quorum 时延异常" + ("/重发" if resends else ""),
-                   f"近 {k} 轮 quorum 中位 {recent / 1000:.1f}s（基线 {base / 1000:.1f}s）"
-                   + (f"，重发 {resends} 次" if resends else ""),
+    return [_alert(1, "quorum", "quorum latency abnormal" + ("/resends" if resends else ""),
+                   f"median quorum over the last {k} rounds {recent / 1000:.1f}s (baseline {base / 1000:.1f}s)"
+                   + (f", {resends} resends" if resends else ""),
                    round=rounds[-1]["round"], metric="reward")]
 
 
@@ -149,16 +149,16 @@ def grad_norm(reducer, th: dict) -> list[dict]:
     for iid in reducer.island_ids():
         isl = reducer.islands[iid]
         for x in isl["nonfinite"]:
-            out.append(_alert(0, "grad_norm_nan", f"岛 {iid} grad_norm/loss 非有限",
-                              f"round {x} 出现 NaN/Inf", island=iid, round=x, metric="grad_norm"))
+            out.append(_alert(0, "grad_norm_nan", f"island {iid} grad_norm/loss not finite",
+                              f"NaN/Inf in round {x}", island=iid, round=x, metric="grad_norm"))
         pts = [(x, isl["points"][x]["grad_norm"]) for x in sorted(isl["points"])
                if isl["points"][x].get("grad_norm") is not None]
         for i in range(w, len(pts)):
             base = statistics.median(v for _, v in pts[i - w:i])
             x, v = pts[i]
             if base > 0 and v > th["grad_norm_spike_factor"] * base:
-                out.append(_alert(1, "grad_norm_spike", f"岛 {iid} grad_norm 尖峰",
-                                  f"round {x} grad_norm {v:.3g}（基线 ~{base:.3g}）",
+                out.append(_alert(1, "grad_norm_spike", f"island {iid} grad_norm spike",
+                                  f"round {x} grad_norm {v:.3g} (baseline ~{base:.3g})",
                                   island=iid, round=x, metric="grad_norm"))
     return out
 
@@ -173,12 +173,12 @@ def clip_kl(reducer, th: dict) -> list[dict]:
         clip = pts[x].get("clip")
         kl = pts[x].get("kl")
         if clip is not None and clip > th["clipfrac_info"]:
-            out.append(_alert(2, "clipfrac", f"岛 {iid} clipfrac 偏高",
-                              f"clip {clip:.3f}（阈值 {th['clipfrac_info']}），仅提示",
+            out.append(_alert(2, "clipfrac", f"island {iid} clipfrac high",
+                              f"clip {clip:.3f} (threshold {th['clipfrac_info']}), info only",
                               island=iid, round=x, metric="clip"))
         if kl is not None and kl > th["kl_warn"]:
-            out.append(_alert(1, "kl", f"岛 {iid} KL 超阈值",
-                              f"KL {kl:.4g}（阈值 {th['kl_warn']}）", island=iid, round=x, metric="kl"))
+            out.append(_alert(1, "kl", f"island {iid} KL above threshold",
+                              f"KL {kl:.4g} (threshold {th['kl_warn']})", island=iid, round=x, metric="kl"))
     return out
 
 
@@ -193,10 +193,10 @@ def budget(cost: dict, th: dict) -> list[dict]:
     else:
         return []
     eta = cost.get("hours_to_cap")
-    detail = f"${cost['total_usd']:.0f} / ${cost['budget_usd']:.0f}（估算，非账单）"
+    detail = f"${cost['total_usd']:.0f} / ${cost['budget_usd']:.0f}(estimate, not billing data)"
     if eta is not None and math.isfinite(eta):
-        detail += f"，按 ${cost['burn_usd_h']:.1f}/h 约 {eta:.1f} h 后触达"
-    return [_alert(sev, "budget", f"预算逼近 {pct:.0f}%", detail)]
+        detail += f", reached in about {eta:.1f} h at ${cost['burn_usd_h']:.1f}/h"
+    return [_alert(sev, "budget", f"budget at {pct:.0f}%", detail)]
 
 
 def recovery(reducer) -> list[dict]:
@@ -207,16 +207,16 @@ def recovery(reducer) -> list[dict]:
         if not rr or reducer.stopped_by_us(isl):  # failure caused by our own stop of the app
             continue
         last = rr[-1]
-        tx = f"，E1 {last['tx_id']}" if last.get("tx_id") else ""
-        out.append(_alert(0, "recovery_required", f"岛 {iid} RECOVERY_REQUIRED",
-                          f"{(last.get('error') or '')[:160]}{tx}（共 {len(rr)} 条记录）",
+        tx = f", transaction {last['tx_id']}" if last.get("tx_id") else ""
+        out.append(_alert(0, "recovery_required", f"island {iid} RECOVERY_REQUIRED",
+                          f"{(last.get('error') or '')[:160]}{tx}({len(rr)} records)",
                           island=iid, round=last.get("round"), metric="reward"))
     return out
 
 
 def source_lost(cards: list[dict]) -> list[dict]:
-    return [_alert(1, "source_lost", f"岛 {c['id']} 磁带来源丢失",
-                   f"ssh 跟随断开：{(c['source_lost'].get('error') or '')[:120]}", island=c["id"])
+    return [_alert(1, "source_lost", f"island {c['id']} tape source lost",
+                   f"ssh follow disconnected: {(c['source_lost'].get('error') or '')[:120]}", island=c["id"])
             for c in cards if c["source_lost"] and not c["source_lost"].get("recovered")]
 
 

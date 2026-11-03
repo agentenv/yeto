@@ -1,4 +1,4 @@
-"""rl-island-graceful-leave: LEAVE reason codes (design D7).
+"""rl-island-graceful-leave: LEAVE reason codes.
 
 Parity with the Rust syncer, the exception -> code table, and the driver
 closing an island-pool session with the code of its departure."""
@@ -46,7 +46,7 @@ def test_reason_codes_match_the_rust_syncer():
     (TransactionFailed.__new__(TransactionFailed), LeaveReason.INFRA_FAILED),
     (CutError("x"), LeaveReason.INFRA_FAILED),
     (EpochConflict("x"), LeaveReason.INFRA_FAILED),
-    (RuntimeError("CUDA out of memory"), LeaveReason.INFRA_FAILED),  # unmapped: D7 Q2
+    (RuntimeError("CUDA out of memory"), LeaveReason.INFRA_FAILED),  # unmapped error
     (DriverError("x"), LeaveReason.TRAINING_FAILED),
     (PublicationError("x"), LeaveReason.TRAINING_FAILED),
     (PolicyIdentityError("x"), LeaveReason.TRAINING_FAILED),

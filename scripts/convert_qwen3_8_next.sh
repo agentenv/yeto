@@ -48,7 +48,7 @@ extra=()
 [[ -n $OUTPUT ]] && extra+=(--output "$OUTPUT")
 [[ -n $NPROC ]] && extra+=(--nproc "$NPROC")
 
-CONVERT_CMD=$(profile convert-command "${extra[@]}")
+CONVERT_CMD=$(profile convert-command ${extra[@]+"${extra[@]}"})
 CONVERT_ENV=$(profile convert-env)
 # the --save path is the token after "--save" in the rendered command
 SAVE_DIR=$(python3 -c 'import shlex,sys; t=shlex.split(sys.argv[1]); print(t[t.index("--save")+1])' "$CONVERT_CMD")

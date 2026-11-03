@@ -1,5 +1,5 @@
-"""Neutral determinism switch: backend x device family -> environment
-(yeto-framework-decoupling task 4.9, audit P4). Import-light, core.
+"""Neutral determinism switch: backend x device family -> environment.
+Import-light, core.
 
 ``--deterministic`` (alias of the historical ``--rl-deterministic-trainer``)
 asks for a deterministic trainer. What that means in environment variables
@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-# E2 plan-v2 §0 (moved unchanged from miles_adapter/entry.py). NVTE_ALLOW_
+# (Moved unchanged from miles_adapter/entry.py). NVTE_ALLOW_
 # NONDETERMINISTIC_ALGO=0: Megatron's --deterministic-mode only setdefaults it
 # in the process that validates the args, while Transformer Engine reads it in
 # each trainer rank (Ray worker), so it is set for every rank.

@@ -1,5 +1,5 @@
 """Per-source off-policy metrics: the ``offpolicy_source`` event
-(rl-hetero-sampler-engines D4, S25 N2.5; grouping per A-INF 4.1).
+(grouped per trajectory group).
 
 yeto computes no importance weight for training. The training backend logs, per
 consumed sample, its recomputed log-probs next to the rollout log-probs (the

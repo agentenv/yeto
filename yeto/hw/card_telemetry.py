@@ -1,4 +1,4 @@
-"""Per-card telemetry collectors for ``rl_resource_sample`` (S25 N2.2,
+"""Per-card telemetry collectors for ``rl_resource_sample`` (
 rl-hetero-sampler-engines "Telemetry by device family").
 
 One collector per device family, one card-sample shape:

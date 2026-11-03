@@ -1,4 +1,4 @@
-"""Runtime manifest for the ports engine image (rl-infra-spec task 1.1).
+"""Runtime manifest for the ports engine image.
 
 Two halves:
 
@@ -11,7 +11,7 @@ Two halves:
 * :func:`check_manifest` / :func:`certify` are pure. The manifest must agree
   with the backend pins (Miles: ``MILES_NEXT_*`` / ``SGLANG_NEXT_*``, and the image digest), and a
   capability may only be declared when every interface it needs is present
-  ("缺接口组合拒绝认证").
+  (a missing interface refuses certification).
 
 ``python -m yeto.rl.engine.runtime_manifest --image <digest> --out m.json``
 writes the manifest; ``--check m.json`` validates one against the pins.
@@ -157,7 +157,7 @@ def collect(*, image: str | None, runtime: RuntimeDescription | None = None) -> 
             # only source. Recorded as such, together with the version string.
             commits[name] = image_manifest[name]["commit"]
             commit_source[name] = "image-manifest"
-    # Code patched after the image was built (Miles: S13 critic overlay): neither
+    # Code patched after the image was built (Miles: the critic overlay): neither
     # git HEAD nor the image build manifest describes the running code.
     overlay = runtime.overlay_record()
     if overlay is not None and runtime.overlay_checkout in commit_source:

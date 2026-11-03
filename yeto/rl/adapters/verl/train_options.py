@@ -1,4 +1,4 @@
-"""Miles training and observation options on a verl full-parameter island (S27 G-EC).
+"""Miles training and observation options on a verl full-parameter island.
 
 The launcher sends these Miles island options to every island.  The verl
 FSDP2 full-parameter island maps the ones verl can express; each mapping
@@ -47,7 +47,7 @@ VERL_LR_SCHEDULES = ("constant",)
 
 def add_island_flags(parser) -> None:
     """The options above, in Miles island spellings.  An island parser that
-    already defines one (the verl Megatron island, S27 G-DC) keeps its own."""
+    already defines one (the verl Megatron island) keeps its own."""
 
     for flag, kwargs in (
         ("--rl-lr-schedule", {"default": None}),
@@ -55,10 +55,10 @@ def add_island_flags(parser) -> None:
         ("--rl-activation-recompute", {"action": "store_true"}),
         ("--rl-observe-timeline", {"action": "store_true"}),
         ("--rl-resource-sample-interval", {"type": float, "default": None}),
-        # S27 G-EU (VERL-PARITY #25, #26): the publication checks (verify_plan)
+        # The publication checks (verify_plan)
         ("--rl-verify-every-round", {"action": "store_true"}),
         ("--rl-verify-every", {"type": int, "default": None}),
-        # S27 G-EU (VERL-PARITY #35): Miles' debug dump (debug_plan)
+        # Miles' debug dump (debug_plan)
         ("--rl-debug-dump", {"action": "store_true"}),
     ):
         if flag not in parser._option_string_actions:
@@ -89,16 +89,16 @@ def apply_training_options(args: Any, overrides: Sequence[str], asserted_keys: S
     schedule = getattr(args, "rl_lr_schedule", None)
     if schedule not in (None, "auto"):
         if schedule not in VERL_LR_SCHEDULES:
-            raise ValueError(f"verl 全参数岛只接 --rl-lr-schedule constant（得到 {schedule}）："
-                             "verl FSDP2 的学习率调度只有 constant 与 cosine，没有 Miles 的线性衰减")
+            raise ValueError(f"a verl full-parameter island only accepts --rl-lr-schedule constant (got {schedule}): "
+                             "verl FSDP2 has only constant and cosine LR schedules, not Miles' linear decay")
         out = _replace(out, LR_SCHEDULER_KEY, schedule)
         asserted.append(LR_SCHEDULER_KEY)
     tokens = getattr(args, "rl_max_tokens_per_gpu", None)
     if tokens is not None:
         need = int(max_prompt_len) + int(max_response_len)
         if int(tokens) < need:
-            raise ValueError(f"--rl-max-tokens-per-gpu {tokens} 放不下一条样本"
-                             f"（max_prompt_len + max_response_len = {need}）")
+            raise ValueError(f"--rl-max-tokens-per-gpu {tokens} cannot hold one sample"
+                             f" (max_prompt_len + max_response_len = {need})")
         for key in (ACTOR_TOKENS_KEY, LOG_PROB_TOKENS_KEY):
             out = _replace(out, key, int(tokens))
             asserted.append(key)
@@ -138,17 +138,17 @@ def wire_observation(driver: Any, plan: dict) -> None:
             setattr(driver, key, float(plan[key]))
 
 
-# S27 G-EU (VERL-PARITY #25): why a full-parameter verl island refuses --rl-verify-every-round
+# Why a full-parameter verl island refuses --rl-verify-every-round
 VERIFY_EVERY_ROUND_REFUSAL = (
     "--rl-verify-every-round: a full-parameter verl publication does not read vLLM's weights back "
-    "(VERL-PARITY #25; verl's update_weights / NCCL checkpoint engine report no per-tensor checksum, "
+    "(verl's update_weights / NCCL checkpoint engine report no per-tensor checksum, "
     "and the LoRA read-back hook vllm_readback reads a registered adapter only). Every round already "
     "checks the training/rollout log-prob gap (the criteria); drop the option")
 
 
 def verify_plan(args: Any, *, full: bool) -> dict[str, Any]:
     """The plan keys of the publication checks (absent when off), as Miles' island
-    reads them (``adapters/miles/island_entry.py``, S27 C5):
+    reads them (``adapters/miles/island_entry.py``):
 
     * ``--rl-verify-every-round``: a LoRA island verifies every publication anyway
       (the driver hashes the adapter, ``VerlPublisher`` reads vLLM's copy back), so
@@ -183,7 +183,7 @@ def verify_plan(args: Any, *, full: bool) -> dict[str, Any]:
             print(f"[yeto-verl] WARNING: {note}", file=sys.stderr, flush=True)
             out["verify_every_note"] = note
     if getattr(args, "rl_measure_no_verify", False):
-        # S29: a debug switch for measurement runs. Nothing outside the island reads the
+        # A debug switch for measurement runs. Nothing outside the island reads the
         # policy hash when no release is written, so the first and last rounds' full
         # hash only costs start-up and tear-down time.
         if not getattr(args, "rl_measure_no_release", False):
@@ -201,7 +201,7 @@ def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
 
     if plan.get("verify_every_round"):
         driver.verify_every_round = True
-    if plan.get("measure_no_verify"):  # S29
+    if plan.get("measure_no_verify"):
         driver.measure_no_verify = True
         # the first round has no verified cut to refer to: the state builds one from the
         # layout instead of hashing every fragment (VerlFullParameterLocalState._measurement_base)
@@ -216,7 +216,7 @@ def wire_verify(driver: Any, policy_state: Any, plan: dict) -> None:
 
 
 def debug_plan(args: Any) -> dict[str, Any]:
-    """S27 G-EU (VERL-PARITY #35): ``--rl-debug-dump`` as on a Miles island, the
+    """``--rl-debug-dump`` as on a Miles island, the
     round's rollout samples and train data next to the event tape: the island
     already writes the log-prob tensors of every step (``verl-dump-<id>-stepNNN.pt``,
     the mismatch criteria); with the option every round also writes
@@ -234,7 +234,7 @@ def wire_debug(island: Any, plan: dict) -> None:
 
 
 def refuse_unmapped_argv(ignored: Sequence[str], *, full: bool) -> None:
-    """S27 G-EU: a full-parameter island refuses the Miles options it has no mapping
+    """A full-parameter island refuses the Miles options it has no mapping
     for when they reach it anyway (the launcher checks them on a synced full-parameter
     preset only; a no-sync island, e.g. the Megatron island, got them dropped by
     ``parse_known_args``). Raises ValueError with each option's reason."""

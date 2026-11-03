@@ -406,7 +406,7 @@ def test_island_pool_slot_filled_by_peer_recovery(tmp_path):
 
 @pytest.mark.timeout(240)
 def test_donor_keeps_training_while_a_slow_snapshot_commit_runs(tmp_path):
-    """S27 G-DU (Nemotron Nano: a ~470 GB snapshot on a Modal Volume): with a
+    """(Nemotron Nano: a ~470 GB snapshot on a Modal Volume): with a
     background donor only the snapshot write pauses training; the island trains
     on during the slow commit, and the recovered state is still the donor's,
     bitwise."""
@@ -454,7 +454,7 @@ def test_donor_keeps_training_while_a_slow_snapshot_commit_runs(tmp_path):
 
 @pytest.mark.timeout(240)
 def test_a_relaunch_without_recover_rejoins_a_recovery_pool_by_catch_up(tmp_path):
-    """S27 G-DU: one run tests both state sources. Peer recovery is on at the
+    """One run tests both state sources. Peer recovery is on at the
     syncer (pool, syncer epoch); a relaunched island that skips it (fault
     injection ``catch_up_incarnations``) joins as a fresh process, gets every
     fragment at its current version, trains with fresh optimizer state and
@@ -853,7 +853,7 @@ def test_snapshot_store_rejects_path_locators(tmp_path):
             store.get(bad, b"\0" * 32)
 
 
-# -- S27 G-EL: capture then write, and a manifest that shows up late ----------
+# -- capture then write, and a manifest that shows up late ----------
 
 
 class _CapturingIsland(_FileIsland):
@@ -913,7 +913,7 @@ def test_capturing_donor_refusal_and_the_inline_switch(tmp_path):
     assert donor.poll() == 0 and donor.poll() == 0
     (_, reason), = donor.refused
     assert reason == "rank 3 failed" and not donor.busy and store.locators() == []
-    # capture=False: the island writes at the safe point (the behavior before G-EL).
+    # capture=False: the island writes at the safe point (the behavior before background resends).
     inline_island = _CapturingIsland([5, 7])
     client = _ScriptedClient(requests=[rp.SnapshotRequest(2, 78, 9, (5, 6))])
     donor = DonorService(client, inline_island, DirectorySnapshotStore(tmp_path / "b"), capture=False)

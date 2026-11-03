@@ -9,7 +9,7 @@ Ray, so it is unit tested on the CPU:
 
 * :func:`fully_async_run_overrides` -- the sync-path overrides turned into the
   fully_async ones; ``--rl-max-policy-age N`` drives
-  ``async_training.staleness_threshold = N`` (S19 10-10; was N - 1) and ``partial_rollout=True``
+  ``async_training.staleness_threshold = N`` (was N - 1) and ``partial_rollout=True``
   through 6.4a's :func:`~.fully_async_translate.fully_async_overrides`.
 * :func:`sample_meta` -- one queued ``RolloutSample`` (one prompt, ``n``
   responses) -> plain metadata (versions, per-call token counts, lengths).
@@ -145,7 +145,7 @@ def total_rollout_steps(limit: int, *, groups_per_round: int, rounds: int) -> in
 
 
 def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None) -> tuple[int, int]:
-    """``(nodes, cards per node)`` of a buffer trainer island (S27 G-EZ2).
+    """``(nodes, cards per node)`` of a buffer trainer island.
 
     A buffer trainer has no rollout pool, so its trainer gets every card the
     island's Ray reports (``cards``), over ``--actor-num-nodes`` nodes. Before
@@ -176,7 +176,7 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
     (``separation/utils.create_resource_pool_manager``). A buffer trainer
     passes its island's shape (:func:`buffer_trainer_shape`).
 
-    ``rollouter`` False (S27 G-FN): a buffer trainer island. It starts no rollouter and
+    ``rollouter`` False: a buffer trainer island. It starts no rollouter and
     no checkpoint engine (``buffer_trainer_runner``), so it asks for the always-present
     ``naive`` weight transport instead of nccl. This is not cosmetic: every trainer
     worker validates the configured backend while it builds its model, and the
@@ -203,16 +203,16 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         # FullyAsyncTrainer/FullyAsyncRollouter assert not hybrid_engine
         # (fork acad9875, fully_async_trainer.py:76); the sync path never sets
         # this key, so without this override the config default True kills the
-        # island at startup (s19-verl64b-dbg1-20261009a, exit 1 after 86 s).
+        # island at startup (observed: exit 1 after 86 s).
         "actor_rollout_ref.hybrid_engine=False",
         # FullyAsyncRollouter asserts train_batch_size == 0 (fork
-        # fully_async_rollouter.py:351; s19-verl64b-async3-20261009a died here).
+        # fully_async_rollouter.py:351).
         "data.train_batch_size=0",
     ]
     if any(o.startswith(AGENT_LOOP_CONFIG_KEY) for o in out):
         # The rollouter replaces every row's agent_name with single_turn_agent unless
         # multi_turn is on (fork detach_utils.prepare_single_generation_data), so an
-        # agent-loop run (Harbor) would never reach its loop (S26 agv-async-eff-b).
+        # agent-loop run (Harbor) would never reach its loop.
         out.append("actor_rollout_ref.rollout.multi_turn.enable=True")
     return out
 
@@ -337,7 +337,7 @@ class RoundCollector:
         """The round's ``rl_rollout_carry_over`` fields (Miles names, carry_over.CARRY_FIELDS).
 
         Also the ``offpolicy_gate`` inputs the driver turns into its own event
-        (rl-offpolicy-correction-passthrough D5/D6): verl has no drop by version
+        (rl-offpolicy-correction-passthrough): verl has no drop by version
         at consumption, so this collector is it (a group more than ``limit``
         versions behind is dropped whole). verl gives versions per trajectory,
         so the granularity is ``trajectory``; truncation by turn is not reported.

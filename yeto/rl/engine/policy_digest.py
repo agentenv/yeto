@@ -4,7 +4,7 @@ On a single island without an outer sync the driver never needs the LoRA
 tensors themselves: publication goes trainer -> engines through Miles'
 ``update_weights``, and the driver only checks identities.  Shipping the whole
 adapter (11.2 GB for Flash-Next) through Ray to the driver twice per round and
-hashing it three times there was ~60% of a round (S16 FN 2x8 run).
+hashing it three times there was ~60% of a round on a 2x8 Flash-Next run.
 
 This module computes, in ONE call over the canonical tensors, exactly the two
 digests the driver used to compute itself:
@@ -42,7 +42,7 @@ from .trainable_state import (
 )
 
 # Layouts a trainer-resident handle can stand for.  ``fragments`` (full
-# parameters, P0-D1) never materializes: its tensors stay chunked in the trainer.
+# parameters) never materializes: its tensors stay chunked in the trainer.
 RESIDENT_LAYOUTS = frozenset({LAYOUT_LORA, LAYOUT_FRAGMENTS})
 
 POLICY_TENSOR_PREFIX = b"yeto-rl-policy-tensors-v1\0"
@@ -88,7 +88,7 @@ class PolicyDigest:
 
 class DeferredDigest:
     """A :class:`PolicyDigest` whose hashes are still being computed in the trainer
-    (E1, sync colocated mode: the trainer hashes while it offloads). The layout
+    (sync colocated mode: the trainer hashes while it offloads). The layout
     (``specs``) is known at once; the first read of a hash calls ``resolve`` once
     (it waits for the trainer) and the values are those of the eager digest."""
 
@@ -211,7 +211,7 @@ class NonFiniteTensor(ValueError):
 
 
 class HostStaging:
-    """One reusable pinned host buffer for :func:`stage_f32_on_host` (E1).
+    """One reusable pinned host buffer for :func:`stage_f32_on_host`.
 
     Allocating pinned memory costs milliseconds per call; the policy keeps the
     same size every round, so the owner (the trainer process) keeps one of
@@ -234,7 +234,7 @@ def stage_f32_on_host(tensors: Mapping[str, Any], staging: HostStaging | None = 
     """Canonical CPU f32 contiguous copies of ``tensors`` (sorted by name), bit for bit
     the values of ``t.detach().to("cpu", torch.float32).contiguous()`` per tensor.
 
-    E1: with ``staging`` and every tensor on one device, the f32 conversion and the
+    With ``staging`` and every tensor on one device, the f32 conversion and the
     finite check run on that device (the GPU) and the copies go to the pinned host
     buffer asynchronously, with ONE synchronization for all of them (the per-tensor
     path waits once per tensor: ~400 waits for a Qwen3-0.6B LoRA). No extra device
@@ -310,11 +310,11 @@ class TrainerResidentState:
     policy_version: int
     digest: PolicyDigest
     materialize_fn: Callable[[int], TrainableState] = field(repr=False, compare=False)
-    # trainer weights version at export: {"process_id", "version"} (design D3)
+    # trainer weights version at export: {"process_id", "version"}
     weights_mark: Mapping[str, Any] | None = None
     # (state) -> None, raises when the trainer no longer holds this policy
     holds_fn: Callable[[Any], None] | None = field(default=None, repr=False, compare=False)
-    # E1: False for a round whose policy content is not hashed (see unverified_identity):
+    # False for a round whose policy content is not hashed (see unverified_identity):
     # ``digest`` then holds an identity of the trainer weights version, not a content hash,
     # and the publisher skips the engine read-back
     verified: bool = True
@@ -340,7 +340,7 @@ class TrainerResidentState:
 
     def check_holds(self) -> None:
         """Raise if the trainer's weights changed since this handle's export
-        (weights-version comparison, see design D3)."""
+        (weights-version comparison)."""
 
         if self.holds_fn is None:
             raise WeightsChanged("resident state has no trainer weights check")
@@ -374,7 +374,7 @@ UNVERIFIED_PREFIX = b"yeto-unverified-policy-v1\0"
 
 
 def unverified_identity(policy_version: int, weights_mark: Mapping[str, Any]) -> str:
-    """The 64-hex policy identity of a publication whose content is not hashed (E1):
+    """The 64-hex policy identity of a publication whose content is not hashed:
     names the trainer process and its weights version, so two different weights never
     share it; it is never equal to a content hash of the same weights."""
     raw = json.dumps({"policy_version": int(policy_version), "weights": dict(weights_mark)},

@@ -1,4 +1,4 @@
-"""Profile/epoch-tagged execution timeline accounting (rl-infra-spec task 1.7, design D9).
+"""Profile/epoch-tagged execution timeline accounting.
 
 Pure accounting. ``IslandDriver(observe=True)`` emits the tagged events
 (``rl_timeline_span``/``rl_readiness``/``rl_load_sample``/``rl_round_labels``);
@@ -151,7 +151,7 @@ HARNESS_METRIC_KEYS = (
     "policy_age_violation",
 )
 
-# -- S14-M1: per-record TITO session mismatches (``rl_harness_mismatch``) -----
+# -- per-record TITO session mismatches (``rl_harness_mismatch``) -----
 # Observe-only (``--rl-observe-timeline``): one event per mismatch record that
 # upstream Miles' session server stored in ``sample.metadata["tito_session_mismatch"]``
 # (list[dict] from ``TokenSeqComparator.compare_sequences``), capped per round and
@@ -197,7 +197,7 @@ TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
 }
 
 
-# S27 task assignment (observe only): the --data rows one round trained, all of
+# The --data rows one round trained, all of
 # them (``rl_trajectory_reward`` stops at TRAJECTORY_REWARD_MAX_PER_ROUND samples).
 # ``rows``: distinct row numbers as arithmetic runs [first, last, step]
 # (``data_split.row_runs``); ``samples``: trained samples that carried a row.
@@ -225,12 +225,12 @@ def validate_round_data_rows(record: Mapping[str, object]) -> list[str]:
     return problems
 
 
-# S15 stage-2 follow-up (observe only): why a trajectory scored what it did.
+# Observe only: why a trajectory scored what it did.
 # Present only when the harness reported them (old key set kept otherwise):
 # Codex exit status (completed / max_turns / max_seq_len / timeout), agent
 # counters and the signed test.sh exit code.
 TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
-    # S27 task assignment: the sample's row number in the unsplit --data, on an
+    # The sample's row number in the unsplit --data, on an
     # island that reads a row slot (``data_split.DATA_ROW_KEY``)
     "data_row": (int,),
     "exit_status": (str,),
@@ -241,7 +241,7 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "max_seq_len_hit": (int,),
     "timed_out": (int,),
     "testsh_rc": (int, type(None)),
-    # S15 r2 follow-up: why Codex stopped and the shape of its last reply.
+    # Why Codex stopped and the shape of its last reply.
     "end_reason": (str,),
     "last_finish_reason": (str,),
     "last_content_chars": (int,),
@@ -252,7 +252,7 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "last_content_head": (str,),
     "last_reasoning_tail": (str,),
     "verifier_log": (str,),
-    # S17 C9: finer end reason than ``exit_status`` (submit / completed_no_submit
+    # Finer end reason than ``exit_status`` (submit / completed_no_submit
     # / turn_limit / protocol_error / response_truncated / context_limit /
     # timeout) and per-turn lengths: model reply tokens, context tokens after
     # each reply, tool-result bytes fed back.  Lists hold ints (None = no usage).
@@ -260,7 +260,7 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "turn_completion_tokens": (list,),
     "turn_context_tokens": (list,),
     "turn_tool_output_bytes": (list,),
-    # S17 N13: seconds the trusted verifier spent grading this trajectory
+    # Seconds the trusted verifier spent grading this trajectory
     # (absent when grading was skipped, e.g. timeout).
     "evaluate_time": (float,),
     # agentic-rollout-utilization 1.3: wall start/end, sandbox cold start and
@@ -340,7 +340,7 @@ def validate_load_sample(sample: Mapping[str, object]) -> list[str]:
 
 
 def classify_load(sample: LoadSample) -> str:
-    """D9 attribution of one sample; never treats tool waiting as a GPU gap."""
+    """Time attribution of one sample; never treats tool waiting as a GPU gap."""
     if sample.active_requests == 0 and sample.tool_wait_trajectories > 0:
         return "tool-wait"
     if sample.queued_requests > 0 and sample.active_requests >= sample.engine_capacity:
@@ -352,8 +352,8 @@ def classify_load(sample: LoadSample) -> str:
     return "rollout-busy"
 
 
-# -- task 5.1: reconfiguration cost distribution and bottleneck choice ---------
-# Phases of one source->target transition (design D6/D10 vocabulary). "blocking"
+# -- reconfiguration cost distribution and bottleneck choice ---------
+# Phases of one source->target transition. "blocking"
 # phases stop training; "background" ones overlap the next rounds.
 TRANSITION_PHASES = (
     "wait_safe_point", "drain", "export", "init", "restore", "publish", "first_step",
@@ -443,7 +443,7 @@ GPU_ROLES = ("trainer", "rollout")
 class LoadSummary:
     """One fixed window of observed load for one (profile_hash, epoch).
 
-    STABLE INTERFACE (rl-infra-spec 1.7 -> 6.1): field names do not change.
+    STABLE INTERFACE: field names do not change.
 
     * ``window_start``/``window_end``: driver clock seconds, ``[start, end)``.
     * ``gpu_busy_fraction``: union of ``compute`` spans on trainer/rollout

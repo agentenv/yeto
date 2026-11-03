@@ -1,4 +1,4 @@
-"""S25 N10.1-N10.4: neutral agentic layer, Harbor harness, Miles and verl adapters (CPU, fakes only).
+"""Neutral agentic layer, Harbor harness, Miles and verl adapters (CPU, fakes only).
 
 No Harbor, Miles, verl or sandbox is needed: Harbor's ``Trial`` is a fake class,
 Miles' example module and verl's agent-loop module are stubbed in ``sys.modules``.
@@ -44,7 +44,7 @@ def _turn(prompt, completion, lp=None) -> TokenTurn:
     return TokenTurn(tuple(prompt), tuple(completion), tuple(lp or [-0.5] * len(completion)))
 
 
-# --- neutral types and token join (N10.2 / N10.3) ----------------------------
+# --- neutral types and token join ----------------------------
 
 
 def test_join_turns_masks_environment_tokens_and_keeps_policy_logprobs():
@@ -89,7 +89,7 @@ def test_agent_task_from_miles_metadata_and_safe_ids():
         AgentBudget(agent_timeout_s=900, wall_clock_s=600)
 
 
-# --- outcome classification and trust boundary (N10.2) ------------------------
+# --- outcome classification and trust boundary ------------------------
 
 
 @pytest.mark.parametrize(("verdict", "expected"), [
@@ -130,7 +130,7 @@ def test_trust_boundary_env_and_task_dir(tmp_path):
         task_dir(tmp_path, _task(task_id="out"))
 
 
-# --- outer layer runner (N10.2) ----------------------------------------------
+# --- outer layer runner ----------------------------------------------
 
 
 class _Harness:
@@ -197,7 +197,7 @@ def test_gate_bounds_sandboxes_in_flight():
     assert max(peak) == 2 and gate.metrics.admitted == 6
 
 
-# --- Harbor harness (N10.1) --------------------------------------------------
+# --- Harbor harness --------------------------------------------------
 
 
 def _result(rewards=None, exc_type=None):
@@ -254,7 +254,7 @@ def test_harbor_pins_and_agent_env():
         agent_env("claude-code", "http://r/v1")
 
 
-# --- Miles adapter (N10.1 / N10.2) -------------------------------------------
+# --- Miles adapter -------------------------------------------
 
 
 @pytest.fixture
@@ -322,8 +322,8 @@ def test_miles_reward_hook_marks_aborted_and_fails_closed(miles_stubs):
 
 
 def test_miles_train_args_match_the_example_except_the_yeto_hooks(monkeypatch):
-    path = Path(os.path.expanduser("~/work/miles-next/examples/experimental/harbor/launch_common.py"))
-    if not path.exists():
+    path = Path(os.environ.get("YETO_MILES_SRC", "")) / "examples/experimental/harbor/launch_common.py"
+    if not os.environ.get("YETO_MILES_SRC") or not path.exists():
         pytest.skip("Miles source not on this machine")
     creds = types.ModuleType("miles.rollout.agentic.credentials")
     creds.PROVIDER_CREDENTIALS, creds.provision_provider = {}, None
@@ -344,7 +344,7 @@ def test_miles_train_args_match_the_example_except_the_yeto_hooks(monkeypatch):
     assert ours == [swap.get(token, token) for token in theirs]
 
 
-# --- verl adapter (N10.3) ----------------------------------------------------
+# --- verl adapter ----------------------------------------------------
 
 
 @pytest.fixture
@@ -492,7 +492,7 @@ def test_verl_loop_requires_an_agent_task_row(verl_loop):
         _run(loop.run({}, extra_info={}))
 
 
-# --- verl refuses Miles agentic flags (N10.4) --------------------------------
+# --- verl refuses Miles agentic flags --------------------------------
 
 
 def test_verl_rules_refuse_agentic_flags():
@@ -512,7 +512,7 @@ def test_verl_launcher_refuses_agentic_flags_before_launch():
 
     args = _args(["--use-session-server", "--tito-model", "qwen38small"])
     args.rl_backend = "verl"
-    with pytest.raises(ValueError, match="verl 后端不支持 Miles agentic 参数"):
+    with pytest.raises(ValueError, match="the verl backend does not support Miles agentic options"):
         _prepare_rl_args(args)
 
 

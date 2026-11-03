@@ -1,4 +1,4 @@
-"""Scope rule of quantized rollout (S26 E6): which linears may be quantized, and the
+"""Scope rule of quantized rollout: which linears may be quantized, and the
 tier 1 engine ignore lists that follow from it."""
 
 from __future__ import annotations

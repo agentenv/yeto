@@ -102,7 +102,7 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
         return role_stream_session_contract_hash(layout_hash, self.config)
 
     async def _prepare_group(self, group):
-        # S27 G-AG diagnostics: host facts of the driver and of every trainer
+        # Diagnostics: host facts of the driver and of every trainer
         # rank, then one timed line per Miles group call.
         print_host_report(f"{self.config.role} driver learner {self.config.learner_id}")
         await report_rank_hosts(group, f"{self.config.role} learner {self.config.learner_id}")
@@ -121,7 +121,7 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
         return optimizer_proof_without_model_check_supported(self.group)
 
     def _stored_fragment_verifier(self, group) -> StoredFragmentVerifier | None:
-        # S27 G-CG verify-ahead: Miles' own prepare check
+        # Verify-ahead: Miles' own prepare check
         # (verify_stored_fragment_chunks) on a background thread; the apply
         # names the checked fragments (Miles transport feature verified_apply).
         if not verified_apply_supported(group):
@@ -164,7 +164,7 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
         from yeto.rl.adapters.miles.full_parameter.peer_recovery import MilesRankShards
         from yeto.rl.engine.stream_recovery import recovery_island
 
-        # MilesRankShards captures (S27 G-EL), so this is the capturing island
+        # MilesRankShards captures, so this is the capturing island
         shards = MilesRankShards(group, adapter.layout.layout_hash)
         return recovery_island(self, shards, asyncio.get_running_loop(), recovering=recovering)
 

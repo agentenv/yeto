@@ -1,4 +1,4 @@
-"""Rollout quantization tiers (S26 E6): launch refusals, tier 1 engine plans, tier 2
+"""Rollout quantization tiers: launch refusals, tier 1 engine plans, tier 2
 scoped FP8 layout, conversion, release scope check and the releaser."""
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def test_tier_2_needs_sampler_islands_and_full_parameters():
     with pytest.raises(QuantTierError, match="--tuning full"):
         tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_island_sample_role=["1:sampler"], tuning="lora"))
     assert tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_island_sample_role=["1:sampler"])) == 2
-    for role in ("sampler", "trainer"):  # one launch per role on a shared store (S25 C3 shape)
+    for role in ("sampler", "trainer"):  # one launch per role on a shared store (sampler/trainer pair shape)
         assert tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_sample_role=role)) == 2
     with pytest.raises(QuantTierError, match="store-coupled"):
         tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_sample_role="both"))
@@ -378,10 +378,10 @@ def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
         assert "--rl-rollout-quant-fp8-source" not in task.run
 
 
-MILES_NEXT = Path(os.path.expanduser("~/work/miles-next"))
+MILES_NEXT = Path(os.environ.get("YETO_MILES_SRC", "/nonexistent"))
 
 
-@pytest.mark.skipif(not (MILES_NEXT / "miles/utils/workers/process_utils.py").is_file(), reason="no miles-next checkout")
+@pytest.mark.skipif(not (MILES_NEXT / "miles/utils/workers/process_utils.py").is_file(), reason="set YETO_MILES_SRC to a Miles checkout")
 def test_ignore_list_reaches_the_sglang_server_process(dense, tmp_path, monkeypatch):
     """Tier 1, item 4 of the GPU review: the last hop. Miles' CommandActor starts
     ``sglang.launch_server`` with ``process_utils.launch_bound_subprocess(["/bin/sh", "-c",
@@ -414,7 +414,7 @@ QWEN3_4B = json.loads((Path(__file__).parent / "data" / "qwen3_4b_instruct_2507_
 
 
 @pytest.mark.skipif(not (MILES_NEXT / "miles/backends/megatron_utils/megatron_to_hf/qwen2.py").is_file(),
-                    reason="no miles-next checkout")
+                    reason="set YETO_MILES_SRC to a Miles checkout")
 def test_miles_raw_export_names_equal_the_hf_base_names():
     """Item 5 of the GPU review (raw path): every Megatron parameter of Qwen3-4B (TE layout,
     tied embeddings: no output_layer) through Miles' own ``convert_qwen2_to_hf`` gives exactly

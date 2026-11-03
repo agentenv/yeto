@@ -1,4 +1,4 @@
-"""rl-infra-spec 2.3: guards of the age-0 eval||train/outer_sync overlap (pure, CPU)."""
+"""Guards of the age-0 eval||train/outer_sync overlap (pure, CPU)."""
 
 from __future__ import annotations
 

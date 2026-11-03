@@ -1,4 +1,4 @@
-"""ReconfigurationCut shard save/restore executed inside every Megatron rank (rl-infra-spec 4.2).
+"""ReconfigurationCut shard save/restore executed inside every Megatron rank.
 
 Loaded through ``TrainGroup.run_plugin`` like :mod:`.state_plugin`; every
 function is collective-safe (no collective inside; every rank writes/reads
@@ -21,7 +21,7 @@ One shard per rank holds (4.1 audit, ``cut-audit.md``):
   (``capture_rng_state``; restored exactly -- same-shape only);
 * Megatron global counters (``iteration``, ``consumed_train_samples``) when present.
 
-Same-shape only (E2): the shard coordinate (tp, pp, dp, sizes; with EP>1 also
+Same-shape only: the shard coordinate (tp, pp, dp, sizes; with EP>1 also
 ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
 (DistributedOptimizer) shard is written back only onto identical per-parameter
 ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
@@ -102,7 +102,7 @@ class MilesCutBackend:
         return dp_invariant_state
 
     def export_optimizer(self, optimizer: Any, named: list, *, on_device: bool = False) -> Any:
-        """The fork-M5 named optimizer export. ``on_device`` (E1): the tensors are
+        """The fork's named optimizer export. ``on_device``: the tensors are
         device copies (same layout, not yet on the host); :func:`to_host` turns the
         result into exactly the host export."""
         export = self._dps().export_named_optimizer_state
@@ -184,9 +184,9 @@ class MilesCutBackend:
 
 
 def _device_export(dps: Any) -> Any:
-    """``export_named_optimizer_state`` keeping each tensor on its device (E1).
+    """``export_named_optimizer_state`` keeping each tensor on its device.
 
-    The Miles fork takes ``device=None`` for this (yeto/s26-e1-device-export); the
+    The Miles fork takes ``device=None`` for this (fork branch with device export); the
     pinned image's fork does not yet, and then this module builds the same
     entries from the fork's own ``optimizer_slots`` -- the fork function's body
     without its ``.cpu()`` (tests pin the equality with the fork's host export)."""
@@ -287,14 +287,14 @@ def side_effect_free_state(optimizer: Any):
                 del state[key]
 
 
-# Per rank process; False = default (side-effect-free reads). Only the E2 diagnostic
+# Per rank process; False = default (side-effect-free reads). Only the GPU harness diagnostic
 # sub-run turns it on (plugin below), to check the fork-M5 fix on a real DistOpt.
 _UNSAFE_STATE_READS = [False]
 SET_UNSAFE_STATE_READS = "yeto.rl.adapters.miles.cut_plugin.set_unsafe_state_reads"
 
 
 def set_unsafe_state_reads(actor: Any, *, enabled: bool) -> dict[str, Any]:
-    """Diagnostic switch (E2 plan-v6 C1 sub-run): read optimizer state WITHOUT the
+    """Diagnostic switch (GPU harness): read optimizer state WITHOUT the
     side-effect-free guard in this rank process."""
     del actor
     _UNSAFE_STATE_READS[0] = bool(enabled)
@@ -350,8 +350,7 @@ def _precision_aware_problems(args: Any) -> list[str]:
 
     ``--optimizer-cpu-offload`` requires ``--use-precision-aware-optimizer``;
     its HybridDeviceOptimizer keeps standalone FP32 masters and moments, which
-    the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``,
-    s25-distopt). On the device the precision-aware path keeps scaled or
+    the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``). On the device the precision-aware path keeps scaled or
     low-precision state, which a cut does not represent.
     """
     if not getattr(args, "optimizer_cpu_offload", False):
@@ -421,7 +420,7 @@ def _feed(digest: Any, value: Any) -> None:
         t = value.detach().to("cpu").contiguous().reshape(-1)
         digest.update(f"T{t.dtype}{shape}".encode())
         # a buffer, not a bytes copy: same digest, and hashlib releases the GIL while it
-        # hashes (a background cut writer must not stall the training thread, E1)
+        # hashes (a background cut writer must not stall the training thread)
         digest.update(t.view(torch.uint8).numpy() if t.numel() else b"")
     elif isinstance(value, np.ndarray):
         digest.update(f"N{value.dtype}{value.shape}".encode())
@@ -592,7 +591,7 @@ def miles_counters(actor: Any) -> dict[str, int]:
     ``weight_updater.weight_version``: every ``update_weights`` increments it and
     the rollout executor refuses a version that goes backwards, so a rebuilt
     trainer starting at 0 fails its first re-publication ("Engine weight version
-    went backwards: 4 -> 1"; GPU C1 plan-v6, 2026-09-30). Absent attribute -> {}.
+    went backwards: 4 -> 1"). Absent attribute -> {}.
     """
     updater = getattr(actor, "weight_updater", None)
     version = getattr(updater, "weight_version", None)
@@ -610,7 +609,7 @@ def set_miles_counters(actor: Any, counters: Mapping[str, int]) -> None:
 def train_state_digest(snap: Mapping[str, Any]) -> str:
     """Digest of the training state WITHOUT the publication counter (``miles_counters``):
     a re-publication legitimately advances ``weight_version`` without touching the
-    trainable state (E2 harness pre-step comparisons)."""
+    trainable state (GPU harness pre-step comparisons)."""
     return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
 
 
@@ -640,7 +639,7 @@ def resume_inputs(actor: Any) -> dict[str, Any]:
 def resume_rank_state(actor: Any, optimizer_named: Any, *, lrs: list[float] | None = None,
                       scheduler_progress: int | None = None) -> dict[str, Any]:
     """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
-    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6).
+    read from the named optimizer export and the Megatron LR scheduler.
     ``lrs`` / ``scheduler_progress`` (from :func:`resume_inputs`, taken at the step
     boundary) replace the reads of ``actor`` (then ``None`` is allowed)."""
     from yeto.rl.engine.resume_manifest import build_rank_state
@@ -692,7 +691,7 @@ def _add_param_layout(snap: dict[str, Any], actor: Any, backend: Any, named: lis
 
 
 def _snapshot(actor: Any, backend: Any, named: list, *, on_device: bool = False) -> dict[str, Any]:
-    """The shard state at this step boundary. ``on_device`` (E1): the adapter and
+    """The shard state at this step boundary. ``on_device``: the adapter and
     optimizer tensors are device copies (device-to-device, no wait for the host);
     :func:`to_host` later makes them exactly the host snapshot."""
     if on_device:
@@ -726,7 +725,7 @@ def to_host(value: Any) -> Any:
     return value
 
 
-# E1: device copies of a background cut need this much free device memory besides
+# Device copies of a background cut need this much free device memory besides
 # their own size (twice the copies: the allocator's rounding and what training
 # allocates next); below it the capture stays on the host path
 DEVICE_COPY_ENV = "YETO_RL_CUT_DEVICE_COPY"
@@ -774,11 +773,11 @@ REFUSED = "refused"  # key of a "nothing written" result (reason text)
 REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
 
 
-# E1: shards being written by a background thread of this rank, by cut id
+# Shards being written by a background thread of this rank, by cut id
 _PENDING_SHARDS: dict[str, Any] = {}
 
 
-# S27 G-EL: ``save_cut_shard(background=HOST_BACKGROUND)``: a host copy written by a
+# ``save_cut_shard(background=HOST_BACKGROUND)``: a host copy written by a
 # thread of this rank, no other copy (peer snapshots of a 30B trainer: 8 ranks x
 # about 59 GB of host memory next to a training container at about 289 GiB of 768)
 HOST_BACKGROUND = "host"
@@ -789,19 +788,19 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
 
     A refusal (unsupported configuration, not at a step boundary, ...) is
     RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
-    errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
+    errored on any ``run_plugin`` exception (GPU run 2026-09-30), which
     would turn a clean "no cut" into a dead trainer.
 
-    ``background`` (E1): take the state now (at this step boundary) and write, hash
+    ``background``: take the state now (at this step boundary) and write, hash
     and summarize it off the training thread (:func:`_write_background`), so
     training goes on; returns ``{"pending": cut_id}``. :func:`finish_cut_shard`
     returns the summary, :func:`poll_cut_shard` says whether it is ready.
 
-    ``background="host"`` (:data:`HOST_BACKGROUND`, S27 G-EL peer snapshots): the
+    ``background="host"`` (:data:`HOST_BACKGROUND`, peer snapshots): the
     state is copied to host memory here (the host path of :func:`_capture`) and a
     thread of this rank writes the shard from that copy (:func:`_write_refusing`,
     the inline write's code), without the device copies, the shared-memory buffer
-    and the writer process of the E1 path: those hold up to three copies of the
+    and the writer process of the device background path: those hold up to three copies of the
     shard at once, about 1.4 TB on an 8-rank 30B trainer.
     """
     host = background == HOST_BACKGROUND
@@ -853,7 +852,7 @@ def _write_host_background(captured: dict[str, Any], *, directory: str, cut_id: 
 
 def _release_capture(captured: dict[str, Any], cut_id: str) -> None:
     """Drop the host copy of a written (or refused) host capture and give its
-    memory back to the OS (S27 G-EY, :mod:`yeto.rl.engine.host_memory`). The
+    memory back to the OS (:mod:`yeto.rl.engine.host_memory`). The
     caller holds the last reference: the capture is emptied in place."""
     from yeto.rl.engine.host_memory import anonymous_rss_mib
 
@@ -890,7 +889,7 @@ def _write_refusing(captured: dict[str, Any], *, directory: str, cut_id: str) ->
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
-# E1 phase 5: a background cut is serialized (torch.save), hashed and committed in a
+# A background cut is serialized (torch.save), hashed and committed in a
 # writer process of this rank, not in a thread of the trainer process: the writer
 # thread competed with training (each trained token about 8 % slower while it ran,
 # GPU runs e1g/e1h). The trainer copies the state into shared memory and hands it
@@ -1079,7 +1078,7 @@ def _pack(value: Any) -> tuple[Any, list, Any]:
     the same bytes. Other tensors stay in the skeleton, moved to shared memory one by
     one. One buffer is one file descriptor to hand over: per-tensor sharing passed
     about 400 descriptors per cut through the trainer process's resource sharer
-    while the next round trained (E1 profile run e1j-yeto-miles-async-a)."""
+    while the next round trained (measured in a background-cut profile run)."""
     import torch
 
     tensors: list = []
@@ -1172,7 +1171,7 @@ def _write_packed(skeleton: Any, layout: list, flat: Any, *, directory: str, cut
 def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str, Any]:
     """Everything the shard and its summary need, read at the step boundary.
 
-    Host path: CPU copies, taken here. ``device_copy`` (E1, background cuts): the
+    Host path: CPU copies, taken here. ``device_copy`` (background cuts): the
     adapter and optimizer tensors are copied device-to-device here and reach the
     host in the writer thread (:func:`_on_host`), so the trainer waits only for
     the device copies. The device path is skipped (host path, reason in
@@ -1219,7 +1218,7 @@ def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str,
     if not on_device:
         captured["resume"] = resume_rank_state(actor, snap["optimizer_named"], **captured["resume_inputs"])
     marks.append(time.monotonic())
-    # E1 diagnosis: where the step-boundary capture of a cut goes (driver log only)
+    # Diagnosis: where the step-boundary capture of a cut goes (driver log only)
     print("yeto cut capture timing " + json.dumps({**dict(zip(
         ("snapshot_s", "rng_tuning_s", "resume_state_s"),
         (round(b - a, 3) for a, b in zip(marks, marks[1:])))), "capture": capture}), flush=True)
@@ -1238,7 +1237,7 @@ def _on_host(captured: dict[str, Any]) -> dict[str, Any]:
 
 
 def _with_resume(captured: dict[str, Any]) -> dict[str, Any]:
-    """``captured`` with the N7.6 resume state a device capture defers (computed from
+    """``captured`` with the sharded-optimizer resume state a device capture defers (computed from
     the host snapshot and the step-boundary resume inputs)."""
     if "resume" in captured:
         return captured
@@ -1301,7 +1300,7 @@ def _interned(value: Any) -> Any:
     and back-references repeats of the same object; interning makes that depend on
     the values only, so a shard serialized in the writer process (whose strings
     arrived unpickled, as separate objects) has the same bytes as one serialized in
-    the trainer (E1 phase 5)."""
+    the trainer."""
     import sys
 
     if isinstance(value, str):
@@ -1437,7 +1436,7 @@ RANK_COORDS = f"{_MODULE}.rank_coords"
 def rebase_full_parameter_tracking(actor: Any) -> None:
     """After a restore loads the donor's LR scheduler, move Miles' full-parameter
     scheduler anchor to it. Without this the island's first global apply fails
-    with "scheduler progress has no local-step receipt" (G-D2 rec-c): the
+    with "scheduler progress has no local-step receipt": the
     restored progress has no local step behind it on this trainer. A trainer
     without full-parameter tracking (LoRA cut path) is left alone."""
     if getattr(actor, "_external_full_policy_version", None) is None:
@@ -1482,7 +1481,7 @@ def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, An
         kind = "refused" if isinstance(error, CutPluginError) else "failed_before_write"
         return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: kind}
     finally:
-        # S27 G-EY: the loaded shard's host tensors are garbage once the trainer
+        # The loaded shard's host tensors are garbage once the trainer
         # holds their values (or the restore was refused).
         _release_host_memory(f"after restoring {cut_id}")
 
@@ -1606,7 +1605,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
 
 
 # --------------------------------------------------------------------------
-# DP resharding restore (rl-infra-spec 4.6 spike; E3)
+# DP resharding restore
 # --------------------------------------------------------------------------
 
 RESTORE_RESHARDED_SHARD = f"{_MODULE}.restore_resharded_shard"
@@ -1721,7 +1720,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     rebase_full_parameter_tracking(actor)
     backend.set_megatron_counters(first.get("megatron_counters") or {})
-    set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
+    set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded path
     refresh_actor_backup(actor)
     if own_rng is not None:
         backend.restore_rng(own_rng)
@@ -1744,7 +1743,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         "rng_digest": state_digest(backend.capture_rng()),
         "optimizer_names": sorted(export.get("entries", {})),
         "adapter_names": sorted(names),
-        # S25 N7.6: run-wide resume assertions (Adam step, scheduler, LRs) at the new DP
+        # Run-wide resume assertions (Adam step, scheduler, LRs) at the new DP
         "path": shard_name(coord),
         "resume": resume_rank_state(actor, export),
     }
@@ -1760,10 +1759,10 @@ def train_parallel_config(actor: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# E2 GPU harness read-outs (plan-v3): no writes, no randomness consumed.
+# GPU harness read-outs: no writes, no randomness consumed.
 # --------------------------------------------------------------------------
 
-# plan-v3 §0 (= launcher --rl-deterministic-trainer, entry.DETERMINISM_ENV).
+# Determinism (= launcher --rl-deterministic-trainer, entry.DETERMINISM_ENV).
 DETERMINISM_ENV = {
     "NCCL_ALGO": "Ring",
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
@@ -1776,7 +1775,7 @@ RANK_DETERMINISM = f"{_MODULE}.rank_determinism"
 
 
 def rank_determinism(actor: Any) -> dict[str, Any]:
-    """What this rank actually runs with (plan-v3 §0: all must hold, else environment-blocked)."""
+    """What this rank actually runs with (all must hold, else environment-blocked)."""
     env = {k: os.environ.get(k) for k in DETERMINISM_ENV}
     return {
         "info_env": {k: os.environ.get(k) for k in DETERMINISM_INFO_ENV},
@@ -1795,7 +1794,7 @@ def state_summary(actor: Any) -> dict[str, Any]:
     (diagnostics when the overall digest differs); ``moments_nonzero``: number
     of optimizer entries whose ``exp_avg`` has a non-zero element;
     ``bf16_master_mismatch``: adapter model copies that differ from their FP32
-    master cast to the model dtype over the owned range (plan-v3 §3 L2).
+    master cast to the model dtype over the owned range.
     """
     with trainer_resident(actor):
         return _state_summary(actor)

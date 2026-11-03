@@ -1,12 +1,12 @@
-"""decoupling 4.7: neutral loss reference vs the paper formulas and vs the
+"""Neutral loss reference vs the paper formulas and vs the
 Miles fork functions at the pinned commit, bitwise on CPU.
 
 The fork comparison does not import Miles (it is blocked on this host and the
 module pulls torch.distributed / cp_utils): it takes the function *source*
 from a local Miles checkout at ``MILES_NEXT_COMMIT`` (``git show``), drops
 the ``@torch.compile`` decorators and executes the definitions with torch
-only. Without a checkout (``YETO_MILES_REPO``, default
-``~/work/miles-next``) those tests are skipped, not failed.
+only. Without a checkout (``YETO_MILES_REPO``, unset or
+not a checkout) those tests are skipped, not failed.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ from pathlib import Path
 import pytest
 import torch
 
+import loss_reference as ref
 import rl_loss_variant_reference as paper
 from yeto.rl import MILES_NEXT_COMMIT
-from yeto.rl.algos import loss_reference as ref
 
 MATH = "miles/backends/training_utils/loss_hub/math_utils.py"
 CORR = "miles/backends/training_utils/loss_hub/corrections.py"
-REPO = Path(os.environ.get("YETO_MILES_REPO", os.path.expanduser("~/work/miles-next")))
+REPO = Path(os.environ.get("YETO_MILES_REPO", "/nonexistent-miles-checkout"))
 
 
 def _fork(path: str, names: tuple[str, ...]) -> dict:

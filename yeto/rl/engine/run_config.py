@@ -1,4 +1,4 @@
-"""Engine-agnostic RL run configuration (rl-engine-ports task 2.4, design D8).
+"""Engine-agnostic RL run configuration.
 
 ``resolve_rl_run_config`` turns one parsed learner namespace plus the Bridge
 model provider into an immutable :class:`RLRunConfig`.  All validation and
@@ -147,7 +147,7 @@ class ModelRecipe:
     training_attention_backend: str
     gdn: GdnRecipe
     # Megatron --transformer-impl of a recipe that chooses it (glm5_next: the
-    # N7.5 TE-free fallback is "local"); the other recipes keep their own.
+    # the TE-free fallback is "local"); the other recipes keep their own.
     transformer_impl: str = "transformer_engine"
     # Recipe-owned Miles model flags read from the provider (nemotron_h router,
     # latent MoE); empty for the other recipes.
@@ -168,16 +168,16 @@ class ParallelLayout:
     visible_gpus_per_node: int
     # Uneven pipeline split: (first, last) stage layer counts, else None.
     uneven_pipeline_layers: tuple[int, int] | None
-    # rl-infra-spec 2.1: reserved standby GPUs of a fixed partition (never
+    # Reserved standby GPUs of a fixed partition (never
     # started by any role); a non-zero value needs the fork-M1 placement map.
     standby_gpus: int = 0
-    # rl-infra-spec 3.x/4.7 (fork F-R1): yeto names of the rollout engine cells
+    # Yeto names of the rollout engine cells
     # declared to the fork (placement map "rollout_cells"); () = fork default.
     rollout_cell_names: tuple[str, ...] = ()
-    # rl-multinode-island: GPUs per island node on a multi-node island; None on
+    # GPUs per island node on a multi-node island; None on
     # a single node (every node rule off).
     island_gpus_per_node: int | None = None
-    # rl-multinode-island Q2: explicit role -> logical bundle map of a multi-node
+    # Explicit role -> logical bundle map of a multi-node
     # fixed partition whose trainer is not the leading bundles (the launcher
     # derives it from the elastic cfg placement); None = leading layout.
     bundle_map: dict[str, tuple[int, ...]] | None = None
@@ -185,7 +185,7 @@ class ParallelLayout:
     # --rl-allow-cross-node-engine-tp); default False = TP stays inside a node.
     allow_cross_node_tp: bool = False
     allow_cross_node_engine_tp: bool = False
-    # S27 G-AC: Megatron context parallelism of the trainer (Miles splits each
+    # Megatron context parallelism of the trainer (Miles splits each
     # packed micro batch of max_tokens_per_gpu * CP tokens across the CP ranks).
     context_parallel: int = 1
 
@@ -311,7 +311,7 @@ class AlgorithmConfig:
 
 @dataclass(frozen=True)
 class CriticRunConfig:
-    """Run-level critic inputs of the ports main stage (design D5).
+    """Run-level critic inputs of the ports main stage.
 
     ``critic_load``: the warm-up stage product (critic checkpoint directory)
     the main stage loads with ``--critic-load``; ``init_sha256``: its content
@@ -387,19 +387,18 @@ def resolve_lr_schedule(
     requested: str = "auto",
     full_parameter_async: bool = False,
 ) -> LrSchedule | None:
-    """The island's LR schedule (design D1-D3), ``--rl-lr-schedule`` (S17 N16).
+    """The island's LR schedule, ``--rl-lr-schedule``.
 
     ``auto`` (default) keeps the mode rule: decoupled, island-pool and
     asynchronous full-parameter islands run until the syncer stops them (an
-    island that re-JOINs needs local rounds past ``global_rounds``; S17 N5
-    a73ab1b2; an asynchronous full-parameter island trains H local rounds per
+    island that re-JOINs needs local rounds past ``global_rounds``; an asynchronous full-parameter island trains H local rounds per
     fragment round and, with a partial quorum, as many rounds as it is fast),
     so any finite linear horizon can reach zero mid-run -> constant;
     strict-avg / full-parameter sweep / single island -> linear over
     ``global_rounds * optimizer_steps``.
     ``constant`` holds the LR in every mode (e.g. a single island compared
-    with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
-    linear horizon). ``linear`` is refused where the horizon is unknown.
+    with a fixed-LR baseline, which a linear schedule could only
+    approximate with a very long horizon). ``linear`` is refused where the horizon is unknown.
 
     The Miles translation (``translate_run_config``) emits exactly this schedule.
     """
@@ -458,10 +457,10 @@ class ServingConfig:
     page_size: Any = None
     max_running_requests: Any = None
     chunked_prefill_size: Any = None
-    # rl-trainer-cold-start-cost L8.2: opt-in SGLang snapshot flags on the
+    # Opt-in SGLang snapshot flags on the
     # sampler (rollout) engines; refused without a recorded compatibility pass.
     sampler_snapshot: bool = False
-    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
+    # Rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
     rollout_quant_tier: int = 0
     # tier 1: who quantizes ("engine" online FP8, or "trainer": Miles block FP8 updates)
     rollout_quant_fp8_source: str = "engine"
@@ -509,10 +508,10 @@ class RLRunConfig:
     agent: AgentConfig
     yeto_policy_sync: bool
     distributed_timeout_minutes: int
-    # E2 plan-v2 §0 (A6/A6b/A8): Megatron --deterministic-mode; the matching
+    # Megatron --deterministic-mode; the matching
     # NCCL/cuBLAS/TF32 environment is set by the learner (--rl-deterministic-trainer).
     deterministic_trainer: bool = False
-    # rl-infra-spec 4.7 (E3): trainer DP-change edges enabled
+    # Trainer DP-change edges enabled
     # (--rl-elastic-trainer-edges); the first certified DP profile refuses
     # --balance-data, so the translation drops it only then.
     trainer_dp_edges: bool = False
@@ -524,12 +523,12 @@ class RLRunConfig:
     # fails the publish (abort -> REBUILD_OLD) instead of stalling the run.
     # None = flag not emitted (fork default: torch's process-group timeout).
     update_weight_group_timeout_s: float | None = None
-    # D1/D2 wiring (6.5, d2-wire): 5.7 per-(profile_hash, source, target) cost
+    # Per-(profile_hash, source, target) cost
     # table read by ``elastic.ElasticHook`` (None = no costs -> recommend/auto hold),
     # and the load-window length for ``timeline.load_windows`` (None = no hook).
     edge_costs_path: str | None = None
     elastic_window_s: float | None = None
-    # rl-trainer-start-stop L4.6 (--rl-sample-role sampler|trainer): the island
+    # rl-trainer-start-stop (--rl-sample-role sampler|trainer): the island
     # writes or reads the durable sample buffer. None = role both (unchanged).
     sample_buffer: SampleBufferConfig | None = None
     train_memory: TrainMemoryConfig = TrainMemoryConfig()
@@ -551,7 +550,7 @@ def qwen3_8_next_variant(args, provider) -> str | None:
     Fingerprint, not name: the HF model id (any path whose basename is a known
     Flash-Next repo) OR the provider shape (GDN + 512 routed experts + hidden
     2560 + 48/4 layers).  Both GDN, so without this the Qwen3.5 spec would be
-    picked silently (G1)."""
+    picked silently."""
     from yeto.rl.profiles import qwen3_8_next as q
 
     model = str(getattr(args, "model", None) or "").rstrip("/")
@@ -649,7 +648,7 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
       ``--colocate`` / ``--offload-train`` (the adapter adds both): the trainer
       sleeps while the engines generate and publishes from its host backups.
       A synced island stays refused: its outer-sync boundary needs the trainer
-      state resident while the engines hold the GPUs (G-EB, AGENTIC-ROLLOUT-SCALING
+      state resident while the engines hold the GPUs (AGENTIC-ROLLOUT-SCALING
       section 4.1). The island GPUs split evenly into engines of
       ``--rollout-num-gpus-per-engine``.
     """
@@ -827,7 +826,7 @@ def resolve_rl_run_config(
         rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
         role = sample_roles.sample_role(args)
         island_gpus_per_node = getattr(args, "rl_island_gpus_per_node", None)
-        # G-EF: engines on the trainer GPUs (one island without outer sync only)
+        # Engines on the trainer GPUs (one island without outer sync only)
         colocated = (role == sample_roles.BOTH and rollout_gpus in (None, 0)
                      and getattr(args, "rl_placement", "colocated") == "colocated")
         if problem := full_parameter_layout_problem(
@@ -859,7 +858,7 @@ def resolve_rl_run_config(
             visible_gpus_per_node = (args.actor_num_gpus_per_node + rollout_gpus
                                      if island_gpus_per_node is None else int(island_gpus_per_node))
     elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
-        # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
+        # A LoRA fixed partition (ports engine only; the
         # legacy CLI never sets rl_placement, so its layout is unchanged).
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         per_engine = getattr(args, "rollout_num_gpus_per_engine", 1)
@@ -944,7 +943,7 @@ def resolve_rl_run_config(
             )
         recipe_name, attention_backend = RECIPE_QWEN3_8_NEXT, "flash"
         if getattr(args, "sglang_deterministic_inference", True):
-            # S11 try26: the recipe's GDN prefill backend is FlashInfer (Miles
+            # The recipe's GDN prefill backend is FlashInfer (Miles
             # run_qwen3_8_next.py: --sglang-linear-attn-prefill-backend flashinfer),
             # which SGLang rejects under --enable-deterministic-inference; Miles'
             # validated recipe runs non-deterministic inference.
@@ -1349,7 +1348,7 @@ def ports_training_eval(args) -> bool:
     """Training-time heldout eval on a ports island (not eval-only).
 
     Dense full-parameter islands use the same driver evaluation (rollout 0,
-    every ``interval`` rollouts and the final one; P0 1.7b.1b).
+    every ``interval`` rollouts and the final one).
 
     Shared by the learner's dataset-identity check and :func:`_resolve_eval`
     so both accept exactly the same runs.
@@ -1371,7 +1370,7 @@ def _resolve_eval(
     if not yeto_policy_sync and not getattr(args, "rl_single_island_no_sync", False):
         # A single island without outer sync owns its policy versions (it publishes
         # every round to its own engines), so the driver's training-time eval needs no
-        # syncer (S27 G-DA: held-out agentic eval at round 0 and at the last round).
+        # syncer (held-out agentic eval at round 0 and at the last round).
         raise ValueError("Yeto evaluation requires the external policy boundary")
     if eval_interval <= 0:
         raise ValueError("evaluation interval must be positive")
@@ -1382,7 +1381,7 @@ def _resolve_eval(
             raise ValueError("SSH evaluation must be one separate eval-only run")
         selected = prompt_path
     elif ports_train_eval:
-        # Ports LoRA island (rl-infra-spec 2.3 / launcher wiring): Miles runs
+        # Ports LoRA island (launcher wiring): Miles runs
         # the heldout eval every ``interval`` rollouts through the driver's
         # evaluate port; a distinct heldout split is mandatory.
         if eval_prompt_path is None:

@@ -18,7 +18,7 @@ def _vmap(pairs=((0, 10), (1, 11), (2, 12), (3, 13))):
 
 
 def test_limit_to_staleness_threshold_and_queue_lag():
-    """(c) staleness only throttles by samples: s = N (S19 10-10, was N - 1: async8 had
+    """(c) staleness only throttles by samples: s = N (was N - 1: async8 had
     nothing in flight at a push), queued lag floor(s) + 1 = N + 1, beyond N yeto discards."""
     assert t.staleness_threshold_for(1) == 1.0 and t.staleness_threshold_for(2) == 2.0
     assert t.queue_version_lag(t.staleness_threshold_for(1)) == 2

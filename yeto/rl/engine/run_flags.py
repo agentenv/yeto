@@ -1,4 +1,4 @@
-"""RL launch flag schema: every RL flag is defined exactly once (P0 4.7).
+"""RL launch flag schema: every RL flag is defined exactly once.
 
 A flag is an :class:`RlFlag` with the layers that accept it:
 
@@ -48,7 +48,7 @@ from yeto.rl.engine.selection import (
 )
 
 CLI = "cli"
-# S27 asynchronous full-parameter rounds: the default and the largest number
+# asynchronous full-parameter rounds: the default and the largest number
 # of fragment rounds in flight (--rl-sync-fragment-pipeline / island
 # --pipeline).  The syncer and the island pairing take any depth up to P; the
 # bound limits the retained submissions and staged broadcasts (one fragment
@@ -60,7 +60,7 @@ FULL_PARAMETER_ASYNC_MAX_PIPELINE = 60
 # The island's wait for a paired broadcast, the terminal barrier and the FINAL
 # cut (--rl-sync-wait-timeout-s / island --sweep-wait-timeout-s).
 FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S = 900.0
-# S27 G-AG lead cap of the asynchronous rounds (--rl-sync-max-local-rounds-ahead
+# lead cap of the asynchronous rounds (--rl-sync-max-local-rounds-ahead
 # / island --sweep-max-local-rounds-ahead): the largest accepted K.
 FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD = 1000
 
@@ -172,11 +172,11 @@ GLOBAL_ROUNDS_HELP = (
     "sync rounds R (the syncer's outer budget). With full-parameter asynchronous rounds "
     "the syncer merges one fragment per outer step and the island pushes one fragment per "
     "local training step, so the island trains R x --fragments local steps "
-    "(--total-fragment-steps), not R (S29 D7)")
+    "(--total-fragment-steps), not R")
 
 
 def local_training_steps_line(global_rounds: int, fragments: int, *, who: str = "launcher") -> str:
-    """S29 D7: the line a launcher / island prints for full-parameter asynchronous
+    """The line a launcher / island prints for full-parameter asynchronous
     rounds, where ``--global-rounds`` counts sync rounds and the island trains one
     local step per fragment round."""
     rounds, frags = int(global_rounds), int(fragments)
@@ -186,7 +186,7 @@ def local_training_steps_line(global_rounds: int, fragments: int, *, who: str = 
 
 
 def check_verify_every(args) -> None:
-    """S27 C5: ``--rl-verify-every N`` skips the policy hash on a no-sync island only
+    """``--rl-verify-every N`` skips the policy hash on a no-sync island only
     (nothing outside the island reads it); N >= 1; not with --rl-verify-every-round."""
     every = getattr(args, "rl_verify_every", None)
     if every is None:
@@ -368,7 +368,7 @@ _ALGORITHM = (
             "fallback after this many rejected groups"
         ),
     ),
-    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
+    cli_flag(  # refused (the Codex/SecRLEnv agents were removed)
         "--secrlenv-max-infrastructure-replacements",
         type=int,
         default=None,
@@ -386,7 +386,7 @@ _ALGORITHM = (
             "Default: RL requires a revision-pinned Hugging Face dataset"
         ),
     ),
-    # rl-algorithm-capabilities D8/D9/D11 (ports only; refused on legacy).
+    # algorithm spec, critic and capability flags (ports only; refused on legacy).
     shared_flag(
         "--rl-algorithm-spec",
         default=None,
@@ -396,8 +396,8 @@ _ALGORITHM = (
             "sends each island its canonical form and expected hash"
         ),
     ),
-    # rl-algo-critic-family 5.3 (design D5): critic warm-up stage on the island
-    # rl-algo-critic-family D5: the critic warm-up stage product the main stage loads
+    # critic family: the critic warm-up stage on the island and the warm-up
+    # product the main stage loads
     shared_flag(
         "--rl-critic-load",
         default=None,
@@ -427,13 +427,13 @@ _ALGORITHM = (
 )
 
 _PLACEMENT = (
-    # rl-infra-spec 2.1 (ports only): LoRA fixed partition + reserved standby
+    # Ports only: LoRA fixed partition + reserved standby
     # GPUs, read by engine.run_config.resolve_rl_run_config.
     shared_flag(
         "--rl-placement",
         choices=["colocated", "fixed-partition"],
         default="colocated",
-        help="ports: colocated (default) or a fixed partition (rl-infra-spec 2.1); full "
+        help="ports: colocated (default) or a fixed partition; full "
         "parameters colocate only on one island without outer sync (--rl-single-island-no-sync)",
     ),
     cli_flag(
@@ -441,7 +441,7 @@ _PLACEMENT = (
         dest="rollout_num_gpus",
         type=int,
         default=None,
-        help="ports fixed partition: dedicated rollout GPUs per island (rl-infra-spec 2.1; "
+        help="ports fixed partition: dedicated rollout GPUs per island ("
         "on a multi-node island the island total, laid out after the trainer's nodes). "
         "Note: on `launch`, a bare --rollout-num-gpus is an argparse abbreviation of "
         "--rollout-num-gpus-per-engine, not this option",
@@ -492,11 +492,11 @@ _PLACEMENT = (
              "size as the workers"),
     cli_flag("--rl-island-ray-head-preallocate", action="store_true", default=False,
              help="RL island: start the head's raylet with RAY_preallocate_plasma_memory=1, so "
-             "the whole head object store is populated once, sequentially, at start (S27 "
-             "RAY-SEGV R1: the island driver on gVisor got SIGSEGV when its shared-memory "
+             "the whole head object store is populated once, sequentially, at start (the "
+             "island driver on gVisor got SIGSEGV when its shared-memory "
              "mappings were fragmented). Needs an explicit head store size. Ray notes the "
              "populate runs at a few GB/s on Linux (raise --rl-island-ray-head-start-wait-s); "
-             "on a Modal CPU container a 300 GiB head started in 8.4 s (G-CQ)"),
+             "on a Modal CPU container a 300 GiB head started in 8.4 s"),
     cli_flag("--rl-island-ray-head-start-wait-s", type=int, default=None, metavar="SECONDS",
              help="RL island: how long the head's `ray start` and raylet wait for the raylet "
              "to come up (RAY_raylet_start_wait_time_s and RAY_raylet_client_num_connect_attempts, "
@@ -514,7 +514,7 @@ _PLACEMENT = (
              "at /mnt/yeto-models on every node (needs nebius@<region>) and points "
              "HF_HUB_CACHE at it when it holds a completed --model@--model-revision "
              "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download"),
-    # S27 G-DI two-cluster island (yeto.launch.engine_cluster)
+    # two-cluster island (yeto.launch.engine_cluster)
     cli_flag("--rl-engine-cluster", default=None, metavar="SPEC",
              help="two-cluster RL island (Nebius sky islands): the LAST n nodes of the "
              "--gpu island (n = SPEC's node count) run as a second sky cluster of SPEC's "
@@ -539,15 +539,15 @@ _PLACEMENT = (
 )
 
 _RUNTIME = (
-    # S27 G-FL: pipeline parallelism in a full-parameter session is gated because the
+    # pipeline parallelism in a full-parameter session is gated because the
     # stage-1 trainer rank segfaults at start on a GPU island; this retries it anyway.
     shared_flag("--rl-allow-pipeline-parallel-sync", action="store_true", default=False,
                 help="island with model parallelism in a full-parameter session: allow "
                 "--pipeline-parallel > 1, which is refused by default because the trainer rank of "
                 "the second pipeline stage segfaults while the island reads its parameter boundary "
-                "(run s27-fl-1). The boundary code itself is verified on CPU; pass this to retry "
+                "(observed on a real run). The boundary code itself is verified on CPU; pass this to retry "
                 "the shape on cards, for example after the upstream behaviour changes"),
-    # S27 G-FL: islands with model parallelism check every gradient bucket for
+    # islands with model parallelism check every gradient bucket for
     # non-finite values by default (the trainer's own bucket check); this turns it off.
     shared_flag("--rl-no-grad-nan-check", action="store_true", default=False,
                 help="island with model parallelism (TP/PP/EP > 1): do NOT check each gradient "
@@ -555,7 +555,7 @@ _RUNTIME = (
                 "on by default because without it a NaN gradient is scaled into every parameter "
                 "and written into the weights with no error; turning it off buys back one L2 norm "
                 "per bucket per step and restores that silent-corruption path"),
-    # S27 G-FL: the Ascend SFT recipe's plugin stack, opt-in and off by default
+    # the Ascend SFT recipe's plugin stack, opt-in and off by default
     # (yeto.rl.ascend_plugin_stack). Only an island with model parallelism honours it.
     shared_flag("--rl-ascend-plugin-stack", default=None, metavar="ISLAND_DIR",
                 help="Ascend island with model parallelism (TP/PP/EP > 1): install the SFT "
@@ -565,7 +565,7 @@ _RUNTIME = (
                 "the recipe); the recipe's per-stage recompute policy and HCCL_BUFFSIZE stay "
                 "unset (they belong to its three-stage pipeline layout). The island log lists "
                 "every switch and every plugin it did or did not install"),
-    # S29: the 18.60 list adds five plugins that change the numerics path; opt-in only
+    # the 18.60 list adds five plugins that change the numerics path; opt-in only
     shared_flag("--rl-ascend-plugin-recipe", default=None, choices=("18.44", "18.60"),
                 help="with --rl-ascend-plugin-stack: which recipe's plugin list to load. "
                 "Default 18.44. 18.60 also loads conv_bf16_taps, mamba_headloop, mamba_dxmask, "
@@ -577,33 +577,33 @@ _RUNTIME = (
              help="--rl-elastic: re-run the learner in place (same args and state dir) "
              "after a non-zero exit, at most N times; off by default"),
     cli_flag("--rl-test-inject-lora-perturb", type=float, default=None, metavar="EPS",
-             help="--rl-elastic, TEST ONLY (3.5 E1-B): the first member update ships the "
+             help="--rl-elastic, TEST ONLY: the first member update ships the "
              "LoRA adapter + EPS (trainer restored right after), so check_weights must "
              "refuse the new engines"),
     cli_flag("--rl-test-hold-before-check-s", type=float, default=None, metavar="S",
-             help="--rl-elastic, TEST ONLY (A4 E1-B (a)): the first member publication "
+             help="--rl-elastic, TEST ONLY: the first member publication "
              "stays S seconds after end_update_weights and before check_weights/"
              "admit_cells (observation window); needs another --rl-test-* injection"),
     cli_flag("--rl-test-inject-tool-wait-s", type=float, default=None, metavar="S",
-             help="--rl-elastic, TEST ONLY (A4b): every drain executes an artificial tool "
+             help="--rl-elastic, TEST ONLY: every drain executes an artificial tool "
              "that waits S seconds (drain timeout -> CANCELLED -> undrain); a drain "
              "while it still waits is journaled, not re-armed; needs "
              "--rl-elastic-tool-wait-board"),
     cli_flag("--rl-test-tool-side-effect-log", action="store_true", default=False,
-             help="--rl-elastic, TEST ONLY (A4bc / 3.3 X5): journal every execution of "
+             help="--rl-elastic, TEST ONLY: journal every execution of "
              "the injected tool (--rl-test-inject-tool-wait-s) in <elastic state dir>/"
              "side_effects.jsonl, one tool_side_effect record per (trajectory, tool call) "
              "before the wait starts; the judge proves a drain-timeout cancel never "
              "replays a tool call"),
     cli_flag("--rl-test-inject-undrain-fail", type=int, default=None, metavar="N",
-             help="--rl-elastic, TEST ONLY (A4b / E1-C): the next N undrain calls fail "
+             help="--rl-elastic, TEST ONLY: the next N undrain calls fail "
              "inside the adapter, so a drain timeout cannot restore the old routing "
              "and the island must end in RECOVERY_REQUIRED (never CANCELLED)"),
     cli_flag("--rl-test-inject-stop-failures", type=int, default=None, metavar="N",
-             help="--rl-elastic, TEST ONLY (3.7 E1-D ③④): the next N fork stop_cells fail "
+             help="--rl-elastic, TEST ONLY: the next N fork stop_cells fail "
              "inside the fork after deregistration (incomplete)"),
     cli_flag("--rl-test-kill-learner-at", default=None, metavar="PHASE",
-             help="--rl-elastic, TEST ONLY (3.7 E1-D ⑤⑥): hard-kill the learner once when a "
+             help="--rl-elastic, TEST ONLY: hard-kill the learner once when a "
              "transaction journals PHASE (needs --rl-elastic-restart-attempts)"),
     # ports LoRA training-time dropout (default 0 = unchanged argv)
     shared_flag("--rl-lora-dropout", type=float, default=None, metavar="P",
@@ -618,30 +618,30 @@ _RUNTIME = (
              "run script and executed on the node (inside the island image, GPUs idle) "
              "BEFORE the island's Ray starts; a non-zero exit fails the job. For node-side "
              "preparation the launcher has no flag for, e.g. an HF -> torch_dist conversion "
-             "on a cloud that cannot mount a prepared model volume (Verda G0)"),
+             "on a cloud that cannot mount a prepared model volume, e.g. Verda)"),
     cli_flag("--rl-test-inject-rebuild-fail", action="store_true",
-             help="--rl-elastic, TEST ONLY (4.4 REBUILD_OLD): the first same-shape trainer "
+             help="--rl-elastic, TEST ONLY (REBUILD_OLD path): the first same-shape trainer "
              "rebuild fails in the fork at create_training_models"),
     cli_flag("--rl-test-inject-cut-save-kill-rank", type=int, default=None, metavar="RANK",
-             help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits while "
+             help="--rl-elastic, TEST ONLY: that trainer rank exits while "
              "writing its save_cut shard"),
     cli_flag("--rl-test-inject-cut-restore-kill-rank", type=int, default=None, metavar="RANK",
-             help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank exits during "
+             help="--rl-elastic, TEST ONLY: that trainer rank exits during "
              "restore_cut (after the adapter write)"),
     cli_flag("--rl-test-inject-cut-restore-sleep", default=None, metavar="RANK:SECONDS",
-             help="--rl-elastic, TEST ONLY (E2 G-4.5): that trainer rank sleeps before "
+             help="--rl-elastic, TEST ONLY: that trainer rank sleeps before "
              "restore_cut"),
     cli_flag("--rl-test-inject-rebuild-cursor-shift", type=int, default=None, metavar="GROUPS",
-             help="--rl-elastic, TEST ONLY (E2 G-4.5): before a trainer rebuild, place a "
+             help="--rl-elastic, TEST ONLY: before a trainer rebuild, place a "
              "dataset state advanced by GROUPS where rollout_executor.load reads it"),
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
-                help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+                help="ports: record per-round timeline labels; off by default"),
     shared_flag("--rl-verify-every-round", action="store_true",
                 help="ports: hash the policy and read the engine weight checksums back at every "
                 "publication (default: on the first publication and on every --rl-cut-every-th "
                 "round, which includes every round that keeps a round cut)"),
-    # S27 C5 (G-CT): a no-sync island hashes its policy only every N-th publication
+    # a no-sync island hashes its policy only every N-th publication
     shared_flag("--rl-verify-every", type=int, default=None, metavar="N",
                 help="--rl-single-island-no-sync: hash the policy and read the engine weight "
                 "checksums back on the first publication, every N-th policy version, the last "
@@ -650,7 +650,7 @@ _RUNTIME = (
                 "full-parameter digest (about 8.4 s a round on Nano 8xH200). Default: off "
                 "(every publication is verified, or the --rl-cut-every interval for LoRA)"),
     shared_flag("--rl-profile-trainer", action="store_true",
-                help="ports, observation only (E1): per training step, print where the trainer "
+                help="ports, observation only: per training step, print where the trainer "
                 "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
     shared_flag("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                 help="ports: NVML rl_resource_sample period forwarded to the learner "
@@ -658,7 +658,7 @@ _RUNTIME = (
 )
 
 _ELASTIC = (
-    # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
+    # wire the island's ToolWaitBoard actor into the elastic pool (needs a
     # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
     shared_flag("--rl-elastic-tool-wait-board", action="store_true",
                 help="--rl-elastic: feed the island's tool-wait board into the drain check "
@@ -666,7 +666,7 @@ _ELASTIC = (
     shared_flag(
         "--rl-elastic",
         action="store_true",
-        help="ports: enable the E1 elastic rollout controller (rl-infra-spec 3.x); "
+        help="ports: enable the elastic rollout controller; "
         "needs --rl-elastic-resources/-initial-config/-cells; off by default",
     ),
     shared_flag("--rl-elastic-resources", default=None, metavar="PATH",
@@ -677,29 +677,29 @@ _ELASTIC = (
                 help="--rl-elastic: initial config id in the manifest"),
     shared_flag("--rl-elastic-cells", default=None, metavar="ID[,ID...]",
                 help="--rl-elastic: the rollout cells to manage: yeto names declared to the fork "
-                "with --rl-elastic-declare-cells (F-R1), else the fork's own cell ids; "
-                "default: every cell the fork declares (needs describe_cells, F-R1)"),
+                "with --rl-elastic-declare-cells, else the fork's own cell ids; "
+                "default: every cell the fork declares (needs describe_cells)"),
 )
 
 _RESUME = (
     cli_flag("--rl-checkpoint-store", default=None, metavar="PATH|URI",
              help="--rl-elastic, or --rl-single-island-no-sync (resume across launches, "
              "rl-resume-from-checkpoint): off-island copy of the island state dir (journal, cuts, "
-             "ledger) for a rebuild after node loss (rl-multinode-island Q4): a bucket "
+             "ledger) for a rebuild after node loss: a bucket "
              "URI (s3://, gs://, ...) mounted on the island, modal-volume://NAME[/PREFIX] on "
              "a Modal island (the only form Modal accepts), or a path already shared "
              "across machines (NFS, persistent volume). The learner syncs the state dir "
              "there after every commit point and restores from it when its state dir "
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
-    # S27 G-CO: a single-island store that holds only the HF exports
+    # a single-island store that holds only the HF exports
     cli_flag("--rl-checkpoint-store-export-only", action="store_true", default=False,
              help="with --rl-single-island-no-sync, --rl-checkpoint-store and "
              "--rl-export-hf-rounds: the store holds only the HF exports. The launcher "
              "forwards no --rl-resume-store (no resume ledger, no round cuts), so the run "
              "does not resume across launches; --rl-rollout-ahead accepts this store. "
              "Refused with the cut and resume flags"),
-    # rl-identity-tiering L9.4-L9.6
+    # Run code pack
     cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch", "release"], default="auto",
              help="git-patch: pack the local git tree (commit + dirty patch with untracked "
              "files) once at the first start, store it in --rl-checkpoint-store and ship it "
@@ -712,7 +712,7 @@ _RESUME = (
              help="with --rl-code-pack git-patch or release on an existing run: switch the run "
              "to a pack of the current local tree (or to the release --rl-image); refused unless the algorithm semantic hash is "
              "unchanged; the manifest records the old -> new pack and REASON"),
-    # rl-resume-from-checkpoint (S17 C4)
+    # rl-resume-from-checkpoint
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
                 "last round and our own stop). Default: a timed interval, at most 5%% of the "
@@ -721,7 +721,7 @@ _RESUME = (
                 "publication checks (policy "
                 "hash, engine weight read-back) run at the same interval and on the first "
                 "publication; see --rl-verify-every-round"),
-    # S27 R-2: a timed cut interval
+    # a timed cut interval
     shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
                 help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "
                 "once sqrt(2 * C * S) seconds have passed since the previous one (C = "
@@ -738,7 +738,7 @@ _RESUME = (
     shared_flag("--rl-stop-after-rounds", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
                 "with a final cut (our own stop; the next launch resumes)"),
-    # S27 closing-run evaluation (yeto.rl.engine.hf_export)
+    # closing-run evaluation (yeto.rl.engine.hf_export)
     shared_flag("--rl-export-hf-rounds", default=None, metavar="R[,R...][,final]",
                 help="with --rl-checkpoint-store (full parameter, no --rl-elastic): at "
                 "the sync boundary of round R (the island's R-th trained round; final: the "
@@ -746,7 +746,7 @@ _RESUME = (
                 "model as an HF directory to <store>/hf/island<k>/round-R (k = learner id; "
                 "complete when it holds .complete; <store>/hf/island<k>/final.json names the "
                 "final one); tape event rl_hf_export. Off by default"),
-    # rl-trainer-start-stop L4.6: sampler / trainer islands over the durable sample buffer
+    # Sampler / trainer islands over the durable sample buffer
     shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer", "convertible"),
                 default="both",
                 help="both (default): the island generates and trains as before. sampler: the "
@@ -776,11 +776,11 @@ _RESUME = (
                 "two); default off"),
     shared_flag("--rl-release-reload-latest", action="store_true", default=False,
                 help="--rl-sample-role trainer: reload the store and read LATEST before every "
-                "policy release and commit LATEST in a second commit (the behavior before "
-                "S26 E5); default: the trainer keeps the LATEST it wrote and commits once"),
+                "policy release and commit LATEST in a second commit (the earlier "
+                "behavior); default: the trainer keeps the LATEST it wrote and commits once"),
     shared_flag("--rl-release-inline", action="store_true", default=False,
                 help="--rl-sample-role trainer: write each full-weight policy release into the "
-                "store before the next training step (the behavior before S27 G-AT); default: "
+                "store before the next training step (the earlier behavior); default: "
                 "stage it on local disk (every rank writes a share) and upload it while the "
                 "next step trains"),
     shared_flag("--rl-release-delta-full-every", type=int, default=0, metavar="N",
@@ -803,7 +803,7 @@ _RESUME = (
     shared_flag("--rl-sampler-data-slot", default=None, metavar="I/N",
                 help="--rl-sample-role sampler with several samplers: draw only the prompt rows "
                 "i with i %% N == I (set by the launcher; the samplers draw disjoint prompts)"),
-    # S27 G-EA: spot rollout islands on any cloud (yeto.rl.spot_rollout)
+    # spot rollout islands on any cloud (yeto.rl.spot_rollout)
     shared_flag("--rl-spot-subscribers", type=int, default=0, metavar="N",
                 help="the actor syncer admits N receive-only subscribers (spot sampler islands "
                 "on any cloud that follow the merged weights as bf16 broadcasts; never in "
@@ -813,10 +813,10 @@ _RESUME = (
                 help="the actor syncer serves the sample relay; a --rl-sample-role trainer island "
                 "reads the spot samplers' groups from it (a local buffer filled by the relay "
                 "pump) and makes no policy releases. Off by default. With --rl-spot-subscribers "
-                "the run is a spot rollout run: an island pool by default (S29 D11, "
+                "the run is a spot rollout run: an island pool by default ("
                 "--rl-sync-island-lease-s 150; see --rl-spot-fixed-roster)"),
     cli_flag("--rl-spot-fixed-roster", action="store_true", default=False,
-             help="S29 D11: a spot rollout run (--rl-sample-relay with --rl-spot-subscribers) "
+             help="a spot rollout run (--rl-sample-relay with --rl-spot-subscribers) "
              "keeps a fixed island roster instead of the default island pool (a trainer island "
              "that restarts then cannot rejoin). Any explicit membership option "
              "(--rl-sync-island-lease-s, ...) also replaces the default"),
@@ -834,16 +834,16 @@ _RESUME = (
 )
 
 _SCHEDULING = (
-    # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
+    # Accept a changed GPU uuid pool (rebind) at startup
     shared_flag("--rl-elastic-accept-rebind", action="store_true",
                 help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
                 "cfg / journal binding (machine replaced) and rebind; off by default the "
-                "learner refuses to start on changed GPUs (Q6)"),
-    # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
+                "learner refuses to start on changed GPUs"),
+    # Declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
     shared_flag("--rl-elastic-declare-cells", action="store_true",
                 help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                 "rollout engine cells (placement map rollout_cells: started on the rollout "
-                "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)"),
+                "GPUs, then stopped on standby GPUs, then stopped unbound; needs the fork cell declaration)"),
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
              help="secret-handling-hardening: island contract v3 (backend identity bound to "
@@ -855,7 +855,7 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
-    # S27 rollout ahead (yeto.rl.engine.rollout_ahead): whole batches, weight writes
+    # rollout ahead (yeto.rl.engine.rollout_ahead): whole batches, weight writes
     # between them; the age limit must cover the lag.
     shared_flag("--rl-rollout-ahead", type=int, choices=(0, 1), default=0, metavar="N",
                 help="fixed-partition island: the engines generate the next round's batch "
@@ -864,7 +864,7 @@ _SCHEDULING = (
                 "sample lags exactly N versions (round 0: none). Needs "
                 "--rl-max-policy-age >= N and a TIS correction; replaces the backend's own "
                 "in-batch overlap (fully_async). 0 (default): serial rounds"),
-    # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
+    # the overlap buffer bounds how far generation runs ahead, so it bounds the
     # realised policy age (the backend maps K to its own buffer setting).
     shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",
                 help="--rl-max-policy-age N > 0 with generation that overlaps training "
@@ -872,7 +872,7 @@ _SCHEDULING = (
                 "so generation runs at most about K rounds ahead and the realised policy "
                 "age stays near min(K, N). Default: K = N (a deeper buffer only adds groups "
                 "that are too old when trained). Refused without overlap"),
-    # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
+    # LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                 help="island optimizer LR schedule: auto (default) = constant for decoupled, "
                 "island-pool and asynchronous full-parameter islands (they train until the "
@@ -905,18 +905,18 @@ _SCHEDULING = (
              "after the launch (default: the launched islands; not with the "
              "full-parameter preset, whose session binds the roster)"),
     cli_flag("--rl-sync-inline-resend", action="store_true", default=False,
-             help="S27 G-EL: the syncer sends a rejoin catch-up and a recovery replay from its "
-             "scheduler, waiting on the island's link for each fragment (the behavior before "
-             "G-EL; a whole-model resend then stalls every round and lease). Default: a "
-             "forwarder task per island sends them while rounds, heartbeats and leases go on "
-             "(S27 G-FH: on bf16-downlink sessions too)"),
+             help="DEPRECATED (prints a warning when set): the syncer sends a rejoin catch-up "
+             "and a recovery replay from its scheduler, waiting on the island's link for each "
+             "fragment (the old behavior; a whole-model resend then stalls every round and "
+             "lease). Default: a forwarder task per island sends them while rounds, heartbeats "
+             "and leases go on, on bf16-downlink sessions too"),
     cli_flag("--rl-sync-inline-broadcast", action="store_true", default=False,
-             help="S27 G-FD/G-FH: the syncer sends every broadcast (the initial cut, each merged "
-             "fragment, the final cut) to each island from its scheduler, in turn, waiting on "
-             "each island's link (the behavior before G-FD and G-FH; one slow downlink then "
-             "stalls every merge, PULL and the other islands' cuts). Default: a broadcast that "
-             "does not fit in an island's send queues goes to that island's forwarder task, and "
-             "each island's final cut goes out on its own task"),
+             help="DEPRECATED (prints a warning when set): the syncer sends every broadcast "
+             "(the initial cut, each merged fragment, the final cut) to each island from its "
+             "scheduler, in turn, waiting on each island's link (the old behavior; one slow "
+             "downlink then stalls every merge, PULL and the other islands' cuts). Default: a "
+             "broadcast that does not fit in an island's send queues goes to that island's "
+             "forwarder task, and each island's final cut goes out on its own task"),
     cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
              help="membership: after the last step the syncer waits this long for the "
              "islands still connected to take the final cut, then finishes without the "
@@ -971,13 +971,13 @@ _SCHEDULING = (
     shared_flag("--rl-peer-recovery-manifest-wait-s", type=float, default=None, metavar="S",
                 help="--rl-peer-recovery: a recovering island that does not find the donor's "
                 "snapshot manifest reloads the store again with backoff for up to S seconds "
-                "before it refuses the snapshot (default 120; 0: refuse at once, the behavior "
-                "before S27 G-EL)"),
+                "before it refuses the snapshot (default 120; 0: refuse at once, the earlier "
+                "behavior)"),
     shared_flag("--rl-peer-recovery-donor-write", choices=("background", "inline"), default=None,
                 help="--rl-peer-recovery: background (default): at its safe point the donor "
                 "copies its state to host memory and trains on while every rank writes its "
                 "shard; inline: the donor writes the shards before its next round (the "
-                "behavior before S27 G-EL)"),
+                "earlier behavior)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
                 "island's strict pause budget input (default: syncer default 900)"),
@@ -991,7 +991,7 @@ _SCHEDULING = (
              help="--rl-elastic, TEST ONLY (watchdog fault injection): block up to S "
              "seconds before the island's first member update_weights, failing as soon "
              "as a target engine dies; off by default"),
-    # controller D4 timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
+    # controller timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
     shared_flag("--rl-elastic-drain-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: controller T_drain (default 120)"),
     shared_flag("--rl-elastic-recovery-timeout-s", type=float, default=None, metavar="S",
@@ -1004,7 +1004,7 @@ _SCHEDULING = (
                 "(default 3)"),
     shared_flag("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                 help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
-                "X6 cross-quorum runs only)"),
+                "cross-quorum runs only)"),
     # rl-per-island-tasks: each training island trains on its own task subset.
     cli_flag("--rl-island-tasks", default=None, metavar="SPEC",
              help="per-island task lists from --data (a local JSONL whose rows carry "
@@ -1012,7 +1012,7 @@ _SCHEDULING = (
              "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
              "every training island needs a list; eval runs on the eval island only; a JSON "
              "spec file path must not contain '='"),
-    # S27 task assignment (P1): which training island reads which rows of --data.
+    # task assignment: which training island reads which rows of --data.
     cli_flag("--rl-data-split", choices=DATA_SPLITS, default=AUTO,
              help="which rows of --data each training island reads (islands that generate "
              "and train; samplers always read their own slots). auto (default): with N >= 2 "
@@ -1020,7 +1020,7 @@ _SCHEDULING = (
              "in data order; after its last row it starts the next pass over its own rows, "
              "reshuffled; a relaunched island keeps its rows. --rl-island-tasks replaces this. "
              "stride: the same as auto, and refused where auto would not split. dispense "
-             "(S27 P2, opt-in): the actor syncer hands out the rows, a block per island round; "
+             "(opt-in): the actor syncer hands out the rows, a block per island round; "
              "no row goes to two islands, a fast island claims more, the rows of an island "
              "that leaves go to the others, a relaunched or added island just claims. shared: "
              "every island reads every row in the same order (the old behaviour; controlled "
@@ -1042,7 +1042,7 @@ _SCHEDULING = (
     shared_flag("--rl-dispense-prefetch-blocks", type=int, default=2, metavar="N",
                 help="--rl-data-split dispense: blocks (rounds of rows) an island keeps ready "
                 "ahead, so it trains on through a short head outage (default 2)"),
-    # S27 P3: the dispenser's streams (--data-mix sources, task labels)
+    # the dispenser's streams (--data-mix sources, task labels)
     cli_flag("--rl-island-task-labels", default=None, metavar="SPEC",
              help="--rl-data-split dispense: island M takes only the rows whose task_label "
              "(top level or metadata) is one of its labels: 'l0=web;l1=pwn,crypto' ('-' "
@@ -1058,7 +1058,7 @@ _SCHEDULING = (
     shared_flag("--rl-dispense-labels", default=None, metavar="L,L,...",
                 help="this island takes only the rows with these task labels (set by the "
                 "launcher from --rl-island-task-labels; not a launch option)"),
-    # S27 P4: a sampler island claims its rows from a dispenser
+    # a sampler island claims its rows from a dispenser
     shared_flag("--rl-dispense-addr", default=None, metavar="HOST:PORT",
                 help="the dispenser this sampler island claims its rows from (set by the "
                 "launcher for a synced group's samplers: the actor syncer; a sampler launch "
@@ -1127,7 +1127,7 @@ _RUN_CONTROL = (
         action="store_true",
         help=(
             "ports only: launch exactly one island with no syncer and no outer "
-            "sync (the G1 smoke entry for --rl-allow-unverified-mechanism)"
+            "sync (the smoke-test entry for --rl-allow-unverified-mechanism)"
         ),
     ),
     cli_flag(
@@ -1138,7 +1138,7 @@ _RUN_CONTROL = (
             "ports single-island smoke only: shell command run on the island's "
             "rank 0 after the learner exits (whatever its exit code), with "
             "stdout+stderr in ~/yeto-output/post-cmd.txt (mirrored into the Modal "
-            "tape Volume); the learner's exit code is preserved (S14 A17: run the "
+            "tape Volume); the learner's exit code is preserved (e.g. run the "
             "fork's Ray tests in the same container)"
         ),
     ),
@@ -1180,10 +1180,10 @@ _ROLLOUT_ENGINE = (
     ),
     shared_flag("--rollout-max-response-len", type=int, default=32768,
                 island={"default": None, "required": True}),
-    # S26 E6: quantized rollout tiers (yeto.rl.quant.tiers)
+    # quantized rollout tiers (yeto.rl.quant.tiers)
     shared_flag("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0,
                 help="sampler precision: 0 BF16 (default); 1 the engine quantizes FFN linears "
-                "(dense) or routed experts (MoE) to FP8 itself, FP8 KV cache; 2 the trainer side "
+                "(dense) or routed experts (MoE) to FP8 (engine or trainer, see --rl-rollout-quant-fp8-source); 2 the trainer side "
                 "converts each release to FP8 W8A8 on the same linears and the sampler island "
                 "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
                 "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
@@ -1197,7 +1197,7 @@ _ROLLOUT_ENGINE = (
 
 _AGENT = (
     shared_flag("--apply-chat-template-kwargs", type=json.loads, default=None),
-    # S27 G-FS (VERL-PARITY #33): the backend-neutral Harbor switch. It says only
+    # the backend-neutral Harbor switch. It says only
     # that the rollout runs Harbor trials, so the island needs the Harbor image
     # layer, the sandbox-provider environment and a tunnelled callback port. How a
     # backend picks the agent stays with that backend: one selects it per data row
@@ -1210,7 +1210,7 @@ _AGENT = (
                      "agent runs is chosen by the backend (per data row, or by "
                      "--custom-agent-function-path where that flag applies)"),
     shared_flag("--custom-generate-function-path", default=None),
-    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
+    cli_flag(  # refused (the Codex/SecRLEnv agents were removed)
         "--codex-reasoning-effort",
         choices=["xhigh"],
         default=None,
@@ -1223,7 +1223,7 @@ _AGENT = (
     shared_flag("--session-server-ip", default=None),
     shared_flag("--session-server-port", type=int, nargs="+", default=None),
     shared_flag("--tito-model", default=None),
-    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
+    cli_flag(  # refused (the Codex/SecRLEnv agents were removed)
         "--codex-exclude-reasoning-from-loss",
         action="store_true",
         help=(
@@ -1298,7 +1298,7 @@ _SYNC = (
     cli_flag(
         "--rl-sync-overlap",
         action="store_true",
-        help="full-parameter only (E2 option): train the next round while the "
+        help="full-parameter only: train the next round while the "
         "sweep syncs, then rebase the trainer onto the new global weights "
         "(theta <- G_k + local progress). The local weights lag the global policy "
         "by one outer step; rollouts stay on-policy, so --rl-max-policy-age stays 0. "
@@ -1407,13 +1407,13 @@ _SYNC = (
         help="full-parameter only: the syncer writes each per-round checkpoint off "
         "its scheduler and broadcasts that round only once the checkpoint is durable",
     ),
-    # S27 P1: the outer-merge settings each RL preset used to fix. Unset keeps
+    # the outer-merge settings each RL preset used to fix. Unset keeps
     # the preset's value, so the syncer command and profile stay unchanged.
     cli_flag(
         "--rl-sync-init-mode",
         choices=("auto", "local", "upload"),
         default="auto",
-        help="full-parameter only (S27): how islands get the version-0 weights. "
+        help="full-parameter only: how islands get the version-0 weights. "
         "local = every island keeps the base checkpoint it loaded and reports "
         "per-fragment digests; the syncer checks they agree and sends no initial "
         "broadcast (learner 0 still uploads INIT for the syncer's f32 masters). "
@@ -1424,7 +1424,7 @@ _SYNC = (
         "--rl-sync-full-parameter-rounds",
         choices=FULL_PARAMETER_ROUNDS,
         default=sync_mode_default("sweep"),
-        help="full-parameter only (S27 P2): sweep = strict policy sweeps (every "
+        help="full-parameter only: sweep = strict policy sweeps (every "
         "island per fragment round, plain average; the control, default in "
         "--rl-sync-mode strict); async = (default in --rl-sync-mode async) "
         "asynchronous fragment rounds: H = --local-rl-rounds-per-sync, at most "

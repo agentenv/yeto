@@ -238,8 +238,8 @@ def _reject_sao_not_at_pin(s: AlgorithmSpec) -> str | None:
 register_rejection("sao_dis_fields", _reject_sao_dis)
 register_rejection("sao_not_at_pin", _reject_sao_not_at_pin)
 
-# Fork-only SAO mechanisms (e07e51c07): undeclared by the Miles adapter until GPU
-# G1 (task 8.4), so a run needs --rl-allow-unverified-mechanism for each.
+# Fork-only SAO mechanisms (e07e51c07): undeclared by the Miles adapter until
+# a GPU run verifies them, so a run needs --rl-allow-unverified-mechanism for each.
 register_mechanism("features", "sao_dis",
                    lambda s: getattr(s.loss, "policy_objective", None) == SAO_DIS)
 register_mechanism("features", "value_hl_gauss",

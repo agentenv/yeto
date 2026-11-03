@@ -1,5 +1,5 @@
 {
-  "_note": "示例价目表，数值为示意，非账单；请用 --prices 指向自己的价目表。host_prices 为每核·时与每 GiB·时单价（Modal 按其公开单价 $0.0000131/核·秒、$0.00000222/GiB·秒 折算）",
+  "_note": "Example price table: illustrative values, not billing data; point --prices at your own table. host_prices are per core-hour and per GiB-hour rates (Modal converted from its public rates of $0.0000131/core-second and $0.00000222/GiB-second)",
   "prices": {
     "modal:H100": 3.95,
     "modal:H200": 4.54,

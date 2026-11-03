@@ -1,4 +1,4 @@
-"""S17 WP6: "reasoning tokens do not count toward the loss" switch (CPU only).
+"""The "reasoning tokens do not count toward the loss" switch (CPU only).
 
 Covers: default is a strict no-op (samples, metadata and contract hashes
 bit-identical); masking rules; idempotence (only 1 -> 0, never 0 -> 1);
@@ -193,8 +193,7 @@ def test_hook_installed_for_both_placements(colocated):
 
 
 def _miles_root() -> pathlib.Path | None:
-    for candidate in (os.environ.get("YETO_MILES_CHECKOUT"), os.path.expanduser("~/work/s16-raw-lora-disagg-miles"),
-                      os.path.expanduser("~/work/miles-next")):
+    for candidate in (os.environ.get("YETO_MILES_CHECKOUT"), os.environ.get("YETO_MILES_SRC")):
         if candidate and (pathlib.Path(candidate) / "miles/rollout/sglang_rollout.py").is_file():
             return pathlib.Path(candidate)
     return None

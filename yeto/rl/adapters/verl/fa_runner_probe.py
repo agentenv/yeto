@@ -1,7 +1,7 @@
 """Ray probe of the fully_async task runner inside the verl image (Modal CPU
 dry run, no GPU).  Prints one JSON line.
 
-s19-verl64b-async7-20261010a: the trainer verl built was its own
+Background: in one run the trainer verl built was its own
 ``FullyAsyncTrainer``, not ``YetoFullyAsyncTrainer``.  This starts a local Ray
 (CPU), creates the task runner as an actor the way ``verl_main`` does, and
 reports which ``_create_trainer`` the actor resolves and whether verl's

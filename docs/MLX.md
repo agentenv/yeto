@@ -82,26 +82,14 @@ Notes:
 
 ## Validation status
 
-- ✅ Unit tests (`tests/test_mlx_backend.py`): peft math/shape parity of the
-  LoRA layer, canonical naming, fragment pack/write round-trip.
-- ✅ Name parity vs torch/peft on LFM2.5-230M (`scripts/check_name_parity.py`).
-- ✅ Local smoke on an M1 Ultra: real syncer + MLX learner, LFM2.5-230M,
-  12 outer steps, adapters saved and re-loaded into torch/peft
-  (`PeftModel.from_pretrained` on the MLX-written directory), generation
-  reflects the fine-tune.
-- ✅ Heterogeneous local smoke: torch (CPU) learner 0 + MLX learner 1 on one
-  syncer, quorum 2 — all 8 outer merges had both learners as responders with
-  token-weighted RDA (the MLX side contributed ~28× the steps), both applied
-  broadcasts and exited cleanly.
-- ✅ Mac + AWS G-instance cross run over the WAN (2026-07-04): syncer VM +
-  g5 spot learner in us-west-2 (`--external-learners 1`), this Mac joined as
-  MLX learner 1 on LFM2.5-1.2B. All 16 outer merges had BOTH learners as
-  responders (event tape), with token-weighted RDA reflecting the ~160×
-  token-rate gap between the islands. Shakedown fixes that run produced:
-  the syncer is now built ON the syncer VM for non-x86-Linux submitters
-  (`SYNCER_REMOTE_BUILD` — a Mac-built arm64 binary is an Exec format error
-  on the VM), and single-file `--data` mounts keep their extension
-  (`datasource._mount_target`) so learners can detect the format.
-  Operational note: this AWS account had zero on-demand G quota, so the run
-  used spot in us-west-2 (the only region with spot G quota) after
-  `--retry-until-up` rode out InsufficientInstanceCapacity.
+- Unit tests (`tests/test_mlx_backend.py`) cover peft math/shape parity of the
+  LoRA layer, canonical naming and the fragment pack/write round-trip;
+  `scripts/check_name_parity.py` checks name parity against torch/peft.
+- Verified locally on Apple silicon: an MLX learner against a real syncer, with
+  the saved adapter reloading in torch/peft (`PeftModel.from_pretrained`), and a
+  mixed torch (CPU) + MLX fleet at quorum 2 where every merge has both learners
+  as responders.
+- Verified over the WAN: a Mac joining a cloud fleet as an external MLX learner
+  (`--external-learners 1`) next to a cloud GPU learner, both responders in every
+  merge. A submitter that is not x86 Linux builds the syncer on the syncer VM
+  (`SYNCER_REMOTE_BUILD`).

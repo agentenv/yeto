@@ -1,5 +1,5 @@
 # yeto-ppu-train: PPU trainer (Megatron + Miles glm5_next, or verl FSDP2) and
-# SGLang sampler image, linux/amd64 (S25 N0.2). WRITTEN, NEVER BUILT.
+# SGLang sampler image, linux/amd64. WRITTEN, NEVER BUILT.
 #
 # Versions: versions.lock.json in this directory is the single source; the
 # build args below must equal it (tests/test_engine_images.py checks this).
@@ -12,11 +12,11 @@
 # release layer (scripts/build_yeto_release_image.sh, docker/yeto-release) puts
 # one clean commit at /opt/yeto/src on top of this image.
 #
-# Base: the Alibaba PPU image the user runs as `ppu_sgl` on ppu1-4
+# Base: the Alibaba PPU image the PPU nodes run as `ppu_sgl`
 # (inference-xpu-pytorch-opt:v0.5.17: sglang 0.5.17, torch 2.10.0, triton 3.6.0,
-# fla 1.0.0, transformers 5.12.1, ray 2.31.0; SESSION25/N0.1-ppu-survey.md).
-# Its registry path and digest are not known yet (read them on ppu1 with
-# `docker inspect`), so BASE_IMAGE has no default and must be a digest.
+# fla 1.0.0, transformers 5.12.1, ray 2.31.0, from a survey of the nodes).
+# Its registry path and digest are not known yet (read them on a PPU node
+# with `docker inspect`), so BASE_IMAGE has no default and must be a digest.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
@@ -63,13 +63,13 @@ RUN pip install --no-cache-dir --no-deps \
       megatron-energon multi-storage-client
 
 # tilelang: the DSA SparseMLA kernels of Miles glm5_next need it. Whether it
-# runs on PPU is the first PPU probe (N7.5); the lock marks it optional.
+# runs on PPU is the first PPU probe; the lock marks it optional.
 ARG TILELANG_VERSION=0.1.14
 RUN pip install --no-cache-dir --no-deps "tilelang==${TILELANG_VERSION}" apache-tvm-ffi==0.1.11 \
- || echo "tilelang ${TILELANG_VERSION} did not install; DSA falls back to torch (N7.5)" >&2
+ || echo "tilelang ${TILELANG_VERSION} did not install; DSA falls back to torch" >&2
 
-# Miles at the GLM 5.3 Flash commit (radixark/miles #2786). T-N77 builds the
-# yeto fork branch on this commit; switch MILES_* to it when that is pushed.
+# Miles at the GLM 5.3 Flash commit (radixark/miles #2786). A yeto fork branch
+# will build on this commit; switch MILES_* to it when that is pushed.
 ARG MILES_REPOSITORY=https://github.com/radixark/miles
 ARG MILES_COMMIT=cc76e23915b2132ecfff65b97331fd83b02637e6
 RUN git init -q /opt/miles && cd /opt/miles \

@@ -1,4 +1,4 @@
-"""Per-profile pause audit for island reconfiguration (rl-infra-spec task 1.5, design D10).
+"""Per-profile pause audit for island reconfiguration.
 
 Pure. It answers: at this moment, may the island pause its local loop for up to
 ``T`` seconds while its outer-sync connection stays alive, and what is the

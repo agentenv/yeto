@@ -51,7 +51,7 @@ def test_trainer_not_rectangular_rejected():
 
 
 def test_pp_group_spanning_nodes_legal():
-    # Q3 ruling 2026-10-04: PP may cross nodes. tp=2,pp=2 on a 2x8 island with a
+    # PP may cross nodes. tp=2,pp=2 on a 2x8 island with a
     # 16-GPU trainer: model_parallel (tp*pp*cp) = 4 is irrelevant to node rules;
     # node_parallel = tp*cp = 2 fits a node.
     r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, gpus_per_node=8,
@@ -66,7 +66,7 @@ def test_pp_group_spanning_nodes_legal():
 
 
 def test_ep_group_spanning_nodes_legal():
-    # Q1 ruling 2026-10-04: EP may cross nodes. tp=2, ep=8 over 16 trainer GPUs on
+    # EP may cross nodes. tp=2, ep=8 over 16 trainer GPUs on
     # 2 nodes: the EP group (8 TP groups) spans both nodes and is legal.
     r = _req(trainer_gpus=16, rollout_gpus=8, gpus_per_engine=8, node_parallel=2, expert_parallel=8)
     assert r.trainer_shape() == (2, 8)
@@ -228,7 +228,7 @@ def test_startup_bundles_node_resolver_and_single_node_untouched():
         plain.node_of("g0")
 
 
-# ---- D3 head pin (ruling 2026-10-03): node 0 = Ray head = trainer, fail closed
+# ---- head pin: node 0 = Ray head = trainer, fail closed
 
 def test_startup_bundles_head_pin_fails_closed():
     views = _views(["A", "A", "B", "B"])
@@ -322,7 +322,7 @@ def test_pin_placement_group_to_head_patches_fork_and_checks(monkeypatch):
         mod._create_placement_group(2)
 
 
-# ---- Q2 (2026-10-04 ruling): mixed rollout/trainer nodes via an explicit bundle map
+# ---- mixed rollout/trainer nodes via an explicit bundle map
 
 def test_mixed_2x2_bundle_map_legal_and_shape():
     bm = {"trainer": (0, 2), "rollout": (1,), "standby": (3,)}

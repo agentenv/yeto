@@ -54,7 +54,7 @@ class _RelaunchAttempt:
 # time spent recovering in the window.
 FIXED_ROSTER_MAX_RELAUNCHES = 2
 RECOVERY_STABLE_S = 300.0
-# S26 E3b: how long one rejected-link relaunch may take to get a new container.
+# How long one rejected-link relaunch may take to get a new container.
 WAN_RECOVERY_S = 900.0
 # How long a failed-looking island is given for its rl_learner_finalized record
 # to arrive over the log stream before recovery starts.
@@ -180,7 +180,7 @@ class FleetController:
         self.left_pool_probe = left_pool_probe
         self.elastic = elastic
         self.no_island_relaunch = no_island_relaunch
-        # S26 E3b: name -> number of rejected link probes the island logged
+        # name -> number of rejected link probes the island logged
         # (rl_wan_probe accepted=false, exit 75). Such an island never joined
         # the syncer session, so it is relaunched in a fresh container up to
         # wan_probe_relaunches times, also under --no-island-relaunch.
@@ -192,7 +192,7 @@ class FleetController:
         # existing relaunch runs unchanged. On: its launch() result (a new job
         # id) replaces the same-place relaunch.
         self.replacement_planner = replacement_planner
-        # S27 E-3: environment added to an island task before its relaunch (peer
+        # Environment added to an island task before its relaunch (peer
         # recovery: the relaunched trainer restores from a peer, not from scratch).
         self.island_relaunch_envs = dict(island_relaunch_envs or {})
         # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for

@@ -1,4 +1,4 @@
-"""Backend-neutral agentic RL layer (S25 N10.2).
+"""Backend-neutral agentic RL layer.
 
 The harness (Harbor) owns tasks, sandboxes, the agent and the verifier.  This
 package owns only what yeto adds around it: neutral types, admission,

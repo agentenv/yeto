@@ -1,4 +1,4 @@
-"""Loopback-only, GET-only dashboard server (design D2).
+"""Loopback-only, GET-only dashboard server.
 
 ``yeto dashboard serve`` binds 127.0.0.1 (any non-loopback host is refused:
 use an SSH tunnel), follows the tapes in a background thread and answers:

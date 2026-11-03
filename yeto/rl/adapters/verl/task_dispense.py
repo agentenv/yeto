@@ -1,5 +1,5 @@
 """verl: a training island takes its prompt rows from the task dispenser
-(S27 P2 on verl, VERL-PARITY #31).
+(VERL-PARITY #31).
 
 With ``--rl-data-split dispense`` the launcher gives every verl training island
 ``--rl-data-dispense`` instead of a row slot, and the actor syncer runs the
@@ -38,8 +38,8 @@ verl-specific:
 Not covered (the island refuses ``--rl-data-dispense`` there): the Megatron
 island (one island, no syncer), the fully_async path and the buffer trainer
 (their rows come from verl's rollouter or the sample buffer), ``--rl-data-slot``.
-A verl *sampler* island claims through ``DispensedPrompts`` (S27 P4,
-``sampler_entry.dispense_spec``), not through this module.
+A verl *sampler* island claims through ``DispensedPrompts``
+(``sampler_entry.dispense_spec``), not through this module.
 
 Runs inside verl's task-runner Ray actor (``verl_main.YetoTaskRunner``), next
 to the trainer object; imports verl and numpy lazily (CPU-testable with a fake
@@ -94,7 +94,7 @@ def island_dispense(args: Any, *, engine: str = "fsdp2", buffer_trainer: bool = 
         problems.append("--rl-data-position-store (the dispenser keeps the data position)")
     if getattr(args, "rl_single_island_no_sync", False) or not getattr(args, "syncer", None):
         problems.append("no syncer (--rl-single-island-no-sync): the dispenser runs in the actor syncer")
-    if engine not in ("fsdp2", "megatron"):  # S27 G-FG: a synced Megatron island draws through the same loader
+    if engine not in ("fsdp2", "megatron"):  # a synced Megatron island draws through the same loader
         problems.append(f"the {engine} island")
     if fully_async:
         problems.append("the fully_async path (--rl-max-policy-age > 0: verl's rollouter draws the rows)")
@@ -113,7 +113,7 @@ def _messages(value: Any) -> list[dict[str, str]]:
 def rows_file_record(row: Mapping[str, Any]) -> dict[str, Any]:
     """One canonical line of :data:`ROWS_FILE` for a ``--data`` row (``messages``,
     ``label``; the task label and the ``--data-mix`` source when the row has them,
-    so the streams of S27 P3 read the same file)."""
+    so the island's streams read the same file)."""
     record: dict[str, Any] = {"messages": _messages(row["messages"]), "label": str(row["label"])}
     raw_meta = row.get("metadata")
     metadata = raw_meta if isinstance(raw_meta, Mapping) else {}
@@ -159,7 +159,7 @@ def dispense_section(args: Any, rows_file: str | os.PathLike[str], *, block: int
         "mix": mix.split(",") if mix else None, "by_label": by_label,
         "labels": labels.split(",") if labels else None,
     }
-    if mix or by_label:  # S27 P3: the island's streams, checked here before any GPU work
+    if mix or by_label:  # the island's streams, checked here before any GPU work
         try:
             table = StreamTable.from_prompts(rows_file, mix=section["mix"], by_label=by_label)
             accept = table.accept(section["labels"]) if section["labels"] else None

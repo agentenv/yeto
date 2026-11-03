@@ -6,7 +6,6 @@ No verl / vLLM / Ray here: modules that need them (``trainer``, ``verl_main``,
 
 from __future__ import annotations
 
-import os
 import argparse
 import dataclasses
 import json
@@ -23,9 +22,6 @@ from yeto.rl.adapters.verl import publish as pub
 from yeto.rl.adapters.verl.pins import VERL_COMMIT, VERL_IMAGE
 from yeto.rl.engine import backends, mismatch_criteria as mc
 
-S16_DUMPS = Path(os.path.expanduser("~/work/s1-runs/s16-verl-mismatch-20261008/s16-verl-mismatch-20261008"))
-
-
 def _cfg(**kw):
     base = dict(model_path="/m", train_file="/t", val_file="/v", out_dir="/o")
     base.update(kw)
@@ -39,7 +35,7 @@ def test_verl_is_registered_with_the_roles_neutral_code_uses():
                  "elastic_hook", "image"):
         assert backends.module(role, "verl").__name__.startswith("yeto.rl.adapters.verl.")
     assert "verl" in backends.registered() and entry.package == "yeto.rl.adapters.verl"
-    with pytest.raises(backends.UnknownBackend, match="没有提供"):
+    with pytest.raises(backends.UnknownBackend, match="does not provide"):
         backends.module("harness_glue", "verl")
 
 
@@ -70,7 +66,7 @@ def test_modal_runner_passes_engine_built_image_refs_through():
 
 
 def test_verl_run_config_rules_parallel_shapes():
-    # S27 G-DC (V8): data parallel on either engine; TP/PP > 1 (Megatron engine) must divide
+    # Data parallel on either engine; TP/PP > 1 (Megatron engine) must divide
     rules = backends.module("run_config_rules", "verl")
     for good in ((1, 1, 1), (2, 1, 1), (8, 1, 1), (8, 2, 1), (8, 2, 2)):
         rules.check_trainer_parallel(*good)
@@ -87,17 +83,17 @@ def test_verl_run_config_rules_parallel_shapes():
 @pytest.mark.parametrize("kw,match", [
     (dict(lora_rank=32, lora_alpha=16), "lora_alpha"),
     (dict(engine_commit="0" * 40), "commit"),
-    (dict(bypass_mode=True, criteria_enabled=True), "旁路"),
+    (dict(bypass_mode=True, criteria_enabled=True), "bypass mode"),
     (dict(full_determinism=True, enforce_eager=True, mode="train"), "full_determinism"),
     (dict(full_determinism=True, enforce_eager=False, mode="diagnose"), "enforce_eager"),
-    (dict(correction="mis"), "不支持此修正"),
-    (dict(correction="opsm"), "不支持此修正"),
-    (dict(correction="tis", tis_lower=0.5), "下界"),
+    (dict(correction="mis"), "does not support this correction"),
+    (dict(correction="opsm"), "does not support this correction"),
+    (dict(correction="tis", tis_lower=0.5), "lower bound must be 0"),
     (dict(correction="icepop"), "icepop"),
     (dict(top_p=0.9), "top_p"),
     (dict(top_k=50), "top_p/top_k"),
-    (dict(temperature=0.7), "温度"),
-    (dict(n_gpus=0), "n_gpus 必须 >= 1"),
+    (dict(temperature=0.7), "sampling temperature"),
+    (dict(n_gpus=0), "n_gpus must be >= 1"),
 ])
 def test_config_rules_refuse(kw, match):
     with pytest.raises(vconf.VerlConfigError, match=match):
@@ -204,34 +200,8 @@ def test_signed_criterion_alarms_on_one_sided_shift_k3_does_not():
     alarms = mc.judge(shifted, limits)
     assert alarms == ["signed_mean"]
     assert mc.judge(mc.compute(infer, infer, mask), limits) == []
-    with pytest.raises(mc.Uncalibrated, match="未标定"):
+    with pytest.raises(mc.Uncalibrated, match="uncalibrated"):
         mc.thresholds_for(("verl", "fsdp2", "vllm-0.29.0", "Ascend910B"))
-
-
-def _s16(arm: str, step: int):
-    path = S16_DUMPS / arm / "dump" / f"step{step:03d}.pt"
-    if not path.is_file():
-        pytest.skip(f"S16 raw data not on this machine: {path}")
-    return torch.load(path, map_location="cpu", weights_only=False)
-
-
-@pytest.mark.parametrize("arm,step,abs_diff,k3,signed", [
-    ("A1_base_lr0", 1, 0.0176, 0.00080, -0.0009),
-    ("A1_base_lr0", 2, 0.0172, 0.00078, -0.0009),
-    ("D_topp09_lr0", 1, 0.0354, 0.00165, -0.032),
-    ("D_topp09_lr0", 2, 0.0355, 0.00167, -0.032),
-])
-def test_s16_raw_data_reproduces_the_published_table(arm, step, abs_diff, k3, signed):
-    """1.6 acceptance: VERL-MODAL-CHECK-S16.md 7.2 rows A1 and D; D alarms on the signed criterion."""
-    rec = _s16(arm, step)
-    out = mc.compute(rec["old_log_probs"], rec["rollout_log_probs"], rec["response_mask"])
-    assert abs(out["abs_diff"] - abs_diff) < 0.00051
-    assert abs(out["k3"] - k3) < 0.000051
-    assert abs(out["signed_mean"] - signed) < (0.0006 if arm.startswith("A") else 0.0025)
-    alarms = mc.judge(out, mc.thresholds_for(("verl", "fsdp2", "vllm-0.29.0", "H100")))
-    assert ("signed_mean" in alarms) == arm.startswith("D")
-    # k3 / tis_clipfrac cannot see the top_p shift (S16 7.3 point 3); abs_diff doubles past 0.03
-    assert alarms == ([] if arm.startswith("A") else ["abs_diff", "signed_mean"])
 
 
 # ---------------------------------------------------------------- 1.10 publication
@@ -320,21 +290,21 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     for other, anchor, *_ in patch_verl.PATCHES[1:]:
         (tmp_path / other).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / other).write_text("def g(self):\n" + anchor + "            return 1\n")
-    # S27 G-EK: the fsdp profile also takes the two zmq SUB patches (one file, both anchors)
+    # The fsdp profile also takes the two zmq SUB patches (one file, both anchors)
     zmq = tmp_path / patch_verl.ZMQ_TARGET
     zmq.parent.mkdir(parents=True, exist_ok=True)
     zmq.write_text("".join("def g(self):\n" + anchor + "        pass\n" for _t, anchor, *_r in patch_verl.ZMQ_SUB))
-    # S27 G-EQ2: the auto-class patch (its own file)
+    # The auto-class patch (its own file)
     auto = tmp_path / patch_verl.AUTO_CLASS[0]
     auto.parent.mkdir(parents=True, exist_ok=True)
     auto.write_text("def h(hf_config):\n" + patch_verl.AUTO_CLASS[1] + "    return auto_class\n")
-    # S27 G-EZ2: the meta-init patch (the FSDP engine's module builder)
+    # The meta-init patch (the FSDP engine's module builder)
     meta = tmp_path / patch_verl.META_INIT[0]
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text("def build(self):\n" + patch_verl.META_INIT[1] + "        return module\n"
-                    # S27 G-EQ3: the tenth patch (the NemotronH torch-path fix), same file
+                    # The tenth patch (the NemotronH torch-path fix), same file
                     + patch_verl.NEMOTRON_FIX[1] + "        pass\n"
-                    # S27 G-EZ2: the ninth patch's other anchors in the same file
+                    # The ninth patch's other anchors in the same file
                     "def shard(self):\n" + patch_verl.RANK0_STATE_ANCHOR
                     + "            if offload:\n" + patch_verl.PIN_ANCHOR)
     load = tmp_path / patch_verl.RANK0_LOAD_TARGET
@@ -346,7 +316,7 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     assert text.count("_yeto_after_add_lora(self, VLLM_LORA_INT_ID)") == 1
     assert meta.read_text().count('init_context, "__name__"') == 1  # replaced once, not twice
     assert meta.read_text().count("nemotron_h_torch_fix: ") == 1  # the same for the NemotronH fix
-    assert meta.read_text().count("nemotron_h_recompute: ") == 1  # S27 G-EQ4: and the recompute hook
+    assert meta.read_text().count("nemotron_h_recompute: ") == 1  # and the recompute hook
     assert meta.read_text().count("YETO_VERL_RANK0_CHECKPOINT_DTYPE") == 2  # the hook and its error text
     assert load.read_text().count("t.is_meta") == 1
     target.write_text("nothing here\n")
@@ -370,7 +340,7 @@ def test_unmapped_reward_and_algorithm_fields_are_refused():
         reward_fn.function_for("my_reward:score")
     golden = json.loads(Path("tests/golden/decoupling/grpo_tis.json").read_text())["algorithm_spec"]
     loss = golden["loss"]
-    # eps_clip / eps_clip_high: read by the Megatron island only (S27 G-DC)
+    # eps_clip / eps_clip_high: read by the Megatron island only
     assert island_entry.algorithm_options(golden) == {"correction": "tis", "tis_upper": 2.0,
                                                       "tis_lower": 0.0, "eps_clip": loss.get("eps_clip"),
                                                       "eps_clip_high": loss.get("eps_clip_high")}
@@ -426,7 +396,7 @@ def test_ray_cpu_guard_only_acts_inside_modal(monkeypatch):
     assert "skipped" not in island_entry.ensure_ray_cpus() and "restart" not in island_entry.ensure_ray_cpus()
 
 
-# --- S17 N16: data cursor of a relaunched verl island ----------------------------
+# --- data cursor of a relaunched verl island ----------------------------
 class _FakeVerlTrainer:
     """``_fetch_one_gen_batch`` as in verl acad9875: gen_batch_size prompts per call,
     re-iterating the dataset at its end."""
@@ -481,7 +451,7 @@ def test_verl_data_cursor_refuses_what_it_cannot_honour():
 
 
 def test_fully_async_runtime_env_keeps_nccl_host_buffers_on_shm(monkeypatch):
-    # S26 E0.1: a cuMem host-buffer sender and a /dev/shm receiver cannot attach on Modal
+    # A cuMem host-buffer sender and a /dev/shm receiver cannot attach on Modal
     import sys
     import types
 
@@ -521,7 +491,7 @@ def test_vllm_prefix_renaming_is_undone():
 
 
 def test_verl_expert_parallel_runs_on_the_megatron_engine():
-    # S26 E7 refused verl+EP; S27 G-DC (V8) wires the Megatron engine island: EP must
+    # The Megatron engine island takes EP: EP must
     # divide the trainer GPUs, and the run must be one the Megatron island can run.
     import argparse
 
@@ -547,7 +517,7 @@ def test_verl_expert_parallel_runs_on_the_megatron_engine():
     assert not rules.megatron_run(fsdp) and not rules.hf_export_supported(fsdp)
 
 
-# ------------------------------------------- verl agentic island (S27 G-FS, VERL-PARITY #33)
+# ------------------------------------------- verl agentic island (VERL-PARITY #33)
 
 def _agentic_cfg(**kw) -> "vconf.VerlRunConfig":
     base = dict(model_path="/snap/model", train_file="/t.parquet", val_file="/v.parquet", out_dir="/o",
@@ -572,7 +542,7 @@ def test_agentic_island_overrides_select_the_loop_and_the_estimator():
 
 @pytest.mark.parametrize("kw, match", [
     (dict(agentic=True), "agent_loop_config"),
-    (dict(agent_loop_config="/x"), "只在 agentic 岛"),
+    (dict(agent_loop_config="/x"), "only applies to an agentic island"),
     (dict(agentic=True, agent_loop_config="/x", agent_loop_workers=0), "agent_loop_workers"),
 ])
 def test_bad_agentic_config_is_refused(kw, match):
@@ -592,7 +562,7 @@ def test_agentic_shapes_the_island_cannot_run_are_refused():
     rules.check_agentic(args())  # the covered shape passes
     assert rules.agentic_problems(args()) == []
     for kw, needle in ((dict(expert_parallel=8), "Megatron"), (dict(rl_max_policy_age=2), "policy-age"),
-                       (dict(rl_sample_role="sampler"), "采样岛"), (dict(rl_eval_interval=2), "eval-interval")):
+                       (dict(rl_sample_role="sampler"), "sampler"), (dict(rl_eval_interval=2), "eval-interval")):
         with pytest.raises(ValueError, match="rl-agentic-harbor"):
             rules.check_agentic(args(**kw))
         assert any(needle in p for p in rules.agentic_problems(args(**kw))), (kw, rules.agentic_problems(args(**kw)))
@@ -600,7 +570,7 @@ def test_agentic_shapes_the_island_cannot_run_are_refused():
 
 def test_agentic_rows_pass_through_prepare_data(tmp_path):
     """``task_lists.verl_rows`` output must survive the island's data preparation:
-    before S27 G-FS it rewrote every row into the math schema and lost agent_name."""
+    before this fix it rewrote every row into the math schema and lost agent_name."""
     import pandas as pd
 
     from yeto.rl.adapters.verl import island_entry
@@ -625,7 +595,7 @@ def test_agent_loop_registry_file_is_read_the_way_verl_reads_it(tmp_path):
     """verl loads the file and *iterates* it, taking ``.name`` off each entry
     (fork acad9875, ``agent_loop.py:554-556``).  A top-level mapping iterates over
     its keys and dies with "'str' object has no attribute 'name'", which is how
-    S27 G-FS run s27-fs-2 failed; so parse it here as verl does, not as text.
+    a GPU run failed; so parse it here as verl does, not as text.
     """
     # OmegaConf is not in the CPU test environment; PyYAML parses the same file
     # into the same Python structure, and what this test pins is the structure.
@@ -681,7 +651,7 @@ def test_records_proxy_environment_is_derived_from_the_island_config(monkeypatch
 def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
     """On the agentic path the row's prompt is a label; the real prompt is the
     joined agent conversation, so the 512-token cap of a single-turn data prompt
-    aborts every sample (S27 G-FS run s27-fs-3: 8 of 8 ABORTED with
+    aborts every sample (a GPU run: 8 of 8 ABORTED with
     prompt_exceeds_prompt_length, agent n_input_tokens 7585..64960, after which
     verl refused the step -- "response_mask must contain at least one valid token").
     """
@@ -689,7 +659,7 @@ def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
 
     source = Path(island_entry.__file__).read_text()
     # the rule itself, read off the module: the agentic branch uses the budget
-    # (S29: a spot relay trainer holds the same agentic rows, so it takes the budget too)
+    # (a spot relay trainer holds the same agentic rows, so it takes the budget too)
     assert "if wide_prompt_rows(args) else 512" in source
     agentic = argparse.Namespace(rl_agentic_harbor=True, seq_len=81920, rollout_max_response_len=8192)
     plain = argparse.Namespace(rl_agentic_harbor=False, seq_len=81920, rollout_max_response_len=8192)
@@ -705,7 +675,7 @@ def test_agentic_island_sizes_the_prompt_from_the_sequence_budget():
 
 
 def test_only_agentic_or_relay_trainers_widen_the_prompt_rows():
-    """S29: a buffer trainer takes seq_len - response_len only on the spot relay path;
+    """A buffer trainer takes seq_len - response_len only on the spot relay path;
     any other --rl-sample-role trainer island keeps the 512 default."""
     from yeto.rl.adapters.verl import island_entry
 

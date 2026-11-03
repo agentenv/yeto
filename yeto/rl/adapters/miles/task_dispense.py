@@ -1,4 +1,4 @@
-"""Miles: an island takes its prompt rows from the task dispenser (S27 P2).
+"""Miles: an island takes its prompt rows from the task dispenser.
 
 With ``--rl-data-split dispense`` the island's ``prompts.jsonl`` holds every
 row of ``--data`` (each with ``metadata["yeto_data_row"]``), and the rollout
@@ -44,7 +44,7 @@ own cursor (``yeto.rl.engine.task_dispense`` module doc):
   position not trained yet goes back to the dispenser (release).
 * Miles' own cursor (``sample_offset``, ``epoch_id``) does not move; the
   dispenser keeps the data position, so a relaunched island needs none.
-* Sampler islands (S27 P4, ``sampler_island.run_sampler_island``): the same
+* Sampler islands (``sampler_island.run_sampler_island``): the same
   wrapped data source; a position is reported trained when the buffer writer
   has written its group into the sample buffer (:func:`written`), so a
   sampler that dies before the write leaves its rows unreported and the
@@ -202,14 +202,14 @@ def install(executor: Any, config: Mapping[str, Any], key: bytes | None) -> dict
     if getattr(getattr(source, "args", None), "fully_async", False):
         raise DispenseInstallError("the dispenser does not cover fully_async rollouts yet")
     rows = int(config["rows"])
-    # S27 P3: the streams of --data-mix / task labels (None: the one P2 stream)
+    # The streams of --data-mix / task labels (None: the single default stream)
     table = StreamTable.from_config(config["streams"]) if config.get("streams") else None
     accept = config.get("accept")
     connect = tcp_connector(str(config["address"]), learner_id=int(config["learner_id"]), rows=rows,
                             fingerprint=bytes.fromhex(str(config["fingerprint"])), key=key,
                             streams=None if table is None else table.decl(),
                             accept=None if accept is None else [int(a) for a in accept])
-    sampler = int(config["learner_id"]) >= SAMPLER_HOLDER_BASE  # S27 P4: one member per process
+    sampler = int(config["learner_id"]) >= SAMPLER_HOLDER_BASE  # one member per process
     tasks = TaskSource(connect=connect, block=int(config["block"]),
                        prefetch_blocks=int(config.get("prefetch_blocks", 2)),
                        emit=lambda kind, **fields: logger.info("%s %s", kind, fields),
@@ -259,7 +259,7 @@ def commit_round(executor: Any, rollout_id: int) -> dict[str, Any] | None:
 
 def written(rollout_id: int, positions: Sequence[int]) -> dict[str, Any] | None:
     """The sampler's buffer writer (``BufferWriterRolloutFn._write``, in the rollout
-    executor): the groups of ``positions`` are in the buffer (S27 P4). None without
+    executor): the groups of ``positions`` are in the buffer. None without
     a dispenser; never raises (the buffer write already happened)."""
     source = _CURRENT
     if source is None:

@@ -1,5 +1,4 @@
-"""Backend identity, hashed beside the algorithm and contract hashes
-(yeto-framework-decoupling phase 5, tasks 6.1 / 6.2, design D7, audit E23).
+"""Backend identity, hashed beside the algorithm and contract hashes.
 
 ``AlgorithmSpec.sha256()`` and ``ExecutionProfile.contract_hash`` say *what*
 is trained; they do not say *which training stack* runs it.  Two islands with
@@ -89,7 +88,7 @@ def session_contract_hash(layout_fingerprint: bytes, identity_sha256: str) -> by
 
 LR_SCHEDULE_SCHEMA = "yeto-lr-schedule-v1"
 # v2 (rl-code-quality-cleanup 4.8): the AlgorithmSpec hash is a third slot.
-# v3 (rl-identity-tiering L9.7, design D6): the algorithm slot holds
+# v3: the algorithm slot holds
 # AlgorithmSpec.semantic_sha256() and the run code pack digest is a fourth slot.
 ISLAND_CONTRACT_DOMAIN = b"yeto-rl-island-contract-v3\0"
 # Slot value of an undeclared slot (not a reachable sha256).
@@ -98,7 +97,7 @@ _UNDECLARED = bytes(32)
 
 def lr_schedule_sha256(decay_style: str, decay_iters: int | None, lr: Any,
                        warmup_iters: int = 0, min_lr: Any = 0) -> str:
-    """Engine-neutral hash of the optimizer LR schedule an island applies (S17 N17).
+    """Engine-neutral hash of the optimizer LR schedule an island applies.
 
     Two islands whose schedules differ must not be merged: averaging deltas
     trained at different learning rates silently skews the result.  A
@@ -122,7 +121,7 @@ def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None,
                            code_pack_digest: str | None = None,
                            test_salt: str | None = None) -> str | None:
     """What an island declares to the syncer as its identity (HELLO session
-    contract and elastic JOIN), contract v3 (rl-identity-tiering L9.7):
+    contract and elastic JOIN), contract v3:
     the backend identity, bound to the LR schedule hash, the algorithm's
     semantic hash (``AlgorithmSpec.semantic_sha256()``) and the run code pack
     digest when the adapter supplies them.  With none declared the plain

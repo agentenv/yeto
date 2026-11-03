@@ -1,6 +1,6 @@
 """Durable sample buffer: an ordered index of samples next to their payloads.
 
-rl-trainer-start-stop L4.1/L4.3, design D4. The buffer keeps samples across
+rl-trainer-start-stop. The buffer keeps samples across
 trainer stops and head restarts. It lives in the existing cut storage (a
 :class:`~yeto.rl.engine.resume.CheckpointStore`) under ``sample-buffer/``:
 
@@ -30,9 +30,9 @@ Arrival notification is by polling the index (``poll`` / ``start_polling``).
 Limits of this first implementation: one consumer (or one per lane: synced
 trainer islands read disjoint lanes, :mod:`.merged_release`); with ``index.jsonl``,
 concurrent appenders must share one host (``flock``); the version gate on
-selection is the consumer's job (P0-S ``max_policy_age``).
+selection is the consumer's job (``max_policy_age``).
 
-Appenders on several hosts (convertible nodes, rl-trainer-start-stop L7.5c): each
+Appenders on several hosts (convertible nodes, rl-trainer-start-stop): each
 appender writes its own shard index ``shards/<shard>.jsonl`` (same line format,
 one writer per file) next to the shared payloads, and one merger -- the head --
 appends the new shard lines to ``index.jsonl`` (:func:`merge_shards`). The
@@ -338,7 +338,7 @@ def _entry(record: dict[str, Any]) -> SampleIndexEntry:
 
 class UnmergedShards:
     """The head's read-only view of the sampler shard records that the consumer
-    has not merged into the index yet (rl-cross-site-sample-store N3.6).
+    has not merged into the index yet (rl-cross-site-sample-store).
 
     The head reads the merged index only, and only the trainer merges. With the
     trainer scheduler on, a stopped trainer merges nothing, so without this view
@@ -428,7 +428,7 @@ class FileSampleBuffer:
         this buffer (the consumer) merges the sampler shards into the index on
         every refresh (see the module doc); it must be the only one that does.
         On a shared directory the shards are ``shards/<shard>.jsonl`` files (one
-        sampler island writes each; S25 C1: several sampler islands on one
+        sampler island writes each; several sampler islands on one
         Modal Volume, where ``flock`` does not hold across containers).
         ``expected_shards``: the shards that must all end before the merged index
         ends (None: the shards seen so far), so an early-ending sampler cannot
@@ -802,7 +802,7 @@ def merge_shards(files, shards: Iterable[str]) -> int:
 
 class CommittedBacklog:
     """The head's view of a buffer the trainer reads elsewhere (rl-trainer-start-stop
-    L5.3c, D4). The backlog starts at the consumed watermark the trainer committed
+    rl-trainer-start-stop). The backlog starts at the consumed watermark the trainer committed
     into its newest cut (``watermark()``, e.g. ``StoreCutLog.watermark``), not at a
     cursor of this process. While a trainer runs, the samples it selected after its
     newest cut still count as backlog (at most the rounds between two cuts)."""

@@ -1,15 +1,15 @@
-"""The run's merged version on a relay board (S29 spot run, defects D9 and D4).
+"""The run's merged version on a relay board.
 
 A spot sampler learns the policy version only from the fragments its subscriber
 receives. Over a slow WAN the first fragment of a (re)joined sampler arrives
 tens of minutes after it starts, and until then it generated on the base weights,
-far past any policy-age limit (D9). The relay trainers therefore put the run's
+far past any policy-age limit. The relay trainers therefore put the run's
 merged version on board :data:`VERSION_BOARD` after every publication
 (:class:`VersionPublisher`); the sampler reads it at every round admission
 (:class:`VersionReader`) and holds rounds while the weights it serves are more
 than ``max_policy_age`` merged versions behind.
 
-The same board fences a sampler out of another run (D4). Every record carries
+The same board fences a sampler out of another run. Every record carries
 the run identity (``run``, from :data:`RUN_ID_ENVS`) and its publisher (the
 trainer's learner id). Several relay trainers of one run write the same board
 (the newest PUT wins), so a lagging or just restarted trainer may write a version
@@ -148,7 +148,7 @@ class VersionReader:
             item_id = int(item.item_id)
             # a fresh syncer numbers its board items from 1 again
             if item_id < self.last_item_id:
-                self.regressed = True  # D4: the syncer of the run this sampler joined is gone
+                self.regressed = True  # the syncer of the run this sampler joined is gone
             self.item_id = item_id
             self.last_item_id = max(self.last_item_id, item_id)
             if record is not None:
@@ -160,7 +160,7 @@ class VersionReader:
                 publisher: int | None = None) -> None:
         if run is not None:
             if self.run is not None and run != self.run:
-                self.regressed = True  # D4: another run took the board
+                self.regressed = True  # another run took the board
                 return
             self.run = run
         if merged_version < self.highest:

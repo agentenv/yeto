@@ -1,4 +1,4 @@
-"""verl backend adapter (rl-verl-backend; design D1-D11).
+"""verl backend adapter (rl-verl-backend).
 
 First step: verl FSDP2 + vLLM on NVIDIA, user fork pinned in ``pins``.  All
 ``verl`` / ``vllm`` imports live in the modules that run inside the verl image

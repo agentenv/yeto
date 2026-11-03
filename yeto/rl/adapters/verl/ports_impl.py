@@ -1,4 +1,4 @@
-"""The five engine ports over verl's v1 sync trainer (rl-verl-backend 2.1/2.2, design D3).
+"""The five engine ports over verl's v1 sync trainer.
 
 Runs inside verl's task-runner Ray actor (``verl_main``), next to the verl
 trainer object; imports verl lazily.  yeto's neutral ``IslandDriver`` drives
@@ -9,7 +9,7 @@ Miles path:
   prompts, sample the replay buffer (vLLM generates), rule reward, balance;
   the KVBatchMeta stays in verl (``payload``), yeto reads metadata only.
 * ``VerlTrainerGroup.train_step`` -- steps 4-9: old log-prob recompute (+ the
-  yeto mismatch criteria in the Miles convention, design D7), GRPO advantage,
+  yeto mismatch criteria in the Miles convention), GRPO advantage,
   actor update; returns the receipt; ``step_metrics`` gives grad_norm/lr.
 * ``VerlPolicyState`` -- export/apply the LoRA tensors of the FSDP2 PEFT model
   by canonical name (``param_names``), via ``__ray_call__`` on the actor
@@ -104,12 +104,12 @@ def digest_lora_tensors(tensors, *, base_model_revision: str, lora_config_hash: 
     from yeto.rl.engine.policy_digest import digest_canonical_tensors
 
     started = time.monotonic()
-    # E1: ``tensors`` are this call's own copies (the trainer's export), so the
+    # ``tensors`` are this call's own copies (the trainer's export), so the
     # validation keeps them without a second clone; the values are the same
     state = canonical_state_from_owned_tensors(
         0, tensors, base_model_revision=base_model_revision, lora_config_hash=lora_config_hash,
         layout_hash=layout_hash, expected_specs=expected_specs)
-    # E1: the bf16 send checksum runs in its own thread beside the two digest streams
+    # The bf16 send checksum runs in its own thread beside the two digest streams
     # (hashlib releases the GIL); each function is unchanged, so the values are too
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-lora-checksum") as pool:
         checksum = pool.submit(pub.lora_checksum, dict(state.tensors))
@@ -125,7 +125,7 @@ def digest_lora_tensors(tensors, *, base_model_revision: str, lora_config_hash: 
 def remote_export_digest(worker_dict, kwargs: dict):
     """All ranks gather the LoRA (``full_tensor`` is collective); rank 0 hashes it.
 
-    E1: rank 0 stages the tensors in one reusable pinned buffer (one GPU
+    Rank 0 stages the tensors in one reusable pinned buffer (one GPU
     synchronization, :func:`~yeto.rl.engine.policy_digest.stage_f32_on_host`); they
     are hashed here and dropped, never returned."""
     import torch
@@ -287,7 +287,7 @@ class VerlRolloutPool:
         from .data_cursor import VerlDataCursor
 
         self.island = island
-        # S27 G-EU (VERL-PARITY #31): the rows come from the task dispenser
+        # The rows come from the task dispenser
         # (``task_dispense.VerlDispensedBatches``, installed on the trainer already)
         self.dispense = dispense
         if dispense is not None:
@@ -295,7 +295,7 @@ class VerlRolloutPool:
             # restart and rejoin paths skip a pool without a callable seek)
             self.seek_data_cursor = None
         else:
-            # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
+            # Lets the driver skip whole rounds when the island (re)starts at v > 0
             self._cursor = VerlDataCursor(island.trainer)
 
     def data_cursor(self) -> dict[str, int]:
@@ -304,14 +304,14 @@ class VerlRolloutPool:
         return self._cursor.cursor()
 
     def commit_dispensed(self, rollout_id: int) -> dict | None:
-        """S27 G-EU (driver, after the round's sync boundary): report the round's
+        """Driver hook, after the round's sync boundary: report the round's
         kept rows trained to the dispenser; None without one."""
         if self.dispense is None or getattr(self, "_dispense_closed", False):
             return None
         return self.dispense.commit(int(rollout_id))
 
     def close_dispensed(self) -> dict | None:
-        """S27 G-EU (driver, finished run): release every row not trained yet."""
+        """Driver hook, finished run: release every row not trained yet."""
         if self.dispense is None or getattr(self, "_dispense_closed", False):
             return None
         self._dispense_closed = True
@@ -336,7 +336,7 @@ class VerlRolloutPool:
         return self._collect(VerlPendingGeneration(rollout_id, isl.published, dict(prep or {}), started,
                                                    expected_policy_version))
 
-    # -- rollout ahead (driver ``rollout_ahead``, ``yeto.rl.engine.rollout_ahead``; S27 G-EV) --
+    # -- rollout ahead (driver ``rollout_ahead``, ``yeto.rl.engine.rollout_ahead``) --
     def start_generate(self, rollout_id: int, *,
                        expected_policy_version: str | None = None) -> VerlPendingGeneration:
         """Submit the prompts of ``rollout_id`` to the rollout servers with the policy
@@ -362,7 +362,7 @@ class VerlRolloutPool:
         try:
             prep = t.prepare_step()
         except Exception as error:  # noqa: BLE001 - raised by finish_generate (the driver's join)
-            # S27 G-EV: the round being trained must still train and pass its boundary;
+            # The round being trained must still train and pass its boundary;
             # the driver then ends on a data end or fails the join (rollout_ahead module)
             prep, failure = {}, error
         finally:
@@ -446,7 +446,7 @@ class VerlRolloutPool:
                 token_count=int(sum(lengths[i] for i in idx)),
             ))
         isl.pending = {"batch": batch, "metrics": metrics, "gen_seconds": gen_seconds}
-        # S27 G-EU: the dispensed rows of the groups the trainer gets wait for the commit
+        # The dispensed rows of the groups the trainer gets wait for the commit
         data_rows = (None if self.dispense is None else
                      self.dispense.kept_round(rollout_id, {uid: len(idx) for uid, idx in groups.items()}))
         lens = sorted(lengths)
@@ -479,7 +479,7 @@ class VerlRolloutPool:
 def round_base_policy(island, batch: RolloutBatchHandle) -> tuple[int, str]:
     """(version, hash) of the policy a round's optimizer step starts from: the island's
     publication of that round. Serial rounds: the policy that generated the batch.
-    Rollout ahead (S27 G-EV): the batch was generated one version earlier, so the
+    Rollout ahead: the batch was generated one version earlier, so the
     receipt names the round's own publication (the full-parameter stream binds it to
     the round's anchor) and the batch evidence keeps the generating policy."""
     published = getattr(island, "published", None)
@@ -496,7 +496,7 @@ class VerlTrainerGroup(CutPorts):
         self._metrics = None
         self._cut_trainer = None
 
-    # ---- cut verbs (S25 N7.6; .cut.CutPorts) ----
+    # ---- cut verbs (.cut.CutPorts) ----
     def _cut_calls(self):
         return self.island.call_workers
 
@@ -526,7 +526,7 @@ class VerlTrainerGroup(CutPorts):
         if t.use_reference_policy:
             kv = t._compute_ref_log_prob(kv, metrics=metrics)
         kv = t._compute_advantage(kv, metrics=metrics)
-        if getattr(isl, "debug_dump", False):  # S27 G-EU (VERL-PARITY #35): --rl-debug-dump
+        if getattr(isl, "debug_dump", False):  # --rl-debug-dump
             debug_dump(isl, kv, batch.rollout_id)
         kv = t._update_actor(kv, metrics=metrics)
         try:
@@ -776,7 +776,7 @@ DEBUG_DUMP_FIELDS = ("uid", "prompts", "responses", "response_mask", "rm_scores"
 
 
 def debug_dump(isl: VerlIsland, kv_batch, rollout_id: int, *, get=None, save=None) -> dict:
-    """S27 G-EU (``--rl-debug-dump``, ``train_options.debug_plan``): the round's
+    """``--rl-debug-dump`` (``train_options.debug_plan``): the round's
     samples and train data after the advantage step, as
     ``verl-debug-<id>-r<round>.pt`` at the top of the output dir (the tape mirror
     picks it up). Archival: a field verl does not hold is skipped and named in the

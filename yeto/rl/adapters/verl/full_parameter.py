@@ -1,4 +1,4 @@
-"""Full-parameter boundary of a verl FSDP2 island (S27 B10, phase 1).
+"""Full-parameter boundary of a verl FSDP2 island .
 
 The LoRA island (:mod:`.ports_impl`) exports adapter tensors from one card.
 A full-parameter island trains every parameter of the model on ``n_gpus``
@@ -17,7 +17,7 @@ What this module provides:
 * the worker-side operations a fragment needs
   (:func:`remote_manifest`, :func:`remote_export_fragment`,
   :func:`remote_export_flat`, :func:`remote_apply_fragment`), run on every
-  actor worker through ``VerlIsland.call_workers``.  Since S27 G-EC a
+  actor worker through ``VerlIsland.call_workers``.  A
   fragment is read with :func:`remote_export_flat` (rank 0 builds the flat
   payload, checks it finite on the device, hashes it) and every payload
   crosses Ray as a numpy array, not a torch tensor (Ray pickles torch tensors
@@ -46,7 +46,7 @@ Every export and apply is collective: all ranks must call it with the same
 fragment, because ``DTensor.full_tensor`` and ``distribute_tensor`` are
 collectives over the device mesh.
 
-Two additions for the HF export (S27 G-EQ3):
+Two additions for the HF export:
 
 * the manifest also lists the module's **persistent buffers** (``buffers``),
   and :func:`remote_export_fragment` reads them by name.  A buffer is part of
@@ -86,12 +86,12 @@ def base_to_canonical(name: str) -> str:
 
     if ".lora_" in name:
         raise VerlFullParameterError(
-            f"LoRA 参数出现在全参数边界上: {name!r}（全参数岛必须 lora_rank=0）")
+            f"LoRA parameter on the full-parameter boundary: {name!r} (a full-parameter island needs lora_rank=0)")
     canonical = name
     for segment in WRAPPER_SEGMENTS:
         canonical = canonical.replace(segment, "")
     if not canonical or canonical.startswith(".") or ".." in canonical:
-        raise VerlFullParameterError(f"无法规范化的参数名: {name!r}")
+        raise VerlFullParameterError(f"cannot canonicalize parameter name: {name!r}")
     return canonical
 
 
@@ -99,7 +99,7 @@ def island_specs(shapes: Mapping[str, Sequence[int]], *, role: str = "actor") ->
     """The boundary's FP32 specs, sorted, from ``{canonical name: shape}``."""
 
     if not shapes:
-        raise VerlFullParameterError("全参数边界没有任何参数")
+        raise VerlFullParameterError("the full-parameter boundary has no parameters")
     specs = tuple(
         ParameterSpec(role, name, tuple(int(dimension) for dimension in shape), "float32",
                       _numel(shape))
@@ -166,7 +166,7 @@ def _named_full_parameters(module):
              for name, parameter in module.named_parameters()
              if parameter.requires_grad]
     if len({name for name, _parameter in named}) != len(named):
-        raise VerlFullParameterError("规范化后出现重名参数")
+        raise VerlFullParameterError("duplicate parameter names after canonicalization")
     return sorted(named, key=lambda item: item[0])
 
 
@@ -183,7 +183,7 @@ def _named_persistent_buffers(module):
             seen.add(id(buffer))
             named.append((base_to_canonical(f"{prefix}.{name}" if prefix else name), buffer))
     if len({name for name, _buffer in named}) != len(named):
-        raise VerlFullParameterError("规范化后出现重名 buffer")
+        raise VerlFullParameterError("duplicate buffer names after canonicalization")
     return sorted(named, key=lambda item: item[0])
 
 
@@ -194,7 +194,7 @@ def _exportable(module) -> dict:
     buffers = dict(_named_persistent_buffers(module))
     clash = sorted(set(by_name) & set(buffers))
     if clash:
-        raise VerlFullParameterError(f"参数与 buffer 同名: {clash[:4]}")
+        raise VerlFullParameterError(f"parameter and buffer share a name: {clash[:4]}")
     by_name.update(buffers)
     return by_name
 
@@ -227,15 +227,15 @@ def remote_manifest(worker_dict) -> dict:
     dtypes = sorted({str(parameter.dtype) for _name, parameter in named})
     if dtypes != [MASTER_DTYPE]:
         raise VerlFullParameterError(
-            f"全参数同步需要 FP32 主权重（actor.fsdp_config.model_dtype=fp32）；"
-            f"看到的参数 dtype: {dtypes}")
+            f"full-parameter sync needs FP32 master weights (actor.fsdp_config.model_dtype=fp32); "
+            f"parameter dtypes seen: {dtypes}")
     initialized = dist.is_available() and dist.is_initialized()
     return {
         "shapes": {name: list(_global_shape(parameter)) for name, parameter in named},
         "param_dtypes": dtypes,
         "buffers": {name: list(_global_shape(buffer)) for name, buffer in buffers},
         "buffer_dtypes": sorted({str(buffer.dtype) for _name, buffer in buffers}),
-        # S27 G-EQ3: a fingerprint per buffer, so the island can see that every rank
+        # A fingerprint per buffer, so the island can see that every rank
         # holds the same buffer values (:func:`agree_on_buffers`)
         "buffer_digests": {name: _buffer_digest(buffer) for name, buffer in buffers},
         "rank": int(dist.get_rank()) if initialized else 0,
@@ -247,7 +247,7 @@ def remote_manifest(worker_dict) -> dict:
 def _buffer_digest(buffer) -> list[float]:
     """``[sum, sum of absolute values, number of values]`` of one buffer, as floats.
 
-    Why (S27 G-EQ3): a persistent buffer is **not sharded**, so every rank keeps
+    Why: a persistent buffer is **not sharded**, so every rank keeps
     its own copy and each rank's forward reads its own. A rank whose copy is
     wrong computes wrong log-probs while the parameters are perfectly fine -- for
     a MoE model the router's correction bias decides which experts a token goes
@@ -287,7 +287,7 @@ def remote_export_fragment(worker_dict, names: Sequence[str], return_tensors: bo
     by_name = _exportable(module)
     missing = sorted(set(names) - set(by_name))
     if missing:
-        raise VerlFullParameterError(f"分片引用了模型里没有的参数: {missing[:4]}")
+        raise VerlFullParameterError(f"the shard references parameters the model does not have: {missing[:4]}")
     tensors = {}
     with torch.no_grad():
         for name in names:  # the island's order, the same on every rank
@@ -306,7 +306,7 @@ def remote_export_for_reader(worker_dict, names: Sequence[str]) -> dict:
 
 def remote_export_arrays_for_reader(worker_dict, names: Sequence[str]) -> dict:
     """:func:`remote_export_for_reader` with the reader's tensors as numpy arrays
-    (S27 G-EC): Ray moves a numpy array out of band into its object store,
+   : Ray moves a numpy array out of band into its object store,
     while a torch tensor goes through ``torch.save`` pickling (two extra
     copies of every byte at about 0.5 GB/s each way, measured on CPU)."""
 
@@ -332,15 +332,14 @@ def fragment_units(layout: ParameterLayout, fragment_id: int) -> tuple[tuple[str
 
 class FlatFragment:
     """One fragment's flat FP32 payload, filled from whole parameters on the
-    reading rank (S27 G-EC; S27 G-FG: shared by the FSDP2 and the Megatron
-    worker exports).
+    reading rank (shared by the FSDP2 and the Megatron worker exports).
 
     ``units`` are ``(name, flat start, flat stop)`` in the layout's order;
     :meth:`add` copies each unit of one whole parameter into its place and
     checks it finite on the parameter's device; :meth:`result` adds the hash
     and the payload.  Off the reader (``reader`` False) nothing is kept.
 
-    S27 G-FT: :meth:`add_part` takes one *piece* of a parameter with its flat
+    :meth:`add_part` takes one *piece* of a parameter with its flat
     element offset, so a layout tensor the HF loader stacks out of many
     checkpoint tensors (NemotronH: 128 per-expert tensors along dim 0) is
     assembled in this buffer, piece by piece, instead of as a whole tensor in a
@@ -350,7 +349,7 @@ class FlatFragment:
     offset of a name counts once: a piece that claims an offset already written
     is copied, the way one whole tensor twice always was, but adds nothing to
     the coverage -- otherwise four copies of row 0 would count as four rows
-    (``tests/test_s27_megatron_export_b15.py``'s mutation test found this)."""
+    (a mutation test found this)."""
 
     def __init__(self, units: Sequence[Sequence], numel: int, *, reader: bool) -> None:
         import torch
@@ -362,7 +361,7 @@ class FlatFragment:
             self.offsets.append(offset)
             offset += stop - start
         if offset != int(numel):
-            raise VerlFullParameterError(f"分片元素数不符: 切片合计 {offset}，布局是 {numel}")
+            raise VerlFullParameterError(f"shard element count mismatch: slices add up to {offset}, the layout has {numel}")
         self.reader = reader
         self.flat = torch.empty(int(numel), dtype=torch.float32) if reader else None
         self.finite = None
@@ -423,10 +422,10 @@ class FlatFragment:
         if not self.reader:
             timings["total_s"] = time.perf_counter() - started
             return {"names": self.names, "timings": timings}
-        missing = [f"{name} ({self.covered[name]}/{self.needed[name]} 个元素)"
+        missing = [f"{name} ({self.covered[name]}/{self.needed[name]} elements)"
                    for name in self.names if self.covered[name] < self.needed[name]]
         if missing:
-            raise VerlFullParameterError(f"分片引用的参数没有完整导出: {missing[:4]}")
+            raise VerlFullParameterError(f"parameters referenced by the shard were not fully exported: {missing[:4]}")
         result: dict = {"names": self.names, "finite": bool(self.finite.item()) if self.finite is not None else True}
         if want_hash:
             mark = time.perf_counter()
@@ -441,7 +440,7 @@ class FlatFragment:
 
 def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_payload: bool,
                        want_hash: bool) -> dict:
-    """One fragment's flat FP32 payload, built on the reading rank (S27 G-EC).
+    """One fragment's flat FP32 payload, built on the reading rank.
 
     Collective like :func:`remote_export_fragment`: every rank gathers each
     parameter of ``units`` whole, in the order the parameters first appear.
@@ -462,7 +461,7 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
     by_name = dict(_named_full_parameters(module))
     missing = sorted(set(fragment.names) - set(by_name))
     if missing:
-        raise VerlFullParameterError(f"分片引用了模型里没有的参数: {missing[:4]}")
+        raise VerlFullParameterError(f"the shard references parameters the model does not have: {missing[:4]}")
     gather_s = 0.0
     with torch.no_grad():
         for name in fragment.names:  # the island's order, the same on every rank
@@ -476,13 +475,13 @@ def remote_export_flat(worker_dict, units: Sequence[Sequence], numel: int, want_
 
 
 def remote_release_memory(worker_dict, host: bool = True) -> dict:
-    """Give the device allocator's cached blocks back (S27 G-EQ3).
+    """Give the device allocator's cached blocks back.
 
     Why: a full export gathers every parameter whole on the device
     (:func:`_whole`), and the biggest ones are large -- a Nemotron Nano MoE
     layer's stacked expert tensor is 1.28e9 values. The allocator keeps those
     blocks cached, so the step *after* an export starts with a much smaller
-    free pool: on npu1 the first step peaked at 63.1 of 65.5 GiB and the step
+    free pool: on a 64 GiB card the first step peaked at 63.1 of 65.5 GiB and the step
     after the first release died asking for 9.00 GiB. Returns the allocator's
     numbers before and after, for the island's tape.
     """
@@ -498,13 +497,13 @@ def remote_release_memory(worker_dict, host: bool = True) -> dict:
     device.empty_cache()
     result = {"before": before,
               "after": {"allocated": int(device.memory_allocated()), "reserved": int(device.memory_reserved())}}
-    if host and host_memory.host_memory_mode() == "trim":  # S27 G-EZ3: the export's host copies too
+    if host and host_memory.host_memory_mode() == "trim":  # The export's host copies too
         result["host"] = host_memory.release_host_memory()
     return result
 
 
 def remote_host_memory(worker_dict, release: bool) -> dict:
-    """This worker's host memory (S27 G-EZ3): its RSS by kind and its node's
+    """This worker's host memory: its RSS by kind and its node's
     ``/proc/meminfo`` (``yeto.rl.engine.host_memory``), after a full garbage
     collection and ``malloc_trim(0)`` when ``release`` (the trim's own result
     is in ``release``). Not collective: each worker reads its own process."""
@@ -542,7 +541,7 @@ def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_opti
     by_name = dict(_named_full_parameters(module))
     missing = sorted(set(tensors) - set(by_name))
     if missing:
-        raise VerlFullParameterError(f"要写入的参数不在模型里: {missing[:4]}")
+        raise VerlFullParameterError(f"parameters to write are not in the model: {missing[:4]}")
     applied = 0
     with torch.no_grad():
         for name in sorted(tensors):
@@ -550,7 +549,7 @@ def remote_apply_fragment(worker_dict, tensors: Mapping[str, object], reset_opti
             value = _as_tensor(tensors[name])
             if tuple(value.shape) != _global_shape(parameter):
                 raise VerlFullParameterError(
-                    f"{name!r} 形状不符: 收到 {tuple(value.shape)}，模型是 {_global_shape(parameter)}")
+                    f"{name!r} shape mismatch: received {tuple(value.shape)}, the model has {_global_shape(parameter)}")
             if hasattr(parameter, "device_mesh"):
                 from torch.distributed.tensor import distribute_tensor
 
@@ -611,14 +610,14 @@ def agree_on_buffers(manifests: Sequence[Mapping[str, object]]) -> dict[str, lis
             only_first = sorted(set(first) - set(other))
             only_other = sorted(set(other) - set(first))
             raise VerlFullParameterError(
-                f"worker 0 与 worker {index} 的 buffer 集合不一致: 仅 0 有 {only_first[:4]}, "
-                f"仅 {index} 有 {only_other[:4]}")
+                f"worker 0 and worker {index} hold different buffer sets: only 0 has {only_first[:4]}, "
+                f"only {index} has {only_other[:4]}")
         for name in sorted(first):
             if other[name] != first[name]:
                 raise VerlFullParameterError(
-                    f"buffer {name!r} 在 worker 0 与 worker {index} 上的值不同（和/绝对值和/元素数: "
-                    f"{first[name]} 对 {other[name]}）。持久 buffer 不分片，每个 rank 用自己那份；"
-                    f"值不同说明加载没有把它广播到所有 rank，这个 rank 的前向会算错（MoE 路由偏置就是一例）")
+                    f"buffer {name!r} differs between worker 0 and worker {index} (sum/abs sum/numel: "
+                    f"{first[name]} vs {other[name]}). A persistent buffer is not sharded and every rank uses its own copy; "
+                    f"a difference means loading did not broadcast it to every rank, and this rank's forward is wrong (the MoE router bias is one example)")
     return first
 
 
@@ -629,7 +628,7 @@ def agree_on_shapes(manifests: Sequence[Mapping[str, object]], *,
     buffers; a manifest without the key has none)."""
 
     if not manifests:
-        raise VerlFullParameterError("没有收到任何 worker 的全参数清单")
+        raise VerlFullParameterError("no worker returned a full-parameter manifest")
     first = {name: tuple(shape) for name, shape in dict(manifests[0].get(key) or {}).items()}
     for index, manifest in enumerate(manifests[1:], start=1):
         other = {name: tuple(shape) for name, shape in dict(manifest.get(key) or {}).items()}
@@ -637,6 +636,6 @@ def agree_on_shapes(manifests: Sequence[Mapping[str, object]], *,
             only_first = sorted(set(first) - set(other))
             only_other = sorted(set(other) - set(first))
             raise VerlFullParameterError(
-                f"worker 0 与 worker {index} 的参数集合不一致: "
-                f"仅 0 有 {only_first[:4]}, 仅 {index} 有 {only_other[:4]}")
+                f"worker 0 and worker {index} hold different parameter sets: "
+                f"only 0 has {only_first[:4]}, only {index} has {only_other[:4]}")
     return first

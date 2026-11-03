@@ -1,4 +1,4 @@
-"""Sampler island replacement: where a new incarnation continues (S25 C1).
+"""Sampler island replacement: where a new incarnation continues.
 
 A sampler island on spot capacity can be reclaimed at any time; the cloud (or
 the launcher) then starts a new incarnation of the same island. The island's
@@ -73,7 +73,7 @@ class SamplerRound:
     rollout_id: int
     data_cursor: Mapping[str, int] | None = None  # the data source after the round drew its prompts
     last: bool = False  # the round's last group
-    # S27 P4: the task-dispenser position of the group's row (a sampler with a dispenser)
+    # the task-dispenser position of the group's row (a sampler with a dispenser)
     dispense_position: int | None = None
 
     def record(self) -> dict[str, Any]:

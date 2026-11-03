@@ -1,10 +1,10 @@
-"""Miles :class:`~yeto.rl.engine.engine_outage.EngineRecoveryPort` (S27 G-DI design v2).
+"""Miles :class:`~yeto.rl.engine.engine_outage.EngineRecoveryPort` .
 
 The engines of a two-cluster island run on the engine cluster's Ray nodes; the trainer
-and the driver run on the Ray head (D3 head pin). This port tells the driver whether
+and the driver run on the Ray head (head pin). This port tells the driver whether
 those nodes are alive and restarts the engines on the nodes that replace them.
 
-Mechanism (all fork verbs already used by E1 membership, ``rollout.MilesRolloutPool``):
+Mechanism (all fork verbs already used by elastic membership, ``rollout.MilesRolloutPool``):
 
 * ``engines_alive``: every island node with GPUs is alive in the island's Ray
   (``ray.nodes()``; the head never dies without the driver).
@@ -20,7 +20,7 @@ Mechanism (all fork verbs already used by E1 membership, ``rollout.MilesRolloutP
 Requires declared rollout cells (``--rl-elastic-declare-cells --rl-elastic-cells``; the
 launcher adds them for a two-cluster island).
 
-NOT verified on GPUs (S27 G-DI): whether ``stop_cells`` accepts cells whose actors are
+NOT verified on GPUs: whether ``stop_cells`` accepts cells whose actors are
 dead; whether the restarted cells see the right local GPUs on the new node (the startup
 GPU-id view may need ``bind_members``); whether a full ``update_weights`` reaches cells
 started after the weight-update NCCL group was created.

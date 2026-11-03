@@ -1,4 +1,4 @@
-"""S25 C2: verl trainer island over the sample buffer (CPU, no verl/Ray).
+"""Verl trainer island over the sample buffer (CPU, no verl/Ray).
 
 The trainer actor is a fake reached through the island's ``call``; the buffer,
 the release store, the yeto driver, the fully_async rollout port (version map,
@@ -128,7 +128,7 @@ def test_feed_returns_none_at_the_data_end_and_times_out_without_data(tmp_path):
 def test_buffer_call_routes_queue_calls_to_the_feed():
     seen = []
 
-    class _Feed:  # S27 G-EQ4: the call also commits the cursor record after a train call
+    class _Feed:  # The call also commits the cursor record after a train call
         def __call__(self, name, *a):
             seen.append(("feed", name))
 
@@ -332,7 +332,7 @@ def _released(releases, version):
 
 
 def test_a_relaunched_buffer_trainer_trains_the_groups_of_the_releases_it_finds(tmp_path):
-    """S27 G-EQ5 (gap 22): the version account continues above the store's releases.
+    """The version account continues above the store's releases.
 
     An earlier process released v1, v2 and v3; the samplers then wrote groups with
     v1, v2 and v3. This process must start at v3, train the groups inside the
@@ -385,7 +385,7 @@ def test_a_relaunched_buffer_trainer_trains_the_groups_of_the_releases_it_finds(
 
 
 def test_a_buffer_trainer_whose_store_holds_no_release_counts_from_zero(tmp_path):
-    """S27 G-EQ5: a run that starts here is unchanged (the account begins at v0)."""
+    """A run that starts here is unchanged (the account begins at v0)."""
     from yeto.rl.engine.merged_release import resumed_releases
 
     store_dir = tmp_path / "store"
@@ -471,8 +471,8 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
     assert section == {"store": "/s", "wait_s": 60.0, "lane": None,
-                       "release_delta_full_every": 0}  # G-EQ3: staged bf16 deltas, off here
-    # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
+                       "release_delta_full_every": 0}  # Staged bf16 deltas, off here
+    # A sampler island runs the engine sampler (no buffer section); other roles stop
     assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
         sample_buffer_section(_entry_args("--rl-sample-role", "convertible", "--rl-resume-store", "/s"))
@@ -498,7 +498,7 @@ def test_island_entry_plans_a_synced_trainer_lane_and_refuses_partial_flags():
                                           "--rl-sample-lanes", "2"))
 
 
-# ---------------------------------------------------------------------- synced trainers (S25 C3)
+# ---------------------------------------------------------------------- synced trainers
 class _State:
     """A published policy state: local version, hash, the LoRA tensors."""
 
@@ -588,7 +588,7 @@ def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_r
     island.call("yeto_assemble")  # collection ended: the cursor record is only pending
     lane_file = tmp_path / "store" / "sample-buffer" / "lanes" / "1-of-2.jsonl"
     assert not lane_file.exists()  # nothing recorded yet: the round has not trained
-    # S27 G-EQ4: the record is written once the round has trained, so an island that
+    # The record is written once the round has trained, so an island that
     # stopped between the two reads these groups again (tests/test_rl_buffer_feed_cursor.py
     # covers that, and BufferCall commits after the train call returns)
     feed.commit_round()
@@ -599,7 +599,7 @@ def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_r
 
 
 def test_two_shard_samplers_drain_their_backlog_through_the_verl_release(tmp_path):
-    """S26 E9 G1 (e9-g1-f) root cause: the verl trainer released without the per-shard
+    """Root cause of a stuck shard backlog: the verl trainer released without the per-shard
     read positions, so a shard sampler never saw its backlog drain (stuck at the cap).
     Two shard samplers with a 2-group cap now feed three rounds of 2 groups."""
     from yeto.rl.engine.engine_sampler_entry import build_stores
@@ -654,7 +654,7 @@ def test_two_shard_samplers_drain_their_backlog_through_the_verl_release(tmp_pat
 
 
 def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path):
-    """S26 E9 G1 (e9-g1-h): the buffer ended with groups passed over as too old, so
+    """The buffer ended with groups passed over as too old, so
     the trainer could not fill its last round. On verl that was "rollouter ended
     the queue" (INFRA_FAILED); it is the buffer's end: the run ends FINISHED."""
     store_dir = tmp_path / "store"
@@ -679,7 +679,7 @@ def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path)
 
 
 def test_a_single_buffer_trainer_continues_after_the_groups_it_trained(tmp_path):
-    """S27 G-EQ3 (gap 21): a restarted trainer without a lane used to read the
+    """A restarted trainer without a lane used to read the
     buffer from the first group again. The cursor log the synced trainers already
     have now serves it too, so it continues where it stopped."""
     from yeto.rl.engine.merged_release import lane_cursor_log
@@ -699,7 +699,7 @@ def test_a_single_buffer_trainer_continues_after_the_groups_it_trained(tmp_path)
 
 
 def test_a_measurement_run_trains_every_round_and_writes_no_release(tmp_path):
-    """S28 G-120C (--rl-measure-no-release): a memory / MFU run trains as usual but
+    """A memory / MFU run trains as usual but
     writes no policy release, and says so for every round it skips."""
     store_dir = tmp_path / "store"
     store = CheckpointStore(store_dir)
@@ -740,7 +740,7 @@ def test_measurement_no_release_is_planned_from_the_flag_and_refused_on_a_synced
 
 
 def test_a_run_releases_only_the_listed_versions(tmp_path):
-    """S28 G-120C (--rl-release-only-versions 2): two trained rounds publish v1 and v2;
+    """Two trained rounds publish v1 and v2;
     only v2 is released."""
     store_dir = tmp_path / "store"
     store = CheckpointStore(store_dir)
@@ -779,7 +779,7 @@ def test_release_only_versions_is_planned_from_the_flag():
 
 
 def test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal(tmp_path):
-    """S29 D21 (run s29r120-b): a sample past the row widths used to raise in keep()
+    """A sample past the row widths used to raise in keep()
     and end the island INFRA_FAILED; the feed now records the group dropped
     (over_length) and goes on to the next one."""
     writer = GroupWriter(_buffer(tmp_path), "s0")
@@ -802,7 +802,7 @@ def test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal(tmp_path):
 
 
 def test_d22_a_group_short_of_samples_per_group_is_dropped(tmp_path):
-    """S29 D22 (run s29r120-d): an agentic group with 3 of 4 trials made a 15-sample
+    """An agentic group with 3 of 4 trials made a 15-sample
     round and verl's mini-batch split asserted (15 % 16); with group_size the feed
     drops the short group."""
     writer = GroupWriter(_buffer(tmp_path), "s0")
@@ -827,20 +827,60 @@ def test_d3_relay_ports_forward_group_size():
     from yeto.rl.adapters.verl.relay_trainer import install_relay_ports
 
     assert "group_size" in inspect.signature(install_relay_ports).parameters
-def test_both_buffer_trainer_paths_pass_group_size_to_the_feed():
+@pytest.mark.parametrize("relay", [False, True])
+def test_both_buffer_trainer_paths_pass_group_size_to_the_feed(monkeypatch, tmp_path, relay):
     """Only the relay path forwarded group_size, so a 120B store trainer
     (install_buffer_ports) trained a 3-sample group and verl asserted 15 % 16."""
-    import ast
+    import sys
+    import types
 
-    import yeto.rl.adapters.verl as verl_adapters
+    from verl_island_fakes import stub_verl_and_ray
 
-    source = Path(verl_adapters.__file__).with_name("buffer_trainer_runner.py").read_text()
-    calls = [node for node in ast.walk(ast.parse(source))
-             if isinstance(node, ast.Call) and getattr(node.func, "id", None)
-             in ("install_buffer_ports", "install_relay_ports")]
-    assert {c.func.id for c in calls} == {"install_buffer_ports", "install_relay_ports"}
-    for call in calls:
-        assert "group_size" in {k.arg for k in call.keywords}, call.func.id
+    with stub_verl_and_ray():
+        omegaconf = types.ModuleType("omegaconf")
+        omegaconf.OmegaConf = types.SimpleNamespace(to_container=lambda config, resolve: {})
+        sys.modules["omegaconf"] = omegaconf  # the image's; the stub restores sys.modules
+        from verl_island_fakes import modules
+
+        (island_credential_guard, buffer_ports, runner, relay_trainer, trainer, merged_release, policy_release,
+         release_delta, resume, sample_buffer) = modules(
+            "yeto.island_credential_guard", "yeto.rl.adapters.verl.buffer_ports",
+            "yeto.rl.adapters.verl.buffer_trainer_runner", "yeto.rl.adapters.verl.relay_trainer",
+            "yeto.rl.adapters.verl.trainer", "yeto.rl.engine.merged_release", "yeto.rl.engine.policy_release",
+            "yeto.rl.engine.release_delta", "yeto.rl.engine.resume", "yeto.rl.engine.sample_buffer")
+
+        seen = {}
+
+        def capture(name, result):
+            def fake(island, **kwargs):
+                seen[name] = kwargs
+                return result
+            return fake
+
+        monkeypatch.setattr(island_credential_guard, "check_island_credentials", lambda: None)
+        monkeypatch.setattr(buffer_ports, "install_buffer_ports", capture("install_buffer_ports", (1, 2, 3)))
+        monkeypatch.setattr(buffer_ports, "release_weights_for", lambda island, plan: None)
+        monkeypatch.setattr(relay_trainer, "install_relay_ports", capture("install_relay_ports", (1, 2, 3)))
+        monkeypatch.setattr(relay_trainer, "relay_buffer", lambda *a, **k: ("buffer", None))
+        monkeypatch.setattr(resume, "store_for", lambda *a, **k: "store")
+        monkeypatch.setattr(sample_buffer, "open_trainer_buffer", lambda *a, **k: "buffer")
+        monkeypatch.setattr(policy_release, "PolicyReleaseStore", lambda *a, **k: "releases")
+        monkeypatch.setattr(release_delta, "default_mirror", lambda *a, **k: None)
+        monkeypatch.setattr(merged_release, "lane_cursor_log", lambda *a: None)
+        monkeypatch.setattr(runner, "release_staging_dir", lambda plan, environ: tmp_path)
+        monkeypatch.setattr(trainer, "run_fully_async_island",
+                            lambda call, start, plan, cfg, *, buffer_ports: buffer_ports("island"))
+        section = {"store": str(tmp_path), **({relay_trainer.RELAY_SECTION_KEY: {"channel": 0}} if relay else {})}
+        task = runner.YetoBufferTaskRunner.__new__(runner.YetoBufferTaskRunner)
+        task.components = {"trainer": None, "tokenizer": types.SimpleNamespace(encode=None, pad_token_id=0)}
+        task._initialize_trainer = lambda config, steps: None
+        config = types.SimpleNamespace(data=types.SimpleNamespace(max_prompt_length=8, max_response_length=8))
+        plan = {runner.SAMPLE_BUFFER_PLAN_KEY: section, "global_rounds": 1, "learner_id": 0,
+                "samples_per_group": 16, "model_path": str(tmp_path), "sync": "none"}
+        task.run(config, plan)
+    (name,) = seen
+    assert name == ("install_relay_ports" if relay else "install_buffer_ports")
+    assert seen[name]["group_size"] == 16
 
 
 def test_dropped_groups_are_counted_and_a_high_drop_rate_warns(tmp_path, capsys):

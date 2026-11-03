@@ -1,5 +1,5 @@
 """Convertible pool: node selection (GOAL §7.1 item 14), buffer shards, and the
-remote conversion channel (rl-trainer-start-stop L7.5) with fake nodes."""
+remote conversion channel with fake nodes."""
 
 from __future__ import annotations
 
@@ -411,7 +411,7 @@ class Cuts:
 
 
 def test_scheduler_converts_the_selected_node_trains_and_brings_it_back():
-    """S1 decides on its own from the backlog; the gate picks the node by the rule
+    """The first sampler decides on its own from the backlog; the gate picks the node by the rule
     (n1: fewer in-flight); the node trains two rounds, is stopped by ski rental and
     comes back to rollout with the trained version; n0 keeps generating."""
     files, records, clock = MemFiles(), [], Clock()
@@ -670,7 +670,7 @@ def test_pool_backlog_gate_holds_at_the_cap_and_ignores_a_missing_or_stale_count
 
 def test_pool_backlog_gate_adds_the_groups_appended_since_the_heads_count(tmp_path):
     """The head counts between trainer rounds only; groups the nodes wrote since
-    then count too (GPU run s24-final-conv-20261019d ran past the cap)."""
+    then count too (a GPU run ran past the cap)."""
     from yeto.rl.engine.convertible_remote import PoolBacklogGate, write_pool_backlog
 
     files, clock = LocalStoreFiles(CheckpointStore(str(tmp_path))), Clock()

@@ -1,4 +1,4 @@
-"""The controller loop of the trainer scheduler (rl-trainer-start-stop L5.3b, D1/D8).
+"""The controller loop of the trainer scheduler.
 
 :class:`TrainerLoop` connects the policy to the mechanism. Each :meth:`TrainerLoop.tick`:
 
@@ -11,7 +11,7 @@
    * ``Start``: plan a new incarnation, start it from the newest cut
      (``CutLog.latest``; the lifecycle JOINs and restores it), wait until ready;
    * ``Stop``: ``lifecycle.stop`` (drain, cut with the trigger of the reason --
-     ``STOPPED`` -> ``SCHEDULED`` --, LEAVE with the P5 code, release the cards);
+     ``STOPPED`` -> ``SCHEDULED`` --, LEAVE with its leave code, release the cards);
    * ``Hold`` while ``TRAINING`` with at least one batch: train ``rounds_per_tick``
      rounds and return at the round boundary.
 
@@ -103,7 +103,7 @@ class TrainerLoop:
     ``release_orphan(incarnation)`` gives back the cards of a trainer the dead head
     started (cloud layer). ``needs_first_policy()`` is True while the samplers wait
     for a first policy release (a LoRA sampler serves no adapter before it): the
-    buffer then stays empty and S1 would never start the trainer, so the loop
+    buffer then stays empty and the scheduler would never start the trainer, so the loop
     starts one, and keeps it until it trained a round (no idle stop of a trainer
     that only published the first policy)."""
 
@@ -228,7 +228,7 @@ class TrainerLoop:
         self.started += 1
         try:
             self.handle = self.lifecycle.start(plan, resume_from=resume)
-        except Exception as error:  # noqa: BLE001 - the lifecycle stopped it with its P5 code
+        except Exception as error:  # noqa: BLE001 - the lifecycle stopped it with its leave code
             self.handle = None
             self.consecutive_failures += 1
             self._journal(STOPPED, plan.incarnation, reason=None, error=repr(error))
@@ -291,7 +291,7 @@ class TrainerLoop:
                       released=getattr(handle, "released", None),
                       error=None if handle.error is None else repr(handle.error))
 
-    # ------------------------------------------------------------ journal (D8)
+    # ------------------------------------------------------------ journal
     def _journal(self, event: str, incarnation: int | None, **fields: Any) -> None:
         if self._record is not None:
             self._record(LOOP_KIND, event=event,

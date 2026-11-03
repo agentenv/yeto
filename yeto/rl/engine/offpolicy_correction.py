@@ -2,28 +2,28 @@
 (change ``rl-offpolicy-correction-passthrough``).
 
 yeto does not compute importance weights. A backend adapter maps the neutral
-``CorrectionSpec`` (design D1) to its own settings and returns a
+``CorrectionSpec`` to its own settings and returns a
 :class:`CorrectionMapping`. This module holds what every adapter shares:
 
 * :class:`CorrectionMapping` / :class:`CorrectionWarning` -- the mapped
-  values, the proximal-policy anchor (``prox_anchor``, design D2) and the
-  fields the backend could not map (``correction_config_warning``, D3);
-* :func:`refuse_correction_warnings` -- phase 2 (L6b.2): an unmappable field
+  values, the proximal-policy anchor (``prox_anchor``) and the
+  fields the backend could not map (``correction_config_warning``);
+* :func:`refuse_correction_warnings` -- phase 2: an unmappable field
   or an island difference refuses the launch;
 * :class:`ForbiddenSetting` / :func:`refuse_forbidden` -- backend settings
   that break decoupled PPO (Miles ``--use-rollout-logprobs``, verl
   ``bypass_mode=True``, ...). They are refused at launch with the setting
   named, also in phase 1;
 * :func:`correction_record` / :func:`compare_island_records` -- the manifest
-  and tape record (D8) and the cross-island comparison (D2, D8);
+  and tape record and the cross-island comparison;
 * :func:`start_version` / :func:`start_version_gap` -- the version gap from
-  the start version (D4);
-* :func:`offpolicy_gate_event` -- the per-round drop and truncation event (D6);
+  the start version;
+* :func:`offpolicy_gate_event` -- the per-round drop and truncation event;
 * :func:`cross_version_bounds` / :func:`staleness_correction` -- the
-  observe-only cross-version IS takes its bounds and name from the spec (D7).
+  observe-only cross-version IS takes its bounds and name from the spec.
 
 Phase 1 warned on unmappable settings and on island differences. Phase 2
-(L6b.2) refuses them: the launcher refuses the run manifest's warnings and each
+refuses them: the launcher refuses the run manifest's warnings and each
 island refuses the fields its backend cannot map.
 """
 
@@ -36,17 +36,17 @@ from typing import Any
 from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec
 
 CORRECTION_RECORD_SCHEMA = "yeto-offpolicy-correction-v1"
-# Tape / manifest event names (design D2, D3, D6, D8).
+# Tape / manifest event names.
 CORRECTION_RECORD_EVENT = "rl_offpolicy_correction"
 CORRECTION_CONFIG_WARNING = "correction_config_warning"
 OFFPOLICY_GATE_EVENT = "offpolicy_gate"
 
-# Which weights the backend uses for pi_prox (design D2).
+# Which weights the backend uses for pi_prox.
 PROX_PER_STEP = "per_step"  # recomputed on the weights before each update (Miles)
 PROX_FIRST_LOCAL_STEP = "first_local_step"  # first local step of the cycle (verl)
 PROX_ANCHORS = (PROX_PER_STEP, PROX_FIRST_LOCAL_STEP)
 
-# offpolicy_gate reasons (design D6). Backends may add their own admission drops.
+# offpolicy_gate reasons. Backends may add their own admission drops.
 GATE_KEPT = "kept"
 GATE_GROUP_DROPPED = "group_dropped"  # gap over A_hard at consumption, whole group
 GATE_UNKNOWN_VERSION_DROPPED = "unknown_version_dropped"
@@ -80,7 +80,7 @@ class CorrectionConfigError(ValueError):
 
 @dataclass(frozen=True)
 class CorrectionWarning:
-    """One field a backend cannot map as written (design D3 "warning" rows)."""
+    """One field a backend cannot map as written ("warning" rows)."""
 
     field: str  # neutral field, e.g. "lower"
     backend: str
@@ -126,8 +126,7 @@ class ForbiddenSetting:
     reason: str
 
     def message(self) -> str:
-        return (f"{self.setting} is refused on backend {self.backend!r}: {self.reason} "
-                "(rl-offpolicy-correction-passthrough D2)")
+        return (f"{self.setting} is refused on backend {self.backend!r}: {self.reason}")
 
 
 def refuse_forbidden(present: Iterable[str], forbidden: Iterable[ForbiddenSetting]) -> None:
@@ -155,12 +154,12 @@ def refuse_correction_warnings(warnings: Sequence[Mapping[str, Any]]) -> None:
             lines.append(f"{warning.get('field')} on backend {warning.get('backend')!r}: "
                          f"{warning.get('reason')}")
     raise CorrectionConfigError(
-        "correction settings refused (rl-offpolicy-correction-passthrough L6b.2): "
+        "correction settings refused: "
         + "; ".join(lines))
 
 
 # --------------------------------------------------------------------------
-# manifest / tape record and the cross-island comparison (D2, D8)
+# manifest / tape record and the cross-island comparison
 # --------------------------------------------------------------------------
 
 
@@ -227,7 +226,7 @@ def backend_mapping(spec: AlgorithmSpec, backend: str) -> CorrectionMapping | No
 
 def run_correction_manifest(spec: AlgorithmSpec,
                             island_backends: Mapping[str, str]) -> dict[str, Any]:
-    """The run manifest's ``offpolicy_correction`` section (design D8, L6.5).
+    """The run manifest's ``offpolicy_correction`` section.
 
     ``island_backends``: island name -> backend. Returns the record of every
     island and the ``correction_config_warning`` events: one per field a
@@ -264,7 +263,7 @@ def _comparable(value: Any) -> Any:
 
 
 # --------------------------------------------------------------------------
-# version gap from the start version (D4)
+# version gap from the start version
 # --------------------------------------------------------------------------
 
 
@@ -275,14 +274,14 @@ def start_version(token_versions: Sequence[int | None]) -> int | None:
 
 
 def start_version_gap(trainer_version: int, token_versions: Sequence[int | None]) -> int | None:
-    """Current trainer version minus the trajectory start version (design D4)."""
+    """Current trainer version minus the trajectory start version."""
 
     start = start_version(token_versions)
     return None if start is None else trainer_version - start
 
 
 def oldest_is_start(token_versions: Sequence[int | None]) -> bool | None:
-    """L6.12: whether the oldest token version equals the start version.
+    """Whether the oldest token version equals the start version.
 
     True for a continued trajectory (versions never decrease along the
     response). None when no version is known.
@@ -294,7 +293,7 @@ def oldest_is_start(token_versions: Sequence[int | None]) -> bool | None:
 
 def segments_start_check(records: Iterable[Mapping[str, Any]],
                          key: str = "policy_versions") -> dict[str, int]:
-    """L6.12 on a tape: counts of records whose oldest segment version is (not)
+    """Start-version check on a tape: counts of records whose oldest segment version is (not)
     the first one. ``key`` holds ``[[version, start, end), ...]`` segments
     (``rl_trajectory_reward.policy_versions``)."""
 
@@ -310,7 +309,7 @@ def segments_start_check(records: Iterable[Mapping[str, Any]],
 
 
 # --------------------------------------------------------------------------
-# offpolicy_gate (D6)
+# offpolicy_gate
 # --------------------------------------------------------------------------
 
 
@@ -338,7 +337,7 @@ def offpolicy_gate_event(*, backend: str, counts: Mapping[str, int],
                          dropped_lengths: Mapping[str, Sequence[int]],
                          truncation_by_turn: Mapping[int, tuple[int, int]] | None,
                          granularity: str, **extra: Any) -> dict[str, Any]:
-    """The ``offpolicy_gate`` fields of one round (design D6).
+    """The ``offpolicy_gate`` fields of one round.
 
     ``counts``: reason -> groups. ``dropped_lengths``: reason -> response
     lengths of the dropped trajectories. ``truncation_by_turn``: turn index
@@ -389,10 +388,10 @@ def gate_from_carry_over(fields: dict[str, Any], *, kept: int, backend: str
 
 
 # --------------------------------------------------------------------------
-# cross_version_is: observe-only, bounds and name from the spec (D7)
+# cross_version_is: observe-only, bounds and name from the spec
 # --------------------------------------------------------------------------
 
-# Bounds the observe-only estimate used before D7; kept when the spec has none.
+# Bounds the observe-only estimate used before the spec named them; kept when the spec has none.
 OBSERVE_DEFAULT_BOUNDS = (0.0, 2.0)
 
 
@@ -410,7 +409,7 @@ def cross_version_bounds(correction: CorrectionSpec) -> tuple[float, float]:
 
 
 def staleness_correction(spec: AlgorithmSpec, default: str = "tis") -> str:
-    """The ``StalenessPolicy.correction`` name derived from the spec (D7)."""
+    """The ``StalenessPolicy.correction`` name derived from the spec."""
 
     from yeto.rl.algos.mismatch_correction import selected_corrections
 

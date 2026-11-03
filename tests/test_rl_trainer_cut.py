@@ -1,4 +1,4 @@
-"""rl-infra-spec 4.2/4.3/4.5: MilesTrainerGroup.save_cut/restore_cut and same-shape rebuild (CPU)."""
+"""MilesTrainerGroup.save_cut/restore_cut and same-shape rebuild (CPU)."""
 
 from __future__ import annotations
 
@@ -459,7 +459,7 @@ def test_failure_before_any_write_is_told_apart_from_a_refusal(tmp_path):
 
 
 def test_unknown_live_cursor_fails_closed(tmp_path):
-    """INFRA-E1 f707dc3: data_cursor() is None when the live read fails -> no comparison."""
+    """data_cursor() is None when the live read fails -> no comparison."""
     _, _, actor, trainer = _setup(tmp_path)
 
     class Unknown:

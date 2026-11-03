@@ -1,4 +1,4 @@
-"""The sampler island's loop (rl-trainer-start-stop L4.6).
+"""The sampler island's loop (rl-trainer-start-stop).
 
 A sampler island generates rounds and writes their groups to the durable sample
 buffer (the engine's rollout function does the write). Before each round it:
@@ -37,7 +37,7 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 (the round's caller drops its groups); an error other than
 :class:`~.policy_release.ReleaseNotLoaded` stops the island after the round.
 
-``rl_sampler_policy_loaded`` carries the latency fields of S26 E5: the trainer's
+``rl_sampler_policy_loaded`` carries the release latency fields: the trainer's
 ``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
 ``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
 
@@ -211,7 +211,7 @@ class SamplerLoop:
         waiting_policy_since = None
         while True:
             self._load_newest()
-            behind = getattr(self.follower.releases, "behind", None)  # S29 D9 (spot samplers)
+            behind = getattr(self.follower.releases, "behind", None)  # spot samplers
             on_old_weights = behind is not None and behind(
                 None if self.follower.release is None else self.follower.version)
             if not self.ready() or (self.require_release and self.follower.release is None) or on_old_weights:

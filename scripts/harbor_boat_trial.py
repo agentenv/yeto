@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Run Harbor trials of TB2 tasks on boat sandboxes through the yeto Harbor path (S25 N10.8).
+"""Run Harbor trials of TB2 tasks on boat sandboxes through the yeto Harbor path.
 
 No model endpoint: use ``--agent oracle`` (Harbor runs the task's reference
 solution) or ``--agent nop`` (does nothing; the verifier must fail).  Each
 trial goes AgentTask -> build_trial_config (provider "boat" -> import_path)
 -> Harbor Trial.run() -> TrialVerdict, and appends one JSON line to --out.
 
-    python scripts/harbor_boat_trial.py --tasks-dir ~/work/tb2-data \\
+    python scripts/harbor_boat_trial.py --tasks-dir <tb2-data dir> \\
         --agent oracle --out results.jsonl fix-git regex-log
 """
 

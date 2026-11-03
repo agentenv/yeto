@@ -1,7 +1,7 @@
-"""ModalVolumeStore puts through the container's mount (S27 G-DR).
+"""ModalVolumeStore puts through the container's mount.
 
 A Modal island used to put HF exports and staged policy releases with
-``Volume.batch_upload``, which Modal bills as network egress (S27 G-DE: about
+``Volume.batch_upload``, which Modal bills as network egress (about
 $2.79 per 63 GB export). When the Volume is mounted in the container the store
 now writes through the mount (temporary names, then rename) and commits once,
 under the writer guard; a reader in another container sees the files after its
@@ -142,7 +142,7 @@ def test_volume_mounted_reads_the_mount_table(tmp_path):
 
 def test_volume_mounted_knows_the_modal_container_layout(tmp_path, monkeypatch):
     """In a Modal container the mount path is a symlink to /__modal/volumes/<id>
-    and is in no line of the mount table (S27 G-DR, yeto-gdr-3 diag.json)."""
+    and is in no line of the mount table."""
     volumes = tmp_path.resolve() / "__modal" / "volumes"
     (volumes / "vo-kpBXryWNF9bENmb9AkP2yv").mkdir(parents=True)
     monkeypatch.setattr(mcs, "MODAL_VOLUMES_DIR", str(volumes))
@@ -271,7 +271,7 @@ def test_a_reload_by_another_process_waits_out_the_put(tmp_path, monkeypatch):
 
 
 def test_a_put_is_skipped_by_no_reader_guard_but_the_readers_reload_is(tmp_path):
-    """G-CO (S27-FIXES §2): a reader holds the shared guard while its file is
+    """A reader holds the shared guard while its file is
     open. A put shares it (both are readers of the lock), so a put never waits
     for a reader; a reload waits for both."""
     writer, _ = _two_containers(tmp_path)

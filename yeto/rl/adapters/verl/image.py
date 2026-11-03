@@ -1,6 +1,6 @@
-"""Modal image of the verl engine (rl-verl-backend 1.1, design D10).
+"""Modal image of the verl engine (rl-verl-backend 1.1).
 
-Same recipe S16 measured (VERL-MODAL-CHECK-S16.md section 1): CUDA 13.0 devel
+Recipe: CUDA 13.0 devel
 base + Python 3.12, the pinned fork checked out at ``VERL_COMMIT``, all
 dependencies from the fork's own ``uv.lock`` (``uv sync --frozen
 --all-packages --extra vllm --extra fsdp``), plus yeto's one-hook local patch
@@ -18,7 +18,7 @@ from .pins import (STORE_CLIENT_REQUIREMENTS, VERL_BASE_IMAGE, VERL_COMMIT, VERL
                    VERL_ROOT, VERL_UV_VERSION)
 
 VENV_BIN = f"{VERL_ROOT}/.venv/bin"
-# S27 G-FS: the interpreter the Harbor layer installs into (``image_layer``):
+# The interpreter the Harbor layer installs into (``image_layer``):
 # verl runs out of its own venv, not the image's /usr/local python.
 HARBOR_LAYER_PYTHON = f"{VENV_BIN}/python"
 
@@ -35,7 +35,7 @@ def build_commands(commit: str = VERL_COMMIT) -> list[str]:
 
 
 def store_client_commands() -> list[str]:
-    """An island over an s3:// or oss:// store reads it with boto3 (S25 C3V); its own
+    """An island over an s3:// or oss:// store reads it with boto3; its own
     layer, so the cached verl build above stays valid."""
     return [f"uv pip install --python {VENV_BIN}/python " + " ".join(STORE_CLIENT_REQUIREMENTS)]
 
@@ -50,14 +50,14 @@ def image_env() -> dict[str, str]:
 
 
 def megatron_commands(max_jobs: int = 16) -> list[str]:
-    """S27 G-DC: the Megatron engine layers on top of :func:`build_commands` (variant
+    """The Megatron engine layers on top of :func:`build_commands` (variant
     ``megatron``): the fork's ``megatron`` extra (``--inexact``: the vLLM and FSDP
     packages stay), then causal-conv1d and mamba-ssm built for Hopper (the extra does
     not list them; mamba-ssm needs its CUDA selective-scan module, so the build
     cannot be skipped), then the flash-attn FA4 preview removed (it raises
     AttributeError against the locked cutlass-dsl, Megatron-Core only catches
     ImportError; Hopper does not use it). ``megatron_recipe.image_commands`` (the bare-verl
-    smoke of S27 G-R) returns these same steps."""
+    smoke) returns these same steps."""
     from .pins import CAUSAL_CONV1D_VERSION, MAMBA_SSM_VERSION
 
     env = f"MAX_JOBS={max_jobs} TORCH_CUDA_ARCH_LIST=9.0 CC=gcc CXX=g++"
@@ -74,17 +74,17 @@ def megatron_commands(max_jobs: int = 16) -> list[str]:
 
 
 VARIANTS = (None, "megatron")
-# S27 G-DC: the Megatron island sends the weights from the trainer container to the
+# The Megatron island sends the weights from the trainer container to the
 # rollout container over NCCL (verl's checkpoint engine, cupy NCCL). Without the
 # verbs libraries NCCL cannot use the cluster's RDMA network and falls back to
-# sockets: s27-dc-smoke2's first 63 GB update took 57.7 s (about 1.1 GB/s).
+# sockets: a measured first 63 GB update took 57.7 s (about 1.1 GB/s).
 RDMA_PACKAGES = ("rdma-core", "ibverbs-providers")
 
 
 def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True, variant: str | None = None):
     """The verl image; ``patched=False`` leaves the verl source as the fork ships it
     (the bare-verl arms of the efficiency evaluation, which must not import yeto).
-    ``variant="megatron"`` (``--rl-image verl-megatron-build:<commit>``, S27 G-DC) adds
+    ``variant="megatron"`` (``--rl-image verl-megatron-build:<commit>``) adds
     the Megatron engine layers after the cached FSDP ones and applies the
     ``megatron`` patch profile (``patch_verl``)."""
     if variant not in VARIANTS:

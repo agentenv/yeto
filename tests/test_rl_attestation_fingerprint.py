@@ -3,7 +3,6 @@ runtime fingerprint the island computes (same launch object, same function)."""
 
 from __future__ import annotations
 
-import inspect
 import io
 import json
 import sys
@@ -44,21 +43,52 @@ def test_printed_value_is_the_island_value():
     assert not rl_learner.print_attestation_fingerprint(SimpleNamespace(), launch, out)
 
 
-def test_both_paths_hash_the_same_launch_with_the_same_function():
-    island = inspect.getsource(entry.preflight_stage)  # IR-1: pre-Ray stage of run_ports_island
-    assert "fingerprint = ports_runtime_fingerprint(launch)" in island
-    assert "preflight_stage(" in inspect.getsource(entry.run_ports_island)
-    run = inspect.getsource(rl_learner.run_miles)
-    # printed right after the launch is built and verified, before anything else
-    i_build = run.index("ports_launch = build_ports_launch(")
-    i_verify = run.index("verify_ports_algorithm(args, miles_args, ports_launch)")
-    i_print = run.index("print_attestation_fingerprint(args, ports_launch)")
-    i_run = run.index("_run_ports(")
-    assert i_build < i_verify < i_print < i_run
-    # the island receives this very launch object
-    assert "ports_launch,\n" in run[i_run:i_run + 200]
-    ports = inspect.getsource(rl_learner._run_ports)
-    assert "run_ports_island(" in ports and "launch," in ports
+def test_both_paths_hash_the_same_launch_with_the_same_function(monkeypatch, tmp_path):
+    import pytest
+
+    from test_rl_algorithm_provenance import drive_run_miles
+
+    # island path: run_ports_island -> preflight_stage hashes the launch it was given
+    hashed, staged = [], []
+    monkeypatch.setattr(entry, "ports_runtime_fingerprint",
+                        lambda launch: hashed.append(launch) or "fp")
+    monkeypatch.setattr(entry, "miles_capabilities",
+                        lambda fp, unverified_mechanisms=(): staged.append(fp) or "caps")
+    monkeypatch.setattr(entry, "with_partitioned_serial", lambda caps: caps)
+    monkeypatch.setattr(entry, "execution_profile_for", lambda *a, **k: "profile")
+    monkeypatch.setattr(entry, "expected_algorithm_sha256", lambda a: None)
+    monkeypatch.setattr(entry, "preflight", lambda *a: None)
+    monkeypatch.setattr(entry, "elastic_wiring_for", lambda a, profile, fingerprint: None)
+    monkeypatch.setattr(entry, "resolve_harness_preflight", lambda a: None)
+    from yeto.rl.adapters.miles import state
+
+    monkeypatch.setattr(state, "require_run_plugin", lambda: None)
+    real_stage = entry.preflight_stage
+
+    class Stop(Exception):
+        pass
+
+    def stage(miles_args, launch, algorithm, **kw):
+        real_stage(miles_args, launch, algorithm, **kw)
+        raise Stop  # nothing after the pre-Ray stage runs here
+
+    monkeypatch.setattr(entry, "preflight_stage", stage)
+    launch = SimpleNamespace(argv=["--x"])
+    with pytest.raises(Stop):
+        entry.run_ports_island(SimpleNamespace(), launch, None, learner_id=0,
+                               base_model_revision="r", lora_config_hash="c",
+                               layout_hash=None, yeto_policy_sync=False)
+    assert hashed == [launch] and staged == ["fp"]
+    # CPU entry: printed with the same function as the island
+    hashed.clear()
+    out = io.StringIO()
+    assert rl_learner.print_attestation_fingerprint(
+        SimpleNamespace(rl_print_attestation_fingerprint=True), launch, out)
+    assert hashed == [launch] and json.loads(out.getvalue())["runtime_fingerprint"] == "fp"
+    # run_miles: the launch it prints (after verifying) is the very one the island gets
+    calls = drive_run_miles(tmp_path)["calls"]
+    assert [c["call"] for c in calls] == ["verify", "print", "run_ports"]
+    assert len({c["launch"] for c in calls}) == 1
 
 
 def test_launcher_forwards_the_flag_and_it_is_not_in_the_miles_argv(tmp_path, monkeypatch):

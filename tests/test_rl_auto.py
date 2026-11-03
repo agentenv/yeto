@@ -1,4 +1,4 @@
-"""D2 6.4/6.5 + D1<->1.7 wiring (CPU only)."""
+"""Auto-reconfiguration controller and recommender wiring (CPU only)."""
 import json
 from types import SimpleNamespace as NS
 
@@ -12,8 +12,8 @@ from yeto.rl.engine.recommend import (CandidateEdge, EdgeCost, LoadWindow, Recom
 from yeto.rl.engine.timeline import load_windows
 
 PH = "a" * 64
-EDGE = CandidateEdge("P2", "P4", 2, 4)
-COSTS = {(PH, "P2", "P4"): EdgeCost(PH, "P2", "P4", 30.0, 60.0, 30.0)}
+EDGE = CandidateEdge("cfg2", "cfg4", 2, 4)
+COSTS = {(PH, "cfg2", "cfg4"): EdgeCost(PH, "cfg2", "cfg4", 30.0, 60.0, 30.0)}
 
 
 class Clock:
@@ -26,7 +26,7 @@ class Clock:
 
 class FakeCtl:
     def __init__(self, mode="auto", fail=False):
-        self.journal = NS(epochs=NS(config_epoch=3, config_id="P2"))
+        self.journal = NS(epochs=NS(config_epoch=3, config_id="cfg2"))
         self.profile = NS(contract_hash=PH)
         self.recommend_mode = mode
         self.finalizing = None
@@ -34,7 +34,7 @@ class FakeCtl:
         self.plans, self.requests, self.cancels = [], [], []
         self._status = {}
         self.pending_tx = False
-        self.certified = {("P2", "P4")}
+        self.certified = {("cfg2", "cfg4")}
 
     def plan(self, target, expected_epoch, *, deadline_s=0.0):
         self.plans.append(target)
@@ -99,8 +99,8 @@ def test_steady_imbalance_triggers_via_revalidate_and_plan():
     a, clock = auto()
     c = FakeCtl()
     d = step(a, c, [win(i) for i in range(6)])
-    assert d["action"] == "requested" and d["target"] == "P4"
-    assert c.plans.count("P4") >= 2  # revalidate's plan + request's plan
+    assert d["action"] == "requested" and d["target"] == "cfg4"
+    assert c.plans.count("cfg4") >= 2  # revalidate's plan + request's plan
     assert c.requests[0][0].startswith("auto-")
 
 
@@ -126,10 +126,10 @@ def test_oscillating_regimes_are_rate_limited():
     """Long alternating regimes (each > K windows): switches bounded by dwell/cooldown/rate."""
     a, clock = auto(max_switches=1, switch_window_s=1e9)
     c = FakeCtl()
-    c.certified |= {("P4", "P2")}
-    edges = [EDGE, CandidateEdge("P4", "P2", 4, 2)]
+    c.certified |= {("cfg4", "cfg2")}
+    edges = [EDGE, CandidateEdge("cfg4", "cfg2", 4, 2)]
     costs = dict(COSTS)
-    costs[(PH, "P4", "P2")] = EdgeCost(PH, "P4", "P2", 30.0, 60.0, 30.0)
+    costs[(PH, "cfg4", "cfg2")] = EdgeCost(PH, "cfg4", "cfg2", 30.0, 60.0, 30.0)
     hist = []
     for i in range(200):
         high = (i // 5) % 2 == 0
@@ -173,18 +173,18 @@ def test_no_cost_table_always_holds(tmp_path):
 
 
 def test_uncertified_trainer_edge_not_selectable():
-    att = NS(certified_edges=frozenset({("P2", "P4", "rollout-only")}))
+    att = NS(certified_edges=frozenset({("cfg2", "cfg4", "rollout-only")}))
     cfg = {n: NS(rollout=r, rollout_engine_gpus=1) for n, r in
-           (("P2", 2), ("P4", 4), ("T6R2", 2))}
-    edges = candidate_edges_from_attestation(att, cfg, source="P2")
+           (("cfg2", 2), ("cfg4", 4), ("T6R2", 2))}
+    edges = candidate_edges_from_attestation(att, cfg, source="cfg2")
     assert edges == [EDGE]
     # a cost row for an uncertified trainer edge does not make it a candidate
     a, _ = auto()
     c = FakeCtl()
     costs = dict(COSTS)
-    costs[(PH, "P2", "T6R2")] = EdgeCost(PH, "P2", "T6R2", 0.0, 0.0, 0.0)
+    costs[(PH, "cfg2", "T6R2")] = EdgeCost(PH, "cfg2", "T6R2", 0.0, 0.0, 0.0)
     d = a.step(c, [win(i) for i in range(6)], edges, costs, remaining_budget_s=1e6)
-    assert d["target"] == "P4"
+    assert d["target"] == "cfg4"
     # even if handed an uncertified edge, controller.plan refuses (via revalidate)
     a, _ = auto()
     c = FakeCtl()
@@ -209,10 +209,10 @@ def test_failed_switch_disables_auto_keeps_manual():
 def test_dwell_and_cooldown_after_success():
     a, clock = auto(max_switches=5)
     c = FakeCtl()
-    c.certified |= {("P4", "P8")}
-    e2 = CandidateEdge("P4", "P8", 4, 8)
+    c.certified |= {("cfg4", "cfg8")}
+    e2 = CandidateEdge("cfg4", "cfg8", 4, 8)
     costs = dict(COSTS)
-    costs[(PH, "P4", "P8")] = EdgeCost(PH, "P4", "P8", 1.0, 1.0, 1.0)
+    costs[(PH, "cfg4", "cfg8")] = EdgeCost(PH, "cfg4", "cfg8", 1.0, 1.0, 1.0)
     step(a, c, [win(i) for i in range(6)])
     c.finish()
     ws = [win(i, epoch=4) for i in range(6)]
@@ -235,7 +235,7 @@ def test_load_summary_train_fraction_and_adapter():
 
 
 def test_edge_costs_from_table(tmp_path):
-    row = {"profile_hash": PH, "source": "P2", "target": "P4", "cost_lower_s": 30,
+    row = {"profile_hash": PH, "source": "cfg2", "target": "cfg4", "cost_lower_s": 30,
            "cost_upper_s": 60, "recovery_upper_s": 30, "n": 3, "provenance": "5.7 run x"}
     p = tmp_path / "c.json"
     p.write_text(json.dumps([row]))
@@ -250,7 +250,7 @@ def test_edge_costs_from_table(tmp_path):
 
 # ---------------------------------------------------------------- 6.5 real controller
 def test_mode_switch_does_not_interrupt_transaction(tmp_path):
-    from test_rl_reconfig_e1 import _setup
+    from test_rl_reconfig_controller import _setup
     from yeto.rl.engine.controller import CommandInbox
 
     driver, ctl, *_ = _setup(tmp_path, inbox=True)

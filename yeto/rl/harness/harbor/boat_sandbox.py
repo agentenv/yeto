@@ -1,4 +1,4 @@
-"""One task container inside one boat VM (S25 N10.8); no Harbor import.
+"""One task container inside one boat VM; no Harbor import.
 
 TB2 tasks name a prebuilt image (``[environment].docker_image``) and expect
 to run inside it.  A boat sandbox is a VM with Docker, so this class:
@@ -13,7 +13,7 @@ to run inside it.  A boat sandbox is a VM with Docker, so this class:
 5. deletes the VM in :meth:`close`.  :meth:`close` is idempotent and also runs
    when :meth:`start` fails, so a failed or cancelled trial leaves no VM.
 
-S26 E8: :attr:`BoatSandbox.timings` records how long each start phase took
+:attr:`BoatSandbox.timings` records how long each start phase took
 (``create_s``, ``ready_s``, ``pull_s``, ``run_s``), and a started VM can be
 reused for the next task (:meth:`BoatSandbox.recycle` then
 :meth:`BoatSandbox.reuse`, driven by :class:`~.boat_pool.BoatSandboxPool`).
@@ -116,7 +116,7 @@ class CodexCache:
 
 # On a cache hit the container must end up with the same commands, in the same
 # places, as Harbor's own codex install (agents/installed/codex.py).  Measured
-# on boat (SESSION26/logs/E8/tools-compare-merge2.jsonl): on glibc images
+# on boat: on glibc images
 # Harbor leaves curl and ripgrep on the plain PATH (what a verifier's test.sh
 # sees), while node, npm and codex live only under ``~/.nvm`` and are on PATH
 # only after ``. ~/.nvm/nvm.sh`` (what Harbor's codex run does).  Harbor's
@@ -275,7 +275,7 @@ class BoatSandbox:
         await self._label()
 
     async def _label(self) -> None:
-        """S29 D15: name the sandbox after its run / island / incarnation
+        """Name the sandbox after its run / island / incarnation
         (``boat_labels``) so a successor can delete it if this process dies
         without its exit cleanup.  A failed rename is logged (the TTL stays the
         backstop); a client without ``set_name`` (a test fake) is skipped."""
@@ -367,7 +367,7 @@ class BoatSandbox:
         self.timings["pull_s"] = time.monotonic() - started
         self.image = image
 
-    # -- reuse (S26 E8) -----------------------------------------------------
+    # -- reuse -----------------------------------------------------
 
     async def recycle(self) -> None:
         """Remove the task container and every trace of the task on the VM.

@@ -1,4 +1,4 @@
-"""verl trainer mode ``yeto_separate`` (S27 G-DC; runs inside verl's task runner).
+"""verl trainer mode ``yeto_separate`` (runs inside verl's task runner).
 
 verl's v1 ``separate_async`` trainer with the yeto driver in charge of the
 round loop, for the Megatron island (:mod:`.megatron_engine`):
@@ -16,7 +16,7 @@ round loop, for the Megatron island (:mod:`.megatron_engine`):
   round (``save_model_to_cpu``) only to restore the same weights.
 
 The yeto mismatch criteria are attached right after the old log-probs, as in
-``trainer.YetoSyncTrainer`` (design D7).
+``trainer.YetoSyncTrainer``.
 """
 
 from __future__ import annotations

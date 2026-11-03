@@ -1,4 +1,4 @@
-"""codex-harness interface requests IR-1..IR-4 (INFRA-E1; design R-IR).
+"""codex-harness interface requests IR-1..IR-4.
 
 CPU only: config translation, harness preflight hook, drain blockers with
 harness counts + admission, driver -> pool policy token, 1.7 schema.

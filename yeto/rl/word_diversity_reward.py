@@ -1,7 +1,7 @@
 """Dense word-diversity reward for rehearsals on models that cannot solve the task.
 
 A test reward, not a product reward. The cut 4-layer GLM5.3-Flash rehearsal model
-(S25 T-G1) never answers GSM8K and every response runs to ``max_tokens``: the
+never answers GSM8K and every response runs to ``max_tokens``: the
 GSM8K reward and the length reward are constant within a group, so GRPO
 advantages, the loss gradient and grad_norm are all 0 and the weights never move.
 This reward depends on the text itself, so samples of one prompt differ even when

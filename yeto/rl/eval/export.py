@@ -1,4 +1,4 @@
-"""Training-driver side of the eval island (rl-eval-difficulty-buckets 5.2/5.8, D11.2/D11.4).
+"""Training-driver side of the eval island (rl-eval-difficulty-buckets).
 
 ``StoreEvalExporter`` is assigned to ``IslandDriver.eval_export``. At an eval
 version (round 0, every ``interval`` rounds, the final round) it writes the
@@ -23,7 +23,7 @@ from .store import EvalStore
 POLICY_TENSORS = "policy.safetensors"
 POLICY_IDENTITY = "policy.json"
 STORE_ENV = "YETO_RL_EVAL_STORE"            # local path / Modal Volume mount of the eval store
-INTERVAL_ENV = "YETO_RL_EVAL_STORE_INTERVAL"  # eval interval in rounds (default 10, D3)
+INTERVAL_ENV = "YETO_RL_EVAL_STORE_INTERVAL"  # eval interval in rounds (default 10)
 DEFAULT_INTERVAL = 10
 
 

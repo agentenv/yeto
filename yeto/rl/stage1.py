@@ -1,4 +1,4 @@
-"""Stage 1 of the S25 goal as one plan: GLM5.3-Flash bf16 full-parameter RL on
+"""Stage 1 as one plan: GLM5.3-Flash bf16 full-parameter RL on
 PPU nodes (trainer + SGLang sampler on PPU, head on this server, OSS store).
 
 ``yeto-stage1 plan PLAN.yaml`` expands the plan file and its node inventory
@@ -25,7 +25,7 @@ What the plan expands (all derived from one place, so the names agree):
 * sampler: the engine sampler island's spec file and command
   (``python -m yeto.rl.engine.engine_sampler``), which starts the SGLang TP8
   server of the ``sglang-server`` adapter (:mod:`yeto.rl.adapters.sampler_engines`);
-* re-quantizer: the :mod:`yeto.rl.quant.release` argv (N8.5 MXFP4 RTN), with
+* re-quantizer: the :mod:`yeto.rl.quant.release` argv (MXFP4 RTN), with
   the release directory named after the scheme;
 * store: the run directory on OSS, the OSS staging paths of the weights, and
   how the head reaches the store (``store_access``: through a relay node,
@@ -66,10 +66,10 @@ from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
-VERL_STRATEGY = "fsdp2"  # the only verl actor strategy the adapter runs (S26 E7)
+VERL_STRATEGY = "fsdp2"  # the only verl actor strategy the adapter runs
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 RAY_PORT = 6379
-MEMORY_TOLERANCE = 0.02  # plan memory figures vs the estimator (both 推算)
+MEMORY_TOLERANCE = 0.02  # plan memory figures vs the estimator (both estimated)
 HEAD_ACCESS = ("relay", "direct")  # how the head reaches the store (store_access.head)
 RAY_JOIN_TIMEOUT_S = 600
 
@@ -182,7 +182,7 @@ class Expanded:
 
 
 # Where the run store lives: Alibaba OSS (stage 1 on PPU), or a Modal Volume
-# mounted at the store path in every container (the Modal rehearsal, S25 T-G1),
+# mounted at the store path in every container (the Modal rehearsal),
 # reached through the yeto store hook (resume.STORE_IMPL_ENV).
 STORE_BACKENDS = {"oss": None, "modal-volume": "yeto.cloud.modal_ckpt_store:store_from_env"}
 
@@ -208,7 +208,7 @@ def expected_algorithm_sha256(island_argv: Sequence[str]) -> str:
 
 def store_env(plan: Stage1Plan) -> dict[str, str]:
     """Environment every node needs for the store backend (none for OSS here: the
-    nodes' ossutil/OSS configuration is set up on the node, runbook S4)."""
+    nodes' ossutil/OSS configuration is set up on the node, see the runbook)."""
     backend = str(plan.doc.get("store_backend") or "oss")
     if STORE_BACKENDS.get(backend) is None:
         return {}
@@ -245,7 +245,7 @@ def megatron_layout(miles: Mapping[str, Any], trainer_cards: int, cards_per_node
 def island_optimizer(argv: Sequence[str]) -> dict[str, Any]:
     """The optimizer the Miles island runs for this argv (``adapters.miles.config``):
     a no-sync trainer island in full-parameter mode keeps Miles' distributed
-    optimizer (only the full-parameter sync needs whole FP32 masters, N7.1d);
+    optimizer (only the full-parameter sync needs whole FP32 masters);
     ``--rl-optimizer-offload-fraction`` sets the host share of the Adam state."""
     def value(flag: str, default: str) -> str:
         return argv[argv.index(flag) + 1] if flag in argv else default
@@ -261,7 +261,7 @@ def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: 
                     hf_config: str | Path | None = None, *,
                     island: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Memory of the Miles layout from the estimator (``yeto.rl.fullparam.memory``,
-    framework megatron, N7.1c), all figures "推算".
+    framework megatron), all figures estimated.
 
     ``plan``: the layout as the plan writes it (distributed optimizer, the
     plan's optimizer offload fraction, FP32 master offloaded with the Adam
@@ -351,7 +351,7 @@ def verl_overrides(verl: Mapping[str, Any], trainer_nodes: Sequence[Node], task:
             f"data.max_response_length={int(sampling['max_tokens'])}",
             f"trainer.nnodes={len(trainer_nodes)}",
             f"trainer.n_gpus_per_node={trainer_nodes[0].cards_per_node}",
-            "trainer.device=cuda"]  # PPU runs the CUDA compatibility layer (rl-ssh-node-pool D2)
+            "trainer.device=cuda"]  # PPU runs the CUDA compatibility layer
 
 
 def _sampler_engine(plan: Stage1Plan, node: Node):
@@ -599,7 +599,7 @@ def state_dir_of(plan: Stage1Plan) -> str:
 
 def sampler_spec(plan: Stage1Plan, node: Node, engine: Any, *, slot: DataSlot | None = None) -> dict[str, Any]:
     """The engine sampler island's spec file (``engine_sampler_entry``). ``slot``:
-    the node's slot of the prompt data when several sampler nodes draw (S26 E9.3)."""
+    the node's slot of the prompt data when several sampler nodes draw."""
     sampling, task, quant = plan.section("sampling"), plan.section("task"), plan.section("quant")
     config, options = engine.config, engine.options
     server = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
@@ -618,7 +618,7 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any, *, slot: DataSlot | 
                      "n": int(task["n_samples_per_prompt"]), "seed": int(plan.doc.get("seed", 0)),
                      **{k: float(sampling.get(k, v)) for k, v in NEUTRAL_PENALTIES.items()}},
         "num_rollouts": int(plan.doc["rounds"]),
-        # decision T-GAPS 10-19: one round ahead of the trainer at most (stage 1 runs on-policy)
+        # decision 10-19: one round ahead of the trainer at most (stage 1 runs on-policy)
         "max_backlog_groups": int(task["rollout_batch_size"]),
         "max_prompt_tokens": int(sampling["max_prompt_len"]),
         "base_version": 0, "base_dir": str(config.base_dir),
@@ -634,7 +634,7 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any, *, slot: DataSlot | 
         "checks": {**dict(plan.section("sampler").get("checks") or {}),
                    "expected_expert_matrices": int(quant["expected_expert_matrices"])},
         "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
-        # S26 E6: the rollout quant tier, applied on the node (sampler_engines.quant_tier)
+        # the rollout quant tier, applied on the node (sampler_engines.quant_tier)
         **({"rollout_quant": section} if (section := quant_spec_section(plan)) else {}),
     }
 
@@ -671,7 +671,7 @@ def trainer_island_spec(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node
     """The Miles trainer island as an SSH trainer island (``SshTrainerSpec``):
     Ray on every trainer node, the island entry on node 0 after every node
     joined, the re-quantizer as node 0's side process; one docker container per
-    node. Unset image or device flags show as placeholders (gaps N0.2/N0.2b)."""
+    node. Unset image or device flags show as placeholders (open gaps)."""
     from yeto.launch.ssh_trainer_island import SshTrainerSpec  # noqa: PLC0415
 
     images, rendezvous = plan.section("images"), plan.section("rendezvous")
@@ -720,7 +720,7 @@ def _verl_memory(trainers: Sequence[Node], plan: Stage1Plan, sampling: Mapping[s
 
     verl = _section(plan.section("trainer"), "verl")
     shape = shape_from_hf_config(json.loads(Path(hf_config).read_text()))
-    # yeto's FSDP2 config has no optimizer-only host offload (N7.1); the optimizer
+    # yeto's FSDP2 config has no optimizer-only host offload; the optimizer
     # offload of the plan is estimated as the full CPU offload policy.
     offload = "full" if verl["param_offload"] or verl["optimizer_offload"] else "none"
     train_plan = plan_for_nodes(list(trainers), seq_len=int(sampling["max_prompt_len"]) + int(sampling["max_tokens"]),
@@ -794,7 +794,7 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     model, quant, sampling = plan.section("model"), plan.section("quant"), plan.section("sampling")
     tier = int(plan.doc.get("rollout_quant_tier", 0) or 0)
     if tier and quant.get("scheme") != "bf16":
-        # S26 E6: stage 1 serves the quant section's scheme; a tier on top would quantize twice
+        # stage 1 serves the quant section's scheme; a tier on top would quantize twice
         errors.append(f"rollout_quant_tier {tier} needs quant.scheme bf16 (got {quant.get('scheme')!r})")
     if tier == 2:
         errors.append("rollout_quant_tier 2 is not wired into the stage-1 re-quantizer "
@@ -841,9 +841,9 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
         errors.append("trainer arguments enable FP8/FP4; training is bf16 only (user 10-19, report #1)")
     verl = _section(trainer_cfg, "verl")
     if out.trainer["backend"] == "verl" and str(verl["strategy"]) != VERL_STRATEGY:
-        # S26 E7: the verl Megatron engine (EP) is not wired; EP runs use Miles.
+        # the verl Megatron engine (EP) is not wired; EP runs use Miles.
         errors.append(f"verl.strategy {verl['strategy']!r}: the yeto verl adapter runs {VERL_STRATEGY} "
-                      "only (verl Megatron/EP not supported, S26 E7); use trainer.backend miles for EP")
+                      "only (verl Megatron/EP not supported); use trainer.backend miles for EP")
     if int(verl["fsdp_size"]) not in (0, out.trainer["cards"]) and out.trainer["cards"] % int(verl["fsdp_size"]):
         errors.append(f"verl.fsdp_size {verl['fsdp_size']} does not divide {out.trainer['cards']} cards")
 
@@ -904,21 +904,21 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if verl_max != [f"data.max_response_length={int(sampling['max_tokens'])}"]:
         errors.append("verl data.max_response_length differs from sampling.max_tokens")
 
-    # N7.1d: the island runs the plan's optimizer (megatron_args are the reference).
+    # The island runs the plan's optimizer (megatron_args are the reference).
     runs = island_optimizer(island)
     planned = {"distributed_optimizer": "--use-distributed-optimizer" in margs,
                "optimizer_offload_fraction": float(miles.get("optimizer_offload_fraction") or 0.0)}
     if runs != planned:
         errors.append(f"Miles island optimizer {runs} differs from the plan's megatron_args {planned}")
-    # Memory (N7.1c): the estimator decides; the plan's own figures must agree with it.
+    # Memory: the estimator decides; the plan's own figures must agree with it.
     mem = out.trainer["miles"]["memory_estimate"]["plan"]
-    errors += [f"Miles memory estimate (推算): {p}" for p in mem["problems"]]
+    errors += [f"Miles memory estimate (estimated): {p}" for p in mem["problems"]]
     stated = miles.get("memory_estimate") or {}
     for key, ours in (("weights_grads_gib_per_card", mem["weights_grads_gib_per_card"]),
                       ("host_optimizer_gib_per_node", mem["host_optimizer_gib_per_node"])):
         if key in stated and abs(float(stated[key]) - ours) > MEMORY_TOLERANCE * max(ours, 1.0):
             errors.append(f"trainer.miles.memory_estimate.{key} = {stated[key]} GiB, the estimator gives "
-                          f"{ours} GiB (推算; tolerance {MEMORY_TOLERANCE:.0%})")
+                          f"{ours} GiB (estimated; tolerance {MEMORY_TOLERANCE:.0%})")
     return errors
 
 
@@ -955,9 +955,9 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
     """What the run needs that does not exist yet (each one blocks ``run``)."""
     found: list[str] = []
     if not plan.section("images").get("trainer"):
-        found.append("images.trainer is unset: the PPU trainer image is task N0.2")
+        found.append("images.trainer is unset: the PPU trainer image is still to be built")
     if not plan.section("images").get("docker_device_args"):
-        found.append("images.docker_device_args is empty: the PPU device flags of docker run are N0.2b")
+        found.append("images.docker_device_args is empty: the PPU device flags of docker run are still to be set")
     for module, what in (("yeto.rl.engine.engine_sampler", "sampler island entry (N2 wiring)"),):
         if gap := _module_gap(module, what):
             found.append(gap)
@@ -978,10 +978,10 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
     else:
         if not out.trainer["verl"]["commit"]:
             found.append("trainer.verl.commit is unset (verl pin)")
-        found.append("verl backend: no SSH launch path for the verl trainer island and no cut save path (N7.6 verl)")
+        found.append("verl backend: no SSH launch path for the verl trainer island and no cut save path for verl")
     if out.store["run"].startswith("oss://") and out.store["head_access"]["mode"] == "direct":
         found.append("head on this server cannot reach the intranet-only OSS bucket (PublicEndpointForbidden): "
-                     "set store_access.head: relay (through ppu1) or give a public endpoint/CNAME (runbook N3.5)")
+                     "set store_access.head: relay (through ppu1) or give a public endpoint/CNAME (see the runbook)")
     return found
 
 
@@ -1011,8 +1011,8 @@ def _island_optimizer_gap(out: Expanded) -> str | None:
     if island["fits"]:
         return None
     runs = island_optimizer(out.trainer["miles"]["island_argv"])
-    return (f"Miles island optimizer {runs} does not fit: estimator (推算) {island['device_gib_per_card']} "
-            f"GiB/card > {island['device_usable_gib']} GiB usable (N7.1d)")
+    return (f"Miles island optimizer {runs} does not fit: estimator (estimated) {island['device_gib_per_card']} "
+            f"GiB/card > {island['device_usable_gib']} GiB usable")
 
 
 # --------------------------------------------------------------------- CLI
@@ -1023,7 +1023,7 @@ def run_steps(out: Expanded, *, ssh: Sequence[str] = ("ssh", "-o", "BatchMode=ye
     started (``starter``, default ``subprocess.Popen``) and not waited for; after
     the last step the run waits for the first trainer node's service, whose
     exit is the run's exit (the other services are then left to the operator:
-    runbook S11 stops them)."""
+    the runbook stops them)."""
     starter = starter or (lambda argv, script: subprocess.Popen(  # noqa: S603
         argv, stdin=subprocess.PIPE, text=True))
     hosts = {n.name: n.host for n in out.plan.nodes}

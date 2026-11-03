@@ -1,6 +1,9 @@
-"""--modal-model-volume / --modal-memory-gib / --modal-cpu (S13 FN Modal smoke)."""
+"""--modal-model-volume / --modal-memory-gib / --modal-cpu (FN Modal smoke)."""
 import json
+import os
 import subprocess
+
+import pytest
 
 from yeto.launcher import modal_volume_store_env
 from yeto.modal_runner import HostMemSampler, ModalIslandConfig
@@ -50,6 +53,10 @@ def test_store_env_hit_and_miss(tmp_path):
     assert "hit=\n" in bad.stdout
 
 
+LINUX_PROC = pytest.mark.skipif(not os.path.exists("/proc/meminfo"), reason="needs Linux /proc (the sampler runs in Modal containers)")
+
+
+@LINUX_PROC
 def test_hostmem_sampler(tmp_path):
     s = HostMemSampler(1, str(tmp_path / "h.jsonl"))
     rec = s.sample()
@@ -57,7 +64,7 @@ def test_hostmem_sampler(tmp_path):
 
 
 def test_hostmem_cgroup_v2_and_v1_and_rss(tmp_path):
-    """s19-compaction-g3-20261010b: cgroup_current/peak were null on Modal (gVisor);
+    """cgroup_current/peak were null on Modal (gVisor);
     the sampler now finds the own cgroup (v2, else v1) and adds summed process RSS."""
     from yeto import modal_runner as mr
 
@@ -84,6 +91,8 @@ def test_hostmem_cgroup_v2_and_v1_and_rss(tmp_path):
     proc = tmp_path / "proc"; (proc / "12").mkdir(parents=True); (proc / "self").mkdir()
     (proc / "12" / "status").write_text("Name:\tx\nVmRSS:\t   2048 kB\n")
     assert mr._proc_rss_sum(str(proc)) == 2048 * 1024
+    if not os.path.exists("/proc/meminfo"):
+        return  # the live check below reads this machine's /proc (Linux only)
     rec = mr._host_mem_used_bytes()  # this machine: at least one memory source is non-null
     assert rec["proc_rss_sum"] and (rec["cgroup_current"] is not None or rec["meminfo_used"])
 

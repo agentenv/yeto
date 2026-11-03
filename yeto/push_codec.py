@@ -5,7 +5,7 @@
 rounded to nearest in [-7, 7] as two's-complement nibbles, low nibble first.
 Its reference implementation makes about ten whole-array passes, each with a
 fresh allocation, so a 0.5B-value fragment costs several seconds of one core
-and much more when several pushes share the memory bus (S27 G-AP: 20-45 s
+and much more when several pushes share the memory bus (20-45 s
 per fragment on the Nemotron 30B islands).
 
 :func:`encode_i4_nearest` computes the same bytes in batches of rows that fit

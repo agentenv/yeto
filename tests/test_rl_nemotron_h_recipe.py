@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_s25_g1_stage1mini import REPO
+from test_stage1_mini_rehearsal import REPO
 
 from yeto.rl.adapters.miles.models import nemotron_h
 
@@ -87,7 +87,7 @@ def test_nemotron_h_provider_reaches_the_miles_argv(tmp_path):
     assert _flag(miles, "--moe-router-bias-update-rate") == "0"
     assert "--swiglu" not in miles  # relu2 experts
     assert miles.count("--moe-router-score-function") == 1
-    # S27 G-AN training defaults; no DeepEP on this CPU host -> all-to-all. The
+    # Training defaults; no DeepEP on this CPU host -> all-to-all. The
     # plan's own --rl-activation-recompute keeps full recompute.
     assert args.rl_activation_recompute and _flag(miles, "--recompute-granularity") == "full"
     assert "--recompute-modules" not in miles
@@ -247,7 +247,7 @@ def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
     assert "--colocate" not in miles and "--optimizer-cpu-offload" not in miles
     # Megatron's moe_freq_type evaluates a bracketed pattern: one mask entry per layer.
     # Its _eval_pattern allows only digits, commas, brackets, +, * and parentheses (no
-    # spaces): s27-aw-a failed on "[0, 1, ...]" (argument --moe-layer-freq: invalid value).
+    # spaces): a GPU run failed on "[0, 1, ...]" (argument --moe-layer-freq: invalid value).
     freq = _flag(miles, "--moe-layer-freq")
     assert not re.search(r"[^,\d\[\]\(\)\+\*]", freq), freq
     assert ast.literal_eval(freq) == [int(c == "E") for c in pattern]

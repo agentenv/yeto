@@ -1,4 +1,4 @@
-"""CPU fakes for the trainer lifecycle (rl-trainer-start-stop L3.1).
+"""CPU fakes for the trainer lifecycle.
 
 * :class:`FakeMembership` records JOIN / LEAVE on a tape;
 * :class:`CuttableFakeTrainer` is the fake trainer with the ``CuttableTrainer``
@@ -98,7 +98,7 @@ class FakeRoundCuts:
     def __init__(self, root: str | os.PathLike[str], *,
                  watermark: Callable[[], int | None] | None = None) -> None:
         self.store = CheckpointStore(root)
-        self.watermark = watermark  # the durable buffer's consumed watermark (D4)
+        self.watermark = watermark  # the durable buffer's consumed watermark
         self.root = Path(root)
         self.saved: list[dict[str, Any]] = []
         self.resumed: dict[str, Any] | None = None
@@ -185,7 +185,7 @@ class BufferFedFakeRollout(FakeRolloutPool):
 
 class FakeSampler:
     """A sampler that appends to the durable buffer with the version it loaded.
-    ``load`` takes the newest published version (D5); while no trainer runs,
+    ``load`` takes the newest published version; while no trainer runs,
     ``latest_published`` returns None and the sampler keeps its version."""
 
     def __init__(self, buffer: Any, latest_published: Callable[[], int | None], *, name: str = "s0") -> None:

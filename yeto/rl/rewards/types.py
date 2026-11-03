@@ -1,6 +1,6 @@
 """Framework-neutral trajectory, reward result and filter decision (decoupling 3.1).
 
-Spec ``rl-neutral-rewards-harness`` / design D5: the fields are the union of
+Spec ``rl-neutral-rewards-harness``: the fields are the union of
 what today's Miles samples carry, so a backend adapter can convert a sample to
 a :class:`Trajectory` and apply a :class:`RewardResult` / :class:`FilterDecision`
 back without loss.  Neutral reward functions and group filters read and write

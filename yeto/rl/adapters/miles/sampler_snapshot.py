@@ -1,4 +1,4 @@
-"""Opt-in SGLang snapshot mode for sampler engines (rl-trainer-cold-start-cost L8.2, design D5).
+"""Opt-in SGLang snapshot mode for sampler engines.
 
 Snapshot mode starts the rollout (sampler) SGLang engines with
 ``enable_memory_saver`` and ``enable_weights_cpu_backup``, the two flags a GPU
@@ -8,7 +8,7 @@ The mode is gated: it is refused at launch unless ``sampler_snapshot_compat.json
 (shipped with the package, so with the image) holds a ``pass`` record for the
 pinned SGLang commit AND the weight-update path the island uses. A record is
 written only after a GPU check compared text and weight checksums with the flags
-on and off across RL weight updates (L8.1: ``tensor``; L8.2: ``distributed``).
+on and off across RL weight updates (``tensor`` or ``distributed``).
 
 Miles does not expose ``--sglang-enable-memory-saver`` (it derives the field from
 ``--offload-rollout``), so the flags reach the engines as per-group overrides in
@@ -86,7 +86,7 @@ def require_recorded_pass(
             )
     raise SamplerSnapshotRefused(
         "sampler snapshot mode refused: no recorded pass of the SGLang snapshot "
-        "compatibility check (flags on vs off across RL weight updates, design D5) for "
+        "compatibility check (flags on vs off across RL weight updates) for "
         f"SGLang {sglang_commit[:9]} on the {update_path!r} weight-update path "
         f"(see yeto/rl/adapters/miles/{COMPAT_FILE})"
     )

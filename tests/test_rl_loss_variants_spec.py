@@ -376,7 +376,7 @@ def test_fake_driver_gmpo_correction_mask_does_not_relax(tmp_path):
 
 @pytest.mark.parametrize("variant", lv.VARIANTS)
 def test_miles_adapter_opens_variants_on_declared_pin(variant):
-    # rl-algo-supplement 4.2/4.3 G1 passed on Miles 64b591a4b (MILES_DECLARED_PINS)
+    # rl-algo-supplement 4.2/4.3 GPU check passed on Miles 64b591a4b (MILES_DECLARED_PINS)
     caps = miles_capabilities(FP)
     assert variant in caps.losses
     caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",

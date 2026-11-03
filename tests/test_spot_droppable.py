@@ -37,7 +37,7 @@ def test_no_roles_is_a_noop():
 
 
 def test_fixed_roster_refused_with_spec_reason():
-    with pytest.raises(ValueError, match="可丢弃岛只在岛池下支持"):
+    with pytest.raises(ValueError, match="droppable islands need island pool options"):
         dr.admit(_args(rl_sync_island_lease_s=None), ["nebius", "aws", "aws"])
 
 
@@ -193,7 +193,7 @@ def _delta(island, led):
 
 
 def test_all_droppable_reclaimed_anchor_keeps_rounds_going():
-    """Python mirror of the syncer ledger (the Rust syncer applies the same P4 rule)."""
+    """Python mirror of the syncer ledger (the Rust syncer applies the same rule)."""
     led = CrossIslandLedger(mode="elastic", theta=0.75, quorum_min=1)
     for i in ("anchor", "d1", "d2"):
         led.join(i, now=0.0)

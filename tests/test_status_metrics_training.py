@@ -1,4 +1,4 @@
-"""fleet-dashboard 1.5: `yeto status --tape` shows training fields; missing -> 无数据."""
+"""`yeto status --tape` shows training fields; missing -> n/a."""
 
 from pathlib import Path
 
@@ -17,9 +17,9 @@ def test_ports_learner_tape_shows_missing_fields_as_no_data():
     lines = render_tape_summary(FX / "s9-m4x1" / "rl-island-0.jsonl")
     train = [line for line in lines if line.startswith("TRAIN")]
     assert train == [
-        "TRAIN island=0 round=2 train_step=无数据 reward=0.4688 loss=无数据 pg_loss=无数据 "
-        "grad_norm=0.5178 kl=无数据 entropy=无数据 clipfrac=无数据 lr=8.75e-06 adv_mean=无数据 "
-        "resp_len=无数据 trunc=无数据 tok/s=无数据"
+        "TRAIN island=0 round=2 train_step=n/a reward=0.4688 loss=n/a pg_loss=n/a "
+        "grad_norm=0.5178 kl=n/a entropy=n/a clipfrac=n/a lr=8.75e-06 adv_mean=n/a "
+        "resp_len=n/a trunc=n/a tok/s=n/a"
     ]
 
 

@@ -67,7 +67,7 @@ def _paths(args) -> list[str]:
 
 
 def _attach_compare(reducer, args) -> None:
-    """agentic-rollout-utilization 7.6: load the --compare run into its own reducer."""
+    """load the --compare run into its own reducer."""
     if not getattr(args, "compare", None):
         return
     from .sources import load_all

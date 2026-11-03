@@ -1,4 +1,4 @@
-"""S27 G-EM: the relay names each sample's cut, and the clients end with the run.
+"""The relay names each sample's cut, and the clients end with the run.
 
 * a relay item carries the cut of every engine version in its group; the
   trainer's pump writes each sample's cut into its metadata and rejects an item

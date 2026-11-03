@@ -1,5 +1,5 @@
 #!/bin/sh
-# Engine image entrypoint (S25 N0.2): check the image against its version lock,
+# Engine image entrypoint: check the image against its version lock,
 # then run the command. A failed check stops the container (exit 1) before any
 # engine starts. The report is kept at /tmp/yeto-image-assert.json.
 set -e

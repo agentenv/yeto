@@ -1,4 +1,4 @@
-"""yeto down deletes a Nebius run's leaked sky security groups (S19 real-spot A2:
+"""yeto down deletes a Nebius run's leaked sky security groups (seen on a real spot run:
 quota 128 hit by 125 leaked groups)."""
 
 from __future__ import annotations

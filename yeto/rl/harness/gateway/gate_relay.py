@@ -1,4 +1,4 @@
-"""HTTP relay that holds an agent's model calls at a closed :class:`~yeto.rl.agentic.suspend.TurnGate` (S26 E9.5).
+"""HTTP relay that holds an agent's model calls at a closed :class:`~yeto.rl.agentic.suspend.TurnGate`.
 
 On Miles the Harbor agent talks to Miles' session server directly, so yeto
 has no place to hold a model call between two rounds.  :class:`GateRelay`

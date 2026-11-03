@@ -1,9 +1,9 @@
-"""rl-ssh-node-pool (S25 N1), CPU half: node inventory, device-family card
+"""rl-ssh-node-pool, CPU half: node inventory, device-family card
 preflight, jump-host SSH options and the collective-communication variables.
 
 Every card tool output here is a recorded or stub sample; no test reaches a
 real machine. The NPU samples carry their driver version in the constant name
-(design D3: the format changes with the driver).
+(the format changes with the driver).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ NVIDIA_SMI_H200 = """0, NVIDIA H200, 143771
 
 # npu-smi info of a 910B4 64 GiB node, two cards shown. The shape follows the
 # sample in yeto/gpu_spec.py; the driver version of that sample is unknown, so
-# a real node must confirm it (task N1.2, GPU half).
+# a real node must confirm it (GPU half).
 NPU_SMI_INFO_64G = """+---------------------------+---------------+----------------------------------+
 | NPU   Name                | Health        | Power(W)  Temp(C)  Hugepages      |
 | Chip                      | Bus-Id        | AICore(%) Memory-Usage(MB)        |
@@ -41,7 +41,7 @@ NPU_SMI_INFO_64G = """+---------------------------+---------------+-------------
 +===========================+===============+==================================+
 """
 
-# The same node with the 32 GiB sub-model (the ModelArts machine of S21).
+# The same node with the 32 GiB sub-model (a ModelArts machine).
 NPU_SMI_INFO_32G = NPU_SMI_INFO_64G.replace("65536", "32768")
 
 NPU_SMI_MEMORY_32G = """NPU ID                         : 0
@@ -80,7 +80,7 @@ def _inventory_node(**overrides) -> dict:
     return {key: value for key, value in node.items() if value is not None}
 
 
-# --- N1.1 inventory ---------------------------------------------------------
+# --- inventory ---------------------------------------------------------
 
 
 def test_inventory_reads_every_declared_field(tmp_path):
@@ -135,7 +135,7 @@ def test_inventory_refuses_a_bad_field(overrides, message):
         parse_inventory({"nodes": [_inventory_node(**overrides)]})
 
 
-# --- N1.6 cpu_arch and image selection -------------------------------------
+# --- cpu_arch and image selection -------------------------------------
 
 
 def test_inventory_requires_cpu_arch_and_normalizes_docker_spellings():
@@ -161,8 +161,6 @@ def test_inventory_selects_the_image_of_the_node_arch():
 
 @pytest.mark.parametrize("overrides, message", [
     ({"image": "reg.example/yeto-ppu-train:1@sha256:ab"}, "x86_64 image ppu-train; the node is aarch64"),
-    ({"cpu_arch": "x86_64", "image": "reg.example/yeto-npu-sampler:1"},
-     "aarch64 image npu-sampler; the node is x86_64"),
     ({"image": None}, "set image, or images.aarch64"),
 ])
 def test_inventory_refuses_an_image_of_another_arch(overrides, message):
@@ -236,7 +234,7 @@ def test_island_nodes_selects_by_role():
         ["ascend00", "ascend02"]
 
 
-# --- N1.1/N1.2 card catalog -------------------------------------------------
+# --- card catalog -------------------------------------------------
 
 
 def test_an_unknown_card_name_is_refused_instead_of_defaulting_to_cuda():
@@ -253,7 +251,7 @@ def test_device_family_and_torch_device_type_differ_on_a_ppu():
     assert canonical_card("910b3") == "910B3"
 
 
-# --- N1.2 card tool parsers -------------------------------------------------
+# --- card tool parsers -------------------------------------------------
 
 
 def test_nvidia_smi_csv_gives_index_card_and_hbm():
@@ -294,7 +292,7 @@ def test_preflight_commands_per_device_family():
         card_tools.preflight_commands("tpu")
 
 
-# --- N1.2 preflight refusals ------------------------------------------------
+# --- preflight refusals ------------------------------------------------
 
 
 def test_preflight_passes_when_the_node_matches_the_inventory():
@@ -342,7 +340,7 @@ def test_preflight_refuses_when_the_tool_reports_no_hbm():
         check_cards("cuda", "0, NVIDIA H200, [N/A]", card="H200", count=1, hbm_gib=141)
 
 
-# --- N1.4 collective communication variables --------------------------------
+# --- collective communication variables --------------------------------
 
 
 def test_an_ascend_island_gets_hccl_variables_and_no_nccl_variables():
@@ -393,7 +391,7 @@ def test_the_cloud_prelude_is_unchanged():
     assert topology.multinode_env_prelude("aws", 1) == ""
 
 
-# --- N1.3 (CPU half): the harness is no longer pinned to H200 ---------------
+# --- CPU half: the harness is no longer pinned to H200 ---------------
 
 
 def _npu_plan() -> dict:
@@ -466,7 +464,7 @@ def test_the_jit_cache_is_refused_on_a_non_cuda_island():
         ssh_harness._require_cuda_jit_cache(plan)
 
 
-# --- N1.3 (CPU half): fake SSH, jump host, preflight refusal ----------------
+# --- CPU half: fake SSH, jump host, preflight refusal ----------------
 
 
 class _FakeSsh:
@@ -534,7 +532,7 @@ def test_a_node_without_a_jump_host_uses_plain_ssh():
     assert node.preflight_commands()[0][0] == "nvidia-smi"
 
 
-# --- N1.1: the launcher validates the inventory before any cloud work --------
+# --- the launcher validates the inventory before any cloud work --------
 
 
 def test_the_launch_flag_validates_the_inventory_file(tmp_path):

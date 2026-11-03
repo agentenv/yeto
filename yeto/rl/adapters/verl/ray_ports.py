@@ -1,4 +1,4 @@
-"""Master ports of verl's Ray worker groups without the bind-and-release race (S27 G-DC).
+"""Master ports of verl's Ray worker groups without the bind-and-release race.
 
 verl gives every ``RayWorkerGroup`` its torch.distributed master port from
 ``verl.single_controller.ray.base.get_master_addr_port``: bind port 0, read the
@@ -7,7 +7,7 @@ standalone vLLM replicas at once (``LLMServerManager.create`` gathers
 ``init_standalone``), each with its own checkpoint-engine worker group, so
 several groups on one node ask at the same time. On Modal the kernel handed
 the same released port to two of them; the second ``TCPStore`` failed with
-EADDRINUSE (s27-dc-smoke1, port 52589, 2026-10-25).
+EADDRINUSE.
 
 :func:`pick_free_port` draws the port at random from a range below Linux's
 ephemeral range (so the kernel's own port-0 binds never land there) and keeps

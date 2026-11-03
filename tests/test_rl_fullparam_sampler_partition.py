@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from test_s25_g1_stage1mini import _MINI_TEXT_CONFIG, REPO, glm5_next
+from test_stage1_mini_rehearsal import _MINI_TEXT_CONFIG, REPO, glm5_next
 
 from yeto.rl.engine.engine_sampler import _completion_version
 from yeto.rl.engine.policy_release import FULL, PolicyFollower, PolicyReleaseStore
@@ -43,7 +43,7 @@ def test_full_parameter_sampler_refuses_a_separate_rollout_count_and_uneven_engi
 
 
 def test_full_parameter_sampler_island_translates_to_an_engine_only_miles_argv(tmp_path):
-    """The island path up to the Miles argv: the S26 E5 one-card sampler was refused here."""
+    """The island path up to the Miles argv: a one-card sampler used to be refused here."""
     from yeto.rl.adapters.miles.island_entry import build_ports_launch, parse_args
     from yeto.rl.engine.run_config import resolve_rl_run_config
     from yeto.rl.stage1 import expand, load_plan

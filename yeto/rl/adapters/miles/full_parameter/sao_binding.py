@@ -2,7 +2,7 @@
 
 ``yeto.rl.sao_streaming_runtime`` loads and checks the engine-neutral
 contract.  This module turns its two role contracts into the one two-role
-:class:`FullParameterSyncConfig` (actor and critic, P0-D8), checks the parsed
+:class:`FullParameterSyncConfig` (actor and critic), checks the parsed
 Miles namespace against the contract and creates the private evidence
 directory.  The island's ``IslandDriver`` owns the loop, rollout and
 publication, so nothing here installs a Miles training-loop callback.
@@ -67,7 +67,7 @@ def sao_sync_config(
 ) -> FullParameterSyncConfig:
     """The two-role (actor, critic) streaming sync the contract describes.
 
-    Both role sessions bind the island's algorithm spec hash (P0-4.8).
+    Both role sessions bind the island's algorithm spec hash.
     """
 
     return FullParameterSyncConfig(

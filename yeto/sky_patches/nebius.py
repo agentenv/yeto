@@ -1,7 +1,7 @@
 """Runtime fix for SkyPilot's Nebius provisioner (sky/provision/nebius/utils.py).
 
 SkyPilot 0.13.0 asks for a preemptible VM with ``InstanceSpec(preemptible=...)``
-only. The Nebius API now refuses that (seen 2026-10-10, S19 real-spot drill):
+only. The Nebius API now refuses that (seen in a real spot drill):
 ``INVALID_ARGUMENT: spec.pricing_model - pricing model must be specified for a
 preemptible instance``. The SDK's ``InstanceSpec`` has a ``pricing_model`` oneof:
 ``on_demand`` | ``follows_spot_price`` | ``spot_pricing_policy``.

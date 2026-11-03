@@ -1,4 +1,4 @@
-"""Gate between rollout quantization tiers (S26 E6): a quantized sampler against BF16.
+"""Gate between rollout quantization tiers: a quantized sampler against BF16.
 
 A tier may replace the previous one only when, on one fixed prompt set, its
 samples stay close to what the BF16 policy would assign them. For each

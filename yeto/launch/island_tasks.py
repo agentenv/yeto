@@ -46,7 +46,7 @@ def island_task_plan(args):
 
 
 def _check_island_tasks(args, eval_interval: int | None) -> None:
-    """``--rl-island-tasks``: refuse a bad spec before any cloud call (P3-Q1..Q3),
+    """``--rl-island-tasks``: refuse a bad spec before any cloud call,
     then cache the plan on ``args``.
 
     Rewrites the flag to its inline form so a JSON-file spec reaches the head.
@@ -70,7 +70,7 @@ def _check_island_tasks(args, eval_interval: int | None) -> None:
     if getattr(args, "external_learners", 0):
         raise ValueError(f"{flag} does not cover --external-learners")
     if eval_interval is not None:
-        # P3-Q3: eval uses the full set on the eval island only.
+        # Eval uses the full set on the eval island only.
         raise ValueError(f"{flag}: training islands do not run eval; drop "
                          f"{rl_option('rl_eval_interval', CLI)} and evaluate on the eval island")
     spec = parse_island_tasks(args.rl_island_tasks, flag=flag)
@@ -103,7 +103,7 @@ def _check_data_split(args) -> None:
     """``--rl-data-split``: plan which rows each training island reads, refuse a
     request the launch cannot honour, print the plan and cache it on ``args``.
 
-    Several islands that read the same rows get a loud warning (P0): every round
+    Several islands that read the same rows get a loud warning: every round
     they train the same prompts."""
 
     from ..rl.engine.data_split import DATA_SPLIT_FLAG
@@ -129,7 +129,7 @@ def _check_data_split(args) -> None:
 
 
 def _check_dispense(args, plan) -> None:
-    """S27 P2: refuse what the dispenser does not cover yet (fail closed)."""
+    """Refuse what the dispenser does not cover yet (fail closed)."""
 
     from ..rl.engine.data_split import DATA_SPLIT_FLAG
     from .syncer import syncer_shard_count
@@ -148,7 +148,7 @@ def _check_dispense(args, plan) -> None:
         raise ValueError("--rl-data-passes must be >= 1")
     if passes is not None and not plan.islands:
         raise ValueError("--rl-data-passes: sampler islands do not end on the dispenser's data end "
-                         "yet (S27 P4); give the samplers their rounds instead")
+                         "yet; give the samplers their rounds instead")
     if passes is not None and _strict_roster(args):
         raise ValueError("--rl-data-passes needs islands that may end on their own when the data "
                          "ends (asynchronous rounds or an island pool); a strict roster trains "
@@ -159,7 +159,7 @@ def _check_dispense(args, plan) -> None:
         raise ValueError("--rl-dispense-lease-s must be positive")
     if int(getattr(args, "rl_dispense_prefetch_blocks", 2)) < 1:
         raise ValueError("--rl-dispense-prefetch-blocks must be >= 1")
-    joins = bool(getattr(args, "rl_dispense_addr", None))  # a sampler launch of its own (P4)
+    joins = bool(getattr(args, "rl_dispense_addr", None))  # a sampler launch of its own
     if ((getattr(args, "rl_single_island_no_sync", False) and not joins)
             or getattr(args, "rl_elastic", False)):
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense needs a synced launch (the dispenser runs "
@@ -172,7 +172,7 @@ def _check_dispense(args, plan) -> None:
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense does not cover Miles fully_async rollouts "
                          "(--rl-max-policy-age without --rl-rollout-ahead) yet")
     for name in ("rl_cut_every", "rl_cut_auto_mtbf_s"):
-        # S27 P4: a buffer trainer's cut keeps its buffer position, not a data position
+        # A buffer trainer's cut keeps its buffer position, not a data position
         if plan.islands and getattr(args, name, None) is not None:
             raise ValueError(f"{DATA_SPLIT_FLAG} dispense and island round cuts "
                              f"({rl_option(name, CLI)}) exclude each other: the dispenser, not the "
@@ -181,7 +181,7 @@ def _check_dispense(args, plan) -> None:
 
     backends = island_backends(args)
     if plan.islands and len(backends) > 1:
-        # S27 G-EU: a Miles island and a verl island write different prompt files, so the
+        # A Miles island and a verl island write different prompt files, so the
         # dispenser would refuse the second fingerprint (sampler islands claim through the
         # engine-neutral DispensedPrompts / the Miles data source either way)
         raise ValueError(f"{DATA_SPLIT_FLAG} dispense: the training islands run different backends "
@@ -224,7 +224,7 @@ def _data_rows(args):
 
 
 def _check_streams(args, plan) -> None:
-    """S27 P3: ``--data-mix`` and ``--rl-island-task-labels`` need the
+    """``--data-mix`` and ``--rl-island-task-labels`` need the
     dispenser; every row label must be taken by an island of the launch and
     every listed label must be on a row (fail before any cloud spend)."""
 
@@ -282,7 +282,7 @@ def _check_streams(args, plan) -> None:
 
 
 def sampler_dispense_island(args, plan) -> int | None:
-    """S27 P4: the island index of a sampler island that claims rows (``args``:
+    """The island index of a sampler island that claims rows (``args``:
     the island args), or None. A synced group's sampler carries it
     (``sample_roles``: ``rl_sampler_dispense_island``); a sampler launch of its
     own is its island 0."""
@@ -309,7 +309,7 @@ def sampler_dispense_addr(args) -> str:
 
 
 def stream_island_flags(args, island: int) -> str:
-    """The island flags of the dispenser's streams (S27 P3): the mix weights and
+    """The island flags of the dispenser's streams: the mix weights and
     the label split for every claiming island, its own labels when it has some."""
 
     flags = ""
@@ -385,7 +385,7 @@ def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
         island = learner_id if both else sampler_dispense_island(args, split)
         if split.dispense and (both or island is not None):
             flags += f" {rl_option('rl_data_dispense')}"
-            if not both:  # S27 P4: a sampler names its dispenser (it has no --syncer)
+            if not both:  # A sampler names its dispenser (it has no --syncer)
                 flags += f" {rl_option('rl_dispense_addr')} {sampler_dispense_addr(args)}"
             prefetch = int(getattr(args, "rl_dispense_prefetch_blocks", 2))
             if prefetch != 2:

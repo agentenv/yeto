@@ -1,4 +1,4 @@
-"""The verl full-parameter layout of a model, before any GPU work (S27 G-DN).
+"""The verl full-parameter layout of a model, before any GPU work.
 
 ``yeto launch --rl-backend verl --rl-sync-preset full-parameter`` needs the
 island's fragment layout hash (``--rl-parameter-layout-sha256``) and fragment

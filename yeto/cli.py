@@ -87,9 +87,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
 
     _add_preflight_args(p)  # launch-preflight-guards 1.2 / 2.4 / 3.1
     rl = p.add_argument_group("Miles RL")
-    add_rl_flags(rl, CLI)  # yeto/rl/engine/run_flags.py is the single definition (P0 4.7)
+    add_rl_flags(rl, CLI)  # yeto/rl/engine/run_flags.py is the single definition
     from yeto.rl.engine import backends as _rl_backends
-    _rl_backends.module("elastic_hook", _rl_backends.DEFAULT_BACKEND).add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
+    _rl_backends.module("elastic_hook", _rl_backends.DEFAULT_BACKEND).add_recommend_arguments(rl)  # elastic hook
     p.add_argument(
         "--output",
         default=None,
@@ -111,7 +111,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--data-mix",
         default=None,
         metavar="SPEC",
-        help="RL with --rl-data-split dispense (S27 P3): several prompt data sets "
+        help="RL with --rl-data-split dispense: several prompt data sets "
         "with weights, 'a.jsonl=0.7,org/ds@rev=0.3' (local paths or HF ids with "
         "an optional @revision). The launcher writes them into one prompt file "
         "(the run's --data); the dispenser interleaves them so that any prefix of "
@@ -201,7 +201,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
     tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
     tune.add_argument("--context-parallel", type=int, default=1,
-                      help="RL ports (Miles) trainer: context-parallel degree (S27 G-AC long sequences); "
+                      help="RL ports (Miles) trainer: context-parallel degree (for long sequences); "
                            "the trainer world is TP x PP x CP x DP")
     tune.add_argument(
         "--train-on",
@@ -372,7 +372,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
 
     sync = p.add_argument_group("async sync")
     sync.add_argument("--total-steps", type=int, default=64,
-                      help="outer steps T (one fragment each). RL: the islands' --global-rounds, i.e. sync rounds; with --rl-sync-preset full-parameter (asynchronous rounds) each island trains T x --fragments local steps (S29 D7)")
+                      help="outer steps T (one fragment each). RL: the islands' --global-rounds, i.e. sync rounds; with --rl-sync-preset full-parameter (asynchronous rounds) each island trains T x --fragments local steps")
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(
@@ -1217,7 +1217,7 @@ def cmd_launch(args) -> int:
             file=sys.stderr,
         )
         return 1
-    try:  # S27 P3: --data-mix becomes one prompt file before anything pins --data
+    try:  # --data-mix becomes one prompt file before anything pins --data
         from .launch.data_mix import materialize_data_mix
 
         materialize_data_mix(args)
@@ -1637,7 +1637,7 @@ def cmd_launch_head(args) -> int:
     _record_head_result(name, head_cluster, job_id)
     from .launch.dispense_evidence import pull_from_head
 
-    pull_from_head(args, head_cluster, runs.run_dir(name))  # S27 P2 (no-op without it)
+    pull_from_head(args, head_cluster, runs.run_dir(name))  # no-op without a head dispenser
     print(
         f"[yeto] head job ended; the head cluster {head_cluster} is still up — "
         f"tear everything down with: yeto down {name}"
@@ -1659,7 +1659,7 @@ def cmd_head(payload: str) -> int:
 
         args.rl_sao_manifest = load_sao_streaming_manifest(args.rl_sao_contracts)
     # Same count launcher.run uses: the synced islands (a synced group's sampler
-    # islands do not join the syncer, S26 e9b-sync-a) plus --external-learners
+    # islands do not join the syncer) plus --external-learners
     # seats; without the seats the syncer rejects every manual joiner.
     from .rl.engine import sample_roles
 
@@ -1891,7 +1891,7 @@ HEAD_DOWN_ATTEMPTS = 3
 HEAD_DOWN_RETRY_S = 20.0
 # The head's sky lives in the interpreter its setup installed into: HEAD_VENV
 # when the stock Python was < 3.11 (Nebius: miniconda 3.10, which has NO sky —
-# S19: "No module named 'sky'" on every Nebius head down), else miniconda/system.
+# "No module named 'sky'" on every Nebius head down), else miniconda/system.
 HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$(for p in ~/yeto-head-py/bin/python3 ~/miniconda3/bin/python3; do [ -x "$p" ] && "$p" -c 'import sky' 2>/dev/null && {{ echo "$p"; break; }}; done) && PY=${{PY:-python3}} && "$PY" - <<'PY'
 import sky
 from yeto.launcher import terminate_and_verify
@@ -1970,8 +1970,8 @@ def _down_and_verify(cluster: str, num_nodes: int = 1) -> bool:
     The probe is captured before the down (down deletes the record it needs).
     Without a probe we fall back to sky's own answer: a clean down or "does
     not exist" counts, any other error does not. A multi-node island
-    (``num_nodes`` > 1) takes the launcher's per-node confirmation path
-    (rl-multinode-island D10): every node instance must be confirmed gone at
+    (``num_nodes`` > 1) takes the launcher's per-node confirmation path:
+    every node instance must be confirmed gone at
     the cloud, sky's own answer is never trusted for more than one node."""
     from .launcher import terminate_and_verify
 

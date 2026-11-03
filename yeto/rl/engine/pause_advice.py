@@ -1,4 +1,4 @@
-"""PauseAdvice and its merge with the local pause decision (f-design §1.5, gap G3).
+"""PauseAdvice and its merge with the local pause decision.
 
 Advice can only tighten: any live veto refuses; the budget is the minimum of
 the local budget and all live advice budgets; expired advice does not exist;
@@ -48,7 +48,7 @@ def merge_pause(local: PauseDecision, advice: Iterable[PauseAdvice], *, now: flo
 
 def lease_veto(island_id: str, *, now: float, lease_remaining_s: float,
                margin_s: float = 0.0) -> PauseAdvice:
-    """Coordinator advice derived from a heartbeat lease (design Q4).
+    """Coordinator advice derived from a heartbeat lease.
 
     The budget is what is left of the lease minus a margin; a non-positive
     remainder is a veto.

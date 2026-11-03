@@ -1,8 +1,8 @@
-"""Run logs never enter the repository (rl-code-quality-cleanup, spec
-"运行日志不入库").
+"""Run logs never enter the repository (rl-code-quality-cleanup spec
+"run logs stay out of the repository").
 
 Evidence logs live outside the repository under
-~/work/infra-drafts/evidence/<change>/ ; each old directory keeps
+a separate evidence directory per change; each old directory keeps
 an EVIDENCE.md pointer. Test fixtures under tests/ and data/ are inputs, not
 run logs, and are out of scope.
 """

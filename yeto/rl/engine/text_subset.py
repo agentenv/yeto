@@ -1,4 +1,4 @@
-"""Which part of a vision-language checkpoint is the text model (S27 G-EZ).
+"""Which part of a vision-language checkpoint is the text model.
 
 A VL checkpoint wraps a text causal LM next to a vision tower and one or more
 projectors. RL on the text model must train the text parameters and must not
@@ -79,7 +79,7 @@ class TextSubsetRule:
 # two projectors. The index of that checkpoint carries exactly four top-level
 # prefixes: ``language_model.`` (42683 keys), ``vision_model.`` (391),
 # ``mlp1.`` (3), ``vision_projector.`` (2). The same prefix rule is what the
-# vLLM text-only load on npu1 n4 uses (``survey/ascend_nemotron_serve.md``).
+# vLLM text-only load on Ascend uses (``survey/ascend_nemotron_serve.md``).
 NEMOTRON_H_OMNI = TextSubsetRule(
     outer_model_type="nemotron_h_omni",
     text_prefix="language_model.",
@@ -214,13 +214,13 @@ def check_loaded(
     ``shapes`` (optional) maps the checkpoint's text names to the shape the
     source checkpoint recorded, so a silently reshaped parameter also fails.
 
-    ``key_map`` (S27 G-EZ2, optional) maps each checkpoint text name to the
+    ``key_map`` (optional) maps each checkpoint text name to the
     model state name it loads into, as the backend's loader renames and stacks
     them (``adapters/verl/hf_checkpoint_keys``); several names may load into one
     stacked tensor, whose element count must then be their sum. Without it the
     names must be equal.
 
-    ``non_trainable`` (S27 G-EZ2, optional) are the model's persistent buffers
+    ``non_trainable`` (optional) are the model's persistent buffers
     (name -> shape): state the loader fills from the checkpoint and no
     optimizer updates. They count toward the name check, not toward the
     trainable total; ``expected_params`` is the checkpoint's text total, and the

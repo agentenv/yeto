@@ -1,4 +1,4 @@
-"""Optional "reasoning tokens do not count toward the loss" switch (S17 WP6).
+"""Optional "reasoning tokens do not count toward the loss" switch.
 
 Default: reasoning tokens DO count (``reasoning_in_loss=True``), i.e. this
 module is a no-op unless the run explicitly opts out.
@@ -111,7 +111,7 @@ _MARKER_CACHE_ATTR = "_yeto_reasoning_marker_ids"
 
 
 def _load_tokenizer(args: Any) -> Any:
-    # Neutral core must not import the engine (import boundary, decoupling D4):
+    # Neutral core must not import the engine (import boundary):
     # the engine adapter passes its tokenizer loader in
     # (miles_adapter/rollout_meta_hook.py ``_load_miles_tokenizer``).
     raise ReasoningMarkerError(

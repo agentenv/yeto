@@ -1,4 +1,4 @@
-"""fleet-dashboard 3.3/5.3: every alert rule fires and stays quiet."""
+"""Every alert rule fires and stays quiet."""
 
 import pytest
 

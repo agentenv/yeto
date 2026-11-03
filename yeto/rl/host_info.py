@@ -1,7 +1,7 @@
-"""Host facts an island prints at start (S27 G-AG diagnostics).
+"""Host facts an island prints at start.
 
 Two islands with the same image and the same requested CPU and memory ran
-memory-heavy boundary work 2-4x apart (s27-gr-g2), and no log said on which
+memory-heavy boundary work 2-4x apart, and no log said on which
 hardware.  :func:`host_report` collects the facts that decide that speed:
 CPU model and count, the CPUs this process may use, cgroup CPU and memory
 limits, host memory, NUMA nodes, and the thread settings of OpenMP, MKL,
@@ -56,6 +56,11 @@ def _meminfo_gib() -> dict[str, float | None]:
                 values[name] = round(int(rest.split()[0]) / (1 << 20), 1)  # kB -> GiB
             except (IndexError, ValueError):
                 pass
+    if values["mem_total_gib"] is None:  # no /proc (macOS): physical pages from sysconf
+        try:
+            values["mem_total_gib"] = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1 << 30), 1)
+        except (AttributeError, OSError, ValueError):
+            pass
     return values
 
 

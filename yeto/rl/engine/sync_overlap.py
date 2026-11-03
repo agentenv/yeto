@@ -1,4 +1,4 @@
-"""Sync/train overlap for the full-parameter sweep (S26 E3 item 3, E2 option).
+"""Sync/train overlap for the full-parameter sweep.
 
 Round k's outer delta is pushed at boundary k and the island trains round
 k+1 immediately on its own weights. At boundary k+1 it waits for the global

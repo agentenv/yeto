@@ -1,4 +1,4 @@
-"""rl-infra-spec 2.4 (decision (a)): DP-sharded FP32 masters under Megatron's DistributedOptimizer.
+"""DP-sharded FP32 masters under Megatron's DistributedOptimizer.
 
 Ranges come from the real ``DistributedOptimizer._build_model_gbuf_param_range_map`` and the
 state accessor is the real ``_get_main_param_and_optimizer_states`` (same CPU-constructible

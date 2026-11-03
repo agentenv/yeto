@@ -278,7 +278,9 @@ environment). See [docs/CYBERGYM_RL.md](CYBERGYM_RL.md).
 Module entry points: `python -m yeto.learner` and `python -m
 yeto.mlx.learner` (manual learners, see below),
 `python -m yeto.rl.engine.engine_sampler --spec SPEC.json` (one rollout island
-from a sampler spec).
+from a sampler spec), and `python -m yeto.rl.spot.{watchdog,patrol,s3_delivery,spot_plan}`
+(spot rollout island operations, see
+[docs/MILES_RL.md](MILES_RL.md#buffer-trainer-releases-and-spot-rollout-islands)).
 
 ## Launch flags reference
 

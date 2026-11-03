@@ -35,7 +35,7 @@ def persist_published_round_evidence(
     rollout_id: int | None = None,
 ) -> None:
     """Write one accepted batch, bound to the policy token the driver published
-    and every trajectory to the policy that generated it (P0-S, schema 4).
+    and every trajectory to the policy that generated it (schema 4).
 
     The caller (the ports rollout hook) calls this only when
     :func:`evidence_enabled`; it is the one writer of round evidence.  The
@@ -80,7 +80,7 @@ def persist_published_round_evidence(
 
     external = getattr(args, EXTERNAL_CUT_ROUND_ATTR, None)
     if external is not None:
-        # S27 G-EM relay trainer: every trajectory names its external merged cut
+        # Relay trainer: every trajectory names its external merged cut
         # (schema 5); the age bound is the merged version the round's take gated on.
         from yeto.rl.engine.external_policy import behavior_cut_of
 

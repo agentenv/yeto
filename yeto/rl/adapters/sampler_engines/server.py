@@ -121,7 +121,7 @@ def is_engine_server(argv: Sequence[str] | None, engine: str, port: int) -> bool
 
 
 def reap_stale_server(engine: str, port: int, *, kill: Callable[[int, int], None] | None = None) -> int | None:
-    """End the process group a SIGKILLed island left on this port (S29 spot run, defect D8).
+    """End the process group a SIGKILLed island left on this port.
 
     ``kill -9`` of a spot sampler process leaves its SGLang scheduler running
     (58.7 GiB of the H100's memory), so the next sampler process on the same VM
@@ -150,7 +150,8 @@ def httpx_call(method: str, url: str, body: Any, timeout_s: float) -> tuple[int,
     import httpx  # noqa: PLC0415 - optional on hosts that only run tests
 
     try:
-        response = httpx.request(method, url, json=body, timeout=timeout_s)
+        # engine control traffic is direct: an env proxy (e.g. all_proxy=socks5://) must not reroute or break it
+        response = httpx.request(method, url, json=body, timeout=timeout_s, trust_env=False)
     except httpx.HTTPError as exc:
         return 0, {"error": f"{type(exc).__name__}: {exc}"}
     try:
@@ -192,7 +193,7 @@ class ServerConfig:
     stop_grace_s: float = 120.0
     min_host_free_gib: float | None = None
     expected_format: str | None = None  # quantization_config.format the release must carry
-    in_place_reload: bool = False  # only after an on-card test passed (N4.2)
+    in_place_reload: bool = False  # only after an on-card test passed
 
     @property
     def url(self) -> str:

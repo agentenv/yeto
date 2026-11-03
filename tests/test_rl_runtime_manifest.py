@@ -1,4 +1,4 @@
-"""rl-infra-spec 1.1: runtime manifest consistency and capability refusal (pure)."""
+"""Runtime manifest consistency and capability refusal (pure)."""
 
 from __future__ import annotations
 

@@ -10,7 +10,7 @@ from yeto.rl.engine.capabilities import BackendTraits
 MILES_WEIGHT_TRANSPORTS = {"same-device-ipc": "cuda-ipc", "collective-broadcast": "nccl-broadcast"}
 
 # --offload-train: upstream train.py sleeps the actor *before* update_weights and
-# publishes from host backups (S13 FN OOM fix), so Miles can publish while asleep.
+# publishes from host backups (avoids an OOM), so Miles can publish while asleep.
 MILES_TRAITS = BackendTraits(weight_transport_names=MILES_WEIGHT_TRANSPORTS, publish_while_offloaded=True)
 
 # Ledger ``engine_discarded.mechanism`` for groups aborted in flight when the

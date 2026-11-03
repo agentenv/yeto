@@ -1,17 +1,17 @@
-# 静态边界检查白名单（yeto-framework-decoupling 任务 1.2，design D4）
-# 格式：文件路径<TAB>被禁模块<TAB># 审计编号与说明（infra-drafts/YETO-DECOUPLING-AUDIT-S16.md）
-# 只减不增：修掉一条就删一条，并把 tests/test_import_boundaries.py 的 ALLOWLIST_CAP 同步减小。
-# 规则与约定见 yeto/rl/engine/README.md。初始 31 条（2026-10-08，基于 agentenv/main 62cec689）。
+# Allowlist of the static import-boundary check.
+# Format: file path<TAB>forbidden module<TAB># audit id and note
+# Shrink only: when a violation is fixed, delete its line and lower ALLOWLIST_CAP in
+# tests/test_import_boundaries.py to match. Rules and conventions: yeto/rl/engine/README.md.
 #
-# --- 云层/启动层 import Miles 适配层（A8、A9）
+# --- cloud/launch layer importing the Miles adapter (A8, A9)
 #
-# --- 引擎核心（E1-E9）
+# --- engine core
 #
-# --- 算法扩展（A1-A5）
-yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
-yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
-yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
+# --- algorithm extensions (A1-A5)
+yeto/rl/algos/reducers.py	megatron	# A3 :35,41 -- kept for now (reducers are not moved)
+yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils -- kept for now
+yeto/rl/grad_audit.py	megatron	# A3 :209,320 -- kept for now
 #
-# --- 奖励与过滤（R1-R3）
-yeto/rl/math_reward.py	miles	# R1 :24 math_utils —— 保留（D9c，运行时 math 奖励需装 Miles）
+# --- rewards and filters (R1-R3)
+yeto/rl/math_reward.py	miles	# R1 :24 math_utils -- kept (the runtime math reward needs Miles installed)
 yeto/rl/filters.py	miles	# R3 :30 DynamicFilterOutput

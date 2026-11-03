@@ -1,4 +1,4 @@
-//! Receive-only subscribers (S27 G-EA): a sampler island on any cloud that
+//! Receive-only subscribers: a sampler island on any cloud that
 //! follows the global weights without being a learner.
 //!
 //! A subscriber connects with SUBSCRIBE (instead of HELLO): the same body as

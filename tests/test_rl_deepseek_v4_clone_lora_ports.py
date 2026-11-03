@@ -1,4 +1,4 @@
-"""DeepSeek V4 clone-only expert LoRA on the ports Miles layout (P0 1.7b.2b).
+"""DeepSeek V4 clone-only expert LoRA on the ports Miles layout.
 
 The ports state plugin binds each packed grouped-expert adapter to one
 representative name; :class:`ClonePackedAdapterPolicy` makes the sync policy

@@ -1,4 +1,4 @@
-"""Observe-only train/inference mismatch plugin (change ``rl-algo-mismatch-correction`` D2).
+"""Observe-only train/inference mismatch plugin (change ``rl-algo-mismatch-correction``).
 
 A Miles custom-TIS function (``--custom-tis-function-path``; called by Miles
 ``loss_hub/losses.py`` whenever ``--use-tis`` or ``--get-mismatch-metrics`` is

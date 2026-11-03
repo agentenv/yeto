@@ -1,4 +1,4 @@
-"""Pinned Harbor build for agentic RL (S25 N10.1).
+"""Pinned Harbor build for agentic RL.
 
 Miles' Harbor example (``examples/experimental/harbor``) requires the
 ``harbor-miles-v0.20.0`` branch of harbor-framework/harbor: upstream 0.24.0
@@ -24,12 +24,12 @@ HARBOR_VERSION = "0.20.0"
 MILES_BINDINGS_COMMIT = "53a6e92a"
 
 # Codex build Harbor's built-in codex agent installs (``npm install -g
-# @openai/codex@<version>``).  Same build as the S24 TB2 long run; whether
-# Harbor's codex agent drives it unchanged is not verified yet (N10.7).
+# @openai/codex@<version>``).  Same build as the earlier TB2 long run; whether
+# Harbor's codex agent drives it unchanged is not verified yet.
 CODEX_VERSION = "0.145.0"
 
 # The linux-x64 build of that version as npm ships it (a static musl binary
-# plus its bundled rg), for the boat Codex cache (S26 E8).  sha512 = npm
+# plus its bundled rg), for the boat Codex cache.  sha512 = npm
 # ``dist.integrity`` of the tarball, in hex.
 CODEX_LINUX_X64_URL = "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-x64.tgz"
 CODEX_LINUX_X64_SHA512 = (
@@ -37,7 +37,7 @@ CODEX_LINUX_X64_SHA512 = (
     "ace4f6a32c07f36d53c37dbe101f37b9990312c5a0c7b1e2feba2631ee656c0"
 )
 
-# Node for the boat Codex cache (S26 E8).  Harbor's codex install runs
+# Node for the boat Codex cache.  Harbor's codex install runs
 # ``nvm install 22``, i.e. the newest 22.x on the day it runs; on 2026-10-21
 # that is v22.23.3 (nodejs.org/dist/index.json).  sha256 from SHASUMS256.txt.
 NODE_VERSION = "22.23.3"

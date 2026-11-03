@@ -1,4 +1,4 @@
-"""LoRA publication on the verl backend (rl-verl-backend 1.10 / 2.2, design D5).
+"""LoRA publication on the verl backend (rl-verl-backend 1.10 / 2.2).
 
 One publisher interface, two transports chosen by configuration:
 
@@ -12,7 +12,7 @@ One publisher interface, two transports chosen by configuration:
 After every publication the inference side reports a checksum of the adapter
 it *registered* (``vllm_readback``), keyed by canonical names; it is compared
 with the checksum of what the trainer sent.  This proves "the inference side
-received this version" -- not "the slot in use holds it" (design D5 level).
+received this version" -- not "the slot in use holds it".
 When no readback can be obtained the result is ``LORA_UNVERIFIABLE``, never a
 silent pass.
 
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 TRANSPORTS = ("memory", "disk")
-CHECK_LEVEL = "inference-received"  # D5: registered adapter, not the active slot
+CHECK_LEVEL = "inference-received"  # registered adapter, not the active slot
 VERIFIED = "VERIFIED"
 MISMATCH = "LORA_MISMATCH"
 UNVERIFIABLE = "LORA_UNVERIFIABLE"

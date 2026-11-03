@@ -1,4 +1,4 @@
-"""S25 C3 end to end on CPU: two synced trainer islands, the real Rust syncer
+"""Synced trainers feeding a sampler, end to end on CPU: two synced trainer islands, the real Rust syncer
 (elastic OuterStep merge), one sampler that follows the releases.
 
 The trainers are fake ports islands (``yeto.rl.engine.fake``) wired with the
@@ -7,7 +7,7 @@ production lane reader (``buffer_rollout.BatchReader`` over a lane of one
 ``FileSampleBuffer``). The sampler is a thread: ``PolicyFollower`` loads each
 release and writes groups stamped with the version it serves.
 
-Checks (the same as the GPU run's, SESSION25/gpu-review/T-C3.md):
+Checks (the same as the GPU run's):
 1. both trainers apply the same merged policy hash at every outer version;
 2. the sampler loads exactly the merged versions 0..R, in order, each with the
    merged hash, all released by learner 0;

@@ -1,4 +1,4 @@
-"""Miles/SGLang :class:`~yeto.rl.engine.convertible.ConversionPort` (L7.2).
+"""Miles/SGLang :class:`~yeto.rl.engine.convertible.ConversionPort`.
 
 The calls are the ones of the upstream colocated branch of ``train.py`` that the
 adapter already uses (``rollout.py`` ``_offload_after_rollout``, ``publish.py``
@@ -16,11 +16,10 @@ adapter already uses (``rollout.py`` ``_offload_after_rollout``, ``publish.py``
   which does nothing unless ``--offload-rollout-level`` has ``weight``, while
   the release above always frees the weights), then ``load_weights(version)``
   (the existing weight update; in this fork ``begin_weight_update`` ->
-  ``update_weights_from_tensor`` -> ``end_weight_update``, checked on one GPU in
-  SESSION24 L8.1), then ``controller.onload_kv()``, then ``read_checksum()``:
+  ``update_weights_from_tensor`` -> ``end_weight_update``, checked on one GPU), then ``controller.onload_kv()``, then ``read_checksum()``:
   the engine weight checksum of the loaded version. The read comes after the KV
   onload: in LoRA mode it serves one generate to load the adapter into the LoRA
-  pool, which crashed the engine scheduler with the KV cache released (G-L7.4).
+  pool, which crashed the engine scheduler with the KV cache released.
 
 :func:`miles_conversion_port` wires the three callbacks from the island's
 adapter objects:
@@ -36,7 +35,7 @@ adapter objects:
 * ``set_admission``: :meth:`.rollout.MilesRolloutPool.set_admission` (harness
   admission; no-op without a harness board).
 
-Not checked on GPU yet: the whole port (L7.4).
+Not checked on GPU yet: the whole port.
 """
 
 from __future__ import annotations
@@ -147,7 +146,7 @@ def miles_conversion_port(*, controller: Any, rollout: Any, trainer: Any, publis
 
 
 # ---------------------------------------------------------------------------
-# Convertible pool node (rl-trainer-start-stop L7.5)
+# Convertible pool node
 # ---------------------------------------------------------------------------
 def convertible_node_name(miles_args: Any) -> str | None:
     """This island's node name when it is a convertible pool node, else None."""
@@ -175,7 +174,7 @@ class DriverHandoffPort:
     back (``MilesPublisher._publish``). The driver's first publication expects the
     engines of a fresh boot: weights resident, KV cache and CUDA graphs released
     (it loads the weights, then ``onload_kv``; a KV cache that is still resident
-    makes SGLang fail with ``KeyError: 'kv_cache'``, GPU run s24-conv-20261015b).
+    makes SGLang fail with ``KeyError: 'kv_cache'`` on a GPU run).
     So the port:
 
     * ``stop_requests``: close admission, count the requests on the engines, abort
@@ -188,8 +187,8 @@ class DriverHandoffPort:
       incarnation on this node left it asleep after its last publication);
     * ``offload_trainer``: nothing (the drained incarnation put it to sleep);
     * ``resume_rollout(version)``: the rollout function generates again, the engines
-      load the trained ``version`` once more from the trainer (``load_version``, the
-      L7.4 path) and their checksum is read (``served_checksum``); the node compares
+      load the trained ``version`` once more from the trainer (``load_version``
+      path) and their checksum is read (``served_checksum``); the node compares
       it with the checksum of the last publication;
     * ``accept_requests``: open admission.
     """
@@ -317,8 +316,8 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
         store.reload()  # the newest cut may come from another node
         if current.get("driver") is not None:
             # this node trained before: the new driver restores the newest cut into the
-            # same trainer, whose LR scheduler the earlier stint stepped (GPU run
-            # s24-final-conv-20261019c: "LR scheduler already at 96")
+            # same trainer, whose LR scheduler the earlier stint stepped (a GPU run
+            # failed with "LR scheduler already at 96")
             rewound = runner.run(actor.run_plugin(REWIND_SCHEDULER, {}))
             emit("rl_convertible_scheduler_rewound", node=name, incarnation=incarnation,
                  ranks=rewound)

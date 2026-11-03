@@ -1,8 +1,8 @@
-"""positive_lm_success launch check + gsm8k success flag (S19 #6 s19-vapo-g3-20261010a).
+"""positive_lm_success launch check + gsm8k success flag.
 
-The G3 run loaded the out-of-tree ``gsm8k_reward:score`` (no success flag) with a
+A VAPO GPU run loaded the out-of-tree ``gsm8k_reward:score`` (no success flag) with a
 VAPO spec using ``positive_lm_source='success'``; the Miles fork raised on both
-islands at the first critic step. S13 G1 passed with ``yeto.rl.gsm8k_reward:score``.
+islands at the first critic step. An earlier run passed with ``yeto.rl.gsm8k_reward:score``.
 """
 
 from __future__ import annotations

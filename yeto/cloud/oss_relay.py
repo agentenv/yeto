@@ -1,14 +1,13 @@
 """Cloud layer: the head's object API of an ``oss://`` store through a relay node
-(S25 stage 1, gap 6; main-agent ruling 10-19: the head on this server reads and
-writes OSS through ppu1).
+(a head outside the cloud's intranet reads and writes OSS through a relay node).
 
-The stage-1 bucket accepts only Alibaba intranet endpoints
-(``PublicEndpointForbidden`` from this server). The islands on the PPU nodes
+Such a bucket accepts only Alibaba intranet endpoints
+(``PublicEndpointForbidden`` from outside). The islands on the PPU nodes
 reach it directly (:mod:`yeto.cloud.oss_store`). The head instead runs
 ``ossutil`` on a relay node over SSH: every :class:`RelayOssObjectStore` call is
 one ``ssh RELAY bash -c SCRIPT`` with one ``ossutil`` command; object bodies
 travel on the SSH stdin and stdout. ``ossutil`` on the relay uses the relay's own
-configuration (``~/.ossutilconfig`` with the intranet endpoint, runbook S4); no
+configuration (``~/.ossutilconfig`` with the intranet endpoint); no
 credential passes through the head.
 
 Switch: :data:`RELAY_ENV` names the relay's SSH target. Unset, the head talks

@@ -1,4 +1,4 @@
-"""s13-g3-modal-20261007b: two Modal islands redialed a Nebius syncer (actor
+"""Two Modal islands redialed a Nebius syncer (actor
 29400 + critic 29401) silently for the whole 900 s stall timeout. The launcher
 now probes every syncer port before starting any island, and the island-side
 client reports its dial progress."""

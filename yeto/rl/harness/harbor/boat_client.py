@@ -1,4 +1,4 @@
-"""Thin client for boat.dev sandboxes (S25 N10.8), plus the account-quota guard.
+"""Thin client for boat.dev sandboxes, plus the account-quota guard.
 
 ``BoatClient`` is the narrow, synchronous surface the boat provider needs.
 :class:`SdkBoatClient` implements it on the official SDK (``boat-sdk``,
@@ -14,7 +14,7 @@ sandboxes, 12 starts per minute, 60 per hour, 200 per day.  :class:`BoatQuota`
 holds the first two per process (per event loop, see :func:`process_quota`);
 :func:`check_in_flight_cap` refuses an
 admission gate larger than the active-sandbox cap.  The hourly cap is held
-too when ``YETO_BOAT_STARTS_PER_HOUR`` is set (S26 E8: a burst past it got
+too when ``YETO_BOAT_STARTS_PER_HOUR`` is set (a burst past it got
 HTTP 429 for 75 s of retries, then the trial was ABORTED); the daily cap is
 left to the server (a refused create raises :class:`BoatQuotaError`).
 """
@@ -81,7 +81,7 @@ class BoatClient(Protocol):
     def usage_seconds(self, sandbox_id: str) -> float | None: ...
     def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None: ...
     def delete(self, sandbox_id: str) -> None: ...
-    # S29 D15 (optional on fakes): the name carries the run labels (boat_labels)
+    # Optional on fakes: the name carries the run labels (boat_labels)
     # def set_name(self, sandbox_id: str, name: str) -> None
     # def list_sandboxes(self) -> list[boat_labels.SandboxInfo]
 
@@ -112,7 +112,7 @@ class SdkBoatClient:
 
         config = Configuration(host=host, access_token=token or load_token())
         proxy = os.environ.get(PROXY_ENV, "").strip()
-        if proxy:  # S29 D17: a trainer node without direct internet (n4) reaches boat through one
+        if proxy:  # a trainer node without direct internet reaches boat through one
             config.proxy = proxy
         self._client = ApiClient(config)
         self._api = BoatApi(self._client)
@@ -183,7 +183,7 @@ class SdkBoatClient:
         self._api.update(sandbox_id, UpdateSandboxRequest(ttl_seconds=int(ttl_seconds)))
 
     def set_name(self, sandbox_id: str, name: str) -> None:
-        """Rename the sandbox (S29 D15: the name carries the run labels, ``boat_labels``)."""
+        """Rename the sandbox (the name carries the run labels, ``boat_labels``)."""
         from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
 
         self._api.update(sandbox_id, UpdateSandboxRequest(name=name))

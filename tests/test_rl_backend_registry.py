@@ -1,5 +1,5 @@
 """yeto-framework-decoupling 5.4 + 4.11: backend registry and the neutral
-rollout-metadata port (design D11 方案 A; unset YETO_RL_BACKEND = miles)."""
+rollout-metadata port (registry by module name; unset YETO_RL_BACKEND = miles)."""
 
 from __future__ import annotations
 
@@ -19,11 +19,11 @@ def test_default_backend_is_miles_when_env_unset(monkeypatch):
 
 def test_env_selects_backend_and_unknown_is_refused(monkeypatch):
     monkeypatch.setenv(backends.BACKEND_ENV, "nope")
-    with pytest.raises(backends.UnknownBackend, match="未注册"):
+    with pytest.raises(backends.UnknownBackend, match="not registered"):
         rollout_meta.current_policy_token()
-    with pytest.raises(backends.UnknownBackend, match="未注册"):
+    with pytest.raises(backends.UnknownBackend, match="not registered"):
         backends.get("nope")
-    with pytest.raises(backends.UnknownBackend, match="没有提供"):
+    with pytest.raises(backends.UnknownBackend, match="does not provide"):
         backends.module("no-such-role", "miles")
 
 
@@ -96,7 +96,7 @@ def test_cli_rl_backend_flag_and_launcher_refuses_unregistered():
     from yeto import launcher
 
     args = argparse.Namespace(training_mode="rl", rl_backend="nope", rl_image="x")
-    with pytest.raises(ValueError, match="未注册"):
+    with pytest.raises(ValueError, match="not registered"):
         launcher.resolve_default_rl_image(args)
     args = argparse.Namespace(training_mode="rl", rl_backend="miles", rl_image="x")
     launcher.resolve_default_rl_image(args)

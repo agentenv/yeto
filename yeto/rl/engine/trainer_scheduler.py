@@ -1,4 +1,4 @@
-"""Scheduler S1: start on backlog, stop by ski rental (rl-trainer-start-stop D6, D8).
+"""Ski-rental scheduler: start on backlog, stop by ski rental.
 
 * Start when the backlog ``Q`` (in batches) reaches ``Q_on``. Default
   ``Q_on = A_hard + 1``. With the optional ``alpha`` (allowed start-cost share)
@@ -8,15 +8,15 @@
   ``T_idle = T_s``; stop (``FINISHED``) when the data ended and less than one batch
   is left (a remainder below one batch is never trained). At the data end a cold
   trainer starts for the full batches left, also below ``Q_on``.
-* ``T_s`` is the last measured start (``trainer_start_summary.total_s``, the event of
-  rl-trainer-cold-start-cost L0.1) or, without a measurement, the configured value.
+* ``T_s`` is the last measured start (``trainer_start_summary.total_s``, the start-phase
+  event) or, without a measurement, the configured value.
   With ``fixed_start_seconds`` the configured value is an override (a check run uses
   a small one to get several stops); the measured value is still journaled.
 * Prices are accepted and ignored (S3 is not in this change).
 
 The idle start time is the only state. It is a wall-clock time, so a scheduler
 restored from the controller journal after a head restart continues with the idle
-time already spent (D8). The journal record has kind ``trainer_scheduler_state``
+time already spent. The journal record has kind ``trainer_scheduler_state``
 and holds the inputs and the decision, in the same way as ``auto_state``
 (``elastic.py``).
 """
@@ -33,7 +33,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from .trainer_lifecycle import BacklogStats, Decision, Hold, LifecycleState, Start, Stop
 
-START_SUMMARY_EVENT = "trainer_start_summary"  # rl-trainer-cold-start-cost L0.1
+START_SUMMARY_EVENT = "trainer_start_summary"  
 SCHEDULER_STATE_KIND = "trainer_scheduler_state"
 
 # A cold trainer starts from these states; a running trainer is judged for stop
@@ -77,7 +77,7 @@ class S1Config:
 
 
 class S1Scheduler:
-    """:class:`~.trainer_lifecycle.TrainerScheduler` S1.
+    """The ski-rental :class:`~.trainer_lifecycle.TrainerScheduler`.
 
     ``start_events`` returns the start-phase events read so far (any iterable of
     event dicts); the newest summary gives ``T_s``. ``record`` is the controller
@@ -112,7 +112,7 @@ class S1Scheduler:
     # ------------------------------------------------------------ decision
     def decide(self, backlog: BacklogStats, lifecycle_state: LifecycleState,
                prices: Mapping[str, float] | None = None) -> Decision:
-        del prices  # S1 ignores prices (D6)
+        del prices  # this scheduler ignores prices
         now = self._clock()
         t_s = self.start_seconds()
         q_on = self.q_on(t_s)
@@ -147,7 +147,7 @@ class S1Scheduler:
             return Stop(LeaveReason.STOPPED)
         return Hold()
 
-    # ------------------------------------------------------------ journal (D8)
+    # ------------------------------------------------------------ journal
     def _journal(self, backlog: BacklogStats, state: LifecycleState, now: float,
                  t_s: float, q_on: float, decision: Decision, before: float | None) -> None:
         # Write when the state changes or the decision acts; a steady Hold is not news.

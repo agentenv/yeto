@@ -318,9 +318,9 @@ def test_template_drops_reasoning_is_the_only_reason_when_only_reasoning_differs
 
 @pytest.mark.parametrize("profile_name", ["qwen38_next", "qwen38_next_4layer"])
 def test_fn_profile_declares_true_so_template_drops_reasoning_count_stays_zero(profile_name):
-    # D2: FN's fixed template keeps history reasoning, so the gateway built from the profile must never
+    # FN's fixed template keeps history reasoning, so the gateway built from the profile must never
     # classify a divergence as template_drops_reasoning. A harness replay that *does* drop reasoning is
-    # then a retry_fork; the counter staying 0 is what the GPU判据 "tito_chain_breaks{template_drops_reasoning}=0" reads.
+    # then a retry_fork; the counter staying 0 is what the GPU acceptance criterion "tito_chain_breaks{template_drops_reasoning}=0" reads.
     reply = tool_reply("c1", "x", "{}", reasoning="deep")
     backend = FakeBackend([reply] + [{"role": "assistant", "content": "e"}] * 3)
     gw = Gateway(GatewayConfig.from_codex_profile(profile_name, SIGNED), backend)

@@ -1,4 +1,4 @@
-"""Harbor environment provider for boat.dev (S25 N10.8).
+"""Harbor environment provider for boat.dev.
 
 Load it without changing Harbor::
 
@@ -13,13 +13,13 @@ Scope: single-container tasks with a prebuilt ``docker_image`` (all 89 local
 TB2 tasks).  Refused before any VM starts: Dockerfile-only or compose tasks,
 GPUs/TPUs, Windows, network modes other than public.  ``stop`` always
 deletes the VM, also for ``delete=False`` (boat snapshots are off, so a
-stopped VM keeps nothing worth paying for).  With ``pool`` on (S26 E8,
-:mod:`.boat_pool`), ``stop`` instead recycles the VM for the next task,
+stopped VM keeps nothing worth paying for).  With ``pool`` on
+(:mod:`.boat_pool`), ``stop`` instead recycles the VM for the next task,
 unless an exec or file transfer failed on it; then it is deleted.
 
 A cancelled exec or transfer (the trial was aborted: an over-sampling surplus,
 an over-age suspended trajectory, a stopped rollout) is not a failure of the
-VM (S27 G-EF, G-EB section 7.3): the boat command of a cancelled exec is stopped
+VM: the boat command of a cancelled exec is stopped
 (:meth:`~.boat_sandbox.BoatSandbox.vm_exec`), and a cancelled upload can only
 finish into the staging directory, so the VM goes through the same recycle as a
 finished task.  The recycle removes every container (with any
@@ -62,11 +62,11 @@ class BoatEnvironment(BaseEnvironment):
     ``quota`` the environment takes the process quota, so it must be built
     inside the running loop (Harbor builds it in ``Trial.create``).
 
-    ``pool`` (S26 E8): ``True`` takes the process
+    ``pool``: ``True`` takes the process
     :class:`~.boat_pool.BoatSandboxPool`, a pool object takes that one,
     ``None`` (default) follows ``YETO_BOAT_POOL=1``, ``False`` never pools.
 
-    ``codex_cache`` (S26 E8): ``True`` mounts the pinned Codex build from the
+    ``codex_cache``: ``True`` mounts the pinned Codex build from the
     VM cache (:class:`~.boat_sandbox.CodexCache`) so Harbor skips the Codex
     install; ``None`` (default) follows ``YETO_BOAT_CODEX_CACHE=1``.
     """

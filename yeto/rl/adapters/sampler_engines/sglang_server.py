@@ -60,7 +60,7 @@ then uses the version served when the request was sent as
 ``weight_version`` (never newer than the real one: a request still queued
 at the update counts at the older version).
 Checked against SGLang 0.5.20 (miles-next venv; the miles-ports image pins
-0.5.21.dev70) source; on card see SESSION27/gpu-review/SAMPLER-LIVE.md.
+0.5.21.dev70) source.
 """
 
 from __future__ import annotations
@@ -303,7 +303,7 @@ class SGLangServerEngine(ServerEngine):
 
     def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
                         stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
-        """Token-id prompts (``input_ids``), for the records proxy (S25 N10.5)."""
+        """Token-id prompts (``input_ids``), for the records proxy."""
         n = int(sampling.n)
         inputs = [[int(t) for t in p] for p in prompts for _ in range(n)]
         params = self._params(sampling.replace(n=1))

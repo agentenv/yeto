@@ -1,7 +1,7 @@
 """TEST workload: a rollout whose every trajectory waits on a (fake) tool call.
 
 For GPU acceptance runs that need real tool waits on the ports path:
-A2+ (rl-infra-spec 1.7, tool-wait observation) and A4b (3.3 X5, drain keeps
+A2+ (tool-wait observation) and A4b (3.3 X5, drain keeps
 the old routing while trajectories wait on tools). Plugged in through Miles'
 supported per-sample hook ``--custom-generate-function-path
 yeto.rl.adapters.miles.harness_glue.tool_wait.generate`` (the ports adapter passes it through;

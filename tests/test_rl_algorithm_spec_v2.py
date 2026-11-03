@@ -169,7 +169,7 @@ def test_new_field_switches_to_v2_and_changes_hash(change):
 
 
 def test_correction_group_switches_to_v2_and_is_hashed():
-    # rl-offpolicy-correction-passthrough L6b.1: the group is hashed.
+    # The group is hashed.
     spec = AlgorithmSpec(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4))
     assert json.loads(spec.canonical_json())["schema"] == ALGORITHM_SPEC_SCHEMA_V2
     assert spec.sha256() != AlgorithmSpec().sha256()
@@ -226,7 +226,7 @@ def test_plugin_hash_matches():
 
 
 def test_plugin_hash_mismatch_warns_with_both():
-    # rl-identity-tiering L9.2: a stale hash is a warning, not a reject.
+    # A stale hash is a warning, not a reject.
     bad = PluginRef(FILE_REF.path, "0" * 64)
     assert f"spec {'0' * 64}, runtime {FILE_REF.sha256}" in bad.verify()
     assert AlgorithmSpec(plugins=(bad,)).verify_plugins() == (bad.verify(),)

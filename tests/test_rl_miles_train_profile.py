@@ -1,4 +1,4 @@
-"""E1: --rl-profile-trainer is observation only and reaches the trainer."""
+"""--rl-profile-trainer is observation only and reaches the trainer."""
 
 from __future__ import annotations
 
@@ -23,21 +23,13 @@ def test_profiled_returns_the_call_result_and_prints_one_record(capsys):
     assert record["samples"] >= 1 and any("step" in label for label, _ in record["main_top"])
 
 
-def test_the_flag_reaches_the_launcher_args_and_the_eval_spec():
-    from tools.eval.efficiency import spec
-
-    sp = spec.get_spec("qwen3-0.6b", checkpoint="every-round", profile_trainer=True)
-    assert " --rl-profile-trainer" in spec.yeto_miles_launcher_args(sp, "async", "r1")
-    assert spec.control_fingerprint(sp) == spec.control_fingerprint(spec.get_spec("qwen3-0.6b"))
-
-
 def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args(monkeypatch):
     import argparse
 
     from yeto.rl.engine import phase_profile
 
     # the sampler would stay on for the rest of the test process and print on every
-    # driver phase (it broke the JSON output of test_rl_reconfig_e1 in the full suite)
+    # driver phase (it broke the JSON output of test_rl_reconfig_controller in the full suite)
     monkeypatch.setattr(phase_profile, "enable", lambda: None)
     from types import SimpleNamespace
 

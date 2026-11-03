@@ -1,4 +1,4 @@
-"""Miles backend of the Harbor agentic path (S25 N10.1/N10.2).
+"""Miles backend of the Harbor agentic path.
 
 Miles' own Harbor example (``examples/experimental/harbor``) is the backend
 entry: its launcher wiring, its ``TrialConfig`` builder
@@ -21,7 +21,7 @@ rejects them.  For these the ``TrialConfig`` comes from yeto's
 the example's harness bindings are not applied, so only agents that
 ``trial.agent_env`` wires (OpenAI base URL: codex, oracle, nop, ...) run there.
 
-Suspension between rounds (S26 E9.5, Miles stage 3,
+Suspension between rounds (Miles stage 3,
 ``--agentic-suspend-between-turns``): Miles calls this module's
 :func:`suspend` at a round's cut-off and :func:`resume` at the next round's
 start.  They close and open the loop's
@@ -81,7 +81,7 @@ AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
 REWARD_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.reward_func"
 # The example's generate.RolloutFn plus boat VM cleanup at RolloutExecutor.dispose().
 ROLLOUT_FUNCTION = "yeto.rl.adapters.miles.harbor_rollout.RolloutFn"
-DEFAULT_AGENT = "codex"  # N10.7: Harbor's built-in codex agent
+DEFAULT_AGENT = "codex"  # Harbor's built-in codex agent
 MAX_IN_FLIGHT_ENV = "YETO_HARBOR_MAX_IN_FLIGHT"
 _DEFAULT_MAX_IN_FLIGHT = 64
 
@@ -253,7 +253,7 @@ def test_hold_extra_s(environ: Any = None) -> float:
     """Test-only extra hold before the gate reopens (default 0 = off).
 
     A GPU check needs the agent's held model call to outlast Codex's stream
-    idle limit (300 s), longer than one training step of a small model (E9.5 R3)."""
+    idle limit (300 s), longer than one training step of a small model."""
     raw = str((os.environ if environ is None else environ).get(TEST_HOLD_EXTRA_ENV, "") or "").strip()
     if not raw:
         return 0.0

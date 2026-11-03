@@ -1,5 +1,5 @@
 """Training/inference mismatch criteria, computed by yeto in the Miles convention
-(rl-verl-backend 1.6, design D7).
+(rl-verl-backend).
 
 Every backend hands yeto the same three per-token tensors -- training-side
 log-probs (recomputed old log-probs), inference-side log-probs (what the
@@ -8,8 +8,8 @@ criteria itself, so the numbers mean the same thing whichever engine produced
 them.  Backend-native metrics (verl ``rollout_corr/*`` ...) are archived next to
 these, never used as a criterion.
 
-Convention (Miles ``losses.py`` / ``math_utils.py``, cross-checked in
-VERL-MODAL-CHECK-S16.md section 2 against ``compute_approx_kl(low_var_kl)``):
+Convention (Miles ``losses.py`` / ``math_utils.py``, cross-checked
+against verl's ``compute_approx_kl(low_var_kl)``):
 
 * ``abs_diff``: |train - infer| per token, mean within each sample (masked),
   then mean over samples;
@@ -20,8 +20,8 @@ VERL-MODAL-CHECK-S16.md section 2 against ``compute_approx_kl(low_var_kl)``):
   TIS upper bound (default 2.0), per-sample mean;
 * ``signed_mean``: the signed mean of (train - infer) over all masked tokens.
   k3 and tis_clipfrac cannot see a one-sided shift such as top_p < 1
-  (S16: top_p 0.9 gives signed mean about -0.032 while k3 stays 0.0017), so it
-  is a criterion of its own (user decision 2026-10-08).
+  (measured: top_p 0.9 gives signed mean about -0.032 while k3 stays 0.0017), so it
+  is a criterion of its own.
 
 Thresholds are keyed by (backend, train engine, inference engine+version,
 hardware); a missing key is reported as "uncalibrated" instead of guessed.
@@ -91,8 +91,8 @@ class Thresholds:
 
 
 # (backend, train engine, inference engine + version, hardware) -> thresholds.
-# Only entries backed by a measurement; the values are provisional (design
-# "待定" 2) and come from VERL-MODAL-CHECK-S16.md 7.4 (measured 0.017 / 0.0008 /
+# Only entries backed by a measurement; the values are provisional and come
+# from a verl check on Modal H100 (measured 0.017 / 0.0008 /
 # <=5e-5 / signed -0.0009) with headroom, the design's suggested 0.03 / 0.01 / 1%.
 THRESHOLDS: dict[tuple[str, str, str, str], Thresholds] = {
     ("verl", "fsdp2", "vllm-0.29.0", "H100"): Thresholds(0.03, 0.01, 0.01, 0.01),
@@ -108,7 +108,7 @@ def thresholds_for(key: tuple[str, str, str, str],
     try:
         return table[key]
     except KeyError:
-        raise Uncalibrated(f"训推不一致阈值未标定: {key}") from None
+        raise Uncalibrated(f"uncalibrated train/inference mismatch threshold: {key}") from None
 
 
 def judge(metrics: Mapping[str, float], limits: Thresholds) -> list[str]:

@@ -1,4 +1,4 @@
-"""Miles wiring of the ports full-parameter sync (P0-D8).
+"""Miles wiring of the ports full-parameter sync.
 
 ``island_entry`` stores one :class:`FullParameterSyncConfig` on the Miles
 args; :func:`build_full_parameter_sync` turns it into the engine-neutral
@@ -37,7 +37,7 @@ class FullParameterSyncConfig:
 
     roles: tuple[RoleStreamConfig, ...]
     sweep: bool = False
-    # S27 G-AG lead cap (``--sweep-max-local-rounds-ahead``); None = off.
+    # Lead cap (``--sweep-max-local-rounds-ahead``); None = off.
     # Island-local: not part of the session contract or the syncer profile.
     max_local_rounds_ahead: int | None = None
 

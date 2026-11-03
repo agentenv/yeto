@@ -5,7 +5,7 @@ Vendor facts handled here (A-INF §3, report items 15-18; none verified on a
 910B by this code):
 
 * reload: restart only. In-place reload of W4A8_DYNAMIC on vllm-ascend is not
-  tested (GOAL §8); ``in_place_reload`` stays False until N4.2 measures it, and
+  tested (GOAL §8); ``in_place_reload`` stays False until an on-card test measures it, and
   this adapter has no in-place path yet;
 * item 17: 910B reads ``int-quantized`` only, not ``pack-quantized``; the
   default ``expected_format`` for a quantized scheme is ``int-quantized``.
@@ -15,8 +15,8 @@ Vendor facts handled here (A-INF §3, report items 15-18; none verified on a
   graphs; ``--enforce-eager`` is refused unless ``allow_eager`` (debug only);
 * item 15: a missing CANN 9.1 libprofapi stub hangs HCCL without an error; the
   start timeout names it;
-* items 16 and the PT_INTERP fix belong to the image or rootfs start script
-  (N0.2), not to this adapter.
+* items 16 and the PT_INTERP fix belong to the image or rootfs start script,
+  not to this adapter.
 
 API calls (vLLM OpenAI-compatible server): ``GET /health``;
 ``POST /v1/completions`` with ``logprobs: 1`` and
@@ -48,7 +48,7 @@ INT_QUANTIZED = "int-quantized"
 @dataclass
 class VllmOptions:
     tp: int = 4
-    max_num_seqs: int | None = None  # N4.1 measures 8 / 32 / 64
+    max_num_seqs: int | None = None  # measured with 8 / 32 / 64
     served_model_name: str = "yeto-policy"
     allow_eager: bool = False
 
@@ -71,7 +71,7 @@ class VllmServerEngine(ServerEngine):
             config.expected_format = INT_QUANTIZED  # item 17
         if config.in_place_reload:
             raise SamplerEngineError("vllm-server: in-place reload is not built; restart is the "
-                                     "only reload mode until N4.2 tests it")
+                                     "only reload mode until an on-card test covers it")
         super().__init__(config, **kw)
         self.options = options or VllmOptions()
         if "--enforce-eager" in config.extra_args and not self.options.allow_eager:
@@ -115,7 +115,7 @@ class VllmServerEngine(ServerEngine):
     def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
                         stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
         """Token-id prompts (a list of id lists as ``prompt``), for the records
-        proxy (S25 N10.5). vLLM does not re-tokenize an id prompt, so the
+        proxy. vLLM does not re-tokenize an id prompt, so the
         template's own BOS tokens are not doubled."""
         ids = [[int(t) for t in p] for p in prompts]
         extra = {"stop_token_ids": [int(t) for t in stop_token_ids]} if stop_token_ids else {}

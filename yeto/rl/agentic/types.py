@@ -1,4 +1,4 @@
-"""Framework-neutral agentic task, verdict and trajectory (S25 N10.2).
+"""Framework-neutral agentic task, verdict and trajectory.
 
 The yeto core only knows these types.  A harness (Harbor today) turns an
 :class:`AgentTask` into a :class:`TrialVerdict`; the outer layer

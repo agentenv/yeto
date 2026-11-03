@@ -1,4 +1,4 @@
-"""``ReconfigurationCut`` manifest (rl-infra-spec 4.1/4.2, design D5). Import-light.
+"""``ReconfigurationCut`` manifest. Import-light.
 
 A cut is a directory written once and then only read::
 
@@ -94,18 +94,18 @@ class CutFile:
 class AlgorithmIdentity:
     """alignment A3: what must be identical between the cut and the restoring run.
 
-    rl-identity-tiering L9.8: a cut written since the version boundary also
+    A cut written since the version boundary also
     holds the canonical spec and its ``semantic_sha256``. Such a cut is compared
     by the semantic hash: a plugin source change (code identity, pinned by the
     run code pack) does not refuse the resume. An older cut holds hashes only
-    and keeps the whole-hash comparison (SESSION24 GOAL §6, L9.8 rule).
+    and keeps the whole-hash comparison.
     """
 
     algorithm_spec_sha256: str
     plugin_sha256: tuple[str, ...] = ()  # sorted "<dotted path>@<source sha256>" of every PluginRef
     runtime_attrs_sha256: str | None = None  # hash of the yeto_algo_plugins runtime attrs
     ref_model: Mapping[str, Any] | None = None  # {"ref_load", "base_model_revision"} when a ref model is used
-    semantic_sha256: str | None = None  # AlgorithmSpec.semantic_sha256(); None in a cut from before L9.8
+    semantic_sha256: str | None = None  # AlgorithmSpec.semantic_sha256(); None in an older cut
     algorithm_spec: Mapping[str, Any] | None = None  # the canonical spec the semantic hash is taken of
 
     def to_dict(self) -> dict[str, Any]:
@@ -237,7 +237,7 @@ class CutProgress:
         return dict(self.__dict__)
 
 
-# State families that a complete cut must carry (design D5 table / 4.1 audit).
+# State families that a complete cut must carry.
 REQUIRED_SECTIONS = ("runtime", "progress", "algorithm", "data", "ledger", "outer", "files")
 
 
@@ -250,7 +250,7 @@ class CutManifest:
     algorithm: AlgorithmIdentity
     data: Mapping[str, Any]  # rollout data cursor (the backend data source position)
     ledger: Mapping[str, Any]  # 3.6 summary: carried_over, ready_unconsumed, counts
-    outer: Mapping[str, Any]  # outer protocol position; settled must be True (D5)
+    outer: Mapping[str, Any]  # outer protocol position; settled must be True
     files: tuple[CutFile, ...]
     rank_summaries: tuple[Mapping[str, Any], ...] = ()
     schema: str = CUT_SCHEMA
@@ -260,11 +260,11 @@ class CutManifest:
     # cut (InFlightTrajectory.to_dict()); written only under a policy-age limit
     # > 0 and serialized only when non-empty (default manifests unchanged).
     in_flight: tuple[Mapping[str, Any], ...] = ()
-    # S25 N7.6: ResumeManifest.to_dict() (yeto.rl.engine.resume_manifest);
+    # ResumeManifest.to_dict() (yeto.rl.engine.resume_manifest);
     # serialized only when non-empty. Restoring a cut without it is refused
     # by the backends that write it.
     resume: Mapping[str, Any] = field(default_factory=dict)
-    # S27 R-5: wall clock (epoch seconds) when the writer built the manifest;
+    # Wall clock (epoch seconds) when the writer built the manifest;
     # serialized only when set (manifests without it keep their bytes).
     created_unix: float | None = None
 
@@ -408,7 +408,7 @@ def context_problems(
     if ledger.get("ready_unconsumed") != 0:
         out.append("ledger: first-version cut requires no ready-unconsumed group (quiescent cut)")
     if outer.get("settled") is not True:
-        out.append("outer: the outer commit of this cut is not settled (D5)")
+        out.append("outer: the outer commit of this cut is not settled")
     for key in ("backend_fingerprint", "layout", "rng_policy"):
         if not runtime.get(key):
             out.append(f"runtime: {key} missing")

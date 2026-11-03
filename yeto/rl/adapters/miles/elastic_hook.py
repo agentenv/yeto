@@ -1,4 +1,4 @@
-"""D2 learner wiring: ``--rl-recommend-mode`` / ``--rl-edge-costs-path`` /
+"""Learner wiring: ``--rl-recommend-mode`` / ``--rl-edge-costs-path`` /
 ``--rl-elastic-window-s`` -> :class:`yeto.rl.engine.elastic.ElasticHook`.
 
 The learner copies the flags onto ``miles_args`` (``yeto_rl_recommend_mode``,
@@ -30,7 +30,7 @@ def recommend_mode_of(miles_args: Any) -> str:
 
 
 def is_flash_next_full(profile: Any, miles_args: Any = None) -> bool:
-    """G2: the real ports path names its profile ``miles-lora-partitioned-serial``,
+    """The real ports path names its profile ``miles-lora-partitioned-serial``,
     so recognise Flash-Next full by the model fingerprint the qwen3_8_next recipe
     renders into the parsed Miles args (model-name + native provider + 48 layers +
     512 experts); the profile-name prefix is kept for the declared test profile."""
@@ -204,7 +204,7 @@ def apply_recommend_flags(args: Any, miles_args: Any) -> None:
 
 def add_recommend_arguments(parser: Any) -> None:
     parser.add_argument("--rl-recommend-mode", choices=RECOMMEND_MODE_CHOICES, default=None,
-                        help="ports+--rl-elastic+--rl-observe-timeline: D2 recommend/auto "
+                        help="ports+--rl-elastic+--rl-observe-timeline: recommend/auto "
                         "mode at startup (default disabled)")
     parser.add_argument("--rl-edge-costs-path", default=None,
                         help="5.7 transition cost table for recommend/auto (missing -> hold)")
@@ -212,4 +212,4 @@ def add_recommend_arguments(parser: Any) -> None:
                         help=f"load window seconds (default {DEFAULT_WINDOW_S:g})")
     for flag, _t, field_, typ in TUNING:
         parser.add_argument(f"--rl-{flag}", type=typ, default=None,
-                            help=f"D2 tuning for {field_} (needs --rl-recommend-mode; default: code default)")
+                            help=f"tuning for {field_} (needs --rl-recommend-mode; default: code default)")

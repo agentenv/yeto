@@ -1,4 +1,4 @@
-"""S27 G-EA: receive-only subscribers and the sample relay on the real syncer.
+"""Receive-only subscribers and the sample relay on the real syncer.
 
 Each test starts the Rust syncer binary (debug build) with one or two raw
 f32 learners. Outer lr 1 and momentum 0 with one learner make every merged

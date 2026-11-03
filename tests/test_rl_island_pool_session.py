@@ -72,7 +72,7 @@ def test_session_pauses_only_the_named_island_once_after_after_v(tmp_path, monke
 
 
 def test_an_island_that_applied_the_final_cut_stops_without_another_push(tmp_path):
-    """S17 M1: the island stops once it applied the final outer version."""
+    """The island stops once it applied the final outer version."""
     fake = FakePoolSyncer(final=3)
     engine = _engine(torch.tensor([1.0, 3.0]))
     sync = _sync(tmp_path, engine, fake.client(), rounds=3)

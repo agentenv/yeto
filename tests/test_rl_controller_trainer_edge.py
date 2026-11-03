@@ -1,4 +1,4 @@
-"""E3 (4.7) through the E1 IslandController (CPU protocol; needs infra-e3-controller.patch)."""
+"""Trainer-edge reconfiguration through the IslandController (CPU protocol)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-# E3 modules/fakes live on infra-e3 until integration (E1 applied the controller patch).
+# Skips when the trainer-edge modules/fakes are not importable.
 pytest.importorskip("yeto.rl.engine.trainer_transition")
 pytest.importorskip("tests.rl_reshard_fakes")
 

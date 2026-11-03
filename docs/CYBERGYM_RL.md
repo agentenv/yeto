@@ -88,7 +88,8 @@ prompts or worker artifacts.
 
 An image-backed CyberGym deployment can use prebuilt `<task>-vul-cov` images.
 For a binary-only server started with `--binary_dir`, prepare the local
-`vul-cov` directories once before training. From the CyberGym checkout, run:
+`vul-cov` directories once before training. From the CyberGym checkout (the
+script lives in the CyberGym repository, not in Yeto), run:
 
 ```bash
 python scripts/server_data/prepare_cybergym_coverage.py \
@@ -189,11 +190,8 @@ when authentication is required; Yeto forwards it through the job environment
 without recording it in the launch arguments.
 
 The LM benchmark accepts the resulting prompt files and reward callable
-unchanged. Use
-`--arms native --rl-engine legacy` to run only the direct Miles reference, or
-select any comma-separated combination of `native`, `single`, `federated`, and
-`decoupled` (`native` needs `--rl-engine legacy`; the default `ports` engine
-runs only the Yeto arms).
+unchanged. Use `--arms` to select any comma-separated combination of `single`,
+`federated`, and `decoupled` (default: all three).
 
 To reduce zero-advantage GRPO groups, add Miles oversampling and its shipped
 nonzero-reward-variance filter to the RL launch:
@@ -207,5 +205,5 @@ nonzero-reward-variance filter to the RL launch:
 ```
 
 The filter is an intervention, not a new control: compare it against the
-archived teammate baseline using the same model, task manifest, seed schedule,
+an existing baseline using the same model, task manifest, seed schedule,
 reward contract, and optimizer budget.

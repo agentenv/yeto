@@ -121,7 +121,7 @@ def expected_trainable_params_4layer(lora_rank: int, lora_expert_rank: int) -> i
 
 
 def expected_rank_trainable_4layer(lora_rank: int, lora_expert_rank: int, num_gpus: int) -> tuple[int, int]:
-    """Per-rank ``trainable=`` values logged by ``apply_qwen3_8_next_lora`` (T2-S7 F2).
+    """Per-rank ``trainable=`` values logged by ``apply_qwen3_8_next_lora``.
 
     The trainer log sums the *local* ``model.parameters()`` of one rank under
     the 4-layer layout TP2 / PP2 / EP=num_gpus/2 / ETP1: PP stage 0 holds
@@ -223,7 +223,7 @@ class Qwen38NextLoraProfile:
     miles_root: str = "/root/miles"
     megatron_path: str = "/root/Megatron-LM"
     dataset: str = "zhuzilin/dapo-math-17k"
-    # held-out eval set (T2-S7 F5; Miles gemma recipe source, prompt/label keys)
+    # held-out eval set (Miles gemma recipe source, prompt/label keys)
     eval_dataset: str = "zhuzilin/aime-2024"
     # Miles' recipe defaults to disk offload; CI and this profile use cpu so the
     # per-rank train state never hits the (small, slow) container disk.
@@ -242,7 +242,7 @@ class Qwen38NextLoraProfile:
     lora_expert_rank: int = 8
     lora_dropout: float = 0.0
     # run shape; run_id (Miles --run-id) fixes <save_dir>/<run_id>/checkpoints so a
-    # restart can point --lora-adapter-path at a known iter (T2-S7 F4); "" = Miles default
+    # restart can point --lora-adapter-path at a known iter; "" = Miles default
     run_id: str = ""
     num_rollout: int = 5
     rollout_max_response_len: int = 512
@@ -378,7 +378,7 @@ class Qwen38NextLoraProfile:
         extra = [*self.lora_extra_args(), *extra_args]
         # run_qwen3_8_next.py registers a single typer command, which typer
         # flattens: passing the documented `train` word is rejected by the image
-        # ("Got unexpected extra argument(s) (train)", T2-S7 G3 attempt 1).
+        # ("Got unexpected extra argument(s) (train)", seen on an early attempt).
         cmd = [
             "python3", f"{self.miles_root}/scripts/run_qwen3_8_next.py",
             "--model-name", self.model_name,
@@ -506,7 +506,7 @@ if __name__ == "__main__":
     sys.exit(main())
 
 
-# ---- D1/D2 elastic declaration (rl-infra-spec 6.5 wiring, d2-wire) ---------------
+# ---- elastic declaration ---------------
 # DATA ONLY.  Declares the candidate fixed configs and the rollout elastic edges
 # for the Flash-Next target shape (multi-node H200, native LoRA, MoE EP).  Nothing
 # here certifies anything: ``ElasticHook`` intersects ``declared_edges`` with the
@@ -584,7 +584,7 @@ PORTS_DROPPED_FLAGS = frozenset({"--lora-type", "--lora-base-cpu-backup"})
 # scripts/run_qwen3_8_next.py perf / serving / health flags the validated runs used
 # (perf_args, sglang_args, misc_args).  The ports renderer either omits these or
 # emits a different default; the recipe pins the historical values so the ports
-# argv matches what ran on GPUs (differences: infra-drafts/FN-A-PRELAUNCH-REVIEW.md).
+# argv matches what ran on GPUs.
 PORTS_RUNTIME_ARGS: tuple[str, ...] = (
     "--recompute-granularity", "full",
     "--recompute-method", "uniform",

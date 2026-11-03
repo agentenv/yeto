@@ -1,4 +1,4 @@
-"""verl backend of the Harbor agentic path: ``HarborAgentLoop(AgentLoopBase)`` (S25 N10.3).
+"""verl backend of the Harbor agentic path: ``HarborAgentLoop(AgentLoopBase)``.
 
 verl's agent loop schedules samples and assembles the batch; Harbor runs the
 trial; the yeto outer layer admits and classifies.  Neither verl nor Harbor is
@@ -9,7 +9,7 @@ Per sample, ``run``:
 
 1. reads the :class:`~yeto.rl.agentic.AgentTask` from the row
    (``extra_info.agent_task``);
-2. opens a token-recorder session (N10.5) with verl's sampling parameters and
+2. opens a token-recorder session with verl's sampling parameters and
    hands its OpenAI URL to the agent (the session id is the task's
    ``trajectory_id`` plus a per-sample suffix: verl repeats a row ``n`` times);
 3. runs one Harbor ``Trial`` through ``run_agent_task``;
@@ -18,13 +18,13 @@ Per sample, ``run``:
    trained tokens are always the generated ones).
 
 Calls aborted by verl's fully-async rollouter at a weight update are sent
-again after a back-off (``rollout_engine`` module doc, S26 E9.5); the trial
+again after a back-off (``rollout_engine`` module doc); the trial
 keeps running, and a time limit hit after such a wait is ABORTED.
 
 ABORTED on verl: the batch has no per-sample drop, so an ABORTED sample is a
 one-token placeholder with mask 0 and reward 0, flagged in ``extra_fields``.
 It adds no policy-gradient tokens.  The ``yeto_grpo`` estimator
-(:mod:`.advantage`) keeps it out of its GRPO group's mean and std (N10.3b);
+(:mod:`.advantage`) keeps it out of its GRPO group's mean and std;
 the loop refuses to start under another estimator.
 
 Configuration (worker environment; pass it to the Ray workers, e.g. through
@@ -117,7 +117,7 @@ def _recorder_from_env() -> TokenRecorder:
     spec = os.environ.get(RECORDER_ENV, "")
     module, _, attr = spec.partition(":")
     if not module or not attr:
-        raise HarnessConfigError(f"set {RECORDER_ENV}=module:callable (the N10.5 token recorder)")
+        raise HarnessConfigError(f"set {RECORDER_ENV}=module:callable (the token recorder)")
     return getattr(importlib.import_module(module), attr)()
 
 
@@ -136,7 +136,7 @@ def recorder_session_id(task: AgentTask) -> str:
 
 
 def check_estimator(config: Any) -> None:
-    """Refuse an advantage estimator that would count ABORTED placeholders (N10.3b).
+    """Refuse an advantage estimator that would count ABORTED placeholders.
 
     A config without ``algorithm.adv_estimator`` (a test stub) is not checked.
     """
@@ -198,7 +198,7 @@ class HarborAgentLoop(AgentLoopBase):
         task = task_from_row(kwargs)
         recorder = self.recorder_factory()
         client = getattr(self, "server_manager", None)
-        if client is not None:  # a recorder over verl's own rollout needs verl's client (N10.9)
+        if client is not None:  # a recorder over verl's own rollout needs verl's client
             bind_rollout_client(recorder, client)
         session = recorder_session_id(task)
         endpoint = await recorder.open(session, sampling_params)
@@ -259,7 +259,7 @@ class HarborAgentLoop(AgentLoopBase):
 
 
 def _after_suspension(trajectory: AgentTrajectory, ledger: SuspendLedger) -> AgentTrajectory:
-    """Suspension metrics; a time limit after an aborted-and-retried call is ABORTED (S26 E9.5)."""
+    """Suspension metrics; a time limit after an aborted-and-retried call is ABORTED."""
     updated = after_suspension(trajectory, ledger)
     if updated.outcome is not trajectory.outcome:
         _gate().metrics.reclassify(trajectory.outcome, updated.outcome)

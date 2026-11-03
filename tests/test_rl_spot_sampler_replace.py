@@ -1,4 +1,4 @@
-"""S25 C1: a sampler island on spot capacity is reclaimed and replaced.
+"""A sampler island on spot capacity is reclaimed and replaced.
 
 CPU only (no Miles, no Ray): the resume point read from the buffer, the
 resumable round writer (no round written twice, no prompt drawn twice), several
@@ -369,7 +369,7 @@ def test_the_island_resolves_its_sampler_id_and_the_shards():
 
 
 def test_sampler_and_resumable_trainer_islands_get_the_reclaim_marker():
-    """S25 C1: the sampler islands; S26 E9.1: also the trainer, a resumable island on
+    """The sampler islands, and also the trainer, a resumable island on
     Modal (--rl-checkpoint-store), whose driver turns the marker into the preemption
     notice."""
     from yeto.gpu_spec import parse_gpu_spec
@@ -489,7 +489,7 @@ def test_sampler_spot_bills_only_the_samplers_and_adds_no_spot_volume(monkeypatc
     # the sampler gets the store mount only, like the trainer: no legacy --spot volume
     assert spots == [True, False] and volumes[0] == volumes[1] and len(volumes[0]) == 1
     # Nebius stops the VM without signalling the container: the host unit writes the
-    # sampler's marker (S25 C1b); the on-demand trainer gets no unit
+    # sampler's marker ; the on-demand trainer gets no unit
     assert hooks == [True, False] and markers == [nebius_reclaim.NOTICE_FILE, None]
 
 

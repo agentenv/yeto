@@ -15,8 +15,8 @@ e.g. under the tape mount). When set, the learner:
   :meth:`InFlightSaver.save` (25 s cap; a save that overruns is abandoned and
   only its ``.tmp`` file is left, never a half written ``.json``). The notice is
   a marker file (``YETO_SPOT_RECLAIM_MARKER``) the Modal function process writes
-  on SIGINT/SIGTERM; a daemon thread in the learner watches it. (S19 run
-  s19-agentic5-b-20261010b: a signal forwarded to the learner was not handled
+  on SIGINT/SIGTERM; a daemon thread in the learner watches it. (On one run
+  a signal forwarded to the learner was not handled
   within the ~20 s before the kill -- a Python signal handler runs only on the
   main thread, which was inside a training call.) Each step prints
   ``[yeto] rl_inflight_save_progress {...}``.
@@ -147,7 +147,7 @@ class InFlightSaver:
         self.results: list[dict[str, Any]] = []
         # The in-flight set taken right after a rollout ends (driver phase "train"):
         # between the rollout's cut-off and the next rollout it does not change, and
-        # at a reclaim the Ray actors may already be gone (S19 s19-agentic5-r-20261010c:
+        # at a reclaim the Ray actors may already be gone (one run saw
         # RolloutExecutor "killed by ray.kill" within 1 s of the signal). None while a
         # rollout runs (the set changes then): the reclaim save exports live.
         self.cached: Mapping[str, Any] | None = None

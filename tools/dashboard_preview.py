@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""yeto-fleet-dashboard 9.1: static preview page built from a REAL run directory.
+"""Static fleet-dashboard preview page built from a real run directory.
 
-Only real tape / run data goes in (missing -> null -> "无"). Sources:
+Only real tape / run data goes in (missing -> null -> "none"). Sources:
   * learner tape  rl-island-*.jsonl     -> phases (rl_timeline_span), reward quantiles, publications, events
   * modal-hostmem-rank*.jsonl           -> per-node GPU memory (rollout node included)
-  * runs/<run>/{fleet.jsonl,meta.json}  -> cost (GPU+CPU+memory, tasks 8.2) and run name (8.3) via the Reducer
+  * runs/<run>/{fleet.jsonl,meta.json}  -> cost (GPU+CPU+memory) and run name via the Reducer
   * <run dir>/metrics.json (optional)   -> per-round truncation / logprob diff / response length parsed
-                                           from launch.log by the s16 metrics script
-usage: python tools/dashboard_preview.py <s1-runs run dir> -o out.html
+                                           from launch.log by a separate metrics script
+usage: python tools/dashboard_preview.py <run dir> -o out.html
 """
 
 from __future__ import annotations
@@ -113,15 +113,15 @@ def build(run_dir: Path) -> dict:
                                                                          "global_status", "cost", "islands",
                                                                          "alerts", "first_ts", "data_ts")},
         "t0": t_unix0, "driver_start": start and start["time_unix"], "rounds": out_rounds, "nodes": nodes,
-        "node_roles": {"0": "训练（TP2 PP4 EP2）+ 驱动", "1": "推理（SGLang TP8）"},
+        "node_roles": {"0": "training (TP2 PP4 EP2) + driver", "1": "inference (SGLang TP8)"},
         "events": events,
         "config": {"model": a.get("model"), "gpu": a.get("gpu"), "placement": a.get("rl_placement"),
                    "image": a.get("rl_image"), "budget": a.get("budget")},
         "commands": [
-            ["本地看板", f"yeto dashboard serve --tapes {run_dir}/runs/{ov['run']} {run_dir}/tape-direct --port 8787"],
-            ["运行状态", f"yeto status {ov['run']}"],
-            ["Modal 日志", f"modal app logs yeto-{ov['run']}"],
-            ["停止应用", f"modal app stop --yes yeto-{ov['run']}"],
+            ["Local dashboard", f"yeto dashboard serve --tapes {run_dir}/runs/{ov['run']} {run_dir}/tape-direct --port 8787"],
+            ["Run status", f"yeto status {ov['run']}"],
+            ["Modal logs", f"modal app logs yeto-{ov['run']}"],
+            ["Stop app", f"modal app stop --yes yeto-{ov['run']}"],
         ],
     }
 

@@ -201,7 +201,7 @@ def test_register_conflict_rejected():
 
 # -- 3.9 math graders: test-only copy -------------------------------------------------
 
-MILES_PIN_CHECKOUT = Path(os.path.expanduser("~/work/miles-fr1"))
+MILES_PIN_CHECKOUT = Path(os.environ.get("YETO_TEST_MILES_PIN_CHECKOUT", "/nonexistent-miles-checkout"))
 # The Miles commit tests/vendor/miles_math_utils.py was copied from (the pin of
 # the removed legacy engine); the copy stays byte-identical to that file.
 VENDOR_SOURCE_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"
@@ -223,7 +223,7 @@ def test_vendor_copy_is_marked_and_matches_the_pinned_source():
     import subprocess
 
     text = (REPO / "tests/vendor/miles_math_utils.py").read_text()
-    assert "许可证待核实、不进 main" in text.splitlines()[0]
+    assert "License to be verified; not for main." in text.splitlines()[0]
     if not (MILES_PIN_CHECKOUT / ".git").exists():
         pytest.skip("no local Miles checkout to compare the copy with")
     pinned = subprocess.run(
@@ -232,7 +232,7 @@ def test_vendor_copy_is_marked_and_matches_the_pinned_source():
         capture_output=True, text=True)
     if pinned.returncode != 0:
         pytest.skip("pinned Miles commit not in the local checkout")
-    body = text.split("# 以下自下一行起与 pin 提交中的文件逐字节相同。\n", 1)[1]
+    body = text.split("# Everything from the next line on is byte-identical to the file at the pin commit.\n", 1)[1]
     assert body == pinned.stdout
 
 

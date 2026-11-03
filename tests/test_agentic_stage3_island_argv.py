@@ -1,13 +1,13 @@
-"""S26 E9.5 R6 (CPU, no Ray, no GPU): agentic stage 3 through the Miles island entry.
+"""CPU, no Ray, no GPU: agentic stage 3 through the Miles island entry.
 
 A colocated no-sync island with the Harbor agent, ``--rl-max-policy-age 1`` and
 ``--rl-resume-store`` derives Miles' suspension between turns (not
 ``--partial-rollout`` / ``--fully-async``), keeps the round-cut store on the
 Miles args, and refuses to start without the gate relay. A full-parameter
-island ran this layout only after S27 G-EF: colocated full parameters are
+island runs this layout only since colocated full parameters are
 accepted on one island without outer sync and refused otherwise (see
 ``test_fullparam_colocated_island.py``); a fixed partition derives
-``--fully-async``. That is why the S26 R6 GPU run used LoRA.
+``--fully-async``.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ def test_island_start_needs_the_gate_relay_and_keeps_the_cut_store(tmp_path):
 
 
 def test_full_parameter_colocated_suspension_layout_needs_no_outer_sync(tmp_path):
-    # colocated (no dedicated engines): refused unless the island has no outer sync (S27 G-EF)
+    # colocated (no dedicated engines): refused unless the island has no outer sync
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=1, rollout_gpus=None,
                                          rollout_gpus_per_engine=1) is not None
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=1, rollout_gpus=None,
@@ -131,6 +131,6 @@ def test_full_parameter_colocated_suspension_layout_needs_no_outer_sync(tmp_path
                                          rollout_gpus_per_engine=1, colocated=True,
                                          single_island_no_sync=True) is None
     # the island parser takes full parameters on a no-sync island with both roles
-    # (S26 E11); the layout check above is what refuses this colocated layout
+    # the layout check above is what refuses this colocated layout
     args = island_entry.parse_args([a if a != "lora" else "full" for a in _island_argv(tmp_path)])
     assert args.parameter_mode == "full"

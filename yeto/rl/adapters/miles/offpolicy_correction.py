@@ -1,9 +1,9 @@
 """Miles mapping of the neutral correction group
-(change ``rl-offpolicy-correction-passthrough`` L6.3, L6.7, L6.9).
+(off-policy correction passthrough).
 
 :func:`correction_mapping` turns ``AlgorithmSpec.correction`` into Miles
-argv (design D2/D3); :func:`algorithm_flags.algorithm_argv` emits the same
-argv through its ``--use-tis`` row. Mapping table (design D3):
+argv; :func:`algorithm_flags.algorithm_argv` emits the same
+argv through its ``--use-tis`` row. Mapping table:
 
 ====================  ==========================================================
 neutral               Miles
@@ -16,16 +16,16 @@ ratio_mask=mis        the same with the MIS function; mask mode, ``level``,
 opsm                  ``--use-opsm --opsm-delta``
 ====================  ==========================================================
 
-Rows Miles cannot express give a :class:`CorrectionWarning`; phase 2 (L6b.2)
+Rows Miles cannot express give a :class:`CorrectionWarning`; phase 2
 refuses the start on them: ``level`` other than token without the MIS mask, and ``veto`` /
 ``batch_normalize`` without the MIS mask.
 
-Decoupled PPO (design D2) needs pi_prox, which Miles recomputes on the
+Decoupled PPO needs pi_prox, which Miles recomputes on the
 weights before each update (``prox_anchor=per_step``). :data:`FORBIDDEN`
 lists the flags that remove it or mask by version; :func:`refuse_forbidden_argv`
 refuses them with the flag named.
 
-Admission (design D5, approximate): :func:`admission_argv` maps the
+Admission (approximate): :func:`admission_argv` maps the
 consumption limit ``A_hard`` and an optional admission limit ``k`` to
 ``--max-weight-staleness`` and the fully_async buffer capacity.
 """
@@ -152,7 +152,7 @@ def refuse_forbidden_argv(argv: Sequence[str]) -> None:
 
 
 def admission_argv(max_policy_age: int, *, admission_limit: int | None = None) -> tuple[str, ...]:
-    """Approximate admission and consumption limits on Miles fully_async (D5).
+    """Approximate admission and consumption limits on Miles fully_async.
 
     Consumption: ``--max-weight-staleness A_hard`` drops a group whose oldest
     token is more than ``A_hard`` versions behind (whole group). Admission:

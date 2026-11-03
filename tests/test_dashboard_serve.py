@@ -1,4 +1,4 @@
-"""fleet-dashboard 3.5/3.6: loopback GET-only server and the offline export."""
+"""Loopback GET-only server and the offline export."""
 
 import json
 import re
@@ -142,8 +142,8 @@ def test_old_tape_renders_no_data_in_the_page(tmp_path):
                          capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     page = json.loads(res.stdout)
-    assert "多岛总览" in page["title"] and page["wall_hidden"] is False  # run_kind multi_island
-    assert "无" in page["islands"] and "无" in page["kpis"]  # no fleet.jsonl / resource samples: "无", never 0
-    assert "岛 3" in page["wall"] and page["svg_nodes"] > 0
-    assert "第 0 轮" in page["tip_key"] and "岛 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
-    assert "单岛总览" in page["title_after_switch"] and page["wall_hidden_after_switch"] is True
+    assert "Multi-island overview" in page["title"] and page["wall_hidden"] is False  # run_kind multi_island
+    assert "n/a" in page["islands"] and "n/a" in page["kpis"]  # no fleet.jsonl / resource samples: "n/a", never 0
+    assert "Island 3" in page["wall"] and page["svg_nodes"] > 0
+    assert "Round 0" in page["tip_key"] and "Island 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
+    assert "Single-island overview" in page["title_after_switch"] and page["wall_hidden_after_switch"] is True

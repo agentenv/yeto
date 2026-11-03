@@ -1,4 +1,4 @@
-"""S29 D13: hand a policy release to a far spot island through a nearby object store.
+"""Hand a policy release to a far spot island through a nearby object store.
 
 The npu1 uplink is ~0.2 MB/s to Nebius, so a 120B release (a 13 GB delta,
 ``policy_release`` ``.ydelta`` files) cannot go over the syncer link. Instead:

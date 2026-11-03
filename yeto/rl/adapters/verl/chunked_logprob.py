@@ -1,4 +1,4 @@
-"""Chunked vocab-parallel log-probs for verl's Megatron fused-kernel path (S28 FCE).
+"""Chunked vocab-parallel log-probs for verl's Megatron fused-kernel path.
 
 verl's ``use_fused_kernels`` path (``verl/models/mcore/model_forward_fused.py``) asks
 for per-token log-probs and entropy straight from the last hidden states and the
@@ -9,7 +9,7 @@ on Ascend: it wraps everything in ``torch.cuda.nvtx.range`` (a RuntimeError on a
 And the path only knows ``GPTModel``: NemotronH is built by Megatron-Bridge as
 ``MambaModel`` (a ``HybridModel``), whose ``forward`` has no ``output_processor``
 hook, so ``patch_fused_forward`` skips it and the fused call then fails with a
-TypeError. (Investigation: ``infra-drafts/SESSION28/report/FCE-PLAN.md``.)
+TypeError.
 
 This module replaces both pieces at run time, in the worker process, without
 changing a verl file on disk:
@@ -34,7 +34,7 @@ changing a verl file on disk:
 On Ascend, :func:`linear_cross_entropy` dispatches to :class:`ChunkedNpuLogprob`, which
 keeps the same contract and numbers but uses CANN's fused vocab-parallel operators. It is
 both faster than the current non-chunked path and far smaller in HBM; the measurements and
-the operator semantics are in the "Ascend path" section below. (S28 G-FCK.)
+the operator semantics are in the "Ascend path" section below.
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ class ChunkedVocabParallelLogprob(torch.autograd.Function):
 # --------------------------------------------------------------------------- Ascend path
 # Measured on one Ascend 910B3 card at the 120B island's output-layer shape (H=4096,
 # V/TP=32768, bf16), forward+backward, 8192 tokens per chunk, against the current
-# non-chunked path (one [T, V/TP] logits tensor plus autograd), `s1-runs/s28-fck`:
+# non-chunked path (one [T, V/TP] logits tensor plus autograd):
 #
 #   tokens | entropy | current path         | this path          | gain  | peak HBM
 #   -------|---------|----------------------|--------------------|-------|-----------

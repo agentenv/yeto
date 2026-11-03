@@ -1,4 +1,4 @@
-"""Run the Qwen3.8-Flash-Next-4layer native LoRA GRPO steps (M4 G0-G4) on Modal H100:4 / H100:8.
+"""Run the Qwen3.8-Flash-Next-4layer native LoRA GRPO steps on Modal H100:4 / H100:8.
 
     modal run scripts/modal_qwen3_8_next_4layer_lora.py --step g0|g1|g2|g3|g4|g4r|shell
         [--timeout SECONDS] [--cmd 'override bash command'] [--run-id ID]
@@ -9,10 +9,10 @@ into the task), yeto's `yeto/` + `scripts/` mounted at /root/yeto, and one Volum
 holding HF weights / torch_dist / datasets / checkpoints / logs / compile caches
 so steps survive container turnover.  g0 and g1 are CPU-only (image checks,
 downloads); g2-g4r reserve H100:<YETO_Q38N_NUM_GPUS_PER_NODE> (default 4; `M4_GPU`
-overrides) with >=256 GiB RAM.  The 8-GPU final acceptance (T2-B, Miles' native
+overrides) with >=256 GiB RAM.  The 8-GPU final acceptance (Miles' native
 TP2/PP2/EP4 layout) converts into its own torch_dist directory
 (`ckpt_dir_for_gpus`: /root/ckpt/gpus8) so the EP4 manifest / expected_rank_trainable
-never collide with the 4-GPU A-stage output on the shared Volume.  Every
+never collide with the 4-GPU output on the shared Volume.  Every
 step runs under `timeout` (the launcher's own EXIT trap stops the ray job), the
 container's function timeout is a second ceiling, and `modal app stop <app>` is
 the external watchdog.  The GPU actually granted is logged at the top of every
@@ -29,10 +29,15 @@ import time
 
 import modal
 
-IMAGE = (
-    "ghcr.io/michaellchung/yeto-miles-ports:c35702e-4e4148f"
+# The registry that hosts the ports image (for example ghcr.io/<owner>); YETO_IMAGE
+# overrides the whole reference.
+IMAGE_REGISTRY = os.environ.get("YETO_IMAGE_REGISTRY", "ghcr.io/<owner>")
+IMAGE = os.environ.get("YETO_IMAGE") or (
+    f"{IMAGE_REGISTRY}/yeto-miles-ports:c35702e-4e4148f"
     "@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9"
 )
+if modal.is_local() and "<owner>" in IMAGE:
+    raise SystemExit("set YETO_IMAGE_REGISTRY (e.g. ghcr.io/<owner>) or YETO_IMAGE to the ports image")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.environ.get("M4_APP", "m4-q38n-" + time.strftime("%Y%m%d"))
 NUM_GPUS = int(os.environ.get("YETO_Q38N_NUM_GPUS_PER_NODE", "4"))
@@ -65,14 +70,14 @@ app = modal.App(APP, image=image)
 LAUNCH = f"bash {YETO}/scripts/run_qwen3_8_next_4layer_lora.sh --yeto-root {YETO}"
 # same mapping as yeto.rl.profiles.qwen3_8_next.ckpt_dir_for_gpus (not imported: this module is
 # re-imported inside the container where yeto lives under /root/yeto, not on sys.path)
-CKPT_DIR = "/root/ckpt" if NUM_GPUS == 4 else f"/root/ckpt/gpus{NUM_GPUS}"  # 8 -> gpus8 (B-stage, EP4)
+CKPT_DIR = "/root/ckpt" if NUM_GPUS == 4 else f"/root/ckpt/gpus{NUM_GPUS}"  # 8 -> gpus8 (EP4)
 TORCH_DIST = f"{CKPT_DIR}/qwen3.8-flash-next-4layer_torch_dist"
 # NUM_GPUS / CKPT_DIR / APP are read from the *local* environment and shipped to the container as
 # function arguments (`ctx`): the module is re-imported inside the container, where these env vars
-# are unset and would silently fall back to the 4-GPU defaults (B-stage G0 attempt 2).
+# are unset and would silently fall back to the 4-GPU defaults.
 LOCAL_CTX = {"num_gpus": NUM_GPUS, "ckpt_dir": CKPT_DIR, "app": APP, "gpu": GPU}
 # extra train.py args for g3/g4/g4r (e.g. "--entropy-coef 0.01": the 4-layer slice earns
-# reward 0 on dapo-math, so without it GRPO advantages and LoRA B stay 0 — T2-S7 G3)
+# reward 0 on dapo-math, so without it GRPO advantages and LoRA B stay 0)
 EXTRA = os.environ.get("M4_EXTRA_TRAIN_ARGS", "")
 EVAL = ("--eval-interval 5 --eval-prompt-data aime /root/datasets/aime-2024/aime-2024.jsonl "
         "--n-samples-per-eval-prompt 2 --eval-max-response-len 512")
@@ -101,15 +106,15 @@ STEPS: dict[str, tuple[str, int, bool]] = {  # name -> (command, default timeout
            f"--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID {EVAL} {EXTRA}; "
            "ls /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter /root/shared_data/$RUN_ID/checkpoints/iter_0000019/adapter",
            3000 + 300, True),
-    # F4: restart with a NEW run id and --lora-adapter-path (never --load on the LoRA dir).
+    # Restart with a NEW run id and --lora-adapter-path (never --load on the LoRA dir).
     # Miles names checkpoints by the 0-based rollout id: save-interval 10 over 20 rounds
-    # writes iter_0000009 and iter_0000019 (T2-S7 G4).
+    # writes iter_0000009 and iter_0000019.
     "g4r": (f"export TENSORBOARD_DIR=/vol/tensorboard_log/m4-q38n/$RUN_ID-restart; "
             f"YETO_Q38N_RUN_ID=$RUN_ID-restart YETO_Q38N_NUM_ROLLOUT=1 {LAUNCH} --skip-download --skip-convert --timeout 1800 -- "
             "--use-tensorboard --tb-project-name m4-q38n --tb-experiment-name $RUN_ID-restart "
             # training_state_rank0.pt restores the OptimizerParamScheduler of the 20-round run
             # (640 steps); a 1-round restart (32) trips Megatron's total-iteration assert
-            # unless the scheduler is rebuilt from the new args (G4r attempt 1).
+            # unless the scheduler is rebuilt from the new args.
             f"--lora-adapter-path /root/shared_data/$RUN_ID/checkpoints/iter_0000009/adapter "
             f"--override-opt_param-scheduler {EXTRA}",
             1800 + 300, True),

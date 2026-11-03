@@ -1,4 +1,4 @@
-"""FSDP2 full-parameter training of an HF causal LM (S25 N7.2, design D1).
+"""FSDP2 full-parameter training of an HF causal LM.
 
 One configuration, two consumers:
 
@@ -39,7 +39,7 @@ from torch import nn
 from ... import accel
 from .memory import OFFLOAD_MODES
 
-# The collective backend of each device family (D4), from yeto.accel. PPU keeps
+# The collective backend of each device family, from yeto.accel. PPU keeps
 # the CUDA device name and NCCL API (over ACCL-P); NPU uses torch_npu + HCCL.
 # Neither is verified on its machine.
 BACKENDS = {family: accel.family_dist_backend(family) for family in accel.FAMILY_DEVICE_TYPES}
@@ -132,12 +132,27 @@ def shard_model(model: nn.Module, cfg: FullParamConfig, mesh: Any = None) -> nn.
         "mp_policy": MixedPrecisionPolicy(param_dtype=cfg.param_dtype, reduce_dtype=cfg.reduce_dtype),
         "offload_policy": CPUOffloadPolicy() if cfg.offload == "full" else OffloadPolicy(),
     }
+    if mesh is None:
+        mesh = _cpu_mesh_for_gloo()
     if mesh is not None:
         kwargs["mesh"] = mesh
     for layer in decoder_layers(model):
         fully_shard(layer, reshard_after_forward=cfg.reshard_after_forward, **kwargs)
     fully_shard(model, reshard_after_forward=False, **kwargs)  # root: kept gathered for the backward
     return model
+
+
+def _cpu_mesh_for_gloo() -> Any:
+    """A CPU mesh over the default group when it runs gloo (the cpu family), else None.
+
+    fully_shard's own default mesh follows the host accelerator, so a gloo run on a
+    machine with an idle accelerator (e.g. MPS on macOS) would place shards there."""
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+
+    if not dist.is_initialized() or dist.get_backend() != "gloo":
+        return None
+    return init_device_mesh("cpu", (dist.get_world_size(),))
 
 
 @dataclass

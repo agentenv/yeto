@@ -1,4 +1,4 @@
-"""In-flight tool-wait trajectory count (rl-infra-spec 1.7; drain probe for 3.3 X5).
+"""In-flight tool-wait trajectory count (drain probe for 3.3 X5).
 
 ``tool_wait_seconds`` (rollout metadata) is a per-round total and cannot answer
 "is anybody waiting on a tool *right now*?". This module gives the instantaneous
@@ -15,7 +15,7 @@ Pieces:
   generate code wraps around each tool call; it reports to a local board or to
   the actor handle.
 * :func:`read_tool_wait` + :func:`drain_blockers` - the reader side used by the
-  drain (INFRA-E1): fail closed when either count is unknown.
+  drain: fail closed when either count is unknown.
 * :class:`HarnessBoard` / :class:`HarnessSnapshot` (IR-2, codex-harness
   R-IR): harness sessions in flight, live sandbox leases (idle ones included,
   each with a hard deadline) and the per-island admission switch

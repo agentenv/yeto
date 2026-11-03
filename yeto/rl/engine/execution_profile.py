@@ -1,4 +1,4 @@
-"""``ExecutionProfile`` and ``ReadinessSnapshot`` (rl-infra-spec task 1.4, design D0/D3).
+"""``ExecutionProfile`` and ``ReadinessSnapshot``.
 
 Pure and import-light: no torch/ray/miles. The profile freezes, for one run,
 which island-internal tasks depend on which, which pairs may overlap, how much
@@ -82,7 +82,7 @@ UNKNOWN = object()  # a precondition whose value the caller has no source for
 
 def check_overlap_eval(*, placement_kind: Any, eval_uses_snapshots: Any = UNKNOWN,
                        eval_interval: Any = UNKNOWN) -> None:
-    """Preconditions of eval overlap (task 2.3); shared by the island
+    """Preconditions of eval overlap; shared by the island
     (miles_adapter.entry) and the launcher's local pre-provisioning check.
 
     A value passed as :data:`UNKNOWN` is not checked here: a caller without a
@@ -157,7 +157,7 @@ def _independent_alignment(a: str, b: str, age: int) -> tuple[int, int] | None:
 
 @dataclass(frozen=True)
 class ExecutionProfile:
-    """Fixed for a run; the controller never rewrites it (design D0)."""
+    """Fixed for a run; the controller never rewrites it."""
 
     name: str
     execution_mode: str
@@ -175,7 +175,7 @@ class ExecutionProfile:
     # the run's ``AlgorithmSpec`` (``AlgorithmSpec.sha256()``, 64 hex). None =
     # unbound profile (planning only); the driver refuses to run one.
     algorithm_spec_sha256: str | None = None
-    # S17 N17: engine-neutral LR schedule hash (backend_identity.lr_schedule_sha256);
+    # Engine-neutral LR schedule hash (backend_identity.lr_schedule_sha256);
     # part of the contract identity. None = schedule not declared.
     lr_schedule_sha256: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict, compare=False)
@@ -312,11 +312,11 @@ def execution_max_policy_staleness(modes: Iterable[str]) -> int:
 
 
 def algorithm_max_policy_staleness(algorithm: Any) -> int:
-    """``AlgorithmSpec.execution.max_policy_staleness`` (rl-algorithm-capabilities D1/D4).
+    """``AlgorithmSpec.execution.max_policy_staleness``.
 
     The v1 spec (5 flat fields, R0) has no ``execution`` group; every v1
     algorithm is on-policy GRPO, so it reads as 0. INTERFACE NOTE: written
-    against the P0 design (``spec.execution.max_policy_staleness``) before the
+    against the original design (``spec.execution.max_policy_staleness``) before the
     ALGO-CAP v2 dataclass was frozen; re-check when it lands.
     """
     execution = getattr(algorithm, "execution", None)
@@ -420,7 +420,7 @@ def dependency_table(profile: ExecutionProfile) -> list[dict[str, Any]]:
 
 @dataclass(frozen=True)
 class ReadinessSnapshot:
-    """What the controller reads (design D3). Filled by the driver/bridge."""
+    """What the controller reads. Filled by the driver/bridge."""
 
     rollout_id: int
     optimizer_step: int
@@ -496,7 +496,7 @@ def train_blockers(profile: ExecutionProfile, snap: ReadinessSnapshot) -> list[s
 
 
 def quiescent_cut_blockers(profile: ExecutionProfile, snap: ReadinessSnapshot) -> list[str]:
-    """Reasons the island is not at a full-island quiescent cut (design D4)."""
+    """Reasons the island is not at a full-island quiescent cut."""
     out = []
     checks = (
         (not snap.driver_safe_point, "driver is not at a safe point"),

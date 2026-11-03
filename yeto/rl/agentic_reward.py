@@ -1,4 +1,4 @@
-"""The agentic path's reward comes from the agent harness, not from a grader here (S27 G-FS).
+"""The agentic path's reward comes from the agent harness, not from a grader here.
 
 A Harbor trial's verdict is produced by the task's own tests inside the sandbox
 and is already on the sample before any reward function could run:

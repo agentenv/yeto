@@ -13,7 +13,7 @@ int values 100 % equal, scales bit-equal (CPU, 2026-10-16). The divisor 7.0
 or 8.0 gives about 90 % equal values, so the divisor is not a free choice.
 
 Each output row is quantized on its own, so any row slice of a weight gives
-the same rows as the whole weight (the basis for per-rank quantization, D7).
+the same rows as the whole weight (the basis for per-rank quantization).
 """
 
 from __future__ import annotations

@@ -1,9 +1,9 @@
 """verl mapping of the neutral correction group
-(change ``rl-offpolicy-correction-passthrough`` L6.4, L6.6, L6.7, L6.11).
+(off-policy correction passthrough).
 
 :func:`correction_mapping` turns ``AlgorithmSpec.correction`` into Hydra
 overrides under ``algorithm.rollout_correction`` (verl fork ``acad9875``,
-``verl/trainer/ppo/rollout_corr_helper.py``). Mapping table (design D3):
+``verl/trainer/ppo/rollout_corr_helper.py``). Mapping table:
 
 ==========================  =====================================================
 neutral                     verl
@@ -17,13 +17,13 @@ ratio_mask=mis              ``rollout_rs=token_k1|seq_mean_k1``,
 batch_normalize             ``rollout_is_batch_normalize=True``
 ==========================  =====================================================
 
-Rows verl cannot express give a :class:`CorrectionWarning`; phase 2 (L6b.2) refuses
+Rows verl cannot express give a :class:`CorrectionWarning`; phase 2 refuses
 the start on them:
 ``lower > 0`` on plain TIS (verl clamps the upper side only), level
 ``sequence`` with the MIS mask (verl has the geometric mean only), ``veto``,
 ``opsm``, a custom function, and the MIS mask (denominator).
 
-Decoupled PPO (design D2): ``bypass_mode=False`` makes verl recompute
+Decoupled PPO: ``bypass_mode=False`` makes verl recompute
 ``old_log_probs`` as pi_prox; the fully_async trainer computes it on the
 weights of the first local step of the current sync cycle
 (``fully_async_trainer.py`` ``_compute_old_log_prob``), hence
@@ -33,7 +33,7 @@ weights of the first local step of the current sync cycle
 
 ``actor.use_rollout_log_probs`` (yaml: True) is not forbidden: no Python code
 in the fork reads it (``grep`` over ``verl/`` at ``acad9875``: only the config
-dataclasses declare it), so it does not change pi_prox (L6.6).
+dataclasses declare it), so it does not change pi_prox.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ N fake islands run as ``multiprocessing`` processes (no Ray, no GPU, no model);
 the coordinator runs in the calling process and owns a
 :class:`~yeto.rl.engine.island_ledger.CrossIslandLedger`. It demonstrates:
 
-* P4 stepping -- advance when the arrived capacity reaches ``theta`` of the
+* Capacity stepping -- advance when the arrived capacity reaches ``theta`` of the
   total, or at the soft deadline T_soft; late deltas are carried over with a
   ``gamma**lag`` discount;
 * heartbeat leases -- a crashed island (silent exit) is removed when its lease

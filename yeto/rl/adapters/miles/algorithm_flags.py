@@ -1,5 +1,5 @@
 """Miles algorithm flags <-> ``AlgorithmSpec`` fields (change
-``rl-algorithm-capabilities``, design D3).
+``rl-algorithm-capabilities``).
 
 One table drives three things:
 
@@ -15,7 +15,7 @@ One table drives three things:
 objective (loss / advantage / rollout groups of Miles ``arguments.py``). It
 is a superset of the table; an objective flag without a mapping row is
 refused in extra argv (:data:`UNMAPPED_OBJECTIVE_FLAGS`). When Miles is
-upgraded, re-review this list against the new parser (``docs/MILES_RL.md``);
+upgraded, re-review this list against the new parser (``docs/RL_ALGORITHMS.md``);
 ``tests/test_rl_algorithm_flags_upstream.py`` pins its existence upstream.
 
 Extension rows are registered with :func:`register_flag` by the Miles adapter
@@ -140,7 +140,7 @@ def _kl_rows() -> list[FlagMapping]:
 
 def _correction_rows() -> list[FlagMapping]:
     def use_tis(spec):
-        from .offpolicy_correction import tis_argv  # neutral fields -> Miles (D3)
+        from .offpolicy_correction import tis_argv  # neutral fields -> Miles
 
         return tis_argv(spec)
 
@@ -276,7 +276,7 @@ _UNMAPPED = [
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
-# Reviewed P0 rows (design D3) and rows added by extension modules; the
+# Reviewed core rows and rows added by extension modules; the
 # table must always equal their union (tests/test_rl_algorithm_flags.py).
 BUILTIN_FLAGS: frozenset[str] = frozenset(MAPPINGS)
 EXTENSION_FLAGS: set[str] = set()
@@ -338,7 +338,7 @@ def algorithm_argv(spec: AlgorithmSpec) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# absorption (design D3 / D8 step 3)
+# absorption
 # --------------------------------------------------------------------------
 
 
@@ -467,7 +467,7 @@ def absorb_extra_argv(
 
 
 # --------------------------------------------------------------------------
-# dry run (docs/MILES_RL.md "Algorithm specs")
+# dry run (docs/RL_ALGORITHMS.md)
 # --------------------------------------------------------------------------
 
 
@@ -497,7 +497,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     try:
         base = resolve_ports_algorithm(args)
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
-        # models a single-island G1 smoke without outer sync (D11)
+        # models a single-island smoke run without outer sync
         allow = check_unverified_allowance(
             args.rl_allow_unverified_mechanism or (), islands=1, outer_sync=False
         )

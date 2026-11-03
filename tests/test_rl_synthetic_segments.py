@@ -1,4 +1,4 @@
-"""Task 6.4 G1 helper: synthetic two-segment reward + its launcher gate."""
+"""Helper: synthetic two-segment reward + its launcher gate."""
 
 from __future__ import annotations
 

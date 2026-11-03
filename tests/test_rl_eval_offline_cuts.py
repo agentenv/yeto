@@ -1,4 +1,4 @@
-"""S27 R-5: offline evaluation of round cuts on a held-out set (CPU, fake engine)."""
+"""Offline evaluation of round cuts on a held-out set (CPU, fake engine)."""
 
 from __future__ import annotations
 

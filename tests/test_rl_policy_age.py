@@ -183,7 +183,7 @@ def test_driver_limit_one_accepts_version_segments_within_the_window(tmp_path):
     _driver(tmp_path, 1, versions=lambda rid: (max(0, rid - 1), rid)).run()
     events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
     assert len([e for e in events if e["event"] == "rl_round_trained"]) == 3
-    # P0-S evidence: each accepted group's generating policy, labelled with the
+    # Evidence: each accepted group's generating policy, labelled with the
     # published hash of its version
     labels = {e["policy_version"]: e["rl/policy_token"] for e in events if e["event"] == "rl_publication"}
     policies = [e for e in events if e["event"] == "rl_group_policies"]
@@ -229,7 +229,7 @@ def test_miles_switches_are_derived_from_the_limit():
 
 
 def test_driver_tapes_the_buffer_readers_stale_groups_per_round(tmp_path):
-    """T-EVAL E4: groups a sample-buffer reader passed over as too old reach the
+    """Groups a sample-buffer reader passed over as too old reach the
     tape as rl_buffer_stale_skipped (one per round, 0 included); an engine that
     does not report them tapes nothing."""
     import dataclasses

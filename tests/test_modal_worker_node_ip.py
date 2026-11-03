@@ -1,4 +1,4 @@
-"""CLOUD-OPTIONS-S16 A.5 item 4: Modal worker pins `ray start --node-ip-address` to its rank's IPv4;
+"""Modal worker pins `ray start --node-ip-address` to its rank's IPv4;
 every other cloud keeps the worker argv byte-identical."""
 from yeto import launcher
 

@@ -303,9 +303,9 @@ exec python3 train_async.py \
   --distributed-timeout-minutes 60 \
   --empty-unused-memory-level 2 \
   --train-memory-margin-bytes "${TRAIN_MEMORY_MARGIN_BYTES}" \
-  "${RECOVERY_CLI_ARGS[@]}" \
+  ${RECOVERY_CLI_ARGS[@]+"${RECOVERY_CLI_ARGS[@]}"} \
   --colocate-critic \
   --custom-megatron-after-model-init-hook-path yeto.megatron.miles_value_island.after_model_init \
   --custom-megatron-before-train-step-hook-path yeto.megatron.miles_value_island.before_train_step \
   --custom-megatron-after-train-step-hook-path yeto.megatron.miles_value_island.after_train_step \
-  "${WANDB_ARGS[@]}"
+  ${WANDB_ARGS[@]+"${WANDB_ARGS[@]}"}

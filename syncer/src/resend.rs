@@ -1,12 +1,12 @@
-//! Bulk resends off the scheduler (S27 G-EL).
+//! Bulk resends off the scheduler.
 //!
 //! A rejoin catch-up (reconnect, pool re-JOIN after a lease expiry) and the
 //! replay after a peer or degraded recovery send a learner the current
 //! value of many fragments: the whole model on the degraded path (126 GB of
 //! f32 for Nemotron Nano). The scheduler used to send them itself, one
 //! fragment after the other (the recovery replay) or one fragment per pass
-//! (the catch-up), and each send waits for the learner's link. In run
-//! s27-elastic-a the degraded replay held the scheduler for 8.8 min: no
+//! (the catch-up), and each send waits for the learner's link. In one run
+//! the degraded replay held the scheduler for 8.8 min: no
 //! heartbeat was read, both islands' 150 s leases expired, and both rejoined
 //! with another full catch-up.
 //!
@@ -17,12 +17,12 @@
 //! in flight the learner holds the current value of every fragment it was
 //! offered; then the scheduler runs the tail of the catch-up or recovery.
 //!
-//! [`Pending`] is also the structure of the G-EA receive-only subscribers
+//! [`Pending`] is also the structure of the receive-only subscribers
 //! (`subscriber.rs` re-exports it): pending entries coalesce per fragment,
 //! the newest version wins, and a version already handed to the forwarder
 //! is not queued again.
 //!
-//! Tail condition (S27 G-EY). Run s27-elastic-c (Nemotron Nano) showed that
+//! Tail condition. A run on Nemotron Nano showed that
 //! "nothing pending" is the wrong condition for the tail: with one island
 //! merging, new versions were published at about 12 GB/min and the link to
 //! the recovering island took about 13.5 GB/min, so the map almost never
@@ -130,7 +130,7 @@ impl Pending {
         Some((p, version, values))
     }
 
-    /// S27 G-FH: version `version` of fragment `p` was handed over outside
+    /// Version `version` of fragment `p` was handed over outside
     /// this map (an initial-cut frame the forwarder sent first): an older or
     /// equal offer is then ignored, as for a popped entry.
     pub fn mark_sent(&mut self, p: usize, version: u64) {
@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(pending.len(), 2);
     }
 
-    /// S27 G-EY: the versions owed at the start are targets. They go out
+    /// The versions owed at the start are targets. They go out
     /// first even when merges republish their fragments meanwhile, and the
     /// owner sees them all handed over while newer versions still wait.
     #[test]

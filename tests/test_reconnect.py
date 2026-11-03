@@ -386,7 +386,7 @@ def test_max_reconnects_exhausted_fails_health_check():
 def test_syncer_sockets_use_tcp_keepalive():
     """A silently dropped idle flow (NAT) must surface as a socket error, which
     test_max_reconnects_exhausted_fails_health_check shows becomes a health failure
-    (rl-infra-spec 2.4 T2R2 s29 hung 30+ min on such a flow)."""
+    (an earlier run hung 30+ min on such a flow)."""
     import socket as _socket
 
     from yeto import protocol
@@ -399,7 +399,7 @@ def test_syncer_sockets_use_tcp_keepalive():
         client.start()
         accept_group(listener, 1)
         for sock in client._socks:
-            assert sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE) == 1
+            assert sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE)  # macOS reports the flag bit (8), Linux 1
             if hasattr(_socket, "TCP_KEEPIDLE"):
                 assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE) == protocol.TCP_KEEPIDLE_S
                 assert sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL) == protocol.TCP_KEEPINTVL_S

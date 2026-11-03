@@ -1,4 +1,4 @@
-"""rl-infra-spec 3.5: a wrong LoRA adapter must not be admitted. The read-back body
+"""A wrong LoRA adapter must not be admitted. The read-back body
 carries ``lora:<adapter>:<module>:<layer>:A|B`` keys; LoRA mode without them fails closed."""
 import asyncio
 from types import SimpleNamespace

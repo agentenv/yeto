@@ -53,7 +53,7 @@ def test_vapo_spec_carries_the_paper_values():
 
 def test_vapo_translation_snapshot():
     assert af.algorithm_argv(vapo_spec()) == VAPO_ARGV
-    # the warm-up length is not a main-stage flag: it is stage W (design D5)
+    # the warm-up length is not a main-stage flag: it is stage W
     assert "50" not in VAPO_ARGV
 
 
@@ -61,7 +61,7 @@ def test_dry_run_snapshot_and_absorption_equal_the_declaration():
     refused = af.dry_run(["--dry-run", "--extra", VAPO_EXTRA])
     assert refused["verdict"] == "rejected"
     for name in ("gae_decoupled", "gae_length_adaptive", "positive_example_lm_loss"):
-        assert name in refused["error"]  # not declared before GPU G1 (task 7.3)
+        assert name in refused["error"]  # not declared before a GPU check
     flags = [x for name in UNDECLARED for x in ("--rl-allow-unverified-mechanism", name)]
     result = af.dry_run(["--dry-run", "--extra", VAPO_EXTRA, *flags])
     assert result["verdict"] == "accepted"

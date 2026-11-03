@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 CUTOFF_EVENT = "rl_rollout_cutoff"
-# Event fields shared by every backend (Miles, verl): spec "两种训练后端行为一致".
+# Event fields shared by every backend (Miles, verl): both training backends must behave the same.
 CUTOFF_FIELDS = (
     "submitted_groups",
     "target_groups",

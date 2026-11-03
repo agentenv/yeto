@@ -1,4 +1,4 @@
-"""verl LoRA tensor names <-> yeto canonical names (rl-verl-backend 1.5, design D2).
+"""verl LoRA tensor names <-> yeto canonical names (rl-verl-backend 1.5).
 
 yeto canonical LoRA names are the PEFT state-dict names
 ``base_model.model.<module>.lora_{A,B}.weight`` (``yeto.rl.core``), f32.

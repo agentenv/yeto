@@ -1,4 +1,4 @@
-"""DeepSeek V4 runtime patches for the ports Miles layout (P0 1.7b.2/1.7b.2b).
+"""DeepSeek V4 runtime patches for the ports Miles layout.
 
 Expert-full (:func:`install`) trains attention LoRA plus a prefix of the E288
 clone experts.  On ports, Miles itself streams that hybrid state through the

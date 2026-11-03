@@ -1,12 +1,13 @@
-# 许可证待核实、不进 main（yeto-framework-decoupling 任务 3.9，design D9c）。
+# License to be verified; not for main.
 #
-# 只作测试用：Miles `miles/rollout/rm_hub/math_utils.py` 的原样拷贝，取自 Miles
-# pin 提交 ae475060fa670145aef75d678809039ae999cb97（radixark/miles，仓库根
-# LICENSE 为 Apache-2.0；文件首行注明来源于 agentica-project/deepscaler，该上游
-# 的许可证尚未核实）。用于在未安装 Miles 的环境里对照 `yeto.rl.math_reward`
-# 的三个判分函数 extract_answer / grade_answer_mathd / grade_answer_sympy。
-# `yeto/` 运行代码不得 import 本文件（tests/test_import_boundaries.py 检查）。
-# 以下自下一行起与 pin 提交中的文件逐字节相同。
+# Test-only: a verbatim copy of Miles `miles/rollout/rm_hub/math_utils.py` at Miles
+# pin commit ae475060fa670145aef75d678809039ae999cb97 (radixark/miles, root LICENSE
+# Apache-2.0; the file's first line credits agentica-project/deepscaler, whose
+# license is not yet verified). Used to compare the three graders of
+# `yeto.rl.math_reward` (extract_answer / grade_answer_mathd / grade_answer_sympy)
+# where Miles is not installed. Runtime code under `yeto/` must not import this
+# file (checked by tests/test_import_boundaries.py).
+# Everything from the next line on is byte-identical to the file at the pin commit.
 # from https://github.com/agentica-project/deepscaler/blob/e6080ccd974eb64bd3430f0b36108244a6fee330/deepscaler/rewards/math_utils/utils.py
 """
 Answer checker API that uses sympy to simplify expressions and check for equality.

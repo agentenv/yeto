@@ -1,4 +1,4 @@
-"""Prompt accounting for Miles fully_async rollouts (P0-S).
+"""Prompt accounting for Miles fully_async rollouts.
 
 Under ``--fully-async`` Miles draws prompt groups from its data source in a
 background worker; groups in flight and finished groups waiting in the output
@@ -9,9 +9,9 @@ data source. It serves two purposes:
 
 * round accounting: groups drawn since the last report and Miles' stale-group
   count (reported unknown, with a warning, when Miles does not expose it);
-* cuts (decision P0-S-Q3): background generation is never saved; every drawn,
+* cuts: background generation is never saved; every drawn,
   untrained group goes into the cut reset for a fresh generation, so the
-  resumed run generates it again. :func:`snapshot_untrained` (E1, the cut path)
+  resumed run generates it again. :func:`snapshot_untrained` (the cut path)
   records them, the data source buffer and the data cursor in one step on the
   worker's event loop and leaves the worker running: the live run keeps
   generating ahead across the cut. :func:`requeue_untrained` (the older path)
@@ -170,7 +170,7 @@ def requeue_untrained(executor: Any, *, timeout_s: float = WORKER_STOP_TIMEOUT_S
 
     The worker's group generation tasks are cancelled and awaited too: the new
     worker submits a full budget again, so a task left running would keep
-    generating outside the in-flight budget (S24 T-TB2: about one budget leaked
+    generating outside the in-flight budget (about one budget leaked
     per cut). A task that does not settle in time still holds its own
     (original) samples; the data source gets reset copies, so nothing it
     writes reaches them. The rollout function starts a new worker on its next

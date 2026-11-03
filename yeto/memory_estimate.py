@@ -21,7 +21,7 @@ island) alternate two phases: training (engine released, offload) and
 rollout (trainer offloaded).  The peak is the larger of the two phases;
 the rollout phase is ``mem_fraction_static * GPU memory + R0``.
 
-Calibration (task 2.2; data archived outside the repo): S17 M1 runs b, c, d (Qwen3.5-4B LoRA r16,
+Calibration (data archived outside the repo): calibration runs b, c, d (Qwen3.5-4B LoRA r16,
 one GPU per island, colocated).
 
 * K_LOGIT: run c OOM message "Tried to allocate 7.58 GiB" = 16384 x 248320
@@ -48,15 +48,15 @@ from typing import Any
 
 GIB = float(1 << 30)
 
-# --- calibration constants (task 2.2) --------------------------------------
+# --- calibration constants -----------------------------------------------
 K_LOGIT = 0.5
 FRAG = 21.04 / 107.75          # 0.1953
 R0_GIB = 133.76 - 107.75 - 21.04  # 4.97
 K_ACT_NO_RECOMPUTE = 45.62     # solved from run d (see evidence/memory-backtest.json)
-K_ACT_RECOMPUTE = 2.0          # 未验证: no run with full recompute was measured
+K_ACT_RECOMPUTE = 2.0          # unverified: no run with full recompute was measured
 CALIBRATED_MODELS = frozenset({"Qwen/Qwen3.5-4B"})
 
-# Usable GPU memory as torch reports it (GiB).  H100/H200: the S17 M1 OOM
+# Usable GPU memory as torch reports it (GiB).  H100/H200: the calibration runs' OOM
 # messages ("total capacity of 79.18 GiB" / "139.80 GiB").  Other GPUs:
 # the launcher's GPU_MEM_GB nominal value x 0.98 (H100 80 -> 78.4, H200 141 -> 138.2).
 MEASURED_CAPACITY_GIB = {"H100": 79.18, "H200": 139.80}
@@ -107,7 +107,7 @@ def arch_from_hf_config(cfg: dict) -> ModelArch:
 
 
 # Text-model fields of the HF config.json of models used on GPU so far (copied
-# from the HF cache, same revisions as the S17/S18 runs), so a machine without
+# from the HF cache, same revisions as the calibration runs), so a machine without
 # the cache still estimates them.  Other models: local dir or HF cache only.
 BUILTIN_CONFIGS: dict[str, dict] = {
     "Qwen/Qwen3-0.6B": {"num_hidden_layers": 28, "hidden_size": 1024, "intermediate_size": 3072,

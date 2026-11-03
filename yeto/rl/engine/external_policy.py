@@ -1,4 +1,4 @@
-"""Behavior policies that are external merged cuts (S27 G-EM, relay mode).
+"""Behavior policies that are external merged cuts (relay mode).
 
 A training island that reads its groups from the head's sample relay
 (``--rl-sample-relay`` with ``--rl-sample-role trainer``) did not generate

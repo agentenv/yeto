@@ -1,7 +1,7 @@
-"""Miles argv of the GLM5.3-Flash (``glm5_next``) recipe (S25 stage 1, gap 4).
+"""Miles argv of the GLM5.3-Flash (``glm5_next``) recipe.
 
 Model arguments: Miles ``scripts/models/glm5.3-flash.py`` ``model_args()`` at
-the pinned Miles commit (cc76e2391, with the s25-no-te fallback a38decedf),
+the pinned Miles commit (cc76e2391, with the no-TransformerEngine fallback a38decedf),
 copied as one tuple so the launch layer does not import a Miles script. The
 model trains through the Miles plugin spec
 ``miles_plugins.models.glm5_next.glm5_next:get_glm5_next_spec`` (KDA + DSA MLA
@@ -12,7 +12,7 @@ recipe replaces every geometry flag the generic translation derives.
 
 * ``transformer_engine`` (default, main-agent ruling 10-19 (3)): TE layers,
   grouped GEMM experts and fused permutation;
-* ``local``: the TE-free fallback of N7.5 (Miles ``glm5_next/local_layers.py``);
+* ``local``: the TE-free fallback (Miles ``glm5_next/local_layers.py``);
   the TE-only flags are dropped (Megatron raises on ``--moe-permute-fusion``
   without TE) and gradient-accumulation fusion is off.
 
@@ -37,7 +37,7 @@ HIDDEN_SIZE = 4096
 VOCAB_SIZE = 154880
 NUM_EXPERTS = 288
 
-# N7.5 E6/E7: flags that exist only with TransformerEngine.
+# Flags that exist only with TransformerEngine.
 TE_ONLY_ARGV: tuple[str, ...] = ("--moe-grouped-gemm", "--moe-permute-fusion")
 LOCAL_ARGV: tuple[str, ...] = ("--transformer-impl", LOCAL, "--no-gradient-accumulation-fusion")
 

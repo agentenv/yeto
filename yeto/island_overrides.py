@@ -20,9 +20,7 @@ A negative-test run must never become a production run:
   this machine; the island again at start, on every cloud);
 * ``yeto merge`` refuses an adapter directory of a negative-test run.
 
-(10-09 ruling of the main agent for the user: the original ``--rl-resume`` /
-``yeto export`` do not exist on main; resume is ``--rl-checkpoint-store``,
-export is ``yeto merge``.  ``--rl-sync-max-base-lag`` is a syncer parameter and
+(Resume is ``--rl-checkpoint-store``, export is ``yeto merge``.  ``--rl-sync-max-base-lag`` is a syncer parameter and
 cannot be overridden per island.)
 
 This module is imported by the launcher AND by the island (env helpers), so it
@@ -45,7 +43,7 @@ NEGATIVE_MARKER = "YETO_NEGATIVE_TEST"
 # The syncer takes the session contract / identity from the FIRST admitted
 # connection.  An overridden island waits this long before it starts (and so
 # before it connects), so the unchanged island sets the contract and the
-# overridden one is the one refused (10-09 ruling of the main agent).
+# overridden one is the one refused.
 DEFAULT_JOIN_DELAY_S = 180.0
 
 LR_SCHEDULES = ("auto", "linear", "constant")
@@ -75,9 +73,9 @@ def _salt(value: str) -> str:
 
 # key -> (parser, human name for the dashboard / warning)
 WHITELIST = {
-    "rl_lr_schedule": (_lr, "学习率调度"),
-    "rl_max_policy_age": (_age, "落后上限"),
-    "identity_test_salt": (_salt, "岛身份测试扰动"),
+    "rl_lr_schedule": (_lr, "learning-rate schedule"),
+    "rl_max_policy_age": (_age, "max policy age"),
+    "identity_test_salt": (_salt, "identity test salt"),
 }
 SYNCER_ONLY = {"rl_sync_max_base_lag": "--rl-sync-max-base-lag"}
 
@@ -103,7 +101,7 @@ def parse_overrides(items, num_islands: int) -> dict[int, dict[str, Any]]:
         key = _norm_key(key)
         if key in SYNCER_ONLY:
             raise ValueError(f"--rl-island-override {item!r}: {SYNCER_ONLY[key]} is a syncer "
-                             "parameter, it cannot be changed per island (syncer 参数，不能按岛换)")
+                             "parameter, it cannot be changed per island")
         if key not in WHITELIST:
             raise ValueError(f"--rl-island-override {item!r}: {key!r} cannot be overridden per "
                              f"island; allowed: {sorted(WHITELIST)}")
@@ -123,7 +121,7 @@ def overrides_of(args, num_islands: int) -> dict[int, dict[str, Any]]:
         raise ValueError("--rl-island-override needs --training-mode rl")
     if not getattr(args, "rl_negative_test_run", False):
         raise ValueError("--rl-island-override needs --rl-negative-test-run: a per-island override "
-                         "is only for negative tests (负例运行)")
+                         "is only for negative tests")
     return parse_overrides(items, num_islands)
 
 
@@ -223,7 +221,7 @@ def apply_to_task(task, env: dict[str, str]) -> None:
 def print_warning(args, overrides, out=None) -> None:
     out = sys.stderr if out is None else out
     bar = "!" * 72
-    lines = [bar, "!! NEGATIVE-TEST RUN (负例运行): per-island parameter overrides are ON",
+    lines = [bar, "!! NEGATIVE-TEST RUN: per-island parameter overrides are ON",
              "!! this run is ONLY for negative tests; it cannot be resumed by a normal run",
              "!! and `yeto merge` refuses its adapters"]
     for r in records(args, overrides):
@@ -379,13 +377,13 @@ def check_merge_source(adapter_dir) -> None:
     for d in [base, *list(base.parents)[:2]]:
         if (d / NEGATIVE_MARKER).exists():
             raise ValueError(f"{adapter_dir} belongs to a negative-test run ({d / NEGATIVE_MARKER}); "
-                             "its weights must not be exported (负例运行，禁止导出)")
+                             "its weights must not be exported")
         manifest = d / "run_manifest.json"
         if manifest.is_file():
             try:
                 if json.loads(manifest.read_text(encoding="utf-8")).get("negative_test"):
                     raise ValueError(f"{adapter_dir} belongs to a negative-test run ({manifest}); "
-                                     "its weights must not be exported (负例运行，禁止导出)")
+                                     "its weights must not be exported")
             except (OSError, ValueError) as e:
                 if "negative-test" in str(e):
                     raise

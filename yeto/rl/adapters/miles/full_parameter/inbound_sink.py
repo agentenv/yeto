@@ -47,7 +47,7 @@ class _MilesInboundTransaction:
 
 def _chunk_put(ray_module):
     """``put`` of one CPU chunk: Miles' zero-copy form when this Miles has
-    it (S27 G-AP; a broadcast stores ~2 GB per Nemotron 30B fragment, ~10x
+    it (a broadcast stores ~2 GB per Nemotron 30B fragment, ~10x
     faster than pickling the tensor), else ``ray_module.put``."""
 
     try:

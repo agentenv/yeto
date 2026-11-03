@@ -1,4 +1,4 @@
-"""S11 try24: Flash-Next fnA died in ``_run_ports`` on ``canonical_layout_hash(())``.
+"""Flash-Next died in ``_run_ports`` on ``canonical_layout_hash(())``.
 
 The Flash-Next LoRA layout is not predictable CPU-side (Miles' native
 qwen3_8_next exporter: tied q/k/v A, rank-padded experts), so the ports island
@@ -180,25 +180,68 @@ def test_native_export_refuses_duplicates_and_apply():
         sp._apply_state(_actor(), tensors={}, policy_version=0, local_step=0, optimizer=sp.OPTIMIZER_MODES[0])
 
 
-def test_receipt_layout_reads_learned_hash_after_first_sync_start_export():
-    """Driver order: LocalOnlySync.start exports before any train/receipt."""
-    import inspect
+def test_receipt_layout_reads_learned_hash_after_first_sync_start_export(tmp_path, monkeypatch):
+    """Driver order: LocalOnlySync.start exports before any train/receipt, so an
+    island composed without a predicted layout hash learns it from that first
+    export and every receipt carries the learned hash (read late, not captured)."""
+    from test_rl_engine_selection import NAME, _Actor, _Controller
+    from test_rl_miles_adapter_rollout import Call, Sample, Span
 
-    from yeto.rl.engine import bridges
-    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles import LoopRunner
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import trainer as miles_trainer
+    from yeto.rl.adapters.miles.entry import compose_island, miles_capabilities
+    from yeto.rl.adapters.miles.placement import MilesPlacement, PlacementRequest
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
+    from yeto.rl.core import canonical_state
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape
 
-    # rl-publish-fastpath: start goes through _local_state, which exports (digest
-    # export or full export); both learn the layout hash on the first export.
-    assert "_local_state(driver" in inspect.getsource(bridges.LocalOnlySync.start)
-    local_state = inspect.getsource(bridges._local_state)
-    assert "export_local_resident" in local_state and "driver.export_local()" in local_state
-    from yeto.rl.adapters.miles import state as miles_state
+    receipts = []
+    real_receipt = miles_trainer.LocalStepReceipt
+    monkeypatch.setattr(miles_trainer, "LocalStepReceipt",
+                        lambda **kw: receipts.append(kw) or real_receipt(**kw))
+    sink = tmp_path / "sink"
+    monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
+    controller, actor = _Controller(), _Actor()
+    rollout_args = SimpleNamespace(n_samples_per_prompt=2)
 
-    assert "self._expected_layout_hash = layout_hash" in inspect.getsource(
-        miles_state.MilesPolicyState._digest_result)
-    src = inspect.getsource(entry)
-    assert "parameter_layout_hash=lambda: policy_state.layout_hash" in src
-    assert "parameter_layout_hash=lambda: layout_hash" not in src
+    class Executor:
+        async def get(self, rollout_id):
+            token = controller.engine.version
+            groups = [[Sample(index=10 * g + i, group_index=g, rollout_id=rollout_id, reward=float(i),
+                              weight_versions=[Call([Span(token)])]) for i in range(2)] for g in range(2)]
+            hook.record_trained_groups(rollout_args, groups)
+            hook.extract_rollout_metadata(rollout_args, groups)
+            return SimpleNamespace(sample_indices=[s.index for g in groups for s in g])
+
+    async def update_weights(*args, **kwargs):
+        pass
+
+    request = PlacementRequest("colocated", 1, 1, 1)
+    runner = LoopRunner()
+    driver = compose_island(
+        miles_args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True, offload_rollout=False),
+        launch=SimpleNamespace(placement=request), algorithm=AlgorithmSpec(),
+        inference_controller=controller, rollout_executor=Executor(), actor_model=actor, learner_id=0,
+        base_model_revision="0" * 40, lora_config_hash="1" * 64,
+        layout_hash=None,  # Flash-Next: not predicted, learned from the first export
+        sync=LocalOnlySync(2), progress=None, metadata=DirMetadataSource(sink),
+        capabilities=miles_capabilities("sha256:" + "0" * 64), runner=runner,
+        events=EventTape(tmp_path / "events.jsonl", 0), update_weights=update_weights,
+        release_refs=lambda args, pack: None, flatten_checksums=lambda raw: [{"w": "x"} for _ in raw],
+        placement=MilesPlacement(request, {"actor": (None, [0], [0]), "rollout": (None, [0], [0])},
+                                 logical=True),
+    )
+    try:
+        driver.run()
+    finally:
+        runner.close()
+    expected = canonical_state(0, {NAME: torch.zeros(2, 4)}, base_model_revision="0" * 40,
+                               lora_config_hash="1" * 64).layout_hash
+    assert len(receipts) == 2
+    assert [r["parameter_layout_hash"] for r in receipts] == [expected, expected]
 
 
 # --- PP gather of the native export (FN-A-RESULT 38 vs 78) -------------------
@@ -289,7 +332,7 @@ def test_merge_pp_stage_exports_validates():
 
 
 def test_pp_gather_unwraps_miles_reloadable_process_group():
-    """s13-h100-20261007a: gather_object(dst=...) rejected Miles' ReloadableProcessGroup
+    """gather_object(dst=...) rejected Miles' ReloadableProcessGroup
     wrapper ("is not registered"); the export must hand torch the inner group."""
     from yeto.rl.adapters.miles.state_plugin import _torch_group
 

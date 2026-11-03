@@ -52,7 +52,7 @@ def test_dry_run_snapshot_and_absorption_equal_the_declaration():
     refused = af.dry_run(["--dry-run", "--extra", CRL_EXTRA])
     assert refused["verdict"] == "rejected"
     for name in ("gae_cross_segment", "critic_multi_update"):
-        assert name in refused["error"]  # not declared before GPU G1 (task 9.4)
+        assert name in refused["error"]  # not declared before a GPU check
     flags = [x for name in UNDECLARED for x in ("--rl-allow-unverified-mechanism", name)]
     result = af.dry_run(["--dry-run", "--extra", CRL_EXTRA, *flags])
     assert result["verdict"] == "accepted"
@@ -134,7 +134,7 @@ def test_whole_rollout_control_arm_is_explicit():
 
 
 def test_linear_schedule_shorter_than_critic_steps_is_refused():
-    """S14 SAO G1: --lr-decay-iters = actor steps is shared with a critic that
+    """SAO: --lr-decay-iters = actor steps is shared with a critic that
     takes 2 updates per step, so the critic LR hit 0 halfway (critic_lr_horizon)."""
     from yeto.rl.algos import sao
     from yeto.rl.engine.algorithm import launch_problems

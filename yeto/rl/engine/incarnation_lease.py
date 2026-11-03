@@ -4,8 +4,8 @@ A spot sampler island can outlive its own replacement: a VM that was taken for
 preempted (stopped, unreachable, deleted from the console too late) may still
 run while a new incarnation of the same island already writes. Before this
 module the 120B path (the engine sampler, no syncer) had no fence at all; the
-only isolation was the incarnation prefix of the sample ids (defects doc,
-"Old sampler" of the D23 run).
+only isolation was the incarnation prefix of the sample ids (an earlier spot
+run saw an old sampler keep writing).
 
 The lease is one JSON record per sampler island,
 ``sample-buffer/leases/<sampler>.json``, in a store every incarnation and the

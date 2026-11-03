@@ -1,4 +1,4 @@
-"""SAO streaming role syncers against the real Rust syncer (P0-1.7b.3).
+"""SAO streaming role syncers against the real Rust syncer.
 
 The launcher starts one syncer per role (actor, critic) for
 ``--rl-sync-preset sao-streaming-full``, each serving the contract bundle's

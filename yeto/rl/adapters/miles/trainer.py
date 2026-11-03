@@ -6,7 +6,7 @@ norm via the state plugin, and always releases the rollout object-store refs
 (upstream ``remove_rollout_data_refs``). The receipt is built from handle
 metadata only; ``base_policy_hash`` is the published ``policy_tensor_hash``
 (the hash inside the policy token). The group must consist of exactly one cell
-(D5); the adapter never touches cells itself.
+; the adapter never touches cells itself.
 
 ``step_metrics()`` is the driver's grad_norm source for the per-round
 gradient invariant. ``grad_norm`` and ``applied_lrs`` (the LR each optimizer
@@ -110,8 +110,8 @@ def receipt_trajectory_ids(batch: RolloutBatchHandle) -> tuple[str, ...]:
     """One id per trained trajectory, in batch order.
 
     CompactionRL trains one sample per segment; the segments of one rollout
-    keep its sample index, so ``g.sample_ids`` repeats it (s19-compaction-g1-
-    20261010g: "local-step receipt contains duplicate trajectories"). The
+    keep its sample index, so ``g.sample_ids`` repeats it (observed:
+    "local-step receipt contains duplicate trajectories"). The
     segments are one trajectory: repeated ids collapse to the first. The
     sample-level ``sample_ids`` (batch hash, trained_sample_indices check,
     pooled reward) stay unchanged; trained_tokens still sums every segment.
@@ -130,7 +130,7 @@ def masked_fraction(outputs: Any) -> float | None:
 
     Upstream Miles does not report it by default; a masking mechanism's
     change wires its metric to one of ``MASKED_FRACTION_KEYS``
-    (rl-algorithm-capabilities D6). Unknown (None) keeps the R0 rule.
+    (rl-algorithm-capabilities). Unknown (None) keeps the R0 rule.
     """
 
     from yeto.rl.engine.algorithm import valid_masked_fraction
@@ -151,10 +151,10 @@ def masked_fraction(outputs: Any) -> float | None:
 
 
 # Estimators whose masked fraction comes from the per-step clip fraction
-# (rl-algo-seq-and-adv D2: GSPO clips whole sequences).
+# (rl-algo-seq-and-adv: GSPO clips whole sequences).
 CLIPFRAC_MASKED_ESTIMATORS = frozenset({"gspo"})
 # Policy-loss variants whose gradient rule reads the clip fraction
-# (rl-algo-loss-variants D5: GMPO, global gmpo_clip_num / gmpo_clip_den).
+# (rl-algo-loss-variants: GMPO, global gmpo_clip_num / gmpo_clip_den).
 # CISPO keeps gradients on clipped tokens and SAPO never clips: not listed.
 CLIPFRAC_LOSS_VARIANTS = frozenset({"gmpo"})
 
@@ -275,7 +275,7 @@ def _own_storage(value: Any) -> Any:
     the critic channel hands over views into one flat fp32 buffer
     (``tensors_from_flat_owned``), so each of ~300 views shipped the whole
     ~2.4 GB buffer to the critic rank -- hundreds of GiB in the driver and a
-    hang in ``import_critic_state`` (s19-ppo-g3-20261009a)."""
+    hang in ``import_critic_state`` (observed on GPU)."""
 
     import torch
 
@@ -330,7 +330,7 @@ class MilesTrainerGroup:
         # (``last_step_losses`` stays gated on the mechanisms that consume it).
         self.last_round_step_losses: list[dict[str, Any]] | None = None
         self.optimizer_steps_total = 0
-        # S25 N7.6: the restored cut's resume manifest until the first step after it is checked
+        # the restored cut's resume manifest until the first step after it is checked
         self._resume_reference: Any = None
         # ... and whether the data cursor the driver restored was compared with it
         # (confirm_resumed_data_cursor); the first step refuses an unconfirmed one.
@@ -390,7 +390,7 @@ class MilesTrainerGroup:
                 estimator = getattr(self._spec, "advantage_estimator", self._algorithm)
                 # Clip fraction / mismatch diagnostics are collected when a
                 # mechanism needs them (R0 GRPO keeps its RPC set unchanged).
-                # rl-algo-loss-variants D5: GMPO needs pg_clipfrac, passed as
+                # rl-algo-loss-variants: GMPO needs pg_clipfrac, passed as
                 # TrainStepMetrics.clip_fraction (never as masked_fraction,
                 # which corrections may fill with their own mask).
                 clipfrac_variant = (
@@ -452,7 +452,7 @@ class MilesTrainerGroup:
 
     def _check_first_step_after_resume(self, steps: int) -> None:
         """The first round after ``restore_cut`` advanced every rank's Adam step and the
-        LR scheduler by exactly ``steps`` optimizer steps (S25 N7.6; A-TRN report #8)."""
+        LR scheduler by exactly ``steps`` optimizer steps."""
         from yeto.rl.engine.resume_manifest import ResumeAssertionError, ResumeManifest, require_first_step
         from .cut_plugin import RESUME_STATE
 
@@ -472,7 +472,7 @@ class MilesTrainerGroup:
 
     def confirm_resumed_data_cursor(self, cursor: Mapping[str, int]) -> None:
         """Compare the data cursor the run actually resumed from with the restored
-        cut's data watermark (S25 N7.6). Called by whoever restored the cursor
+        cut's data watermark. Called by whoever restored the cursor
         after ``restore_cut`` / ``restore_cut_resharded``: the driver after its
         seek landed (restart), or the trainer rebuild after its live re-read.
         A no-op when no restore is pending its first step."""
@@ -739,7 +739,7 @@ class MilesTrainerGroup:
     def _clip_fraction(self) -> float | None:
         """Mean ``pg_clipfrac``; for GMPO the global num/den clip fraction.
 
-        rl-algo-loss-variants D5 (fork 5c1b49eb): GMPO's gradient rule needs
+        rl-algo-loss-variants: GMPO's gradient rule needs
         sum(gmpo_clip_num) / sum(gmpo_clip_den) over the round, not the
         per-sequence-mean ``pg_clipfrac`` (which stays in the step metrics).
         """
@@ -773,7 +773,7 @@ class MilesTrainerGroup:
             self._run(self._actor.clear_memory())
 
     # ------------------------------------------------------------------
-    # ReconfigurationCut (rl-infra-spec 4.2): explicit, off the default
+    # ReconfigurationCut: explicit, off the default
     # checkpoint path. The driver calls these only at a quiescent cut.
     # ------------------------------------------------------------------
 
@@ -782,7 +782,7 @@ class MilesTrainerGroup:
 
     @contextmanager
     def retained_payloads(self):
-        """E2 harness (plan-v3 G-4.3): train the SAME frozen batch in two arms.
+        """Cut-equivalence harness: train the SAME frozen batch in two arms.
 
         Inside the block ``train_step`` does not release the rollout refs; the
         caller releases them once with :meth:`release_payload` afterwards.
@@ -818,7 +818,7 @@ class MilesTrainerGroup:
         return self.finish_cut(self.start_cut(epoch=epoch, context=context, background=False))
 
     def start_cut(self, *, epoch: int, context: "CutContext", background: bool = True) -> dict[str, Any]:
-        """E1: the part of :meth:`save_cut` that must run at the step boundary: the
+        """The part of :meth:`save_cut` that must run at the step boundary: the
         context checks and every rank's state capture. With ``background`` the ranks
         write and hash their shards in a thread while training goes on; :meth:`finish_cut`
         (later, before the next cut) collects them and commits the manifest. Nothing
@@ -843,7 +843,7 @@ class MilesTrainerGroup:
         critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
         kwargs = {"directory": str(directory), "cut_id": cut_id, **({"background": True} if background else {})}
         results = [dict(s) for s in self._run(self._actor.run_plugin(SAVE_CUT_SHARD, kwargs))]
-        # E1: how each rank took its state (device copies or host path, and why)
+        # how each rank took its state (device copies or host path, and why)
         capture = [dict(s["capture"]) for s in results if isinstance(s.get("capture"), Mapping)]
         return {"epoch": int(epoch), "context": context, "runtime": runtime, "directory": directory,
                 "background": background, "results": results, "critic": critic,
@@ -854,7 +854,7 @@ class MilesTrainerGroup:
         return self.collect_cut(pending)()
 
     def collect_cut(self, pending: Mapping[str, Any]) -> Callable[[], str]:
-        """E1: the trainer part of :meth:`finish_cut` (collect and check every rank's
+        """The trainer part of :meth:`finish_cut` (collect and check every rank's
         shard summary, build the manifest). Returns the commit of that manifest: plain
         filesystem work (no trainer call), so the caller may run it on another thread.
         Raises like :meth:`finish_cut` before anything is committed."""
@@ -870,7 +870,7 @@ class MilesTrainerGroup:
             if started:
                 summaries += [dict(s) for s in self._run(
                     self._actor.run_plugin(FINISH_CUT_SHARD, {"cut_id": cut_id}))]
-        # E1: where each rank's background shard was written (writer process, or this
+        # where each rank's background shard was written (writer process, or this
         # thread after a writer-process failure); reported with rl_cut_committed
         self.last_cut_writer = [dict(s["writer"]) for s in summaries if isinstance(s.get("writer"), Mapping)]
         problems: list[str] = []
@@ -920,7 +920,7 @@ class MilesTrainerGroup:
         return commit
 
     def _resume_manifest(self, context: "CutContext", summaries: list[Mapping[str, Any]]) -> Any:
-        """Resume manifest of this cut: run counters plus every rank's optimizer state (S25 N7.6)."""
+        """Resume manifest of this cut: run counters plus every rank's optimizer state."""
         from yeto.rl.engine.resume_manifest import ResumeManifest, require_saveable
 
         manifest = ResumeManifest(
@@ -1037,14 +1037,14 @@ class MilesTrainerGroup:
     def _restored_resume(self, manifest: Any, expect: Any,
                          results: list[Mapping[str, Any]]) -> tuple[Any, list[str]]:
         """The cut's resume manifest and every resume assertion the restored ranks fail
-        (S25 N7.6; A-TRN report #8: a silently reset Adam step). The data watermark is
+        (guards against a silently reset Adam step). The data watermark is
         not checked here: the data cursor is restored after this call, by the driver
         or the trainer rebuild, which then call :meth:`confirm_resumed_data_cursor`."""
         from yeto.rl.engine.cut import CutError
         from yeto.rl.engine.resume_manifest import ResumeManifest, restore_problems
 
         if not manifest.resume:
-            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written before S25 N7.6); "
+            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written by an older version); "
                            "refusing to resume without the optimizer-continuity checks")
         saved = ResumeManifest.from_dict(manifest.resume)
         now = ResumeManifest(
@@ -1056,7 +1056,7 @@ class MilesTrainerGroup:
         return saved, restore_problems(saved, now, check_data_watermark=False)
 
     def _resharded_resume(self, manifest: Any, expect: Any, results: list[Mapping[str, Any]]) -> Any:
-        """Resume assertions for a DP change (S25 N7.6). Shard names and optimizer
+        """Resume assertions for a DP change. Shard names and optimizer
         ranges change, so per-rank moment fingerprints have no counterpart; the
         run-wide counters (global step, every rank's Adam step, LR scheduler
         progress, applied LRs) must still continue the cut. Moments are covered by
@@ -1065,7 +1065,7 @@ class MilesTrainerGroup:
         from yeto.rl.engine.resume_manifest import ResumeManifest, require, restore_problems, run_wide_reference
 
         if not manifest.resume:
-            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written before S25 N7.6); "
+            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written by an older version); "
                            "refusing to resume without the optimizer-continuity checks")
         ranks = self._rank_resume_states(results, "restore_cut_resharded")
         reference = run_wide_reference(ResumeManifest.from_dict(manifest.resume), ranks)

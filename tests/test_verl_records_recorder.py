@@ -1,4 +1,4 @@
-"""S25 N10.5 on verl: HarborAgentLoop with the records proxy as its token recorder (CPU).
+"""On verl: HarborAgentLoop with the records proxy as its token recorder (CPU).
 
 Real pieces: ``HarborAgentLoop.run``, the outer layer, ``ProxyTokenRecorder``
 serving a ``RecordsProxy`` over HTTP on 127.0.0.1, the gateway and the

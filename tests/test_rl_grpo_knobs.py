@@ -435,11 +435,6 @@ def test_expects_gradient_with_overlong_filter():
 # ---------------------------------------------------------------- 6.3 hook (1b-hook.patch)
 
 from yeto.rl.adapters.miles import rollout_meta_hook as rmh  # noqa: E402
-import inspect as _inspect  # noqa: E402
-
-needs_hook = pytest.mark.skipif("apply_sample_filters" not in _inspect.getsource(rmh.record_trained_groups),
-                                reason="needs infra-drafts/1b-hook.patch")
-
 
 def _hook_samples(statuses, group_index):
     return [SimpleNamespace(index=group_index * 10 + i, group_index=group_index, rollout_id=3,
@@ -448,7 +443,6 @@ def _hook_samples(statuses, group_index):
             for i, s in enumerate(statuses)]
 
 
-@needs_hook
 @pytest.mark.ray_local  # build_metadata -> current_policy_token auto-starts Ray
 def test_hook_overlong_filter_and_metadata():
     spec = AlgorithmSpec(sampling={"overlong_filter": True})
@@ -461,7 +455,6 @@ def test_hook_overlong_filter_and_metadata():
     assert [s.remove_sample for g in data for s in g] == [False, True, True, True]
 
 
-@needs_hook
 @pytest.mark.ray_local  # build_metadata -> current_policy_token auto-starts Ray
 def test_hook_default_unchanged():
     args = SimpleNamespace()
@@ -479,7 +472,7 @@ def test_hook_default_unchanged():
 
 def test_two_islands_ref_model_checked_before_joining(tmp_path):
     """Island B's base revision differs from the spec's KL reference: B fails in
-    verify_ports_algorithm (called before any bridge, P0 test_learner_checks_before_the_bridge)."""
+    verify_ports_algorithm (called before any bridge, see test_learner_checks_before_the_bridge)."""
 
     from test_rl_miles_adapter_config import make_config
     from yeto.rl.adapters.miles import island_entry as rl_learner
@@ -521,7 +514,7 @@ def test_examples_build_and_translate(name):
     from yeto.rl.adapters.miles import config as mc
 
     spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
-    # plugins are referenced by path only (L9.11): a plugin edit needs no regeneration
+    # plugins are referenced by path only: a plugin edit needs no regeneration
     assert spec.verify_plugins() == ()
     assert spec.rejections() == []
     cfg = make_config()
@@ -558,14 +551,14 @@ def test_other_module_stages_enter_identity():
         spec = pipeline_spec(transform="test_foreign")
         assert spec.rejections() == []
         assert "yeto.rl.algos.reducers._foreign" in {p.path for p in spec.plugins}
-        # no source hash travels in the runtime attrs (L9.11): the code pack pins code
+        # no source hash travels in the runtime attrs: the code pack pins code
         assert "pipeline_sha256" not in gk.plugins_config(spec)["reward_pipeline"]
     finally:
         rp.ADV_TRANSFORMS.pop("test_foreign")
 
 
 def test_post_process_ignores_legacy_pipeline_hash():
-    """L9.11: an old config that still carries ``pipeline_sha256`` is not rejected."""
+    """An old config that still carries ``pipeline_sha256`` is not rejected."""
 
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     payload = gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]
@@ -620,7 +613,7 @@ def test_sample_filters_fail_closed():
     assert spec.rejections() == []
     assert rp.SAMPLE_FILTERS_PATH in {p.path for p in spec.plugins}
     cfg = json.loads(json.dumps(gk.runtime_attrs(spec)[rp.PIPELINE_ATTR]["config"]))
-    assert "sample_filters_sha256" not in cfg  # L9.11: the code pack pins the source
+    assert "sample_filters_sha256" not in cfg  # The code pack pins the source
     cfg["sample_filters_sha256"] = "0" * 64  # a legacy config still runs the filter
     legacy = SimpleNamespace(**{rp.PIPELINE_ATTR: {"config": cfg, "sha256": rp.canonical_sha256(cfg)}})
     assert sf.apply_sample_filters(legacy, data) is not None
@@ -812,7 +805,7 @@ FINAL_1B = {f"{d}:{n}" for d, names in EXPECTED_1B_DECLARED.items() for n in nam
 
 
 def test_declared_table_matches_final_declaration():
-    """G1_DECLARED == the 1b part of ALGO-CAP's final MILES_DECLARED (integ-decl d6be0f1);
+    """GRPO_KNOBS_DECLARED == the GRPO-knob part of MILES_DECLARED;
     custom_pg_loss_reducer is declared there separately, limited to the Dr.GRPO reducer."""
 
     assert {d: set(n) for d, n in gk.declared_mechanisms().items()} == EXPECTED_1B_DECLARED
@@ -906,7 +899,7 @@ def test_fake_engine_declares_the_1b_mechanisms():
 
     caps = fake_capabilities()
     if not EXPECTED_1B_DECLARED["features"] <= set(caps.features):
-        pytest.skip("needs infra-drafts/1b-fake-declare.patch (fake.py is ALGO-CAP's)")
+        pytest.skip("needs the 1b fake-declare patch to yeto/rl/engine/fake.py")
     for dim, names in EXPECTED_1B_DECLARED.items():
         assert names <= set(getattr(caps, dim)), dim
     assert "dual_clip" not in caps.features

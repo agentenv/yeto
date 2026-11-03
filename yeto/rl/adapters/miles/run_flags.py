@@ -87,20 +87,20 @@ _ALGORITHM = (
 
 _PLACEMENT = (
     shared_flag("--rl-allow-cross-node-engine-tp", action="store_true",
-                help="rl-multinode-island (ruling 2026-10-04 v2): let a rollout engine's TP span "
+                help="rl-multinode-island: let a rollout engine's TP span "
                 "nodes as whole-node replicas (e.g. SGLang TP8 over 2x4); an engine then scales "
                 "up/down as one replica; same as cfg parallel.allow_cross_node_engine_tp"),
 )
 
 _RUNTIME = (
-    # rl-infra-spec 2.3 / 3.x (ports only, off by default; the default island
-    # and its Miles argv are unchanged): eval||train overlap and the E1
+    # Ports only, off by default; the default island
+    # and its Miles argv are unchanged): eval||train overlap and the
     # elastic rollout controller.
     shared_flag(
         "--rl-overlap-eval",
         action="store_true",
         help="ports fixed partition: run eval overlapped with train/outer sync "
-        "(rl-infra-spec 2.3; needs --rl-eval-interval); off by default",
+        "(needs --rl-eval-interval); off by default",
     ),
     cli_flag("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
              help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
@@ -117,12 +117,12 @@ _RUNTIME = (
                 help="ports, single island no-sync: the learner runs every check that needs no "
                 "torch_dist (model provider view, Miles argv build + parse, --rl-megatron-ref-load "
                 "probe), writes ~/yeto-rl/boot_only.json + a FN_BOOT_ONLY_OK line and exits 0 "
-                "WITHOUT training, so the job SUCCEEDS and --keep keeps the cluster (S11 fnboot)"),
+                "WITHOUT training, so the job SUCCEEDS and --keep keeps the cluster"),
     cli_flag("--rl-megatron-ref-load", default=None, metavar="DIR",
              help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
              "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "
              "/mnt/yeto-models/torch_dist/qwen3.8-flash-next_torch_dist)"),
-    # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
+    # determinism: Megatron --deterministic-mode + DETERMINISM_ENV
     # in the learner and every Ray worker; off by default.
     shared_flag("--rl-deterministic-trainer", action="store_true",
                 dest="rl_deterministic_trainer",
@@ -130,7 +130,7 @@ _RUNTIME = (
                 "environment comes from yeto.rl.engine.determinism per backend x device) "
                 "ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                 "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
-                "every Ray worker (E2 plan-v2 §0); off by default. SGLang deterministic "
+                "every Ray worker; off by default. SGLang deterministic "
                 "inference is --sglang-deterministic-inference (on by default)",
                 cli_aliases=("--deterministic",)),
     # ports: Miles rollout/train debug dumps next to the event tape (flat .pt
@@ -143,7 +143,7 @@ _RUNTIME = (
 )
 
 _ELASTIC = (
-    # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
+    # enable trainer DP-change / role-transfer edges (drops --balance-data,
     # wires MilesTrainerOps and the pool GPU ids)
     shared_flag("--rl-elastic-trainer-edges", action="store_true",
                 help="--rl-elastic: enable trainer DP-change / role-transfer edges (4.7): "
@@ -276,7 +276,7 @@ _AGENT = (
         "on few-core single-GPU islands to avoid the parallel-import storm "
         "(32 sglang imports can miss the 300 s ready window)",
     ),
-    cli_flag(  # refused since S26 E0.5 (removed Codex/SecRLEnv agents)
+    cli_flag(  # refused (removed Codex/SecRLEnv agents)
         "--codex-backend-profile",
         default=None,
         help=(
@@ -332,10 +332,10 @@ _ISLAND = (
     island_flag("--learner-generation", type=int, default=0),
     island_flag("--reward-sha256", required=True),
     island_flag("--source-sha256", required=True),
-    # rl-identity-tiering L9.5: the run code pack digest; the island refuses to start
+    # The run code pack digest; the island refuses to start
     # when its workdir is not that pack.
     island_flag("--code-pack-digest", default=None),
-    # L9.12: "release" -- the code is the island image's /opt/yeto/src (checked against
+    # "release" -- the code is the island image's /opt/yeto/src (checked against
     # the image's release manifest; the digest is the image digest).
     island_flag("--code-pack-mode", choices=["git-patch", "release"], default=None),
     island_flag("--global-rounds", type=int, required=True, help=GLOBAL_ROUNDS_HELP),
@@ -464,7 +464,7 @@ _ISLAND = (
         help="full-parameter mode: the launcher-computed syncer semantic profile hash "
         "(yeto.syncer_profile), bound into every role's HELLO",
     ),
-    # The SAO streaming run contract (P0-1.7b.3).
+    # The SAO streaming run contract.
     island_flag(
         "--sao-streaming-runtime",
         default=None,
@@ -496,13 +496,13 @@ _ISLAND = (
     # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
     # else off (0 disables explicitly).
     island_flag("--rl-heartbeat-interval", type=float, default=None),
-    # rl-multinode-island: GPUs per island node when the island spans nodes (the
+    # GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     island_flag("--rl-island-gpus-per-node", type=int, default=None),
     # set by the launcher on every island of a --rl-island-placement launch:
     # the placement flags then stay out of the full-parameter training contract
     island_flag("--rl-per-island-placement", action="store_true"),
-    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
+    # Mixed rollout/trainer nodes: the role -> logical
     # bundle map derived by the launcher from the elastic cfg placement; None =
     # the leading-bundle layout (trainer first, then rollout, then standby).
     island_flag("--rl-island-bundle-map", default=None, metavar="JSON"),
@@ -514,32 +514,32 @@ _ISLAND = (
                 help="declare this compat group on every island instead of the group of each "
                      "island's card, so islands on different cards (e.g. H200 and H100) merge; "
                      "their numeric tolerance is not calibrated"),
-    # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
+    # Off-island copy of the state dir (journal/cuts/ledger),
     # synced after every commit point and restored on an empty state dir (machine replaced)
     island_flag("--rl-elastic-checkpoint-store", default=None, metavar="PATH"),
-    # rl-resume-from-checkpoint (S17 C4): resume across launches WITHOUT --rl-elastic
+    # rl-resume-from-checkpoint: resume across launches WITHOUT --rl-elastic
     # (single island, no sync). The store path is on the island (a Modal Volume mount, a
     # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
     island_flag("--rl-resume-store", default=None, metavar="PATH"),
     island_flag("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH"),
-    # S27 R-2: round cuts of a synced island (strict / decoupled outer sync), written only
+    # round cuts of a synced island (strict / decoupled outer sync), written only
     # (the syncer stays authoritative at start): the island's cuts go to
     # <PATH>/island<learner id>; the launcher forwards it from --rl-checkpoint-store
     island_flag("--rl-island-cut-store", default=None, metavar="PATH"),
     # --rl-export-hf-rounds (yeto.rl.engine.hf_export): <--rl-checkpoint-store>/hf on the
     # island; the island exports to <PATH>/island<learner id>/round-<r>
     island_flag("--rl-export-hf-store", default=None, metavar="PATH"),
-    # S27 E-3: this trainer lost its state and recovers from a peer snapshot (the
+    # this trainer lost its state and recovers from a peer snapshot (the
     # launcher sets YETO_RL_PEER_RECOVER=1 on a relaunch instead); local staging
     # directory of object-store snapshot transfers (node-shared on a multi-node island)
     island_flag("--rl-peer-recover", action="store_true", default=False),
     island_flag("--rl-peer-recovery-staging", default=None, metavar="PATH"),
-    # S25 C3: a synced trainer island (--rl-sample-role trainer with a syncer): the
+    # a synced trainer island (--rl-sample-role trainer with a syncer): the
     # store of the sample buffer and the policy releases (no round cuts), and the
     # number of synced trainers (its buffer lane is learner id of that count)
     island_flag("--rl-sample-store", default=None, metavar="PATH"),
     island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
-    # S27 G-CA: a sampler of a full-parameter synced group runs until its trainers
+    # a sampler of a full-parameter synced group runs until its trainers
     # ended (sample_roles module doc); 0: the island's own rounds
     island_flag("--rl-sampler-until-trainers-end", type=int, default=0, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
@@ -588,7 +588,7 @@ _ISLAND = (
 )
 
 
-# Full-parameter run inputs produced by Miles probes (P0-1.7b.1, P0-1.7b.3).
+# Full-parameter run inputs produced by Miles probes.
 _SYNC = (
     cli_flag(
         "--rl-sao-contracts",

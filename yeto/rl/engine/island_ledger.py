@@ -1,7 +1,7 @@
-"""Cross-island policy-version ledger (rl-inter-island-scheduling, design Q2/Q3/Q4).
+"""Cross-island policy-version ledger (rl-inter-island-scheduling).
 
 Pure Python reference implementation of the outer-layer bookkeeping the
-coordinator (the syncer, per design Q2) is meant to own:
+coordinator (the syncer) is meant to own:
 
 * ``SampleGroup`` -- one GRPO prompt group produced by one island under one
   policy version, judged as a whole: ACCEPT / ACCEPT_IS / REJECT.
@@ -10,7 +10,7 @@ coordinator (the syncer, per design Q2) is meant to own:
   a member that joined (catch-up) in the current round contributes weight 0.
 * Membership with ``membership_epoch``; a member that leaves (explicitly or by
   lease expiry) has its uncommitted delta dropped and recorded.
-* ``try_advance`` -- P4 (user ruling 2026-10-07): step when the arrived
+* ``try_advance``: step when the arrived
   capacity sum reaches ``theta * total capacity`` (and >= ``quorum_min``
   members), or on the soft deadline ``T_soft``; a late delta (computed on an
   older base, lag <= ``max_carry_lag``) is NOT dropped but carried over into
@@ -105,13 +105,12 @@ class StalenessPolicy:
     max_outer_lag: int = 2
     max_inner_lag: int | None = None  # None: no inner-step cap
     correction: str = "tis"
-    # Algorithm families whose value/critic needs on-policy data (design Q3).
+    # Algorithm families whose value/critic needs on-policy data.
     on_policy_only: bool = False
 
     @classmethod
     def for_algorithm(cls, spec: Any, **kwargs: Any) -> "StalenessPolicy":
-        """``correction`` derived from the algorithm spec, not the fixed ``"tis"``
-        (rl-offpolicy-correction-passthrough D7)."""
+        """``correction`` derived from the algorithm spec, not the fixed ``"tis"``."""
         from .offpolicy_correction import staleness_correction
 
         return cls(correction=staleness_correction(spec), **kwargs)
@@ -183,10 +182,10 @@ class _Member:
     joined_at: int  # outer version at join; zero weight while version == joined_at
     catch_up: bool
     last_heartbeat: float
-    capacity: float = 1.0  # cap_i (P4); from the syncer step-time EMA in stage 1
+    capacity: float = 1.0  # cap_i; from the syncer step-time EMA in stage 1
 
 
-# P4 defaults [待真机校准]: recommended, not yet measured on hardware.
+# Quorum defaults (to be calibrated on hardware): recommended, not yet measured.
 DEFAULT_THETA = 0.75
 DEFAULT_QUORUM_MIN = 1
 DEFAULT_GAMMA = 0.5
@@ -208,7 +207,7 @@ class CrossIslandLedger:
         self.quorum_min = quorum_min
         self.gamma = gamma
         self.max_carry_lag = max_carry_lag
-        self.syncer_epoch = syncer_epoch  # P9 fencing token
+        self.syncer_epoch = syncer_epoch  # fencing token
         self.carried: dict[str, tuple[DeltaEntry, int]] = {}
         self.lease_s = lease_s
         self.outer_version = 0
@@ -227,7 +226,7 @@ class CrossIslandLedger:
 
     # -- membership -----------------------------------------------------------
     def check_fence(self, syncer_epoch: int) -> None:
-        """P9: refuse messages stamped by an older coordinator incarnation."""
+        """Refuse messages stamped by an older coordinator incarnation."""
         if syncer_epoch < self.syncer_epoch:
             raise LedgerError(f"fenced: syncer_epoch {syncer_epoch} < {self.syncer_epoch}")
 
@@ -238,7 +237,7 @@ class CrossIslandLedger:
     def join(self, island_id: str, *, now: float, catch_up: bool | None = None,
              capacity: float = 1.0, role: str = "train") -> dict[str, Any]:
         if role != "train":
-            # D11.1 (rl-eval-difficulty-buckets 5.1): an eval island only serves
+            # An eval island only serves
             # inference; it never joins the merge pool nor submits a delta.
             raise LedgerError(f"{island_id}: role {role!r} cannot join the merge pool (train islands only)")
         if island_id in self.members:
@@ -371,7 +370,7 @@ class CrossIslandLedger:
         return merge_weight(delta.c_tokens, delta.c_steps)
 
     def try_advance(self, *, timed_out: bool, new_hash: str | None = None) -> dict[str, Any] | None:
-        """P4 step; ``timed_out`` means the soft deadline T_soft passed."""
+        """Quorum step; ``timed_out`` means the soft deadline T_soft passed."""
         cap_arrived, cap_total = self.capacity_arrived()
         arrived = len(self.pending)
         if self.legacy:

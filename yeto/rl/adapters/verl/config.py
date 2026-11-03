@@ -1,18 +1,18 @@
-"""yeto run options -> checked verl hydra overrides (rl-verl-backend 1.3, design D4/D7/D11).
+"""yeto run options -> checked verl hydra overrides.
 
 Rules enforced before anything starts (each has a CPU test):
 
-* LoRA ``lora_alpha`` must equal ``rank`` (yeto canonical LoRA, D4);
-* the verl source commit must equal the pin (D1);
+* LoRA ``lora_alpha`` must equal ``rank`` (yeto canonical LoRA);
+* the verl source commit must equal the pin;
 * bypass mode (old log-probs = rollout log-probs) cannot be combined with any
-  mismatch criterion (D7: the criteria would compare a tensor with itself);
+  mismatch criterion (the criteria would compare a tensor with itself);
 * ``full_determinism`` is refused in training mode, and in diagnostic mode it
-  requires ``enforce_eager`` (S16: vLLM's Inductor autotune refuses
+  requires ``enforce_eager`` (vLLM's Inductor autotune refuses
   deterministic mode; deterministic sampling also makes the GRPO group
   identical, i.e. no learning signal);
 * corrections: only TIS with lower bound 0 is mapped; IcePop is in the design
   but its verl mapping is not verified yet, so it is refused for now; every
-  other correction is refused with "verl 后端不支持此修正";
+  other correction is refused with "verl backend does not support this correction";
 * sampling defaults are T=1, top_p=1, top_k=-1; non-default top_p/top_k need
   ``allow_sampling_shift`` (the criteria then see a systematic shift).
 """
@@ -27,9 +27,9 @@ from .run_config_rules import AGENTIC_ADV_ESTIMATOR
 
 MODES = ("train", "diagnose")
 SUPPORTED_CORRECTIONS = ("none", "tis")
-DESIGNED_NOT_MAPPED = ("icepop",)  # in design D7, mapping to verl not verified yet
+DESIGNED_NOT_MAPPED = ("icepop",)  # designed, mapping to verl not verified yet
 # ``parameter_mode``: the island's trainable set. "lora" is the original
-# one-card adapter island; "full" (S27 B10) trains every parameter on
+# one-card adapter island; "full" trains every parameter on
 # ``n_gpus`` cards with FSDP2 data parallelism and FP32 masters
 # (:mod:`.full_parameter`), alone (``--rl-single-island-no-sync``) or synced
 # through the unified full-parameter syncer (:mod:`.full_parameter_stream`).
@@ -82,7 +82,7 @@ class VerlRunConfig:
     reward_name: str = "compute_score"
     chat_template_kwargs: dict = field(default_factory=dict)
     experiment_name: str = "yeto-verl"
-    # S27 G-EQ2 (npu1): keep the parameters and the optimizer state in host
+    # Keep the parameters and the optimizer state in host
     # memory, the card holding only what a step computes with. Both default off,
     # as before. param_offload is what lets a card smaller than the NVIDIA
     # reference hold a large full-parameter island at all: without it verl puts
@@ -98,12 +98,12 @@ class VerlRunConfig:
     # offload_policy is set (fork acad9875,
     # workers/engine/fsdp/transformer_impl.py:459-463).
     offload_policy: bool = False
-    # S27 G-EQ2: activation recomputation, when the model's implementation
+    # Activation recomputation, when the model's implementation
     # supports it (``island_entry.gradient_checkpointing_for``). The HF
     # NemotronH of the Ascend image's transformers 5.3 does not, and verl's
     # FSDP2 engine dies on it right after building the model.
     gradient_checkpointing: bool = True
-    # S27 G-EQ2: load the model and tokenizer with the checkpoint's own code
+    # Load the model and tokenizer with the checkpoint's own code
     # (``--trust-remote-code``, the launcher's flag the Miles islands already
     # take). Needed for an architecture whose support lives in the repository
     # rather than in the installed transformers: the official Ascend verl
@@ -112,7 +112,7 @@ class VerlRunConfig:
     # modeling_nemotron_h.py sets it True. Default off: an NVIDIA island is
     # unchanged, and remote code is only run when the launch asks for it.
     trust_remote_code: bool = False
-    # S27 G-FS (VERL-PARITY #33): the agentic island. The rows select yeto's
+    # The agentic island. The rows select yeto's
     # Harbor agent loop (``agent_name: yeto_harbor``), so the advantage estimator
     # must be ``yeto_grpo`` (``run_config_rules.AGENTIC_ADV_ESTIMATOR``; the loop
     # refuses any other one, ``harbor_agent_loop.check_estimator``) and verl must
@@ -136,58 +136,58 @@ def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
     """Raise :class:`VerlConfigError` naming the first violated rule."""
     if cfg.parameter_mode not in PARAMETER_MODES:
         raise VerlConfigError(
-            f"parameter_mode 必须是 {PARAMETER_MODES} 之一，得到 {cfg.parameter_mode!r}")
+            f"parameter_mode must be one of {PARAMETER_MODES}, got {cfg.parameter_mode!r}")
     if full_parameter(cfg):
         if cfg.lora_rank != 0:
-            raise VerlConfigError("全参数模式必须 lora_rank=0（全参数岛不带适配器）")
+            raise VerlConfigError("full-parameter mode requires lora_rank=0 (the full-parameter island has no adapter)")
         if cfg.model_dtype != "fp32":
             raise VerlConfigError(
-                "全参数同步要求 FP32 主权重：model_dtype 必须是 fp32（见 full_parameter 模块说明）")
+                "full-parameter sync requires FP32 masters: model_dtype must be fp32 (see the full_parameter module)")
     elif cfg.lora_rank <= 0:
-        raise VerlConfigError("LoRA 模式的 lora_rank 必须 > 0（全参数请用 parameter_mode=full）")
+        raise VerlConfigError("LoRA mode requires lora_rank > 0 (use parameter_mode=full for full parameters)")
     if not full_parameter(cfg) and cfg.lora_alpha != cfg.lora_rank:
         raise VerlConfigError(
-            f"lora_alpha ({cfg.lora_alpha}) 必须等于 rank ({cfg.lora_rank})：yeto 规范 LoRA 不带缩放")
+            f"lora_alpha ({cfg.lora_alpha}) must equal rank ({cfg.lora_rank}): yeto canonical LoRA has no scaling")
     if cfg.engine_commit != expected_commit:
         raise VerlConfigError(
-            f"verl 源码 commit {cfg.engine_commit} 与钉定的 {expected_commit} 不符")
+            f"verl source commit {cfg.engine_commit} does not match the pinned {expected_commit}")
     if cfg.mode not in MODES:
-        raise VerlConfigError(f"mode 必须是 {MODES} 之一，得到 {cfg.mode!r}")
+        raise VerlConfigError(f"mode must be one of {MODES}, got {cfg.mode!r}")
     if cfg.bypass_mode and cfg.criteria_enabled:
-        raise VerlConfigError("旁路模式（old=rollout）与训推不一致判据互斥：判据会拿同一张量比自己")
+        raise VerlConfigError("bypass mode (old=rollout) excludes the train/rollout mismatch criteria: they would compare a tensor with itself")
     if cfg.full_determinism and cfg.mode == "train":
         raise VerlConfigError(
-            "训练模式不允许 full_determinism：组内采样会完全相同、GRPO 无学习信号（只用于诊断）")
+            "full_determinism is not allowed in train mode: every sample in a group would be identical and GRPO gets no learning signal (diagnostics only)")
     if cfg.mode == "diagnose" and cfg.full_determinism and not cfg.enforce_eager:
-        raise VerlConfigError("诊断模式开 full_determinism 必须同时 enforce_eager=True（否则 vLLM 起不来）")
+        raise VerlConfigError("full_determinism in diagnose mode requires enforce_eager=True (vLLM does not start otherwise)")
     if cfg.correction in DESIGNED_NOT_MAPPED:
-        raise VerlConfigError(f"verl 后端的 {cfg.correction} 映射尚未核实，暂不开放")
+        raise VerlConfigError(f"the verl backend's {cfg.correction} mapping is not verified yet and is not available")
     if cfg.correction not in SUPPORTED_CORRECTIONS:
-        raise VerlConfigError(f"verl 后端不支持此修正: {cfg.correction!r}")
+        raise VerlConfigError(f"verl backend does not support this correction: {cfg.correction!r}")
     if cfg.correction == "tis":
         if cfg.tis_lower != 0.0:
-            raise VerlConfigError("verl 后端不支持此修正: TIS 下界只能为 0")
+            raise VerlConfigError("verl backend does not support this correction: the TIS lower bound must be 0")
         if not (math.isfinite(cfg.tis_upper) and cfg.tis_upper > 1.0):
-            raise VerlConfigError(f"TIS 上界必须 > 1，得到 {cfg.tis_upper}")
+            raise VerlConfigError(f"TIS upper bound must be > 1, got {cfg.tis_upper}")
     if cfg.temperature != 1.0:
-        raise VerlConfigError("verl 后端第一版采样温度固定为 1（判据口径）")
+        raise VerlConfigError("the verl backend fixes the sampling temperature at 1 (the criteria assume it)")
     if (cfg.top_p != 1.0 or cfg.top_k != -1) and not cfg.allow_sampling_shift:
         raise VerlConfigError(
-            "非默认 top_p/top_k 会让推理 logprob 系统性偏移（S16 实测 top_p=0.9 偏 -0.032）；"
-            "确需如此请显式 allow_sampling_shift")
+            "non-default top_p/top_k shift the rollout log-probs systematically (measured: top_p=0.9 "
+            "shifts them by -0.032); set allow_sampling_shift explicitly if this is intended")
     if cfg.groups_per_round <= 0 or cfg.samples_per_group <= 0 or cfg.total_rounds <= 0:
-        raise VerlConfigError("groups_per_round / samples_per_group / total_rounds 必须为正")
+        raise VerlConfigError("groups_per_round / samples_per_group / total_rounds must be positive")
     if cfg.n_gpus < 1:
-        raise VerlConfigError(f"n_gpus 必须 >= 1（单节点岛的卡数），得到 {cfg.n_gpus}")
-    if cfg.agentic:  # S27 G-FS
+        raise VerlConfigError(f"n_gpus must be >= 1 (cards of a single-node island), got {cfg.n_gpus}")
+    if cfg.agentic:
         if not cfg.agent_loop_config:
-            raise VerlConfigError("agentic 岛要 agent_loop_config（yeto_harbor 的注册表 YAML 路径）")
+            raise VerlConfigError("an agentic island needs agent_loop_config (the yeto_harbor registry YAML path)")
         if cfg.agent_loop_workers < 1:
-            raise VerlConfigError(f"agent_loop_workers 必须 >= 1，得到 {cfg.agent_loop_workers}")
+            raise VerlConfigError(f"agent_loop_workers must be >= 1, got {cfg.agent_loop_workers}")
     elif cfg.agent_loop_config:
-        raise VerlConfigError("agent_loop_config 只在 agentic 岛上有意义")
+        raise VerlConfigError("agent_loop_config only applies to an agentic island")
     if cfg.model_dtype not in ("fp32", "bf16"):
-        raise VerlConfigError(f"model_dtype 必须是 fp32 或 bf16，得到 {cfg.model_dtype!r}")
+        raise VerlConfigError(f"model_dtype must be fp32 or bf16, got {cfg.model_dtype!r}")
 
 
 def build_overrides(cfg: VerlRunConfig) -> list[str]:
@@ -265,7 +265,7 @@ def build_overrides(cfg: VerlRunConfig) -> list[str]:
         "trainer.total_epochs=1000",
         "ray_kwargs.ray_init.runtime_env.py_executable=null",
     ]
-    if cfg.agentic:  # S27 G-FS: the rows name the loop; verl needs its registry entry
+    if cfg.agentic:  # the rows name the loop; verl needs its registry entry
         o += [f"actor_rollout_ref.rollout.agent.agent_loop_config_path={cfg.agent_loop_config}",
               f"actor_rollout_ref.rollout.agent.num_workers={cfg.agent_loop_workers}"]
     if cfg.correction == "tis":
@@ -291,7 +291,7 @@ ASSERTED_KEYS = (
     "algorithm.rollout_correction.bypass_mode",
     "actor_rollout_ref.rollout.full_determinism",
     "actor_rollout_ref.actor.strategy",
-    # S27 G-EZ: a silently dropped offload_policy would only show up as an
+    # A silently dropped offload_policy would only show up as an
     # out-of-memory failure deep into the first step, so assert it resolved.
     "actor_rollout_ref.actor.fsdp_config.offload_policy",
 )

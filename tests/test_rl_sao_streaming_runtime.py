@@ -68,7 +68,7 @@ def test_syncer_profile_matches_rust_canonical_vector():
 
 
 def test_syncer_profile_hash_ignores_resume():
-    # P0-1.7b.1-Q7: a restarted syncer (--resume) keeps the islands' HELLO hash.
+    # A restarted syncer (--resume) keeps the islands' HELLO hash.
     fresh = _syncer_profile()
     fresh["resume"] = False
     assert SyncerSemanticProfile.from_mapping(fresh).sha256 == (
@@ -418,7 +418,7 @@ def test_bind_rejects_state_bypassing_debug_shortcuts(tmp_path, overrides):
     assert not evidence.exists()
 
 
-# --- the ports island entry (P0-1.7b.3) ------------------------------------
+# --- the ports island entry --------------------------------------------------
 
 
 def _island_argv(*extra):
@@ -535,7 +535,7 @@ def test_island_entry_binds_the_sao_streaming_runtime_end_to_end(monkeypatch, tm
 
     miles_args = captured["miles_args"]
     assert miles_args.yeto_rl_sync_preset == "sao-streaming-full"
-    # P0-4.8: both role sessions bind the island's algorithm spec hash.
+    # Both role sessions bind the island's algorithm spec hash.
     assert getattr(miles_args, CONFIG_ATTRIBUTE) == sao_sync_config(
         load_sao_streaming_runtime(
             source,
@@ -581,7 +581,7 @@ def test_island_entry_rejects_an_evidence_root_others_can_write(monkeypatch, tmp
 
 
 def test_full_parameter_island_accepts_a_policy_age_limit():
-    """P0-S: every trajectory records its own behavior policy (evidence schema 4)."""
+    """Every trajectory records its own behavior policy (evidence schema 4)."""
     from yeto.rl.adapters.miles import island_entry
 
     args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)

@@ -245,7 +245,7 @@ def _modal_store(tmp_path, volume):
 
 
 def test_the_first_export_to_a_modal_volume_succeeds(tmp_path):
-    # S27 s27-bb-b1 round 56: removing the not yet existing round directory raised
+    # A GPU run, round 56: removing the not yet existing round directory raised
     # InvalidError "No such file or directory", so every first export failed
     volume = _MissingPathVolume(tmp_path / "volume")
     store = _modal_store(tmp_path, volume)
@@ -443,7 +443,7 @@ def test_verl_lora_and_elastic_launches_are_refused():
     from yeto.launch import rl_ports
 
     args = _cli("--rl-export-hf-rounds", "2", "--rl-checkpoint-store", "/s")
-    # S27 G-DS / G-DC: a verl launch exports only from synced full-parameter islands and the Megatron
+    # A verl launch exports only from synced full-parameter islands and the Megatron
     # island; a strict-avg FSDP2 verl launch is still refused
     args.rl_backend = "verl"
     with pytest.raises(ValueError, match="verl Megatron island.*verl: synced full-parameter islands"):
@@ -453,13 +453,13 @@ def test_verl_lora_and_elastic_launches_are_refused():
         rl_ports._check_hf_export_launch_flags(args)
 
 
-# ------------------------------------------------- S27 G-EQ/G-EQ3: the base checkpoint's own layout
+# --------------------------------------------------------------- the base checkpoint's own layout
 def test_the_export_plan_reuses_the_source_checkpoints_own_files(tmp_path):
     """The export writes the files the source checkpoint has, under its own tensor
     names and dtypes, so a later release_delta against that checkpoint compares
-    same-name, same-size files (G-EQ) and a sampler loads the names it knows
-    (G-EQ3). The name conversion itself is tested in
-    tests/test_s27_hf_checkpoint_keys.py against a real nemotron_h model."""
+    same-name, same-size files and a sampler loads the names it knows.
+    The name conversion itself is tested in
+    tests/test_hf_export_checkpoint_keys.py against a real nemotron_h model."""
     from safetensors.torch import save_file
 
     from yeto.rl.adapters.verl.hf_checkpoint_keys import base_export

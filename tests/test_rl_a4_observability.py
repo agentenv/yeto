@@ -1,5 +1,5 @@
-"""A4 observability / injection fixes (E1-B cause, membership event, hold, watchdog
-classification, A4b tool-wait injection, undrain failure). CPU only, no Ray."""
+"""Observability / injection fixes (startup failure cause, membership event, hold, watchdog
+classification, tool-wait injection, undrain failure). CPU only, no Ray."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_rl_e1_injections import _perturb_publisher
-from test_rl_reconfig_e1 import (
+from test_rl_fault_injections import _perturb_publisher
+from test_rl_reconfig_controller import (
     ElasticFakePublisher,
     _events,
     _run_with_request,

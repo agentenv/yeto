@@ -1,4 +1,4 @@
-"""CPU tests of S26 E8: boat VM reuse (pool), start-phase timings, setup retries."""
+"""CPU tests of boat VM reuse (pool), start-phase timings, setup retries."""
 
 from __future__ import annotations
 
@@ -565,8 +565,18 @@ def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool, ha
     if not node_runs:  # e.g. the image's glibc is older than the Node build needs
         (mount / "node/bin/node").write_text("#!/bin/sh\nexit 1\n")
     core.mkdir()
-    for tool in ("mkdir", "ln", "rm", "grep", "ldd", "sh", "chmod", "mv"):
+    for tool in ("mkdir", "ln", "rm", "grep", "sh", "chmod"):
         os.symlink(shutil.which(tool), core / tool)
+    real_mv = shutil.which("mv")
+    if subprocess.run([real_mv, "-T", "--version"], capture_output=True, check=False).returncode == 0:
+        os.symlink(real_mv, core / "mv")
+    else:  # BSD mv (macOS) has no -T: emulate it for a destination that must not exist yet
+        (core / "mv").write_text(f'#!/bin/sh\n[ "$1" = -T ] || exec {real_mv} "$@"\n'
+                                 f'shift; [ -e "$2" ] && exit 1; exec {real_mv} "$1" "$2"\n')
+        (core / "mv").chmod(0o755)
+    # The simulated image is glibc; a stub keeps that true on hosts without ldd (macOS) or with musl.
+    (core / "ldd").write_text("#!/bin/sh\necho 'ldd (GNU libc) 2.35'\n")
+    (core / "ldd").chmod(0o755)
     calls = tmp_path / "apt-calls"
     apt = core / "apt-get"
     install_curl = f"printf '#!/bin/sh\\n' > {local_bin}/curl; chmod 755 {local_bin}/curl" if apt_ok else "exit 100"
@@ -606,7 +616,7 @@ def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, ha
     code, plain, nvm, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl,
                                                               has_rg=has_rg, has_node=has_node)
     assert code == 0
-    # Harbor's install on glibc (measured on boat, logs/E8/tools-compare-merge2.jsonl): curl and rg on the
+    # Harbor's install on glibc (measured on a boat VM): curl and rg on the
     # plain PATH; node, npm and codex only after ". ~/.nvm/nvm.sh".
     image_node = {"node", "npm"} if has_node else set()
     assert plain == {"curl", "rg"} | image_node
@@ -724,7 +734,7 @@ async def _cancel_while_running(env, command: str) -> None:
 
 
 def test_aborted_trial_returns_its_vm_to_the_pool_through_the_recycle(tmp_path):
-    # S27 G-EF: a cancelled exec (aborted trial) is not a VM failure: the command is
+    # A cancelled exec (aborted trial) is not a VM failure: the command is
     # stopped, the VM is recycled and checked, and the next task gets a fresh container
     pytest.importorskip("harbor")
     fake = VmFake()

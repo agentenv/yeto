@@ -1,4 +1,4 @@
-"""A full-parameter island's data position, kept across its processes (S27 task assignment, P0).
+"""A full-parameter island's data position, kept across its processes.
 
 Why: a full-parameter island counts its rounds locally from 0 in every process
 (``full_parameter_sync`` module doc: the policy version is the local round
@@ -19,7 +19,7 @@ own data slot (``data_split``). At start:
 * a process that starts the run writes a start record (its fresh cursor), so a
   record that an earlier run left in a reused store is never read.
 
-What a relaunch draws again (until a central dispenser replaces this, P2):
+What a relaunch draws again (until a central dispenser replaces this):
 
 * never the rows of the rounds that reached their boundary before the last
   record;

@@ -1,4 +1,4 @@
-"""Reuse of boat VMs across tasks, and pre-warmed VMs (S26 E8).
+"""Reuse of boat VMs across tasks, and pre-warmed VMs.
 
 A fresh boat sandbox pays for a VM create, a wait until the VM is ready,
 and an image pull before the task container runs.  :class:`BoatSandboxPool`
@@ -20,10 +20,10 @@ pool call and by a background reaper), at most ``max_idle`` VMs are kept,
 a VM is reused at most ``max_reuses`` times.  :meth:`BoatSandboxPool.close`
 deletes all idle VMs.
 
-When the process ends, the reaper ends with it (S26 agentic run: 59 idle
+When the process ends, the reaper ends with it (one agentic run left 59 idle
 VMs left on the account, each with a 3 h boat TTL).  So:
 
-* an idle VM's boat TTL is cut to ``idle_vm_ttl_s`` (default 10 min, S29 D15) on
+* an idle VM's boat TTL is cut to ``idle_vm_ttl_s`` (default 10 min) on
   release and set back to the task TTL on reuse: a VM idle in a dead process
   stops on its own soon;
 * :func:`process_pool` registers the pool for exit cleanup: ``atexit`` and
@@ -31,7 +31,7 @@ VMs left on the account, each with a 3 h boat TTL).  So:
   (:meth:`BoatSandboxPool.close_now`).  SIGKILL leaves only the TTLs.
 * a hard VM stop (spot preemption) runs neither: the sandboxes carry run /
   island / incarnation labels, and the next sampler incarnation and the
-  trainer's relay watchdog delete them (:mod:`.boat_labels`, S29 D15).
+  trainer's relay watchdog delete them (:mod:`.boat_labels`).
 
 Idle VMs keep their :class:`~.boat_client.BoatQuota` slot: on boat they are
 active sandboxes.  A reuse takes no start from the per-minute budget.
@@ -67,7 +67,7 @@ POOL_ENV = "YETO_BOAT_POOL"  # "1" turns reuse on for BoatEnvironment
 POOL_IDLE_TTL_ENV = "YETO_BOAT_POOL_IDLE_TTL_S"
 POOL_MAX_IDLE_ENV = "YETO_BOAT_POOL_MAX_IDLE"
 POOL_IDLE_VM_TTL_ENV = "YETO_BOAT_POOL_IDLE_VM_TTL_S"
-DEFAULT_IDLE_VM_TTL_S = 10 * 60  # S29 D15: was 20 min; YETO_BOAT_POOL_IDLE_VM_TTL_S overrides
+DEFAULT_IDLE_VM_TTL_S = 10 * 60  # was 20 min; YETO_BOAT_POOL_IDLE_VM_TTL_S overrides
 
 
 @dataclass

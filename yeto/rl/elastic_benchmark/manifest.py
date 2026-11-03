@@ -28,7 +28,7 @@ FIELD_GROUPS = (
 )
 PARAMETER_MODES = ("lora", "full")
 EXECUTION_MODES = ("colocated-serial", "partitioned-serial", "partitioned-overlap")
-# The rl-infra-spec spec/tasks spell the compatibility mode "serial-colocated";
+# Older design notes spell the compatibility mode "serial-colocated";
 # code (driver, #66) uses "colocated-serial". Both are accepted, canonical is the latter.
 EXECUTION_MODE_ALIASES = {"serial-colocated": "colocated-serial"}
 

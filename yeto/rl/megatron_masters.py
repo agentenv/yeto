@@ -1,6 +1,6 @@
 """FP32 optimizer masters of a Megatron model, read and written in place.
 
-Moved unchanged from the Miles adapter's ``state_plugin`` (S27 G-FG) so that
+Moved unchanged from the Miles adapter's ``state_plugin`` so that
 every backend that trains on Megatron reads the same masters: the Miles
 islands (LoRA state, critic write-back, cuts) and the verl Megatron engine
 island (:mod:`yeto.rl.megatron_hf_boundary`).  ``state_plugin`` re-exports
@@ -33,7 +33,7 @@ class MegatronMasterError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# Gradient-flow-safe master exposure (#64 / D4)
+# Gradient-flow-safe master exposure (#64)
 # --------------------------------------------------------------------------
 
 
@@ -76,7 +76,7 @@ def has_complete_master(parameter: Any) -> bool:
 
 
 # --------------------------------------------------------------------------
-# DistributedOptimizer: DP-sharded FP32 masters (rl-infra-spec 2.4, decision (a))
+# DistributedOptimizer: DP-sharded FP32 masters (decision (a))
 # --------------------------------------------------------------------------
 # Under Megatron's DistributedOptimizer with DP>1 a bf16 adapter parameter has
 # no ``main_param``: each DP rank's optimizer owns the FP32 main copy of a
@@ -118,14 +118,14 @@ def distributed_ranges(optimizer: Any) -> tuple[bool, dict[int, tuple[Any, Any, 
     return found, owned
 
 
-# Precision-aware optimizer (S28 G-RCP). Megatron hands the master and the Adam
+# Precision-aware optimizer. Megatron hands the master and the Adam
 # moments to TE FusedAdam, which stores each in its configured dtype. With an FP32
 # master (main_params_dtype fp32, store_param_remainders False) the master is still
 # an exact FP32 shard: ``get_unscaled_state(shard, "master_param")`` returns it as is
 # (TE fused_adam.get_unscaled_state). FusedAdam creates ``master_param`` only in the
 # first step(), as the bf16 shard cast to FP32 (fused_adam._init_or_fix_state); before
 # that the same cast is the master. Refused: INT16 remainders, a non-FP32 master, and
-# the CPU offload is read through HybridDeviceOptimizer.param_to_fp32_param (S28 G-120).
+# the CPU offload is read through HybridDeviceOptimizer.param_to_fp32_param.
 
 
 def _precision_aware(leaf: Any) -> bool:
@@ -139,7 +139,7 @@ def _hybrid(leaf: Any) -> bool:
     ``param_to_fp32_param`` maps each bf16 shard of the param groups to the FP32 tensor
     the sub-optimizers step (on the host for the offloaded share); after step() the
     same tensor is ``state[shard]["master_param"]`` and a post-step hook copies it back
-    into the bf16 shard (cpu_offloading/hybrid_optimizer.py, core 0.18.2 on npu1)."""
+    into the bf16 shard (cpu_offloading/hybrid_optimizer.py, core 0.18.2)."""
     return hasattr(getattr(leaf, "optimizer", None), "param_to_fp32_param")
 
 
@@ -150,7 +150,7 @@ def _check_precision_aware(leaf: Any) -> None:
 
     config = leaf.config
     if getattr(config, "optimizer_cpu_offload", False):
-        # S28 G-120: Megatron's CPU offload (HybridDeviceOptimizer) keeps its own FP32
+        # Megatron's CPU offload (HybridDeviceOptimizer) keeps its own FP32
         # copy of every shard; readable only when it updates in FP32.
         if not _hybrid(leaf):
             raise MegatronMasterError("optimizer_cpu_offload without a HybridDeviceOptimizer "
@@ -278,7 +278,7 @@ def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=No
 
     One flat FP32 buffer per leaf holds the gathered masters (each returned
     master is a view of it); no second concatenated copy is made
-    (s19-compaction-g3-20261010a: the critic export ran out of GPU memory on
+    (a critic export ran out of GPU memory on
     that copy). ``device``: where the gather buffers live (default: each
     parameter's device). A leaf whose DP group has one rank needs no
     collective, so a CPU buffer is allowed there; a CPU buffer with a

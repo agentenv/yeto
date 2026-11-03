@@ -8,7 +8,7 @@ their raw json and kept in stream order, so a reconnecting stream that
 replays lines is harmless.
 
 ``python -m yeto.rl.event_echo LOG OUT`` rebuilds a tape from a saved log (the
-successor of rl-infra-spec's ``extract_tape.py``; it writes the raw tape
+successor of the older ``extract_tape.py``; it writes the raw tape
 lines, i.e. byte-identical to the island's file).
 """
 
@@ -133,7 +133,7 @@ class TapeCollector:
         self.discarded = 0
         self.finalized = False
         self.left_pool = False  # 0.27: elastic_left_pool seen (re-JOIN exhausted)
-        self.wan_rejects = 0  # S26 E3b: rl_wan_probe records with accepted=false
+        self.wan_rejects = 0  # rl_wan_probe records with accepted=false
         self.closed = False
 
     @property

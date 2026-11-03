@@ -1,4 +1,4 @@
-"""Scheduler S1 (rl-trainer-start-stop L5.1-L5.3): every scheduler scenario of the spec."""
+"""Scheduler: every scheduler scenario of the spec."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def test_data_end_finishes_and_trains_the_remainder():
     assert s.decide(ended, TRAINING) == Hold()
     done = BacklogStats(batches=0.0, samples=0, data_ended=True)
     assert s.decide(done, TRAINING) == Stop(LeaveReason.FINISHED)
-    # nothing left: a stopped (or never started) trainer also finishes the run (L5.3c)
+    # nothing left: a stopped (or never started) trainer also finishes the run
     assert s.decide(done, COLD) == Stop(LeaveReason.FINISHED)
 
 
@@ -119,7 +119,7 @@ def test_start_once():
     assert s.decide(done, TRAINING) == Stop(LeaveReason.FINISHED)
 
 
-# ---------------------------------------------------------------- L5.2: T_s
+# ---------------------------------------------------------------- T_s
 def _summary(total_s, island=1):
     return {"event": "trainer_start_summary", "island_id": island, "total_s": total_s}
 
@@ -165,7 +165,7 @@ def test_measured_t_s_changes_q_s1():
     assert s.q_on(s.start_seconds()) == 2
 
 
-# ---------------------------------------------------------------- L5.3: journal
+# ---------------------------------------------------------------- journal
 def test_head_restart_while_idle_continues_the_idle_time(tmp_path):
     clock = _Clock()
     cfg = S1Config(a_hard=2, start_seconds=300.0)

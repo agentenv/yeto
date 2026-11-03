@@ -1,6 +1,6 @@
 """One persistent event loop that drives an engine's async handles from
 yeto's synchronous ports (moved from ``adapters/miles/__init__.py``; the verl
-full-parameter island uses the same runner, S27 G-DV)."""
+full-parameter island uses the same runner)."""
 
 from __future__ import annotations
 

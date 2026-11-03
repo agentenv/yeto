@@ -1,4 +1,4 @@
-"""Trust boundary of the agentic outer layer (S25 N10.2; was L3/L9 of the Codex harness).
+"""Trust boundary of the agentic outer layer (formerly part of the Codex harness).
 
 The policy controls everything the agent does inside the sandbox, so:
 

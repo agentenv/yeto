@@ -50,14 +50,14 @@ def test_fixed_roster_syncer_command_is_byte_identical(head_launcher):
     island HMAC key check in front (the key itself is a secret env); SFT only
     gains the explicit --allow-unauthenticated-islands."""
     args = _args()
-    # S27 G-DH: the default data split (the dispenser) adds --dispense flags on purpose;
+    # The default data split (the dispenser) adds --dispense flags on purpose;
     # the row slots keep the line this test compares
     args.rl_data_split = "stride"
     assert not launcher.island_pool(args)
     for n in (1, 2, 4):
         assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(
             "mkdir -p ~/yeto-output && ", "mkdir -p ~/yeto-output && " + HMAC_CHECK, 1)
-        # P0-D8: one command per role; the HMAC check sits once in front.
+        # One command per role; the HMAC check sits once in front.
         commands = launcher.role_syncer_commands(args, n)
         assert list(commands) == ["actor"]
         assert launcher.syncer_command(args, n).endswith(HMAC_CHECK + commands["actor"])
@@ -230,9 +230,35 @@ def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
         "YETO_ISLAND_HMAC_KEY"] == "k3y"
 
 
-def test_head_job_ships_hmac_secret():
-    src = Path(launcher.__file__).with_name("cli.py").read_text()
-    assert "secrets.update(launcher.island_hmac_secret(args))" in src
+def _submitted_head_job(monkeypatch, tmp_path, args):
+    """Run `cmd_launch_head` on fakes; return the sky.Task handed to the head exec."""
+    import yeto.cli as cli
+    import yeto.runs as runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    submitted = []
+    monkeypatch.setattr(cli, "_make_head_task", lambda args, mounts=None: "head-task")
+    monkeypatch.setattr(cli, "_sky_launch_head", lambda task, c: SimpleNamespace(head_ip="203.0.113.5"))
+    monkeypatch.setattr(cli, "_probe_head_port", lambda c, ip: True)
+    monkeypatch.setattr(cli, "_sky_exec_head", lambda task, c: submitted.append(task) or 7)
+    monkeypatch.setattr(cli, "_stream_head_logs", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_record_head_result", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "head_cloud_credentials", lambda clouds: ({}, {}))
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda a: None)
+    monkeypatch.setattr("yeto.launch_preflight.pre_cloud_checks", lambda a: None)
+    monkeypatch.setattr("yeto.launch.dispense_evidence.pull_from_head", lambda *a, **k: None)
+    fake_sky = SimpleNamespace(Task=lambda **kw: SimpleNamespace(**kw))
+    monkeypatch.setitem(sys.modules, "sky", fake_sky)
+    args.controller, args.syncer_region = "head", "aws/us-east-1"
+    assert cli.cmd_launch_head(args) == 0
+    (task,) = submitted
+    return task
+
+
+def test_head_job_ships_hmac_secret(monkeypatch, tmp_path):
+    task = _submitted_head_job(monkeypatch, tmp_path, _args())
+    assert task.secrets["YETO_ISLAND_HMAC_KEY"] == "k3y"
+    assert "k3y" not in task.run and "k3y" not in str(task.envs)  # secret, not env/argv
     assert launcher.island_hmac_secret(_args()) == {"YETO_ISLAND_HMAC_KEY": "k3y"}
     assert launcher.island_hmac_secret(_sft()) == {}
     assert launcher.island_hmac_secret(_args(POOL)) == {

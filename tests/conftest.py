@@ -23,11 +23,6 @@ def pytest_configure(config):
         "ray_local: test starts Ray on this machine (gcs_server/raylet/ray.init); "
         "not collected unless --run-ray-local is given",
     )
-    config.addinivalue_line(
-        "markers",
-        "gpu: end-to-end tests that require a CUDA accelerator (run on the "
-        "self-hosted GPU runner; skipped automatically without CUDA)",
-    )
 
 
 import os as _os
@@ -209,3 +204,12 @@ def ppu_plan(tmp_path_factory):
             text = text.replace(placeholder, ip)
         (dst / name).write_text(text)
     return dst / "glm53-flash-ppu.yaml"
+
+
+# No yeto-syncer subprocess outlives the test that started it (tests/syncer_reaper.py).
+from syncer_reaper import (  # noqa: E402,F401
+    pytest_fixture_setup,
+    pytest_runtest_teardown,
+    pytest_sessionfinish,
+    pytest_sessionstart,
+)

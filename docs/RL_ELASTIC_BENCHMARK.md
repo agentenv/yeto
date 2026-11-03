@@ -6,11 +6,10 @@ resizing inside one RL island. It is separate from `scripts/benchmark_rl.py`;
 that harness, its CLI and its result fields are unchanged. The suite reuses
 its prompt pairing and file format through `yeto/rl/elastic_benchmark/legacy.py`.
 
-The planning contract lives in the miles repository under
-`openspec/changes/rl-elastic-resource-benchmark/`. This document covers what is
-implemented today: the study contract, capability gating, evidence, paired work
-and reporting. No GPU runner ships yet; matrix items are executed by runners
-that register against a runtime capability attestation.
+This document covers what is implemented: the study contract, capability
+gating, evidence, paired work and reporting. No GPU runner ships yet; matrix
+items are executed by runners that register against a runtime capability
+attestation.
 
 ## Commands
 
@@ -126,19 +125,19 @@ yeto launch ... --training-mode rl --rl-sync-quorum-theta 0.75 --rl-sync-max-bas
 | Key | Effect on the named island |
 |---|---|
 | `rl_lr_schedule` | another LR schedule (`auto`/`linear`/`constant`); the LR schedule hash is part of the island identity |
-| `rl_max_policy_age` | another policy-age limit (落后上限); checked against the backend like the global flag |
+| `rl_max_policy_age` | another policy-age limit; checked against the backend like the global flag |
 | `identity_test_salt` | TEST ONLY: mixed into `island_contract_sha256`, so the island declares a different identity |
 
-`--rl-sync-max-base-lag` is a syncer parameter and cannot be changed per island
-(10-09 ruling of the main agent for the user). Any other key, an island number
+`--rl-sync-max-base-lag` is a syncer parameter and cannot be changed per island. Any other key, an island number
 out of range, or `--rl-island-override` without `--rl-negative-test-run` stops
 the launch before any cloud resource.
 
 **Warnings.** The launcher prints a NEGATIVE-TEST RUN banner. The run manifest
 has `negative_test: true` and `island_overrides` (island, key, old, new). The
 overridden island gets `YETO_ISLAND_OVERRIDE` (JSON) and writes an
-`rl_island_override` event at the head of its tape; the dashboard shows
-"负例岛：学习率调度 linear→constant" next to it. Every island of the run gets
+`rl_island_override` event at the head of its tape; the dashboard marks it
+as a negative-test island and shows the overridden value (for example
+`linear -> constant` for the LR schedule). Every island of the run gets
 `YETO_NEGATIVE_TEST_RUN=1` and writes `YETO_NEGATIVE_TEST` at the root of its
 checkpoint store.
 
@@ -147,9 +146,7 @@ checkpoint store.
 store is a path on this machine, plus the local run manifests; the island again
 at start, on every cloud). `yeto merge` refuses an adapter directory with the
 marker or with a `run_manifest.json` that has `negative_test: true` in it or up
-to two levels above. (The original plan named `--rl-resume` and `yeto export`;
-they do not exist on main, so the same guard sits on `--rl-checkpoint-store`
-and `yeto merge` -- 10-09 ruling of the main agent for the user.)
+to two levels above.
 
 Without `--rl-island-override` and `--rl-negative-test-run` every island
 command and environment is unchanged (`tests/test_decoupling_golden.py`).
@@ -158,6 +155,5 @@ command and environment is unchanged (`tests/test_decoupling_golden.py`).
 
 Runners for the fixed partition, scheduled switching, auto control, the
 switching timeline and cost aggregation, the amortization sweep and the
-statistical acceptance are pending on the upstream reconfiguration change and
-on real calibration runs. See the tasks file in the miles repository for
-status.
+statistical acceptance are not implemented; they depend on the upstream
+reconfiguration support and on real calibration runs.

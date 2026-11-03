@@ -19,6 +19,7 @@ wandb/
 syncer/target/
 .yeto_loss.pkl
 .yeto_loss.*.pkl
+# Default output directories of the comparison, smoke and benchmark scripts.
 compare-work/
 compare-report/
 smoke-report/
@@ -26,17 +27,19 @@ lm-benchmark-probes/
 # Local run directories (Modal app/call ids, pulled tapes) stay outside the repo.
 /s1-runs/
 .claude/
-/docs/superpowers/
-docs/MILES_RL_ZH.md
-docs/INIT_Decoupled_DiLoCo_RL_Support.md
-docs/DECOUPLED_DILOCO_MILES_RL_CONTINUATION_DESIGN.md
-docs/DECOUPLED_DILOCO_MILES_RL_DESIGN.md
 
-# 本地图页集中目录（不上传）
+# Personal drafts, translations, diagrams and scratch builds stay local:
+# keep them under drafts/ or scratch/ (or name them *.zh.md / *_ZH.md).
+drafts/
+scratch/
 diagrams/
+*_ZH.md
+*.zh.md
+.*-build/
 
 # Specs, run evidence, run logs and reports stay outside the repository.
 /openspec/
+/evidence*/
 **/run-logs/
 
 # Run logs never enter the repository. These rules come last so no earlier

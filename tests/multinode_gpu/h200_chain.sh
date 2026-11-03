@@ -1,0 +1,183 @@
+#!/bin/bash
+# Combined GPU chain: one launch, capped at CAP_USD.
+#   seg 1 sweep: T2R1S1 / T2R2S0 layouts, seeds 17 and 29
+#   seg 2 e1: elastic run, 3 up/down pairs, 14 rounds
+#   seg 2b lp: teacher-forced logprob of the base model on the island's GPUs / TP shapes (logprob_segment.sh)
+#   seg 2c T1R3S0 seeds 17, 29 (sweep config with the most layout risk -> after the must-have data)
+#   seg 3 fnboot -> fnprep -> fna -> fnconv (Flash-Next stage A, 4layer, own FS-attached H200 cluster <P>-f; highest FAILED risk -> chain tail)
+# Path: PREFER_L40S=1 (default) tries the first run on nebius 2x2 L40S eu-north1 ($9.14/h). Provision failure (provision_failed.txt)
+#   -> immediately falls back to nebius 1x8 SWEEP_GPU (h200 default; h100 = gpu-h100-sxm_8gpu-128vcpu-1600gb, 80GB; if h100 also
+#   fails and FALLBACK_H200=1 (default) one more try on H200 after sky-downing the failed cluster; all failed -> exit 8) -> was: 1x8 H200 eu-north1 (gpu-h200-sxm_8gpu-128vcpu-1600gb, $36/h, island allocated GPUs 0-3) for
+#   segs 1-2c. The fn segments always run on a separate FS-attached H200 cluster (sweep cluster downed first).
+# Clusters: <P>-l-l0-eu-north1 (L40S), <P>-h-l0-eu-north1 (H200). Exit: watchdogs killed, both clusters downed, cleanup_run.sh <P> x2.
+# Budget guard: spent = sum(cluster wall x rate); a step starts only if spent + its estimate <= CAP_USD.
+# START_AT=e1: skip seg 1 (sweep already valid in an earlier chain); e1 is the first run and provisions the cluster
+#   (set PREFER_L40S=0 SWEEP_GPU=h100 to stay on the H100 path). Then lp, c17/c29, fn as usual.
+# A failed run whose launcher tore the cluster down (job FAILED -> recovery teardown, even with --keep) no longer stops the chain:
+#   the next step re-provisions (cost of the dead cluster folded into ACC); lp runs after the re-provisioning c17 in that case.
+# usage: h200_chain.sh <prefix>     env: START_AT (sweep|e1|fn), PREFER_L40S (1), CAP_USD (150), YETO_SKY (sky binary), YETO_CLEANUP_RUN (cleanup script), FN_ENABLE (1), FNA_EST_USD (50), SWEEP_GPU (h200|h100), FALLBACK_H200 (1), FN_GPU (h200|h100), FN_CONV (1; 0 when FN_GPU=h100), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA,
+#        FNA_CASE (fn8s | fn8r: fnboot+fna case; fn8r = dense length reward, judge_fn_learning_signal.py), FNA_SKIP (0; 1 = fnboot -> fnprep -> fnconv
+#        only, no fna: H200 full-model conversion), FN_PLAN_ONLY (1 = print the resolved fn plan and exit 0 before any cloud call)
+set -u
+P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-${YETO_HOME:-$HOME}/yeto-gpu-runs}; export HOME=${YETO_HOME:-$HOME}
+SKY=${YETO_SKY:-sky}; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
+CLL=$P-l-l0-eu-north1; CLH=$P-h-l0-eu-north1; RATE_L=9.14
+G=${SWEEP_GPU:-h200}; FG=${FN_GPU:-h200}
+for g in $G $FG; do case $g in h100|h200) ;; *) echo "abort: SWEEP_GPU/FN_GPU must be h100|h200 (got $g)"; exit 64;; esac; done
+FC=${FNA_CASE:-fn8s}; case $FC in fn8s|fn8r) ;; *) echo "abort: FNA_CASE must be fn8s|fn8r (got $FC)"; exit 64;; esac
+FSKIP=${FNA_SKIP:-0}; case $FSKIP in 0|1) ;; *) echo "abort: FNA_SKIP must be 0|1 (got $FSKIP)"; exit 64;; esac
+FCONV=${FN_CONV:-$( [ $FG = h100 ] && echo 0 || echo 1 )}
+[ $FSKIP = 1 ] && [ $FCONV != 1 ] && { echo "abort: FNA_SKIP=1 leaves only fnconv, but fnconv is disabled (FN_CONV=$FCONV, FN_GPU=$FG)"; exit 64; }
+FNJ="--num-gpus 8 --rollouts 6 --rank 16 --expert-rank 8"   # FN-A-RESULT section 2: judge defaults (rank 32) mis-judged try27 trainable
+[ "${FN_PLAN_ONLY:-0}" = 1 ] && { echo "fnplan case=$FC skip_fna=$FSKIP fnconv=$FCONV fn_gpu=$FG segs=fnboot,fnprep$( [ $FSKIP = 1 ] || echo ,fna)$( [ $FCONV = 1 ] && echo ,fnconv) judge=\"$FNJ\"$( [ $FC = fn8r ] && echo ' signal=judge_fn_learning_signal.py')"; exit 0; }
+rate() { [ $1 = h100 ] && echo 30.8 || echo 36.0; }               # nebius eu-north1 8-GPU on-demand $/h [sky catalog]
+sku() { echo gpu-$1-sxm_8gpu-128vcpu-1600gb; }
+hest() { [ $1 = h100 ] && echo 7 || echo 8; }                       # $ per warm run (H200 8; scaled by 30.8/36 for h100)
+RATE_H=$(rate $G)
+log() { echo "[chain $(date -u +%FT%TZ)] $*" | tee -a $LOG; }
+UP_L=0; UP_H=0; ACC=0   # cluster-up epoch (0 = down) and accumulated $ of downed clusters
+spent() { python3 -c "import time;n=time.time();print(round($ACC+(($RATE_L*(n-$UP_L)) if $UP_L else 0)/3600+(($RATE_H*(n-$UP_H)) if $UP_H else 0)/3600,2))"; }
+down() {  # down <cluster> <L|H>
+  timeout 900 $SKY down -y $1 >> $LOG 2>&1; log "sky down $1 rc=$?"
+  if [ $2 = L ] && [ $UP_L != 0 ]; then ACC=$(python3 -c "import time;print($ACC+$RATE_L*(time.time()-$UP_L)/3600)"); UP_L=0; fi
+  if [ $2 = H ] && [ $UP_H != 0 ]; then ACC=$(python3 -c "import time;print($ACC+$RATE_H*(time.time()-$UP_H)/3600)"); UP_H=0; fi
+}
+finish() {
+  for f in $B/$P-*/watchdog.pid; do [ -f "$f" ] && kill $(cat $f) 2>/dev/null; done
+  down $CLL L; down $CLH H; down $P-f-l0-eu-north1 H
+  RUNS_BASE=$B ${YETO_CLEANUP_RUN:-cleanup_run.sh} $P > $B/$P.cleanup1.out 2>&1; log "cleanup1 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup1.out | tail -1)"
+  RUNS_BASE=$B ${YETO_CLEANUP_RUN:-cleanup_run.sh} $P > $B/$P.cleanup2.out 2>&1; log "cleanup2 rc=$? $(grep -o 'RESULT:.*' $B/$P.cleanup2.out | tail -1)"
+  timeout 120 $SKY status 2>/dev/null | grep -E "$CLL|$CLH|$P-f-l0" && log "WARNING: cluster still listed" || log "sky status: $CLL / $CLH gone"
+  log "estimated spend \$$(spent) (cap \$$CAP)"
+}
+trap finish EXIT
+df_free=$(df -BG --output=avail / | tail -1 | tr -dc 0-9); [ "$df_free" -ge 50 ] || { log "abort: root disk ${df_free}G < 50G"; exit 9; }
+T=$(ps -u "$(id -un)" -L -o pid= | wc -l); [ "$T" -lt ${THREAD_MAX:-2850} ] || { log "abort: $T threads"; exit 9; }
+log "start $P code $(git -C $REPO rev-parse --short HEAD) prefer_l40s=${PREFER_L40S:-1} cap=\$$CAP sweep_gpu=$G ($(sku $G) \$$RATE_H/h) fn_gpu=$FG ($(sku $FG) \$$(rate $FG)/h)"
+H=0; CL=$CLL; CP=$P-l; export NODES=2; [ "${PREFER_L40S:-1}" = 1 ] || { H=1; CL=$CLH; CP=$P-h; export NODES=1; }
+N=0
+post() {  # per-run data capture (all local; cluster untouched)
+  local R=$1
+  python3 $D/multinode_cost.py sweep $R > $R/sweep.json 2>&1
+  grep -E "Pull|pull|Download|download|Loading|loaded|ready|Ready|Provision|provision|Launching|Launched|sglang|engine.*start" $R/launch.ts.log > $R/coldstart.txt 2>/dev/null
+  grep -hiE "tok/s|tokens/s|throughput|perf/" $R/pulled/run.log > $R/perf.txt 2>/dev/null
+  (cd $REPO && PYTHONPATH=. timeout 300 /tmp/yeto-venv/bin/python -m yeto.cli dashboard export --tapes $R/pulled -o $R/dashboard.html > $R/dashboard.out 2>&1)
+}
+step() {  # step <name> <case> <est_usd> [env...]
+  local name=$1 c=$2 est=$3; shift 3
+  local s; s=$(spent); python3 -c "import sys;sys.exit(0 if $s+$est<=$CAP else 1)" || { log "budget guard: spent \$$s + est \$$est > \$$CAP -> skip $name and the rest"; exit 4; }
+  if [ $N -gt 0 ]; then
+    if ! timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP '; then
+      log "cluster $CL not UP before $name (previous run's launcher tore it down) -> fold its cost, re-provision with $name"
+      if [ $H = 1 ]; then down $CL H; else down $CL L; fi; N=0
+    fi
+  fi
+  if [ $N -gt 0 ]; then
+    $D/multinode_reset.sh $CL $B/$P-$name.reset.txt || { log "reset NOT CLEAN before $name -> stop"; exit 3; }
+  fi
+  local t0; t0=$(date +%s)
+  env "$@" SWEEP_H200=$H SWEEP_GPU=$G CLUSTER_PREFIX=$CP RUN_ROOT=$B $D/multinode_run.sh $c $P-$name ${HARD:-3000} ${WD:-3600} > $B/$P-$name.out 2>&1
+  kill $(cat $B/$P-$name/watchdog.pid 2>/dev/null) 2>/dev/null   # would sky-down the shared cluster later
+  if [ -f $B/$P-$name/provision_failed.txt ]; then log "$name: provision failed on $CL"; return 7; fi
+  if [ $N = 0 ]; then
+    if [ $H = 1 ]; then UP_H=$t0; else UP_L=$t0; fi
+    timeout 120 $SKY status -v $CL > $B/$P-sky-status-$CL.txt 2>&1   # SKU/instance type evidence
+  fi
+  N=$((N+1)); post $B/$P-$name
+  log "$name $(cat $B/$P-$name/rc.txt 2>/dev/null) $(python3 -c "import json;d=json.load(open('$B/$P-$name/sweep.json'))[0];print('valid',d['valid'],'median_round_s',d['median_round_s'])" 2>/dev/null) spent~\$$(spent)"
+}
+EST=$( [ $H = 1 ] && hest $G || echo 3 )   # per warm run (8 min); first run adds cold start
+sw() { step $1 sweep_fixed $2 SWEEP_CFG=$3 SEED=$4; }
+SA=${START_AT:-sweep}; case $SA in sweep|e1|fn) ;; *) log "abort: START_AT must be sweep|e1|fn (got $SA)"; exit 64;; esac
+if [ $SA = fn ]; then log "START_AT=fn: segs 1-2c skipped (sweep data already valid from an earlier chain); straight to the fn cluster"
+elif [ $SA = sweep ]; then
+sw a17 $(( EST * 3 )) T2R1S1 17; rc=$?
+if [ $rc = 7 ] && [ $H = 0 ]; then
+  log "L40S provision failed -> fallback to $G $(sku $G) \$$RATE_H/h ($CLH)"; H=1; CL=$CLH; CP=$P-h; EST=$(hest $G); export NODES=1
+  sw a17h $(( EST * 3 )) T2R1S1 17; rc=$?
+fi
+if [ $rc = 7 ] && [ $G = h100 ] && [ "${FALLBACK_H200:-1}" = 1 ]; then
+  log "h100 provision failed -> sky down $CLH, fallback to h200 $(sku h200) \$36.0/h"; down $CLH H
+  G=h200; RATE_H=$(rate h200); H=1; CL=$CLH; CP=$P-h; EST=$(hest h200); export NODES=1
+  sw a17h2 $(( EST * 3 )) T2R1S1 17; rc=$?
+fi
+[ $rc = 7 ] && { log "$G provision failed too -> stop (capacity; report to main agent)"; exit 8; }
+log "sweep SKU: $( [ $H = 1 ] && echo "$(sku $G) \$$RATE_H/h" || echo "L40S \$$RATE_L/h")"
+sw b17 $EST T2R2S0 17; sw a29 $EST T2R1S1 29; sw b29 $EST T2R2S0 29
+step e1 sweep_elastic $(( EST * 2 )) KEEP_M3=1
+else
+log "START_AT=e1: sweep skipped; e1 provisions $CL"
+step e1 sweep_elastic $(( EST * 4 )) KEEP_M3=1; rc=$?
+[ $rc = 7 ] && { log "e1 provision failed on $CL -> stop (capacity)"; exit 8; }
+fi
+if [ $SA != fn ]; then
+python3 $D/multinode_cost.py $B/$P-e1 --json $B/$P-e1/cost.json > $B/$P-e1/cost.tsv 2>&1; log "e1 cost rows $(($(wc -l < $B/$P-e1/cost.tsv)-1)) inwatch=$(grep -c submitted $B/$P-e1/pulled/inwatch.log 2>/dev/null)"
+# seg 2b: lp on the same cluster, island stopped (if e1's launcher tore the cluster down, lp runs after c17 re-provisions it)
+lp() {
+if python3 -c "import sys;sys.exit(0 if $(spent)+$EST<=$CAP else 1)" && $D/multinode_reset.sh $CL $B/$P-lp.reset.txt; then
+  timeout 2400 $D/logprob_segment.sh $CL $B/$P-lp $( [ $H = 1 ] && echo 4 || echo 2 ) > $B/$P-lp.out 2>&1; log "lp $(tail -1 $B/$P-lp.out | cut -c1-300)"
+else log "lp skipped (budget or reset)"; fi
+}
+if timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP '; then lp; sw c17 $EST T1R3S0 17
+else log "cluster $CL not UP after e1 -> c17 re-provisions, lp after it"; sw c17 $(( EST * 3 )) T1R3S0 17; lp; fi
+sw c29 $EST T1R3S0 29
+fi
+# seg 3 (chain tail): Flash-Next stage A on its OWN H200 cluster <P>-f (the model store FS is attached only at provision time, so the
+# sweep cluster -- launched without --model-store -- cannot be reused). The sweep cluster is downed first.
+#   fnboot: fnrun fn8s launch (--keep) with BOOT_ONLY=1 (--rl-boot-only) to provision the FS-attached node: the learner runs every
+#           torch_dist-free check (provider view, Miles argv build+parse, ref-load probe), writes ~/yeto-rl/boot_only.json +
+#           "FN_BOOT_ONLY_OK ref_load_present=<bool>" and exits 0 -> job SUCCEEDED -> --keep keeps the cluster (a FAILED job is
+#           abandoned and torn down regardless of --keep: seen as "fn cluster not UP after fnboot").  fnboot NEVER trains, even if
+#           torch_dist already exists; training happens only in fna.  fnboot OK = marker seen AND cluster UP, else stop with reason.
+#   fnprep: flash_next_prep.sh (populate 4layer snapshot + convert torch_dist; df gates; never deletes) -> fnprep.json
+#   fna   : fnrun fn8s again (warm), STEPS=6; judge_qwen3_8_next_lora_log.py on run.log
+#   fnconv: flash_next_convert.sh (full model -> torch_dist, TP2 PP4 nproc 8; df/marker/no-retry gates) -> fnconv.json
+[ "${FN_ENABLE:-1}" = 1 ] || { log "fn segments disabled (FN_ENABLE=0)"; exit 0; }
+if [ $H = 1 ]; then down $CLH H; else down $CLL L; fi
+CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; export NODES=1; RATE_H=$(rate $FG); export FN_GPU=$FG   # sweep cluster already folded into ACC
+log "fn SKU: $(sku $FG) \$$RATE_H/h"
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNA_EST_USD:-50}<=$CAP else 1)" || { log "budget guard: fn est \$${FNA_EST_USD:-50} + \$$s > \$$CAP -> fn not executed"; exit 4; }
+(cd $REPO && /tmp/yeto-venv/bin/python $D/fp_fn.py $REPO $FC --seed 17 --total-steps 6 > $B/$P-fp_$FC.json 2>$B/$P-fp_$FC.err); log "fp_fn $FC steps6: $(tail -1 $B/$P-fp_$FC.json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fp"))' 2>/dev/null)"
+fnrun() {  # fnrun <name> <hard> [boot_only 0|1]
+  local t0; t0=$(date +%s)
+  env STEPS=6 BOOT_ONLY=${3:-0} CLUSTER_PREFIX=$CP RUN_ROOT=$B $D/multinode_run.sh $FC $P-$1 $2 $(( $2 + 600 )) > $B/$P-$1.out 2>&1
+  kill $(cat $B/$P-$1/watchdog.pid 2>/dev/null) 2>/dev/null
+  [ $UP_H = 0 ] && [ ! -f $B/$P-$1/provision_failed.txt ] && UP_H=$t0
+  post $B/$P-$1
+  grep -iE "lora|rank|expected_lora_keys|trainable" $B/$P-$1/pulled/run.log > $B/$P-$1/lora.txt 2>/dev/null
+  grep -iE "ref.load|torch_dist|load.*checkpoint|loaded" $B/$P-$1/pulled/run.log > $B/$P-$1/torchdist-load.txt 2>/dev/null
+  (cd $REPO && timeout 300 python3 scripts/judge_qwen3_8_next_lora_log.py $B/$P-$1/pulled/run.log $FNJ > $B/$P-$1/judge-fn.out 2>&1; echo "judge rc=$?" >> $B/$P-$1/judge-fn.out)
+  [ $FC = fn8r ] && [ "${3:-0}" = 0 ] && (cd $REPO && timeout 120 python3 scripts/judge_fn_learning_signal.py $B/$P-$1/pulled/rl-island-0.jsonl --json $B/$P-$1/judge-signal.json > $B/$P-$1/judge-signal.out 2>&1; echo "signal judge rc=$?" >> $B/$P-$1/judge-signal.out)
+  timeout 120 ssh -o StrictHostKeyChecking=no $CL 'cat ~/yeto-rl/boot_only.json 2>/dev/null' > $B/$P-$1/boot_only.json 2>/dev/null
+  timeout 120 ssh -o StrictHostKeyChecking=no $CL 'cat ~/yeto-rl/terminal.json 2>/dev/null; echo; df -h /mnt/yeto-models | tail -1; nvidia-smi --query-gpu=index,memory.used --format=csv' > $B/$P-$1/terminal.txt 2>&1
+  log "$1 $(cat $B/$P-$1/rc.txt 2>/dev/null) rounds=$(grep -c rl_round_trained $B/$P-$1/pulled/rl-island-0.jsonl 2>/dev/null) spent~\$$(spent)"
+}
+fnrun fnboot ${HARD_FNBOOT:-3000} 1
+[ -f $B/$P-fnboot/provision_failed.txt ] && { log "fn $FG provision failed -> fn not executed (capacity)"; exit 8; }
+fb=$(grep -hoE "FN_BOOT_ONLY_OK ref_load_present=(true|false)" $B/$P-fnboot/pulled/run.log $B/$P-fnboot/launch.log 2>/dev/null | tail -1)
+[ -z "$fb" ] && grep -q '"marker": "FN_BOOT_ONLY_OK"' $B/$P-fnboot/boot_only.json 2>/dev/null && fb="FN_BOOT_ONLY_OK ref_load_present=$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["ref_load_present"]).lower())' $B/$P-fnboot/boot_only.json 2>/dev/null)"
+fbup=0; timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' && fbup=1
+log "fnboot boot-only: marker='${fb:-none}' cluster_up=$fbup"
+[ -n "$fb" ] || { log "fnboot: no FN_BOOT_ONLY_OK marker (learner failed before the boot-only exit; see $B/$P-fnboot/pulled/run.log) -> stop (EXIT trap downs the fn cluster)"; exit 2; }
+[ $fbup = 1 ] || { log "fn cluster not UP after fnboot (marker seen: launcher/watchdog tore it down?) -> stop"; exit 2; }
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+30<=$CAP else 1)" || { log "budget guard before fnprep (\$$s) -> fnprep/fna not executed"; exit 4; }
+$D/multinode_reset.sh $CL $B/$P-fnprep.reset.txt || { log "reset NOT CLEAN before fnprep -> stop"; exit 3; }
+mkdir -p $B/$P-fnprep; git -C $REPO archive HEAD | (rm -rf $B/$P-fnprep/yeto && mkdir -p $B/$P-fnprep/yeto && tar x -C $B/$P-fnprep/yeto)
+$D/flash_next_prep.sh $CL $B/$P-fnprep $B/$P-fnprep/yeto > $B/$P-fnprep.out 2>&1; log "fnprep $(tail -1 $B/$P-fnprep.out) $(cat $B/$P-fnprep/fnprep.json 2>/dev/null | tr -d '\n ' | cut -c1-300)"
+grep -q FNPREP_OK $B/$P-fnprep.out || { log "fnprep failed -> fnA not executed"; exit 6; }
+if [ $FSKIP = 1 ]; then log "fna skipped (FNA_SKIP=1: fnboot -> fnprep -> fnconv only)"; else
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+25<=$CAP else 1)" || { log "budget guard before fna (\$$s) -> fnA not executed"; exit 4; }
+$D/multinode_reset.sh $CL $B/$P-fna.reset.txt || { log "reset NOT CLEAN before fna -> stop"; exit 3; }
+fnrun fna ${HARD_FNA:-3600}
+[ $FC = fn8r ] && log "fna signal $(grep -h verdict $B/$P-fna/judge-signal.out 2>/dev/null | tail -1)"
+fi
+# seg 3d fnconv: full HF -> torch_dist on the same FS cluster, after fnA (chain tail; never re-run on failure:
+# a partial output dir makes flash_next_convert.sh FAIL instead of retrying). Est $22-50 [speculative; conversion time never measured] -> guard
+# uses FNCONV_EST_USD (50) inside the same CAP. FN_CONV=0 skips. fnA failing does not block it (independent of the 4layer run).
+[ $FCONV = 1 ] || { log "fnconv disabled (FN_CONV=0; default 0 on FN_GPU=h100: TP2 PP4 ~45GB/rank + HF-load peak unverified on 80GB)"; exit 0; }
+timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "fn cluster not UP before fnconv -> stop"; exit 2; }
+s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNCONV_EST_USD:-50}<=$CAP else 1)" || { log "budget guard before fnconv (\$$s + \$${FNCONV_EST_USD:-50} > \$$CAP) -> fnconv not executed"; exit 4; }
+$D/multinode_reset.sh $CL $B/$P-fnconv.reset.txt || { log "reset NOT CLEAN before fnconv -> stop"; exit 3; }
+mkdir -p $B/$P-fnconv; tc=$(date +%s)
+$D/flash_next_convert.sh $CL $B/$P-fnconv $B/$P-fnprep/yeto > $B/$P-fnconv.out 2>&1
+log "fnconv $(tail -1 $B/$P-fnconv.out) wall=$(( $(date +%s) - tc ))s spent~\$$(spent) $(tr -d '\n ' < $B/$P-fnconv/fnconv.json 2>/dev/null | cut -c1-400)"

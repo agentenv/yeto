@@ -1,5 +1,5 @@
 """The ``SamplerEngine`` port: one interface for every inference engine a
-sampler island drives (rl-hetero-sampler-engines D1, S25 N2.3).
+sampler island drives (rl-hetero-sampler-engines).
 
 The sampler island's loop, buffer writer, reward call and release follower are
 engine-neutral. Everything that depends on the engine (process start, HTTP API,
@@ -23,11 +23,11 @@ The port has four kinds of operation:
 
 Who uses it: :class:`yeto.rl.engine.sampler_checks.PortReleaseLoader` (the
 ``PolicyFollower`` load hook) and :mod:`yeto.rl.engine.engine_sampler`
-(the island's round). A records proxy (S25 N10.5) can wrap a ``SamplerEngine``
+(the island's round). A records proxy can wrap a ``SamplerEngine``
 and forward every call; the port has no hidden state the proxy must copy.
 
-Sampling parameters are the same for every source of a run (A-INF 5, guard
-D11): :class:`SamplingParams` is built once from the run config, and
+Sampling parameters are the same for every source of a run (A-INF 5, a
+guard): :class:`SamplingParams` is built once from the run config, and
 :meth:`SamplingParams.check` refuses repetition penalties, which change the
 behavior distribution away from the model's own distribution.
 """
@@ -62,7 +62,7 @@ class SamplerEngineError(RuntimeError):
 
 
 class SamplingConfigError(ValueError):
-    """The sampling parameters are not allowed for a rollout (guard D11)."""
+    """The sampling parameters are not allowed for a rollout (guard)."""
 
 
 @dataclass(frozen=True)
@@ -251,7 +251,7 @@ def completion_version(completion: Completion, served: int, *, live: bool) -> in
 
 @runtime_checkable
 class TokenSamplerEngine(SamplerEngine, Protocol):
-    """Optional capability: generate from prompt token ids (S25 N10.5).
+    """Optional capability: generate from prompt token ids.
 
     The records proxy renders the chat template once and sends the ids, so the
     engine never re-tokenizes the prompt and the recorded prompt tokens are the
@@ -271,7 +271,7 @@ UNKNOWN = "unknown"
 
 @dataclass(frozen=True)
 class Provenance:
-    """The source of a buffer entry (rl-hetero-sampler-engines D3, S25 N2.4).
+    """The source of a buffer entry (rl-hetero-sampler-engines).
 
     Data only: it never enters ``algorithm_sha256`` or the session contract
     hash. The behavior policy version stays in the entry's ``behavior_version``.
@@ -287,7 +287,7 @@ class Provenance:
     sampler_id: str = UNKNOWN
     sampling_digest: str = UNKNOWN
 
-    # The per-source metrics group by these fields (D4, A-INF 4.1).
+    # The per-source metrics group by these fields (A-INF 4.1).
     KEY_FIELDS = ("device_family", "card_model", "engine", "engine_version", "precision",
                   "topology")
 

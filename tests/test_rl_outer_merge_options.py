@@ -1,4 +1,4 @@
-"""S27 P1: the RL outer-merge settings the presets fixed are explicit options. No Ray.
+"""The RL outer-merge settings the presets fixed are explicit options. No Ray.
 
 Each ``--rl-sync-*`` option left at its default keeps the preset's value, so
 the syncer and island commands stay byte-for-byte the previous ones; a set

@@ -1,4 +1,4 @@
-"""Two-component example reward for GDPO (rl-algo-seq-and-adv 5.4, G1).
+"""Two-component example reward for GDPO.
 
 ``--custom-rm-path yeto.rl.algos.gdpo_reward.reward_func`` with
 ``advantage.gdpo = {"components": [{"name": "correctness", "weight": 1.0},
@@ -9,8 +9,8 @@
 * ``format``: 1.0 when the final answer (after ``</think>``) contains a
   ``\\boxed{`` answer at all, else 0.0.
 
-The components go to ``sample.metadata["yeto_reward_components"]`` (design
-D6); the scalar return value (correctness) is only used for metrics/logs.
+The components go to ``sample.metadata["yeto_reward_components"]``;
+the scalar return value (correctness) is only used for metrics/logs.
 Both entry points also set ``sample.metadata["success"]`` = correctness (the
 format component never counts as success).
 """
@@ -41,7 +41,7 @@ def _apply(sample, result) -> float:
 
 
 async def correctness_reward(args, sample, **kwargs) -> float:
-    """Binary {0,1} correctness only (the ``correctness`` component), for MaxRL/MAPO/GSPO/rpp G1."""
+    """Binary {0,1} correctness only (the ``correctness`` component), for MaxRL/MAPO/GSPO/rpp."""
 
     return _apply(sample, gdpo_correctness_result(components(sample.response or "", sample.label)))
 

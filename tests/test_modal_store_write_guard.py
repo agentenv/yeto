@@ -1,6 +1,6 @@
 """ModalVolumeStore: a reload never runs while a writer of the same Volume holds
-a ``hold_writer()`` guard, in this process or another one of the container (S26
-E6: rollout actors' reloads dropped a half-written tier 2 release)."""
+a ``hold_writer()`` guard, in this process or another one of the container
+(rollout actors' reloads dropped a half-written tier 2 release)."""
 
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def test_a_writer_in_another_process_blocks_the_reload(tmp_path):
     assert volume.reloads == 1
 
 
-# S27 G-CC E2: the trainer driver's release reload failed with "there are open files
+# The trainer driver's release reload failed with "there are open files
 # preventing the operation" while the buffer reader process read sample payloads.
 
 

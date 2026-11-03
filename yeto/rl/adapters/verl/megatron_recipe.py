@@ -65,20 +65,20 @@ class NemotronMegatronPlan:
 def validate(p: NemotronMegatronPlan) -> None:
     if p.architecture in VL_ARCHITECTURES:
         raise NemotronPlanError(
-            "verl 不冻结视觉部分（freeze_vision_tower 无代码读取）；VL 模型需先接入冻结规则")
+            "verl does not freeze the vision tower (no code reads freeze_vision_tower); a VL model needs freezing rules first")
     world = p.n_gpus * p.nnodes
     model_parallel = p.tp * p.pp * p.cp
     if world % model_parallel:
-        raise NemotronPlanError(f"TP*PP*CP={model_parallel} 不整除卡数 {world}")
+        raise NemotronPlanError(f"TP*PP*CP={model_parallel} does not divide the card count {world}")
     if p.num_experts % p.ep:
-        raise NemotronPlanError(f"EP={p.ep} 不整除专家数 {p.num_experts}")
+        raise NemotronPlanError(f"EP={p.ep} does not divide the expert count {p.num_experts}")
     # Megatron: EP x ETP must divide the expert-side world (TP*CP*DP folded per PP stage).
     if (world // p.pp) % (p.ep * p.etp):
-        raise NemotronPlanError(f"EP*ETP={p.ep * p.etp} 不整除每个流水级的卡数 {world // p.pp}")
+        raise NemotronPlanError(f"EP*ETP={p.ep * p.etp} does not divide the cards per pipeline stage {world // p.pp}")
     if p.rollout_tp > p.n_gpus or p.n_gpus % p.rollout_tp:
-        raise NemotronPlanError(f"rollout TP={p.rollout_tp} 必须整除每机卡数 {p.n_gpus}")
+        raise NemotronPlanError(f"rollout TP={p.rollout_tp} must divide the cards per node {p.n_gpus}")
     if p.groups_per_round <= 0 or p.samples_per_group <= 0 or p.total_steps <= 0:
-        raise NemotronPlanError("groups_per_round / samples_per_group / total_steps 必须为正")
+        raise NemotronPlanError("groups_per_round / samples_per_group / total_steps must be positive")
 
 
 def build_overrides(p: NemotronMegatronPlan) -> list[str]:
@@ -176,7 +176,7 @@ def build_overrides(p: NemotronMegatronPlan) -> list[str]:
 def image_commands(max_jobs: int = 16) -> list[str]:
     """Extra image layers on top of the verl uv venv: the megatron extra plus the Mamba
     training kernels. One definition with the yeto island's Megatron image
-    (``image.megatron_commands``, S27 G-DC), so the bare-verl smoke and the island
+    (``image.megatron_commands``), so the bare-verl smoke and the island
     build the same layers."""
     from .image import megatron_commands
 

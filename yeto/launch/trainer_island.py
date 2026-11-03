@@ -1,5 +1,5 @@
 """Cloud binding of the trainer scheduler: the trainer island on Modal
-(rl-trainer-start-stop L5.3c) or on a sky cloud.
+(rl-trainer-start-stop) or on a sky cloud.
 
 With ``--rl-trainer-scheduler s1`` the launcher holds back the island named by
 ``--rl-trainer-island``: the fleet controller does not start it. The binding
@@ -94,7 +94,7 @@ class CloudTrainerBinding:
     a dead head started. ``data_ended`` tells the samplers finished.
     ``after_restore()`` runs after the journal is read back and an orphan released
     (e.g. reset the head's buffer to the watermark of the newest cut).
-    ``wrap_scheduler(scheduler, record)`` decorates the S1 scheduler (a convertible
+    ``wrap_scheduler(scheduler, record)`` decorates the backlog scheduler (a convertible
     pool holds a start no node may take); ``on_finished()`` runs once the loop
     finished (a convertible pool ends its nodes)."""
 
@@ -550,7 +550,7 @@ def object_store_binding(args: Any, files: ObjectStore, islands: Any, *,
                          journal_dir: Path) -> CloudTrainerBinding:
     """The binding over a store the head reads by object key (sky, SSH islands).
     A sharded buffer (OSS) also counts the shard records the trainer has not
-    merged yet: a stopped trainer merges nothing (N3.6)."""
+    merged yet: a stopped trainer merges nothing."""
     buffer = FileSampleBuffer(files, batch_size=int(args.rollout_batch_size))  # by object key
     unmerged = UnmergedShards(files) if needs_shards(files) else None
     return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer, unmerged=unmerged)

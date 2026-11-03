@@ -1,12 +1,12 @@
 """Convertible nodes: rollout by default, trainer when the scheduler says so.
 
-rl-trainer-start-stop design D7 (Q5), tasks L7.1–L7.3. Neutral core: node
-classes, the conversion port, the P0-S cut rule for in-flight trajectories, the
+Neutral core: node
+classes, the conversion port, the cut rule for in-flight trajectories, the
 rollout capacity of the node pool, and the scheduler that converts nodes.
 No backend names here; the Miles/SGLang port is
 :mod:`yeto.rl.adapters.miles.convertible`.
 
-Node classes (D7):
+Node classes:
 
 * ``trainer``: on-demand, fast interconnect, trainer precision;
 * ``rollout``: may be spot, another region, lower precision;
@@ -16,8 +16,8 @@ Node classes (D7):
 Conversion rollout -> trainer (in this order):
 
 1. the rollout engine stops taking requests; the in-flight trajectories are cut
-   by the P0-S rule (:func:`apply_cut_rule`): finished segments go back to the
-   buffer, unfinished trajectories are dropped and regenerated (P0-S-Q1 ③);
+   by the cut rule (:func:`apply_cut_rule`): finished segments go back to the
+   buffer, unfinished trajectories are dropped and regenerated;
 2. the rollout engine releases its GPU memory;
 3. the trainer onloads on the same GPUs.
 
@@ -46,7 +46,7 @@ CONVERSION_DECISION_KIND = "convertible_scheduler_decision"
 
 
 # ---------------------------------------------------------------------------
-# L7.1 Node classes
+# Node classes
 # ---------------------------------------------------------------------------
 class NodeClass(str, enum.Enum):
     ROLLOUT = "rollout"
@@ -124,7 +124,7 @@ def parse_node_spec(text: str) -> NodeSpec:
 
 
 # ---------------------------------------------------------------------------
-# L7.2 P0-S cut rule for in-flight trajectories
+# Cut rule for in-flight trajectories
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InflightTrajectory:
@@ -148,8 +148,8 @@ class SampleSink(Protocol):
 
 
 def apply_cut_rule(inflight: Iterable[InflightTrajectory], buffer: SampleSink) -> CutOutcome:
-    """P0-S cut: finished segments go to the buffer; the unfinished part is dropped
-    and the sampler regenerates the trajectory (P0-S-Q1 ③). A trajectory whose
+    """Cut rule: finished segments go to the buffer; the unfinished part is dropped
+    and the sampler regenerates the trajectory. A trajectory whose
     segments all finished is not dropped."""
     returned: list[str] = []
     dropped: list[str] = []
@@ -163,7 +163,7 @@ def apply_cut_rule(inflight: Iterable[InflightTrajectory], buffer: SampleSink) -
 
 
 # ---------------------------------------------------------------------------
-# L7.2 Conversion port and node
+# Conversion port and node
 # ---------------------------------------------------------------------------
 class ConversionPort(Protocol):
     """Mechanism on one convertible node. The node calls the verbs in the order of
@@ -217,7 +217,7 @@ class ConversionReceipt:
 
 
 class ConvertibleNode:
-    """Role state of one convertible node, plus its idle time (L7.3): the time in
+    """Role state of one convertible node, plus its idle time: the time in
     ``TRAINER`` role while it does not train. Rollout time is never idle."""
 
     def __init__(self, spec: NodeSpec, port: ConversionPort, *,
@@ -236,7 +236,7 @@ class ConvertibleNode:
     def name(self) -> str:
         return self.spec.name
 
-    # ------------------------------------------------------------ idle (L7.3)
+    # ------------------------------------------------------------ idle
     def set_training(self, active: bool) -> None:
         """The trainer on this node trains (True) or waits for samples (False)."""
         self._training = active
@@ -314,7 +314,7 @@ class ConvertibleNode:
 
 
 # ---------------------------------------------------------------------------
-# L7.3 Rollout capacity of the pool
+# Rollout capacity of the pool
 # ---------------------------------------------------------------------------
 class NodePool:
     """All nodes of the run. Fixed rollout and trainer nodes have a fixed role;
@@ -513,7 +513,7 @@ def select_group(candidates: Iterable[NodeProfile], needs: TrainerNeeds, *, grou
 
 
 # ---------------------------------------------------------------------------
-# L7.3 Scheduler over convertible nodes
+# Scheduler over convertible nodes
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ConversionDecision:
@@ -526,10 +526,10 @@ class ConversionDecision:
 
 @dataclass
 class ConversionScheduler:
-    """Turns the start/stop decisions of a :class:`TrainerScheduler` (e.g. S1) into
+    """Turns the start/stop decisions of a :class:`TrainerScheduler` (e.g. the ski-rental scheduler) into
     conversions of ``group_size`` convertible nodes (a multi-GPU trainer needs a
     group). Start converts a group to trainer; Stop converts it back to rollout.
-    The ski-rental stop of S1 counts only the time the converted group waits in
+    The ski-rental stop counts only the time the converted group waits in
     ``TRAINER`` role with an empty backlog, i.e. the time it does neither.
 
     A start that would convert the last rollout-capable node holds instead. Each

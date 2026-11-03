@@ -92,7 +92,7 @@ def test_mapping_table_is_subset_of_objective_list():
         }
 
 
-def test_design_d3_flags_are_all_mapped():
+def test_design_algorithm_flags_are_all_mapped():
     d3 = {
         "--advantage-estimator", "--eps-clip", "--eps-clip-high", "--eps-clip-c",
         "--calculate-per-token-loss", "--disable-grpo-std-normalization",
@@ -104,7 +104,7 @@ def test_design_d3_flags_are_all_mapped():
         "--custom-reward-post-process-path", "--loss-type", "--custom-loss-function-path",
         "--dynamic-sampling-filter-path", "--over-sampling-batch-size",
     }
-    # The reviewed P0 rows are exactly D3; the table is D3 plus the rows that
+    # The reviewed built-in rows are exactly the reviewed set; the table is that set plus the rows that
     # registered extension modules declared (register_flag) -- nothing else.
     assert af.BUILTIN_FLAGS == d3
     assert af.mapped_flags() == d3 | af.EXTENSION_FLAGS
@@ -152,7 +152,7 @@ def test_conflict_names_flag_and_both_values():
 
 @pytest.mark.parametrize("flag", ["--gamma", "--value-clip", "--lambd", "--use-routing-replay",
                                   "--rollout-temperature", "--partial-rollout",
-                                  # P0-1.7b.3: TB2.1-fork SAO switches; ports uses the spec
+                                  # TB2.1-fork SAO switches; ports uses the spec
                                   "--sao-online-recipe", "--sao-compaction"])
 def test_unmapped_objective_flag_rejected(flag):
     if flag in af.mapped_flags():

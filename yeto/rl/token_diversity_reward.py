@@ -1,7 +1,7 @@
 """Dense token-diversity reward for rehearsals on models that cannot solve the task.
 
-A test reward, not a product reward (S25 T-G1C). The word-diversity reward
-(:mod:`yeto.rl.word_diversity_reward`) was gamed in T-G1B: after two steps the
+A test reward, not a product reward. The word-diversity reward
+(:mod:`yeto.rl.word_diversity_reward`) was gamed in a mini rehearsal run: after two steps the
 cut model wrote one 512-token "word" without spaces, every sample scored 1.0,
 the group variance was 0 and round 2 had no gradient. This reward counts token
 ids, so one repeated token scores low however it is spelled:

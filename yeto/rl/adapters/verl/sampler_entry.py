@@ -1,4 +1,4 @@
-"""The sampler island of a verl launch (S26 E9.4).
+"""The sampler island of a verl launch.
 
 ``yeto launch --rl-backend verl --rl-island-sample-role 0:sampler,1:trainer``
 starts every island with the verl island entry. A sampler island runs no verl
@@ -6,7 +6,7 @@ trainer: :func:`run_sampler_island` builds the engine sampler spec
 (:mod:`yeto.rl.engine.engine_sampler_entry`) from the island flags and runs the
 engine sampler in-process, on the vLLM of the verl image (adapter
 ``vllm-server``). It writes the same buffer and follows the same releases as
-the S25 C2 sampler (which ran SGLang in the Miles image, from an eval script).
+the earlier sampler (which ran SGLang in the Miles image, from an eval script).
 
 * sampler id = ``--rl-sampler-node`` (the launcher's node name in a pair, the
   buffer shard with several samplers: ``--rl-buffer-shards``), else
@@ -68,7 +68,7 @@ def prompt_rows(rows: Iterable[Mapping[str, Any]], render: Callable[[list], str]
     for row in rows:
         messages = [{"role": m["role"], "content": m["content"]} for m in row["messages"]]
         record = {"text": render(messages), "label": str(row["label"])}
-        # S27 P3/P4: the dispenser's streams read a row's task label and --data-mix source
+        # the dispenser's streams read a row's task label and --data-mix source
         metadata = row.get("metadata") if isinstance(row.get("metadata"), Mapping) else {}
         label = row.get(TASK_LABEL_KEY, metadata.get(TASK_LABEL_KEY))
         if label is not None:
@@ -130,7 +130,7 @@ def sampler_spec(args: Any, *, model_path: str, prompts_path: str, card_model: s
 
 def dispense_spec(args: Any, sampler_id: str) -> dict[str, Any]:
     """``prompts.dispense`` of a sampler island that claims its rows from the task
-    dispenser (S27 P4; ``task_dispense.DispensedPrompts``): the dispenser's address,
+    dispenser (``task_dispense.DispensedPrompts``): the dispenser's address,
     the sampler's island id (from its sampler id), and the streams' flags."""
     from yeto.rl.engine.task_dispense import sampler_holder_id
 

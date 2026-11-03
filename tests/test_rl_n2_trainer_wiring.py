@@ -1,4 +1,4 @@
-"""S25 N2 wiring on the trainer side (CPU): engine-sampler payloads in the
+"""Engine-sampler wiring on the trainer side (CPU): engine-sampler payloads in the
 trainer readers, and the per-source ``offpolicy_source`` event in Miles and verl.
 
 * ``complete_prompt_tokens``: a payload whose engine gave no prompt ids
@@ -121,7 +121,7 @@ def test_masked_source_samples_checks_row_counts():
 
 def test_verl_tq_provenance_is_read_from_the_extra_fields_record(monkeypatch):
     """verl's TQ agent loop stores ``AgentLoopOutput.as_dict()``: provenance sits in
-    ``extra_fields``, not under its own name (S25 T-G4)."""
+    ``extra_fields``, not under its own name."""
     import sys
     import types
 

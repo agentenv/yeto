@@ -1,4 +1,4 @@
-"""rl-eval-difficulty-buckets C6b: eval island (D6, D11) on CPU with fake inference and judge."""
+"""rl-eval-difficulty-buckets: eval island on CPU with fake inference and judge."""
 
 from __future__ import annotations
 
@@ -46,10 +46,10 @@ def _row(tid, **meta):
 
 
 def test_shipped_tb2_holdout_matches_131_and_excludes_smoke6():
-    """S17 N13: the unusable table (data/eval/tb2-unusable.json) also leaves the pool;
-    the list is the N13 one (1937db42..., replaces #131's 28d6730a...)."""
+    """The unusable table (data/eval/tb2-unusable.json) also leaves the pool;
+    the list is the current one (bf07cc61...)."""
     doc = json.loads((REPO / "data/eval/tb2-holdout.json").read_text())
-    assert holdout_sha256(doc).startswith("1937db42")
+    assert holdout_sha256(doc).startswith("bf07cc61")
     items = doc["items"]
     assert len(items) == 30
     counts = {b: sum(i["eval_bucket"] == b for i in items) for b in ("tb2-easy", "tb2-medium", "tb2-hard")}
@@ -62,7 +62,7 @@ def test_shipped_tb2_holdout_matches_131_and_excludes_smoke6():
     assert not (smoke | unusable) & {i["task_id"] for i in items}
 
 
-# --- start-time guard (D6.c) ------------------------------------------------------------
+# --- start-time guard ----------------------------------------------------------------
 
 
 def test_guard_refuses_task_id_overlap(tmp_path):

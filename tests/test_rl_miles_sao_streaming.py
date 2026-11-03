@@ -77,7 +77,7 @@ def test_role_sessions_are_domain_separated_and_dual_config_is_lockstep():
             replace(actor, syncer_profile_hash="2" * 64),
         )
     )
-    # P0-4.8: a different algorithm spec is a different session.
+    # A different algorithm spec is a different session.
     assert role_stream_session_contract_hash("1" * 64, actor) != (
         role_stream_session_contract_hash(
             "1" * 64,
@@ -175,7 +175,7 @@ def test_role_stream_uses_sao_round_horizon_not_critic_adam_update_count():
 
 
 def test_sao_island_builds_the_two_role_streaming_full_parameter_sync():
-    """SAO on ports is the shared full-parameter sync with actor and critic (P0-D8)."""
+    """SAO on ports is the shared full-parameter sync with actor and critic."""
 
     from yeto.rl.adapters.miles.entry import build_sync
 

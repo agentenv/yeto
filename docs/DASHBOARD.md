@@ -1,61 +1,79 @@
-# RL 舰队看板（`yeto dashboard`）
+# RL fleet dashboard (`yeto dashboard`)
 
-只读看板：把 learner 磁带、syncer 磁带、controller journal 与 head 侧 `fleet.jsonl`
-用同一个 reducer（`yeto/dashboard/reducer.py`）归约成视图，两种出口：
+A read-only dashboard. It reduces the learner tapes, the syncer tape, the
+controller journal and the head-side `fleet.jsonl` into views with one reducer
+(`yeto/dashboard/reducer.py`), and has two outputs:
 
-- **实时**：`yeto dashboard serve`，stdlib HTTP，只绑 127.0.0.1、只接受 GET，经 SSH 隧道访问；
-- **离线**：`yeto dashboard export`，单个自包含 HTML（视图 JSON 内联，不加载字体/CDN，打开时无网络请求）。
+- **Live**: `yeto dashboard serve`, a stdlib HTTP server that binds only to
+  127.0.0.1, accepts only GET, and is reached over an SSH tunnel.
+- **Offline**: `yeto dashboard export`, one self-contained HTML file (the view
+  JSON is inlined; no fonts or CDN are loaded and opening it makes no network
+  requests).
 
-界面按 mock v7：告警卡（严重/警告/提示，点击定位岛/round/指标）→ 按岛叠加训练曲线（12 个指标 tab）
-→ syncer round 表（派生，可“仅异常”）→ 岛健康卡（点击展开同页岛明细：进度/policy、cell 表、
-E1 事务、最近事件、Ray 嵌入）→ 成本效率表。页面没有任何改变运行状态的操作，只有“复制 CLI 命令”。
+Layout: alert cards (critical / warning / info; clicking one jumps to the
+island, round or metric) -> per-island overlaid training curves (12 metric tabs)
+-> syncer round table (derived, with an "only anomalies" filter) -> island
+health cards (clicking one expands the island detail on the same page: progress
+and policy, cell table, reconfiguration transactions, recent events, Ray embed)
+-> cost-efficiency table. The page has no action that changes run state; the
+only action is "copy CLI command".
 
-W&B 仍是曲线归档，不是看板的数据源。
+W&B remains the curve archive; it is not a data source of the dashboard.
 
-## 实时：head 上起服务，笔记本经隧道看
+## Live: serve on the head, view through a tunnel
 
 ```bash
-# head 上（run 名即 --cluster-prefix）
-yeto dashboard serve --run <run> [--tapes 额外磁带或目录...] [--port 8787] [--budget 300] [--head <head-host>]
-# 打印：ssh -N -L 8787:127.0.0.1:8787 <head-host>  then open http://127.0.0.1:8787/
+# on the head (the run name is the --cluster-prefix)
+yeto dashboard serve --run <run> [--tapes <extra tapes or directories>...] [--port 8787] [--budget 300] [--head <head-host>]
+# prints: ssh -N -L 8787:127.0.0.1:8787 <head-host>  then open http://127.0.0.1:8787/
 
-# 笔记本上
+# on your laptop
 ssh -N -L 8787:127.0.0.1:8787 <head-host>
-# 浏览器打开 http://127.0.0.1:8787/ ，页面每 5 s 轮询 /api/overview
+# open http://127.0.0.1:8787/ ; the page polls /api/overview every 5 s
 ```
 
-`--run <run>` 自动跟随 `~/.yeto/runs/<run>/events/*.jsonl`（回显重组的 learner 磁带）、
-`~/.yeto/runs/<run>/fleet.jsonl` 与 head 上的 syncer 磁带 `~/yeto-output/yeto-tape.jsonl`（存在时）。
-`--tapes` 可追加文件或目录（目录向下两层收集 `*.jsonl`；同目录只有一个 `rl-island-N.jsonl` 时
-`journal.jsonl` 归到岛 N）。服务每 `--poll` 秒（默认 2）按字节偏移增量读取，只消费完整行，
-重复读同一偏移不重复计数；偏移只在内存里，与 W&B 转发的 `OffsetStore` 互不影响。
+`--run <run>` follows `~/.yeto/runs/<run>/events/*.jsonl` (the reassembled
+learner tapes echoed back), `~/.yeto/runs/<run>/fleet.jsonl`, and the syncer tape
+on the head, `~/yeto-output/yeto-tape.jsonl`, when it exists. `--tapes` adds
+files or directories (a directory is searched two levels deep for `*.jsonl`;
+when a directory holds exactly one `rl-island-N.jsonl`, its `journal.jsonl` is
+attributed to island N). Every `--poll` seconds (default 2) the server reads
+each file incrementally by byte offset and consumes only complete lines;
+re-reading the same offset never counts twice. Offsets live in memory only and
+are independent of the W&B forwarder's `OffsetStore`.
 
-`--host` 只接受回环地址（127.0.0.1 / ::1 / localhost）；`--host 0.0.0.0` 会拒绝启动。
-127.0.0.1 仍可被同机其他用户访问：本工具假定 head 单用户，不做鉴权。
+`--host` accepts only loopback addresses (127.0.0.1 / ::1 / localhost);
+`--host 0.0.0.0` refuses to start. 127.0.0.1 is still reachable by other users
+on the same machine: the tool assumes a single-user head and does no
+authentication.
 
-端点（全部 GET；其它方法 405）：
+Endpoints (all GET; any other method gets 405):
 
-| 端点 | 内容 |
+| Endpoint | Content |
 |---|---|
-| `/` | v7 页面（与导出同一份静态资源） |
-| `/api/overview` | 运行、全局状态、告警、成本摘要、岛卡片、叠加曲线序列、round 标记 |
-| `/api/islands/<id>` | 岛明细：卡片、指标序列、资源采样、cell 表、E1 事务、最近事件、`ray_embed` |
-| `/api/rounds?only_bad=1` | syncer 派生 round 表 |
-| `/api/fleet` | `fleet.jsonl` 生命周期与 `cost_tick`、价目表来源、成本视图 |
-| `/api/events?island=&type=&after=&limit=` | 事件分页（`after` 为上一页 `cursor`） |
+| `/` | The page (the same static assets as the export) |
+| `/api/overview` | Run, global state, alerts, cost summary, island cards, overlaid curve series, round markers |
+| `/api/islands/<id>` | Island detail: card, metric series, resource samples, cell table, reconfiguration transactions, recent events, `ray_embed` |
+| `/api/rounds?only_bad=1` | Derived syncer round table |
+| `/api/fleet` | `fleet.jsonl` lifecycle and `cost_tick`, price table source, cost view |
+| `/api/events?island=&type=&after=&limit=` | Paged events (`after` is the previous page's `cursor`) |
 
-## 离线导出
+## Offline export
 
 ```bash
 yeto dashboard export --run <run> -o run.html
-yeto dashboard export --tapes ~/s1-runs/<run>/pulled -o run.html --budget 1000
+yeto dashboard export --tapes <pulled tape directory> -o run.html --budget 1000
 ```
 
-头部显示“离线导出 · 生成于 …”。离线页的“现在”取磁带里最新时间戳（不是打开时刻），所以已结束运行
-的心跳年龄不会随时间膨胀；对同一组磁带，导出内联的 overview 与以离线时钟运行的 `/api/overview`
-相同（`tests/test_dashboard_serve.py`）。实时服务用墙钟计算年龄。Ray iframe 在导出中只显示占位与隧道命令。
+The header shows "offline export, generated at ...". The offline page takes
+"now" from the newest timestamp in the tapes (not the time it is opened), so
+heartbeat ages of a finished run do not grow over time. For the same tapes, the
+overview inlined by the export equals `/api/overview` served with the offline
+clock (`tests/test_dashboard_serve.py`). The live server computes ages from the
+wall clock. In the export, the Ray iframe shows only a placeholder and the
+tunnel command.
 
-## ssh_harness 运行：远端磁带镜像
+## ssh_harness runs: mirroring remote tapes
 
 ```bash
 yeto dashboard mirror --target user@learner-host --remote ~/yeto-output/rl-island-0.jsonl \
@@ -63,61 +81,92 @@ yeto dashboard mirror --target user@learner-host --remote ~/yeto-output/rl-islan
 yeto dashboard serve --tapes ~/dash/<run>
 ```
 
-镜像用 `ssh <target> tail -c +<已镜像字节+1> -F <remote>`，断线后指数退避（1 s 起，最大 30 s）重连，
-从本地镜像末尾的字节继续，不丢不重；断线/恢复写入旁路文件 `<mirror>.source.jsonl`
-（`dashboard_source_lost` / `dashboard_source_restored`），看板据此给该岛“磁带来源丢失”告警。
-Modal 岛继续走 `TapeCollector` 回显重组，不需要镜像。
+The mirror runs `ssh <target> tail -c +<mirrored bytes + 1> -F <remote>`. After a
+disconnect it reconnects with exponential backoff (from 1 s up to 30 s) and
+continues from the end of the local mirror, with no loss and no duplicates.
+Disconnects and recoveries go to the side file `<mirror>.source.jsonl`
+(`dashboard_source_lost` / `dashboard_source_restored`), from which the dashboard
+raises a "tape source lost" alert for that island. Modal islands keep using the
+`TapeCollector` echo and need no mirror.
 
-## 成本（估算，非账单）
+## Cost (an estimate, not a bill)
 
-成本 = 价目表单价（$/GPU·h）× GPU 数 × 墙钟（`island_ready` 到 `island_lost`/`island_stop`/现在，重启
-后重新累计）。默认价目表 `yeto/dashboard/prices.example.json` 是**示例值，非账单**；用 `--prices my.json`
-（格式同示例，键为 `cloud:GPU`，`*:GPU` 作通配）换成自己的。不在表里的岛显示“未定价”而不是 $0；
-本地岛按 $0 计且不参与效率排名。`--budget` 给出预算上限后，累计达 60%/80% 产生警告/严重告警，
-并显示预计触达时间。没有 `fleet.jsonl` 的运行（旧运行、未经 FleetController 的运行）成本面板显示“无数据”。
+Cost = price-table rate ($/GPU-hour) x GPU count x wall clock (from
+`island_ready` to `island_lost` / `island_stop` / now; restarts accumulate
+again). The default price table `yeto/dashboard/prices.example.json` holds
+**example values, not billing data**; replace it with `--prices my.json` (same
+format as the example, keys are `cloud:GPU`, `*:GPU` is a wildcard). An island
+missing from the table shows "unpriced" rather than $0; local islands count as
+$0 and are left out of the efficiency ranking. With `--budget`, reaching 60% /
+80% of the budget raises a warning / critical alert, and the projected time to
+reach the budget is shown. A run without `fleet.jsonl` (older runs, or runs not
+started through the FleetController) shows "no data" in the cost panel.
 
-head 侧 `fleet.jsonl` 由 `FleetController` 写入（`runs/<run>/fleet.jsonl`）：`island_ready`（含首次与重启）、
-`island_lost`、`island_stop`、每 5 分钟一条 `cost_tick`。价目表与预算可用环境变量
-`YETO_DASHBOARD_PRICES` / `YETO_DASHBOARD_BUDGET_USD` 传给 launcher。
+The head-side `fleet.jsonl` is written by `FleetController`
+(`runs/<run>/fleet.jsonl`): `island_ready` (first start and restarts),
+`island_lost`, `island_stop`, and one `cost_tick` every 5 minutes. The price table
+and the budget can be passed to the launcher with the environment variables
+`YETO_DASHBOARD_PRICES` / `YETO_DASHBOARD_BUDGET_USD`.
 
-## 告警规则与阈值
+## Alert rules and thresholds
 
-| 规则 | 默认阈值 | 级别 |
+| Rule | Default threshold | Level |
 |---|---|---|
-| 心跳/最后事件超时 | >60 s 警告，>300 s 严重 | 0/1 |
-| 连续 missed | ≥2 轮警告，≥5 轮严重 | 0/1 |
-| quorum 时延 | 近 7 轮中位 ≥ 3× 基线（≥10 轮后） | 1 |
-| grad_norm 尖峰 / NaN | > 5× 前 8 轮中位；NaN/Inf 严重 | 1/0 |
-| clipfrac / KL | clip > 0.2 提示；KL > 0.1 警告 | 2/1 |
-| 预算 | 60% / 80% | 1/0 |
-| RECOVERY_REQUIRED（journal phase 或磁带 `rl_reconfiguration`） | — | 0 |
-| ssh 镜像来源丢失 | — | 1 |
+| Heartbeat / last event age | >60 s warning, >300 s critical | 1/0 |
+| Island still starting (no `rl_driver_start` yet) | >1200 s warning, >1800 s critical | 1/0 |
+| One startup step (Ray up / engines ready / weights loaded) stuck while heartbeats arrive | >900 s | 1 |
+| Consecutive missed rounds | >=2 warning, >=5 critical | 1/0 |
+| Quorum latency | median of the last 7 rounds >= 3x baseline (after >=10 rounds) | 1 |
+| grad_norm spike / NaN | > 5x the median of the previous 8 rounds; NaN/Inf critical | 1/0 |
+| clipfrac / KL | clip > 0.2 info; KL > 0.1 warning | 2/1 |
+| Budget | 60% / 80% | 1/0 |
+| RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
+| ssh mirror source lost | — | 1 |
 
-用 `--thresholds t.json` 覆盖（键见 `yeto/dashboard/alerts.py:DEFAULT_THRESHOLDS`，未知键报错）。
+Levels: 0 critical, 1 warning, 2 info. Override thresholds with
+`--thresholds t.json` (keys are in `yeto/dashboard/alerts.py:DEFAULT_THRESHOLDS`;
+an unknown key is an error).
 
-## 缺失数据
+## Missing data
 
-磁带里没有的字段一律显示“无数据”，不画 0。目前 ports 路径的 learner 磁带还没有 `rl_heartbeat`、
-`rl_resource_sample`、`train_metrics{}`、reward 分位数、response length、截断比例等；
-对应曲线 tab 与卡片字段显示“无数据”，
-发射后无需改看板即可出现。tok/s 在没有 `tok_per_s` 时由 `action_tokens / (rollout_seconds + train_seconds)` 推导。
-cell 表在没有 `rl_cell_snapshot` 时由 journal 的 `gpu_pool` 记录派生（标注来源）。
+A field that is not in the tapes is shown as "no data", never drawn as 0. The
+ports-path learner tape does not yet emit `rl_heartbeat`, `rl_resource_sample`,
+`train_metrics{}`, reward quantiles, response length, truncation ratio and
+similar fields; the matching curve tabs and card fields show "no data" and will
+appear without dashboard changes once they are emitted. Without `tok_per_s`,
+tok/s is derived as `action_tokens / (rollout_seconds + train_seconds)`. Without
+`rl_cell_snapshot`, the cell table is derived from the journal's `gpu_pool`
+records (with the source labelled).
 
-## 生成阶段利用率（agentic-rollout-utilization 第 7 组）
+## Generation-phase utilization
 
-"每轮"面板下方的"生成阶段利用率"区块，数据来自学习端磁带：
+The "generation-phase utilization" block below the per-round panel reads the
+learner tape:
 
-- 截止丢弃 / 续跑表：`rl_rollout_cutoff` 的提交组、目标组、丢弃组、丢弃条数、丢弃 token、过滤组；字段为空显示"未知"。
-- 轨迹完成曲线：`rl_trajectory_reward` 的 `trajectory_ended_at` 减生成段（`rl_timeline_span` task=generate）起点；虚线为截止（生成段结束）。被截止丢弃的轨迹没有完成事件，只在表里计数。
-- 四段耗时：`generation_seconds` / `tool_seconds` / `evaluate_time` / `sandbox_start_seconds` 每轮合计与工具执行占比；选定一轮后列出每条轨迹。
-- KV 占用与排队：`rl_load_sample` 的 `kv_used_tokens/kv_capacity_tokens` 与 `queued_requests`，底色为生成段。
-- 续跑跨轮（阶段 2 预留）：轨迹事件带 `started_rollout_id`（与训练轮不同）或 `policy_versions` 含多个版本时才显示。
-- 旧磁带没有这些事件时区块显示"无数据"。
+- Cutoff drop / carry-over table: from `rl_rollout_cutoff`, the submitted groups,
+  target groups, dropped groups, dropped samples, dropped tokens and filtered
+  groups; empty fields show "unknown".
+- Trajectory completion curve: `trajectory_ended_at` of `rl_trajectory_reward`
+  minus the start of the generation span (`rl_timeline_span` with
+  task=generate); the dashed line is the cutoff (end of the generation span).
+  Trajectories dropped at the cutoff have no completion event and are only
+  counted in the table.
+- Four-part timing: per-round totals of `generation_seconds` / `tool_seconds` /
+  `evaluate_time` / `sandbox_start_seconds` and the tool-execution share;
+  selecting a round lists each trajectory.
+- KV usage and queueing: `kv_used_tokens/kv_capacity_tokens` and
+  `queued_requests` from `rl_load_sample`, shaded by generation span.
+- Cross-round carry-over: shown only when trajectory events carry a
+  `started_rollout_id` that differs from the training round, or
+  `policy_versions` with more than one version.
+- Older tapes without these events show "no data" in this block.
 
-两条运行比较（只比较本区块；`--compare` 的磁带启动时读一次，不跟随）：
+Comparing two runs (this block only; the `--compare` tapes are read once at
+start and not followed):
 
 ```bash
-yeto dashboard export --tapes <A 磁带...> --compare <B 磁带...> --label "A 多发 6" --compare-label "B 多发 12" -o ab.html
+yeto dashboard export --tapes <A tapes...> --compare <B tapes...> --label "A oversample 6" --compare-label "B oversample 12" -o ab.html
 ```
 
-页面上可切换"并排 / 叠加"（叠加只作用于完成曲线），以及"全部轮叠加 / 第 N 轮"。
+The page switches between "side by side" and "overlay" (overlay applies only to
+the completion curve), and between "all rounds overlaid" and "round N".

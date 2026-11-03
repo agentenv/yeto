@@ -1,4 +1,4 @@
-"""DeepSeek V4 expert-full patches on the ports Miles layout (P0 1.7b.2)."""
+"""DeepSeek V4 expert-full patches on the ports Miles layout."""
 
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 ``SUPPORT``: Miles implements stage 3 (agentic multi-turn carry-over, on top of
 stage 2 single-turn carry-over) with a limit of at most 1 (the only value
-measured on GPU, design risk "上限先取 1"). :func:`check_task` accepts a limit
+measured on GPU, design choice: start with a limit of 1). :func:`check_task` accepts a limit
 > 0 for Miles' stock single-turn generate (stage 2) and for the agentic
 generate with an agent function that implements the suspend/resume hooks
 (``SUSPEND_CAPABLE_AGENTS``, stage 3); any other custom generate or agent
@@ -19,7 +19,7 @@ N`` (agentenv fork: unfinished trajectories are suspended between two model
 turns at the cut-off and continued by the next rollout, at most N rollouts
 after the one that started them), else ``--partial-rollout`` (unfinished groups go back to Miles' data buffer and
 continue next round; :mod:`.carry_over` keeps those within the limit and drops
-older ones). With ``overlap`` (a partitioned island, P0-S) it emits
+older ones). With ``overlap`` (a partitioned island) it emits
 ``--fully-async --max-weight-staleness N`` instead: Miles keeps generating
 while the trainer trains and drops groups more than N versions old; the
 engines carry the plain policy version, so Miles' staleness filter works.
@@ -33,11 +33,11 @@ from __future__ import annotations
 
 from yeto.rl.engine.policy_age import STAGE_NAMES, PolicyAgeError, PolicyAgeSupport, validate_limit
 
-# rl-offpolicy-correction-passthrough L6.9: the cap was 1 (the only limit
+# The cap was 1 (the only limit
 # measured on GPU). Decoupled PPO needs A_hard >= 2. Miles itself has no upper
 # bound (--max-weight-staleness and --agentic-suspend-max-rounds take any int);
 # 4 bounds the rollout compute a dropped group can waste. Sub-agent decision,
-# 2026-10-14; limits above 1 are not yet run on GPU (L6.10).
+# 2026-10-14; limits above 1 are not yet run on GPU.
 SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4)
 # --rl-rollout-ahead: whole batches the island generates ahead of its trainer
 # (MilesRolloutPool.start_generate; yeto.rl.engine.rollout_ahead).
@@ -47,7 +47,7 @@ PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
 # Agent functions whose module defines the suspend()/resume() hooks Miles calls
 # under --agentic-suspend-between-turns (model-turn gate, survival limit).
-# S26 E0.5 removed the self-written Codex harness; S26 E9.5 gave the Harbor
+# The self-written Codex harness was removed; the Harbor
 # agent function the hooks (model calls held at its gate relay).
 SUSPEND_CAPABLE_AGENTS: frozenset[str] = frozenset({"yeto.rl.adapters.miles.harbor_agent.run"})
 

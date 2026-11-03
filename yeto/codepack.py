@@ -1,4 +1,4 @@
-"""Run code packs (rl-identity-tiering L9.4-L9.6, development mode).
+"""Run code packs (development mode).
 
 A code pack fixes the code of one run. The launcher makes it once, at the first
 start of the run, from the local git work tree:
@@ -20,7 +20,7 @@ on a mismatch. The pack changes only through :func:`upgrade_record` (explicit
 upgrade): it requires an equal semantic hash and appends "pack A -> pack B" to the
 manifest record.
 
-Release mode (L9.12): the code is a layer of the island image
+Release mode: the code is a layer of the island image
 (``scripts/build_yeto_release_image.sh``); the image digest is the pack digest and
 nothing is uploaded (:func:`release_pack`). The island checks its tree against the
 image's release manifest (:func:`verify_release_tree`); the registry pull by digest
@@ -472,7 +472,7 @@ def fetch_tree(pack: CodePack, store: PackStore, cache_root: str | os.PathLike[s
 def upgrade_record(old: CodePack, new: CodePack, *, old_semantic: str | None,
                    new_semantic: str | None, reason: str,
                    now: float | None = None) -> CodePack:
-    """Explicit upgrade (L9.6): allowed only when both semantic hashes are known and
+    """Explicit upgrade: allowed only when both semantic hashes are known and
     equal. Returns ``new`` carrying the old history plus "old → new"."""
 
     if not reason.strip():
@@ -494,7 +494,7 @@ def upgrade_record(old: CodePack, new: CodePack, *, old_semantic: str | None,
 
 
 # ---------------------------------------------------------------------------
-# release mode (L9.12)
+# release mode
 # ---------------------------------------------------------------------------
 def release_image_digest(image_ref: str) -> str:
     """The sha256 hex of ``<repo>@sha256:<hex>`` (a release image is pinned by digest)."""

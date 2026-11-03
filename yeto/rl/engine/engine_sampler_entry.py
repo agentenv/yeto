@@ -1,5 +1,5 @@
 """Process entry of the engine sampler island (``python -m
-yeto.rl.engine.engine_sampler --spec SPEC.json``; S25 stage 1, gap 3).
+yeto.rl.engine.engine_sampler --spec SPEC.json``).
 
 :func:`~.engine_sampler.build_engine_sampler` wires the island from objects;
 this module builds those objects from one JSON spec file that the launch
@@ -36,7 +36,7 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``reward_kind`` is ``"miles"``;
 * ``checks``: :class:`~.sampler_checks.PostLoadChecks` keyword overrides
   (optional; e.g. ``expected_expert_matrices``);
-* ``rollout_quant``: optional ``{"tier", "apply"}`` (S26 E6), applied first
+* ``rollout_quant``: optional ``{"tier", "apply"}``, applied first
   (:func:`apply_rollout_quant`);
 * ``incarnation_lease``: optional (default on, in the buffer store): ``false``, or
   ``{"store", "poll_s", "write_check_s"}`` (:mod:`.incarnation_lease`):
@@ -46,7 +46,7 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
 
-Replacement (S25 G1C): the process is one incarnation of the sampler
+Replacement: the process is one incarnation of the sampler
 (``sampler_resume.new_incarnation``). It reads where the earlier incarnations
 got to from the buffer (``sampler_resume.resume_point``), starts at the next
 round, and writes ``rl_sampler_join`` / ``rl_sampler_leave`` plus one member
@@ -117,7 +117,7 @@ def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
 
 
 def apply_rollout_quant(spec: Mapping[str, Any]) -> Mapping[str, Any]:
-    """S26 E6: ``spec["rollout_quant"] = {"tier", "apply": "module:function"}`` (written by
+    """``spec["rollout_quant"] = {"tier", "apply": "module:function"}`` (written by
     the launch layer) fills the tier's engine settings on this node; the adapter-layer
     function returns the new spec. No section: the spec is used as written."""
     section = spec.get("rollout_quant")
@@ -138,7 +138,7 @@ class JsonlPrompts:
                  render: Callable[[Any], str] = str, data_slot: str | None = None,
                  task_key: str | None = None) -> None:
         """``task_key``: the row field holding the agent task mapping (format
-        ``agentic``, S28 G-120); it goes into the item metadata as ``agent_task``."""
+        ``agentic``); it goes into the item metadata as ``agent_task``."""
         self.path = Path(path)
         rows = list(enumerate(json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
                               if line.strip()))
@@ -188,7 +188,7 @@ def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key:
                       label_key: str | None, groups_per_round: int,
                       render: Callable[[Any], str] = str, key: bytes | None = None,
                       environ: Any = None) -> "Any":
-    """The engine sampler's prompts from the task dispenser (S27 P4): the
+    """The engine sampler's prompts from the task dispenser: the
     sibling of :class:`JsonlPrompts` that a sampler island of any backend uses
     (``task_dispense.DispensedPrompts``). ``config``: ``prompts.dispense`` of the
     spec (address, island id, seed, prefetch blocks; the mix / label streams)."""
@@ -224,7 +224,7 @@ def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
         if not tokenizer:
             raise SamplerSpecError("prompts.format chat needs prompts.tokenizer or a base_dir")
         render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)))
-    if prompts.get("dispense"):  # S27 P4: rows from the task dispenser, not a slot
+    if prompts.get("dispense"):  # Rows from the task dispenser, not a slot
         if prompts.get("data_slot"):
             raise SamplerSpecError("prompts.dispense and prompts.data_slot exclude each other")
         from yeto.protocol import island_hmac_key_from_env  # noqa: PLC0415
@@ -264,7 +264,7 @@ def miles_reward(score: Callable[..., Any]) -> Reward:
 
 
 def build_reward(spec: Mapping[str, Any]) -> Reward:
-    if spec.get("agentic") and not spec.get("reward"):  # S28 G-120: the Harbor verifier scores
+    if spec.get("agentic") and not spec.get("reward"):  # The Harbor verifier scores
         return lambda item, completion: 0.0
     kind = str(spec.get("reward_kind", "neutral"))
     if kind not in REWARD_KINDS:
@@ -348,11 +348,11 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     round starts; the island leaves FINISHED, not PREEMPTED). ``on_event(event,
     **fields)`` sees every tape record after it is written. ``stores(incarnation,
     emit)``: the (release store, sample buffer) pair instead of :func:`build_stores`
-    (S27 G-EA: a spot sampler follows the syncer and writes to the relay).
+    (a spot sampler follows the syncer and writes to the relay).
     ``reclaim_deadline``: armed when the reclaim marker appears; it ends the
     process at its deadline even when a trial or a cleanup step still blocks.
     ``stop_reason()``: after the loop ends, (LeaveReason, detail) to leave with
-    instead of FINISHED, or None (S29 D4: a fenced spot sampler leaves FENCED)."""
+    instead of FINISHED, or None (a fenced spot sampler leaves FENCED)."""
     import os  # noqa: PLC0415
 
     from .sampler_resume import new_incarnation  # noqa: PLC0415
@@ -362,7 +362,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
     if env.get("YETO_BOAT_RUN_ID") and env.get("YETO_BOAT_INCARNATION") != incarnation:
-        # S29 D19: an engine sampler (the release-store path, e.g. the 120B spot island) labels its
+        # An engine sampler (the release-store path, e.g. the 120B spot island) labels its
         # boat sandboxes with its incarnation too and sweeps its earlier incarnations' ones; before
         # this only the spot_rollout sampler did, so these sandboxes carried an empty incarnation
         # ("ytl1.<run>.<island>..") that no sweep selects
@@ -377,7 +377,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
 
 @contextlib.contextmanager
 def _member_incarnation_env(env: Any, incarnation: str):
-    """S27: the member incarnation of every channel this process opens to the
+    """The member incarnation of every channel this process opens to the
     head (task dispenser, spot subscriber, relay) derives from the process
     incarnation (``task_dispense.member_incarnation``), as on a Miles sampler
     island; the variable is restored afterwards (in-process callers, tests)."""
@@ -465,7 +465,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
     fence_watcher = None
     try:
         make_round = None
-        if spec.get("agentic"):  # S28 G-120: Harbor trials through the records proxy
+        if spec.get("agentic"):  # Harbor trials through the records proxy
             from .agentic_round import round_factory  # noqa: PLC0415
 
             make_round = round_factory(spec, engine, env)
@@ -499,7 +499,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         preempted = reclaimed()
         fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
             else None if stop_reason is None else stop_reason()
-        if fence is not None:  # S29 D4: e.g. FENCED, fenced="other run"
+        if fence is not None:  # E.g. FENCED, fenced="other run"
             reason, detail = fence
             print(f"[engine-sampler] leaving {reason.name}: {dict(detail)}", flush=True)
             leave(reason, rounds=rounds, dropped_groups=island.round.dropped_groups, **dict(detail))
@@ -526,13 +526,13 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         if fence_watcher is not None:
             fence_watcher.stop()
         closer = getattr(getattr(island, "round", None), "close", None)
-        if callable(closer):  # S28 G-120: an agentic round deletes its boat sandboxes
+        if callable(closer):  # An agentic round deletes its boat sandboxes
             try:
                 closer()
             except Exception as error:  # noqa: BLE001 - the island's own error is the one to report
                 emit("rl_agentic_close", error=f"{type(error).__name__}: {error}")
         close = getattr(prompts, "close", None)
-        if callable(close):  # S27 P4: the rows this sampler holds go back to the dispenser
+        if callable(close):  # The rows this sampler holds go back to the dispenser
             try:
                 emit("rl_dispense_close", **(close() or {}))
             except Exception as error:  # noqa: BLE001 - the lease returns them anyway

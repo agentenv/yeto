@@ -1,4 +1,4 @@
-"""Rollout quantization tier of an engine sampler island (S26 E6; adapter layer).
+"""Rollout quantization tier of an engine sampler island (adapter layer).
 
 The launch layer writes ``"rollout_quant": {"tier": N, "apply": APPLY}`` into the
 sampler spec (:func:`spec_section`); the engine sampler entry calls ``APPLY`` on

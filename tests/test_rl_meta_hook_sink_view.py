@@ -1,4 +1,4 @@
-"""E1: one metadata-hook run reads each sink value once and looks the sink actor up once."""
+"""One metadata-hook run reads each sink value once and looks the sink actor up once."""
 
 from __future__ import annotations
 

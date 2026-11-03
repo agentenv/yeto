@@ -52,16 +52,14 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   generations and quorum at launch. Joins/reconnects apply only to future
   attempts, disconnects do not erase accepted work, and a below-quorum
   timeout discards partial responses before retrying with a new attempt ID.
-- **Sync-interval sensitivity** (legacy measurement, gemma4/Lean-Workbook,
-  500k tokens, M=2, held-out eval CE): at the design-point sync interval
-  (H≈24 inner steps per fragment) DiLoCo matched the synchronous run within
-  noise (+0.5%); at H≈2 — what a LAN/localhost fleet produces naturally,
+- **Sync-interval sensitivity**: at the design-point sync interval
+  (H≈24 inner steps per fragment) DiLoCo matches the synchronous run within
+  noise on held-out CE; at H≈2 — what a LAN/localhost fleet produces naturally,
   since rounds complete as fast as learners answer — the stock outer
-  optimizer (Nesterov 0.7/0.9) over-drove correlated deltas and cost ~+9%
-  (α=0 overwrite was much worse; the direct-RDA configuration recovered to
-  ~+3%). The old harness used a one-island baseline, so these numbers remain
-  useful directional evidence but are not equal-hardware throughput results.
-  The current `scripts/compare_diloco.py` names H≈24 `m2`, names H-disabled
+  optimizer (Nesterov 0.7/0.9) over-drives correlated deltas and loses
+  noticeably (α=0 overwrite is much worse; the direct-RDA configuration
+  recovers most of the gap). These came from an older one-island-baseline
+  harness and are directional, not equal-hardware results. The current `scripts/compare_diloco.py` names H≈24 `m2`, names H-disabled
   `unthrottled`, pairs every arm with a matching `baseline-mM`, and repeats
   training seeds; see `docs/LM_BENCHMARK.md`. WAN round latency yields large H
   by itself; for low-latency fleets the syncer self-throttles to

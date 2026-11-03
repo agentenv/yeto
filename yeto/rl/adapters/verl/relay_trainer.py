@@ -1,10 +1,10 @@
-"""verl relay training island (S27 G-EV; SPOT-ROLLOUT.md §12.9 item 1).
+"""verl relay training island (SPOT-ROLLOUT.md §12.9 item 1).
 
 A *relay trainer* is a synced full-parameter buffer trainer
 (``--rl-sample-role trainer``, VERL-PARITY #14) whose groups come from spot
 sampler islands through the head's sample relay (``--rl-sample-relay``,
 :mod:`yeto.rl.spot_rollout`), not from a store buffer that its own releases
-feed. The engine-neutral rules are G-EM's (``yeto.rl.engine.external_policy``):
+feed. The engine-neutral rules are in ``yeto.rl.engine.external_policy``:
 the samplers serve merged cuts the syncer broadcast to its receive-only
 subscribers, so a group names the *merged version* of its cut, and its age is
 counted in merged versions against the trainer's merged version at the
@@ -113,7 +113,7 @@ class RelayRolloutPool(FullyAsyncRolloutPool):
     """The fully_async rollout port over the relay buffer (module doc)."""
 
     def __init__(self, island: FullyAsyncIsland, cuts: Callable[[], Any]):
-        # S29 spot run (defect D10): no cap on discarded pulls. A spot sampler that
+        # No cap on discarded pulls. A spot sampler that
         # restarted on older weights, or that loads cuts slowly over a long WAN, sends
         # groups past the policy-age limit for a while; they are discarded (and
         # recorded) and the round waits for newer ones. With verl's 8 x required cap
@@ -165,7 +165,7 @@ class RelayPublisher:
         self.island = island
         self.feed = feed
         self.driver: Any = None
-        self.version_board = _version_publisher(island)  # S29 D9/D4: the run's merged version
+        self.version_board = _version_publisher(island)  # the run's merged version
 
     def bind(self, driver: Any) -> None:
         from yeto.rl.engine.external_policy import ExternalMergedCuts
@@ -222,7 +222,7 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
     from yeto.rl.spot_rollout.relay_buffer import pump_event_printer
 
     log = CONSUMED_LOG.format(learner=island.learner_id)
-    # S29 spot run (defect D12): the local buffer's cursor log, so a relay trainer that
+    # The local buffer's cursor log, so a relay trainer that
     # restarts (and rejoins its pool) continues after the groups it already trained
     # instead of training the whole local buffer again from position 0.
     feed = BufferFeed(buffer, vmap=IdentityVersions, shape=shape,

@@ -1,4 +1,4 @@
-"""S28 G-120: agentic rounds of the engine sampler island (CPU).
+"""Agentic rounds of the engine sampler island (CPU).
 
 Real pieces: ``build_engine_sampler`` with ``AgenticRound``, the outer layer
 (``run_agent_task``, ``finish_sample``), ``ProxyTokenRecorder`` serving a
@@ -6,19 +6,19 @@ Real pieces: ``build_engine_sampler`` with ``AgenticRound``, the outer layer
 buffer trainer's ``group_rows``.  Fakes: the engine (scripted ``FakeEngine``)
 and the agent (a Codex-like harness calling the recorder URL over Responses).
 Tokenizer: Qwen3-0.6B from the local HF cache (skip if absent); the nemotron3
-template tests use the Nemotron-3.5-Super-VL-120B tokenizer files
-(``YETO_NEMOTRON3_TOKENIZER`` or the dev machine's hf-meta copy).
+template tests use the Nemotron-3.5-Super-VL-120B tokenizer files. Repos are
+declared in tests/hf_assets.py.
 """
 
 from __future__ import annotations
 
 import copy
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hf_assets import require_hf_repo
 from test_records_proxy import SCRIPT, ScriptedModel, _template, echo, responses_body, tool_output, user_item
 
 from yeto.rl.agentic import TrialVerdict
@@ -283,17 +283,14 @@ def test_jsonl_prompts_carry_the_agent_task_and_the_spec_pairs_format_and_sectio
 
 
 # ---------------------------------------------------------------------- nemotron3 template
-NEMOTRON3_TOKENIZER = os.environ.get("YETO_NEMOTRON3_TOKENIZER",
-                                     os.path.expanduser("~/work/hf-meta/nemotron35-super-vl-120b"))
+NEMOTRON3_REPO = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
 
 
 @pytest.fixture(scope="module")
 def nemotron3():
     from yeto.rl.harness.chat_templates import ChatTemplate
 
-    if not (Path(NEMOTRON3_TOKENIZER) / "tokenizer.json").is_file():
-        pytest.skip("Nemotron-3 tokenizer files not available")
-    return ChatTemplate.load("nemotron3", tokenizer_path=NEMOTRON3_TOKENIZER)
+    return ChatTemplate.load("nemotron3", tokenizer_path=require_hf_repo(NEMOTRON3_REPO))
 
 
 def test_nemotron3_template_aligns_merges_codex_system_messages_and_keeps_history_reasoning(nemotron3):

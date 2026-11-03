@@ -1,4 +1,4 @@
-"""S27 P2: the launcher keeps the task dispenser's log with the run.
+"""The launcher keeps the task dispenser's log with the run.
 
 With ``--rl-data-split dispense`` the actor syncer appends every dispenser
 event to ``~/yeto-output/task-dispense.jsonl`` (``--dispense-log``) on the
@@ -7,7 +7,7 @@ failure):
 
 * the launcher that runs next to the syncer (the head, or this machine with
   ``--controller local``) copies the log into the run directory and checks
-  it offline (``tools.eval.dispense_check``): ``<run dir>/task-dispense.jsonl``,
+  it offline (``yeto.launch.checks.dispense_check``): ``<run dir>/task-dispense.jsonl``,
   ``<run dir>/dispense-check.json`` and ``~/yeto-output/dispense-check.json``,
   plus one ``[launcher] task dispenser:`` line in the launch log;
 * the submitting machine of a head run (``yeto launch --controller head``)
@@ -42,7 +42,7 @@ def dispense_planned(args) -> bool:
     try:
         from .data_split_plan import data_split_plan
 
-        # a sampler launch of its own (P4) claims from another launch's dispenser
+        # a sampler launch of its own claims from another launch's dispenser
         return bool(data_split_plan(args).dispense) and not getattr(args, "rl_dispense_addr", None)
     except Exception:  # noqa: BLE001 - not an RL launch, or no plan: nothing to keep
         return False
@@ -63,8 +63,8 @@ def _records_since(lines: list[str], since_unix: float | None) -> list[str]:
 
 
 def check_summary(log: Path) -> dict[str, Any]:
-    """``tools.eval.dispense_check`` of ``log`` (without the per-position lists)."""
-    from tools.eval.dispense_check import check, read_records
+    """``yeto.launch.checks.dispense_check`` of ``log`` (without the per-position lists)."""
+    from yeto.launch.checks.dispense_check import check, read_records
 
     summary = check(read_records([log]))
     summary.pop("trained_positions_by_island", None)

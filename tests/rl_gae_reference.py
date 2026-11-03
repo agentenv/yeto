@@ -1,4 +1,4 @@
-"""Independent torch reference implementation of the GAE variants (design D6).
+"""Independent torch reference implementation of the GAE variants.
 
 This module MUST NOT import Miles / fork code; it is the oracle used to
 cross-check the fork's ``--gae-variant`` dispatch (tasks.md 6.1/6.2).
@@ -25,8 +25,7 @@ Variants
                     ``--gae-variant cross_segment``): earlier segments see no terminal
                     reward, which does not match the paper (each segment is optimised
                     individually with the shared reward at its own end).
-- cross_segment_per_sample (CompactionRL, arXiv 2607.05378 sec. 4.2 eq. 13-15, user
-                    decision 2026-10-07): every segment is its own sample whose last
+- cross_segment_per_sample (CompactionRL, arXiv 2607.05378 sec. 4.2 eq. 13-15): every segment is its own sample whose last
                     token carries the shared terminal reward R; local GAE with
                     bootstrap 0 after the segment (eq. 13), then
                     A = (gamma*lambda)^{N_{>s}} * A^loc (eq. 14).  Critic target

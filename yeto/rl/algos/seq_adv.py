@@ -1,24 +1,24 @@
 """Sequence-level ratio and advantage variants (change ``rl-algo-seq-and-adv``).
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. Through
-the P0 registry (never by editing the shared files) it adds:
+the core extension registry (never by editing the shared files) it adds:
 
 * spec fields
-  - ``advantage.gamma`` (design D4): REINFORCE++ discount, default 1.0 (not
+  - ``advantage.gamma``: REINFORCE++ discount, default 1.0 (not
     emitted); ``--gamma`` maps to it. Only 1.0 is open;
-  - ``advantage.gdpo`` (design D6): ``{"components": [{"name", "weight"}],
+  - ``advantage.gdpo``: ``{"components": [{"name", "weight"}],
     "whiten": true}``; components are sorted by name and enter the hash;
-* advantage transforms of the 1b dispatcher (design D5): ``maxrl``, ``mapo``,
+* advantage transforms of the 1b dispatcher: ``maxrl``, ``mapo``,
   ``gdpo`` (``advantage.transform``), computed per rollout entry (multi-segment
   rollouts merged, the result broadcast back to every segment);
 * mechanisms (``features`` dimension): ``maxrl`` / ``mapo`` (binary reward
-  required), ``gdpo``. GSPO / REINFORCE++ / REINFORCE++-baseline are P0's
+  required), ``gdpo``. GSPO / REINFORCE++ / REINFORCE++-baseline are core
   ``advantage_estimators`` mechanisms; none is declared by the Miles adapter
-  before its G1 smoke;
+  before its single-GPU smoke;
 * rejections (pre-GPU): GSPO clip hint (engine default 0.2 vs paper 3e-4/4e-4),
   GSPO + advantage transform, transform/estimator mismatch, MaxRL/MAPO with the
   overlong soft penalty, non-default gamma, GDPO declaration consistency;
-* gradient rules (design D2/D8): GSPO fully clipped round; GDPO / REINFORCE++
+* gradient rules: GSPO fully clipped round; GDPO / REINFORCE++
   where the reported statistics say no advantage is non-zero;
 * runtime attrs ``yeto_rl_seq_adv`` (GDPO components for the Miles process).
 
@@ -55,10 +55,10 @@ TRANSFORM_EVENT = "rl_advantage_transform"
 GROUP_TRANSFORMS = ("maxrl", "mapo", "gdpo")
 BINARY_TRANSFORMS = ("maxrl", "mapo")
 SUPPORTED_GAMMAS = (1.0,)
-# D2: fully clipped when the token-weighted clip fraction reaches 1 (float slack).
+# Fully clipped when the token-weighted clip fraction reaches 1 (float slack).
 FULL_CLIP_THRESHOLD = 1.0 - 1e-9
 # Keys the adapter may use for the GSPO clip fraction (Miles loss dict key and
-# its logged name); the P0 ``masked_fraction`` contract carries the value.
+# its logged name); the core ``masked_fraction`` contract carries the value.
 CLIPFRAC_KEYS = ("pg_clipfrac", "train/pg_clipfrac")
 STD_EPS = 1e-6  # Miles _post_process_rewards: centered / (std + 1e-6)
 
@@ -157,7 +157,7 @@ register_mechanism("features", "mapo", lambda s: _transform(s) == "mapo",
 register_mechanism("features", "gdpo", lambda s: _transform(s) == "gdpo")
 
 # Mechanisms of this change as (dimension, name); ``--rl-allow-unverified-mechanism``
-# takes them qualified, ``"dimension:name"`` (task 6.1). A transform additionally needs the dispatcher
+# takes them qualified, ``"dimension:name"``. A transform additionally needs the dispatcher
 # (``custom_reward_postprocess``).
 MECHANISMS = {
     "gspo": ("advantage_estimators", "gspo"),
@@ -175,7 +175,7 @@ MECHANISMS = {
 
 
 def _reject_gspo_clip(s) -> str | None:
-    # P0 ``sequence_ratio_without_clip`` refuses the spec; this adds the hint (2.1).
+    # The core ``sequence_ratio_without_clip`` rule refuses the spec; this adds the hint.
     if s.advantage.estimator == "gspo" and (s.loss.eps_clip is None or s.loss.eps_clip_high is None):
         return (
             "GSPO clips the sequence-level ratio: give loss.eps_clip and loss.eps_clip_high "
@@ -306,14 +306,14 @@ register_runtime_attrs("seq_adv", runtime_attrs)
 
 
 def launch_problems(spec, values) -> list[str]:
-    """Checks needing the run configuration (alignment A4)."""
+    """Checks needing the run configuration."""
 
     problems = []
     cp = int(values.get("context_parallel_size", 1) or 1)
     if spec.advantage.estimator == "gspo" and cp != 1:
         problems.append(
             f"GSPO with context parallel size {cp}: the sequence-level ratio gathers every "
-            "sequence across CP ranks; that layout is not verified (rl-infra-spec A4). Use "
+            "sequence across CP ranks; that layout is not verified. Use "
             "context parallel size 1"
         )
     return problems
@@ -353,7 +353,7 @@ def maxrl_values(rewards):
 
 
 def mapo_values(rewards):
-    """A = (1-lam)(r-mu)/sigma + lam (r-mu)/mu, lam = 1 - 4p(1-p) (design D5)."""
+    """A = (1-lam)(r-mu)/sigma + lam (r-mu)/mu, lam = 1 - 4p(1-p)."""
 
     import torch
 
@@ -485,7 +485,7 @@ def mapo(args, samples, rewards, groups, params) -> list[float]:
 
 
 def reward_components(samples, rows, names: Sequence[str]) -> list[list[float]]:
-    """Per-row component vectors in ``names`` order; strict (design D6)."""
+    """Per-row component vectors in ``names`` order; strict."""
 
     expected = set(names)
     out = []
@@ -585,12 +585,12 @@ rp.register_advantage_transform("gdpo", gdpo, validate=_validate_gdpo)
 
 
 # --------------------------------------------------------------------------
-# zero-gradient rules (design D2/D8)
+# zero-gradient rules
 # --------------------------------------------------------------------------
 
 
 def aggregate_clipfrac(values: Sequence[Any], weights: Sequence[Any] | None = None) -> float | None:
-    """Round clip fraction from per-mini-batch values (token-weighted, D2).
+    """Round clip fraction from per-mini-batch values (token-weighted).
 
     ``weights`` are the mini-batches' loss-token counts (equal weights when
     omitted). Any missing / non-finite value -> None (unknown keeps the
@@ -638,7 +638,7 @@ def clipfrac_from_losses(step_losses: Sequence[Mapping[str, Any]],
 
 
 def gspo_gradient_rule(spec, batch_summary, step_metrics=None):
-    """D2: a GSPO round whose every sequence was clipped expects no gradient."""
+    """A GSPO round whose every sequence was clipped expects no gradient."""
 
     if spec.advantage.estimator != "gspo":
         return None
@@ -659,7 +659,7 @@ def _batch_value(batch_summary, name):
 
 
 def gdpo_expects_gradient(batch_summary) -> bool:
-    """D8: non-zero advantages reported by the dispatcher; unknown -> True."""
+    """Non-zero advantages reported by the dispatcher; unknown -> True."""
 
     nonzero = _batch_value(batch_summary, "nonzero_advantages")
     if nonzero is None:
@@ -668,7 +668,7 @@ def gdpo_expects_gradient(batch_summary) -> bool:
 
 
 def rpp_expects_gradient(batch_summary, *, reward_kl: bool) -> bool | None:
-    """D8: REINFORCE++ advantages (before whitening) are not all equal.
+    """REINFORCE++ advantages (before whitening) are not all equal.
 
     From group statistics: some group varies or group means differ -> True;
     missing statistics -> True. With identical rewards everywhere the only
@@ -693,11 +693,11 @@ def rpp_expects_gradient(batch_summary, *, reward_kl: bool) -> bool | None:
 
 
 def advantage_gradient_rule(spec, batch_summary, step_metrics=None):
-    """GDPO / REINFORCE++ verdict (D8): ``False`` relaxes, ``True`` requires.
+    """GDPO / REINFORCE++ verdict: ``False`` relaxes, ``True`` requires.
 
-    The P0 hook currently honours only ``False`` (relax); ``True`` takes
-    effect once the hook may tighten (infra-drafts/2a-shared.patch). Until
-    then the P0 default (``any(reward_std > 0)``) is the stricter bound
+    The core hook currently honours only ``False`` (relax); ``True`` takes
+    effect once the hook may tighten. Until
+    then the core default (``any(reward_std > 0)``) is the stricter bound
     only where it already expects a gradient.
     """
 
@@ -710,13 +710,12 @@ def advantage_gradient_rule(spec, batch_summary, step_metrics=None):
 
 
 def expects_gradient(spec, batch_summary, step_metrics=None) -> bool:
-    """Full D2/D8 rule of this change (independent of the relax-only hook).
+    """Full gradient rule of this module (independent of the relax-only hook).
 
-    ``AlgorithmSpec.expects_gradient`` applies the P0 default first
+    ``AlgorithmSpec.expects_gradient`` applies the core default first
     (``any(reward_std > 0)``) and lets rules only relax it; GDPO (components
     may vary while the scalar reward is constant) and REINFORCE++ (group
-    means may differ) can need *more* than the default -- see the interface
-    request in progress.md.
+    means may differ) can need *more* than the default.
     """
 
     groups = getattr(batch_summary, "groups", batch_summary)

@@ -1,4 +1,4 @@
-"""Policy releases from the syncer instead of a store (S27 G-EA).
+"""Policy releases from the syncer instead of a store.
 
 A sampler island follows its trainers through
 :class:`~yeto.rl.engine.policy_release.PolicyFollower` over a
@@ -20,7 +20,7 @@ The release's ``policy_hash`` is the cut digest
 (:func:`yeto.rl.engine.external_policy.cut_digest`: layout fingerprint, every
 fragment's version and the SHA-256 of its bytes). :meth:`cut_identity` names
 the cut of every merged version this sampler loaded, for the relay items
-(S27 G-EM: the trainer's evidence names the cut that generated each sample);
+(the trainer's evidence names the cut that generated each sample);
 the base version (the weights served before the first cut) is named by
 :func:`~yeto.rl.engine.external_policy.base_cut_digest` of ``base_dir``.
 
@@ -82,13 +82,13 @@ class SubscriberReleaseStore:
 
     def past_base(self) -> bool:
         """The run merged past the base weights: some fragment this subscriber received
-        is newer than ``base_version`` (S29 spot run, defect D9). A sampler that
+        is newer than ``base_version`` (a spot-run fix). A sampler that
         (re)joins such a run must not generate on the base weights while its first
         cut is still arriving: those groups are past any policy-age limit."""
         self.follower.drain()
         return any(int(v) > self.base_version for v in self.follower.versions)
 
-    version_reader: Any = None  # S29 D9: the run's merged version board (sampler.SpotChannels)
+    version_reader: Any = None  # The run's merged version board (sampler.SpotChannels)
 
     def behind(self, served_version: int | None) -> bool:
         """Hold rounds: by the run's merged-version board, the weights served (None:
@@ -168,7 +168,7 @@ class SubscriberReleaseStore:
 def subscriber_id_for(sampler_id: str) -> int:
     """The sampler island's id on the head: ``2^31`` plus 31 bits of the SHA-256
     of its sampler id. It is the task dispenser's sampler holder id
-    (``yeto.rl.engine.task_dispense.sampler_holder_id``, S27 P4), so one sampler
+    (``yeto.rl.engine.task_dispense.sampler_holder_id``), so one sampler
     island has one id for its weights, its relay items and its rows."""
     from yeto.rl.engine.task_dispense import sampler_holder_id
 

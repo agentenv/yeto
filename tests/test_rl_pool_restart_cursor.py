@@ -13,7 +13,7 @@ from pool_fakes import FakePoolSyncer as FakeSyncer
 from test_rl_engine_driver import _strict_config
 from test_rl_restart_data_cursor import (DataSourceState, MilesLikePool, _close, _events,
                                          _records)
-from test_rl_reconfig_e1 import _setup
+from test_rl_reconfig_controller import _setup
 
 
 def _island(tmp_path, fake, *, rounds, source, die_at=None, tape="a.jsonl", ledger=True):
@@ -73,7 +73,7 @@ def test_fresh_run_still_starts_at_zero(tmp_path):
     _close(driver, ctl)
 
 
-# 1b (run s15-island1b-20261008b, code d65fe066), l1/rank0/rl-island-1.jsonl lines 3-4: the
+# 1b GPU run, l1/rank0/rl-island-1.jsonl lines 3-4: the
 # restarted Modal island has no batch ledger (no --rl-elastic) and joined at base 3; no
 # cursor event followed and rollouts 3, 4 re-trained rollouts 0, 1's samples.
 TAPE_1B = [

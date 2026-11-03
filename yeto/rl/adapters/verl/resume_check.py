@@ -1,4 +1,4 @@
-"""verl / FSDP2 binding of the resume assertions (S25 N7.6; A-TRN report #8).
+"""verl / FSDP2 binding of the resume assertions.
 
 The checks live in :mod:`yeto.rl.engine.resume_manifest`; this module only maps
 a verl FSDP actor worker onto them (:func:`train_handles`). Two worker shapes:

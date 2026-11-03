@@ -1,4 +1,4 @@
-"""rl-algo-supplement 3.1 (design D6): user-code mechanisms are never declared."""
+"""User-code mechanisms are never declared."""
 
 import pytest
 
@@ -6,7 +6,7 @@ from yeto.rl.adapters.miles import entry
 from yeto.rl.engine.algorithm import AlgorithmSpecError, allowance_names, check_unverified_allowance
 
 
-def test_never_declarable_list_is_the_d6_set():
+def test_never_declarable_list_is_the_designed_set():
     assert entry.NEVER_DECLARABLE == {
         "corrections:custom",
         "features:plugins",

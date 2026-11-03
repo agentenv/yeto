@@ -101,8 +101,8 @@ class RoundCutHooks:
     over ``self.round_cuts`` (:class:`~.round_cut.RoundCutCheckpoint`, wired when a
     checkpoint store is configured; None: no cuts).
 
-    :class:`LocalOnlySync` resumes from its cuts. A synced island (S27 R-2:
-    ``--rl-checkpoint-store`` with a syncer) only writes them -- for offline
+    :class:`LocalOnlySync` resumes from its cuts. A synced island
+    (``--rl-checkpoint-store`` with a syncer) only writes them -- for offline
     evaluation and as the island's own record; at start its syncer stays
     authoritative for the policy -- and cuts periodically only (no final cut:
     the syncer holds the final policy)."""
@@ -141,7 +141,7 @@ class RoundCutHooks:
             rollout_id, final=self._cut_final(rollout_id))
 
     def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
-        """E1: write the trainer part of the cut due at the next safe point while the
+        """Write the trainer part of the cut due at the next safe point while the
         trainer is still resident (the driver calls this right before it offloads a
         colocated trainer for the publication). A failure is reported, not fatal: the
         safe point then cuts the usual way."""
@@ -164,21 +164,21 @@ class LocalOnlySync(RoundCutHooks):
         if num_rollout < 1:
             raise ValueError("num_rollout must be positive")
         self.num_rollout = num_rollout
-        # rl-multinode-island M4: miles_adapter.round_cut.RoundCutCheckpoint, wired when
+        # M4: miles_adapter.round_cut.RoundCutCheckpoint, wired when
         # a checkpoint store is configured (resume from the newest round cut).
         self.round_cuts: Any = None
         # rl-resume-from-checkpoint: our own stop after this many rounds (exclusive
         # rollout id; None = run to num_rollout). A final cut is kept at the stop.
         self.stop_after: int | None = None
-        # rl-trainer-start-stop D3: trigger of the final cut (None = MANUAL); the
+        # Trigger of the final cut (None = MANUAL); the
         # trainer lifecycle sets SCHEDULED for a stop the trainer scheduler ordered.
         self.final_trigger: str | None = None
-        # S27 G-EQ5 (gap 22): the version the island's account continues at
+        # The version the island's account continues at
         # (:meth:`resume_at`); 0 = this process starts the account at v0.
         self.resumed_at = 0
 
     def resume_at(self, version: int) -> None:
-        """S27 G-EQ5 (gap 22): continue the version account at ``version`` K instead
+        """Continue the version account at ``version`` K instead
         of at 0, for a buffer trainer that found releases up to vK in its store
         (``merged_release.ResumedReleases``): its first publication is vK, its rounds
         are K, K+1, ..., and ``num_rollout`` stays the rounds *this process* runs,
@@ -235,7 +235,7 @@ class LocalOnlySync(RoundCutHooks):
         version = getattr(driver, "published_version", None)
         if self.round_cuts is not None and version is not None:
             # after the last round's boundary + publish the island is at a round-boundary
-            # safe point (nothing in flight); the cut requires it settled (G2 A: refused
+            # safe point (nothing in flight); the cut requires it settled (it is refused with
             # "the outer commit of this cut is not settled" without this)
             driver.at_safe_point = True
             self.at_safe_point(driver, rollout_id=int(version), final=True)
@@ -257,7 +257,7 @@ def whole_round_restart_cursor(current: Mapping[str, int] | None, start_rollout_
     cursor must carry ``sample_offset`` (groups drawn so far), and
     ``sample_group_index`` moves with it when present. None when unknown.
 
-    Shared by strict and elastic sync (S17 N16: strict had none, so a verl island
+    Shared by strict and elastic sync (strict had none before, so a verl island
     relaunched at v2 re-drew its rollout-0 prompts)."""
     if not groups_per_round or start_rollout_id <= 0:
         return None
@@ -352,7 +352,7 @@ class StrictAvgSync(RoundCutHooks):
     """Strict-avg at the safe boundary: export+PUSH, wait v+1, reset-apply."""
 
     # a strict roster has every island train every round: one island cannot end on
-    # its own when its buffer is exhausted (S26 E9.3)
+    # its own when its buffer is exhausted
     ends_on_data_end = False
 
     def __init__(
@@ -368,7 +368,7 @@ class StrictAvgSync(RoundCutHooks):
         self.bridge: StrictRlBridge | None = None
         self.current: CanonicalLoraState | None = None
         self.permit = None
-        self._submit_ts: float | None = None  # L5.6: when the last PUSH was handed over
+        self._submit_ts: float | None = None  # When the last PUSH was handed over
 
     def _apply(self, driver: IslandDriver, state: CanonicalLoraState) -> TrainableState:
         return driver.apply_policy(
@@ -397,14 +397,14 @@ class StrictAvgSync(RoundCutHooks):
 
     def restart_cursor_fallback(self, current: Mapping[str, int] | None,
                                 start_rollout_id: int) -> dict[str, int] | None:
-        """S17 N16: a strict island relaunched at v > 0 without a ledger cursor (new
+        """A strict island relaunched at v > 0 without a ledger cursor (new
         container, or no ``--rl-elastic`` ledger) must not re-draw rounds 0..v-1."""
         return whole_round_restart_cursor(current, start_rollout_id,
                                           getattr(self.config, "groups_per_round", None))
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         # Strict: local round ``rollout_id + 1`` is the last iff it reaches
-        # global_rounds (fix-decoupled-lr-schedule D4).
+        # global_rounds.
         return rollout_id + 1 >= self.config.global_rounds
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
@@ -466,7 +466,7 @@ class StrictAvgSync(RoundCutHooks):
             raise RuntimeError("final policy differs from the committed global policy")
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
-        if self.bridge is not None:  # strict roster: no LEAVE semantics (design D3)
+        if self.bridge is not None:  # strict roster: no LEAVE semantics
             self.bridge.client.close()
 
 
@@ -585,7 +585,7 @@ class PoolAvgSync(RoundCutHooks):
             driver.emit(ev["event"], **fields)
 
     def _base_timing(self, submit_ts: float, base) -> SyncTiming:
-        """L5.6 timing of ``base``; the client records receive time only
+        """Timing of ``base``; the client records receive time only
         for its latest base, so an older one has no global_ready_ts."""
         timing = getattr(self.client, "latest_base_timing", None)
         if timing is None or getattr(self.client, "latest_base", None) is not base:
@@ -684,7 +684,7 @@ class PoolAvgSync(RoundCutHooks):
         return whole_round_restart_cursor(current, start_rollout_id, self.groups_per_round)
 
     def _reached_final(self) -> bool:
-        """S17 M1: a pool island ends once it applied the syncer's final outer
+        """A pool island ends once it applied the syncer's final outer
         version, not after ``global_rounds`` LOCAL rounds.  A re-JOINed island lost
         rounds (its delta refused while it was not a member) yet its local rollout
         id kept counting, so on the local count it would leave before the last
@@ -763,7 +763,7 @@ class PoolAvgSync(RoundCutHooks):
         reason wins: a reclaim listener's PREEMPTED is not overwritten by the
         driver's close). The reason goes on the island tape; a failure to
         close is reported as ``elastic_leave_failed``, never raised: the driver
-        may be propagating the original error (design D2)."""
+        may be propagating the original error."""
         with self._leave_lock:
             if self.client is None or self.left:
                 return False
@@ -789,7 +789,6 @@ class PoolAvgSync(RoundCutHooks):
 
 # ---------------------------------------------------------------------------
 # Strict-avg with a critic: two syncer channels, one atomic commit
-# (rl-algo-critic-family 4.2.3, design D4 plan a)
 # ---------------------------------------------------------------------------
 class CrossChannelCommitError(RuntimeError):
     """The actor or critic channel did not reach v+1: neither role was applied."""
@@ -854,7 +853,7 @@ class DualStrictAvgSync:
     equal the actor round, 4.3)."""
 
     # a strict roster has every island train every round: one island cannot end on
-    # its own when its buffer is exhausted (S26 E9.3)
+    # its own when its buffer is exhausted
     ends_on_data_end = False
 
     OUTER_SYNC_KIND = "strict"
@@ -909,7 +908,7 @@ class DualStrictAvgSync:
     def _critic_catchup(self, driver: IslandDriver, version: int, actor: SyncStart) -> SyncStart:
         """The island died after the actor channel committed round ``version + 1``
         but before its critic push for that round reached the critic syncer (a
-        ~2.4 GB upload; s19-ppo-g3-20261009b). The fixed-roster critic syncer still
+        ~2.4 GB upload). The fixed-roster critic syncer still
         waits for this learner's round-``version + 1`` contribution, and the trained
         critic of that round is lost. Submit the committed critic unchanged (zero
         delta) so the critic channel also reaches ``version + 1``; the other islands'
@@ -1045,7 +1044,7 @@ class DecoupledSync(RoundCutHooks):
         self.action_tokens = 0
         self.finished = False
         self._driver: IslandDriver | None = None
-        # Wall seconds blocked on the syncer in the current boundary (L5.6).
+        # Wall seconds blocked on the syncer in the current boundary.
         self._remote_wait_seconds = 0.0
 
     # legacy-compatible helpers ------------------------------------------
@@ -1199,7 +1198,7 @@ class DecoupledSync(RoundCutHooks):
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         # Decoupled: final once the syncer's final cut is known (finalizing),
-        # or this round exhausts the island's optional step budget (D4).
+        # or this round exhausts the island's optional step budget.
         if self.bridge is not None and self.bridge.finalizing:
             return True
         budget = getattr(self.args, "yeto_rl_learner_budget_steps", None)
@@ -1224,7 +1223,7 @@ class DecoupledSync(RoundCutHooks):
 
     def _remote_wait(self, call, *args, **kwargs):
         """Run a bridge call that blocks on the syncer and add its wall time
-        to this boundary's ``sync/remote_quorum_wait_seconds`` (L5.6). A
+        to this boundary's ``sync/remote_quorum_wait_seconds``. A
         normal decoupled round does not block, so the value stays 0 there."""
         import time
 
@@ -1306,5 +1305,5 @@ class DecoupledSync(RoundCutHooks):
             raise RuntimeError("stopped before decoupled RL finalization")
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
-        if self.bridge is not None:  # no LEAVE semantics (design D3)
+        if self.bridge is not None:  # no LEAVE semantics
             self.bridge.close()

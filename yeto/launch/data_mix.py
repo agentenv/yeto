@@ -1,4 +1,4 @@
-"""``--data-mix``: several prompt data sets with weights (S27 P3).
+"""``--data-mix``: several prompt data sets with weights.
 
 ``--data-mix 'a.jsonl=0.7,org/ds@rev=0.3'`` names each source (a local path
 or an HF dataset id with an optional ``@revision``) and its weight. Before

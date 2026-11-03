@@ -52,7 +52,7 @@ def _is_elastic_record(record: dict) -> bool:
 
 def record_metrics(rec: dict, folder: MergeMetricsFolder) -> dict | None:
     """Metrics to log for one tape record, or None. Elastic records go
-    through ``folder`` and log only once per outer step (L5.5)."""
+    through ``folder`` and log only once per outer step."""
     if _is_elastic_record(rec):
         return folder.feed(rec)
     return tape_metrics(rec)
@@ -110,7 +110,7 @@ def tape_metrics(rec: dict) -> dict:
     ):
         if source in rec:
             metrics[metric] = int(rec[source])
-    if "checkpoint_ms" in rec:  # per-round checkpoint wall time (S26 E3)
+    if "checkpoint_ms" in rec:  # per-round checkpoint wall time
         metrics["sync/checkpoint_ms"] = float(rec["checkpoint_ms"])
     if "sweep_complete" in rec:
         metrics["sync/sweep_complete"] = int(bool(rec["sweep_complete"]))
@@ -149,7 +149,7 @@ def tape_metrics(rec: dict) -> dict:
         metrics[f"{learner}/c_steps"] = float(accounted_steps)
         metrics[f"{learner}/c_tokens"] = float(accounted_tokens)
         metrics[f"{learner}/base_version"] = float(responder.get("base_version", 0))
-        if "recv_seconds" in responder:  # upload time of this push (D4 timing)
+        if "recv_seconds" in responder:  # upload time of this push
             metrics[f"{learner}/push_recv_seconds"] = float(responder["recv_seconds"])
     # A missing island logs an explicit 0 so its participation curve shows
     # the dropout instead of flatlining at its last contributed value.

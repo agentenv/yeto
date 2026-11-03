@@ -1,4 +1,4 @@
-"""Environment names of a records proxy built inside a trainer's rollout process (S25 N10.9).
+"""Environment names of a records proxy built inside a trainer's rollout process.
 
 Shared by the backend adapters (verl ``rollout_engine``, Miles
 ``records_generate``); kept here so adapters do not import each other.
@@ -11,7 +11,7 @@ SAMPLING_ENV = "YETO_RECORDS_SAMPLING"          # JSON signed sampling
 MAX_MODEL_LEN_ENV = "YETO_RECORDS_MAX_MODEL_LEN"  # context length of the rollout engine
 CARD_ENV = "YETO_RECORDS_CARD"                  # GPU name (provenance)
 
-# S27 G-FS: the proxy's own server names. They live here, not in ``recorder``,
+# the proxy's own server names. They live here, not in ``recorder``,
 # so the launch layer can name the tunnelled port without importing aiohttp
 # (``recorder`` imports ``.proxy``); ``recorder`` re-exports them.
 PROXY_ENV = "YETO_RECORDS_PROXY"                  # module:callable returning a RecordsProxy

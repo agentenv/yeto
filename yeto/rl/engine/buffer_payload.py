@@ -37,7 +37,7 @@ class SampleBufferRolloutError(RuntimeError):
 
 class SampleBufferExhausted(SampleBufferRolloutError):
     """The samplers ended the buffer and no trainable group is left for the round
-    (S26 E9.3). The trainer's run ends normally (FINISHED) before this round; it
+    The trainer's run ends normally (FINISHED) before this round; it
     is not a failure: e.g. groups were passed over as older than max_policy_age,
     so the data holds fewer rounds than --total-steps."""
 
@@ -54,7 +54,7 @@ def is_buffer_exhausted(error: BaseException | None) -> bool:
 # class name -> data end kind; matched by name (the error comes from another process)
 _DATA_END_KINDS = {
     SampleBufferExhausted.__name__: "buffer_exhausted",
-    # yeto.rl.engine.task_dispense.DispenseEnded (S27 P2: --rl-data-passes used up)
+    # yeto.rl.engine.task_dispense.DispenseEnded (--rl-data-passes used up)
     "DispenseEnded": "dispense_ended",
 }
 
@@ -184,7 +184,7 @@ PROMPT_TOKENIZED_BY = "prompt_tokenized_by"  # metadata: who produced the prompt
 
 def complete_prompt_tokens(sample: Mapping[str, Any],
                            tokenize: Callable[[str], Sequence[int]] | None) -> dict[str, Any]:
-    """Trainer side of ``metadata.prompt_tokens_known`` (S25 N2.3 payload).
+    """Trainer side of ``metadata.prompt_tokens_known``.
 
     An engine that does not return the prompt ids (SGLang text input) writes
     ``tokens`` = response only and ``prompt_tokens_known`` False.  The trainer
@@ -226,9 +226,9 @@ class GroupWriter:
     def write(self, samples: Sequence[Mapping[str, Any]], *, group_key: str,
               provenance: Mapping[str, str] | None = None,
               sampler_round: Mapping[str, Any] | None = None) -> SampleIndexEntry:
-        """``provenance``: the sampler's source record for the index entry (S25 N2.4);
+        """``provenance``: the sampler's source record for the index entry;
         ``sampler_round``: the round record a replacement sampler resumes from
-        (``sampler_resume.SamplerRound.record()``, S25 C1)."""
+        (``sampler_resume.SamplerRound.record()``)."""
         behavior_version, tokens = group_entry_fields(samples)
         sample_id = f"{self.sampler_id}-{group_key}"
         ref = self.buffer.write_payload(sample_id, encode_group(samples))

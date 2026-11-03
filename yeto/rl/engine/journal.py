@@ -1,4 +1,4 @@
-"""Durable reconfiguration journal (rl-infra-spec 3.2, design D4, f-design §1.3/§1.4).
+"""Durable reconfiguration journal.
 
 Two files under the island's persistent state directory:
 
@@ -11,10 +11,10 @@ Two files under the island's persistent state directory:
   ``config_id``, ``fork_membership_epoch``, ...). It changes only through
   :meth:`Journal.compare_and_swap`: read, compare the expected epochs, write
   a temp file, ``fsync``, ``rename``, ``fsync`` the directory. The rename is
-  the single commit point of a transaction (D4 "durable compare-and-swap").
+  the single commit point of a transaction ("durable compare-and-swap").
 
 A process holds the writer lock (``flock`` on ``journal.lock``) for as long
-as the :class:`Journal` object is open: one writer per island (D4 single
+as the :class:`Journal` object is open: one writer per island (single
 writer). Readers (status CLI) use :func:`read_journal` without the lock.
 JSONL observation events (``EventTape``) are NOT this journal and never act
 as the WAL.

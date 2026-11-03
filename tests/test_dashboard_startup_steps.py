@@ -1,4 +1,4 @@
-"""fleet-dashboard 8.4: startup heartbeat / resource sampling and sub-step events."""
+"""Startup heartbeat / resource sampling and sub-step events."""
 
 import threading
 

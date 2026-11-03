@@ -111,7 +111,7 @@ def parse_args(argv=None):
     p.add_argument("--expert-parallel", type=int, default=1)
     p.add_argument("--tensor-parallel", type=int, default=1)
     p.add_argument("--pipeline-parallel", type=int, default=1)
-    # S27 G-FL: same default and same off-switch as the verl Megatron island
+    # Same default and same off-switch as the verl Megatron island
     # (yeto.rl.megatron_grad_checks). NOT hardware-verified on this path.
     p.add_argument("--rl-no-grad-nan-check", action="store_true")
     from ..wandb_logger import add_arguments as add_wandb_arguments
@@ -397,7 +397,7 @@ def main(argv=None):
     adapter_init = {n: p.detach().clone() for n, p in _adapter_params(model).items()}
 
     # mcore DDP wrap so grads land in the distributed optimizer's buckets.
-    # S27 G-FL: check every gradient bucket for non-finite values (on by default);
+    # Check every gradient bucket for non-finite values (on by default);
     # without it a NaN gradient is scaled into every parameter by clip_grads instead
     # of raising (yeto.rl.megatron_grad_checks). This learner has no hardware
     # verification at all, so the setting is for consistency with the verl Megatron
@@ -764,5 +764,5 @@ def _cycle(dataset, micro_batch_size: int = 1):
 if __name__ == "__main__":
     from yeto.island_credential_guard import check_island_credentials
 
-    check_island_credentials()  # secret-handling-hardening D4
+    check_island_credentials()  # secret-handling-hardening
     main()

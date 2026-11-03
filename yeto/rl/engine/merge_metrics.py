@@ -1,4 +1,4 @@
-"""Per-outer-step merge metrics from the elastic syncer tape (rl-trainer-start-stop D9, L5.5).
+"""Per-outer-step merge metrics from the elastic syncer tape.
 
 The elastic syncer (``syncer/src/elastic.rs``) writes one JSONL record per
 event, keyed by ``kind``. :class:`MergeMetricsFolder` reads those records in
@@ -12,7 +12,7 @@ order and returns one flat metrics dict per ``outer_step``:
   over all deltas submitted in the round; ``merge/carried_discount_mean``.
 * ``merge/rejected_fraction`` and ``merge/rejected_fraction/<reason>`` -
   rejected deltas over all deltas submitted in the round.
-* Timing from the tape clock (L5.7) when present: ``merge/step_seconds``,
+* Timing from the tape clock when present: ``merge/step_seconds``,
   ``merge/last_arrival_island``, ``merge/time_unix``.
 
 "Submitted in the round" counts every ``delta_accepted``,

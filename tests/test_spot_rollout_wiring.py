@@ -1,4 +1,4 @@
-"""S27 G-EA wiring: the spot-rollout options are off by default (commands,
+"""Wiring: the spot-rollout options are off by default (commands,
 island argv and environment unchanged) and reach the syncer and islands when
 given."""
 
@@ -142,7 +142,7 @@ def test_wire_constants_match_the_syncer():
     assert 'b"yeto-relay-hello-mac-v1\\0"' in rust and relay.RELAY_MAC_DOMAIN == b"yeto-relay-hello-mac-v1\0"
     for role in ("ROLE_PRODUCER", "ROLE_CONSUMER", "ROLE_BOARD"):
         assert f"pub const {role}: u8 = {getattr(relay, role)};" in rust
-    # S27 dispatch merge: the shared member table (stream, incarnation trailer, fences)
+    # The shared member table (stream, incarnation trailer, fences)
     from yeto.rl.spot_rollout import subscriber
 
     assert f"pub const RELAY_VERSION: u16 = {relay.RELAY_VERSION};" in rust and relay.RELAY_VERSION == 2
@@ -252,7 +252,7 @@ def test_materialize_joins_row_slices_and_strips_the_wire_prefix(tmp_path):
     tensors = load_file(str(out / "model.safetensors"))
     assert sorted(tensors) == ["decoder.w"] and tensors["decoder.w"].float().tolist() == weight.tolist()
     assert (out / "tokenizer.json").is_file() and (out / "config.json").is_file()
-    # With base weights in the directory, the HF names must equal them (G-EE): a
+    # With base weights in the directory, the HF names must equal them: a
     # missing weight would keep its old value in the engine after the reload.
     from safetensors.torch import save_file
 

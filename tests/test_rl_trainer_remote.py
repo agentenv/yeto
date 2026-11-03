@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L5.3c (CPU, fakes): the trainer on its own island.
+"""CPU, fakes: the trainer on its own island.
 
 The head runs the scheduler loop with :class:`RemoteTrainerLifecycle`; each
 incarnation is a fake "island" (a thread running :class:`IslandTrainerAgent` over a
@@ -244,7 +244,7 @@ def test_island_that_dies_is_failed_and_released(tmp_path):
 
 
 def test_data_end_below_one_batch_finishes_without_a_trainer(tmp_path):
-    """S1 boundary: less than one batch at the data end -> stop, the loop ends."""
+    """Boundary: less than one batch at the data end -> stop, the loop ends."""
     clock = _Clock()
     islands, lifecycle, cuts, head_buffer = _setup(tmp_path)
     journal = Journal(tmp_path / "head" / "journal")

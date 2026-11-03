@@ -1,4 +1,4 @@
-"""dashboard 5.1/5.2: reducer prefers controller events, falls back to journal records."""
+"""Dashboard 5.1/5.2: reducer prefers controller events, falls back to journal records."""
 from __future__ import annotations
 
 from yeto.dashboard.reducer import Reducer

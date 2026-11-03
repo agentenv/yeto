@@ -1,4 +1,4 @@
-"""S25 N10.9: the verl agentic entry's Ray setup hook imports nothing CUDA-related (CPU)."""
+"""The verl agentic entry's Ray setup hook imports nothing CUDA-related (CPU)."""
 
 from __future__ import annotations
 

@@ -1,2 +1,3 @@
 # Files allowed above the 500 KB limit (one path or fnmatch glob per line).
 syncer/src/server.rs
+uv.lock

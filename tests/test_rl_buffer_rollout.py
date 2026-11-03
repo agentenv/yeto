@@ -1,4 +1,4 @@
-"""rl-trainer-start-stop L4.5 (CPU, no Ray, no Miles): the Miles rollout through
+"""CPU, no Ray, no Miles: the Miles rollout through
 the durable sample buffer -- payload codec, sampler writes, trainer selection with
 the version gate, the watermark in the round cut, crash and restart in processes."""
 
@@ -70,7 +70,7 @@ def test_rollout_function_paths_name_classes_of_the_plugin_module():
 
 
 def test_convertible_rollout_switches_between_generating_and_reading(monkeypatch):
-    """L7.5: a convertible node generates into its shard (sampler mode) until it
+    """A convertible node generates into its shard (sampler mode) until it
     converts; in trainer mode the same function reads the buffer."""
     plugin = _import_plugin_with_stub_miles(monkeypatch, {})
     fn = plugin.ConvertibleRolloutFn.__new__(plugin.ConvertibleRolloutFn)
@@ -115,7 +115,7 @@ def _import_plugin_with_stub_miles(monkeypatch, registry):
 
 
 def test_reader_round_calls_the_metadata_hooks(monkeypatch):
-    """L5.4 j: a trainer that reads the buffer must still run Miles' end-of-round hooks,
+    """A trainer that reads the buffer must still run Miles' end-of-round hooks,
     or the driver finds no rollout metadata for the round."""
     calls = []
     registry = {"filter": lambda args, data: calls.append(("filter", data)),
@@ -416,7 +416,7 @@ def _round_batch(rollout_id):
 
 
 def test_full_parameter_trainer_stops_at_a_scheduled_cut_and_continues_without_retraining(tmp_path):
-    """L5.4 k blocker (T-FCUT): a full-parameter trainer stopped by the scheduler cuts
+    """Blocker: a full-parameter trainer stopped by the scheduler cuts
     (trigger SCHEDULED); the next incarnation restores it, continues the policy version
     and the buffer position, trains no group twice and ends bitwise equal to a run
     that never stopped."""
@@ -474,7 +474,7 @@ def test_full_parameter_trainer_stops_at_a_scheduled_cut_and_continues_without_r
 
 
 def test_reader_round_reports_its_stale_groups_as_round_metadata(monkeypatch):
-    """T-EVAL E4: the groups the reader passed over this round reach the driver as
+    """The groups the reader passed over this round reach the driver as
     per-round metadata (driver event rl_buffer_stale_skipped), before the
     end-of-round hooks put the round's main record."""
     from types import SimpleNamespace

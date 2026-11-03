@@ -21,6 +21,9 @@ dependencies = [
     "cloudpickle",
     "huggingface-hub>=0.34",
     "safetensors>=0.4",
+    # Delta release format v2 compresses with zstd; Python >= 3.14 ships it
+    # in the standard library (compression.zstd).
+    "zstandard>=0.22; python_version < '3.14'",
 ]
 
 [project.optional-dependencies]
@@ -33,21 +36,20 @@ modal = ["modal>=1.0"]
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 qlora = ["bitsandbytes>=0.46.1"]
 local-rl = ["gymnasium>=0.29.0", "requests>=2.31.0", "numpy>=1.24"]
-diffusion = ["diffusers>=0.35", "safetensors", "pillow", "imageio[ffmpeg]", "bitsandbytes>=0.46.1"]
+diffusion = ["diffusers>=0.35", "pillow", "imageio[ffmpeg]", "yeto[qlora]"]
 diffusion-protenix = ["protenix; python_version >= '3.11'"]
 a100-liger = ["liger-kernel==0.8.0", "peft==0.19.1"]
 a100-flash-attn = ["flash-attn==2.8.3"]
 wandb = ["wandb>=0.18"]
 dev = ["pytest", "pytest-timeout", "pytest-asyncio"]
 # Local safe test suite (docs/TESTING.md): the dev tools plus the optional
-# packages the unit tests import. Versions match the head venv (10-09).
+# packages the unit tests import. peft follows the exact version the
+# a100-liger lane requires (yeto/kernel_deps.py), so both extras co-install.
 test = [
-    "pytest",
-    "pytest-timeout",
-    "pytest-asyncio",
+    "yeto[dev]",
     "skypilot[aws,runpod,nebius,verda]==0.13.0",
     "boto3==1.43.104",
-    "peft==0.21.0",
+    "peft==0.19.1",
     "accelerate==1.15.0",
     "pylatexenc==2.10",  # vendored Miles math grader (test_rl_neutral_rewards)
     "pillow",  # diffusion tests
@@ -72,4 +74,4 @@ include = ["yeto*"]
 [tool.setuptools.package-data]
 "yeto.dashboard" = ["*.json", "static/*"]
 "yeto.cloud" = ["*.json"]
-"yeto.rl.adapters.miles" = ["*.json"]
+"yeto.rl.adapters.miles" = ["*.json", "overlays/*.patch"]

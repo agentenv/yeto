@@ -4,7 +4,7 @@
 runtime contract and one layout attestation per island plus a manifest that
 names them and the frozen syncer semantic profile.  The launcher reads the
 manifest to start one syncer per role with exactly that profile and to send
-every island its own contract (P0-1.7b.3).
+every island its own contract.
 
 Import-light: no torch, ray or miles.
 """

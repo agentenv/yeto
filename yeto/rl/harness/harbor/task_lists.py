@@ -1,4 +1,4 @@
-"""Task lists over Harbor task directories: TB2 hold-out, training split, curriculum (S26 E9.5).
+"""Task lists over Harbor task directories: TB2 hold-out, training split, curriculum.
 
 Harbor reads its tasks from task directories (``<task>/task.toml``,
 ``instruction.md``, ``environment/``, ``tests/``, ``solution/``).
@@ -8,9 +8,9 @@ Both Terminal-Bench layouts are accepted: TB2 (task directories at the
 checkout root) and TB2.1 (under ``tasks/``).
 
 Hold-out and training split (rewrite of the generator that left with the
-self-written Codex harness, git tag ``s26-pre-harness-removal``): the rule is
-the one recorded in ``data/eval/tb2-holdout.json`` (WP3
-rl-eval-difficulty-buckets D2/D6b): drop the S15 smoke-6 and the unusable
+self-written Codex harness): the rule is
+the one recorded in ``data/eval/tb2-holdout.json``:
+drop the smoke-6 and the unusable
 table from the pool, then draw a stratified sample per official difficulty
 with :func:`~yeto.rl.harness.reward_env.benchmark.build_holdout` (rank by
 ``sha256(f"{seed}/{task_id}")``, independent of input order).  The training
@@ -48,14 +48,14 @@ DIFFICULTIES = ("easy", "medium", "hard")
 # --- TB2 hold-out rule (values of data/eval/tb2-holdout.json) -----------------
 HOLDOUT_SEED = 20261008
 HOLDOUT_QUOTAS: dict[str, int | None] = {"tb2-easy": 2, "tb2-medium": 18, "tb2-hard": 10}
-HOLDOUT_RULE = "exclude smoke6 (S15 trained); stratified by difficulty: easy 2 / medium 18 / hard 10"
-HOLDOUT_RULE_UNUSABLE = ("exclude smoke6 (S15 trained) and data/eval/tb2-unusable.json; "
+HOLDOUT_RULE = "exclude smoke6 (trained in the smoke runs); stratified by difficulty: easy 2 / medium 18 / hard 10"
+HOLDOUT_RULE_UNUSABLE = ("exclude smoke6 (trained in the smoke runs) and data/eval/tb2-unusable.json; "
                          "stratified by difficulty: easy 2 / medium 18 / hard 10")
-# WP3 D2 (#123 c8979bd2): trained on in both S15 GPU runs; they leave the eval pool
+# Trained on in both smoke GPU runs; they leave the eval pool
 # (they may stay in training).
 SMOKE6_TASK_IDS = ("fix-git", "regex-log", "sqlite-db-truncate", "log-summary-date-ranges",
                    "openssl-selfsigned-cert", "git-multibranch")
-SMOKE6_REASON = "S15 smoke training"
+SMOKE6_REASON = "trained in the smoke runs"
 
 UNUSABLE_SCHEMA = "yeto.tb2-unusable/v1"
 UNUSABLE_DEFAULT_PATH = Path(__file__).resolve().parents[4] / "data" / "eval" / "tb2-unusable.json"
@@ -246,7 +246,7 @@ _DIFFICULTY_RANK = {d: i for i, d in enumerate(DIFFICULTIES)}
 def load_reference_results(path: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
     """Reference-solution runs (jsonl rows with ``task``/``task_id`` and ``passed``) -> per task.
 
-    Shape of the S17 positive control (``s17-g3-reward-env/pos-all.jsonl``).  A
+    Shape of a positive-control run (``pos-all.jsonl``).  A
     row with an ``error`` and no ``passed`` is a run that gave no verdict (an
     infrastructure failure): it is not a fact about the task and is skipped.
     A task with several verdicts must agree on ``passed`` or it fails closed.
@@ -358,7 +358,7 @@ def assert_no_holdout(task_ids: Iterable[str], holdout: Mapping[str, Any]) -> No
 
 # --- dataset rows for the two backends ----------------------------------------------
 #
-# Formats read from the adapter code and the S25 T-N109 runs (verl and Miles on TB2.1):
+# Formats read from the adapter code and real runs (verl and Miles on TB2.1):
 # * Miles (``--input-key prompt --metadata-key metadata``): ``metadata`` is the
 #   sample metadata ``harbor_agent.task_from_metadata`` reads (``instance_id`` is
 #   the Harbor task directory, ``agent_name`` the agent); Harbor reads the

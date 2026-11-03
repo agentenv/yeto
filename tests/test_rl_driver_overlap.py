@@ -1,4 +1,4 @@
-"""rl-infra-spec 2.3: IslandDriver partitioned-overlap (eval||train/outer_sync) on the fake engine."""
+"""IslandDriver partitioned-overlap (eval||train/outer_sync) on the fake engine."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def test_overlap_profiles_other_than_the_implemented_pairs_are_refused(tmp_path)
                             capabilities=fake_capabilities(execution_modes=MODES),
                             evaluate=lambda r: {}, eval_interval=1,
                             evaluate_start=lambda r: None)
-        with pytest.raises(DriverError, match="2.3"):
+        with pytest.raises(DriverError, match="not runnable"):
             driver.run()
         assert engine.calls == []
     engine = _engine(placement_kind="fixed-partition")

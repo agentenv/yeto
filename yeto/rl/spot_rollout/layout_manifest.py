@@ -1,4 +1,4 @@
-"""The trainer's fragment layout as a JSON record (S27 G-EA).
+"""The trainer's fragment layout as a JSON record.
 
 A subscriber must send the exact layout of the session (the syncer compares
 it and its fingerprint) and needs the tensor names to turn fragment bytes

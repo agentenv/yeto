@@ -46,7 +46,7 @@ class LeaveReason(IntEnum):
     INFRA_FAILED = 4
     TRAINING_FAILED = 5
     CONFIG_MISMATCH = 6
-    # S29 D4: the member is not part of this run any more: a newer incarnation
+    # The member is not part of this run any more: a newer incarnation
     # took its id ("superseded") or a fresh syncer replaced the run it joined
     # ("other run"). An older syncer names the byte unknown_7.
     FENCED = 7
@@ -206,7 +206,7 @@ class PoolIslandClient:
             compat_group=config.compat_group, max_reconnects=config.max_rejoin_failures,
             syncer_epoch=int(config.syncer_epoch))
         self.latest_base: PoolBase | None = None
-        # L5.6: (Unix time the base became visible, seconds from receipt to visible)
+        # (Unix time the base became visible, seconds from receipt to visible)
         self.latest_base_timing: tuple[float, float] | None = None
         self.inner_step = 0
         self.final_outer_version: int | None = None

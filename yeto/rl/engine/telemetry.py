@@ -129,7 +129,7 @@ class ResourceSampler(_Periodic):
     """2.2: ``rl_resource_sample`` every ``interval_s``, single fallback record.
 
     The card source is a :class:`yeto.hw.card_telemetry.CardCollector` of the
-    island's device family (S25 N2.2): ``collector`` when given, else the one of
+    island's device family: ``collector`` when given, else the one of
     ``$YETO_DEVICE_FAMILY`` (``cuda`` when unset: NVML through
     ``nvml_loader``, as before). A collector that cannot open writes one
     ``available: false`` record that names the reason, and no thread starts."""

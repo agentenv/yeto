@@ -3,7 +3,7 @@
  "benchmark": "tb2",
  "benchmark_version": "tb2.1@7131e43",
  "seed": 20261008,
- "rule": "exclude smoke6 (S15 trained) and data/eval/tb2-unusable.json; stratified by difficulty: easy 2 / medium 18 / hard 10",
+ "rule": "exclude smoke6 (trained in the smoke runs) and data/eval/tb2-unusable.json; stratified by difficulty: easy 2 / medium 18 / hard 10",
  "excluded": [
   {
    "task_id": "adaptive-rejection-sampler",
@@ -31,15 +31,15 @@
   },
   {
    "task_id": "fix-git",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "git-multibranch",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "log-summary-date-ranges",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "mcmc-sampling-stan",
@@ -47,7 +47,7 @@
   },
   {
    "task_id": "openssl-selfsigned-cert",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "protein-assembly",
@@ -63,7 +63,7 @@
   },
   {
    "task_id": "regex-log",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "rstan-to-pystan",
@@ -75,7 +75,7 @@
   },
   {
    "task_id": "sqlite-db-truncate",
-   "reason": "S15 smoke training"
+   "reason": "trained in the smoke runs"
   },
   {
    "task_id": "sqlite-with-gcov",

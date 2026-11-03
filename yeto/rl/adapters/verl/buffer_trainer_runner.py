@@ -1,4 +1,4 @@
-"""verl buffer trainer island, image side (S25 C2; runs inside the verl image).
+"""verl buffer trainer island, image side (runs inside the verl image).
 
 The trainer island of a sampler/trainer split (``--rl-sample-role trainer``):
 verl's ``FullyAsyncTrainer`` trains, yeto's driver runs the rounds over the
@@ -13,7 +13,7 @@ instead of verl's rollouter (:mod:`.buffer_feed`, :mod:`.buffer_ports`).
   (``_YetoTrainerMixin``: assemble, train step with the mismatch criteria and
   the per-source off-policy metrics, LoRA export) plus ``yeto_add_group`` (one
   kept group's rows as a verl ``RolloutSample``) and ``yeto_param_version``.
-* A full-parameter trainer (S27 G-EW, VERL-PARITY #14): the same actor; its
+* A full-parameter trainer (VERL-PARITY #14): the same actor; its
   sync and policy state are the full-parameter island's
   (:mod:`.fully_async_full`) and each release is its own weights in the model's
   dtype (``buffer_ports.release_weights_for``). The samplers load full releases as before.
@@ -59,7 +59,7 @@ def rows_to_dataproto(rows: dict):
 
 
 def release_staging_dir(plan: dict, environ: dict) -> "Path":
-    """Where a buffer trainer stages a release before it publishes it (S27 G-EQ3):
+    """Where a buffer trainer stages a release before it publishes it:
     ``$YETO_RL_RELEASE_STAGING``, else a directory beside the island's output on
     local disk (the staged release is a whole checkpoint, and a Modal Volume or
     a shared mount is not a place to build one)."""
@@ -137,7 +137,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from .relay_trainer import RELAY_SECTION_KEY, install_relay_ports, relay_buffer
         from .trainer import run_fully_async_island
 
-        check_island_credentials()  # secret-handling-hardening D4 (buffer trainer Ray actor)
+        check_island_credentials()  # secret-handling-hardening (buffer trainer Ray actor)
         section = plan[SAMPLE_BUFFER_PLAN_KEY]
         self._initialize_trainer(config, int(plan["global_rounds"]))
         trainer = self.components["trainer"]
@@ -149,8 +149,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         environ = dict(os.environ)
         shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
                          int(tokenizer.pad_token_id))
-        if section.get(RELAY_SECTION_KEY):  # S27 G-EV: the spot samplers' groups through the relay
-            # S29 spot run (defect D6): the local buffer lives in the run's own sample store,
+        if section.get(RELAY_SECTION_KEY):  # The spot samplers' groups through the relay
+            # Spot run fix: the local buffer lives in the run's own sample store,
             # not in the host's temp dir. Under /tmp (keyed by learner id only) a fresh run
             # read the groups an earlier run on the same host had pumped, from position 0,
             # and trained them again; a relaunch of the same run still finds its own buffer.
@@ -161,7 +161,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
             def relay_ports(island):
                 return install_relay_ports(island, buffer=buffer, shape=shape, tokenize=tokenizer.encode,
                                            wait_s=float(section.get("wait_s") or 3600.0),
-                                           # S29 D3: a group short of samples_per_group breaks
+                                           # A group short of samples_per_group breaks
                                            # verl's mini-batch division; the feed drops it
                                            group_size=int(plan.get("samples_per_group") or 0) or None,
                                            poll_s=float(section.get("poll_s") or 2.0))
@@ -173,11 +173,11 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                 if pump is not None:
                     pump.stop()
         store = store_for(section["store"], environ=environ)
-        # S25 C3: a synced trainer reads its lane of the buffer (section "lane": "M/N")
+        # A synced trainer reads its lane of the buffer (section "lane": "M/N")
         buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
                                      lane=BufferLane.parse(section.get("lane")),
                                      shards=section.get("shards"))
-        # S27 G-EQ3 (gap 20): the mirror lets this trainer rebuild the store's newest
+        # The mirror lets this trainer rebuild the store's newest
         # release when that one is a delta, so a restarted island can still make its
         # next release a delta against it instead of uploading a whole checkpoint.
         release_root = str(section.get("release_store") or section["store"])
@@ -189,7 +189,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
                                         wait_s=float(section.get("wait_s") or 3600.0),
                                         poll_s=float(section.get("poll_s") or 2.0),
-                                        # S27 G-EQ3: a trainer without a lane keeps its own cursor,
+                                        # A trainer without a lane keeps its own cursor,
                                         # so a restart continues after the groups it already trained
                                         cursor_log=lane_cursor_log(buffer, int(plan["learner_id"])),
                                         # The store path drops short groups like the relay
@@ -197,10 +197,10 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         weights=release_weights_for(island, plan),
                                         staging=release_staging_dir(plan, environ),
                                         delta_full_every=int(section.get("release_delta_full_every") or 0),
-                                        # S28 G-120C: a measurement run writes no release
+                                        # A measurement run writes no release
                                         no_release=bool(section.get("no_release")),
                                         release_only=section.get("release_only"),
-                                        # S27 G-EQ5 (gap 22): this island counts its own
+                                        # This island counts its own
                                         # versions, so a new process of it continues the
                                         # account above the store's newest release
                                         resume_versions=plan["sync"] == "none")

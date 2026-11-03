@@ -244,9 +244,9 @@ def test_inflight_saver_commit_semantics_per_backend(tmp_path, monkeypatch):
     assert log.read_text().splitlines() == ["commit tape-vol"]
 
 
-# ---------------------------------------------------------------- rl-trainer-start-stop L3.2
+# ---------------------------------------------------------------- 
 def test_scheduled_cut_saves_and_resumes_like_a_manual_cut(tmp_path):
-    """D3: a stop the trainer scheduler orders writes a SCHEDULED cut; the next
+    """A stop the trainer scheduler orders writes a SCHEDULED cut; the next
     start restores it the same way as a MANUAL cut."""
     assert rc.SCHEDULED in rc.TRIGGERS and rc.SCHEDULED in rc.FINAL_TRIGGERS
     store = _store(tmp_path / "store")

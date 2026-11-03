@@ -1,4 +1,4 @@
-"""S25 C3: synced trainer islands feed sampler islands (yeto.rl.engine.merged_release).
+"""Synced trainer islands feed sampler islands (yeto.rl.engine.merged_release).
 
 Unit level: buffer lanes, the lane cursor log, the release guard, the publisher
 wrappers, the role checks and the launch/island flags. The end-to-end case with
@@ -334,7 +334,7 @@ def test_synced_trainer_plan_forwards_the_sample_store_and_lanes():
 
 
 def test_relay_trainers_read_their_whole_relay_buffer_as_one_lane():
-    """S27 G-EE: with --rl-sample-relay each synced trainer's local buffer holds only
+    """With --rl-sample-relay each synced trainer's local buffer holds only
     its own relay channel, so it reads every position (lane 0 of 1), not every
     second one."""
     from yeto.rl.adapters.miles import island_entry
@@ -350,7 +350,7 @@ def test_relay_trainers_read_their_whole_relay_buffer_as_one_lane():
 
 
 def test_synced_trainer_launch_writes_island_round_cuts():
-    """S27 R-2: a cut interval gives every synced trainer, in a fixed roster or an
+    """A cut interval gives every synced trainer, in a fixed roster or an
     island pool, its own write-only cuts."""
     from types import SimpleNamespace as NS
 

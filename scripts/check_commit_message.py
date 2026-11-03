@@ -20,8 +20,8 @@ SCISSORS = "# ------------------------ >8 ------------------------"
 # Han (incl. extension A and compatibility), CJK symbols and punctuation, kana,
 # hangul, and half-width / full-width forms.
 CJK_PATTERN = re.compile(
-    "[　-〿぀-ヿ㐀-䶿一-鿿"
-    "가-힯豈-﫿＀-￯]"
+    "[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
 )
 
 

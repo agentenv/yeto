@@ -1,4 +1,4 @@
-"""yeto GPU ids <-> bundles of the placement group Miles created at startup (E3 4.7 glue).
+"""yeto GPU ids <-> bundles of the placement group Miles created at startup (4.7 glue).
 
 A pool GPU id (``ElasticWiring.pool_gpus``, the ids the resources manifest's
 ``placement`` lists) is the LOGICAL bundle position of the fork-M1 placement
@@ -57,12 +57,12 @@ class StartupBundles:
                  gpus_per_node: int | None = None,
                  node_ids: Mapping[str, Any] | Sequence[Any] | None = None,
                  node_resolver: Any = None, head_node: Any = None) -> None:
-        """``gpus_per_node`` (rl-multinode-island D3) turns on the node-block
+        """``gpus_per_node`` (rl-multinode-island) turns on the node-block
         assertion: the node of every logical position comes from ``node_ids``
         (per pool GPU id, or per logical position) or else from the view's
         ``pg_reordered_node_ids``; missing -> ``BundleMapError`` (fail closed).
         ``head_node`` (the Ray head's node id) is required as soon as the pool
-        spans more than one node: block 0 must be the head (D3 head pin), a
+        spans more than one node: block 0 must be the head (head pin), a
         1-GPU-per-node island cannot make the block assertion alone tell."""
         self.pool_gpus = tuple(str(g) for g in pool_gpus)
         if len(set(self.pool_gpus)) != len(self.pool_gpus):
@@ -101,7 +101,7 @@ class StartupBundles:
                 raise BundleMapError(f"placement group is not node-blocked: {exc}") from None
             if head_node is None and len(self.node_blocks) > 1:
                 raise BundleMapError("multi-node island without the Ray head node id: cannot pin "
-                                     "logical node 0 to the head (D3)")
+                                     "logical node 0 to the head")
             if head_node is not None:
                 try:
                     assert_head_block(self.node_blocks, head_node)

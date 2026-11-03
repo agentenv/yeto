@@ -29,7 +29,7 @@ class FakePolicy:
     def __call__(self, messages):
         self.calls.append(messages)
         if messages[-1]["content"] == cp.SUMMARY_PROMPT:
-            body = f"S{sum(1 for c in self.calls if c[-1]['content'] == cp.SUMMARY_PROMPT)}"
+            body = f"summary-{sum(1 for c in self.calls if c[-1]['content'] == cp.SUMMARY_PROMPT)}"
             if self.summary_ok:
                 return f"<analysis>scratch notes</analysis><summary>{body}</summary>"
             return f"<analysis>scratch notes</analysis>{body}"
@@ -88,7 +88,7 @@ def test_rebuilt_context_is_system_resume_and_last_k_steps():
     seg1 = ep.segments[1].prompt
     assert seg1[0] == PROMPT[0]  # s = system prompt only
     assert seg1[1]["role"] == "user"
-    assert seg1[1]["content"] == cp.RESUME_TEMPLATE.format(summary="S1")
+    assert seg1[1]["content"] == cp.RESUME_TEMPLATE.format(summary="summary-1")
     assert "scratch notes" not in seg1[1]["content"]  # <analysis> dropped
     recent = seg1[2:]
     assert len(recent) == 4 and [m["role"] for m in recent] == ["assistant", "user"] * 2

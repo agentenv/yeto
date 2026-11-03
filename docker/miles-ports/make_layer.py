@@ -16,11 +16,11 @@ checkouts only in pure-Python files (checked below), so the layer:
   site-packages, as ``pip install --no-deps`` would,
 * replaces the base's ``megatron/bridge/__init__.py`` (Megatron-Bridge
   8cd3466) with ``megatron_bridge_init.py``: the same file without its eager
-  ``import modelopt.torch`` (rl-trainer-cold-start-cost L2.2),
+  ``import modelopt.torch``,
 * rewrites the Megatron-LM files (/root/Megatron-LM, base commit a84b105)
   touched by ``megatron_lm_lazy_modelopt.patch`` -- the patch applied to the
   commit's files from ``--megatron-lm-src`` -- so a trainer process does not
-  import modelopt unless a model uses it (L2.2),
+  import modelopt unless a model uses it,
 * adds /opt/yeto/image-manifest.json with every component SHA.
 
 Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.

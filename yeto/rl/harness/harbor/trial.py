@@ -62,7 +62,7 @@ class HarborSettings:
     trials_dir: Path = Path("/tmp/harbor_trials")
     provider_kwargs: Mapping[str, Any] = field(default_factory=dict)
     timeout_multiplier: float = 1.0
-    setup_retries: int = 0  # S26 E8: HarborHarness retries of failures before the agent ran
+    setup_retries: int = 0  # HarborHarness retries of failures before the agent ran
 
     @classmethod
     def from_env(cls) -> HarborSettings:
@@ -200,7 +200,7 @@ NOT_RETRIED_EXCEPTIONS = frozenset({"ValueError", "TypeError", "FileNotFoundErro
 
 
 def retryable_setup_failure(result: Any) -> str | None:
-    """Exception name when the trial failed before the agent ran, else ``None`` (S26 E8).
+    """Exception name when the trial failed before the agent ran, else ``None``.
 
     Before the agent's first command nothing the policy produced exists:
     the sandbox start, the image pull and the agent install (Codex: apt,
@@ -224,7 +224,7 @@ def retryable_setup_failure(result: Any) -> str | None:
 class HarborHarness:
     """``AgentHarness`` over Harbor ``Trial``; one sandbox per call.
 
-    ``setup_retries`` (S26 E8, default 0 = off): a trial that failed before
+    ``setup_retries`` (default 0 = off): a trial that failed before
     the agent ran (:func:`retryable_setup_failure`) runs again from a new
     ``TrialConfig``, after ``retry_backoff_s * 2**attempt`` seconds (with
     jitter, capped at 60 s).  The verdict says how many attempts ran
@@ -245,7 +245,7 @@ class HarborHarness:
         if self._trial_cls is None:
             from yeto.launch.image_check import check_image_at_start
 
-            check_image_at_start()  # the image's Harbor layer must match docker/harbor-layer (S26 E0.4)
+            check_image_at_start()  # the image's Harbor layer must match docker/harbor-layer
             from harbor.trial.trial import Trial
 
             self._trial_cls = Trial

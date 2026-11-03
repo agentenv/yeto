@@ -1,4 +1,4 @@
-"""Mirror a remote learner tape over SSH for the live dashboard (design D9).
+"""Mirror a remote learner tape over SSH for the live dashboard.
 
 ``ssh <target> tail -c +<offset+1> -F <remote>`` streams the remote tape
 from exactly the byte the local mirror ends at, so a reconnect neither

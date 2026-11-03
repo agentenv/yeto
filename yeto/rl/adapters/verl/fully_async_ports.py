@@ -62,8 +62,8 @@ class FullyAsyncIsland:
                  base_model_revision: str = "", lora_config_hash: str = "", layout_hash: str = "",
                  expected_specs=(), seek_rollouter=None, optimizer_steps_per_round: int | None = None):
         """``seek_rollouter(prompts)``: skip that many prompts of the rollouter's data
-        before it starts (``fully_async_cut.skip_rollouter_prompts``; round cuts, S26
-        E9.2). ``optimizer_steps_per_round``: the resume first-step check."""
+        before it starts (``fully_async_cut.skip_rollouter_prompts``; round
+        cuts). ``optimizer_steps_per_round``: the resume first-step check."""
         self.call = call
         self.seek_rollouter = seek_rollouter
         self.optimizer_steps_per_round = optimizer_steps_per_round
@@ -95,7 +95,7 @@ class FullyAsyncIsland:
         self.last_metrics: dict = {}
         self.last_criteria: dict = {}
         # A full-parameter island's trainer group (``full_parameter_stream.VerlFullParameterGroup``,
-        # set by ``fully_async_full.full_parameter_ports``, S27 G-EW); None on a LoRA island.
+        # set by ``fully_async_full.full_parameter_ports``); None on a LoRA island.
         self.full_group = None
 
     # hooks of ports_impl.VerlPolicyState (run on the trainer actor's worker group)
@@ -126,7 +126,7 @@ class FullyAsyncRolloutPool:
         """``queue_end_is_buffer_end``: the queue is the sample buffer (a buffer
         trainer): its end is the samplers' data end, so a round it cannot fill
         raises :class:`~yeto.rl.engine.buffer_payload.SampleBufferExhausted` and
-        the run ends FINISHED (S26 E9.3), not a failure."""
+        the run ends FINISHED, not a failure."""
         self.island = island
         # 0: no cap (the relay pool; every pull waits for a new group, see RelayRolloutPool)
         self.max_pulls = max_pulls_factor * island.required if max_pulls_factor > 0 else None
@@ -194,7 +194,7 @@ class FullyAsyncRolloutPool:
                   "group_reward_uniform": advantage["group_reward_uniform"],
                   "nonzero_advantages": advantage["nonzero_advantages"],
                   "version_map": isl.vmap.to_dict(),
-                  # a buffer trainer judges behavior versions with its own map (S27 G-EQ5)
+                  # a buffer trainer judges behavior versions with its own map
                   **({} if isl.consume_map is isl.vmap
                      else {"behavior_map": isl.consume_map.to_dict()})}
         isl.append_jsonl(f"verl-fa-rollout-{isl.learner_id}.jsonl", record)
@@ -214,7 +214,7 @@ class FullyAsyncRolloutPool:
             # trained.  verl's partial rollout continues interrupted requests
             # (counted as resumed_trajectories in carry_over, like Miles'
             # carried-over groups), so the only in-flight loss is yeto's
-            # over-age discard; 0 when none (known, not None -- S19 async10
+            # over-age discard; 0 when none (known, not None -- an early async run
             # showed null on every round).
             **(discard if collector.discarded else {"aborted_in_flight_groups": 0}),
         )
@@ -243,7 +243,7 @@ class FullyAsyncTrainerGroup(CutPorts):
         self._metrics = None
         self._cut_trainer = None
 
-    # ---- cut verbs (S26 E9.2; .cut.CutPorts over the trainer actor's worker group) ----
+    # ---- cut verbs (.cut.CutPorts over the trainer actor's worker group) ----
     def _cut_calls(self):
         return self.island.call_workers
 
@@ -303,7 +303,7 @@ class FullyAsyncTrainerGroup(CutPorts):
             trained_tokens=sum(g.token_count for g in batch.groups), optimizer_steps=1,
             optimizer_step_succeeded=grad_norm is not None,
             parameter_layout_hash=isl.layout_hash)
-        if isl.full_group is not None:  # S27 G-EW: as ports_impl.VerlTrainerGroup.train_step
+        if isl.full_group is not None:  # As ports_impl.VerlTrainerGroup.train_step
             from .full_parameter_stream import VerlRoundEvidence
 
             isl.full_group.record_round(receipt, VerlRoundEvidence(
@@ -313,8 +313,8 @@ class FullyAsyncTrainerGroup(CutPorts):
         return receipt
 
     def _host_memory(self, phase: str, rollout_id: int, *, release: bool) -> None:
-        """Every worker's host memory around a step (``YETO_HOST_MEMORY``, S27
-        G-EZ3; :func:`.full_parameter.remote_host_memory`): one jsonl record and
+        """Every worker's host memory around a step (``YETO_HOST_MEMORY``;
+        :func:`.full_parameter.remote_host_memory`): one jsonl record and
         one ``rl_host_memory`` event with the per-node summary. A failed read is
         recorded and training goes on."""
         from yeto.rl.engine.host_memory import process_memory, summarize_by_node
@@ -384,7 +384,7 @@ class FullyAsyncPublisher:
         if stale.exists():
             stale.unlink()
         started = time.monotonic()
-        try:  # S19 async5: a push that never returns must end the island, not hang it
+        try:  # A push that never returns must end the island, not hang it
             pushed = isl.call("yeto_push_weights", timeout=self.push_timeout_s)  # {"param_version", "timing"}
         except TimeoutError as exc:
             check = pub.compare(version, sent, None, detail=f"push timeout: {exc}")
@@ -423,7 +423,7 @@ class FullyAsyncPublisher:
 
 
 class FullyAsyncFullParameterPublisher:
-    """yeto publication of a full-parameter fully_async island (S27 G-EV, VERL-PARITY #11).
+    """yeto publication of a full-parameter fully_async island (VERL-PARITY #11).
 
     The trainer actor pushes its weights to the rollouter over verl's NCCL
     checkpoint engine (``yeto_push_weights``, the same push as the LoRA path; the
@@ -451,7 +451,7 @@ class FullyAsyncFullParameterPublisher:
         if callable(check):
             check()  # the trainer still holds the hashed weights
         started = time.monotonic()
-        try:  # S19 async5: a push that never returns must end the island, not hang it
+        try:  # A push that never returns must end the island, not hang it
             pushed = isl.call("yeto_push_weights", timeout=self.push_timeout_s)
         except TimeoutError as exc:
             isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", {

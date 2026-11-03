@@ -20,7 +20,7 @@ key                       run-wide flag (args dest)        values
 The four parallel-shape keys need ``--rl-sync-layout shape-free`` on a Miles
 run: only a shape-free full-parameter layout lets Miles islands of different
 TP/EP/PP shapes share one syncer session (``yeto.rl.engine.shape_free_layout``).
-A verl run does not need it (S28 G-MEG): a verl island's full-parameter layout
+A verl run does not need it: a verl island's full-parameter layout
 is planned from the HF model's parameter shapes (``full_parameter_plan``), the
 same for every FSDP2 or Megatron shape, and a Megatron island checks at start
 that Bridge exports exactly those names (``HfTaskIndex.from_manifests``).

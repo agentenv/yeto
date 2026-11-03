@@ -18,7 +18,7 @@ def sky_cluster_name(name: str) -> str:
     its arguments one slot off); an upper-case region such as FIN-03 in
     the name then reads as "no instances", sky drops the record, and the
     same-name relaunch that follows deletes the running node. Lower-case
-    names break that chain at the first link (design D1)."""
+    names break that chain at the first link."""
     return name.lower()
 
 
@@ -61,7 +61,7 @@ def submit_island_launch(sky, args, spec: ClusterSpec, task, name: str):
 
 
 def maybe_install_nebius_reclaim_hook(task, launched, name: str) -> bool | None:
-    """rl-spot-cost-saving (S19 real spot): a droppable island on Nebius gets the host
+    """A droppable island on Nebius gets the host
     unit that forwards the VM stop SIGTERM to the learner (yeto.cloud.nebius_reclaim).
     None when the island does not need it; never raises."""
     from ..cloud import nebius_reclaim
@@ -79,8 +79,7 @@ def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     """Stream a sky job's log into the launcher output (and the tape collector).
 
     Root cause of "sky.tail_logs delivers the setup lines but no run-phase
-    line" (S1 2x1 L40S 2026-10-03/04; -5r1 r7 stream silent after the learner
-    restart), read from skypilot 0.13.0: the API server's ``log_streamer``
+    line" (seen on 2x1 L40S runs and after learner restarts), read from skypilot 0.13.0: the API server's ``log_streamer``
     appends a ``<heartbeat></heartbeat>`` control payload after every 30 s
     without a new log line (sky/server/stream_utils.py, ``_HEARTBEAT_INTERVAL``),
     and the client's ``decode_rich_status`` (sky/utils/rich_utils.py) yields
@@ -203,7 +202,7 @@ class SkySDKOps:
             return None
 
     def __init__(self, nodes_by_cluster=None):
-        # rl-multinode-island D10: the controller's failure-path teardown (job FAILED ->
+        # The controller's failure-path teardown (job FAILED ->
         # recovery refused -> _down) must verify EVERY node instance, like run()'s final
         # teardown; without the mapping a cluster is treated as single-node.
         self.nodes_by_cluster = dict(nodes_by_cluster or {})

@@ -21,7 +21,7 @@ from .remote_setup import WAN_TUNING
 
 
 SYNCER_PORT = 29400
-# rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
+# A critic algorithm runs a
 # second syncer beside the actor's, on its own port, checkpoint and tape; its
 # layout is the critic layout (critic_layout_hash), never the actor LoRA one.
 CRITIC_SYNCER_PORT = 29401
@@ -46,7 +46,7 @@ RL_SYNCER_CHECKPOINT = "~/yeto-output/yeto-state.ckpt"
 
 @dataclass(frozen=True)
 class RoleSyncer:
-    """Where one trainable role's RL syncer listens and keeps its state (P0-D8)."""
+    """Where one trainable role's RL syncer listens and keeps its state."""
 
     role: str
     port: int
@@ -232,7 +232,7 @@ def _syncer_outer_optimizer(args) -> str:
 
 
 def _syncer_bcast_delta(args) -> str:
-    """S26 E3 bf16 downlink deltas (checked by rl_args._check_bcast_delta)."""
+    """bf16 downlink deltas (checked by rl_args._check_bcast_delta)."""
     full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
     return f" --bcast-delta-full-every {full_every}" if full_every else ""
 
@@ -258,7 +258,7 @@ def syncer_disk_resources(args) -> dict:
 
 
 def rl_full_parameter_async(args) -> bool:
-    """S27 P2: the full-parameter preset runs asynchronous sharded rounds, not
+    """The full-parameter preset runs asynchronous sharded rounds, not
     the strict policy sweep (``--rl-sync-full-parameter-rounds async``)."""
     return rl_dense_sweep(args) and getattr(args, "rl_sync_full_parameter_rounds", "sweep") == "async"
 
@@ -298,7 +298,7 @@ def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
     full-parameter adds strict P-fragment policy sweeps (asynchronous rounds,
-    S27 P2, add none); sao-streaming-full adds the frozen contract's timeouts and
+    add none); sao-streaming-full adds the frozen contract's timeouts and
     the publishable final checkpoint."""
     if rl_full_parameter_async(args):
         return " --require-profile-binding"
@@ -317,7 +317,7 @@ def rl_syncer_profile(args, num_learners: int):
     """The semantic profile of :func:`_rl_role_syncer_command` for a
     full-parameter preset, as the Rust syncer hashes it (yeto.syncer_profile).
     Islands send its sha256 in HELLO (``--syncer-profile-sha256``,
-    P0-1.7b.1-Q6; the SAO runtime contracts carry the same hash)."""
+    the SAO runtime contracts carry the same hash)."""
     from ..syncer_profile import SYNCER_SEMANTIC_PROFILE_SCHEMA, SyncerSemanticProfile
 
     if rl_dense_sweep(args):
@@ -567,7 +567,7 @@ def _syncer_island_pool(args) -> str:
 
 
 def peer_recovery_syncer_flags(args) -> str:
-    """S27 E-3 ``--rl-peer-recovery``: the role syncer's epoch and recovery
+    """``--rl-peer-recovery``: the role syncer's epoch and recovery
     options (checked by ``launch.peer_recovery``); "" when recovery is off."""
     if not getattr(args, "rl_peer_recovery", False):
         return ""
@@ -606,7 +606,7 @@ def _rl_max_base_lag(args) -> int:
 
 
 def _rl_learner_weight(args) -> str:
-    """S27 P1 --rl-sync-learner-weight (checked by rl_args); RL defaults to equal."""
+    """--rl-sync-learner-weight (checked by rl_args); RL defaults to equal."""
     return getattr(args, "rl_sync_learner_weight", "equal")
 
 
@@ -646,6 +646,29 @@ def _syncer_grace_floor(args) -> str:
             + (f" --terminal-grace-ms {terminal}" if terminal else ""))
 
 
+# Launcher flag -> syncer flag for the deprecated scheduler-inline send paths.
+_DEPRECATED_INLINE_FLAGS = (
+    ("rl_sync_inline_resend", "--rl-sync-inline-resend", "--inline-resend"),
+    ("rl_sync_inline_broadcast", "--rl-sync-inline-broadcast", "--inline-broadcast"),
+)
+_warned_deprecated: set[str] = set()
+
+
+def _syncer_inline_flags(args) -> str:
+    """Pass the deprecated inline flags through; warn once per process for each."""
+    out = ""
+    for attr, launch_flag, syncer_flag in _DEPRECATED_INLINE_FLAGS:
+        if not getattr(args, attr, False):
+            continue
+        out += f" {syncer_flag}"
+        if launch_flag not in _warned_deprecated:
+            _warned_deprecated.add(launch_flag)
+            print(f"[launcher] WARN: {launch_flag} is deprecated: the syncer's forwarder tasks "
+                  "replaced the scheduler-inline send path; the flag will be removed in a "
+                  "future release", file=sys.stderr)
+    return out
+
+
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
                             syncer: RoleSyncer,
                             shard_plan: tuple[int, int] | None = None) -> str:
@@ -674,8 +697,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_bcast_delta(args)}"
         f"{_syncer_outer_optimizer(args)}"
         f"{peer_recovery_syncer_flags(args)}"
-        f"{' --inline-resend' if getattr(args, 'rl_sync_inline_resend', False) else ''}"
-        f"{' --inline-broadcast' if getattr(args, 'rl_sync_inline_broadcast', False) else ''}"
+        f"{_syncer_inline_flags(args)}"
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
         f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"
@@ -694,7 +716,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
 
 
 def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | None) -> str:
-    """S27 P2: the task dispenser runs in the actor syncer (shard 0) only."""
+    """The task dispenser runs in the actor syncer (shard 0) only."""
     if syncer.role != "actor" or (shard_plan is not None and shard_plan[0] != 0):
         return ""
     from .data_split_plan import dispense_syncer_flags
@@ -703,7 +725,7 @@ def _syncer_dispense(args, syncer: RoleSyncer, shard_plan: tuple[int, int] | Non
 
 
 def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
-    """S27 G-EA: receive-only subscribers and the sample relay on the actor
+    """Receive-only subscribers and the sample relay on the actor
     syncer; "" when off, so the command is unchanged."""
     subscribers = int(getattr(args, "rl_spot_subscribers", 0) or 0)
     relay = bool(getattr(args, "rl_sample_relay", False))
@@ -717,7 +739,7 @@ def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
     if syncer.role != "actor":
         return ""
     if not island_pool(args):
-        # S29 spot run (defect D11): with a fixed roster a trainer island that
+        # Spot rollout: with a fixed roster a trainer island that
         # restarted cannot rejoin the running group (initial broadcast check).
         print("[launcher] WARNING: spot rollout without an island pool: a trainer island that "
               "restarts cannot rejoin the running group; set --rl-sync-island-lease-s (and a quorum "
@@ -728,7 +750,7 @@ def _syncer_spot_rollout(args, syncer: RoleSyncer) -> str:
 
 
 def syncer_shard_count(args) -> int:
-    """``--syncer-shards`` (S27 P4b): syncer processes the head is split
+    """``--syncer-shards``: syncer processes the head is split
     into by fragment range. 1 (default) is the single unsharded syncer.
 
     Sharding needs fragment-round scheduling and a learner that routes per
@@ -784,7 +806,7 @@ def _shard_path(path: str, index: int) -> str:
 
 
 def _syncer_weighted_fold(args) -> str:
-    """S27 P4b: "" keeps the buffered merge of partial-quorum / token-weighted
+    """An empty value keeps the buffered merge of partial-quorum / token-weighted
     rounds (default, historical bits); streaming folds pushes on arrival."""
     mode = getattr(args, "syncer_weighted_fold", None) or "buffered"
     if mode not in ("buffered", "streaming"):
@@ -814,7 +836,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint.
 
-    RL runs one syncer per trainable role (P0-D8): every role after the
+    RL runs one syncer per trainable role: every role after the
     actor is backgrounded first; the actor syncer stays the foreground
     process (the job's health)."""
     if getattr(args, "training_mode", "sft") == "rl":
@@ -940,7 +962,7 @@ def syncer_tape_sidecar(args, num_learners: int, binary: str = "~/yeto-syncer") 
 # Clouds where sky cannot open ports (sky/clouds/verda.py: no OPEN_PORTS).
 # There the syncer's port is reachable because the platform has no
 # firewall; yeto closes everything but SSH and the syncer with ufw inside
-# the VM and proves reachability with an external TCP probe (design D7).
+# the VM and proves reachability with an external TCP probe.
 NO_OPEN_PORTS_CLOUDS = frozenset({"verda"})
 PROBE_BANNER = b"yeto-probe"
 
@@ -1027,7 +1049,7 @@ def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     (actor 29400 and, for a critic algorithm, critic 29401) accepts a TCP
     connection from this machine. On clouds where sky opens the ports
     (security groups, e.g. Nebius) this is the only check that the rule
-    really took effect: s13-g3-modal-20261007b spent the 900 s stall timeout
+    really took effect: one run spent the 900 s stall timeout
     with both islands silently redialing a Nebius syncer that never saw a
     connection. A pass here does not prove the islands' egress (Modal), only
     that the head side is open."""

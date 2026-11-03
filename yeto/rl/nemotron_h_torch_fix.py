@@ -1,6 +1,6 @@
 """Fix of transformers' NemotronH Mamba2 torch path (no mamba kernels: Ascend NPU, CPU).
 
-Finding (S27 G-ES, XCLOUD-ROLLOUT.md "Mamba2 naive path"): transformers 5.12.1 / 5.13.0
+Finding: transformers 5.12.1 / 5.13.0
 ``NemotronHMamba2Mixer.torch_forward`` computes the inter-chunk SSM states as::
 
     decay_chunk = torch.exp(segment_sum(nn.functional.pad(A_cumsum[:, :, :, -1], (1, 0))))
@@ -16,7 +16,7 @@ inputs pass; a sequence longer than ``chunk_size`` (Nano: 128) gets wrong states
 CUDA with the kernels turned off this put the response log-probs 0.44 nats per token
 away from SGLang (kernel path: 0.019), the same gap the Ascend trainer showed.
 
-Second difference, smaller (G-EQ3: about 0.016): the torch path clamps ``dt`` below at
+Second difference, smaller (measured: about 0.016): the torch path clamps ``dt`` below at
 ``time_step_min``; the kernel path (and the checkpoint's own code) clamps with
 ``time_step_limit`` (Nano: (0, inf), i.e. no clamp). ``align_dt_clamp`` makes the
 torch path use ``time_step_limit`` like the kernel path.

@@ -1,21 +1,21 @@
-"""Test-only fault injection for the E2 GPU acceptance (plan-v3 G-4.5). Off by default.
+"""Test-only fault injection for the cut/restore GPU acceptance. Off by default.
 
 Every switch is an environment variable, exported into the island run command
-by the launcher's ``--rl-test-inject-*`` flags (patch for INFRA-E1) or set by
-the E2 harness. Unset (the default) means no code path changes. Values are
+by the launcher's ``--rl-test-inject-*`` flags or set by
+the cut-equivalence harness. Unset (the default) means no code path changes. Values are
 validated on read; an invalid value raises instead of being ignored.
 
 Rank-side (read in the Megatron rank process, ``cut_plugin``):
 
 * ``YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK=<global rank>`` -- that rank
-  ``os._exit(137)`` after writing half of its shard's temp file (G-4.5 "save_cut
-  写分片途中 kill"): no shard, no manifest.
+  ``os._exit(137)`` after writing half of its shard's temp file (kill during
+  the shard write): no shard, no manifest.
 * ``YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK=<global rank>`` -- that rank
   ``os._exit(137)`` after writing the adapter tensors and before the optimizer
-  (G-4.5 "restore 期间 kill rank").
+  (kill a rank during restore).
 * ``YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP=<global rank>:<seconds>`` -- that rank
-  sleeps before entering the restore (G-4.5 "restore 前 sleep 超过 distributed
-  timeout").
+  sleeps before entering the restore (sleep past the distributed
+  timeout before restore).
 
 Driver-side (``trainer_rebuild``):
 
@@ -27,8 +27,8 @@ Driver-side (``trainer_rebuild``):
   ``create_training_models``) reads it, with ``sample_offset`` advanced by
   ``groups``: the real rewind path of review H1.
 
-The sixth G-4.5 row (kill the controller before/after the commit CAS) uses
-INFRA-E1's ``--rl-test-kill-learner-at REBUILDING_TRAINER|COMMITTED`` with
+The sixth acceptance row (kill the controller before/after the commit CAS) uses
+the launcher's ``--rl-test-kill-learner-at REBUILDING_TRAINER|COMMITTED`` with
 ``--rl-elastic-restart-attempts``.
 """
 
