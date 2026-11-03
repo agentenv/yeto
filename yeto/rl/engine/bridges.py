@@ -177,17 +177,22 @@ class LocalOnlySync(RoundCutHooks):
         # (:meth:`resume_at`); 0 = this process starts the account at v0.
         self.resumed_at = 0
 
-    def resume_at(self, version: int) -> None:
+    def resume_at(self, version: int, *, behind_round_cuts: bool = False) -> None:
         """Continue the version account at ``version`` K instead
         of at 0, for a buffer trainer that found releases up to vK in its store
         (``merged_release.ResumedReleases``): its first publication is vK, its rounds
         are K, K+1, ..., and ``num_rollout`` stays the rounds *this process* runs,
         counted from K.
 
-        Refused with a round-cut resume, which brings its own start round."""
+        Refused when the round cuts are wired first. Wired before them (a buffer
+        trainer binds its publisher first), a round cut behind ``version`` continues
+        at ``version`` (:meth:`start`). ``behind_round_cuts``: wired after them (a
+        Miles single trainer wires its round cuts before its releases), the same
+        holds -- ``version`` is a floor under the round cut's start round, not a
+        second start round."""
         if int(version) < 0:
             raise ValueError(f"the version account cannot start below 0, got {version!r}")
-        if self.round_cuts is not None:
+        if self.round_cuts is not None and not behind_round_cuts:
             raise ValueError("a resumed version account and a round-cut resume both set the "
                              "start round; this island has round cuts configured")
         self.resumed_at = int(version)
@@ -195,6 +200,15 @@ class LocalOnlySync(RoundCutHooks):
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
         rollout_id = self.resumed_at if resumed is None else int(resumed["next_rollout_id"])
+        if resumed is not None and self.resumed_at > rollout_id:
+            # The store already holds releases up to vK above this round cut (they were
+            # released after the cut). Retraining from the cut and naming its rounds
+            # v(cut)..vK would give those numbers other weights than the store's; the
+            # account continues at vK instead (as a relaunch without a cut does), so
+            # the first trained round releases vK+1 and every version names one set of weights.
+            driver.emit("rl_round_cut_behind_releases", cut_rollout_id=rollout_id,
+                        latest_release_version=self.resumed_at)
+            rollout_id = self.resumed_at
         return SyncStart(_local_state(driver, rollout_id), rollout_id,
                          finished=rollout_id >= self._end())
 
