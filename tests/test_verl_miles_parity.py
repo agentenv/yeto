@@ -92,7 +92,7 @@ def _run_islands(binary, tmp_path, monkeypatch, *, rounds, fragments, async_roun
                        matrix_merge=matrix_merge, pipeline=pipeline, final_cut=final_cut) for i in range(2)]
         for plan in plans:
             plan[vfs.PLAN_KEY].update(plan_extra)
-        threads = [threading.Thread(target=_run_island, args=(i, plans[i], 20 * rounds, results))
+        threads = [threading.Thread(target=_run_island, args=(i, plans[i], None, results))
                    for i in range(2)]
         for thread in threads:
             thread.start()

@@ -242,3 +242,66 @@ def test_the_verl_pool_island_command_carries_the_lease(monkeypatch):
     run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:1").run
     assert "yeto.rl.adapters.verl.island_entry" in run
     assert " --rl-sync-island-lease-s 90.0" in run and " --rl-island-pool" in run
+
+
+# --- a LEAVE that does not reach the syncer is recorded as not sent -----------
+
+class _LeaveLink:
+    """The SyncerClient surface PoolIslandClient.leave uses."""
+
+    def __init__(self, *, shut_down=False, written=True):
+        import threading
+
+        self.shutdown = threading.Event()
+        if shut_down:
+            self.shutdown.set()
+        self.written = written
+        self.sent: list[int] = []
+        self.closed = False
+
+    def send_leave(self, reason, timeout=5.0):
+        self.sent.append(int(reason))
+        return self.written
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize(("link", "expected", "frames"), [
+    (dict(), None, [LeaveReason.PREEMPTED]),
+    (dict(shut_down=True), "syncer_shut_down", []),
+    (dict(written=False), "not_written", [LeaveReason.PREEMPTED]),
+])
+def test_the_pool_client_says_whether_its_leave_was_sent(link, expected, frames):
+    from yeto.rl.pool_client import PoolClientConfig, PoolIslandClient
+    from yeto.rl.core import CanonicalTensorSpec, build_avg_layout
+
+    layout = build_avg_layout((CanonicalTensorSpec("base_model.model.layer.lora_A.weight", (2, 2), "float32", 4),))
+    fake = _LeaveLink(**link)
+    client = PoolIslandClient(PoolClientConfig(("127.0.0.1", 1), 0), layout,
+                              client_factory=lambda *args, **kwargs: fake)
+    assert client.leave(LeaveReason.PREEMPTED) == expected
+    assert fake.sent == frames and fake.closed
+
+
+def test_a_leave_after_the_run_ended_is_taped_as_not_sent(tmp_path):
+    fake = FakePoolSyncer()
+    engine, sync, client = _pool(tmp_path, fake)
+
+    def train_step(batch):
+        client.leave = lambda reason=0: "syncer_shut_down"
+        assert sync.leave(LeaveReason.PREEMPTED)
+        raise RuntimeError("killed after the notice")
+    engine.trainer.train_step = train_step
+    with pytest.raises(RuntimeError):
+        _driver(engine, sync, tmp_path).run()
+    [leave] = [e for e in _tape(tmp_path) if e["event"] == "elastic_leave"]
+    assert (leave["reason_name"], leave["sent"], leave["not_sent"]) == ("PREEMPTED", False, "syncer_shut_down")
+
+
+def test_a_sent_leave_is_taped_as_sent(tmp_path):
+    fake = FakePoolSyncer()
+    engine, sync, _ = _pool(tmp_path, fake)
+    _driver(engine, sync, tmp_path).run()
+    [leave] = [e for e in _tape(tmp_path) if e["event"] == "elastic_leave"]
+    assert leave["sent"] is True and "not_sent" not in leave

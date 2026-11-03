@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -394,7 +396,26 @@ def _step(learner_id: int, round_id: int) -> dict[str, torch.Tensor]:
     return {name: 0.01 * torch.randn(shape, generator=generator) for name, shape in SHAPES.items()}
 
 
-def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> None:
+# An island with asynchronous rounds trains until the syncer's final cut; how
+# many local rounds that takes depends on how fast the syncer merges, which a
+# loaded host slows far more than the tiny local rounds. Bound it by time.
+ASYNC_ISLAND_SECONDS = 100.0
+
+
+def local_rounds(max_rounds: int | None):
+    """Round ids ``0..max_rounds-1``, or (``None``) until the final cut: then
+    a TimeoutError after ``ASYNC_ISLAND_SECONDS``, inside the test's join."""
+    if max_rounds is not None:
+        yield from range(max_rounds)
+        return
+    deadline = time.monotonic() + ASYNC_ISLAND_SECONDS
+    for round_id in itertools.count():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"no final cut after {round_id} local rounds")
+        yield round_id
+
+
+def _run_island(learner_id: int, plan: dict, max_rounds: int | None, results: dict) -> None:
     """Train and sync until the syncer's final cut (a sweep: exactly one round
     per sweep; asynchronous rounds: as many local rounds as the pool needs)."""
     model = _Model(seed=0)  # every island loads the same checkpoint
@@ -404,7 +425,7 @@ def _run_island(learner_id: int, plan: dict, max_rounds: int, results: dict) -> 
     driver = _Driver()
     try:
         state = sync.start(driver).state
-        for round_id in range(max_rounds):
+        for round_id in local_rounds(max_rounds):
             with torch.no_grad():
                 for name, parameter in model.named_parameters():
                     parameter.add_(_step(learner_id, round_id)[name])
@@ -442,7 +463,7 @@ def _two_islands(binary, tmp_path, monkeypatch, *, rounds: int, fragments: int, 
         threads = [threading.Thread(target=_run_island, args=(
             i, _plan(i, port, profile, rounds=rounds, fragments=fragments, async_rounds=async_rounds,
                      matrix_merge=matrix_merge, pipeline=pipeline, final_cut=final_cut),
-            rounds if not async_rounds else 20 * rounds, results)) for i in range(2)]
+            rounds if not async_rounds else None, results)) for i in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:

@@ -34,6 +34,10 @@ from ..protocol import DTYPE_F32, FragmentLayout, PullRequest, SyncerClient
 from ..tensor_io import pack_tensor, unpack_fragment
 
 
+# PoolClient.leave: why a LEAVE frame was not sent.
+LEAVE_NOT_SENT_SHUT_DOWN = "syncer_shut_down"
+LEAVE_NOT_SENT_NOT_WRITTEN = "not_written"
+
 class LeaveReason(IntEnum):
     """Why an island left the pool (one byte of MSG_LEAVE; the syncer's
     ``pool_leave`` record names it, see ``protocol.rs`` LEAVE_REASON_NAMES).
@@ -231,12 +235,22 @@ class PoolIslandClient:
         version = 0 if self.latest_base is None else self.latest_base.outer_version
         return JoinAck(base_version=version, catch_up=version > 0)
 
-    def leave(self, reason: int = LeaveReason.FINISHED) -> None:
-        """Leave the pool: LEAVE with the reason, then close the connection."""
+    def leave(self, reason: int = LeaveReason.FINISHED) -> str | None:
+        """Leave the pool: LEAVE with the reason, then close the connection.
+
+        Returns None when the LEAVE frame was written, else why it was not:
+        ``LEAVE_NOT_SENT_SHUT_DOWN`` (the run already ended, e.g. the final cut
+        arrived first; the syncer records no leave) or
+        ``LEAVE_NOT_SENT_NOT_WRITTEN`` (the frame was not written in time)."""
         self._stop.set()
-        if not self.client.shutdown.is_set():
-            self.client.send_leave(int(reason))
-        self.close()
+        try:
+            if self.client.shutdown.is_set():
+                return LEAVE_NOT_SENT_SHUT_DOWN
+            if not self.client.send_leave(int(reason)):
+                return LEAVE_NOT_SENT_NOT_WRITTEN
+            return None
+        finally:
+            self.close()
 
     def close(self) -> None:
         self._stop.set()
