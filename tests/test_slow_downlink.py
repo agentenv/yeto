@@ -119,13 +119,13 @@ def steady(tape, syncer_log) -> bool:
     return all(merges_with(records, island, joined, time.time() + 1) >= 10 for island in (0, 1))
 
 
-def start_syncer(tmp_path, port, *extra):
+def start_syncer(tmp_path, port, *extra, total_steps=1200):
     binary = build_syncer()
     tape = tmp_path / "tape.jsonl"
     log = (tmp_path / "syncer.log").open("w")
     proc = subprocess.Popen(
         [str(binary), "--port", str(port), "--learners", "2", "--quorum", "1", "--grace-ms", "50",
-         "--total-steps", "1200", "--outer-lr", "0.7", "--outer-momentum", "0.0",
+         "--total-steps", str(total_steps), "--outer-lr", "0.7", "--outer-momentum", "0.0",
          "--min-round-interval-ms", "20", "--quorum-timeout-s", "30", "--event-tape", str(tape),
          "--island-lease-s", str(SYNCER_LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2", *extra],
         stdout=log, stderr=subprocess.STDOUT, text=True, env={**os.environ, "TOKIO_WORKER_THREADS": "4"})
@@ -253,6 +253,13 @@ def test_env_downlink_limit_names_one_learner_and_opens_at_its_pull_step(monkeyp
 
 
 ENV_FROM_STEP = 400
+# The window opens at step ENV_FROM_STEP and the run must go on long enough
+# after it for island 1 to drain its forwarder backlog (about 100 MB) and be
+# merged again.  Rounds are at least 20 ms apart, so at most 50 merges/s: by
+# the end of the window the syncer is at step <= 400 + 14 * 50 = 1100, and
+# 1700 steps leave at least 12 s after it.  1200 steps left 2 s at CI's merge
+# rate, and the run could end before island 1 was merged again.
+ENV_TOTAL_STEPS = 1700
 
 
 @pytest.mark.timeout(300)
@@ -267,7 +274,8 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
 
     monkeypatch.setenv(DOWNLINK_READ_LIMIT_ENV, f"1:{SLOW_BPS}:{ENV_FROM_STEP}:{SLOW_S}")
     port = free_port()
-    proc, tape, log = start_syncer(tmp_path, port, *(["--inline-broadcast"] if inline else []))
+    proc, tape, log = start_syncer(tmp_path, port, *(["--inline-broadcast"] if inline else []),
+                                   total_steps=ENV_TOTAL_STEPS)
     store = tmp_path / "store"
     a = CountingIsland(0, port, store, dtype=DTYPE_F32)
     b = CountingIsland(1, port, store, dtype=DTYPE_F32)
