@@ -177,6 +177,29 @@ def test_mirror_applies_the_next_delta_to_its_own_copy(tmp_path, monkeypatch):
     assert len([p for p in (tmp_path / "mirror").iterdir() if p.is_dir()]) == 2  # keep=2
 
 
+def test_a_tracking_mirror_records_the_changes_against_the_copy_it_rebuilt_from(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=4)
+    chain = DeltaChain(full_every=8)
+    words = [_words(50_000)]
+    staging = tmp_path / "staging"
+    _release(trainer, chain, _stage(staging, 0, words[0]), 0)
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                 mirror=rd.DeltaMirror(tmp_path / "mirror", keep=2, workers=1, track_changes=True))
+    previous = sampler.resolve(sampler.latest())  # the full v0 in the store: no manifest
+    assert rd.read_changes(previous) is None
+    for version in (1, 2):
+        words.append(_changed(words[-1], 0.02, seed=version))
+        _release(trainer, chain, _stage(staging, version, words[-1]), version)
+        rebuilt = sampler.resolve(sampler.latest())
+        manifest = rd.read_changes(rebuilt)
+        assert Path(manifest["base_dir"]) == previous
+        assert (manifest["base_stamp"] is None) == (version == 1)  # v2 starts from the mirror's v1
+        changed = rd.read_changed_words(manifest["files"]["model.safetensors"])
+        assert changed.tolist() == np.flatnonzero(words[-1] != words[-2]).tolist()
+        previous = rebuilt
+
+
 def test_a_delta_whose_base_is_gone_is_incomplete(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
     trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=4)

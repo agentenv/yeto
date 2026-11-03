@@ -287,10 +287,11 @@ def _apply_chunk(words: np.ndarray, record: Sequence[Any], patch: Any, name: str
         raise ReleaseDeltaError(f"{name}: unknown chunk kind {kind!r}")
 
 
-def apply_chain(base: Path, deltas: Sequence[Path], out: Path) -> str:
+def apply_chain(base: Path, deltas: Sequence[Path], out: Path, *, changed: Path | None = None) -> str:
     """Write ``base`` with every delta of ``deltas`` applied in order into ``out``,
     in one pass (each chunk is read once, patched by every delta, written once);
-    returns the sha256 of ``out``."""
+    returns the sha256 of ``out``. ``changed``: also write the indexes of the
+    16-bit words of ``out`` that differ from ``base`` there (:func:`write_changed_words`)."""
     if not deltas:
         raise ValueError("apply_chain needs at least one delta")
     with ExitStack() as stack:
@@ -309,17 +310,52 @@ def apply_chain(base: Path, deltas: Sequence[Path], out: Path) -> str:
         chunk_words, words = int(footers[0]["chunk_words"]), size // 2
         digest = hashlib.sha256()
         old, sink = stack.enter_context(Path(base).open("rb")), stack.enter_context(Path(out).open("wb"))
+        diffs = None if changed is None else stack.enter_context(Path(changed).open("wb"))
         for number in range(chunks):
             chunk = _read_words(old, min(chunk_words, words - number * chunk_words))
+            before = None if diffs is None else chunk.copy()
             for footer, patch, delta in zip(footers, patches, deltas):
                 _apply_chunk(chunk, footer["chunks"][number], patch, Path(delta).name)
+            if diffs is not None:
+                index = np.flatnonzero(before != chunk).astype("<u8") + np.uint64(number * chunk_words)
+                diffs.write(index.tobytes())
             digest.update(chunk.data)
             sink.write(chunk.data)
         tail = footers[-1]["tail"]
         if tail is not None:
+            if diffs is not None:
+                old.seek(2 * words)
+                if old.read(1) != bytes([int(tail)]):
+                    diffs.write(np.array([words], dtype="<u8").tobytes())  # the odd tail byte
             digest.update(bytes([int(tail)]))
             sink.write(bytes([int(tail)]))
     return digest.hexdigest()
+
+
+def write_changed_words(base: Path, target: Path, out: Path, *, chunk_words: int = CHUNK_WORDS) -> int:
+    """Write into ``out`` the indexes (little-endian uint64, ascending) of the
+    16-bit words of ``target`` that differ from ``base`` (same size); an odd
+    trailing byte that differs counts as word ``size // 2``. Returns the count."""
+    size = os.path.getsize(target)
+    if os.path.getsize(base) != size:
+        raise ReleaseDeltaError(f"{Path(target).name}: base and target sizes differ")
+    words, tail = divmod(size, 2)
+    total = 0
+    with Path(base).open("rb") as old, Path(target).open("rb") as new, Path(out).open("wb") as sink:
+        for start in range(0, words, chunk_words):
+            count = min(chunk_words, words - start)
+            index = np.flatnonzero(_read_words(old, count) != _read_words(new, count)).astype("<u8")
+            sink.write((index + np.uint64(start)).tobytes())
+            total += int(index.size)
+        if tail and old.read(1) != new.read(1):
+            sink.write(np.array([words], dtype="<u8").tobytes())
+            total += 1
+    return total
+
+
+def read_changed_words(path: Path) -> np.ndarray:
+    """The word indexes :func:`write_changed_words` (or ``apply_chain(changed=)``) wrote."""
+    return np.fromfile(path, dtype="<u8")
 
 
 def apply_file(base: Path, delta: Path, out: Path) -> str:
@@ -380,13 +416,19 @@ def encode_directory(base: Path, target: Path, out: Path, *, skip: Callable[[str
 
 
 def apply_directory(base: Path, links: Sequence[tuple[Path, Mapping[str, FileEntry]]], out: Path, *,
-                    workers: int = DEFAULT_WORKERS) -> None:
+                    workers: int = DEFAULT_WORKERS, changes: Path | None = None) -> dict[str, Any] | None:
     """Rebuild into ``out`` every file of the last of ``links`` (delta directory,
     entries; oldest first), starting from ``base``: a file starts from the newest
     link that holds it whole (else from ``base``) and takes the later deltas in
     one pass. Raises :class:`ReleaseDeltaError` (with the file's name) on a
-    digest mismatch or a delta that cannot be applied."""
+    digest mismatch or a delta that cannot be applied.
+
+    ``changes``: a directory that gets, per rebuilt file, ``<name>.words`` = the
+    words that differ from the same file of ``base`` (:func:`read_changed_words`);
+    returns ``{name: changed words, or None when unknown}`` (no file of that
+    name and size in ``base``). Without ``changes``: returns None."""
     base, out = Path(base), Path(out)
+    counts: dict[str, int | None] = {}
     links = [(Path(directory), entries) for directory, entries in links]
 
     def one(item: tuple[str, FileEntry]) -> None:
@@ -406,17 +448,34 @@ def apply_directory(base: Path, links: Sequence[tuple[Path, Mapping[str, FileEnt
                 deltas.append(directory / (name + DELTA_SUFFIX))
         destination = out / name
         destination.parent.mkdir(parents=True, exist_ok=True)
+        words = None if changes is None else changes / (name + CHANGED_SUFFIX)
+        if words is not None:
+            words.parent.mkdir(parents=True, exist_ok=True)
+        from_base = start == base / name  # no full copy of the file along the chain
         if deltas:
-            actual = apply_chain(start, deltas, destination)
+            tracked = {"changed": words} if words is not None and from_base else {}
+            actual = apply_chain(start, deltas, destination, **tracked)
         else:
             shutil.copyfile(start, destination)
             actual = file_sha256(destination)
         if actual != entry.sha256 or destination.stat().st_size != entry.size:
             raise ReleaseDeltaError(f"{name}: rebuilt sha256 {actual} != released {entry.sha256}",
                                     file=name)
+        if words is None:
+            return
+        if from_base and deltas:
+            counts[name] = os.path.getsize(words) // 8
+        elif from_base:  # copied from the base unchanged
+            words.write_bytes(b"")
+            counts[name] = 0
+        elif (base / name).is_file() and (base / name).stat().st_size == entry.size:
+            counts[name] = write_changed_words(base / name, destination, words)
+        else:
+            counts[name] = None
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
         list(pool.map(one, links[-1][1].items()))
+    return None if changes is None else dict(sorted(counts.items()))
 
 
 def entries_of(record: Mapping[str, Any]) -> dict[str, FileEntry]:
@@ -426,6 +485,12 @@ def entries_of(record: Mapping[str, Any]) -> dict[str, FileEntry]:
 
 # ---------------------------------------------------------------- sampler side
 MIRROR_STAMP = ".yeto-mirror.json"  # in a rebuilt release's directory: which release it is
+# in a rebuilt release's directory with change tracking (DeltaMirror track_changes): the
+# words of every file that differ from the base the release was rebuilt from
+CHANGES_MANIFEST = ".yeto-changes.json"
+CHANGES_DIR = ".yeto-changes"
+CHANGED_SUFFIX = ".words"
+TRACK_CHANGES_ENV = "YETO_RL_MIRROR_TRACK_CHANGES"  # "1": default_mirror tracks changes
 
 
 def mirror_stamp(release: Any) -> dict[str, Any]:
@@ -449,11 +514,19 @@ class DeltaMirror:
     release's directory in the store (mount or download). ``from_store``: do not
     start from a rebuilt copy, follow the bases back to a full release in the
     store (a retry after a rebuild failed its digest check). The newest ``keep``
-    rebuilt releases stay (the engines may still read the one they serve)."""
+    rebuilt releases stay (the engines may still read the one they serve).
+
+    ``track_changes``: a rebuilt release also records which words of each file
+    differ from the directory it was rebuilt from (:data:`CHANGES_MANIFEST`:
+    ``base_dir``, ``base_stamp``, ``files`` = {name: changed words or None};
+    the indexes under :data:`CHANGES_DIR`). An engine that serves ``base_dir``
+    can then update only the changed weights (:func:`read_changes`)."""
 
     def __init__(self, root: str | os.PathLike[str], *, keep: int = 2,
-                 workers: int = DEFAULT_WORKERS, scope: str | None = None) -> None:
+                 workers: int = DEFAULT_WORKERS, scope: str | None = None,
+                 track_changes: bool = False) -> None:
         self.root = Path(root).expanduser()
+        self.track_changes = bool(track_changes)
         self.keep = max(1, int(keep))
         self.workers = int(workers)
         # the store this mirror rebuilds for: written into every stamp, and pruning
@@ -503,8 +576,12 @@ class DeltaMirror:
         # unique per process and call: two rebuilds of one name never share a scratch directory
         partial = self.root / f".{release.path}.{os.getpid()}.{uuid.uuid4().hex}.partial"
         try:
-            apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
-                            partial, workers=self.workers)
+            counts = apply_directory(base, [(weights_dir(step), entries_of(step.delta)) for step in reversed(chain)],
+                                     partial, workers=self.workers,
+                                     changes=partial / CHANGES_DIR if self.track_changes else None)
+            if self.track_changes:
+                write_changes(partial, base_dir=base, files=counts, release=self._stamp(release),
+                              base_stamp=self._stamp(link) if held(link) else None)
             (partial / MIRROR_STAMP).write_text(json.dumps(self._stamp(release), sort_keys=True),
                                                 encoding="utf-8")
         except BaseException:
@@ -552,7 +629,34 @@ def default_mirror(environ: Mapping[str, str] | None = None, *, store: str | Non
     subdirectory named by a hash of the store and only prunes its own copies."""
     env = os.environ if environ is None else environ
     root = Path(env.get(MIRROR_ENV) or Path(tempfile.gettempdir()) / "yeto-release-mirror")
+    track = env.get(TRACK_CHANGES_ENV, "").strip().lower() in ("1", "true", "yes", "on")
     if store is None:
-        return DeltaMirror(root)
+        return DeltaMirror(root, track_changes=track)
     key = hashlib.sha256(str(store).encode("utf-8")).hexdigest()[:16]
-    return DeltaMirror(root / f"store-{key}", scope=str(store))
+    return DeltaMirror(root / f"store-{key}", scope=str(store), track_changes=track)
+
+
+def write_changes(release_dir: Path, *, base_dir: Path, files: Mapping[str, int | None],
+                  release: Mapping[str, Any] | None = None, base_stamp: Mapping[str, Any] | None = None) -> None:
+    """Write the change manifest of ``release_dir`` (:class:`DeltaMirror`
+    ``track_changes``); the word indexes must already be under :data:`CHANGES_DIR`."""
+    manifest = {"format": 1, "base_dir": str(base_dir), "base_stamp": None if base_stamp is None else dict(base_stamp),
+                "release": None if release is None else dict(release), "files": dict(files)}
+    (Path(release_dir) / CHANGES_MANIFEST).write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+
+def read_changes(release_dir: Path) -> dict[str, Any] | None:
+    """The change manifest of a rebuilt release (:class:`DeltaMirror`
+    ``track_changes``), or None when it has none (a full release, or a mirror
+    without tracking). ``files`` maps each file to the path of its changed-word
+    index, or None when the changes are unknown."""
+    release_dir = Path(release_dir)
+    try:
+        manifest = json.loads((release_dir / CHANGES_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("format") != 1:
+        return None
+    files = {name: None if count is None else release_dir / CHANGES_DIR / (name + CHANGED_SUFFIX)
+             for name, count in (manifest.get("files") or {}).items()}
+    return {**manifest, "files": files}

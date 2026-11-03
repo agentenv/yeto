@@ -1012,6 +1012,19 @@ invariants in the [Development Guide](#development-guide) must hold.
 
 ## Buffer-trainer releases and spot rollout islands
 
+These options apply to a buffer trainer (`--rl-sample-role trainer`) that
+publishes policy releases to separate rollout islands.
+
+- **Sparse weight updates** (sampler spec `engine.options.sparse_update`,
+  `off` by default, or `auto`): when a release was rebuilt from the served
+  one with change tracking (`YETO_RL_MIRROR_TRACK_CHANGES=1`), the SGLang
+  adapter writes only the changed elements on every rank instead of a full
+  reload. It falls back to a full reload when the release has no change
+  manifest, changes more than `sparse_max_ratio` (default 0.05) of the
+  elements, or touches a tensor the startup probe could not map, and reloads
+  in full after a failed write or check. bf16 weights only; quantized
+  weights and models whose `load_weights` derives tensors are not supported.
+
 Spot rollout islands on Nebius have four operator tools in
 `yeto/rl/spot/` (each with `--help`):
 

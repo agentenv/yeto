@@ -61,16 +61,49 @@ then uses the version served when the request was sent as
 at the update counts at the older version).
 Checked against SGLang 0.5.20 (miles-next venv; the miles-ports image pins
 0.5.21.dev70) source.
+
+Sparse updates (``sparse_update`` ``auto``; off by default). A full in-place
+reload reads the whole checkpoint on every rank. When the new release was
+rebuilt from the served one with change tracking (``release_delta``
+``DeltaMirror(track_changes=True)``, ``YETO_RL_MIRROR_TRACK_CHANGES=1``), the
+adapter instead sends only the changed elements (:mod:`.sparse_update`):
+
+1. at start, the custom weight loader (:mod:`.sglang_sparse_loader`, passed as
+   ``--custom-weight-loader``) probes how ``load_weights`` places every
+   checkpoint element on every rank and writes an element map; the served
+   release is then reloaded from disk (the probe may leave side effects) and a
+   sample of elements is compared with the release (a layout the probe did not
+   see, e.g. a post-load reshuffle, disables sparse updates);
+2. per update, before any pause: the changed words of the manifest become
+   changed tensor elements, and those become one patch per rank (flat
+   parameter positions and new bits) plus check samples of changed and
+   unchanged elements;
+3. ``POST /update_weights_from_tensor`` with ``load_format`` = the loader (one
+   command per rank, no weight data over HTTP; under ``live_update`` between
+   the same pause and continue as a full reload); each rank writes its patch
+   and compares the samples.
+
+It falls back to the full reload, before touching the weights, when the
+release has no change manifest, was not rebuilt from the served directory,
+changes more than ``sparse_max_ratio`` of the elements, or changes a tensor
+the probe could not map; after a failed write or check it reloads in full at
+once (``sparse_repair`` in the load record). Supported: bf16 weights without
+NEXTN (a draft model would not be updated). Not supported: quantized weights
+(FP8/MXFP4 parameters are not the checkpoint's bf16 words) and models whose
+``load_weights`` derives other tensors from the loaded ones.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from yeto.rl.engine.sampler_checks import INDEX_FILE
 from yeto.rl.engine.sampler_engine import (
@@ -81,8 +114,10 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 
-from . import sglang_load_report
+from . import sglang_load_report, sparse_update
 from .server import ServerConfig, ServerEngine
+from .sglang_sparse_loader import LOADER as SPARSE_LOADER
+from .sglang_sparse_loader import command_name
 
 TOPOLOGY_TP8 = "tp8"
 TOPOLOGY_DP8 = "dp8"
@@ -112,6 +147,35 @@ class SGLangOptions:
     live_update: bool = False
     # keep the radix prefix cache under live_update (stale prefix KV is reused; module doc)
     live_prefix_cache: bool = True
+    # update only the changed weight elements (module doc): "off" or "auto" (a full
+    # reload whenever a sparse update is not possible)
+    sparse_update: str = "off"
+    sparse_max_ratio: float = 0.05  # changed elements / all elements above which the update is full
+    sparse_dir: str | None = None  # element maps and patches (default: /dev/shm or the temp directory)
+    sparse_probe_device: str = "cpu"  # where the probe's float64 parameters live
+    sparse_check_tensors: int = 8  # check samples: changed tensors and as many other tensors
+    sparse_check_elements: int = 256  # elements per sampled tensor
+    sparse_prepare_timeout_s: float = 3600.0
+
+
+SPARSE_MODES = ("off", "auto")
+
+
+def _sparse_payload(command: dict[str, Any]) -> str:
+    """One rank's ``serialized_named_tensors`` entry: the command in the tensor
+    name and a one-element placeholder tensor (plain pickle, which SGLang's
+    restricted unpickler accepts, base64 for JSON)."""
+    import base64
+    import pickle
+
+    import torch
+
+    return base64.b64encode(pickle.dumps([(command_name(command), torch.zeros(1))])).decode("ascii")
+
+
+class _ProbeReloadFailed(SamplerEngineError):
+    """The reload of the served release after the sparse probe failed: the
+    weights may still hold probe side effects, so the start fails."""
 
 
 def _finish(meta: dict[str, Any]) -> str:
@@ -173,6 +237,28 @@ class SGLangServerEngine(ServerEngine):
         if is_dp_attention(config.topology) and self.options.nextn:
             raise SamplerEngineError("sglang DP attention + DeepEP cannot run NEXTN (A-INF item 8); "
                                      "turn one of them off")
+        if self.options.sparse_update not in SPARSE_MODES:
+            raise SamplerEngineError(f"sglang sparse_update must be one of {SPARSE_MODES}, "
+                                     f"got {self.options.sparse_update!r}")
+        # why sparse updates are off for this engine (None: they are tried)
+        self.sparse_off: str | None = self._sparse_unsupported()
+        self._served_dir: Path | None = None
+        self._sparse_maps: list[dict[str, Any]] | None = None
+        self._sparse_shapes: dict[str, list[int]] | None = None
+        self.sparse_prepare: dict[str, Any] | None = None  # the last probe's record
+        self._weight_sessions: bool | None = None  # /begin_weight_update exists (None: not asked yet)
+
+    def _sparse_unsupported(self) -> str | None:
+        c, o = self.config, self.options
+        if o.sparse_update == "off":
+            return "off"
+        if not c.in_place_reload:
+            return "needs in_place_reload"
+        if c.precision != "bf16" or c.quant_scheme != "bf16":
+            return f"weights are {c.precision}/{c.quant_scheme}, not bf16"
+        if o.nextn:
+            return "NEXTN draft model"
+        return None
 
     @property
     def updates_during_generation(self) -> bool:
@@ -191,6 +277,8 @@ class SGLangServerEngine(ServerEngine):
             argv += ["--speculative-algorithm", "NEXTN"]
         if o.live_update and not o.live_prefix_cache and "--disable-radix-cache" not in c.extra_args:
             argv += ["--disable-radix-cache"]  # no prefix KV of older weights after an update
+        if self.sparse_off is None:
+            argv += ["--custom-weight-loader", SPARSE_LOADER]
         return argv + list(c.extra_args)
 
     def env(self) -> dict[str, str]:
@@ -207,6 +295,9 @@ class SGLangServerEngine(ServerEngine):
         self._started_version = int(version)  # what ``default`` means in this server's versions
         if self.options.load_report_dir:  # reports of an earlier server must not count for this one
             sglang_load_report.clear_reports(self.options.load_report_dir)
+        self._served_dir = Path(release_dir) if release_dir is not None else Path(self.config.base_dir)
+        self._sparse_maps = None  # a new server: probe again
+        self._weight_sessions = None  # whether it has weight-update sessions: asked at the first call
         return super().start(release_dir, version)
 
     def loaded_expert_matrices(self) -> int | None:
@@ -240,9 +331,28 @@ class SGLangServerEngine(ServerEngine):
                                    SamplingParams(max_tokens=8, temperature=0.0))
             detail["warmup_batch_sizes"] = list(self.options.warmup_batch_sizes)
             detail["warmup_s"] = round(self._clock() - began, 3)
+        if self.sparse_off is None:
+            detail["sparse_prepare"] = self._sparse_prepare()
         return detail
 
     def reload_in_place(self, model_dir: Path, version: int) -> dict[str, Any] | None:
+        sparse: dict[str, Any] = {}
+        if self.sparse_off is None and self._sparse_maps is not None:
+            try:
+                result = self._sparse_update(Path(model_dir), int(version))
+            except sparse_update.SparseUnavailable as error:
+                sparse = {"sparse_fallback": error.reason, "sparse_fallback_detail": str(error)[:300]}
+            else:  # written sparsely, or reloaded in full after a failed write or check
+                self._served_dir = Path(model_dir)
+                return result
+        elif self.options.sparse_update != "off":
+            sparse = {"sparse_fallback": self.sparse_off or "not_prepared"}
+        detail = self._reload_full(model_dir, version)
+        self._served_dir = Path(model_dir)
+        merged = {**(detail or {}), **sparse}
+        return merged or None
+
+    def _reload_full(self, model_dir: Path, version: int) -> dict[str, Any] | None:
         request = {"model_path": str(model_dir), "weight_version": str(int(version))}
         if not self.options.live_update:
             self._update_from_disk(request)
@@ -258,6 +368,211 @@ class SGLangServerEngine(ServerEngine):
         return {"live": True, "pause_call_s": round(paused - began, 3),
                 "update_s": round(updated - paused, 3), "paused_s": round(self._clock() - paused, 3),
                 "num_paused_requests": body.get("num_paused_requests") if isinstance(body, dict) else None}
+
+    # ------------------------------------------------------------------ sparse updates
+    def _sparse_root(self) -> Path:
+        if self.options.sparse_dir:
+            return Path(self.options.sparse_dir)
+        import tempfile
+
+        shm = Path("/dev/shm")
+        return (shm if shm.is_dir() else Path(tempfile.gettempdir())) / f"yeto-sparse-{self.config.port}"
+
+    def _sparse_call(self, commands: list[dict[str, Any]], *, version: int | None = None,
+                     timeout_s: float | None = None) -> list[dict[str, Any]]:
+        """Send one command per rank through the custom loader; the ranks' results."""
+        for command in commands:
+            Path(command["result"]).unlink(missing_ok=True)
+        body: dict[str, Any] = {"serialized_named_tensors": [_sparse_payload(c) for c in commands],
+                                "load_format": SPARSE_LOADER, "flush_cache": False}
+        if version is not None:
+            body["weight_version"] = str(int(version))
+        session = self._begin_weight_update()
+        try:
+            reply = self.call("POST", "/update_weights_from_tensor", body, timeout_s=timeout_s)
+        finally:
+            if session:
+                self.call("POST", "/end_weight_update", {})
+        if isinstance(reply, dict) and reply.get("success") is False:
+            raise SamplerEngineError(f"sglang update_weights_from_tensor: {reply.get('message')}")
+        results = []
+        for command in commands:
+            try:
+                results.append(json.loads(Path(command["result"]).read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                results.append({"ok": False, "error": f"no result from rank {command['rank']} "
+                                f"(is yeto importable by the server's python?)"})
+        return results
+
+    def _begin_weight_update(self) -> bool:
+        """Open a weight-update session where the server has them (the pinned
+        fork: ``/update_weights_from_tensor`` outside a ``/begin_weight_update``
+        session fails an assertion that ends the scheduler). False: the server has
+        no sessions (upstream SGLang; remembered until the next start)."""
+        if self._weight_sessions is False:
+            return False
+        try:
+            self.call("POST", "/begin_weight_update", {})
+        except SamplerEngineError as error:
+            if self._weight_sessions is None and "HTTP 404" in str(error):
+                self._weight_sessions = False
+                return False
+            raise
+        self._weight_sessions = True
+        return True
+
+    def _sparse_prepare(self) -> dict[str, Any]:
+        """Probe the element maps of the started server (module doc). On any
+        failure sparse updates stay off for this server (``sparse_off``)."""
+        assert self._served_dir is not None
+        root, tp = self._sparse_root(), int(self.options.tp)
+        began = self._clock()
+        record: dict[str, Any] = {}
+        try:
+            slots = sparse_update.release_slots(self._served_dir)
+            if not slots:
+                raise SamplerEngineError(f"{self._served_dir}: no *.safetensors files")
+            shapes = {name: list(slot.shape) for name, slot in slots.items()}
+            maps_dir = root / "maps"
+            maps_dir.mkdir(parents=True, exist_ok=True)
+            commands = [{"op": "prepare", "rank": r, "tensors": shapes, "out": str(maps_dir / f"rank{r}.pkl"),
+                         "result": str(maps_dir / f"prepare-rank{r}.json"),
+                         "probe_device": self.options.sparse_probe_device,
+                         "threads": max(1, (os.cpu_count() or 1) // tp)} for r in range(tp)]
+            try:
+                results = self._sparse_call(commands, timeout_s=self.options.sparse_prepare_timeout_s)
+            finally:  # the probe may have touched real tensors: serve the release as loaded from disk
+                try:
+                    self._update_from_disk({"model_path": str(self._served_dir),
+                                            "weight_version": str(self._started_version)})
+                except BaseException as error:  # not a sparse failure: the served weights are unknown
+                    raise _ProbeReloadFailed(f"reload after the sparse probe: {error}") from error
+            failed = [r for r in results if not r.get("ok")]
+            if failed:
+                raise SamplerEngineError(f"sparse probe failed: {failed[0].get('error')}")
+            maps = [sparse_update.load_map(Path(c["out"])) for c in commands]
+            record = {"mapped": min(r["mapped"] for r in results),
+                      "unmapped": max(r["unmapped"] for r in results), "probe_s": max(r["seconds"] for r in results),
+                      "exact_groups": max(len(r.get("exact_groups") or []) for r in results)}
+            mapped = set.intersection(*(set(m["tensors"]) for m in maps))
+            rng = np.random.default_rng(int(self._started_version))
+            checks = sparse_update.pick_checks(rng, slots, mapped, {}, tensors=4 * self.options.sparse_check_tensors,
+                                               per_tensor=self.options.sparse_check_elements)
+            summary = sparse_update.rank_patches(root / "check", maps, slots, {}, checks,
+                                                 {"version": self._started_version})
+            results = self._sparse_call([{"op": "check", "rank": r, "patch": summary[r]["dir"],
+                                          "result": str(root / f"check-rank{r}.json")} for r in range(tp)])
+            bad = [r for r in results if not r.get("ok") or r.get("mismatches")]
+            record["checked"] = sum(int(r.get("checked") or 0) for r in results)
+            if bad:
+                raise SamplerEngineError(f"sparse layout check failed: {bad[0].get('error') or bad[0]}")
+            self._sparse_maps = maps
+            self._sparse_shapes = shapes
+        except (SamplerEngineError, sparse_update.SparseUnavailable, OSError, ValueError, KeyError) as error:
+            self._sparse_maps = None
+            if isinstance(error, _ProbeReloadFailed):
+                raise
+            record["error"] = f"{type(error).__name__}: {str(error)[:300]}"
+        record["prepare_s"] = round(self._clock() - began, 3)
+        record["enabled"] = self._sparse_maps is not None
+        self.sparse_prepare = record
+        return record
+
+    def _sparse_plan(self, model_dir: Path, version: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """The rank patches of the update to ``model_dir`` (written before any pause),
+        or :class:`~.sparse_update.SparseUnavailable`."""
+        from yeto.rl.engine.release_delta import MIRROR_STAMP, read_changes
+
+        manifest = read_changes(model_dir)
+        if manifest is None:
+            raise sparse_update.SparseUnavailable("no_change_manifest", str(model_dir))
+        served = self._served_dir
+        if served is None or Path(manifest["base_dir"]).resolve() != served.resolve():
+            raise sparse_update.SparseUnavailable("base_mismatch", f"rebuilt from {manifest['base_dir']}, "
+                                                  f"serving {served}")
+        if manifest.get("base_stamp") is not None:
+            try:
+                stamp = json.loads((served / MIRROR_STAMP).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                stamp = None
+            if stamp != manifest["base_stamp"]:
+                raise sparse_update.SparseUnavailable("base_mismatch", "the served copy is another release")
+        slots = sparse_update.release_slots(model_dir)
+        if {n: list(s.shape) for n, s in slots.items()} != self._sparse_shapes:
+            raise sparse_update.SparseUnavailable("layout_changed", "tensor names or shapes differ")
+        changes = sparse_update.changed_elements(model_dir, manifest["files"])
+        changed = sum(int(i.size) for i in changes.values())
+        total = sum(s.numel for s in slots.values())
+        ratio = changed / total if total else 1.0
+        if ratio > float(self.options.sparse_max_ratio):
+            raise sparse_update.SparseUnavailable("too_many_changes", f"{ratio:.4f} > {self.options.sparse_max_ratio}")
+        maps = self._sparse_maps or []
+        rng = np.random.default_rng(int(version))
+        mapped = set.intersection(*(set(m["tensors"]) for m in maps))
+        checks = sparse_update.pick_checks(rng, slots, mapped, changes, tensors=self.options.sparse_check_tensors,
+                                           per_tensor=self.options.sparse_check_elements)
+        summary = sparse_update.rank_patches(self._sparse_root() / "patch", maps, slots, changes, checks,
+                                             {"version": int(version)})
+        return summary, {"changed_elements": changed, "changed_tensors": len(changes),
+                         "changed_ratio": round(ratio, 6)}
+
+    def _sparse_update(self, model_dir: Path, version: int) -> dict[str, Any]:
+        began = self._clock()
+        try:  # may raise SparseUnavailable: nothing touched
+            summary, detail = self._sparse_plan(model_dir, version)
+        except (OSError, ValueError, KeyError) as error:  # e.g. /dev/shm full: still nothing touched
+            raise sparse_update.SparseUnavailable("plan_error", f"{type(error).__name__}: {error}") from error
+        planned = self._clock()
+        root = self._sparse_root()
+        commands = [{"op": "apply", "rank": r, "patch": s["dir"], "result": str(root / f"apply-rank{r}.json")}
+                    for r, s in enumerate(summary)]
+        live = bool(self.options.live_update)
+        if live:
+            self.call("POST", "/pause_generation", {"mode": "retract"})
+        paused = self._clock()
+        try:
+            try:
+                results = self._sparse_call(commands, version=version)
+            except SamplerEngineError as error:
+                results = [{"ok": False, "error": str(error)}]
+        finally:
+            updated = self._clock()
+            resumed_error = None
+            if live:
+                try:
+                    self.call("POST", "/continue_generation", {})
+                except SamplerEngineError as error:  # the patch may be partly written: repair below
+                    resumed_error = error
+        if resumed_error is not None:
+            results = [{"ok": False, "error": f"continue_generation after the sparse write: {resumed_error}"}]
+        detail.update({"plan_s": round(planned - began, 3), "update_s": round(updated - paused, 3),
+                       "patch_elements": sum(s["elements"] for s in summary),
+                       "checked": sum(int(r.get("checked") or 0) for r in results),
+                       "write_s": max(float(r.get("write_s") or 0.0) for r in results)})
+        if live:
+            detail.update({"live": True, "paused_s": round(self._clock() - paused, 3)})
+        bad = [r for r in results if not r.get("ok") or r.get("mismatches")]
+        if not bad:
+            return {"sparse": True, **detail}
+        # the weights may be partly written: load the whole release now
+        reason = bad[0].get("error") or f"{bad[0].get('mismatches')} check mismatches {bad[0].get('examples')}"
+        repaired = self._reload_full(model_dir, version) or {}
+        return {"sparse": False, "sparse_repair": str(reason)[:300], **{f"sparse_{k}": v for k, v in detail.items()},
+                **repaired}
+
+    def _remove_sparse_dir(self) -> None:
+        if self.sparse_off is None:  # element maps and patches (in /dev/shm by default)
+            import shutil
+
+            shutil.rmtree(self._sparse_root(), ignore_errors=True)
+
+    def stop(self) -> None:
+        super().stop()
+        self._remove_sparse_dir()
+
+    def _kill(self) -> None:
+        super()._kill()
+        self._remove_sparse_dir()
 
     def _update_from_disk(self, request: dict[str, Any]) -> Any:
         body = self.call("POST", "/update_weights_from_disk", request)
