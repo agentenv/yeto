@@ -147,11 +147,15 @@ def test_a_fast_group_is_written_while_a_slow_group_of_the_same_round_still_runs
     harness.gates["slow"] = threading.Event()
     rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["slow", "fast"]}))
     try:
-        rnd(0)  # returns once the fast group is written and a slot is free
+        rnd(0)  # returns once a slot is free
+        # The first fast trial to end frees a slot, possibly before its sibling
+        # ends; groups settle only inside a round call, so pump empty rounds.
+        _wait(lambda: _entries(tmp_path)[0] or rnd(1))
         entries, _ = _entries(tmp_path)
         assert [e.sample_id for e in entries] == ["s-r0-fast"]
-        (first,) = [f for n, f in events if n == ROUND_EVENT]
-        assert first["groups"] == 1 and first["agentic"]["in_flight"] == N and rnd.holds_weights()
+        rounds = [f for n, f in events if n == ROUND_EVENT]
+        assert sum(f["groups"] for f in rounds) == 1
+        assert rounds[-1]["agentic"]["in_flight"] == N and rnd.holds_weights()
         harness.gates["slow"].set()
         rnd.flush()
     finally:
@@ -181,6 +185,7 @@ def test_the_next_round_is_drawn_while_an_earlier_one_runs(tmp_path):
         rnd(0)  # 2 of 4 slots taken: returns at once for the next round's tasks
         assert not _entries(tmp_path)[0]
         rnd(1)
+        _wait(lambda: _entries(tmp_path)[0] or rnd(2))  # pump until the fast group settles
         assert [e.sample_id for e in _entries(tmp_path)[0]] == ["s-r1-fast"]
         harness.gates["slow"].set()
         rnd.flush()
@@ -340,7 +345,10 @@ def test_each_settled_group_reports_its_own_dispenser_row_and_keeps_the_rows_in_
     try:
         rnd(0)
         rnd(1)
-        _wait(lambda: len(prompts.calls) >= 2)
+        # Groups settle only inside a round call on this thread, so a group that
+        # ends after rnd(1) returned is reported only by a later call: pump
+        # empty rounds until fast and bad have both reported their rows.
+        _wait(lambda: rnd(2) or len(prompts.calls) >= 2)
         harness.gates["slow"].set()
         rnd.flush()
     finally:
