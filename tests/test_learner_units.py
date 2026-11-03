@@ -1254,3 +1254,40 @@ def test_auto_checkpointing_follows_free_memory(monkeypatch, free, total, expect
         is expected
     )
     assert model.training
+
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_step_window_timer_excludes_first_step_warmup():
+    from yeto.learner import StepWindowTimer
+
+    clock = _FakeClock()
+    timer = StepWindowTimer(0, 0, clock=clock)
+    clock.t = 200.0  # first step: dataset build + compile
+    assert timer.first_step_done(1, 100) == 200.0
+    for step in range(2, 11):
+        clock.t += 5.0
+        assert timer.first_step_done(step, step * 100) is None
+    n, dt, toks = timer.window(10, 1000)
+    assert (n, dt, toks) == (9, 45.0, 900)
+    assert dt / n == 5.0  # steady state, not (200 + 45) / 10
+    clock.t += 50.0
+    assert timer.window(20, 2000) == (10, 50.0, 1000)
+
+
+def test_step_window_timer_resume_counts_from_resumed_step():
+    from yeto.learner import StepWindowTimer
+
+    clock = _FakeClock()
+    timer = StepWindowTimer(500, 7000, clock=clock)
+    assert timer.first_step_done(500, 7000) is None  # no step taken yet
+    clock.t = 30.0
+    assert timer.first_step_done(501, 7100) == 30.0
+    clock.t = 39.0
+    assert timer.window(510, 8000) == (9, 9.0, 900)

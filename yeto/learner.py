@@ -534,6 +534,42 @@ def load_model_and_tokenizer(args, device):
     return model, tokenizer
 
 
+class StepWindowTimer:
+    """Wall-clock windows for the s/step and tokens/s telemetry.
+
+    The first local step of a process carries one-off costs (streaming
+    dataset build, graph compilation, collective setup) that can be minutes
+    on a large dataset. It is reported once on its own and the first window
+    starts after it, so s/step reflects steady-state throughput only.
+    """
+
+    def __init__(self, steps, tokens, clock=time.monotonic):
+        self._clock = clock
+        self._start_steps = steps
+        self._first_pending = True
+        self._reset(steps, tokens)
+
+    def _reset(self, steps, tokens):
+        self._t = self._clock()
+        self._steps = steps
+        self._tokens = tokens
+
+    def first_step_done(self, steps, tokens):
+        """Seconds the first step took (once), else None; restarts the window."""
+        if not self._first_pending or steps <= self._start_steps:
+            return None
+        self._first_pending = False
+        elapsed = self._clock() - self._t
+        self._reset(steps, tokens)
+        return elapsed
+
+    def window(self, steps, tokens):
+        """(steps, seconds, tokens) since the last window; starts a new one."""
+        out = (steps - self._steps, self._clock() - self._t, tokens - self._tokens)
+        self._reset(steps, tokens)
+        return out
+
+
 def loss_implementation_for(kernel_backend: str) -> str:
     """Name of the loss kernel a ``--kernel-backend`` value actually runs.
 
@@ -1313,7 +1349,7 @@ def run_inner_loop(
             "train/lr": sched.get_last_lr()[0],
             "train/raw_tokens_total": tokens_total,
             "train/target_tokens_total": target_tokens_total,
-            "train/sec_per_step": seconds / window,
+            "train/sec_per_step": seconds / window if window else 0.0,
             "train/tokens_per_sec": tokens_since / seconds if seconds > 0 else 0.0,
             "train/epoch": epoch,
             "local_step": steps_total,
@@ -1321,8 +1357,7 @@ def run_inner_loop(
         }
 
     epoch = 0
-    t_last = time.monotonic()
-    tokens_at_last_log = 0
+    timer = StepWindowTimer(steps_total, tokens_total)
     while not sync_state.shutdown and steps_total < args.max_local_steps:
         steps_at_epoch_start = steps_total
         sampler = getattr(loader, "sampler", None)
@@ -1411,11 +1446,17 @@ def run_inner_loop(
             tokens_total += global_raw
             target_tokens_total += global_targets
 
+            warmup_s = timer.first_step_done(steps_total, tokens_total)
+            if warmup_s is not None and rank == 0:
+                log.info(
+                    "first local step took %.2f s (data loading, compilation "
+                    "and collective setup; excluded from s/step)",
+                    warmup_s,
+                )
             if steps_total % TELEMETRY_EVERY == 0:
                 loss_sum = _global_loss_sum(step_loss_local, world)
                 if rank == 0:
-                    dt = time.monotonic() - t_last
-                    t_last = time.monotonic()
+                    n_steps, dt, d_tokens = timer.window(steps_total, tokens_total)
                     log.info(
                         "local_step=%d global_step=%d loss/token=%.4f "
                         "target_tokens=%d (%.2f s/step)",
@@ -1423,18 +1464,17 @@ def run_inner_loop(
                         sync_state.global_step,
                         loss_sum / global_targets,
                         target_tokens_total,
-                        dt / TELEMETRY_EVERY,
+                        dt / max(n_steps, 1),
                     )
                     wandb_run.log(
                         train_metrics(
                             loss_sum,
                             global_targets,
-                            TELEMETRY_EVERY,
+                            n_steps,
                             dt,
-                            tokens_total - tokens_at_last_log,
+                            d_tokens,
                         )
                     )
-                    tokens_at_last_log = tokens_total
 
             # --- fragment sync at the step boundary (never blocks) ---
             if sync_diloco_boundary(
@@ -1476,17 +1516,11 @@ def run_inner_loop(
         and steps_total > 0
         and steps_total % TELEMETRY_EVERY != 0
     ):
-        window = steps_total % TELEMETRY_EVERY
         loss_sum = _global_loss_sum(step_loss_local, world)
         if rank == 0:
+            window, dt, d_tokens = timer.window(steps_total, tokens_total)
             wandb_run.log(
-                train_metrics(
-                    loss_sum,
-                    global_targets,
-                    window,
-                    time.monotonic() - t_last,
-                    tokens_total - tokens_at_last_log,
-                )
+                train_metrics(loss_sum, global_targets, window, dt, d_tokens)
             )
 
     learner_budget_steps = getattr(args, "learner_budget_steps", None)
