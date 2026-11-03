@@ -9,7 +9,6 @@ experts named by global expert index. Ranks are emulated; no Megatron runs.
 from __future__ import annotations
 
 import shutil
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -17,6 +16,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from free_ports import free_port
+from process_groups import group_popen
 from yeto.fragments import MERGE_AVG, MERGE_RDA
 from yeto.protocol import DTYPE_F32, SyncerClient, layout_fingerprint
 from yeto.rl.local_learner import (
@@ -243,12 +244,6 @@ def test_qwen3_30b_a3b_layout_is_balanced_and_fits_the_fragment_bound():
     assert len(matrix) == 64
 
 
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def syncer_binary() -> Path:
     if not Path(CARGO).exists():
@@ -295,7 +290,7 @@ def test_two_island_round_trip_matches_numpy(syncer_binary, tmp_path):
         return np.concatenate([values[name] for name, _ in lay.fragments.fragments[fid].tensors]).tobytes()
 
     port = free_port()
-    proc = subprocess.Popen(
+    proc = group_popen(
         [str(syncer_binary), "--port", str(port), "--learners", "2", "--quorum", "2",
          "--grace-ms", "20", "--quorum-timeout-s", "10", "--total-steps", str(num),
          "--pipeline", "1", "--sync-interval-steps", "0", "--delta-correction", "none",

@@ -64,6 +64,16 @@ def _island_hmac_key_does_not_leak():
 
 
 @_pytest.fixture(autouse=True)
+def _reap_syncer_groups():
+    """Kill every process group a test started with process_groups.group_popen,
+    also when the test failed or timed out before its own cleanup ran."""
+    yield
+    from process_groups import reap_groups
+
+    reap_groups()
+
+
+@_pytest.fixture(autouse=True)
 def _no_teardown_diagnostics(monkeypatch):
     """launcher.teardown_island pulls logs over ssh/sky before a teardown;
     unit tests exercise it explicitly (test_verda_provider.py) instead."""

@@ -13,6 +13,7 @@ import time
 import pytest
 import torch
 
+from process_groups import group_popen
 from yeto import island_credential_guard as guard
 from yeto.protocol import (
     DTYPE_F32,
@@ -54,7 +55,7 @@ def _syncer(binary, port, tmp_path, *, key=None, allow_unauth=False, extra=(), l
             "--max-base-lag", "0", "--learner-weight", "equal", *extra]
     if allow_unauth:
         argv.append("--allow-unauthenticated-islands")
-    return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    return group_popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
 
 
 def _client(port, learner_id=0, *, key, identity=GOOD):

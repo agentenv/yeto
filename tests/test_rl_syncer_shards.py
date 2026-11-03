@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -21,6 +20,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from free_ports import free_ports as _free_ports
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_full_parameter_async import FULL, _plan
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
@@ -53,17 +54,6 @@ def _async_args(shards: int, total_steps: int, *extra: str):
                               "--syncer-shards", str(shards), "--rl-sync-final-cut", "download", *extra))
 
 
-def _free_ports(count: int) -> list[int]:
-    socks = [socket.socket() for _ in range(count)]
-    try:
-        for sock in socks:
-            sock.bind(("127.0.0.1", 0))
-        return [sock.getsockname()[1] for sock in socks]
-    finally:
-        for sock in socks:
-            sock.close()
-
-
 def _layout() -> FragmentLayout:
     return FragmentLayout([Fragment(MERGE_AVG, [(f"actor.w{i}", NUMEL)]) for i in range(P)])
 
@@ -90,8 +80,8 @@ def _start(binary: Path, home: Path, shards: int, total_steps: int, extra=(), sy
         command = command.replace(" --event-tape", f" {syncer_flags} --event-tape")
     (home / "yeto-output").mkdir(parents=True)
     env = {**os.environ, "HOME": str(home)}
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, env=env)
+    process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, env=env)
     return process, ports, launcher.rl_syncer_profile(args, 2).sha256, command
 
 
@@ -153,8 +143,7 @@ def _drive(binary: Path, home: Path, shards: int, *, total_steps: int, push, ext
     finally:
         for client in clients:
             client.close()
-        if process.poll() is None:
-            process.kill()
+        kill_group(process)
         log, _ = process.communicate(timeout=10)
     assert manifests[0] == manifests[1], log
     for fid in range(P):

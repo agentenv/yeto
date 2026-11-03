@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shutil
-import socket
 import subprocess
 import threading
 from dataclasses import replace
@@ -21,6 +20,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.protocol import MSG_BCAST_FRAGMENT
 from yeto.rl.adapters.verl import full_parameter as fp
@@ -363,13 +364,11 @@ def _start_syncer(binary: Path, tmp_path: Path, *, fragments: int, rounds: int, 
     args.controller = "local"
     _prepare_rl_args(args)
     command = launcher.role_syncer_commands(args, 2, binary=str(binary))["actor"]
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     command = (command.replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
                .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, 2).sha256
 
 
@@ -450,8 +449,7 @@ def _two_islands(binary, tmp_path, monkeypatch, *, rounds: int, fragments: int, 
             thread.join(timeout=120)
         assert process.wait(timeout=30) == 0
     finally:
-        if process.poll() is None:
-            process.terminate()
+        kill_group(process)
         log = process.communicate(timeout=10)[0]
     for learner_id in range(2):
         assert not isinstance(results.get(learner_id), BaseException), (results.get(learner_id), log[-3000:])

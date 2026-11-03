@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from yeto.launch.checks.dispense_check import check, check_tapes, read_records
+from free_ports import free_port
 from yeto.rl.engine import task_dispense as td
 from yeto.rl.engine.data_split import pass_order
 
@@ -39,12 +40,6 @@ def syncer_binary() -> Path:
     subprocess.run(["cargo", "build", "-q"], cwd=ROOT / "syncer", check=True, env=_cargo_env())
     assert binary.exists()
     return binary
-
-
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class Syncer:

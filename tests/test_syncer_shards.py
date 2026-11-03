@@ -12,7 +12,6 @@ No GPU, no torch, no Ray.
 from __future__ import annotations
 
 import json
-import socket
 import struct
 import subprocess
 import threading
@@ -22,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from free_ports import free_ports
 from yeto.fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, SyncerClient
 from yeto.syncer_shards import (
@@ -42,17 +42,6 @@ def syncer_binary() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
     assert binary.is_file()
     return binary
-
-
-def free_ports(n: int) -> list[int]:
-    socks = [socket.socket() for _ in range(n)]
-    try:
-        for sock in socks:
-            sock.bind(("127.0.0.1", 0))
-        return [sock.getsockname()[1] for sock in socks]
-    finally:
-        for sock in socks:
-            sock.close()
 
 
 def layout() -> FragmentLayout:

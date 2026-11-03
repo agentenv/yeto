@@ -9,13 +9,12 @@ code pack differs and a JOIN from an island that still declares contract v2.
 from __future__ import annotations
 
 import hashlib
-import socket
 import subprocess
-import time
 from types import SimpleNamespace
 
 import pytest
 
+from free_ports import free_port as _free_port
 from yeto.rl.adapters.miles.identity import backend_identity
 from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, PluginRef
 from yeto.rl.engine.backend_identity import (
@@ -80,12 +79,6 @@ def test_island_code_pack_digest_prefers_the_run_pack():
                                                     source_sha256=PACK_B)) == PACK_A
     assert _island_code_pack_digest(SimpleNamespace(code_pack_digest=None,
                                                     source_sha256=PACK_B)) == PACK_B
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 @pytest.mark.parametrize("bad", ["other_pack", "v2_island"])

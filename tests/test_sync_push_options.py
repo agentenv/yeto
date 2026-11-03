@@ -9,6 +9,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 import torch
+from process_groups import group_popen
 from test_rl_algorithm_provenance import (  # noqa: F401
     _fake_sky,
     _island_run,
@@ -263,7 +264,7 @@ def _run_bridge_pair(binary, tmp_path, rounds, *, full_every):
         process.kill()
         process.wait()
         argv = [*process.args, "--bcast-delta-full-every", str(full_every)]
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        process = group_popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     runtimes = (_FakeMiles([0.1, 0.3], 0), _FakeMiles([0.3, 0.5], 1))
     threads = []
     try:

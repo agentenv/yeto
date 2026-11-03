@@ -8254,6 +8254,18 @@ fn append_outer_step_record(
 /// membership (read by `yeto.rl.engine.island_status`).
 const POOL_STATUS_SCHEMA: &str = "yeto.syncer.elastic-status/v1";
 
+/// `status.json` and its temporary file beside the event tape. The shards of
+/// a sharded head share one output directory, so shard `i > 0` writes
+/// `status.shard{i}.json`: one temporary file per writer, or one shard's
+/// rename would move the other's half-written file into place.
+fn pool_status_paths(
+    tape: &std::path::Path,
+    shard: crate::shard::ShardPlan,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let name = if shard.index == 0 { "status.json".to_string() } else { format!("status.shard{}.json", shard.index) };
+    (tape.with_file_name(&name), tape.with_file_name(format!(".{name}.tmp")))
+}
+
 /// Atomically rewrite `status.json` beside the event tape: run state, syncer
 /// epoch, committed step and the live islands. Best effort (a write failure
 /// is logged, never fatal).
@@ -8278,8 +8290,7 @@ fn write_pool_status(cfg: &Config, registry: &Registry, outer_version: u64, stat
         "{{\"schema\":\"{POOL_STATUS_SCHEMA}\",\"state\":\"{state}\",\"syncer_epoch\":{syncer_epoch},\"membership_epoch\":{membership_epoch},\"outer_version\":{outer_version},\"cap_total\":{cap_total:?},\"islands\":{{{}}}}}",
         islands.join(",")
     );
-    let path = tape.with_file_name("status.json");
-    let temporary = tape.with_file_name(".status.json.tmp");
+    let (path, temporary) = pool_status_paths(tape, cfg.shard);
     if let Err(error) = std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, &path)) {
         warn!(path = %path.display(), "status write failed: {error}");
     }
@@ -8703,6 +8714,19 @@ mod tests {
     use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
+
+    #[test]
+    fn shards_of_one_head_write_distinct_status_files() {
+        let tape = std::path::Path::new("/out/yeto-tape.jsonl");
+        let shard = |index| crate::shard::ShardPlan::new(index, 2).unwrap();
+        let (first, first_tmp) = pool_status_paths(tape, shard(0));
+        let (second, second_tmp) = pool_status_paths(tape, shard(1));
+        assert_eq!(first, std::path::Path::new("/out/status.json"));
+        assert_eq!(first_tmp, std::path::Path::new("/out/.status.json.tmp"));
+        assert_eq!(second, std::path::Path::new("/out/status.shard1.json"));
+        assert_ne!(first_tmp, second_tmp);
+        assert_eq!(pool_status_paths(tape, Default::default()).0, first);
+    }
 
     fn member(learner_id: u32, generation: u64) -> Member {
         Member {

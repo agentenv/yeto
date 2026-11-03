@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 
+from free_ports import free_port as _free_port
 from test_rl_engine_driver import _driver, _engine, _strict_config
 from yeto.rl.engine.bridges import PoolAvgSync, RoundCutHooks
 from yeto.rl.pool_client import LeaveReason
@@ -40,12 +39,6 @@ def syncer_binary() -> Path:
 @pytest.fixture(autouse=True)
 def _island_key(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", KEY)
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class Syncer:
@@ -197,14 +190,27 @@ def test_final_grace_ends_the_run_without_an_island_that_left(syncer_binary, tmp
                            "--soft-deadline-s", "1", "--final-grace-s", "3"])
     try:
         islands = [_island(tmp_path, syncer, i, rounds) for i in range(2)]
-        quitter = islands[1][0]
-        original = quitter.boundary
+        stayer, quitter = islands[0][0], islands[1][0]
+        original, stayer_boundary = quitter.boundary, stayer.boundary
+        left = threading.Event()
 
         def leave_after_first_round(driver, *, rollout_id, stats):
-            result = original(driver, rollout_id=rollout_id, stats=stats)
-            quitter.leave(LeaveReason.PREEMPTED)
+            try:
+                original(driver, rollout_id=rollout_id, stats=stats)
+                quitter.leave(LeaveReason.PREEMPTED)
+            finally:
+                left.set()
             raise KeyboardInterrupt("preempted")
+
+        def wait_for_the_quitter(driver, *, rollout_id, stats):
+            # With quorum 1 and a base lag of 2 the staying island can run every
+            # round before the quitter's first boundary returns; the run would
+            # then end before the LEAVE is sent. Hold it after its first round.
+            result = stayer_boundary(driver, rollout_id=rollout_id, stats=stats)
+            assert left.wait(60), "the quitter never left"
+            return result
         quitter.boundary = leave_after_first_round
+        stayer.boundary = wait_for_the_quitter
         errors: list[BaseException] = []
         threads = [_run(driver, errors) for _sync, driver in islands]
         for thread in threads:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 import subprocess
 import threading
 import time
@@ -11,6 +10,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from free_ports import free_port as _port
+from process_groups import group_popen
 from yeto.export import parse_checkpoint
 from yeto.protocol import DTYPE_F32, SyncerClient
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
@@ -44,12 +45,6 @@ def syncer_binary():
     return ROOT / "syncer/target/debug/yeto-syncer"
 
 
-def _port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 def _layout():
     return build_avg_layout(
         (
@@ -74,7 +69,7 @@ def _resume_flag(checkpoint, resume):
 
 
 def _start(binary, port, checkpoint, rounds, *, learners=2, event_tape=None, resume=None):
-    return subprocess.Popen(
+    return group_popen(
         [
             str(binary),
             "--port",
@@ -131,7 +126,7 @@ def _start_decoupled(
     learner_budget_steps=None,
     resume=None,
 ):
-    return subprocess.Popen(
+    return group_popen(
         [
             str(binary),
             "--port",

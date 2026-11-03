@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import shlex
-import socket
 import subprocess
 import threading
 
 import pytest
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from test_verl_full_parameter_sync import (  # noqa: F401 - syncer_binary is a fixture
     MAX_FRAGMENT_BYTES, SHAPES, _run_dict, _run_island, needs_cargo, syncer_binary,
@@ -221,9 +222,7 @@ def test_two_launcher_built_verl_islands_run_async_rounds_through_the_real_synce
     args = _prepared(_verl_args("--total-steps", str(rounds), "--rl-sync-fragment-max-bytes", str(MAX_FRAGMENT_BYTES),
                                 "--rl-sync-wait-timeout-s", "60", layout_hash=layout.layout_hash,
                                 fragments=fragments))
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = free_port()
     command = (launcher.role_syncer_commands(args, 2, binary=str(syncer_binary))["actor"]
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
@@ -237,7 +236,7 @@ def test_two_launcher_built_verl_islands_run_async_rounds_through_the_real_synce
         assert section["full_parameter"]["push_dtype"] == "int4"
         plans.append({"learner_id": learner_id, "syncer": parsed.syncer, "model_revision": parsed.model_revision,
                       vfs.PLAN_KEY: section["full_parameter"]})
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    process = group_popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     results: dict = {}
     try:
         threads = [threading.Thread(target=_run_island, args=(i, plans[i], 20 * rounds, results))
@@ -248,8 +247,7 @@ def test_two_launcher_built_verl_islands_run_async_rounds_through_the_real_synce
             thread.join(timeout=120)
         assert process.wait(timeout=30) == 0
     finally:
-        if process.poll() is None:
-            process.terminate()
+        kill_group(process)
         log = process.communicate(timeout=10)[0]
     for learner_id in range(2):
         result = results.get(learner_id)

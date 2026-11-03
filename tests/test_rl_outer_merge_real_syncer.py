@@ -16,7 +16,6 @@ rounds x P to the syncer's ``--max-base-lag``, which counts versions.
 from __future__ import annotations
 
 import shutil
-import socket
 import subprocess
 import time
 from pathlib import Path
@@ -24,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from free_ports import free_port
+from process_groups import group_popen, kill_group
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
 from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
 
@@ -127,15 +128,13 @@ class Rig:
         args.controller = "local"
         _prepare_rl_args(args)
         command = launcher.role_syncer_commands(args, islands, binary=str(binary))["actor"]
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        port = free_port()
         self.command = (command
                         .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                         .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
                         .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
-        self.process = subprocess.Popen(["bash", "-c", self.command], stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True)
+        self.process = group_popen(["bash", "-c", self.command], stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
         self.clients = [SyncerClient(("127.0.0.1", port), i, self.layout, dtype=DTYPE_F32,
                                      num_streams=1, connect_timeout=10, max_reconnects=0,
                                      finalization_timeout=30) for i in range(islands)]
@@ -181,8 +180,7 @@ class Rig:
     def close(self):
         for client in self.clients:
             client.close()
-        if self.process.poll() is None:
-            self.process.terminate()
+        kill_group(self.process)
         self.output, _ = self.process.communicate(timeout=15)
 
 

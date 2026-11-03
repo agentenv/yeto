@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import copy
 import os
-import socket
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from free_ports import free_port as _free_port
 from yeto.rl.engine.cut import CutError
 from yeto.rl.engine.resume_manifest import (
     RESUME_MANIFEST_NAME,
@@ -242,12 +242,6 @@ def test_verl_worker_binding_refuses_a_reset_step(tmp_path):
         require_worker_restored(saved, worker, rank=0, global_step=CUT, data_watermark=12)
     with pytest.raises(ResumeAssertionError, match="lacks"):
         worker_manifest(SimpleNamespace(), rank=0, global_step=0, data_watermark=0)
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _fsdp2_worker(rank: int, world: int, port: int, out_dir: str) -> None:
