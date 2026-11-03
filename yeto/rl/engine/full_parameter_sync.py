@@ -306,6 +306,10 @@ class RolePairing:
         # Lead cap: local rounds this island completed (set by the session at
         # each boundary) and what its waits did.
         self.local_round = 0
+        # The latest local round whose cut this island retained a pair from,
+        # and when (lead cap: rounds trained since the island last pushed).
+        self.retained_round = 0
+        self.retained_round_at = time.monotonic()
         self.lead_waits = 0
         self.lead_wait_seconds = 0.0
         self.lead_wait_escapes = 0
@@ -522,6 +526,9 @@ class RolePairing:
                 or candidate.c_steps < self.profile.local_horizon
             ):
                 raise RuntimeError("role retained cuts are not one H-qualified round")
+        if self.local_round > self.retained_round:
+            self.retained_round = self.local_round
+            self.retained_round_at = time.monotonic()
         return PairedSubmission(candidates, local_round=self.local_round)
 
     def _retain(self, pair: PairedSubmission) -> None:
@@ -908,8 +915,21 @@ class RolePairing:
             return []
         return [pair for pair in self.inflight.values() if pair.local_round <= self.local_round + 1 - limit]
 
+    def lead_unpushed(self) -> bool:
+        """Lead cap K: the island trained K rounds since it last retained a pair.
+
+        Between a merge and the syncer's next PULL the island has no pair in
+        flight, so :meth:`lead_blockers` is empty, yet every round it trains
+        then still lands in its next push (larger c_steps) and widens its lead
+        over an island the next merge waits for.  So the island also waits
+        until it pushes from a cut at most K - 1 rounds old."""
+
+        limit = self.profile.max_local_rounds_ahead
+        return limit is not None and self.retained_round <= self.local_round - limit
+
     async def wait_for_lead(self, serve: Any = None) -> float:
-        """Lead cap: block at this boundary until :meth:`lead_blockers` is empty.
+        """Lead cap: block at this boundary while :meth:`lead_blockers` is not
+        empty or :meth:`lead_unpushed` holds.
 
         The wait keeps the island's sync duties: every poll materializes and
         pushes PULLs it has candidates for (from this boundary's cut), applies
@@ -929,14 +949,18 @@ class RolePairing:
         Returns the seconds this boundary waited."""
 
         blockers = self.lead_blockers()
-        if not blockers or self.any_finalizing or self.failure is not None:
+        unpushed = self.lead_unpushed()
+        if (not blockers and not unpushed) or self.any_finalizing or self.failure is not None:
             return 0.0
         started = time.monotonic()
         poll = max(self.profile.poll_seconds, LEAD_WAIT_POLL_S)
         escaped = False
-        oldest = min(pair.local_round for pair in blockers)
-        print(f"[yeto-full-parameter] lead wait: local round {self.local_round}, "
-              f"{len(blockers)} pair(s) pushed at local round {oldest}.. are unmerged "
+        if blockers:
+            oldest = min(pair.local_round for pair in blockers)
+            reason = f"{len(blockers)} pair(s) pushed at local round {oldest}.. are unmerged"
+        else:
+            reason = f"no push since local round {self.retained_round}"
+        print(f"[yeto-full-parameter] lead wait: local round {self.local_round}, {reason} "
               f"(lead cap {self.profile.max_local_rounds_ahead})", file=sys.stderr, flush=True)
         while True:
             await asyncio.sleep(poll)
@@ -946,9 +970,11 @@ class RolePairing:
             if serve is not None:
                 await serve()
             blockers = self.lead_blockers()
-            if not blockers or self.any_finalizing:
+            unpushed = self.lead_unpushed()
+            if (not blockers and not unpushed) or self.any_finalizing:
                 break
-            give_up = min(pair.retained_at for pair in blockers) + self.profile.wait_timeout / 2
+            since = min(pair.retained_at for pair in blockers) if blockers else self.retained_round_at
+            give_up = since + self.profile.wait_timeout / 2
             if time.monotonic() >= give_up:
                 escaped = True
                 break

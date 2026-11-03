@@ -128,6 +128,51 @@ async def test_the_wait_gives_up_at_half_the_wait_timeout_and_never_times_out_it
 
 
 @pytest.mark.asyncio
+async def test_the_wait_also_covers_rounds_trained_before_the_next_pull_arrives():
+    """After a merge and before the syncer's next PULL nothing is in flight,
+    but a round trained then lands in the next push all the same: with K = 1
+    the island waits until it pushed from its current cut and that merged."""
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=1)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    assert pairing.inflight == {} and role.fragment_versions == (1, 0)
+    assert await pairing.wait_for_lead() == 0.0  # pushed from this round's cut
+    pairing.local_round = 2  # trained one more round; the next PULL is late
+    assert pairing.lead_blockers() == [] and pairing.lead_unpushed()
+    served = []
+
+    async def serve():
+        served.append(time.monotonic())
+        if len(served) == 3:
+            role.candidates.append(_candidate(3, 2))  # the next PULL arrives
+        return 0
+
+    assert await pairing.wait_for_lead(serve) > 0
+    assert len(served) >= 4 and ("actor", 3, True) in role.events
+    assert pairing.inflight == {} and role.fragment_versions == (3, 0)
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_the_wait_for_a_late_pull_gives_up_at_half_the_wait_timeout():
+    role = _PairedRole("actor", [_candidate(1, 1)], [])
+    pairing = _pairing(role, max_local_rounds_ahead=1, wait_timeout=0.4)
+    pairing.local_round = 1
+    pairing.submit_ready()
+    await pairing.commit_staged_broadcasts()
+    pairing.local_round = 2
+    started = time.monotonic()
+    await pairing.wait_for_lead()
+    assert 0.1 <= time.monotonic() - started < 0.4
+    assert (pairing.lead_waits, pairing.lead_wait_escapes) == (1, 1)
+    pairing.local_round = 3
+    assert await pairing.wait_for_lead() > 0  # past the give-up time: one poll, then trains on
+    assert pairing.lead_wait_escapes == 2
+
+
+@pytest.mark.asyncio
 async def test_no_wait_in_the_terminal_phase_or_without_blockers():
     role = _PairedRole("actor", [_candidate(1, 1)], [], release_broadcasts=False)
     pairing = _pairing(role, max_local_rounds_ahead=2)
@@ -523,11 +568,18 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
     assert _max_lead(capped.log) <= 1
     fast = _pushes(capped.log, 0)
     slow = _pushes(capped.log, 1)
-    # Bounded local progress per push: the fast island trains at most K + 1
-    # rounds on a fragment before it pushes it, so its merge weight
-    # (c_steps * T^2) stays within (K + 1)x of the slow island's.
-    assert max(c for c, _ in fast.values()) <= 2
-    assert max(c for c, _ in slow.values()) <= 2
+    # Bounded local progress per push.  In every merge the fast island pushes
+    # a cut at most K rounds newer than the slow island's.  Its anchor (the
+    # round it applied the base broadcast at) can be up to K + 1 rounds older:
+    # a waiting fast island applies a broadcast at once, the slow island at
+    # its next boundary.  So its c_steps, and its tokens^2/steps merge weight,
+    # exceed the slow island's by at most 2K + 1 rounds.  How many rounds pass
+    # between two pushes of one fragment depends on when the syncer's PULLs
+    # arrive, so c_steps itself has no fixed bound.
+    for step, (c_fast, local_fast) in fast.items():
+        c_slow, local_slow = slow[step]
+        assert local_fast <= local_slow + 1, (step, fast[step], slow[step])
+        assert c_fast <= c_slow + 3, (step, fast[step], slow[step])
     waits = [fields for _, kind, who, (name, fields) in
              ((t, k, w, v) for t, k, w, v in capped.log if k == "event")
              if who == 0 and name == "rl_full_parameter_round"]
