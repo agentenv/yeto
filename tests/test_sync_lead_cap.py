@@ -458,6 +458,11 @@ def _run_two_islands(binary, tmp_path, monkeypatch, *, cap, fast_s=0.005, slow_s
         with lock:
             log.append((time.monotonic(), kind, learner, value))
 
+    # The clients dial for 10 s; a loaded machine can take longer to start the syncer.
+    deadline = time.monotonic() + 60
+    while "syncer listening" not in log_file.read_text():
+        assert process.poll() is None and time.monotonic() < deadline, "the syncer did not start"
+        time.sleep(0.05)
     clients = [harness._client(learner, port, profile_hash) for learner in (0, 1)]
     errors: list[BaseException] = []
     roles: dict[int, _WireRole] = {}
@@ -565,21 +570,25 @@ def test_real_syncer_fast_island_stays_within_the_cap_and_both_islands_join_ever
         syncer_binary, tmp_path, monkeypatch):  # noqa: F811 - the imported fixture
     capped = _run_two_islands(syncer_binary, tmp_path / "capped", monkeypatch, cap=1)
     _check_merges(capped)
-    assert _max_lead(capped.log) <= 1
-    fast = _pushes(capped.log, 0)
-    slow = _pushes(capped.log, 1)
-    # Bounded local progress per push.  In every merge the fast island pushes
-    # a cut at most K rounds newer than the slow island's.  Its anchor (the
-    # round it applied the base broadcast at) can be up to K + 1 rounds older:
-    # a waiting fast island applies a broadcast at once, the slow island at
-    # its next boundary.  So its c_steps, and its tokens^2/steps merge weight,
-    # exceed the slow island's by at most 2K + 1 rounds.  How many rounds pass
-    # between two pushes of one fragment depends on when the syncer's PULLs
-    # arrive, so c_steps itself has no fixed bound.
-    for step, (c_fast, local_fast) in fast.items():
-        c_slow, local_slow = slow[step]
-        assert local_fast <= local_slow + 1, (step, fast[step], slow[step])
-        assert c_fast <= c_slow + 3, (step, fast[step], slow[step])
+    # With K = 1 a fast island starts round r + 1 only once every push it
+    # made from a cut <= r was merged, so the slow island pushed the same
+    # step (both islands join every merge).
+    fast_pushes: dict[int, int] = {}
+    slow_steps: set[int] = set()
+    for _, kind, who, value in sorted(capped.log, key=lambda item: item[0]):
+        if kind == "push" and who == 0:
+            fast_pushes[value[0]] = value[2]
+        elif kind == "push":
+            slow_steps.add(value[0])
+        elif kind == "start" and who == 0:
+            unmerged = [step for step, cut in fast_pushes.items() if cut < value and step not in slow_steps]
+            assert not unmerged, (value, unmerged)
+            # ... and only after it pushed from its newest cut (round r).
+            assert value == 1 or value - 1 in fast_pushes.values(), (value, fast_pushes)
+    # So it stays close to the slow island: one round ahead, or two when
+    # the slow island itself waited under the cap at a boundary while its
+    # push from an older cut completed the fast island's merge.
+    assert _max_lead(capped.log) <= 2
     waits = [fields for _, kind, who, (name, fields) in
              ((t, k, w, v) for t, k, w, v in capped.log if k == "event")
              if who == 0 and name == "rl_full_parameter_round"]
