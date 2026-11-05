@@ -614,7 +614,12 @@ def _resume_body(rank, world, port, out_dir):
     assert moved.state.steps_at_reset == [0, 0, 0] and moved.state.fragment_versions == [9, 9, 9]
     moved.close()
 
-    # (c) Without saved anchors a moved fragment takes the global; an unmoved one is kept.
+    # (c) Without saved anchors a moved fragment takes the global; an unmoved one is kept
+    # (a record without the contract, as written by hand for an older checkpoint, is accepted).
+    if rank == 0:
+        record = json.loads((bare / sm.RESUME_STATE_FILE).read_text())
+        del record["contract"]
+        (bare / sm.RESUME_STATE_FILE).write_text(json.dumps(record))
     restart()
     cut.update({0: (4, old_g), 1: (9, new_g), 2: (9, new_g)})
     mixed = make(str(bare), 3)

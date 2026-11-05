@@ -863,7 +863,10 @@ class MegatronDiLoCoSync:
                 checks = [
                     (record.get("format") == RESUME_FORMAT, "format"),
                     (record.get("learner_id") == self.learner_id, "learner id"),
-                    (record.get("contract") == self.contract.hex(), "layout / parallel shape"),
+                    # A hand-written bridge record (an island checkpoint from before
+                    # these records) may leave the contract out.
+                    (record.get("contract", self.contract.hex()) == self.contract.hex(),
+                     "layout / parallel shape"),
                     (len(record.get("versions", ())) == self.num_fragments, "fragment count"),
                     (resume_iteration is None or record.get("iteration") == int(resume_iteration), "iteration"),
                 ]
