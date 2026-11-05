@@ -6308,7 +6308,12 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
+            // The last step is persisted by the final checkpoint anyway; a
+            // periodic one there wrote the same ~1 TB cut twice in a row.
+            if cfg.checkpoint_every > 0
+                && st.schedule().round_number(t) % cfg.checkpoint_every == 0
+                && t < st.schedule().last_step(cfg.total_steps)
+            {
                 if cfg.background_checkpoint {
                     st.save_checkpoint_in_background(path)?;
                     info!(step = t, path = %path.display(), "background checkpoint started");
@@ -11002,6 +11007,36 @@ mod tests {
             files.push(std::fs::read(&checkpoint).unwrap());
         }
         assert_eq!(files[0], files[1]);
+        // The last step is left to the final checkpoint: no periodic write there.
+        {
+            let checkpoint = directory.join("last-step.ckpt");
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(4);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap();
+            let mut sync_seconds = 0.0;
+            for step in 1..=4u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                while frames.try_recv().is_ok() {}
+            }
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!(on_disk.global_step, 2);
+        }
         // Only for periodic checkpoints with a path, never per round or in a sweep.
         for mutate in [
             |config: &mut Config| config.checkpoint_path = None,
