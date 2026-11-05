@@ -743,7 +743,45 @@ fn append_tensor_bytes(
     }
     let first = byte_offset / width;
     let last = byte_end.div_ceil(width);
-    for (index, value) in values[first..last].iter().enumerate() {
+    // Values cut by the range ends go byte by byte; the whole values between
+    // them are encoded in one pass (a broadcast chunk is 4 MiB, and the
+    // per-value slicing alone held a forwarder to ~0.4 GB/s).
+    let first_whole = byte_offset.div_ceil(width).min(last);
+    let last_whole = (byte_end / width).max(first_whole);
+    append_value_bytes(dtype, width, values, first..first_whole, byte_offset, byte_end, out);
+    let whole = &values[first_whole..last_whole];
+    let start = out.len();
+    out.resize(start + whole.len() * width, 0);
+    let dst = &mut out[start..];
+    match dtype {
+        DTYPE_F32 => {
+            for (d, value) in dst.chunks_exact_mut(4).zip(whole) {
+                d.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        DTYPE_BF16 => {
+            for (d, value) in dst.chunks_exact_mut(2).zip(whole) {
+                d.copy_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
+    }
+    append_value_bytes(dtype, width, values, last_whole..last, byte_offset, byte_end, out);
+    Ok(())
+}
+
+/// The bytes of `values[range]` that fall in `byte_offset..byte_end`.
+fn append_value_bytes(
+    dtype: u8,
+    width: usize,
+    values: &[f32],
+    range: std::ops::Range<usize>,
+    byte_offset: usize,
+    byte_end: usize,
+    out: &mut Vec<u8>,
+) {
+    let first = range.start;
+    for (index, value) in values[range].iter().enumerate() {
         let value_index = first + index;
         let value_start = value_index * width;
         let start = byte_offset.saturating_sub(value_start);
@@ -757,7 +795,6 @@ fn append_tensor_bytes(
             _ => unreachable!(),
         }
     }
-    Ok(())
 }
 
 /// One receive-only subscriber connection (`subscriber.rs`).
@@ -8760,6 +8797,52 @@ mod hello_auth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `append_tensor_bytes` as it was: every value sliced by the range.
+    fn reference_tensor_bytes(dtype: u8, values: &[f32], offset: usize, len: usize) -> Vec<u8> {
+        let mut all = Vec::new();
+        for value in values {
+            match dtype {
+                DTYPE_F32 => all.extend_from_slice(&value.to_le_bytes()),
+                _ => all.extend_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes()),
+            }
+        }
+        all[offset..offset + len].to_vec()
+    }
+
+    #[test]
+    fn tensor_byte_ranges_match_the_value_by_value_encoding() {
+        let values: Vec<f32> = (0..97)
+            .map(|i| match i % 11 {
+                0 => f32::NAN,
+                1 => -0.0,
+                2 => f32::MAX,
+                3 => 1e-40, // subnormal: bf16 rounding
+                _ => (i as f32 * 0.731).sin() * 3.0e4,
+            })
+            .collect();
+        for dtype in [DTYPE_F32, DTYPE_BF16] {
+            let total = tensor_nbytes(dtype, values.len()).unwrap();
+            for offset in 0..12.min(total) {
+                for len in (0..14).chain([total - offset - 1, total - offset]) {
+                    if offset + len > total {
+                        continue;
+                    }
+                    let mut out = vec![0xAA];
+                    append_tensor_bytes(dtype, &values, offset, len, &mut out).unwrap();
+                    assert_eq!(out[0], 0xAA);
+                    assert_eq!(out[1..], reference_tensor_bytes(dtype, &values, offset, len)[..], "{dtype} {offset}+{len}");
+                }
+            }
+            // Ranges cut inside the tail, too.
+            for offset in [total - 7, total - 3, total - 1] {
+                let mut out = Vec::new();
+                append_tensor_bytes(dtype, &values, offset, total - offset, &mut out).unwrap();
+                assert_eq!(out, reference_tensor_bytes(dtype, &values, offset, total - offset));
+            }
+            assert!(append_tensor_bytes(dtype, &values, 1, total, &mut Vec::new()).is_err());
+        }
+    }
     use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
