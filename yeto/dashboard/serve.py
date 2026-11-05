@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import export as export_mod
 from .reducer import Reducer
-from .sources import TapeSource, discover, operator_stops_near
+from .sources import TapeSource, discover, make_source, operator_stops_near
 
 LOOPBACK_NAMES = ("localhost",)
 
@@ -59,7 +59,7 @@ class DashboardState:
         for p in discover(self.paths):  # new island tapes appear mid-run
             key = str(p)
             if key not in self.sources:
-                self.sources[key] = TapeSource(p)
+                self.sources[key] = make_source(p)
         with self.lock:
             for src in self.sources.values():
                 n += src.pump(self.reducer)

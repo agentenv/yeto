@@ -170,3 +170,29 @@ yeto dashboard export --tapes <A tapes...> --compare <B tapes...> --label "A ove
 
 The page switches between "side by side" and "overlay" (overlay applies only to
 the completion curve), and between "all rounds overlaid" and "round N".
+
+## SFT runs (ms-swift Megatron + decoupled DiLoCo)
+
+`yeto/dashboard/sft.py` adapts the native files of ms-swift islands and the
+syncer into `sft_*` records for the same reducer; the page switches to the
+metrics layout (KPI row, "Islands now", fleet charts, distributions,
+cost / efficiency, syncer events) when the view carries an `sft` key. RL runs
+keep their panels with the same styling plus a round-duration distribution.
+The header range (1h / 6h / 24h / 7d / 30d) filters every SFT chart and
+percentile client-side; cost KPIs compare with the previous window of the same
+length.
+
+Local directory layout read by `yeto dashboard serve|export --tapes <dir>`:
+
+```
+<dir>/island-<N>/logging.jsonl  yeto_steps.jsonl  bench_metrics.jsonl  health.rank*.jsonl
+                 args.json  island.json (name, nodes)  hostmem.jsonl (sft_host_mem)
+<dir>/syncer/    syncer.log  tape.jsonl  cmdline.txt (syncer argv)  rss.jsonl (sft_syncer_rss)
+```
+
+Pull the files with any read-only incremental copier (byte offsets); the
+dashboard itself never connects to the nodes. `bench_metrics` / `health` step
+numbers restart at 1 per launch and are anchored at the first step logged by
+ms-swift / the yeto plugin. Reference lines are threshold keys:
+`sft_ref_step_s` (571), `sft_hbm_limit_gib` (53.9),
+`sft_syncer_rss_limit_bytes` (1.4e12), `sft_slow_factor` (1.1).

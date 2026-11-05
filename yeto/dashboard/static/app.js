@@ -359,6 +359,7 @@ function render(){
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
   $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· island "+SEL:"";
   header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();spot();
+  if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
 }
 function load(){
   if(OFFLINE){V=INLINE.page;EVENTS=(INLINE.events||{}).events||[];render();return}
@@ -366,5 +367,6 @@ function load(){
     fetch("/api/events?after="+EV_CURSOR+"&limit=1000",{cache:"no-store"}).then(function(r){return r.json()})]).then(function(x){
     V=x[0];EVENTS=EVENTS.concat(x[1].events||[]).slice(-3000);EV_CURSOR=x[1].cursor||EV_CURSOR;render()}).catch(function(e){$("sub").textContent="fetch failed: "+e})
 }
+if(typeof YetoExt!=="undefined")YetoExt.setReload(load);
 load();if(!OFFLINE)setInterval(load,POLL_MS);
 })();

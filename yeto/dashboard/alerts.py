@@ -33,6 +33,12 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "kl_warn": 0.1,
     "budget_warn_pct": 60.0,
     "budget_severe_pct": 80.0,
+    # SFT page reference lines (not alerts): production step time, HBM line, syncer RSS cap,
+    # "slow step" = step time above ref x factor
+    "sft_ref_step_s": 571.0,
+    "sft_hbm_limit_gib": 53.9,
+    "sft_syncer_rss_limit_bytes": 1.4e12,
+    "sft_slow_factor": 1.1,
 }
 
 
