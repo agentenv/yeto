@@ -104,6 +104,8 @@ pub struct Config {
     pub quorum_timeout_s: u64,
     /// Bounded wait for learners to apply and acknowledge the terminal cut.
     pub final_ack_timeout_s: u64,
+    /// Graceful stop (`crate::shutdown`); None: signals keep their default action.
+    pub shutdown: Option<Arc<crate::shutdown::Shutdown>>,
     pub total_steps: u64,
     /// Strict dense-policy mode: one logical local step contributes every
     /// fragment in a serial sweep.  None preserves the legacy independent
@@ -2080,6 +2082,9 @@ fn check_and_record_profile(cfg: &Config, profile: &[u8; 32]) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    if let Some(stop) = &cfg.shutdown {
+        stop.install_signal_handlers()?;
+    }
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
     check_and_record_profile(&cfg, &semantic_profile_hash)?;
@@ -3848,14 +3853,20 @@ async fn scheduler(
                 break;
             }
         }
-        match recv_init_event(
-            &mut events,
-            &budget_cutoff,
-            budget_reports.len(),
-            cfg.learners,
-        )
-        .await?
-        {
+        let init_event = recv_init_event(&mut events, &budget_cutoff, budget_reports.len(), cfg.learners);
+        let event = match cfg.shutdown.as_deref() {
+            Some(stop) => tokio::select! {
+                biased;
+                _ = stop.requested() => {
+                    // Nothing merged yet: the checkpoint on disk (if any) is current.
+                    info!("stop requested before training started; exiting");
+                    return Ok(());
+                }
+                event = init_event => event?,
+            },
+            None => init_event.await?,
+        };
+        match event {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                 bail!("RL strict failure {metric}: {message}");
@@ -4134,6 +4145,9 @@ async fn scheduler(
     if dynamic {
         write_pool_status(&cfg, &registry, st.global_step, "running");
     }
+    // A stop signal (`crate::shutdown`): set once every round has drained.
+    let mut stopped = false;
+    let mut stop_logged = false;
     'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
@@ -4143,6 +4157,31 @@ async fn scheduler(
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
             break 'outer;
+        }
+        let stop_deadline = cfg.shutdown.as_ref().and_then(|stop| stop.deadline());
+        if let Some(deadline) = stop_deadline {
+            if !stop_logged {
+                stop_logged = true;
+                info!(
+                    step = st.global_step,
+                    gathering = inflight.len(),
+                    computing = computing.len() + ready.len(),
+                    "stopping: no new rounds; waiting for the rounds in flight"
+                );
+            }
+            if Instant::now() >= deadline && !inflight.is_empty() {
+                // A gathering round has not touched the state; after --resume
+                // its step is launched again.
+                let dropped: Vec<u64> = inflight.iter().map(|round| round.t).collect();
+                warn!(steps = ?dropped, "stop timeout: abandoning the rounds still gathering");
+                for round in inflight.drain(..) {
+                    busy_fragments.remove(&round.p);
+                }
+            }
+            if inflight.is_empty() && computing.is_empty() && ready.is_empty() && publishing.is_none() {
+                stopped = true;
+                break 'outer;
+            }
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
         for member in &expired {
@@ -4241,6 +4280,7 @@ async fn scheduler(
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && Instant::now() >= next_launch
         {
             if !budget_cutoff.try_linearize_work() {
@@ -4371,6 +4411,13 @@ async fn scheduler(
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
                         break 'outer;
+                    }
+                    if stop_deadline.is_some() {
+                        // Stopping: no new attempt; the round is launched again after --resume.
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                        warn!(step = round.t, "stop: quorum timeout, round abandoned");
+                        continue;
                     }
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
@@ -4569,6 +4616,7 @@ async fn scheduler(
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
@@ -4580,6 +4628,11 @@ async fn scheduler(
         if !resends.is_empty() {
             // Check the background resends for drained ones a few times a second.
             let check = deadline_now + RESEND_CHECK_INTERVAL;
+            earliest = Some(earliest.map_or(check, |d| d.min(check)));
+        }
+        if cfg.shutdown.is_some() {
+            // Notice a stop signal (and its timeout) within a fraction of a second.
+            let check = deadline_now + SHUTDOWN_CHECK_INTERVAL;
             earliest = Some(earliest.map_or(check, |d| d.min(check)));
         }
         let wake = if let Some(pending) = publishing.as_mut() {
@@ -5106,6 +5159,24 @@ async fn scheduler(
     } else {
         resends.stop(&registry)
     };
+
+    if stopped {
+        drop(forwarders); // a catch-up in progress is resent after the restart
+        st.drain_iso_backend().await?;
+        eval_checkpoints.finish().await?;
+        if let Some(path) = &cfg.checkpoint_path {
+            // Waits for a background checkpoint first, then writes this cut.
+            st.save_checkpoint(path)?;
+            info!(step = st.global_step, path = %path.display(), "stop: checkpoint written");
+        } else {
+            warn!(step = st.global_step, "stop without --checkpoint-path: the merged state is not saved");
+        }
+        if dynamic {
+            write_pool_status(&cfg, &registry, st.global_step, "stopped");
+        }
+        info!(step = st.global_step, "stopped; restart with --resume to continue");
+        return Ok(());
+    }
 
     if cfg.learner_budget_steps.is_some() {
         wait_forwarders(std::mem::take(&mut forwarders)).await;
@@ -7586,6 +7657,8 @@ impl<G: Clone> CatchUps<G> {
 
 /// How often the scheduler checks background resends while any is active.
 const RESEND_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the scheduler looks for a stop signal while it waits.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// At the end of the round loop, wait this long for a forwarder to hand
 /// over the fragment it is sending before it is aborted.
 const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
@@ -9355,6 +9428,7 @@ mod tests {
             delta_correction: false,
             quorum_timeout_s: 1,
             final_ack_timeout_s: 1,
+            shutdown: None,
             total_steps,
             policy_sweep_fragments: None,
             outer_lr: 1.0,

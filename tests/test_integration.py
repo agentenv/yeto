@@ -757,3 +757,75 @@ def test_single_learner_roundtrip():
         if proc.poll() is None:
             proc.kill()
         print((proc.stdout.read() if proc.stdout else "")[-3000:])
+
+
+@pytest.mark.timeout(180)
+def test_sigterm_checkpoints_the_last_outer_step_and_resume_continues_the_tape(tmp_path):
+    """SIGTERM stops a mid-run syncer cleanly: no new rounds, the round in
+    flight closes, the cut is written to --checkpoint-path (although no
+    --checkpoint-every boundary was reached) and the process exits 0; the
+    checkpoint's global step is the last outer step on the tape, and a
+    --resume run continues the tape from the next step."""
+    import signal
+
+    binary = build_syncer()
+    named = [("model.embed.weight", DIM // 4), ("model.body.weight", DIM)]
+    layout = build_layout(named, 2)
+    checkpoint = tmp_path / "state.ckpt"
+    tape = tmp_path / "tape.jsonl"
+
+    def syncer(port, total_steps, *extra):
+        return group_popen(
+            [str(binary), "--port", str(port), "--learners", "1", "--quorum", "1",
+             "--grace-ms", "20", "--sync-interval-steps", "0", "--min-round-interval-ms", "50",
+             "--total-steps", str(total_steps), "--checkpoint-path", str(checkpoint),
+             "--checkpoint-every", "1000", "--event-tape", str(tape),
+             "--shutdown-timeout-s", "5", *extra],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+
+    def steps():
+        if not tape.exists():
+            return []
+        return [json.loads(line)["step"] for line in tape.read_text().splitlines()
+                if line.strip() and "step" in json.loads(line)]
+
+    port = free_port()
+    first = syncer(port, 1000)
+    outputs = []
+    try:
+        learner = ToyLearner(0, port, torch.ones(DIM + DIM // 4), layout, dtype=DTYPE_F32)
+        learner.start()
+        deadline = time.monotonic() + 60
+        while len(steps()) < 4:
+            assert time.monotonic() < deadline, "no outer steps before the stop"
+            assert first.poll() is None, first.communicate()[0]
+            time.sleep(0.05)
+        first.send_signal(signal.SIGTERM)
+        output, _ = first.communicate(timeout=60)
+        outputs.append(output)
+        assert first.returncode == 0, output
+        assert "stop: checkpoint written" in output
+        stopped = steps()
+        assert stopped == list(range(1, len(stopped) + 1))
+        assert read_checkpoint_global_step(checkpoint) == stopped[-1]
+        learner.join(timeout=30)
+
+        port = free_port()
+        total = stopped[-1] + 4
+        second = syncer(port, total, "--resume")
+        learner = ToyLearner(0, port, torch.ones(DIM + DIM // 4), layout, dtype=DTYPE_F32)
+        learner.start()
+        output, _ = second.communicate(timeout=90)
+        outputs.append(output)
+        assert second.returncode == 0, output
+        assert "resumed from checkpoint" in output
+        learner.join(timeout=30)
+        assert learner.final_manifest is not None and learner.final_manifest.global_step == total
+        assert steps() == list(range(1, total + 1))
+        assert read_checkpoint_global_step(checkpoint) == total
+    finally:
+        for process in (first, locals().get("second")):
+            if process is not None and process.poll() is None:
+                process.kill()
+        print("\n".join(outputs)[-4000:])
