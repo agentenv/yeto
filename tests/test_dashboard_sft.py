@@ -152,3 +152,36 @@ process.stdout.write(JSON.stringify({title: els.title.innerHTML, kpis: els.sKpis
   nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, dist: els.sDist.innerHTML,
   cost: els.sCostK.innerHTML, sft_hidden: els.sftRoot.hidden, rl_hidden: els.rlRoot.hidden}));
 """).replace("process.argv[2]", "process.argv[1]")
+
+
+BINS_JS = """
+const fs=require('fs');global.localStorage={getItem(){return null},setItem(){}};global.location={hash:''};
+global.document={getElementById(){return null},body:null};
+eval(fs.readFileSync(process.argv[1],'utf8')+';global.YE=YetoExt;');
+const out=JSON.parse(process.argv[2]).map(v=>YE.bins(v));process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.parametrize("vals", [
+    [571, 571, 575, 579, 586, 592], [0.004, 0.004, 0.005, 0.007, 0.008, 0.006],
+    [5.0, 5.0], [1.0 + 0.37 * (i % 97) ** 1.5 for i in range(1200)],
+])
+def test_histogram_bins_cover_samples_and_quantiles(vals):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = FX.parent.parent.parent / "yeto" / "dashboard" / "static" / "sft.js"
+    res = subprocess.run([node, "-e", BINS_JS, str(js), json.dumps([vals])], capture_output=True, text=True,
+                         timeout=60)
+    assert res.returncode == 0, res.stderr
+    b = json.loads(res.stdout)[0]
+    assert abs(sum(b["pct"]) - 1.0) < 1e-9
+    if len(vals) < 500:
+        assert b["kept"] == len(vals)  # no tail cut for small samples
+    for name, q in b["q"].items():
+        if q["bin"] is None:
+            assert len(vals) >= 500
+            continue
+        lo, hi = b["edges"][q["bin"]], b["edges"][q["bin"] + 1]
+        assert lo * (1 - 1e-9) <= q["v"] <= hi * (1 + 1e-9), name
+        assert b["pct"][q["bin"]] > 0, name  # the quantile's own bin has a bar

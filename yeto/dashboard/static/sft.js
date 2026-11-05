@@ -92,26 +92,40 @@ function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=b
 function card(id,title,sub,wide){return '<div class="cc'+(wide?" wide":"")+'"><div class="ct">'+esc(title)+'</div><div class="cs">'+esc(sub||"")+'</div><div id="'+id+'"></div></div>'}
 
 /* histogram on a log axis, dashed p10/p90/p99, solid p50, outer 0.2% tails not drawn */
+function rank(sorted,q){if(!sorted.length)return null;return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(q*sorted.length)-1))]} // nearest rank: always a sample
+/* log-axis bins: tails (outer 0.2%) are only cut with >= 500 samples; every kept sample lands in a bin
+   (last bin closed); pct sums to 100% of the kept samples. */
+function bins(vals){
+  var v=vals.filter(function(x){return fin(x)&&x>0}).sort(function(a,b){return a-b});if(!v.length)return null;
+  var kept=v.length>=500?v.filter(function(x){return x>=rank(v,0.002)&&x<=rank(v,0.998)}):v;
+  var lo=kept[0],hi=kept[kept.length-1];if(!(hi>lo)){lo=lo*0.95;hi=hi*1.05}
+  var L0=Math.log(lo),L1=Math.log(hi),nb=Math.max(6,Math.min(24,Math.round(Math.sqrt(kept.length)*2))),cnt=[],edges=[];
+  for(var i=0;i<nb;i++){cnt.push(0)}for(i=0;i<=nb;i++)edges.push(Math.exp(L0+(L1-L0)*i/nb));edges[0]=lo;edges[nb]=hi;
+  var idx=function(x){return Math.min(nb-1,Math.max(0,Math.floor((Math.log(x)-L0)/(L1-L0)*nb)))};
+  kept.forEach(function(x){cnt[idx(x)]++});
+  var q={};[["p10",0.1],["p25",0.25],["p50",0.5],["p75",0.75],["p90",0.9],["p99",0.99]].forEach(function(p){var t=rank(v,p[1]);q[p[0]]={v:t,bin:t>=lo&&t<=hi?idx(t):null}});
+  return {sorted:v,kept:kept.length,lo:lo,hi:hi,L0:L0,L1:L1,edges:edges,pct:cnt.map(function(c){return c/kept.length}),q:q}}
 function hist(vals,o){
-  var v=vals.filter(function(x){return fin(x)&&x>0}).sort(function(a,b){return a-b});
-  if(v.length<2)return '<div class="empty">'+(v.length?"one sample: "+esc(o.fmt(v[0])):"no data")+'</div>';
-  var lo=pctl(v,0.002),hi=pctl(v,0.998);if(!(hi>lo)){lo=lo*0.9;hi=hi*1.1}
-  var L0=Math.log(lo),L1=Math.log(hi),nb=Math.max(6,Math.min(24,Math.round(Math.sqrt(v.length)*2))),cnt=[];for(var i=0;i<nb;i++)cnt.push(0);
-  v.forEach(function(x){if(x<lo||x>hi)return;var b=Math.min(nb-1,Math.floor((Math.log(x)-L0)/(L1-L0)*nb));cnt[b]++});
-  var w=300,h=110,m={l:30,r:6,t:16,b:18},mx=Math.max.apply(null,cnt)/v.length,yt=nice(0,mx,3),ym=yt[yt.length-1];
-  var X=function(x){return m.l+(Math.log(x)-L0)/(L1-L0)*(w-m.l-m.r)},Y=function(f){return m.t+(1-f/ym)*(h-m.t-m.b)},bw=(w-m.l-m.r)/nb;
+  var B=bins(vals);
+  if(!B||B.sorted.length<2)return '<div class="empty">'+(B?"one sample: "+esc(o.fmt(B.sorted[0])):"no data")+'</div>';
+  var nb=B.pct.length,w=300,h=118,m={l:30,r:8,t:26,b:18},mx=Math.max.apply(null,B.pct),yt=nice(0,mx,3),ym=yt[yt.length-1];
+  var X=function(x){return m.l+(Math.log(x)-B.L0)/(B.L1-B.L0)*(w-m.l-m.r)},Y=function(f){return m.t+(1-f/ym)*(h-m.t-m.b)};
   var s=['<svg viewBox="0 0 '+w+' '+h+'" class="hs">'];
   yt.forEach(function(f){s.push('<line class="gl" x1="'+m.l+'" x2="'+(w-m.r)+'" y1="'+Y(f).toFixed(1)+'" y2="'+Y(f).toFixed(1)+'"/><text x="'+(m.l-4)+'" y="'+(Y(f)+3).toFixed(1)+'" text-anchor="end">'+(f*100).toFixed(0)+'%</text>')});
-  cnt.forEach(function(c,i){if(c)s.push('<rect x="'+(m.l+i*bw+0.5).toFixed(1)+'" y="'+Y(c/v.length).toFixed(1)+'" width="'+Math.max(1,bw-1).toFixed(1)+'" height="'+(Y(0)-Y(c/v.length)).toFixed(1)+'" fill="'+o.color+'"/>')});
-  var tk=[],dec=Math.pow(10,Math.floor(Math.log10(lo)));for(var d=dec;d<=hi*1.01;d*=10)[1,2,5].forEach(function(mm){var t=d*mm;if(t>=lo&&t<=hi)tk.push(t)});
-  if(tk.length<2)tk=[lo,hi];tk.forEach(function(t){s.push('<text x="'+X(t).toFixed(1)+'" y="'+(h-5)+'" text-anchor="middle">'+esc(o.fmt(t))+'</text>')});
-  [["p10",0.1,1],["p50",0.5,0],["p90",0.9,1],["p99",0.99,1]].forEach(function(q,i){var t=pctl(v,q[1]);if(t<lo||t>hi)return;
-    s.push('<line x1="'+X(t).toFixed(1)+'" x2="'+X(t).toFixed(1)+'" y1="'+(m.t-2)+'" y2="'+Y(0)+'" stroke="'+(q[2]?"#d1d5db":"#f3f4f6")+'"'+(q[2]?' stroke-dasharray="3 2"':' stroke-width="1.2"')+'/><text x="'+X(t).toFixed(1)+'" y="'+(i%2?m.t-5:m.t+6)+'" text-anchor="middle" class="rt">'+q[0]+'</text>')});
+  B.pct.forEach(function(f,i){if(!f)return;var x0=X(B.edges[i]),x1=X(B.edges[i+1]);
+    s.push('<rect class="hb" x="'+(x0+0.5).toFixed(1)+'" y="'+Y(f).toFixed(1)+'" width="'+Math.max(0.8,x1-x0-1).toFixed(1)+'" height="'+(Y(0)-Y(f)).toFixed(1)+'" fill="'+o.color+'"/>')});
+  var tk=[],dec=Math.pow(10,Math.floor(Math.log10(B.lo)));for(var d=dec;d<=B.hi*1.01;d*=10)[1,2,5].forEach(function(mm){var t=d*mm;if(t>=B.lo&&t<=B.hi)tk.push(t)});
+  if(tk.length<2)tk=[B.lo,B.hi];var lastX=-99;tk.forEach(function(t){var xx=X(t);if(xx-lastX<34)return;lastX=xx;s.push('<text x="'+xx.toFixed(1)+'" y="'+(h-5)+'" text-anchor="middle">'+esc(o.fmt(t))+'</text>')});
+  var rows=[[],[]],order=[["p50",0],["p10",1],["p90",1],["p99",1]];
+  order.forEach(function(p){var t=B.q[p[0]];if(!t||t.bin==null)return;var xx=X(t.v);
+    s.push('<line x1="'+xx.toFixed(1)+'" x2="'+xx.toFixed(1)+'" y1="'+(m.t-2)+'" y2="'+Y(0)+'" stroke="'+(p[1]?"#d1d5db":"#f3f4f6")+'"'+(p[1]?' stroke-dasharray="3 2"':' stroke-width="1.2"')+'/>');
+    for(var r=0;r<2;r++){if(rows[r].every(function(px){return Math.abs(px-xx)>=18})){rows[r].push(xx);
+      s.push('<text x="'+xx.toFixed(1)+'" y="'+(r?m.t-14:m.t-4)+'" text-anchor="middle" class="rt">'+p[0]+'</text>');break}}});
   s.push('</svg>');return s.join("")}
 function qrow(lists){ // [[label, sorted vals, fmt, slowText]]
   var qs=[["p10",0.1],["p25",0.25],["p50",0.5],["p75",0.75],["p90",0.9],["p99",0.99]];
   return '<table class="qt"><tr><th></th>'+lists.map(function(l){return '<th>'+esc(l[0])+'</th>'}).join("")+'</tr>'+
-    qs.map(function(q){return '<tr'+(q[0]==="p50"?' class="b"':"")+'><td>'+q[0]+'</td>'+lists.map(function(l){return '<td>'+(l[1].length?esc(l[2](pctl(l[1],q[1]))):"n/a")+'</td>'}).join("")+'</tr>'}).join("")+
+    qs.map(function(q){return '<tr'+(q[0]==="p50"?' class="b"':"")+'><td>'+q[0]+'</td>'+lists.map(function(l){return '<td>'+(l[1].length?esc(l[2](rank(l[1],q[1]))):"n/a")+'</td>'}).join("")+'</tr>'}).join("")+
     '<tr class="m"><td>'+esc(lists[0][4]||"Samples")+'</td>'+lists.map(function(l){return '<td>'+k(l[1].length,0)+'</td>'}).join("")+'</tr>'+
     '<tr class="m"><td>Slow</td>'+lists.map(function(l){return '<td>'+esc(l[3]||"")+'</td>'}).join("")+'</tr></table>'}
 function distCard(color,title,spec,parts){ // parts: [{title, vals, fmt, slow:[thr,text]}]
@@ -256,5 +270,5 @@ function render(view,offline){
     sft(S)}
   else rlDist(V);
 }
-return {render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {bins:bins,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();
