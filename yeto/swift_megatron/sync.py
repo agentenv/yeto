@@ -144,6 +144,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -657,7 +658,7 @@ class MegatronDiLoCoSync:
         self._closed = False
         self.client = None
         self.stats = {"applied": 0, "pushed": 0, "push_bytes": 0, "dropped_pushes": 0,
-                      "deferred_pushes": 0}
+                      "deferred_pushes": 0, "apply_s": 0.0, "export_s": 0.0}
         self._observed_push_bytes = 0  # rank 0: push_bytes at the last observer report
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
@@ -1015,7 +1016,9 @@ class MegatronDiLoCoSync:
         updates = self._take_updates(plan) if self.rank == 0 else {}
         for fid, version in plan.applies:
             data = updates.get(fid) if self.rank == 0 else None
+            started = time.perf_counter()
             self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+            self.stats["apply_s"] += time.perf_counter() - started
             state.steps_at_reset[fid] = iteration
             state.units_at_reset[fid] = self.units_total
             state.fragment_versions[fid] = version
@@ -1029,7 +1032,9 @@ class MegatronDiLoCoSync:
             self._raise_if(pushes)
         error = None
         for fid, step, attempt, c_steps, c_units in pushes:
+            started = time.perf_counter()
             parts = self._export_fragment(fid, delta=True)
+            self.stats["export_s"] += time.perf_counter() - started
             self.events.append((iteration, "push", fid, step))
             if self.rank == 0 and error is None:
                 error = self._push(fid, step, attempt, c_steps, c_units, parts)
