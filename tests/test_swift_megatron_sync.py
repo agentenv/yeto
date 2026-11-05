@@ -54,8 +54,8 @@ def test_global_names_cover_layers_and_both_expert_namings():
 
 
 def test_syncer_address_and_hmac_key_file(tmp_path):
-    assert sm._syncer_addrs("tcp://10.0.0.1:29400") == [("10.0.0.1", 29400)]
-    assert sm._syncer_addrs("a:1, tcp://b:2") == [("a", 1), ("b", 2)]
+    assert sm._syncer_spec("tcp://10.0.0.1:29400") == "10.0.0.1:29400"
+    assert sm._syncer_spec("a:1, tcp://b:2") == "a:1,b:2"
     key = tmp_path / "hmac.key"
     key.write_text("s3cret\n")
     assert sm._read_hmac_key(str(key)) == b"s3cret"  # the YETO_ISLAND_HMAC_KEY encoding
@@ -346,7 +346,7 @@ def _scripted_body(rank, world, port, out_dir):
     alpha = 0.5
 
     def factory(addrs, learner_id, layout, wire, streams, **kwargs):
-        assert addrs == [("127.0.0.1", 1234)] and len(kwargs["session_contract_hash"]) == 32
+        assert addrs == "127.0.0.1:1234" and len(kwargs["session_contract_hash"]) == 32
         script = {}
         script[("bcast", 1)] = [BcastFragment(fid, 7, pack_tensor(_flat(layout, fid, globals_g), 2))
                                 for fid in range(layout.num_fragments)]
