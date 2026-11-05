@@ -18,6 +18,7 @@ mod eval_checkpoint;
 mod protocol;
 mod sample_relay;
 mod server;
+mod sha256;
 mod state;
 mod subscriber;
 

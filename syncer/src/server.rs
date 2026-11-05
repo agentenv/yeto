@@ -3251,9 +3251,14 @@ async fn dispatch_inner(
                     bytes.len()
                 );
             }
-            let sha256: [u8; 32] = Sha256::digest(bytes).into();
-            let mut values = Vec::new();
-            decode_tensor(bulk_dtype(group.dtype), bytes, &mut values)?;
+            // The digest is one sequential pass; decode the values meanwhile.
+            let (sha256, values) = std::thread::scope(|scope| {
+                let digest = scope.spawn(|| crate::sha256::digest(bytes));
+                let mut values = Vec::new();
+                let decoded = decode_tensor(bulk_dtype(group.dtype), bytes, &mut values);
+                (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
+            });
+            let values = values?;
             event_tx
                 .send(Event::Init {
                     member: group.member,

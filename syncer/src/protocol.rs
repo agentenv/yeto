@@ -454,6 +454,26 @@ pub fn decode_budget_done(payload: &[u8]) -> Result<u64> {
 
 /// Decode a tensor payload into f32s.
 pub fn decode_tensor(dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> {
+    decode_tensor_with(crate::par::default_threads(), dtype, bytes, out)
+}
+
+/// Values below which a decode stays on the calling thread.
+const PAR_DECODE_MIN: usize = 1 << 22;
+
+/// `decode_tensor` on up to `threads` threads: disjoint chunks, each value
+/// converted exactly as the serial loop does, so the result (and the error
+/// for a non-finite value) is the same for any thread count. A 120B INIT
+/// fragment is ~15 GB of f32; one thread decodes and checks it at ~1 GB/s
+/// on the read loop.
+pub fn decode_tensor_with(threads: usize, dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> {
+    let width = match dtype {
+        DTYPE_F32 => 4,
+        DTYPE_BF16 => 2,
+        _ => 0,
+    };
+    if threads > 1 && width > 0 && bytes.len() % width == 0 && bytes.len() / width >= PAR_DECODE_MIN {
+        return decode_tensor_par(threads, dtype, width, bytes, out);
+    }
     out.clear();
     match dtype {
         DTYPE_F32 => {
@@ -480,6 +500,42 @@ pub fn decode_tensor(dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> 
         _ => bail!("unknown dtype {dtype}"),
     }
     if out.iter().any(|value| !value.is_finite()) {
+        bail!("tensor payload contains a non-finite value");
+    }
+    Ok(())
+}
+
+fn decode_tensor_par(threads: usize, dtype: u8, width: usize, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let numel = bytes.len() / width;
+    out.clear();
+    out.try_reserve(numel)
+        .map_err(|error| anyhow::anyhow!("cannot allocate {} tensor: {error}", if width == 4 { "f32" } else { "bf16" }))?;
+    let non_finite = AtomicBool::new(false);
+    let spare = &mut out.spare_capacity_mut()[..numel];
+    let tasks: Vec<_> = spare
+        .chunks_mut(crate::par::CHUNK)
+        .zip(bytes.chunks(crate::par::CHUNK * width))
+        .collect();
+    crate::par::run_tasks(threads, tasks, |(dst, src)| {
+        let mut finite = true;
+        for (d, c) in dst.iter_mut().zip(src.chunks_exact(width)) {
+            let value = if dtype == DTYPE_F32 {
+                f32::from_le_bytes(c.try_into().unwrap())
+            } else {
+                f32::from_bits((u16::from_le_bytes(c.try_into().unwrap()) as u32) << 16)
+            };
+            finite &= value.is_finite();
+            d.write(value);
+        }
+        if !finite {
+            non_finite.store(true, Ordering::Relaxed);
+        }
+    });
+    // SAFETY: the chunks cover `spare` exactly and every element was written.
+    unsafe { out.set_len(numel) };
+    if non_finite.into_inner() {
         bail!("tensor payload contains a non-finite value");
     }
     Ok(())
@@ -850,6 +906,37 @@ mod tests {
         let last = pad.len() - 1;
         pad[last] |= 0x10;
         assert!(decode_i4(&pad, 65, &mut out).is_err());
+    }
+
+    #[test]
+    fn parallel_tensor_decode_matches_the_serial_bits_and_errors() {
+        let n = PAR_DECODE_MIN + 3 * crate::par::CHUNK + 17;
+        let vals: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.37).sin() * 1e3 - 0.5).collect();
+        for dtype in [DTYPE_F32, DTYPE_BF16] {
+            let mut wire = Vec::new();
+            encode_tensor(dtype, &vals, &mut wire).unwrap();
+            let mut serial = Vec::new();
+            decode_tensor_with(1, dtype, &wire, &mut serial).unwrap();
+            for threads in [2, 3, 8] {
+                let mut par = vec![7.0f32; 5];
+                decode_tensor_with(threads, dtype, &wire, &mut par).unwrap();
+                assert_eq!(par.len(), serial.len());
+                assert!(par.iter().zip(&serial).all(|(a, b)| a.to_bits() == b.to_bits()), "{dtype} {threads}");
+            }
+            let width = if dtype == DTYPE_F32 { 4 } else { 2 };
+            for at in [0, crate::par::CHUNK - 1, n - 1] {
+                for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    let mut broken = wire.clone();
+                    let mut one = Vec::new();
+                    encode_tensor(dtype, &[bad], &mut one).unwrap();
+                    broken[at * width..(at + 1) * width].copy_from_slice(&one);
+                    let serial = decode_tensor_with(1, dtype, &broken, &mut Vec::new()).unwrap_err();
+                    let par = decode_tensor_with(8, dtype, &broken, &mut Vec::new()).unwrap_err();
+                    assert_eq!(serial.to_string(), par.to_string());
+                }
+            }
+            assert!(decode_tensor_with(8, dtype, &wire[..wire.len() - 1], &mut Vec::new()).is_err());
+        }
     }
 
     #[test]
