@@ -5523,6 +5523,16 @@ fn route_push(
         return PushDisposition::FutureBase;
     }
     if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
+        // The island answered this round's pull; it will not push again for
+        // it. Waiting on its slot would stall the round until the quorum
+        // timeout (and every later round behind it), so release the slot and
+        // let the round close with the remaining responders. The refused work
+        // is not lost: the island's next push is still relative to its raw
+        // anchor. A fixed roster never merges a partial roster, so it keeps
+        // the slot.
+        if !fixed_roster {
+            round.forget_unanswered(member);
+        }
         return PushDisposition::StaleBase;
     }
     let duplicate = if fixed_roster {
@@ -12506,6 +12516,52 @@ mod tests {
             PushDisposition::FutureBase
         );
         assert_eq!(rounds[0].pushes.len(), 1);
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_so_the_round_completes() {
+        // Regression: with --max-base-lag 8 and quorum == learners, a push
+        // refused as StaleBase left its island in expected_members, so the
+        // round (and every later step) waited for the full quorum timeout.
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn stale_base_rejection_first_still_waits_for_the_other_island() {
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
     }
 
     #[test]
