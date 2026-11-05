@@ -57,6 +57,21 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_INITIAL_CUT_TIMEOUT seconds to install the syncer's initial cut
                                   fragment by fragment before training (0 =
                                   apply it at the boundaries; default 0)
+  YETO_DILOCO_RESUME_DIR          checkpoint directory whose sync record to
+                                  resume from (default: ``args.mcore_model``
+                                  when it holds one)
+  YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
+                                  with each checkpoint (~2 bytes per local
+                                  parameter per rank for bf16); default 0
+
+Resume: every checkpoint also gets the sync's record (``on_save`` ->
+``MegatronDiLoCoSync.save_state``): each fragment's anchor version and
+H-gate counters.  On a restart from that checkpoint the syncer's catch-up
+no longer overwrites the island: a fragment still at its checkpointed
+version keeps its local values (anchor only), a newer one becomes
+``global_new + (local - anchor_old)`` if the anchors were saved and the
+global otherwise; without a record (a cold start) the island takes the
+syncer's cut as before.
 """
 
 from __future__ import annotations
@@ -109,6 +124,8 @@ class DiLoCoHookConfig:
     final_cut_payload: str = "full"
     transport: str = "cpu"
     initial_cut_timeout: float = 0.0
+    resume_dir: Optional[str] = None
+    save_anchors: bool = False
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -147,6 +164,8 @@ class DiLoCoHookConfig:
             final_cut_payload=get("FINAL_CUT_PAYLOAD", default="full"),  # type: ignore[arg-type]
             transport=get("TRANSPORT", default="cpu"),  # type: ignore[arg-type]
             initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
+            resume_dir=get("RESUME_DIR"),
+            save_anchors=(get("SAVE_ANCHORS", default="0") or "").strip().lower() in {"1", "true", "yes", "on"},
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -223,7 +242,8 @@ def trainable_filter(name: str, param) -> bool:
     return bool(getattr(param, "requires_grad", False))
 
 
-def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
+def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
+                         resume_dir: Optional[str] = None, resume_iteration: Optional[int] = None):
     from yeto.swift_megatron.sync import MegatronDiLoCoSync
 
     return MegatronDiLoCoSync(
@@ -240,7 +260,33 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
         final_cut_payload=cfg.final_cut_payload,
         transport=cfg.transport,
         initial_cut_timeout=cfg.initial_cut_timeout,
+        resume_dir=resume_dir,
+        resume_iteration=resume_iteration,
     )
+
+
+def resume_dir_for(cfg: DiLoCoHookConfig, args) -> Optional[str]:
+    """The checkpoint directory whose sync record a resumed island reads:
+    ``YETO_DILOCO_RESUME_DIR``, else the checkpoint ms-swift loaded
+    (``--mcore_model``) when it holds a record.  None: a cold start."""
+    from yeto.swift_megatron.sync import RESUME_STATE_FILE
+
+    if cfg.resume_dir:
+        return cfg.resume_dir
+    loaded = getattr(args, "mcore_model", None)
+    if isinstance(loaded, str) and os.path.isfile(os.path.join(loaded, RESUME_STATE_FILE)):
+        return loaded
+    return None
+
+
+def save_dir_for(args, iteration: int, *call_args, **call_kwargs) -> Optional[str]:
+    """The directory of the checkpoint ``on_save`` reports: its
+    ``output_dir`` argument, else ``<args.output_dir>/checkpoint-<iteration>``."""
+    for value in (call_kwargs.get("output_dir"), call_kwargs.get("save_dir"), *call_args):
+        if isinstance(value, (str, os.PathLike)):
+            return os.fspath(value)
+    root = getattr(args, "output_dir", None) or getattr(args, "save", None)
+    return os.path.join(root, f"checkpoint-{iteration}") if root else None
 
 
 def _model_chunks(trainer) -> list:
@@ -290,7 +336,10 @@ class YetoDiLoCoCallback(_CallbackBase):
         # Build here (not in on_train_begin) so a bad config fails before data
         # loading; the trainer has already loaded the resume checkpoint, which
         # is what learner 0's INIT_PARAMS carries.
-        self.sync = type(self).sync_factory(_model_chunks(trainer), trainer.optimizer, self.config)
+        start = int(self.state.iteration)
+        resume_dir = resume_dir_for(self.config, self.args) if start > 0 else None
+        self.sync = type(self).sync_factory(_model_chunks(trainer), trainer.optimizer, self.config,
+                                            resume_dir=resume_dir, resume_iteration=start)
         atexit.register(self.close)
         logger.info("yeto DiLoCo sync attached: learner %d/%d, interval %d, fragments %d, start iteration %d",
                     self.config.learner_id, self.config.num_learners, self.config.sync_interval_steps,
@@ -365,6 +414,17 @@ class YetoDiLoCoCallback(_CallbackBase):
                 handle.write(json.dumps(record) + "\n")
         except OSError as error:  # never let bookkeeping kill a training step
             logger.warning("yeto DiLoCo: cannot write step log %s: %s", path, error)
+
+    def on_save(self, *args, **kwargs):
+        """Record the sync state next to the checkpoint just written (every rank)."""
+        if self.sync is None or self._closed or getattr(self.sync, "finished", False):
+            return
+        iteration = int(self.state.iteration)
+        output_dir = save_dir_for(self.args, iteration, *args, **kwargs)
+        if output_dir is None:
+            logger.warning("yeto DiLoCo: on_save without a checkpoint directory; sync state not recorded")
+            return
+        self.sync.save_state(output_dir, iteration=iteration, save_anchors=self.config.save_anchors)
 
     def on_train_end(self):
         self.close()

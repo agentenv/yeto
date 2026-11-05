@@ -19,14 +19,20 @@ ENV = {
 class FakeSync:
     instances = []
 
-    def __init__(self, model_chunks, optimizer, cfg):
+    def __init__(self, model_chunks, optimizer, cfg, *, resume_dir=None, resume_iteration=None):
         self.model_chunks, self.optimizer, self.cfg = model_chunks, optimizer, cfg
+        self.resume_dir, self.resume_iteration = resume_dir, resume_iteration
+        self.saves = []
         self.calls = []
         self.closed = 0
         FakeSync.instances.append(self)
 
     def after_optimizer_step(self, iteration, target_tokens, *, update_successful=True):
         self.calls.append((iteration, target_tokens))
+
+    def save_state(self, output_dir, *, iteration, save_anchors=False):
+        self.saves.append((output_dir, iteration, save_anchors))
+        return True
 
     def close(self):
         self.closed += 1
@@ -127,6 +133,42 @@ def test_resume_continues_iteration(make):
     trainer, cb = make([([1], True), ([1], True)], start_iteration=100)
     trainer.train()
     assert FakeSync.instances[0].calls == [(101, 2), (102, 2)]
+
+
+def test_cold_start_has_no_resume_dir(make):
+    make([([1], True)])
+    assert FakeSync.instances[0].resume_dir is None and FakeSync.instances[0].resume_iteration == 0
+
+
+def test_resume_reads_the_record_of_the_loaded_checkpoint(make, tmp_path):
+    from yeto.swift_megatron.sync import RESUME_STATE_FILE
+
+    ckpt = tmp_path / "checkpoint-15"
+    ckpt.mkdir()
+    trainer = FakeTrainer([([1], True)], start_iteration=15)
+    trainer.args.mcore_model = str(ckpt)
+    cfg = sp.DiLoCoHookConfig.from_env()
+    assert sp.resume_dir_for(cfg, trainer.args) is None  # no record there: cold start
+    (ckpt / RESUME_STATE_FILE).write_text("{}")
+    assert sp.resume_dir_for(cfg, trainer.args) == str(ckpt)
+    explicit = sp.DiLoCoHookConfig(**{**cfg.__dict__, "resume_dir": "/elsewhere"})
+    assert sp.resume_dir_for(explicit, trainer.args) == "/elsewhere"
+    _, cb = make([([1], True)], start_iteration=15)
+    assert FakeSync.instances[-1].resume_iteration == 15
+
+
+def test_on_save_records_the_sync_state_next_to_the_checkpoint(make, monkeypatch):
+    monkeypatch.setenv("YETO_DILOCO_SAVE_ANCHORS", "1")
+    trainer, cb = make([([1], True), ([1], True)])
+    trainer.args.output_dir = "/runs/x"
+    trainer.state.iteration = 2  # the step whose checkpoint was just written
+    cb.on_save()
+    cb.on_save(output_dir="/runs/x/checkpoint-2-explicit")
+    assert FakeSync.instances[0].saves == [("/runs/x/checkpoint-2", 2, True),
+                                           ("/runs/x/checkpoint-2-explicit", 2, True)]
+    cb.on_train_end()
+    cb.on_save()  # closed: nothing more to record
+    assert len(FakeSync.instances[0].saves) == 2
 
 
 def test_close_is_idempotent(make):

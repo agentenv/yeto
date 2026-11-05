@@ -142,7 +142,9 @@ objects that need them.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -158,6 +160,14 @@ OUTPUT_LAYER_AVG_REGEX = r"(^|\.)output_layer\.weight$"
 DEFAULT_CHUNK_NUMEL = 1 << 28
 CONTRACT_DOMAIN = b"yeto-swift-megatron-native-v1\0"
 FINAL_CUT_PAYLOADS = ("full", "manifest")
+# Island checkpoint record of the sync (``save_state`` / ``resume_dir``), next
+# to the trainer's checkpoint: the JSON on global rank 0, the optional anchor
+# values one file per rank.
+RESUME_STATE_FILE = "yeto_diloco_state.json"
+RESUME_ANCHOR_DIR = "yeto_diloco_anchors"
+RESUME_FORMAT = 1
+# ``yeto.diloco_sync.resume_fragment_mode`` results (that module imports torch).
+RESUME_OVERWRITE, RESUME_ANCHOR, RESUME_SHIFT = "overwrite", "anchor", "shift"
 
 _LAYER_MODULE_RE = re.compile(r"(^|\.)decoder\.layers\.(\d+)$")
 _GROUPED_EXPERT_RE = re.compile(r"^(.*?)(weight|bias)(\d+)$")
@@ -563,7 +573,8 @@ class MegatronDiLoCoSync:
                  final_cut_payload: str = "full", chunk_numel: int = DEFAULT_CHUNK_NUMEL,
                  transport: str = "cpu", parallel_context: ParallelContext | None = None,
                  client_factory=None, observer: Callable[[dict], None] | None = None,
-                 initial_cut_timeout: float = 0.0) -> None:
+                 initial_cut_timeout: float = 0.0, resume_dir: str | None = None,
+                 resume_iteration: int | None = None) -> None:
         import torch
         import torch.distributed as dist
 
@@ -663,6 +674,16 @@ class MegatronDiLoCoSync:
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
         self.events: deque[tuple[int, str, int, int]] = deque(maxlen=4096)
+        # Resume (``resume_dir``): the record ``save_state`` wrote with the
+        # checkpoint the trainer resumed from, the old anchor of every local
+        # shard when it was saved too, and how each fragment's first broadcast
+        # after the restart was installed (fid -> mode, same on every rank).
+        self.resume_record: dict | None = None
+        self._resume_anchors: dict[int, Any] = {}  # id(param) -> old anchor (host)
+        self._resume_has_anchors = False
+        self.resumed: dict[int, str] = {}
+        if resume_dir:
+            self._load_resume(resume_dir, resume_iteration)
 
         if self.rank == 0:
             log.info("swift-megatron sync: %d trainable tensors (%.2f B elements) -> %d fragments",
@@ -765,7 +786,7 @@ class MegatronDiLoCoSync:
             updates = self._take_updates(plan) if self.rank == 0 else {}
             for fid, version in plan.applies:
                 data = updates.pop(fid) if self.rank == 0 else None
-                self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+                self._apply_first_or_blend(fid, data, version)
                 del data
                 self.state.fragment_versions[fid] = version
                 self.state.global_step = max(self.state.global_step, version)
@@ -779,6 +800,166 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             log.info("initial cut: %d of %d fragments installed before training in %.0f s",
                      sum(self.anchored), self.num_fragments, time.monotonic() - started)
+
+    # ------------------------------------------------------------------ resume
+    def _apply_first_or_blend(self, fid: int, data: Any, version: int) -> str | None:
+        """Apply a broadcast; the first one of a fragment after a resume by
+        ``resume_fragment_mode``.  Returns that mode (None: not a resumed
+        first install) and records it in ``self.resumed``."""
+
+        mode = None
+        if self.resume_record is not None and not self.anchored[fid] and fid not in self.resumed:
+            from yeto.diloco_sync import resume_fragment_mode
+
+            mode = resume_fragment_mode(self.resume_record, fid, version, have_anchor=self._resume_has_anchors)
+            self.resumed[fid] = mode
+            if self.rank == 0:
+                log.info("resume: fragment %d version %d (checkpoint anchor %d) -> %s", fid, version,
+                         self.resume_record["versions"][fid], mode)
+        self._apply_fragment(fid, data, self.bulk_torch, blend=True, mode=mode)
+        if mode is not None and len(self.resumed) == self.num_fragments:
+            self._resume_anchors.clear()  # every old anchor is used or no longer needed
+        return mode
+
+    def _restore_counters(self, fid: int, mode: str) -> None:
+        """A fragment whose checkpointed progress was kept (anchor / shift)
+        keeps its H-gate and token counters, and an unchanged anchor its
+        spent-anchor guard; an overwritten one starts afresh."""
+
+        if mode == RESUME_OVERWRITE:
+            return
+        self.state.restore_fragment(self.resume_record, fid)
+        if mode == RESUME_ANCHOR:
+            spent = self.resume_record["spent"][fid]
+            self.spent[fid] = None if spent is None else (int(spent[0]), int(spent[1]))
+
+    def _resume_paths(self, resume_dir: str) -> tuple[str, str]:
+        return (os.path.join(resume_dir, RESUME_STATE_FILE),
+                os.path.join(resume_dir, RESUME_ANCHOR_DIR, f"rank{self.rank:05d}.pt"))
+
+    def _shard_keys(self) -> list[tuple[str, int]]:
+        return [(s.name, s.tp_rank) for s in self.shards]
+
+    def _load_resume(self, resume_dir: str, resume_iteration: int | None) -> None:
+        """Read the record ``save_state`` left in ``resume_dir`` (collective).
+
+        A missing or foreign record (another learner, layout, parallel shape
+        or iteration) is a cold start: every fragment takes the global as
+        before.  Old anchors are used only if every rank has its file."""
+
+        import torch
+
+        record, reason = None, None
+        if self.rank == 0:
+            path = self._resume_paths(resume_dir)[0]
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except FileNotFoundError:
+                reason = f"no {RESUME_STATE_FILE} in {resume_dir}"
+            except (OSError, ValueError) as exc:
+                reason = f"unreadable {path}: {exc}"
+            if record is not None:
+                checks = [
+                    (record.get("format") == RESUME_FORMAT, "format"),
+                    (record.get("learner_id") == self.learner_id, "learner id"),
+                    (record.get("contract") == self.contract.hex(), "layout / parallel shape"),
+                    (len(record.get("versions", ())) == self.num_fragments, "fragment count"),
+                    (resume_iteration is None or record.get("iteration") == int(resume_iteration), "iteration"),
+                ]
+                bad = [what for ok, what in checks if not ok]
+                if bad:
+                    reason = f"{path} does not match this island ({', '.join(bad)})"
+                    record = None
+            if record is None:
+                log.warning("resume: %s; the syncer's cut replaces every fragment (cold start)", reason)
+        record = self._bcast_object(record)
+        if record is None:
+            return
+        loaded: dict[int, Any] = {}
+        ok = bool(record.get("anchors"))
+        if ok:
+            try:
+                saved = torch.load(self._resume_paths(resume_dir)[1], map_location="cpu", weights_only=True)
+                if saved["keys"] != [list(k) for k in self._shard_keys()]:
+                    raise ValueError("shard list differs")
+                for shard, value in zip(self.shards, saved["values"], strict=True):
+                    if tuple(value.shape) != tuple(shard.local_shape):
+                        raise ValueError(f"{shard.name} has shape {tuple(value.shape)}")
+                    loaded[id(shard.param)] = value
+            except Exception as exc:  # agreed on below; a missing anchor file is not fatal
+                log.warning("resume: rank %d cannot use its saved anchors: %s", self.rank, exc)
+                ok = False
+        ok = all(self._gather_object(ok))
+        self.resume_record = record
+        self._resume_has_anchors = ok
+        self._resume_anchors = loaded if ok else {}
+        self.units_total = int(record["units_total"])
+        self.state.global_step = int(record["global_step"])
+        if self.rank == 0:
+            log.info("resume: island record of iteration %s (anchor versions %s..%s, old anchors %s)",
+                     record.get("iteration"), min(record["versions"]), max(record["versions"]),
+                     "loaded" if ok else "not saved: a newer fragment takes the global")
+
+    def _gather_object(self, value: Any) -> list[Any]:
+        import torch.distributed as dist
+
+        if self.world == 1:
+            return [value]
+        out: list[Any] = [None] * self.world
+        dist.all_gather_object(out, value, group=self.comm.world)
+        return out
+
+    def save_state(self, output_dir: str, *, iteration: int, save_anchors: bool = False) -> bool:
+        """Record the sync's per-fragment state next to the trainer checkpoint
+        ``output_dir`` of ``iteration`` (call it on every rank after the
+        checkpoint is written; collective only with ``save_anchors``).
+
+        Global rank 0 writes ``RESUME_STATE_FILE``: each fragment's anchor
+        version, the H-gate / token counters and the spent-anchor guard.
+        ``save_anchors`` also writes every rank's anchor shards (the
+        broadcast dtype, ~``2 * n_r`` bytes per rank for bf16) to
+        ``RESUME_ANCHOR_DIR``; only with them can a fragment that the syncer
+        moved past the checkpoint's anchor keep the island's local progress
+        (``global_new + (local - anchor_old)``).  Never raises on an I/O
+        error (training goes on); returns whether rank 0 wrote the record
+        (True on the other ranks)."""
+
+        import torch
+
+        anchors_ok = False
+        if save_anchors:
+            path = self._resume_paths(output_dir)[1]
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                values = [self.anchors.get(id(s.param)) for s in self.shards]
+                if any(v is None for v in values):
+                    raise ValueError("a local shard has no anchor yet")
+                tmp = f"{path}.tmp"
+                torch.save({"keys": [list(k) for k in self._shard_keys()], "values": values}, tmp)
+                os.replace(tmp, path)
+                anchors_ok = True
+            except Exception as exc:
+                log.warning("save_state: rank %d cannot write its anchors: %s", self.rank, exc)
+        anchors_ok = all(self._gather_object(anchors_ok)) if save_anchors else False
+        written = True
+        if self.rank == 0:
+            record = {"format": RESUME_FORMAT, "learner_id": self.learner_id, "iteration": int(iteration),
+                      "contract": self.contract.hex(), "anchors": anchors_ok,
+                      **self.state.resume_record(anchored=self.anchored, units_total=self.units_total,
+                                                 spent=self.spent)}
+            path = self._resume_paths(output_dir)[0]
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(record, handle)
+                os.replace(tmp, path)
+                log.info("save_state: %s (iteration %d, anchors %s)", path, iteration, anchors_ok)
+            except OSError as exc:
+                log.warning("save_state: cannot write %s: %s", path, exc)
+                written = False
+        return written
 
     # ------------------------------------------------------------------ collectives
     def _bcast_object(self, value: Any) -> Any:
@@ -882,9 +1063,16 @@ class MegatronDiLoCoSync:
 
         return DTYPE_F32 if bulk_dtype(self.wire) == DTYPE_F32 else push_wire_dtype(self.wire)
 
-    def _apply_chunk(self, names: Sequence[str], flat: Any | None, dtype: Any, *, blend: bool) -> None:
+    def _apply_chunk(self, names: Sequence[str], flat: Any | None, dtype: Any, *, blend: bool,
+                     mode: str | None = None) -> None:
         """Install the raw global values of ``names`` (``flat`` on rank 0, in the
-        broadcast dtype) as every rank's anchor, master and model copy."""
+        broadcast dtype) as every rank's anchor, master and model copy.
+
+        A resumed island's first install of a fragment (``mode``,
+        ``yeto.diloco_sync.resume_fragment_mode``): ``"anchor"`` only records
+        the anchor and leaves the master and model copy untouched,
+        ``"shift"`` writes ``global + (master - old anchor)``; ``"overwrite"``
+        (or None) is the ordinary install."""
 
         import torch
         import torch.distributed as dist
@@ -937,7 +1125,16 @@ class MegatronDiLoCoSync:
             raw = whole.to(dtype=torch.float32).contiguous()
             self.anchors[id(shard.param)] = whole.to(device="cpu", dtype=self.anchor_dtype).contiguous().clone()
             targets.append(raw)
-        if blend and self.merge_alpha > 0:
+        if mode == RESUME_ANCHOR:
+            return  # the broadcast is the checkpoint's own anchor: keep the local values
+        if mode == RESUME_SHIFT:
+            from yeto.diloco_sync import shifted_resume_value
+
+            masters = self._masters(local)
+            targets = [shifted_resume_value(t, m, self._resume_anchors.pop(id(s.param)))
+                       for s, m, t in zip(local, masters, targets, strict=True)]
+            del masters
+        elif blend and self.merge_alpha > 0:
             masters = self._masters(local)
             targets = [self.merge_alpha * m.to(torch.float32) + (1.0 - self.merge_alpha) * t
                        for m, t in zip(masters, targets, strict=True)]
@@ -961,8 +1158,10 @@ class MegatronDiLoCoSync:
         if nbytes != expected:
             raise SwiftMegatronSyncError(f"fragment {fid} payload has {nbytes} bytes, expected {expected}")
 
-    def _apply_fragment(self, fid: int, data: Any, dtype: Any, *, blend: bool) -> None:
-        """Apply one fragment's payload (``data`` on rank 0) chunk by chunk."""
+    def _apply_fragment(self, fid: int, data: Any, dtype: Any, *, blend: bool,
+                        mode: str | None = None) -> None:
+        """Apply one fragment's payload (``data`` on rank 0) chunk by chunk
+        (``mode``: a resumed island's first install, ``_apply_chunk``)."""
 
         import torch
 
@@ -974,7 +1173,7 @@ class MegatronDiLoCoSync:
             flat = None
             if view is not None:
                 flat = torch.frombuffer(bytearray(view[offset:offset + nbytes]), dtype=torch.uint8).view(dtype)
-            self._apply_chunk(names, flat, dtype, blend=blend)
+            self._apply_chunk(names, flat, dtype, blend=blend, mode=mode)
             offset += nbytes
 
     # ------------------------------------------------------------------ boundary
@@ -1000,6 +1199,10 @@ class MegatronDiLoCoSync:
         iteration = int(iteration)
         if not self._counters_started:  # count from the (possibly resumed) first step
             state.steps_at_reset = [iteration - 1] * self.num_fragments
+            # A fragment that kept its checkpointed progress keeps its clock:
+            # the H gate is not restarted by the island's own restart.
+            for fid, mode in self.resumed.items():
+                self._restore_counters(fid, mode)
             self._counters_started = True
         self.iteration = iteration
         if update_successful:
@@ -1017,10 +1220,12 @@ class MegatronDiLoCoSync:
         for fid, version in plan.applies:
             data = updates.get(fid) if self.rank == 0 else None
             started = time.perf_counter()
-            self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+            mode = self._apply_first_or_blend(fid, data, version)
             self.stats["apply_s"] += time.perf_counter() - started
             state.steps_at_reset[fid] = iteration
             state.units_at_reset[fid] = self.units_total
+            if mode is not None:
+                self._restore_counters(fid, mode)
             state.fragment_versions[fid] = version
             self.anchored[fid] = True
             state.global_step = max(state.global_step, version)

@@ -148,6 +148,57 @@ class DiLoCoSyncState:
             anchors=[None] * num_fragments if track_anchors else None,
         )
 
+    def resume_record(self, *, anchored: list[bool], units_total: int,
+                      spent: list[tuple[int, int] | None] | None = None) -> dict:
+        """The per-fragment part of an island checkpoint (JSON-safe): which
+        version each fragment's anchor is, and the H-gate / token counters
+        measured from it.  The anchor values themselves are not included."""
+        n = len(self.fragment_versions)
+        spent = spent if spent is not None else [None] * n
+        return {
+            "versions": [int(v) for v in self.fragment_versions],
+            "anchored": [bool(a) for a in anchored],
+            "steps_at_reset": [int(s) for s in self.steps_at_reset],
+            "units_at_reset": [int(u) for u in self.units_at_reset],
+            "spent": [None if s is None else [int(s[0]), int(s[1])] for s in spent],
+            "units_total": int(units_total),
+            "global_step": int(self.global_step),
+        }
+
+    def restore_fragment(self, record: dict, fid: int) -> None:
+        """Take fragment ``fid``'s counters from a ``resume_record`` (a resumed
+        island that kept its local progress keeps its H-gate clock too)."""
+        self.steps_at_reset[fid] = int(record["steps_at_reset"][fid])
+        self.units_at_reset[fid] = int(record["units_at_reset"][fid])
+
+
+# What a resumed island does with the first broadcast of a fragment.
+RESUME_OVERWRITE = "overwrite"  # install the global (no usable record: a cold start)
+RESUME_ANCHOR = "anchor"        # same version as the checkpoint's anchor: anchor only
+RESUME_SHIFT = "shift"          # newer global: global_new + (local - anchor_old)
+
+
+def resume_fragment_mode(record: dict | None, fid: int, version: int, *, have_anchor: bool) -> str:
+    """How a resumed island installs the syncer's first broadcast of ``fid``.
+
+    The checkpoint holds ``local``, trained from the anchor of
+    ``record["versions"][fid]``.  The same version again means the broadcast
+    *is* that anchor, so the local parameters stay as they are.  Any other
+    version moves the island's local progress onto the new global, which
+    needs the old anchor value (``have_anchor``); without it the fragment
+    falls back to the cold-start overwrite."""
+    if record is None or not record["anchored"][fid]:
+        return RESUME_OVERWRITE
+    if int(version) == int(record["versions"][fid]):
+        return RESUME_ANCHOR
+    return RESUME_SHIFT if have_anchor else RESUME_OVERWRITE
+
+
+def shifted_resume_value(global_new: torch.Tensor, local: torch.Tensor, anchor_old: torch.Tensor) -> torch.Tensor:
+    """``global_new + (local - anchor_old)`` in FP32: the island's progress since
+    its checkpointed anchor, moved onto the newer global."""
+    return global_new.to(torch.float32) + (local.to(torch.float32) - anchor_old.to(torch.float32))
+
 
 def sync_diloco_boundary(
     client: SyncerClient | None,
