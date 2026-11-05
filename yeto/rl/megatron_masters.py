@@ -198,6 +198,13 @@ def _write_main_shard(leaf: Any, param: Any, value: Any) -> None:
     if _hybrid(leaf):
         master = leaf.optimizer.param_to_fp32_param[shard]
         master.data.copy_(value.reshape(master.shape).to(master.dtype))
+        # Under offload the host copy the CPU sub-optimizer steps is this same
+        # FP32 tensor (core 0.18.2 rebinds it before recording the copy); a
+        # distinct host copy would be copied back over the shard after the next
+        # step, so it is written too.
+        host = getattr(leaf.optimizer, "gpu_params_map_cpu_copy", {}).get(shard)
+        if host is not None and host is not master:
+            host.data.copy_(value.reshape(host.shape).to(host.dtype))
         return
     leaf.optimizer.set_scaled_state(shard, "master_param", value.reshape(shard.shape).float().clone())
 
