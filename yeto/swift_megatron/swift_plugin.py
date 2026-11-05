@@ -62,8 +62,10 @@ ms-swift's argument parser, so environment variables are the only channel):
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -329,14 +331,40 @@ class YetoDiLoCoCallback(_CallbackBase):
         # step was skipped; the skipped step then contributes zero tokens.
         global_tokens = int(type(self).token_reducer(local_tokens))
         target_tokens = global_tokens if update_successful else 0
+        stats = getattr(self.sync, "stats", None) or {}
+        before = {k: stats.get(k, 0) for k in ("applied", "pushed", "apply_s", "export_s")}
+        started = time.perf_counter()
         self.sync.after_optimizer_step(iteration, target_tokens,
                                        update_successful=update_successful)
+        self._log_step(iteration, target_tokens, time.perf_counter() - started, before, stats)
         if getattr(self.sync, "finished", False) and iteration < int(self.args.train_iters):
             # The final cut is installed: stop here (ms-swift's default_flow
             # saves at train_iters) instead of training past the global result.
             logger.warning("yeto DiLoCo: final cut installed at iteration %d; ending training (train_iters %d)",
                            iteration, int(self.args.train_iters))
             self.args.train_iters = iteration
+
+    def _log_step(self, iteration: int, target_tokens: int, sync_s: float,
+                  before: dict, stats: dict) -> None:
+        """Append one JSON line per step (sync rank 0 only) to ``<prefix>STEP_LOG``.
+
+        ``sync_s`` is the wall time the training loop spent inside the sync
+        boundary; ``export_s`` / ``apply_s`` split out the fp32 master gather
+        for a push and the write-back of a received broadcast."""
+        path = os.environ.get(ENV_PREFIX + "STEP_LOG")
+        if not path or getattr(self.sync, "rank", 0) != 0:
+            return
+        record = {"iteration": iteration, "time": time.time(), "target_tokens": target_tokens,
+                  "sync_s": round(sync_s, 4),
+                  "export_s": round(stats.get("export_s", 0) - before["export_s"], 4),
+                  "apply_s": round(stats.get("apply_s", 0) - before["apply_s"], 4),
+                  "pushes_sent": stats.get("pushed", 0) - before["pushed"],
+                  "applies": stats.get("applied", 0) - before["applied"]}
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\n")
+        except OSError as error:  # never let bookkeeping kill a training step
+            logger.warning("yeto DiLoCo: cannot write step log %s: %s", path, error)
 
     def on_train_end(self):
         self.close()
