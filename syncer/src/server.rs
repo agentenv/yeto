@@ -5529,8 +5529,9 @@ fn route_push(
         // let the round close with the remaining responders. The refused work
         // is not lost: the island's next push is still relative to its raw
         // anchor. A fixed roster never merges a partial roster, so it keeps
-        // the slot.
-        if !fixed_roster {
+        // the slot; so does a round with a fold, which was sized for the full
+        // expected roster and may already have consumed pushes.
+        if !fixed_roster && round.fold.is_none() {
             round.forget_unanswered(member);
         }
         return PushDisposition::StaleBase;
