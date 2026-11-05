@@ -3112,7 +3112,28 @@ async fn read_loop(
     event_tx: &mpsc::Sender<Event>,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let mut inits = std::collections::VecDeque::new();
+    let result = read_frames(rd, group, event_tx, budget_cutoff, &mut inits).await;
+    // A failed INIT decode is this connection's protocol error too.
+    let decoded = reap_init_params(&mut inits, true).await;
+    if let (Ok(()), Err(error)) = (&result, &decoded) {
+        report_protocol_error(group, error).await;
+    }
+    result.and(decoded)
+}
+
+async fn read_frames(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    group: &Arc<Group>,
+    event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
+    inits: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
     loop {
+        if let Err(error) = reap_init_params(inits, false).await {
+            report_protocol_error(group, &error).await;
+            return Err(error);
+        }
         let mut header_at: Option<Instant> = None;
         let frame = match read_frame_limited(rd, |msg_type| {
             header_at = Some(Instant::now());
@@ -3148,11 +3169,15 @@ async fn read_loop(
         group.wire.recv.fetch_add(frame.payload.len() as u64 + 13, Ordering::Relaxed);
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
+                Ok(Some((inner, _))) if inner.msg_type == MSG_INIT_PARAMS => {
+                    inits.push_back(spawn_init_params(group, inner, event_tx));
+                    Ok(())
+                }
                 Ok(Some((inner, recv_seconds))) => {
                     dispatch_inner(
                         group,
                         inner.msg_type,
-                        &inner.payload,
+                        inner.payload(),
                         recv_seconds,
                         event_tx,
                         budget_cutoff,
@@ -3182,7 +3207,7 @@ async fn report_protocol_error(group: &Arc<Group>, error: &anyhow::Error) {
 
 /// Adds one chunk; a completed message comes back with its receive time
 /// (first chunk to last chunk).
-fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>> {
+fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Reassembled, f64)>> {
     let mut r = Reader(payload);
     let msg_id = r.u64()?;
     let total_u64 = r.u64()?;
@@ -3260,17 +3285,107 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>
     }
     let msg_type = r.u8()?;
     let len = r.u64()? as usize;
-    let payload = r.rest();
-    if payload.len() != len {
+    if r.rest().len() != len {
         bail!("inner frame length mismatch");
     }
-    Ok(Some((
-        Frame {
-            msg_type,
-            payload: payload.to_vec(),
-        },
-        recv_seconds,
-    )))
+    // The payload stays in the buffer: copying a model-sized INIT out of it
+    // was one more single-threaded pass on the read loop.
+    Ok(Some((Reassembled { msg_type, buf }, recv_seconds)))
+}
+
+/// A reassembled inner frame: its 13-byte header, then the payload.
+struct Reassembled {
+    msg_type: u8,
+    buf: Vec<u8>,
+}
+
+impl Reassembled {
+    fn payload(&self) -> &[u8] {
+        &self.buf[13..]
+    }
+}
+
+/// INIT_PARAMS of one connection hashed and decoded at once, off its read
+/// loop. Each holds a fragment (~30 GB transient for a 120B f32 fragment:
+/// the payload and its decoded values), and the digest is one sequential
+/// ~1.6 GB/s pass, so the read loop keeps receiving the next fragments
+/// while earlier ones are checked instead of stalling its stream.
+const INIT_PIPELINE: usize = 4;
+
+/// Validate, hash and decode one INIT_PARAMS payload: (fragment, SHA-256 of
+/// its tensor bytes, values).
+fn decode_init_params(group: &Group, payload: &[u8]) -> Result<(u32, [u8; 32], Vec<f32>)> {
+    if group.member.learner_id != 0 {
+        bail!("only learner 0 may send INIT_PARAMS");
+    }
+    let mut r = Reader(payload);
+    let fragment_id = r.u32()?;
+    let fragment = group
+        .layout
+        .fragments
+        .get(fragment_id as usize)
+        .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
+    let numel = fragment.numel()?;
+    let bytes = r.rest();
+    let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
+    if bytes.len() != expected {
+        bail!(
+            "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
+            bytes.len()
+        );
+    }
+    // The digest is one sequential pass; decode the values meanwhile.
+    let (sha256, values) = std::thread::scope(|scope| {
+        let digest = scope.spawn(|| crate::sha256::digest(bytes));
+        let mut values = Vec::new();
+        let decoded = decode_tensor(bulk_dtype(group.dtype), bytes, &mut values);
+        (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
+    });
+    Ok((fragment_id, sha256, values?))
+}
+
+/// Hash and decode a reassembled INIT_PARAMS on the blocking pool, then
+/// hand it to the coordinator. The coordinator applies INITs in any
+/// order (each fragment once, from the current generation only).
+fn spawn_init_params(
+    group: &Arc<Group>,
+    inner: Reassembled,
+    event_tx: &mpsc::Sender<Event>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let (group, event_tx) = (Arc::clone(group), event_tx.clone());
+    tokio::spawn(async move {
+        let member = group.member;
+        let (fragment_id, sha256, values) =
+            tokio::task::spawn_blocking(move || decode_init_params(&group, inner.payload()))
+                .await
+                .context("INIT_PARAMS decoder panicked")??;
+        event_tx
+            .send(Event::Init {
+                member,
+                fragment_id,
+                values,
+                sha256,
+            })
+            .await
+            .ok();
+        Ok(())
+    })
+}
+
+/// Wait for the finished (all, with `all`) INIT_PARAMS decoders of a read
+/// loop, oldest first; the first failure is returned.
+async fn reap_init_params(
+    pending: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+    all: bool,
+) -> Result<()> {
+    while let Some(oldest) = pending.front() {
+        if !all && !oldest.is_finished() && pending.len() < INIT_PIPELINE {
+            break;
+        }
+        let oldest = pending.pop_front().expect("front exists");
+        oldest.await.context("INIT_PARAMS task panicked")??;
+    }
+    Ok(())
 }
 
 async fn dispatch_inner(
@@ -3283,33 +3398,7 @@ async fn dispatch_inner(
 ) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
-            if group.member.learner_id != 0 {
-                bail!("only learner 0 may send INIT_PARAMS");
-            }
-            let mut r = Reader(payload);
-            let fragment_id = r.u32()?;
-            let fragment = group
-                .layout
-                .fragments
-                .get(fragment_id as usize)
-                .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
-            let numel = fragment.numel()?;
-            let bytes = r.rest();
-            let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
-            if bytes.len() != expected {
-                bail!(
-                    "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
-                    bytes.len()
-                );
-            }
-            // The digest is one sequential pass; decode the values meanwhile.
-            let (sha256, values) = std::thread::scope(|scope| {
-                let digest = scope.spawn(|| crate::sha256::digest(bytes));
-                let mut values = Vec::new();
-                let decoded = decode_tensor(bulk_dtype(group.dtype), bytes, &mut values);
-                (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
-            });
-            let values = values?;
+            let (fragment_id, sha256, values) = decode_init_params(group, payload)?;
             event_tx
                 .send(Event::Init {
                     member: group.member,
