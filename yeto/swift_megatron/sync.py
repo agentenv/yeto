@@ -259,14 +259,21 @@ def _global_layer_prefixes(chunk: Any) -> list[tuple[str, str]]:
 
 def _expert_modules(chunk: Any) -> list[tuple[str, list[int]]]:
     """``(prefix, local_expert_indices)`` of every expert container (the
-    ``experts`` child of a MoE layer; the MoE layer itself also carries
-    ``local_expert_indices`` but holds the router and shared experts),
-    longest first."""
+    ``experts`` child of a MoE layer), longest first.
 
+    Older Megatron-Core put ``local_expert_indices`` on the expert container
+    itself; since 0.1x only the MoE layer (its parent, which also holds the
+    router and shared experts) carries it, so fall back to the parent."""
+
+    modules = dict(chunk.named_modules())
     out = []
-    for name, module in chunk.named_modules():
+    for name, module in modules.items():
+        if name.rsplit(".", 1)[-1] != "experts":
+            continue
         indices = getattr(module, "local_expert_indices", None)
-        if indices is None or name.rsplit(".", 1)[-1] != "experts":
+        if indices is None and "." in name:
+            indices = getattr(modules.get(name.rsplit(".", 1)[0]), "local_expert_indices", None)
+        if indices is None:
             continue
         out.append((name + ".", [int(i) for i in indices]))
     return sorted(out, key=lambda item: -len(item[0]))
@@ -328,6 +335,12 @@ def local_shards(model_chunks: Sequence[Any], ctx: ParallelContext,
             if name in out:
                 raise SwiftMegatronSyncError(f"two local parameters map to the global name {name!r}")
             expert = getattr(param, "allreduce", True) is False
+            if expert and ".experts." in local_name and not any(
+                    local_name.startswith(prefix) for prefix, _ in experts):
+                # Without its global expert index the tensor would alias the
+                # same-named tensor of every other expert-parallel rank.
+                raise SwiftMegatronSyncError(
+                    f"{local_name}: expert parameter without local_expert_indices on its container")
             tp_rank, tp_size, group = ((ctx.etp_rank, ctx.etp_size, ctx.etp_group) if expert
                                        else (ctx.tp_rank, ctx.tp_size, ctx.tp_group))
             part_dim = -1
