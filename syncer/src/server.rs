@@ -1137,7 +1137,57 @@ struct Push {
     /// Expert token weights: the per-tensor merge scale of this push (see
     /// `protocol::decode_expert_tags`); `None` when the option is off.
     tensor_scales: Option<Vec<f64>>,
+    /// The learner's wire payload, kept only while it is smaller than the
+    /// decoded gradient, so a late push queued for its fragment's next
+    /// round (`LateCarry`) can drop `outer_gradient` and wait as wire bytes.
+    wire: Option<PushWire>,
     transfer: PushTransfer,
+}
+
+/// A PUSH_FRAGMENT delta payload as received (dtype, tensor segments, bytes).
+struct PushWire {
+    dtype: u8,
+    segments: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl Push {
+    /// Keep only the wire bytes (a late push waiting ~F rounds: an int4
+    /// payload is 1/7.5 of its f32 gradient). No-op without wire bytes.
+    fn compress(&mut self) {
+        if self.wire.is_some() {
+            self.outer_gradient = Vec::new();
+        }
+    }
+
+    /// Undo `compress`: decode the wire bytes exactly as on receipt, so the
+    /// gradient is bit-identical to the one dropped.
+    fn expand(&mut self) {
+        if let Some(wire) = self.wire.take() {
+            if self.outer_gradient.is_empty() {
+                self.outer_gradient = decode_outer_gradient(&wire)
+                    .expect("a push payload that decoded on receipt decodes again");
+            }
+        }
+    }
+}
+
+/// `decode_outer_gradient` of `bytes` with `wire`'s dtype and segments.
+fn decode_push_segments_to_gradient(wire: &PushWire, bytes: &[u8]) -> Result<Vec<f32>> {
+    let mut outer_gradient = Vec::new();
+    decode_push_segments(wire.dtype, bytes, &wire.segments, &mut outer_gradient)?;
+    // Every wire dtype carries learner_delta = local - raw_anchor.
+    // Merge math consumes the corresponding outer gradient with the
+    // opposite sign and never reconstructs a full learner parameter.
+    for value in &mut outer_gradient {
+        *value = -*value;
+    }
+    Ok(outer_gradient)
+}
+
+/// The outer gradient `raw_anchor - local` of a push payload.
+fn decode_outer_gradient(wire: &PushWire) -> Result<Vec<f32>> {
+    decode_push_segments_to_gradient(wire, &wire.bytes)
 }
 
 /// When and how fast one PUSH_FRAGMENT reached the syncer (full-parameter
@@ -3467,16 +3517,12 @@ async fn dispatch_inner(
                 None
             };
             let bytes = r.rest();
-            let mut outer_gradient = Vec::new();
             let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
-            decode_push_segments(group.dtype, bytes, &segments, &mut outer_gradient)
+            let wire = PushWire { dtype: group.dtype, segments, bytes: Vec::new() };
+            let outer_gradient = decode_push_segments_to_gradient(&wire, bytes)
                 .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
-            // Every wire dtype carries learner_delta = local - raw_anchor.
-            // Merge math consumes the corresponding outer gradient with the
-            // opposite sign and never reconstructs a full learner parameter.
-            for value in &mut outer_gradient {
-                *value = -*value;
-            }
+            // Only a payload smaller than its gradient is worth keeping.
+            let wire = (bytes.len() < 4 * numel).then(|| PushWire { bytes: bytes.to_vec(), ..wire });
             event_tx
                 .send(Event::Push {
                     member: group.member,
@@ -3491,6 +3537,7 @@ async fn dispatch_inner(
                         c_tokens,
                         outer_gradient,
                         tensor_scales,
+                        wire,
                         transfer: PushTransfer {
                             recv_seconds,
                             arrived_unix: unix_now(),
@@ -5851,6 +5898,8 @@ impl LateCarry {
                 Err(disposition) => CarryOutcome::Rejected(disposition),
             };
         }
+        let mut push = push;
+        push.compress();
         self.queued.entry(p).or_default().push((member, push));
         CarryOutcome::Queued
     }
@@ -5862,7 +5911,8 @@ impl LateCarry {
         };
         queued
             .into_iter()
-            .map(|(member, push)| {
+            .map(|(member, mut push)| {
+                push.expand();
                 let missed = push.global_step;
                 (member, missed, attach_carry(round, member, push, self.limit))
             })
@@ -9729,6 +9779,7 @@ mod tests {
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
@@ -9840,6 +9891,7 @@ mod tests {
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9924,6 +9976,7 @@ mod tests {
                     c_tokens,
                     outer_gradient: vec![0.25],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9951,6 +10004,7 @@ mod tests {
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
                         tensor_scales: None,
+                        wire: None,
                         transfer: PushTransfer::default(),
                     },
                 )
@@ -12209,6 +12263,36 @@ mod tests {
     }
 
     #[test]
+    fn queued_late_push_holds_wire_bytes_and_decodes_bit_identically() {
+        let vals: Vec<f32> = (0..1000).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013).collect();
+        let bytes = crate::protocol::encode_i4(&vals, 64);
+        let segments = push_segments(DTYPE_F32_PUSH_I4, vals.len(), &[600, 400]).unwrap();
+        let wire = PushWire { dtype: DTYPE_F32_PUSH_I4, segments, bytes: Vec::new() };
+        let eager = decode_push_segments_to_gradient(&wire, &bytes).unwrap();
+        assert!(bytes.len() < 4 * vals.len());
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        late.outer_gradient = eager.clone();
+        late.wire = Some(PushWire { bytes, ..wire });
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        let mut rounds: Vec<Round> = Vec::new();
+        assert_eq!(carry.carry(&mut rounds, island, late, 8, 7), CarryOutcome::Queued);
+        for queued in carry.queued.values().flatten() {
+            assert!(queued.1.outer_gradient.is_empty(), "queued push keeps only wire bytes");
+            assert!(queued.1.wire.is_some());
+        }
+        let mut next = test_round(vec![member(0, 10), island]);
+        next.t = 9;
+        next.base_version = 7;
+        assert_eq!(carry.attach_queued(&mut next).len(), 1);
+        let got = &next.carried[0];
+        let got_bits: Vec<u32> = got.1.outer_gradient.iter().map(|v| v.to_bits()).collect();
+        let want_bits: Vec<u32> = eager.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, want_bits);
+    }
+
+    #[test]
     fn late_push_joins_an_already_open_later_round() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let mut open = test_round(vec![member(0, 10)]);
@@ -12471,6 +12555,7 @@ mod tests {
             c_tokens: 20,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -12885,6 +12970,7 @@ mod tests {
             c_tokens: 1,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -13012,6 +13098,7 @@ mod tests {
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer {
                     recv_seconds: 1.5,
                     arrived_unix: 1792000000.25,
@@ -13189,6 +13276,7 @@ mod tests {
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -13205,6 +13293,7 @@ mod tests {
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -13522,6 +13611,7 @@ mod tests {
             c_tokens: 1 + u64::from(learner_id),
             outer_gradient: gradient,
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
