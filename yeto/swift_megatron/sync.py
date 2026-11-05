@@ -81,6 +81,31 @@ Only global rank 0 talks to the syncer.  Every boundary starts with one
 push, finalization, shutdown, error), so every rank runs the same collectives
 in the same order and an error on rank 0 is raised on every rank.
 
+Decoupled DiLoCo (no island waits for another)
+    The island never waits for a merge or for another island: a boundary
+    only drains what the client already received (broadcasts are applied at
+    the next boundary after they arrive), the PUSH bytes are handed to a
+    background sender thread on rank 0 (``_PushSender``; the client encodes
+    int4/int8 with tensor blocks there), and while a PUSH is still streaming
+    (slow link or syncer, a redial) pulls stay pending instead of blocking.
+    One fragment is gathered per boundary.  A pull is not answered from an
+    anchor already spent on another round (the syncer's late carry refuses
+    that as ``anchor_reused``); a dropped PUSH un-spends its anchor.  The
+    syncer side is the RL async full-parameter preset (quorum 1, adaptive
+    grace, ``--max-base-lag 1``, tokens2-over-steps, two fragment rounds in
+    flight, rda); ``wire_dtype="int4"`` is its int4 tensor-block push.
+
+    What still blocks a step is the collective gather of one fragment's FP32
+    masters (and the in-island broadcast of a received one): host copies,
+    gloo all-reduce over DP and all-gather over TP, then point-to-point to
+    rank 0.  For the 120B / 24-card recipe and P = 16 one fragment is
+    ~7.5e9 elements, ~0.3e9 per rank (~1.2 GB FP32), 30 GB arriving at rank
+    0: roughly 10-20 s over TCP gloo, against a ~570 s step, i.e. ~2-5 % at
+    one push and one apply per step.  It is not overlapped with training: the
+    HDO masters change under the next step, so overlapping needs a host
+    snapshot of the local shards plus a second set of gloo groups driven by a
+    background thread in the same order on every rank.
+
 Memory (N = trainable parameters of the island, P = fragments, n_r = the
 elements of rank r's local parameter shards, C = ``chunk_numel``, t = TP size):
 
@@ -90,18 +115,22 @@ elements of rank r's local parameter shards, C = ``chunk_numel``, t = TP size):
   parameters).  The production pp0 stage has ~0.4 GiB of HBM headroom, so
   ``transport="device"`` (chunk buffers on the accelerator, peak about
   ``4 * C * (2 + t)`` bytes) is only for islands with room to spare;
-* every rank, host: one anchor per local shard in the anchor dtype (bf16 for a
-  bf16 session), ``2 * n_r`` bytes, plus one chunk in flight, about
+* every rank, host: one anchor per local shard in the broadcast dtype (bf16
+  for a bf16 session, FP32 for the int4 / int8 push sessions, whose
+  broadcasts are FP32), ``2 * n_r`` or ``4 * n_r`` bytes, plus one chunk in
+  flight, about
   ``4 * C * (2 + t)`` bytes (C = 2**28 -> ~6 GiB at t = 4; a single tensor
   larger than C is a chunk of its own).  For the TP4/EP8/PP3 (world 24)
   Nemotron-3.5-Super recipe (~120B, MoE-dominated, ETP 1) n_r is about
-  120e9 / 24 = 5e9: ~10 GB of anchors per rank, ~80 GB plus ~50 GB of chunks
+  120e9 / 24 = 5e9: ~10 GB (int4: ~20 GB) of anchors per rank, ~80 GB
+  (int4: ~160 GB) plus ~50 GB of chunks
   per 8-card host, beside the ~450 GB the offloaded masters and Adam moments
   take of its ~2 TB;
 * rank 0, host additionally: the wire bytes of one pushed fragment
   (``2 * N / P`` for bf16) and the client's received broadcasts (each
   ``2 * N / P``; at most the syncer's ``--pipeline`` rounds in flight).  For
-  N = 120e9 and P = 16 that is ~15 GB per fragment, ~45-60 GB peak.  A
+  N = 120e9 and P = 16 that is ~15 GB per fragment, ~45-60 GB peak (int4:
+  the FP32 PUSH parts and FP32 broadcasts, ~30 GB each, ~90-120 GB).  A
   full-payload final cut holds every fragment in FP32 (``4 * N`` = 480 GB) on
   rank 0's host: run the syncer with ``--final-cut-payload manifest`` and
   ``final_cut_payload="manifest"`` for a 120B island.
@@ -523,7 +552,7 @@ class MegatronDiLoCoSync:
         import torch
         import torch.distributed as dist
 
-        from yeto.diloco_sync import DiLoCoSyncState, wire_dtype_code
+        from yeto.diloco_sync import DiLoCoSyncState
         from yeto.fragments import build_layout
         from yeto.protocol import bulk_dtype, layout_fingerprint
 
@@ -547,7 +576,7 @@ class MegatronDiLoCoSync:
         self.merge_alpha = float(merge_alpha)
         self.final_cut_payload = final_cut_payload
         self.chunk_numel = int(chunk_numel)
-        self.wire = wire_dtype_code(wire_dtype)
+        self.wire = session_dtype(wire_dtype)
         self.bulk = bulk_dtype(self.wire)
         self.bulk_torch = _torch_wire(self.bulk)
         self.anchor_dtype = self.bulk_torch  # the raw global is exact in the broadcast dtype
@@ -580,6 +609,12 @@ class MegatronDiLoCoSync:
 
         self.anchors: dict[int, Any] = {}  # id(param) -> raw global shard (host)
         self.anchored = [False] * self.num_fragments
+        # (base version, round step) of each fragment's last sent PUSH: a
+        # decoupled syncer refuses a second delta from a spent anchor for
+        # another round (late carry, ``anchor_reused``), so such a pull waits
+        # for a newer broadcast instead of a gather that would be refused.  A
+        # restarted attempt of the same round may reuse it.
+        self.spent: list[tuple[int, int] | None] = [None] * self.num_fragments
         # The torch learner's per-fragment counters and versions, kept alike on
         # every rank (anchors live in ``self.anchors``, sharded, not here).
         self.state = DiLoCoSyncState.create(self.num_fragments, track_anchors=False)
@@ -592,7 +627,9 @@ class MegatronDiLoCoSync:
         self.finished = False  # the final cut is installed and acknowledged
         self._closed = False
         self.client = None
-        self.stats = {"applied": 0, "pushed": 0, "push_bytes": 0, "dropped_pushes": 0}
+        self.stats = {"applied": 0, "pushed": 0, "push_bytes": 0, "dropped_pushes": 0,
+                      "deferred_pushes": 0}
+        self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
         self.events: deque[tuple[int, str, int, int]] = deque(maxlen=4096)
 
@@ -603,6 +640,7 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             try:
                 self.client = self._connect(syncer, hmac_key_path, wan_streams, client_factory)
+                self.sender = _PushSender(self.client, self.stats, self._push_dropped)
             except Exception as exc:  # raised on every rank below
                 error = f"{type(exc).__name__}: {exc}"
         self._raise_if(self._bcast_object(error))
@@ -729,13 +767,17 @@ class MegatronDiLoCoSync:
                     # Raised on every rank by the caller's error broadcast.
                     self._export_error = f"fragment {fid} holds a non-finite value"
                 parts.append(tensor.reshape(-1) if q4 else
-                             pack_tensor(tensor.reshape(-1), self.bulk if not delta else self._push_dtype()))
+                             pack_tensor(tensor.reshape(-1), self.bulk if not delta else self._push_part_dtype()))
         return parts
 
-    def _push_dtype(self) -> int:
-        from yeto.protocol import push_wire_dtype
+    def _push_part_dtype(self) -> int:
+        """The dtype of the PUSH parts handed to the client: f32 on the
+        f32-bulk sessions (the client encodes bf16 / int8 / int4 itself, with
+        tensor blocks), else the session's push wire dtype."""
 
-        return push_wire_dtype(self.wire)
+        from yeto.protocol import DTYPE_F32, bulk_dtype, push_wire_dtype
+
+        return DTYPE_F32 if bulk_dtype(self.wire) == DTYPE_F32 else push_wire_dtype(self.wire)
 
     def _apply_chunk(self, names: Sequence[str], flat: Any | None, dtype: Any, *, blend: bool) -> None:
         """Install the raw global values of ``names`` (``flat`` on rank 0, in the
@@ -851,18 +893,17 @@ class MegatronDiLoCoSync:
         pushes = self._bcast_object(pushes)
         if isinstance(pushes, str):
             self._raise_if(pushes)
-        error, pushed_bytes = None, 0
+        error = None
         for fid, step, attempt, c_steps, c_units in pushes:
             parts = self._export_fragment(fid, delta=True)
             self.events.append((iteration, "push", fid, step))
             if self.rank == 0 and error is None:
-                error, nbytes = self._push(fid, step, attempt, c_steps, c_units, parts)
-                pushed_bytes += nbytes
+                error = self._push(fid, step, attempt, c_steps, c_units, parts)
         if pushes:
             self._raise_if(self._bcast_object(error))
         if self.observer is not None and self.rank == 0 and (plan.applies or pushes):
             self.observer(boundary_metrics(state, merges=len(plan.applies), pushes=len(pushes),
-                                           push_bytes=pushed_bytes, push_delta_norm=0.0,
+                                           push_bytes=self.stats["push_bytes"], push_delta_norm=0.0,
                                            steps_total=iteration))
 
     @property
@@ -880,6 +921,8 @@ class MegatronDiLoCoSync:
         client = self.client
         try:
             client.check_health()
+            if self.sender is not None:
+                self.sender.raise_error()
             plan.finalizing = bool(client.finalizing.is_set())
             if plan.finalizing:
                 return plan
@@ -905,27 +948,43 @@ class MegatronDiLoCoSync:
             state.pending_pulls.extend(self.client.drain_pulls())
         except Exception as exc:
             return f"{type(exc).__name__}: {exc}"
+        if self.sender is not None and self.sender.busy():
+            # Decoupled: the previous PUSH is still streaming (slow link or
+            # syncer); every pull waits rather than the training step.
+            if state.pending_pulls:
+                self.stats["deferred_pushes"] += 1
+            return []
         ready = take_ready_pulls(state, steps_total=self.iteration, units_total=self.units_total,
                                  anchored=self.anchored.__getitem__, min_steps=self.interval)
-        out, seen = [], set()
+        # One fragment per boundary: its PUSH streams in the background while
+        # training goes on, and the gather of a second would only queue
+        # behind it on the host.
+        out = []
         for pull, c_steps, c_units in ready:
-            fid = int(pull.fragment_id)
-            if fid in seen:
+            if out or not self._pushable(pull):
                 state.pending_pulls.append(pull)
                 continue
-            seen.add(fid)
-            out.append((fid, int(pull.global_step), int(pull.round_attempt), c_steps, c_units))
+            out.append((int(pull.fragment_id), int(pull.global_step), int(pull.round_attempt), c_steps, c_units))
         return out
+
+    def _pushable(self, pull: Any) -> bool:
+        fid = int(pull.fragment_id)
+        spent = self.spent[fid]
+        return spent is None or spent[0] != self.state.fragment_versions[fid] or spent[1] == int(pull.global_step)
+
+    def _push_dropped(self, fid: int, base: int, step: int) -> None:
+        """Sender thread: a dropped PUSH never reached the syncer, so its anchor is not spent."""
+        if self.spent[fid] == (base, step):
+            self.spent[fid] = None
 
     def _take_updates(self, plan: _Plan) -> dict[int, Any]:
         updates, self._updates = self._updates, {}
         return {fid: updates[fid].data for fid, _ in plan.applies}
 
     def _push(self, fid: int, step: int, attempt: int, c_steps: int, c_units: int,
-              parts: list[Any]) -> tuple[str | None, int]:
-        """Rank 0: send one PUSH_FRAGMENT; ``(error, bytes)``.  A lost
-        connection drops the push (the syncer re-requests it after the
-        redial); anything else is fatal on every rank."""
+              parts: list[Any]) -> str | None:
+        """Rank 0: hand one PUSH_FRAGMENT to the background sender and return
+        at once (an error only for a fragment that cannot be pushed at all)."""
 
         import torch
 
@@ -933,27 +992,15 @@ class MegatronDiLoCoSync:
         from yeto.protocol import DTYPE_Q4
 
         if self._export_error is not None:
-            return f"PUSH fragment {fid}: {self._export_error}", 0
-        base = self.state.fragment_versions[fid]
-        try:
-            if self.wire == DTYPE_Q4:
-                # q4 blocks span tensors: the shared encoder takes the whole delta.
-                payload = encode_push_delta(self.client, torch.cat(parts))
-                self.client.push_fragment(fid, step, attempt, base, self.iteration, c_steps, c_units, payload)
-                nbytes = len(payload)
-            else:  # bf16 / f32: stream the per-tensor wire parts
-                self.client.push_fragment_parts(fid, step, attempt, base, self.iteration, c_steps, c_units,
-                                                parts)
-                nbytes = sum(len(part) for part in parts)
-        except (ConnectionError, OSError) as exc:
-            self.stats["dropped_pushes"] += 1
-            log.warning("push of fragment %d dropped (%s); the syncer re-requests it", fid, exc)
-            return None, 0
-        except Exception as exc:
-            return f"PUSH fragment {fid}: {type(exc).__name__}: {exc}", 0
-        self.stats["pushed"] += 1
-        self.stats["push_bytes"] += nbytes
-        return None, nbytes
+            return f"PUSH fragment {fid}: {self._export_error}"
+        head = (fid, step, attempt, self.state.fragment_versions[fid], self.iteration, c_steps, c_units)
+        self.spent[fid] = (self.state.fragment_versions[fid], step)
+        if self.wire == DTYPE_Q4:
+            # q4 blocks span tensors: the shared encoder takes the whole delta.
+            self.sender.submit(head, payload=encode_push_delta(self.client, torch.cat(parts)))
+        else:
+            self.sender.submit(head, parts=parts)
+        return None
 
     def _finalize(self) -> None:
         """Install the coordinator's final cut raw (``full``) or only confirm it
@@ -1010,12 +1057,100 @@ class MegatronDiLoCoSync:
         if self._closed:
             return
         self._closed = True
+        if self.sender is not None:
+            self.sender.stop()
         client, self.client = self.client, None
         if client is not None:
             try:
                 client.close()
             except Exception as exc:  # teardown must not mask the original error
                 log.warning("closing the syncer client failed: %s", exc)
+
+
+def session_dtype(name: str) -> int:
+    """The syncer session dtype of a wire name: the torch learner's
+    ``--wire-dtype`` names (bf16, f32, q4), or the full-parameter push names
+    of the RL island (``int4``, ``int8``, ``int4-log``, ``push-bf16``: f32
+    INIT/BCAST, quantized PUSH deltas with blocks restarting at tensor
+    boundaries, as the RL async full-parameter preset sends them)."""
+
+    from yeto.diloco_sync import WIRE_DTYPES, wire_dtype_code
+    from yeto.protocol import DTYPE_FLAG_TENSOR_BLOCKS, FULL_PARAMETER_PUSH_DTYPES
+
+    if name in WIRE_DTYPES or name == "fp32":
+        return wire_dtype_code(name)
+    key = "bf16" if name == "push-bf16" else name
+    if key not in FULL_PARAMETER_PUSH_DTYPES or key == "f32":
+        raise ValueError(f"unknown wire dtype {name!r}: one of {sorted(WIRE_DTYPES)} or "
+                         "int4, int8, int4-log, push-bf16")
+    code = FULL_PARAMETER_PUSH_DTYPES[key]
+    return code | DTYPE_FLAG_TENSOR_BLOCKS if key != "bf16" else code
+
+
+class _PushSender:
+    """Rank 0's background PUSH streaming: one PUSH in flight at a time, so a
+    slow link or syncer never holds a training step (decoupled DiLoCo, as the
+    RL full-parameter island's background push).  A lost connection drops the
+    push (the syncer re-requests it after the redial); any other failure is
+    re-raised by the next boundary on every rank."""
+
+    def __init__(self, client: Any, stats: dict, on_drop: Callable[[int, int, int], None]) -> None:
+        import queue
+        import threading
+
+        self.client, self.stats, self.on_drop = client, stats, on_drop
+        self.jobs: queue.Queue = queue.Queue()
+        self.idle = threading.Event()
+        self.idle.set()
+        self.error: str | None = None
+        self.thread = threading.Thread(target=self._run, name="yeto-swift-push", daemon=True)
+        self.thread.start()
+
+    def busy(self) -> bool:
+        return not self.idle.is_set()
+
+    def submit(self, head: tuple, *, parts: list[Any] | None = None, payload: bytes | None = None) -> None:
+        self.idle.clear()
+        self.jobs.put((head, parts, payload))
+
+    def raise_error(self) -> None:
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise SwiftMegatronSyncError(error)
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        return self.idle.wait(timeout)
+
+    def stop(self) -> None:
+        self.jobs.put(None)
+        self.thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            head, parts, payload = job
+            fid = head[0]
+            try:
+                if payload is not None:
+                    self.client.push_fragment(*head, payload)
+                    nbytes = len(payload)
+                else:
+                    self.client.push_fragment_parts(*head, parts)
+                    nbytes = sum(len(part) for part in parts)
+                self.stats["pushed"] += 1
+                self.stats["push_bytes"] += nbytes
+            except (ConnectionError, OSError) as exc:
+                self.stats["dropped_pushes"] += 1
+                self.on_drop(fid, head[3], head[1])
+                log.warning("push of fragment %d dropped (%s); the syncer re-requests it", fid, exc)
+            except Exception as exc:
+                self.error = f"PUSH fragment {fid}: {type(exc).__name__}: {exc}"
+            finally:
+                del parts, payload, job
+                if self.jobs.empty():
+                    self.idle.set()
 
 
 def _current_accelerator() -> Any:

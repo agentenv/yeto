@@ -373,7 +373,8 @@ def _scripted_body(rank, world, port, out_dir):
     adam_before = {k: {n: t.clone() for n, t in v.items()} for k, v in opt.optimizer.state.items()}
     updates_total = {name: torch.zeros(shape) for name, shape in full_shapes.items()}
     applied = {}
-    for it in (1, 2, 3):
+    snapshots = {}  # iteration -> updates since the merge, at the end of that step
+    for it in (1, 2, 3, 4, 5):
         opt.step({id(p): _local_update(p, 0, it, tp, 2) for p in trainable})
         for name, shape in full_shapes.items():
             if it >= 2:  # updates after the merge at iteration 1
@@ -381,7 +382,10 @@ def _scripted_body(rank, world, port, out_dir):
         if it == 1:
             pre_merge = {name: _full(name, shape) + _update(name, shape, 0, 1)
                          for name, shape in full_shapes.items()}
+        snapshots[it] = {n: t.clone() for n, t in updates_total.items()}
         syncer.after_optimizer_step(it, 100 * it)
+        if rank == 0:  # the PUSH streams in the background; let it land before the next step
+            assert syncer.sender.wait_idle(10)
         if it == 1:
             # merged with alpha: master = a * local + (1 - a) * global, bf16 copy = master
             for p in trainable:
@@ -400,7 +404,8 @@ def _scripted_body(rank, world, port, out_dir):
         if it == 2:  # one step since the merge: the pulls wait (H = 2)
             assert not any(e[1] == "push" for e in syncer.events)
     pushes = [e for e in syncer.events if e[1] == "push"]
-    assert [e[2] for e in pushes] == list(range(syncer.num_fragments)) and all(e[0] == 3 for e in pushes)
+    # decoupled: one fragment per boundary, the PUSH returns at once
+    assert [(e[0], e[2]) for e in pushes] == [(3 + f, f) for f in range(syncer.num_fragments)]
     assert torch.equal(chunk.vision_model.proj.weight, frozen_before)
     for key, state in opt.optimizer.state.items():  # Adam moments kept
         for n, t in state.items():
@@ -409,9 +414,11 @@ def _scripted_body(rank, world, port, out_dir):
         client = holder["client"]
         assert len(client.pushes) == syncer.num_fragments
         for fid, step, attempt, base, local_step, c_steps, c_units, payload in client.pushes:
-            assert (step, attempt, base, local_step, c_steps, c_units) == (8, 1, 7, 3, 2, 500)
+            it = 3 + fid
+            assert (step, attempt, base, local_step, c_steps, c_units) == (
+                8, 1, 7, it, it - 1, sum(100 * k for k in range(2, it + 1)))
             # PUSH = local - raw anchor (the global, not the blend)
-            local = {n: alpha * pre_merge[n] + (1 - alpha) * globals_g[n] + updates_total[n] for n in full_shapes}
+            local = {n: alpha * pre_merge[n] + (1 - alpha) * globals_g[n] + snapshots[it][n] for n in full_shapes}
             want = _flat(syncer.layout, fid, local) - _flat(syncer.layout, fid, globals_g)
             got = unpack_fragment(syncer.layout.fragments[fid], payload, 2)
             assert torch.allclose(got, want.to(torch.bfloat16).float(), atol=1e-3), fid
@@ -449,12 +456,12 @@ def read_final_state(path: Path) -> list[torch.Tensor]:
     return out
 
 
-def _island_worker(rank, world, island, dist_port, syncer_port, out_dir, drop_at):
+def _island_worker(rank, world, island, dist_port, syncer_port, out_dir, drop_at, opts=None):
     _guard(out_dir, f"island{island}-{rank}",
-           lambda: _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at))
+           lambda: _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, opts or {}))
 
 
-def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at):
+def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, opts):
     dist = _init_dist(rank, world, dist_port)
     tp, pp = rank % 2, rank // 2
     tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
@@ -464,11 +471,15 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at):
     trainable = [p for p in chunk.parameters() if p.requires_grad]
     opt = _DistOpt(trainable, dp_rank=0, dp_size=1, dp_group=singles[rank])
     syncer = sm.MegatronDiLoCoSync([chunk], opt, syncer=f"127.0.0.1:{syncer_port}", learner_id=island,
-                                   num_learners=2, fragments=3, sync_interval_steps=2, wire_dtype="bf16",
+                                   num_learners=2, fragments=3, sync_interval_steps=2,
+                                   wire_dtype=opts.get("wire", "bf16"),
                                    chunk_numel=64, parallel_context=ctx, final_cut_payload="full")
     it = 0
     dropped = False
     started = time.monotonic()
+    stall_at, stall_s = opts.get("stall_at"), opts.get("stall_s", 0.0)
+    step_s = opts.get("step_s", 0.01)
+    timeline = []  # (iteration, wall time after the boundary, boundary seconds, applied so far)
     while not syncer.finished:
         if time.monotonic() - started > 150:
             raise TimeoutError(f"island {island} not finalized after {it} steps")
@@ -481,8 +492,12 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at):
                 except OSError:
                     pass
             dropped = True
+        if it == stall_at:  # a slow / stalled island: no boundary for stall_s
+            time.sleep(stall_s)
+        t0 = time.monotonic()
         syncer.after_optimizer_step(it, 64)
-        time.sleep(0.01)
+        timeline.append((it, time.monotonic(), time.monotonic() - t0, syncer.stats["applied"]))
+        time.sleep(step_s)
     for p in trainable:  # the bf16 copy equals the installed FP32 master
         if id(p) in opt.owned:
             assert torch.equal(p.detach().reshape(-1), opt.master(p).to(torch.bfloat16)), p._full_name
@@ -491,6 +506,7 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at):
     if rank == 0:
         torch.save({"names": names, "values": dict(zip(names, values, strict=True)),
                     "events": list(syncer.events), "stats": dict(syncer.stats), "dropped": dropped,
+                    "timeline": timeline,
                     "fragments": [[n for n, _ in f.tensors] for f in syncer.layout.fragments]},
                    Path(out_dir, f"island{island}.pt"))
     syncer.close()
@@ -566,3 +582,68 @@ def test_write_masters_also_sets_a_distinct_hdo_host_copy():
     assert torch.equal(opt.master(params[0]), target)
     assert torch.equal(opt.optimizer.gpu_params_map_cpu_copy[shard], target)
     assert torch.equal(params[0].detach(), target.to(torch.bfloat16))
+
+
+DECOUPLED_SYNCER_FLAGS = [  # the RL async full-parameter preset (yeto/launch/rl_args.py), test-sized grace
+    "--quorum", "1", "--max-base-lag", "1", "--learner-weight", "tokens2-over-steps",
+    "--pipeline", "2", "--outer-lr", "1.0", "--outer-momentum", "0.0",
+    # A late-carried delta answers its round, so a quorum-1 round never waits
+    # for the stalled island just because the fast island's anchor was spent.
+    "--carry-answers-round",
+]
+
+
+@pytest.mark.timeout(300)
+def test_decoupled_quorum_one_keeps_the_fast_island_merging_while_the_other_stalls(tmp_path):
+    """quorum 1 + max_base_lag 1 + int4 tensor-block pushes: while island 1
+    makes no boundary for several seconds, island 0 keeps training without a
+    blocking boundary and its fragment rounds keep merging; island 1 then
+    resumes with a stale base (accepted with lag or refused by max_base_lag),
+    nothing waits for it, and both islands install the same final cut."""
+
+    binary = build_syncer()
+    from process_groups import group_popen
+
+    port = free_port()
+    final_state = tmp_path / "final.bin"
+    proc = group_popen([str(binary), "--port", str(port), "--learners", "2", "--grace-ms", "200",
+                        "--terminal-grace-ms", "2000", "--total-steps", "40", "--final-state", str(final_state),
+                        *DECOUPLED_SYNCER_FLAGS],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    procs = []
+    stall_s = 4.0
+    try:
+        procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None,
+                      {"wire": "int4", "step_s": 0.05})
+        procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None,
+                      {"wire": "int4", "step_s": 0.05, "stall_at": 6, "stall_s": stall_s})
+        _join(procs, 240, tmp_path)
+        assert proc.wait(timeout=60) == 0, "syncer exited nonzero"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+        if proc.poll() is None:
+            proc.kill()
+        log = proc.stdout.read() if proc.stdout else ""
+        (tmp_path / "syncer.log").write_text(log)
+        print(log[-4000:])
+
+    fast, slow = (torch.load(tmp_path / f"island{i}.pt") for i in range(2))
+    stalled_from = next(t for it, t, _d, _a in slow["timeline"] if it == 5)
+    stalled_to = next(t for it, t, _d, _a in slow["timeline"] if it == 6)
+    assert stalled_to - stalled_from >= stall_s
+    during = [row for row in fast["timeline"] if stalled_from < row[1] < stalled_to]
+    assert len(during) >= 10, "the fast island stopped stepping while the other stalled"
+    assert max(d for _it, _t, d, _a in during) < 1.0, "a boundary blocked on the stalled island"
+    merged_during = during[-1][3] - during[0][3]
+    resumed_pushes = [e for e in slow["events"] if e[1] == "push" and e[0] > 6]
+    assert resumed_pushes, "the resumed island never pushed again"
+    for name in fast["names"]:
+        assert torch.equal(fast["values"][name], slow["values"][name]), name
+    final = read_final_state(final_state)
+    for fid, frag_names in enumerate(fast["fragments"]):
+        assert torch.equal(torch.cat([fast["values"][n].reshape(-1) for n in frag_names]), final[fid])
+    # A late-carried delta counts towards its round's quorum, so the fast
+    # island's rounds keep closing while the other island stalls.
+    assert merged_during >= 3, merged_during
