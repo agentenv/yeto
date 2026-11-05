@@ -593,6 +593,17 @@ coordinator always rewrites `--checkpoint-path` at the final quiescent cut
 before terminal delivery. Thus a total-step count not divisible by the
 periodic interval still leaves an atomic final checkpoint.
 
+SIGTERM or SIGINT stops the syncer gracefully: it launches no new round,
+gives the rounds still gathering `--shutdown-timeout-s` (default 600) to
+close, then abandons the rest (they have not touched the state, so a resumed
+run launches those steps again), commits every computed round, writes
+`--checkpoint-path` synchronously (after any background checkpoint) and exits
+0 with `stop: checkpoint written step=<t>`. The checkpoint's global step is
+then the last `outer step` on the event tape, and `--resume` continues the
+tape at `t + 1`. A signal before training starts exits at once (nothing was
+merged), and a second signal exits immediately without a checkpoint. The
+terminal cut is not marked final.
+
 `--checkpoint-at-steps T1,T2,...` (launcher: `--rl-sync-checkpoint-at-steps`,
 asynchronous full-parameter rounds) also writes the cut at each listed global
 step `t` (one fragment merge, the `step=` of the `outer step` log, the unit of
