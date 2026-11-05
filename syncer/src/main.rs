@@ -148,6 +148,13 @@ struct Args {
     /// keep merging. --resume never reads these files.
     #[arg(long, value_delimiter = ',')]
     checkpoint_at_steps: Vec<u64>,
+    /// Write the --checkpoint-every checkpoints on a background thread while
+    /// rounds keep merging, instead of stopping the scheduler for the whole
+    /// write (a 120B state is ~1 TB; minutes per checkpoint). A crash during
+    /// the write resumes from the previous checkpoint. Per-round checkpoints
+    /// (--checkpoint-every 1) and policy sweeps are unaffected.
+    #[arg(long)]
+    background_checkpoint: bool,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -494,6 +501,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         checkpoint_at_steps: args.checkpoint_at_steps,
+        background_checkpoint: args.background_checkpoint,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,

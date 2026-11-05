@@ -169,6 +169,15 @@ pub struct GlobalState {
     /// Small records written next to every checkpoint at the same cut
     /// (the task dispenser). Empty: none.
     pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
+    /// The periodic checkpoint written off the scheduler
+    /// (`save_checkpoint_in_background`), until a later save waits for it.
+    background_checkpoint: std::sync::Mutex<Option<BackgroundCheckpoint>>,
+}
+
+/// A checkpoint write on its own thread.
+struct BackgroundCheckpoint {
+    step: u64,
+    writer: std::thread::JoinHandle<Result<()>>,
 }
 
 /// A small record captured at every checkpoint cut and written next to the
@@ -373,6 +382,7 @@ impl GlobalState {
             global_step: 0,
             ledger: Default::default(),
             checkpoint_sidecars: Vec::new(),
+            background_checkpoint: std::sync::Mutex::new(None),
             outer_lr,
             outer_momentum,
             wire_dtype,
@@ -1305,7 +1315,59 @@ impl GlobalState {
     /// Written to `<path>.tmp` then renamed, so a crash mid-write never
     /// corrupts the previous checkpoint.
     pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        // Never two writers on `<path>.tmp`; the newest cut lands last.
+        self.wait_for_background_checkpoint()?;
         self.checkpoint_snapshot()?.save(path)
+    }
+
+    /// Start writing the current cut to `path` on its own thread and return
+    /// at once (`--background-checkpoint`). The write is the same as
+    /// `save_checkpoint`'s: the snapshot shares the fragment buffers, so a
+    /// later commit copies only a fragment the writer has not reached yet.
+    /// A previous background write is waited for first. A failed write
+    /// surfaces from the next wait: the next checkpoint, or the final one
+    /// (`save_checkpoint` waits too); `path` keeps the previous cut.
+    pub fn save_checkpoint_in_background(&self, path: &std::path::Path) -> Result<()> {
+        self.wait_for_background_checkpoint()?;
+        let snapshot = self.checkpoint_snapshot()?;
+        let step = self.global_step;
+        let target = path.to_path_buf();
+        let writer = std::thread::Builder::new()
+            .name("yeto-checkpoint".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                snapshot.save(&target)?;
+                tracing::info!(
+                    step,
+                    path = %target.display(),
+                    seconds = %format!("{:.1}", started.elapsed().as_secs_f64()),
+                    "background checkpoint written"
+                );
+                Ok(())
+            })
+            .context("cannot start the checkpoint writer thread")?;
+        *self.background_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(BackgroundCheckpoint { step, writer });
+        Ok(())
+    }
+
+    /// Wait for the background checkpoint write, if any, and return its result.
+    pub fn wait_for_background_checkpoint(&self) -> Result<()> {
+        let pending = self
+            .background_checkpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(BackgroundCheckpoint { step, writer }) = pending else {
+            return Ok(());
+        };
+        if !writer.is_finished() {
+            tracing::info!(step, "waiting for the background checkpoint");
+        }
+        match writer.join() {
+            Ok(result) => result.with_context(|| format!("background checkpoint at step {step}")),
+            Err(_) => bail!("background checkpoint writer at step {step} panicked"),
+        }
     }
 
     /// The exact bytes `save_checkpoint` writes (tests and small states).
@@ -2188,6 +2250,41 @@ mod tests {
         snapshot.save(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), cut);
         assert_ne!(st.encode_checkpoint().unwrap(), cut);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_checkpoint_writes_its_cut_while_later_commits_go_on() {
+        let dir = std::env::temp_dir().join(format!("yeto-ckpt-background-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut st = state_with_fingerprint(layout2(), 0x24);
+        st.init_fragment(0, vec![1.5; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        st.global_step = 3;
+        let first = st.encode_checkpoint().unwrap();
+        st.save_checkpoint_in_background(&path).unwrap();
+        // Commits do not wait for the writer; the file still holds step 3.
+        st.merge_and_step(0, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        st.global_step = 4;
+        let second = st.encode_checkpoint().unwrap();
+        st.wait_for_background_checkpoint().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        // The next background write waits for none (already joined) and
+        // writes the newer cut; a synchronous save after it waits for it.
+        st.save_checkpoint_in_background(&path).unwrap();
+        st.merge_and_step(1, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        st.global_step = 5;
+        let third = st.encode_checkpoint().unwrap();
+        st.save_checkpoint(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), third);
+        assert_ne!(first, second);
+        // A failed background write is reported by the next wait.
+        let missing = dir.join("no-such-dir").join("state.ckpt");
+        st.save_checkpoint_in_background(&missing).unwrap();
+        let error = st.wait_for_background_checkpoint().unwrap_err();
+        assert!(format!("{error:#}").contains("background checkpoint at step 5"), "{error:#}");
+        st.wait_for_background_checkpoint().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

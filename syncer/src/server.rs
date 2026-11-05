@@ -121,6 +121,10 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Write the `checkpoint_every` checkpoints on a background thread while
+    /// rounds keep merging (`GlobalState::save_checkpoint_in_background`)
+    /// instead of on the scheduler. Every other checkpoint waits for it.
+    pub background_checkpoint: bool,
     /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
     /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
     /// below `total_steps`. Empty: none.
@@ -1758,6 +1762,16 @@ fn validate_config(cfg: &Config) -> Result<()> {
     validate_shard_config(cfg)?;
     if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
         bail!("--bcast-delta-full-every must be at least 2");
+    }
+    if cfg.background_checkpoint
+        && (cfg.checkpoint_path.is_none()
+            || cfg.checkpoint_every < 2
+            || cfg.policy_sweep_fragments.is_some())
+    {
+        bail!(
+            "--background-checkpoint needs --checkpoint-path and --checkpoint-every of at least 2, \
+             without --policy-sweep-fragments (per-round checkpoints persist before their broadcast)"
+        );
     }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
@@ -6206,8 +6220,13 @@ async fn publish_round(
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
             if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
-                st.save_checkpoint(path)?;
-                info!(step = t, path = %path.display(), "checkpoint written");
+                if cfg.background_checkpoint {
+                    st.save_checkpoint_in_background(path)?;
+                    info!(step = t, path = %path.display(), "background checkpoint started");
+                } else {
+                    st.save_checkpoint(path)?;
+                    info!(step = t, path = %path.display(), "checkpoint written");
+                }
             }
         }
     }
@@ -9191,6 +9210,7 @@ mod tests {
             checkpoint_path: None,
             checkpoint_every: 0,
             checkpoint_at_steps: Vec::new(),
+            background_checkpoint: false,
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -10850,6 +10870,61 @@ mod tests {
             resumed.load_checkpoint(&checkpoint).unwrap();
             validate_resumed_policy_sweep(&config, &resumed).unwrap();
             assert_eq!(resumed.versions, vec![3, 4]);
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn background_checkpoint_keeps_rounds_going_and_writes_the_same_cuts() {
+        let directory = unique_test_directory("background-checkpoint");
+        let learner = member(0, 30);
+        let mut files = Vec::new();
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("state-{background}.ckpt"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            config.background_checkpoint = background;
+            validate_config(&config).unwrap();
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap(); // version zero
+            let mut sync_seconds = 0.0;
+            for step in 1..=5u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                assert_eq!(chunked_inner_type(&frames.try_recv().unwrap()), MSG_BCAST_FRAGMENT);
+                state.wait_for_background_checkpoint().unwrap();
+                let mut on_disk = two_fragment_sweep_state();
+                on_disk.policy_sweep_fragments = None;
+                on_disk.load_checkpoint(&checkpoint).unwrap();
+                assert_eq!(on_disk.global_step, step - step % 2, "step {step} background {background}");
+            }
+            files.push(std::fs::read(&checkpoint).unwrap());
+        }
+        assert_eq!(files[0], files[1]);
+        // Only for periodic checkpoints with a path, never per round or in a sweep.
+        for mutate in [
+            |config: &mut Config| config.checkpoint_path = None,
+            |config: &mut Config| config.checkpoint_every = 1,
+            |config: &mut Config| config.policy_sweep_fragments = Some(2),
+        ] {
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(directory.join("unused.ckpt"));
+            config.checkpoint_every = 2;
+            config.background_checkpoint = true;
+            mutate(&mut config);
+            assert!(format!("{:#}", validate_config(&config).unwrap_err()).contains("--background-checkpoint"));
         }
         std::fs::remove_dir_all(&directory).ok();
     }
