@@ -9,6 +9,7 @@ mod membership;
 mod recovery;
 mod resend;
 mod merge;
+mod par;
 mod dispense;
 mod dispense_service;
 mod members;
@@ -82,6 +83,11 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
+    /// Threads for the merge and outer optimizer step (results are
+    /// bit-identical for any value). Unset: $YETO_SYNCER_MERGE_THREADS;
+    /// 0 or neither: available cores, capped at 32.
+    #[arg(long)]
+    merge_threads: Option<usize>,
     /// Give up waiting for quorum after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -387,6 +393,12 @@ fn main() -> anyhow::Result<()> {
     let dispense = dispense_config(&args)?;
     let member_lease = member_lease(&args)?;
     let shard = args.shard_plan()?;
+    let merge_threads = par::resolve_threads(
+        args.merge_threads,
+        std::env::var(par::THREADS_ENV).ok().as_deref(),
+    )?;
+    par::set_default_threads(merge_threads);
+    tracing::info!(merge_threads, "merge thread count");
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,

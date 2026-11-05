@@ -418,6 +418,197 @@ pub fn heloco_correct(delta: &mut [f32], momentum: &[f32], h: &Heloco) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Parallel kernels for one large tensor. Each returns exactly the bits of its
+// serial counterpart above for any thread count (see `crate::par`): only
+// element-wise passes are chunked, every reduction stays one sequential loop.
+// ---------------------------------------------------------------------------
+
+/// `l2_norm` of each slice, the slices reduced concurrently.
+fn l2_norms_par(slices: &[&[f32]], threads: usize) -> Vec<f64> {
+    let mut norms = vec![0.0f64; slices.len()];
+    let tasks: Vec<_> = norms.iter_mut().zip(slices).collect();
+    crate::par::run_tasks(threads, tasks, |(n, s)| *n = l2_norm(s));
+    norms
+}
+
+/// out[i] = 0 + Σ_m coef_m · Δ_m[i] in m order, skipping `None` coefficients.
+fn accumulate_par(deltas: &[&[f32]], coefs: &[Option<f32>], out: &mut [f32], threads: usize) {
+    let tasks: Vec<_> = out.chunks_mut(crate::par::CHUNK).enumerate().collect();
+    crate::par::run_tasks(threads, tasks, |(index, o)| {
+        let base = index * crate::par::CHUNK;
+        let len = o.len();
+        o.fill(0.0);
+        for (delta, coef) in deltas.iter().zip(coefs) {
+            let Some(coef) = *coef else { continue };
+            for (x, d) in o.iter_mut().zip(&delta[base..base + len]) {
+                *x += coef * *d;
+            }
+        }
+    });
+}
+
+/// Parallel `merge_avg`.
+pub fn merge_avg_par(deltas: &[&[f32]], weights: &[f64], out: &mut [f32], threads: usize) {
+    if threads <= 1 {
+        return merge_avg(deltas, weights, out);
+    }
+    let wsum: f64 = weights.iter().sum();
+    if wsum <= 0.0 {
+        out.fill(0.0);
+        return;
+    }
+    let coefs: Vec<Option<f32>> = weights.iter().map(|&w| Some((w / wsum) as f32)).collect();
+    accumulate_par(deltas, &coefs, out, threads);
+}
+
+/// Parallel `merge_rda`.
+pub fn merge_rda_par(deltas: &[&[f32]], weights: &[f64], out: &mut [f32], threads: usize) {
+    if threads <= 1 {
+        return merge_rda(deltas, weights, out);
+    }
+    let wsum: f64 = weights.iter().sum();
+    if wsum <= 0.0 {
+        out.fill(0.0);
+        return;
+    }
+    let norms = l2_norms_par(deltas, threads);
+    let radial = rda_radial(&norms, weights, wsum);
+    let coefs: Vec<Option<f32>> = weights
+        .iter()
+        .zip(&norms)
+        .map(|(&w, &n)| (n != 0.0).then(|| (w / wsum / n) as f32))
+        .collect();
+    accumulate_par(deltas, &coefs, out, threads);
+    if !rda_rescale_par(out, radial, threads) {
+        merge_avg_par(deltas, weights, out, threads);
+    }
+}
+
+/// Parallel `rda_rescale`: the norm is one sequential pass, the scaling is
+/// chunked.
+pub(crate) fn rda_rescale_par(out: &mut [f32], radial: f64, threads: usize) -> bool {
+    if threads <= 1 {
+        return rda_rescale(out, radial);
+    }
+    let mean_dir_norm = out
+        .iter()
+        .map(|v| (*v as f64) * (*v as f64))
+        .sum::<f64>()
+        .sqrt();
+    if mean_dir_norm < 1e-12 {
+        return false;
+    }
+    let scale = (radial / mean_dir_norm) as f32;
+    crate::par::run_tasks(threads, out.chunks_mut(crate::par::CHUNK).collect(), |o| {
+        for v in o.iter_mut() {
+            *v *= scale;
+        }
+    });
+    true
+}
+
+/// Parallel `heloco_correct`: ‖Δ‖, ‖m‖ and Δ·m are three independent
+/// sequential reductions run concurrently; the correction itself is
+/// chunked. The rotation branch's ‖ũ‖² is accumulated sequentially from the
+/// same f64 terms the serial loop sums, before any element is written.
+pub fn heloco_correct_par(delta: &mut [f32], momentum: &[f32], h: &Heloco, threads: usize) {
+    if threads <= 1 {
+        return heloco_correct(delta, momentum, h);
+    }
+    debug_assert_eq!(delta.len(), momentum.len());
+    let ro: &[f32] = delta;
+    let (du, dm, dot) = std::thread::scope(|scope| {
+        let du = scope.spawn(|| ro.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt());
+        let dot = scope.spawn(|| {
+            ro.iter()
+                .zip(momentum)
+                .map(|(d, m)| *d as f64 * *m as f64)
+                .sum::<f64>()
+        });
+        let dm = momentum.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+        (du.join().unwrap(), dm, dot.join().unwrap())
+    });
+    if du < h.eps || dm < h.eps {
+        return;
+    }
+    let c = dot / (du * dm);
+    if c >= h.c_ok {
+        return;
+    }
+    let conf = du / (du + h.kappa * dm + h.eps);
+    fn chunks<'a>(delta: &'a mut [f32], momentum: &'a [f32]) -> Vec<(&'a mut [f32], &'a [f32])> {
+        delta.chunks_mut(crate::par::CHUNK).zip(momentum.chunks(crate::par::CHUNK)).collect()
+    }
+    if c < 0.0 {
+        let beta = (h.k_s * (-c) * conf).min(h.beta_max);
+        let coef = (-beta * c * du / dm) as f32;
+        crate::par::run_tasks(threads, chunks(delta, momentum), |(d, m)| {
+            for (d, m) in d.iter_mut().zip(m) {
+                *d += coef * *m;
+            }
+        });
+    } else {
+        let lambda = (h.k_d * (1.0 - c) * conf).min(1.0);
+        let (wu, wv) = ((1.0 - lambda) / du, lambda / dm);
+        let mut norm_sq = 0.0f64;
+        for (d, m) in delta.iter().zip(momentum) {
+            let t = wu * *d as f64 + wv * *m as f64;
+            norm_sq += t * t;
+        }
+        let scale = (du / norm_sq.sqrt().max(h.eps)) as f32;
+        crate::par::run_tasks(threads, chunks(delta, momentum), |(d, m)| {
+            for (d, m) in d.iter_mut().zip(m) {
+                let t = wu * *d as f64 + wv * *m as f64;
+                *d = t as f32 * scale;
+            }
+        });
+    }
+}
+
+/// Parallel `nesterov_step`.
+pub fn nesterov_step_par(
+    params: &mut [f32],
+    buf: &mut [f32],
+    delta: &[f32],
+    lr: f32,
+    mu: f32,
+    threads: usize,
+) {
+    let c = crate::par::CHUNK;
+    let tasks: Vec<_> = params.chunks_mut(c).zip(buf.chunks_mut(c)).zip(delta.chunks(c)).collect();
+    crate::par::run_tasks(threads, tasks, |((p, b), d)| nesterov_step(p, b, d, lr, mu));
+}
+
+/// Parallel `delayed_nesterov_step`.
+#[allow(clippy::too_many_arguments)]
+pub fn delayed_nesterov_step_par(
+    params: &mut [f32],
+    buf: &mut [f32],
+    state: &mut DelayedNesterovState,
+    delta: &[f32],
+    lr: f32,
+    mu: f32,
+    period: u32,
+    threads: usize,
+) {
+    let update = delayed_nesterov_update(state.step, period);
+    let c = crate::par::CHUNK;
+    let accum = std::sync::Arc::make_mut(&mut state.accum);
+    let tasks: Vec<_> = params
+        .chunks_mut(c)
+        .zip(buf.chunks_mut(c))
+        .zip(accum.chunks_mut(c))
+        .zip(delta.chunks(c))
+        .collect();
+    crate::par::run_tasks(threads, tasks, |(((p, b), a), d)| {
+        for (((p, b), a), d) in p.iter_mut().zip(b.iter_mut()).zip(a.iter_mut()).zip(d) {
+            (*p, *b, *a) = delayed_nesterov_elem(*p, *b, *a, *d, lr, mu, period, update);
+        }
+    });
+    state.step += 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
