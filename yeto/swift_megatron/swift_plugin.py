@@ -54,6 +54,9 @@ ms-swift's argument parser, so environment variables are the only channel):
                                   run (default cpu, gloo mirrors)
   YETO_DILOCO_HMAC_KEY_PATH       path to the HMAC key file (optional)
   YETO_DILOCO_DISABLE             set to 1 to make the callback a no-op
+  YETO_DILOCO_INITIAL_CUT_TIMEOUT seconds to install the syncer's initial cut
+                                  fragment by fragment before training (0 =
+                                  apply it at the boundaries; default 0)
 """
 
 from __future__ import annotations
@@ -103,6 +106,7 @@ class DiLoCoHookConfig:
     hmac_key_path: Optional[str] = None
     final_cut_payload: str = "full"
     transport: str = "cpu"
+    initial_cut_timeout: float = 0.0
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -123,6 +127,13 @@ class DiLoCoHookConfig:
             except (TypeError, ValueError):
                 raise ValueError(f"{ENV_PREFIX}{name} must be an integer, got {raw!r}") from None
 
+        def get_float(name: str, default: float) -> float:
+            raw = get(name, str(default))
+            try:
+                return float(raw)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                raise ValueError(f"{ENV_PREFIX}{name} must be a number, got {raw!r}") from None
+
         cfg = cls(
             syncer=get("SYNCER", required=True),  # type: ignore[arg-type]
             learner_id=get_int("LEARNER_ID", required=True),
@@ -133,7 +144,10 @@ class DiLoCoHookConfig:
             hmac_key_path=get("HMAC_KEY_PATH"),
             final_cut_payload=get("FINAL_CUT_PAYLOAD", default="full"),  # type: ignore[arg-type]
             transport=get("TRANSPORT", default="cpu"),  # type: ignore[arg-type]
+            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
         )
+        if cfg.initial_cut_timeout < 0:
+            raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
         if cfg.num_learners < 1 or not 0 <= cfg.learner_id < cfg.num_learners:
             raise ValueError(f"invalid learner_id={cfg.learner_id} for num_learners={cfg.num_learners}")
         if cfg.fragments < 1 or cfg.sync_interval_steps < 1:
@@ -223,6 +237,7 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
         trainable_filter=trainable_filter,
         final_cut_payload=cfg.final_cut_payload,
         transport=cfg.transport,
+        initial_cut_timeout=cfg.initial_cut_timeout,
     )
 
 
