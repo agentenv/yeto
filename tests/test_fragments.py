@@ -152,3 +152,35 @@ def test_avg_regex_groups_vector_like_tensors():
     assert layout.fragments[0].merge_mode == MERGE_AVG
     assert layout.fragments[0].tensors == [("block.norm.weight", 8)]
     assert all(f.merge_mode == MERGE_RDA for f in layout.fragments[1:])
+
+
+def _reference_binpack(named, n_bins):
+    """The greedy packing as originally written: rescan every bin's total."""
+    bins = [[] for _ in range(n_bins)]
+    for name, numel in sorted(named, key=lambda x: (-x[1], x[0])):
+        min(bins, key=lambda b: sum(s for _, s in b)).append((name, numel))
+    return [b for b in bins if b]
+
+
+def test_binpack_matches_the_rescanning_greedy_with_ties():
+    import random
+
+    rng = random.Random(7)
+    for trial in range(20):
+        named = [(f"model.layers.{i % 9}.w{i}", rng.choice([1, 2, 3, 8, 64, rng.randint(1, 500)]))
+                 for i in range(rng.randint(1, 300))]
+        n_bins = rng.randint(1, 12)
+        layout = build_layout(named, n_bins + 0)
+        expected = _reference_binpack(named, max(1, min(n_bins, len(named))))
+        assert [f.tensors for f in layout.fragments] == expected, trial
+
+
+def test_binpack_is_fast_for_an_unfused_moe_tensor_count():
+    import time
+
+    named = [(f"backbone.layers.{i // 800}.mixer.experts.{i % 800}.w", 2_000_000 + i % 5)
+             for i in range(42_000)]
+    started = time.monotonic()
+    layout = build_layout(named, 32)
+    assert time.monotonic() - started < 10.0
+    assert sum(len(f.tensors) for f in layout.fragments) == len(named)
