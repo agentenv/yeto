@@ -150,9 +150,9 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
                          f"multi-island launch: it needs at least two islands (got {num_islands})")
     if is_convertible_pool(args):
         raise ValueError("synced trainers do not combine with convertible nodes")
-    if getattr(args, "tuning", "lora") != "lora":
+    if getattr(args, "tuning", "lora") != "lora" and not synced_full_parameter(args):
         raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
-                         "they need --tuning lora")
+                         "--tuning full needs --rl-sync-preset full-parameter")
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
             getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
         # The strict sweep publishes in lockstep (policy age 0); a synced trainer
@@ -519,6 +519,19 @@ def buffer_full_parameter(args: Any) -> bool:
     a single island with both roles updates its own engines in place."""
     return (getattr(args, "tuning", "lora") == "full"
             and bool(getattr(args, "rl_single_island_no_sync", False)))
+
+
+def synced_full_parameter(args: Any) -> bool:
+    """``--tuning full`` on synced islands: every parameter trains and the
+    full-parameter sync preset (whole-model fragments) carries it. The same
+    islands run with ``--tuning lora`` and the full-parameter preset (the
+    preset alone selects full parameter mode); ``--tuning full`` states it."""
+    from .selection import FULL_PARAMETER_SYNC_PRESETS, canonical_sync_preset
+
+    return (getattr(args, "tuning", "lora") == "full"
+            and not bool(getattr(args, "rl_single_island_no_sync", False))
+            and canonical_sync_preset(str(getattr(args, "rl_sync_preset", "strict-avg")))
+            in FULL_PARAMETER_SYNC_PRESETS)
 
 
 def check_pair(args: Any, num_islands: int) -> None:

@@ -244,6 +244,15 @@ def test_full_parameter_synced_trainers_need_the_asynchronous_rounds():
         sample_roles.check_synced_trainers(_synced_args(rl_sync_full_parameter_rounds="sweep"), 2)
 
 
+def test_full_tuning_synced_trainers_run_on_the_full_parameter_preset():
+    from yeto.rl.engine import sample_roles
+
+    sample_roles.check_synced_trainers(_synced_args(tuning="full"), 2)
+    with pytest.raises(ValueError, match="--tuning full needs --rl-sync-preset full-parameter"):
+        sample_roles.check_synced_trainers(
+            _synced_args(tuning="full", rl_sync_preset="decoupled"), 2)
+
+
 def test_full_parameter_synced_trainer_plan(monkeypatch):
     from test_rl_sampler_trainer_pair_launch import _args
 
