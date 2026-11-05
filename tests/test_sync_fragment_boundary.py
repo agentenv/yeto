@@ -364,6 +364,18 @@ def test_the_manifest_only_profile_matches_the_rust_vector():
     assert on == vector != off
 
 
+
+def test_the_carry_answers_round_profile_matches_the_rust_vector():
+    from test_rl_moe_expert_token_weights import _syncer_profile
+
+    raw = _syncer_profile()
+    off = SyncerSemanticProfile.from_mapping(raw).sha256
+    assert SyncerSemanticProfile.from_mapping({**raw, "carry_answers_round": False}).sha256 == off
+    on = SyncerSemanticProfile.from_mapping({**raw, "carry_answers_round": True}).sha256
+    source = (ROOT / "syncer/src/server.rs").read_text()
+    (vector,) = re.findall(r'CARRY_ANSWERS_ROUND_VECTOR: &str = "([0-9a-f]{64})"', source)
+    assert on == vector != off
+
 # -- the real syncer ------------------------------------------------------------------
 
 

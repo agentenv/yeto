@@ -282,6 +282,11 @@ struct Args {
     /// parameters, which stay in --checkpoint-path / --final-state).
     #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
     final_cut_payload: String,
+    /// A late delta carried into a later round counts as that island's
+    /// answer to the round (quorum and the all-answered check). Off keeps
+    /// carries outside quorum, the historical RL async rule.
+    #[arg(long)]
+    carry_answers_round: bool,
     /// Task dispenser: islands claim the rows of --data they train
     /// from this syncer (TASK_* connections, docs/PROTOCOL.md "Task
     /// dispenser"). Off by default.
@@ -509,6 +514,7 @@ fn main() -> anyhow::Result<()> {
         shard,
         expert_token_weights: args.expert_token_weights,
         final_cut_manifest_only: args.final_cut_payload == "manifest",
+        carry_answers_round: args.carry_answers_round,
         dispense,
         dispense_log: args.dispense_log.clone(),
         member_lease,

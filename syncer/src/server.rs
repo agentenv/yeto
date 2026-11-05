@@ -209,6 +209,13 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// A late delta carried into a round (async rounds, `LateCarry`) answers
+    /// that round for its expected island: it counts towards quorum and the
+    /// all-answered check. The carry spends the island's anchor, so without
+    /// this a quorum-1 round holding only carried deltas waits for the
+    /// slowest island. Off keeps carries outside quorum (the historical RL
+    /// async rule). In the semantic profile hash (appended only when on).
+    pub carry_answers_round: bool,
     /// Task dispenser (`dispense.rs`): islands claim the rows they
     /// train over TASK_* connections. Hands out data only, never changes a
     /// merge, so it is not in the semantic profile hash. None: off.
@@ -234,6 +241,7 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
+const CARRY_ANSWERS_ROUND_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-carry-answers-round-v1\0";
 const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
 const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
 const EVAL_CHECKPOINTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-eval-checkpoints-v1\0";
@@ -304,6 +312,10 @@ impl Config {
             for step in &self.checkpoint_at_steps {
                 encoded.extend_from_slice(&step.to_le_bytes());
             }
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.carry_answers_round {
+            encoded.extend_from_slice(CARRY_ANSWERS_ROUND_PROFILE_DOMAIN);
         }
         Sha256::digest(encoded).into()
     }
@@ -4088,6 +4100,7 @@ async fn scheduler(
                 fold,
                 pushes: HashMap::new(),
                 carried: Vec::new(),
+                carry_answers: cfg.carry_answers_round,
             });
             if let Some(carry) = late_carry.as_mut() {
                 let round = inflight.last_mut().expect("round just launched");
@@ -5265,13 +5278,32 @@ struct Round {
     /// `LateCarry`): merged here against their own base, in arrival order.
     /// They never count toward quorum and stay buffered until the merge.
     carried: Vec<(Member, Push)>,
+    /// `Config::carry_answers_round`, frozen at launch.
+    carry_answers: bool,
 }
 
 impl Round {
+    /// Islands that answered this round: its own pushes plus, with
+    /// `carry_answers`, expected islands whose late delta of an earlier
+    /// round was carried into it (see `Config::carry_answers_round`).
+    fn responders(&self) -> Vec<&Member> {
+        let mut responders: Vec<&Member> = self.pushes.keys().collect();
+        if !self.carry_answers {
+            return responders;
+        }
+        for (member, _push) in &self.carried {
+            if self.expected_members.contains(member) && !responders.contains(&member) {
+                responders.push(member);
+            }
+        }
+        responders
+    }
+
     fn quorum_reached(&self) -> bool {
+        let responders = self.responders();
         match &self.capacity_quorum {
-            Some(quorum) => quorum.reached(&self.expected_members, self.pushes.keys()),
-            None => self.pushes.len() >= self.quorum_size,
+            Some(quorum) => quorum.reached(&self.expected_members, responders),
+            None => responders.len() >= self.quorum_size,
         }
     }
 
@@ -5362,7 +5394,8 @@ enum RoundAction {
 fn round_action(round: &Round, now: Instant) -> RoundAction {
     // A round never merges nothing: if lease expiry emptied its expected
     // set, it waits for the quorum timeout and relaunches.
-    if !round.pushes.is_empty() && round.pushes.len() >= round.expected_members.len() {
+    let responders = round.responders().len();
+    if responders > 0 && responders >= round.expected_members.len() {
         return RoundAction::Complete;
     }
     if round.quorum_reached() {
@@ -9090,6 +9123,7 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            carry_answers_round: false,
             dispense: None,
             dispense_log: None,
             max_subscribers: 0,
@@ -9100,6 +9134,7 @@ mod tests {
     }
 
     const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
+    const CARRY_ANSWERS_ROUND_VECTOR: &str = "13a39546746435ebc1878d962f2fb52cf97a5ba66b45757855746adab4e666d7";
     const GRACE_FLOOR_VECTOR: &str = "6f9104e302f894575fe2203cfe91a93ff37d16e37b4e75c4367b060d13748d12";
     const TERMINAL_GRACE_VECTOR: &str = "6f40c5c1c02e6c63b99bf5aa77fab924fed928a42a9e0d88811583a19fc1aa39";
 
@@ -9155,6 +9190,16 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
+        // Carried deltas answering their round append their own domain;
+        // Python vector in tests/test_sync_fragment_boundary.py.
+        config.final_cut_manifest_only = false;
+        config.carry_answers_round = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_ne!(config.semantic_profile_hash(), original);
+        assert_eq!(digest, CARRY_ANSWERS_ROUND_VECTOR);
+        config.carry_answers_round = false;
+        config.final_cut_manifest_only = true;
         // A grace floor appends its own block; off keeps the hash. Python
         // vector in tests/test_sync_grace_floor.py.
         config.final_cut_manifest_only = false;
@@ -9579,6 +9624,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9662,6 +9708,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9725,6 +9772,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes,
         }
     }
@@ -11945,6 +11993,71 @@ mod tests {
         assert_eq!(carry.carry(&mut Vec::new(), other, late, 8, 7), CarryOutcome::Queued);
     }
 
+    #[test]
+    fn carried_delta_counts_towards_quorum_and_responders() {
+        // Regression: at quorum 1 a round whose only delta from the fast
+        // island arrived as a late carry (anchor spent) waited for the
+        // stalled island instead of closing after grace.
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert!(!round.quorum_reached());
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(round.pushes.is_empty());
+        assert!(round.quorum_reached());
+        // Grace still applies, as for an own push.
+        round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_stays_outside_quorum_when_the_flag_is_off() {
+        let fast = member(0, 1);
+        let mut round = test_round(vec![fast, member(1, 1)]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+    }
+
+    #[test]
+    fn carried_delta_completes_a_round_once_every_expected_island_answered() {
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), slow, test_push_for(1, 5), Some(1), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_of_an_unexpected_member_does_not_count() {
+        let expected = member(0, 1);
+        let replaced = member(0, 0);
+        let mut round = test_round(vec![expected]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        assert_eq!(attach_carry(&mut round, replaced, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        // A carried push from the same island counts once.
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 5), 1), Ok(0));
+        assert_eq!(round.responders().len(), 1);
+    }
+
     fn carried_merge(cfg: &Config) -> f32 {
         let mut st = two_fragment_streaming_state();
         st.versions[0] = 4;
@@ -12054,6 +12167,7 @@ mod tests {
             grace_ms: None,
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::new(),
         }
     }
