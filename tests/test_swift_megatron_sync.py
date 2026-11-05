@@ -498,6 +498,149 @@ def test_initial_cut_is_installed_fragment_by_fragment_before_training(tmp_path)
     _join(procs, 200, tmp_path)
 
 
+def _resume_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"resume-{rank}", lambda: _resume_body(rank, world, port, out_dir))
+
+
+def _resume_body(rank, world, port, out_dir):
+    """An island checkpoints after three steps and restarts from it; the
+    syncer's rejoin catch-up must not undo the island's local progress."""
+
+    from yeto.diloco_sync import shifted_resume_value
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full_shapes = _global_shapes(2, 1)
+    old_g = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    new_g = {n: (_full(n, s) - 0.25).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    cut = {}  # fid -> (version, values) of the next sync's catch-up
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        bcasts = [BcastFragment(fid, v, pack_tensor(_flat(layout, fid, values), 2))
+                  for fid, (v, values) in sorted(cut.items())]
+        return _ScriptedClient(layout, {("bcast", 1): bcasts})
+
+    def make(resume_dir=None, resume_iteration=None):
+        return sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=1, num_learners=2,
+                                     fragments=3, sync_interval_steps=100, chunk_numel=40, parallel_context=ctx,
+                                     client_factory=factory, initial_cut_timeout=60, resume_dir=resume_dir,
+                                     resume_iteration=resume_iteration)
+
+    def shard(full, p):
+        if getattr(p, "tensor_model_parallel", False):
+            size = p._full_shape[p.partition_dim] // 2
+            full = full.narrow(p.partition_dim, tp * size, size)
+        return full
+
+    ckpt, bare = Path(out_dir, "checkpoint-3"), Path(out_dir, "checkpoint-3-bare")
+    # The first run: the initial cut (version 4), three local steps, a checkpoint.
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    first = make()
+    for it in (1, 2, 3):
+        opt.step({id(p): _local_update(p, 1, it, tp, 2) for p in trainable})
+        first.after_optimizer_step(it, 10)
+    assert first.save_state(str(ckpt), iteration=3, save_anchors=True)
+    assert first.save_state(str(bare), iteration=3, save_anchors=False)
+    fid_of = {name: fid for fid, frag in enumerate(first.layout.fragments) for name, _ in frag.tensors}
+    first.close()
+    if rank == 0:
+        record = json.loads((ckpt / sm.RESUME_STATE_FILE).read_text())
+        assert record["versions"] == [4, 4, 4] and record["anchors"] and record["iteration"] == 3
+        assert record["steps_at_reset"] == [0, 0, 0] and record["units_total"] == 30
+        assert not json.loads((bare / sm.RESUME_STATE_FILE).read_text())["anchors"]
+    saved_master = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned}
+    saved_param = {id(p): p.detach().clone() for p in trainable}
+
+    def restart():  # the trainer loads the checkpoint again
+        for p in trainable:
+            if id(p) in opt.owned:
+                opt.master(p).copy_(saved_master[id(p)])
+            p.data.copy_(saved_param[id(p)])
+
+    def check(sync, expect):  # expect(p) -> the full local FP32 value or None (= the checkpoint, bit for bit)
+        assert sync.anchored == [True] * 3
+        for p in trainable:
+            want = expect(p)
+            if want is None:
+                if id(p) in opt.owned:
+                    assert torch.equal(opt.master(p), saved_master[id(p)]), p._full_name
+                assert torch.equal(p.detach(), saved_param[id(p)]), p._full_name
+                continue
+            if id(p) in opt.owned:
+                s, e, _ = opt.owned[id(p)]
+                assert torch.equal(opt.master(p), want.reshape(-1)[s:e]), p._full_name
+                assert torch.equal(p.detach().reshape(-1)[s:e], want.reshape(-1)[s:e].to(torch.bfloat16))
+
+    def check_anchors(sync, values):
+        for p in trainable:
+            assert torch.equal(sync.anchors[id(p)].float(), shard(values[p._full_name], p)), p._full_name
+
+    # (a) The syncer is still at the checkpoint's anchor version: anchor only.
+    restart()
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    same = make(str(ckpt), 3)
+    check(same, lambda p: None)
+    check_anchors(same, old_g)
+    assert same.resumed == {0: "anchor", 1: "anchor", 2: "anchor"}
+    same.after_optimizer_step(4, 10)
+    assert same.state.steps_at_reset == [0, 0, 0], "the H gate restarted with the island"
+    assert same.units_total == 40
+    same.close()
+
+    # (b) The syncer moved on: global_new + (local - anchor_old), exactly.
+    restart()
+    cut.update({fid: (9, new_g) for fid in range(3)})
+    moved = make(str(ckpt), 3)
+    for p in trainable:
+        if id(p) in opt.owned:
+            s, e, _ = opt.owned[id(p)]
+            want = shifted_resume_value(shard(new_g[p._full_name], p).reshape(-1)[s:e], saved_master[id(p)],
+                                        shard(old_g[p._full_name], p).reshape(-1)[s:e])
+            assert torch.equal(opt.master(p), want), p._full_name
+            assert torch.equal(p.detach().reshape(-1)[s:e], want.to(torch.bfloat16)), p._full_name
+            assert not torch.equal(want, shard(new_g[p._full_name], p).reshape(-1)[s:e])
+    check_anchors(moved, new_g)
+    assert set(moved.resumed.values()) == {"shift"} and not moved._resume_anchors
+    moved.after_optimizer_step(4, 10)
+    assert moved.state.steps_at_reset == [0, 0, 0] and moved.state.fragment_versions == [9, 9, 9]
+    moved.close()
+
+    # (c) Without saved anchors a moved fragment takes the global; an unmoved one is kept.
+    restart()
+    cut.update({0: (4, old_g), 1: (9, new_g), 2: (9, new_g)})
+    mixed = make(str(bare), 3)
+    check(mixed, lambda p: None if fid_of[p._full_name] == 0 else shard(new_g[p._full_name], p))
+    assert mixed.resumed == {0: "anchor", 1: "overwrite", 2: "overwrite"}
+    mixed.after_optimizer_step(4, 10)
+    assert mixed.state.steps_at_reset == [0, 3, 3]
+    mixed.close()
+
+    # (d) A cold start (no record, or a record of another iteration) takes the global.
+    for resume in ((None, None), (str(ckpt), 7)):
+        restart()
+        cut.update({fid: (9, new_g) for fid in range(3)})
+        cold = make(*resume)
+        check(cold, lambda p: shard(new_g[p._full_name], p))
+        assert cold.resumed == {} and cold.resume_record is None
+        cold.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_resumed_island_keeps_its_checkpoint_through_the_rejoin_catch_up(tmp_path):
+    procs = _run(_resume_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
