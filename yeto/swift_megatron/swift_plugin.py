@@ -63,6 +63,9 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
                                   with each checkpoint (~2 bytes per local
                                   parameter per rank for bf16); default 0
+  YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
+                                  rate schedule of a resume that did not load
+                                  it (``restore_lr_schedule``)
 
 Resume: every checkpoint also gets the sync's record (``on_save`` ->
 ``MegatronDiLoCoSync.save_state``): each fragment's anchor version and
@@ -289,6 +292,37 @@ def save_dir_for(args, iteration: int, *call_args, **call_kwargs) -> Optional[st
     return os.path.join(root, f"checkpoint-{iteration}") if root else None
 
 
+def restore_lr_schedule(trainer) -> Optional[int]:
+    """Put a resumed run's LR schedule where an uninterrupted run would be.
+
+    ms-swift loads the ``OptimizerParamScheduler`` state only together with
+    the optimizer (``load_mcore_checkpoint``: ``not finetune and not
+    no_load_optim``), and a checkpoint saved with ``--no_save_optim`` holds
+    no scheduler state at all.  So an island that saves parameters only and
+    resumes with ``--no_load_optim true --finetune false`` gets back its
+    iteration and data position but restarts the schedule at step 0: warmup
+    again, the whole decay shifted by the resumed iteration, silently.
+
+    The scheduler counts samples (ms-swift steps it by ``global_batch_size``
+    per successful update), so a fresh scheduler (``num_steps == 0``) at a
+    resumed iteration ``i > 0`` is stepped by ``i * global_batch_size`` here,
+    which sets every parameter group's lr and weight decay the way ``i``
+    uninterrupted updates would.  A scheduler restored from the checkpoint
+    (``num_steps > 0``) and a cold start are left alone.  Returns the samples
+    stepped, or None.  Runs on every rank (each holds its own optimizer)."""
+    if (os.environ.get(ENV_PREFIX + "LR_RESUME", "auto").strip().lower() or "auto") == "off":
+        return None
+    scheduler = getattr(trainer, "opt_param_scheduler", None)
+    iteration = int(getattr(trainer.state, "iteration", 0) or 0)
+    if scheduler is None or iteration <= 0 or int(getattr(scheduler, "num_steps", 0) or 0) != 0:
+        return None
+    samples = iteration * int(trainer.args.global_batch_size)
+    scheduler.step(increment=samples)
+    logger.warning("yeto DiLoCo: the checkpoint of iteration %d restored no LR schedule; stepped it by %d "
+                   "samples to resume it in place", iteration, samples)
+    return samples
+
+
 def _model_chunks(trainer) -> list:
     # Pass the DDP-wrapped chunks: the sync core needs the grad/param buffers
     # and the DistributedOptimizer's mapping, both keyed on the wrapped models.
@@ -332,6 +366,7 @@ class YetoDiLoCoCallback(_CallbackBase):
             logger.warning("yeto DiLoCo callback disabled via %sDISABLE", ENV_PREFIX)
             return
         self.config = DiLoCoHookConfig.from_env()
+        restore_lr_schedule(trainer)
         self._wrap_train_step()
         # Build here (not in on_train_begin) so a bad config fails before data
         # loading; the trainer has already loaded the resume checkpoint, which

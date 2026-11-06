@@ -297,3 +297,79 @@ def test_step_log_only_on_sync_rank_zero(make, monkeypatch, tmp_path):
     FakeSync.instances[0].rank = 5
     trainer.train()
     assert not path.exists()
+
+
+class _Scheduler:
+    """Megatron-Core ``OptimizerParamScheduler`` in miniature: sample-based
+    ``num_steps``, linear warmup then cosine decay, ``step(increment)`` sets
+    every parameter group's lr (the constructor steps by 0)."""
+
+    def __init__(self, groups, *, max_lr=3e-4, min_lr=3e-5, warmup=5 * 8, decay=140 * 8):
+        self.groups, self.max_lr, self.min_lr, self.warmup, self.decay = groups, max_lr, min_lr, warmup, decay
+        self.num_steps = 0
+        self.step(0)
+
+    def get_lr(self):
+        import math
+
+        if self.warmup > 0 and self.num_steps <= self.warmup:
+            return self.max_lr * self.num_steps / self.warmup
+        ratio = min(1.0, (self.num_steps - self.warmup) / (self.decay - self.warmup))
+        return self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (math.cos(math.pi * ratio) + 1.0)
+
+    def step(self, increment):
+        self.num_steps += increment
+        for group in self.groups:
+            group["lr"] = self.get_lr()
+
+
+def _lr_trainer(iteration, gbs=8, scheduler=None):
+    return types.SimpleNamespace(args=types.SimpleNamespace(global_batch_size=gbs),
+                                 state=types.SimpleNamespace(iteration=iteration),
+                                 opt_param_scheduler=scheduler or _Scheduler([{}]))
+
+
+def test_a_resume_without_scheduler_state_continues_the_lr_schedule_in_place(monkeypatch):
+    """A params-only checkpoint (--no_save_optim) restores the iteration but
+    no scheduler: without the rebuild the resumed lr at iteration i is the
+    uninterrupted one at i - 5 (warmup again)."""
+
+    monkeypatch.delenv("YETO_DILOCO_LR_RESUME", raising=False)
+    reference = _Scheduler([{}])
+    want = {}
+    for it in range(1, 141):
+        reference.step(8)
+        want[it] = reference.groups[0]["lr"]
+    trainer = _lr_trainer(5)
+    assert sp.restore_lr_schedule(trainer) == 40
+    resumed = trainer.opt_param_scheduler
+    assert resumed.groups[0]["lr"] == want[5]
+    for it in range(6, 141):
+        resumed.step(8)
+        assert resumed.groups[0]["lr"] == want[it], it
+    # Without it: shifted by the resumed iteration.
+    shifted = _Scheduler([{}])
+    for it in range(6, 141):
+        shifted.step(8)
+        assert shifted.groups[0]["lr"] == want[it - 5]
+
+
+def test_lr_schedule_is_left_alone_when_loaded_cold_or_off(monkeypatch):
+    loaded = _Scheduler([{}])
+    loaded.step(5 * 8)  # restored from a checkpoint with optimizer state
+    assert sp.restore_lr_schedule(_lr_trainer(5, scheduler=loaded)) is None and loaded.num_steps == 40
+    cold = _lr_trainer(0)
+    assert sp.restore_lr_schedule(cold) is None and cold.opt_param_scheduler.num_steps == 0
+    assert sp.restore_lr_schedule(types.SimpleNamespace(state=types.SimpleNamespace(iteration=5))) is None
+    monkeypatch.setenv("YETO_DILOCO_LR_RESUME", "off")
+    off = _lr_trainer(5)
+    assert sp.restore_lr_schedule(off) is None and off.opt_param_scheduler.num_steps == 0
+
+
+def test_callback_rebuilds_the_lr_schedule_on_attach(make):
+    trainer = FakeTrainer([([1], True)], start_iteration=15)
+    trainer.args.global_batch_size = 384
+    trainer.opt_param_scheduler = _Scheduler([{}], warmup=10 * 384, decay=1000 * 384)
+    cb = sp.YetoDiLoCoCallback(trainer)
+    assert trainer.opt_param_scheduler.num_steps == 15 * 384
+    cb.close()
