@@ -167,6 +167,21 @@ from typing import Any
 
 log = logging.getLogger("swift-megatron-sync")
 
+
+def _ensure_visible_logs() -> None:
+    """ms-swift configures only its own ``swift`` logger, so with an
+    unconfigured root this module's INFO lines (``resume: fragment ...``,
+    per-fragment installs) were dropped and only WARNING reached stderr
+    through logging's last resort.  Give the module a stderr handler at INFO
+    unless the process configured logging itself."""
+    if log.handlers or logging.getLogger().handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[swift-megatron-sync] %(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    if log.level == logging.NOTSET:
+        log.setLevel(logging.INFO)
+
 # Megatron's tied/untied output projection is an embedding-like tensor for the
 # direct-averaged fragment, as ``lm_head`` is for the torch learner.
 OUTPUT_LAYER_AVG_REGEX = r"(^|\.)output_layer\.weight$"
@@ -553,6 +568,7 @@ class _Plan:
     modes: dict[int, str] = field(default_factory=dict)  # fragment -> LIVE_* (else ordinary)
     finalizing: bool = False
     shutdown: bool = False
+    send_init: bool = False  # initial-cut wait of a resumed learner 0: the syncer needs INIT
     error: str | None = None
 
 
@@ -593,7 +609,7 @@ class MegatronDiLoCoSync:
                  transport: str = "cpu", parallel_context: ParallelContext | None = None,
                  client_factory=None, observer: Callable[[dict], None] | None = None,
                  initial_cut_timeout: float = 0.0, resume_dir: str | None = None,
-                 resume_iteration: int | None = None) -> None:
+                 resume_iteration: int | None = None, init_probe_s: float = 1800.0) -> None:
         import torch
         import torch.distributed as dist
 
@@ -615,6 +631,7 @@ class MegatronDiLoCoSync:
             raise ValueError("the ms-swift Megatron sync talks to one syncer; sharded syncers are not supported")
         if not dist.is_initialized():
             raise SwiftMegatronSyncError("torch.distributed must be initialized (Megatron does this)")
+        _ensure_visible_logs()
         self.ctx = parallel_context or ParallelContext.from_megatron()
         self.rank, self.world = self.ctx.rank, self.ctx.world
         self.chunks = list(model_chunks)
@@ -724,10 +741,17 @@ class MegatronDiLoCoSync:
             except Exception as exc:  # raised on every rank below
                 error = f"{type(exc).__name__}: {exc}"
         self._raise_if(self._bcast_object(error))
-        if self.learner_id == 0:
+        # A resumed learner 0 (it holds a record, so the syncer of this session
+        # was initialized) first waits for the syncer's catch-up and sends
+        # INIT_PARAMS (~4 bytes per parameter, 480 GB for 120B) only if nothing
+        # arrives within ``init_probe_s``: an initialized syncer ignores INIT,
+        # and receiving the catch-up while gathering INIT doubled rank 0's RSS.
+        defer_init = self.learner_id == 0 and self.resume_record is not None and initial_cut_timeout > 0
+        if self.learner_id == 0 and not defer_init:
             self._send_init()
         if initial_cut_timeout > 0:
-            self._install_initial_cut(float(initial_cut_timeout))
+            self._install_initial_cut(float(initial_cut_timeout),
+                                      init_probe=float(init_probe_s) if defer_init else None)
 
     # ------------------------------------------------------------------ setup
     def _connect(self, syncer: str, hmac_key_path: str | None, wan_streams: int, client_factory):
@@ -747,42 +771,63 @@ class MegatronDiLoCoSync:
     def _send_init(self) -> None:
         """INIT_PARAMS of every fragment from this island's current masters.
 
-        Rank 0 streams fragment k on a background thread while every rank
-        gathers fragment k + 1, so the island's gather and the link overlap;
-        at most two fragments' wire parts are on rank 0's host."""
+        Streamed chunk by chunk: rank 0 hands each exported chunk to a
+        background sender, which writes it into the fragment's INIT_PARAMS
+        frame and drops it, while every rank gathers the next chunk.  At most
+        a few chunks (``chunk_numel`` elements each) are on rank 0's host
+        instead of whole fragments."""
 
         import queue
         import threading
 
+        end = object()
         jobs: queue.Queue = queue.Queue(maxsize=1)
         failure: list[str] = []
         sender = None
         if self.rank == 0:
+            def chunks_of(pending: queue.Queue, ended: list):
+                while (item := pending.get()) is not end:
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield from item
+                ended.append(True)
+
             def send() -> None:
                 while (job := jobs.get()) is not None:
-                    fid, parts = job
-                    if failure:
-                        continue  # drain: the gathers go on until the error is broadcast
+                    fid, pending = job
+                    ended: list = []
                     try:
-                        self.client.send_init_parts(fid, parts)
+                        if not failure and self.client.send_init_parts(fid, chunks_of(pending, ended)) is False:
+                            failure.append(f"INIT fragment {fid}: syncer link down")
                     except Exception as exc:
                         failure.append(f"INIT fragment {fid}: {type(exc).__name__}: {exc}")
-                    del parts, job
+                    # Drain what was not sent: the gathers go on until the error is broadcast.
+                    while not ended and pending.get() is not end:
+                        pass
+                    del job, pending
 
             sender = threading.Thread(target=send, name="yeto-swift-init", daemon=True)
             sender.start()
         error = None
         try:
             for fid in range(self.num_fragments):
-                parts = self._export_fragment(fid, delta=False)
-                if self.rank == 0 and error is None:
-                    if self._export_error is not None:
+                pending = queue.Queue(maxsize=2) if self.rank == 0 else None
+                if pending is not None:
+                    jobs.put((fid, pending))
+                for parts in self._export_fragment_chunks(fid, delta=False):
+                    if pending is None:
+                        continue
+                    if error is None and self._export_error is not None:
                         error = f"INIT fragment {fid}: {self._export_error}"
-                    elif failure:
+                        failure.append(error)  # the sender skips the fragments after it
+                        pending.put(SwiftMegatronSyncError(error))
+                    elif error is None:
+                        pending.put(parts)
+                    del parts
+                if pending is not None:
+                    pending.put(end)
+                    if error is None and failure:
                         error = failure[0]
-                    else:
-                        jobs.put((fid, parts))
-                del parts
         finally:
             if sender is not None:
                 jobs.put(None)
@@ -793,7 +838,7 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             log.info("sent INIT_PARAMS for %d fragments", self.num_fragments)
 
-    def _install_initial_cut(self, timeout: float) -> None:
+    def _install_initial_cut(self, timeout: float, *, init_probe: float | None = None) -> None:
         """Apply the syncer's first broadcast of every fragment as it arrives,
         before training starts (collective: every rank loops together).
 
@@ -807,12 +852,26 @@ class MegatronDiLoCoSync:
         import time
 
         started = time.monotonic()
+        init_pending = init_probe is not None  # resumed learner 0: INIT only if the syncer needs it
         while not all(self.anchored):
             plan = self._plan() if self.rank == 0 else None
-            if self.rank == 0 and time.monotonic() - started > timeout and not plan.applies:
-                plan.shutdown = True  # only ends the wait; the client's flag is unchanged
+            if self.rank == 0:
+                waited = time.monotonic() - started
+                if init_pending and not plan.applies and waited > init_probe:
+                    plan.send_init = True
+                elif not init_pending and waited > timeout and not plan.applies:
+                    plan.shutdown = True  # only ends the wait; the client's flag is unchanged
             plan = self._bcast_object(plan)
             self._raise_if(plan.error)
+            if init_pending and (plan.applies or plan.send_init):
+                init_pending = False
+                if plan.send_init:
+                    if self.rank == 0:
+                        log.warning("no catch-up from the syncer within %.0f s: sending INIT_PARAMS", init_probe)
+                    self._send_init()
+                elif self.rank == 0:
+                    log.warning("the syncer is initialized (catch-up arriving): INIT_PARAMS skipped")
+                started = time.monotonic()
             updates = self._take_updates(plan) if self.rank == 0 else {}
             for fid, version in plan.applies:
                 data = updates.pop(fid) if self.rank == 0 else None
@@ -830,9 +889,11 @@ class MegatronDiLoCoSync:
                 break
             if not plan.applies:
                 time.sleep(0.2)
+        if init_pending:  # the wait ended before the probe did: keep the old order's guarantee
+            self._send_init()
         if self.rank == 0:
-            log.info("initial cut: %d of %d fragments installed before training in %.0f s",
-                     sum(self.anchored), self.num_fragments, time.monotonic() - started)
+            log.warning("initial cut: %d of %d fragments installed before training in %.0f s",
+                        sum(self.anchored), self.num_fragments, time.monotonic() - started)
 
     # ------------------------------------------------------------------ resume
     def _apply_first_or_blend(self, fid: int, data: Any, version: int, *, live: str | None = None) -> str | None:
@@ -861,6 +922,10 @@ class MegatronDiLoCoSync:
         self._apply_fragment(fid, data, self.bulk_torch, blend=True, mode=mode)
         if mode is not None and len(self.resumed) == self.num_fragments:
             self._resume_anchors.clear()  # every old anchor is used or no longer needed
+            if self.rank == 0:
+                counts = {m: list(self.resumed.values()).count(m) for m in (RESUME_ANCHOR, RESUME_SHIFT, RESUME_OVERWRITE)}
+                log.warning("resume: all %d fragments installed: anchor %d, shift %d, overwrite %d",
+                            self.num_fragments, counts[RESUME_ANCHOR], counts[RESUME_SHIFT], counts[RESUME_OVERWRITE])
         return mode
 
     def _restore_counters(self, fid: int, mode: str) -> None:
@@ -1085,23 +1150,36 @@ class MegatronDiLoCoSync:
         """The fragment's values on rank 0 as wire byte parts (INIT, or PUSH
         for bf16/f32 sessions) or, for a q4 push, one f32 tensor."""
 
+        parts: list[Any] | None = [] if self.rank == 0 else None
+        for chunk in self._export_fragment_chunks(fid, delta=delta):
+            if parts is not None:
+                parts.extend(chunk)
+        return parts
+
+    def _export_fragment_chunks(self, fid: int, *, delta: bool):
+        """``_export_fragment`` one chunk at a time (collective): yields each
+        chunk's parts on rank 0, None elsewhere; ``_export_error`` is set once
+        a non-finite value was seen."""
+
         from yeto.protocol import DTYPE_Q4
         from yeto.tensor_io import pack_tensor
 
-        parts: list[Any] | None = [] if self.rank == 0 else None
         self._export_error = None
         q4 = delta and self.wire == DTYPE_Q4
         for names in self.fragment_chunks[fid]:
             tensors = self._export_chunk(names, delta=delta)
-            if parts is None:
+            if tensors is None:
+                yield None
                 continue
+            parts = []
             for tensor in tensors:
                 if self._export_error is None and not bool(tensor.isfinite().all()):
                     # Raised on every rank by the caller's error broadcast.
                     self._export_error = f"fragment {fid} holds a non-finite value"
                 parts.append(tensor.reshape(-1) if q4 else
                              pack_tensor(tensor.reshape(-1), self.bulk if not delta else self._push_part_dtype()))
-        return parts
+            del tensors
+            yield parts
 
     def _push_part_dtype(self) -> int:
         """The dtype of the PUSH parts handed to the client: f32 on the

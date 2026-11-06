@@ -853,6 +853,72 @@ def test_running_island_keeps_its_progress_through_a_catch_up(tmp_path):
     _join(procs, 200, tmp_path)
 
 
+def _resumed_init_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"resumed-init-{rank}", lambda: _resumed_init_body(rank, world, port, out_dir))
+
+
+def _resumed_init_body(rank, world, port, out_dir):
+    """Learner 0 resumed from a checkpoint with a record: an initialized
+    syncer answers its HELLO with the catch-up, so no INIT_PARAMS is sent;
+    a syncer that sends nothing within the probe gets INIT_PARAMS, streamed
+    chunk by chunk, byte-identical to a cold start's."""
+
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in _global_shapes(2, 1).items()}
+    clients, cut = [], {"calls": ()}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        script = {("bcast", c): [BcastFragment(fid, 4, pack_tensor(_flat(layout, fid, full), 2)) for fid in range(3)]
+                  for c in cut["calls"]}
+        clients.append(_ScriptedClient(layout, script))
+        return clients[-1]
+
+    def make(resume_dir=None, **kw):
+        return sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=0, num_learners=2,
+                                     fragments=3, sync_interval_steps=100, chunk_numel=40, parallel_context=ctx,
+                                     client_factory=factory, resume_dir=resume_dir, resume_iteration=3, **kw)
+
+    cut["calls"] = (1,)
+    first = make(initial_cut_timeout=60)  # a cold start: INIT, then the initial cut
+    ckpt = Path(out_dir, "checkpoint-3")
+    first.save_state(str(ckpt), iteration=3)
+    first.close()
+    cold_init = dict(clients[-1].inits) if rank == 0 else {}
+    if rank == 0:
+        assert sorted(cold_init) == [0, 1, 2]
+    resumed = make(str(ckpt), initial_cut_timeout=60, init_probe_s=30)  # the catch-up arrives: no INIT
+    assert resumed.anchored == [True] * 3 and resumed.resumed == {0: "anchor", 1: "anchor", 2: "anchor"}
+    if rank == 0:
+        assert clients[-1].inits == {}
+    resumed.close()
+    cut["calls"] = ()
+    started = time.monotonic()
+    fresh = make(str(ckpt), initial_cut_timeout=1, init_probe_s=0.5)  # nothing arrives: INIT after the probe
+    assert time.monotonic() - started >= 0.5
+    if rank == 0:  # the island's current masters (the installed cut), streamed by chunk
+        layout = clients[-1].layout
+        assert clients[-1].inits == {fid: bytes(pack_tensor(_flat(layout, fid, full), fresh.bulk)) for fid in range(3)}
+    fresh.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_a_resumed_learner_zero_sends_init_only_when_the_syncer_needs_it(tmp_path):
+    procs = _run(_resumed_init_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
