@@ -440,3 +440,56 @@ def test_lease_expired_error_redials_with_new_generation_even_without_reconnect_
     finally:
         client.close()
         listener.close()
+
+
+def _redial(client):
+    """What _connect_group does for a redial: every fragment awaits its catch-up."""
+    with client._bcast_lock:
+        client._catch_up_pending = [True] * client.layout.num_fragments
+
+
+def test_first_broadcast_after_a_redial_is_flagged_and_a_rewound_one_is_taken_on_request():
+    layout = make_layout()
+    v2 = struct.pack("<4f", 2.0, 2.0, 2.0, 2.0)
+    v1 = struct.pack("<4f", 1.0, 1.0, 1.0, 1.0)
+    for accept in (False, True):
+        client = SyncerClient(("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0,
+                              accept_rewound_catch_up=accept)
+        client._gen = 1
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 2) + v2)
+        assert [(u.version, u.catch_up) for u in client.drain_updates()] == [(2, False)]
+        _redial(client)
+        # The syncer resumed from an older checkpoint: its catch-up is version 1.
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 1) + v1)
+        got = [(u.version, u.data, u.catch_up) for u in client.drain_updates()]
+        assert got == ([(1, v1, True)] if accept else [])
+        # Only the first broadcast after the redial may go backwards.
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 0) + v1)
+        assert client.drain_updates() == []
+        # A replay of the version held is dropped (the island keeps its values).
+        _redial(client)
+        held = (1, v1) if accept else (2, v2)
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, held[0]) + held[1])
+        assert client.drain_updates() == []
+        # A newer one is the catch-up of a merge the island missed.
+        _redial(client)
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 5) + v2)
+        assert [(u.version, u.catch_up) for u in client.drain_updates()] == [(5, True)]
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 6) + v1)
+        assert [(u.version, u.catch_up) for u in client.drain_updates()] == [(6, False)]
+        assert client.rewound_catch_ups == int(accept)
+
+
+def test_a_rewound_catch_up_with_the_same_version_and_other_bytes_is_taken_on_request():
+    layout = make_layout()
+    a, b = struct.pack("<4f", 2.0, 2.0, 2.0, 2.0), struct.pack("<4f", 3.0, 3.0, 3.0, 3.0)
+    client = SyncerClient(("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0,
+                          accept_rewound_catch_up=True)
+    client._gen = 1
+    client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 3) + a)
+    client.drain_updates()
+    with pytest.raises(ProtocolError, match="conflicting BCAST_FRAGMENT"):  # not after a redial
+        client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 3) + b)
+    _redial(client)
+    client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 3) + b)
+    assert [(u.version, u.data, u.catch_up) for u in client.drain_updates()] == [(3, b, True)]

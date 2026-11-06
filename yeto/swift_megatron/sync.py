@@ -76,6 +76,19 @@ Write (BCAST, final cut)
     param all-gather reads).  The Adam moments are kept, exactly as the torch
     learner keeps its AdamW state when ``apply_fragment`` overwrites a fragment.
 
+Redial (catch-up)
+    After a redial the syncer sends every fragment's current value.  The
+    client drops a replay of a version already held (same bytes), so an
+    unchanged fragment stays bit for bit; a broadcast of the anchored
+    version that does reach the sync is only confirmed.  The first broadcast
+    of a fragment after the redial (``BcastFragment.catch_up``) moves the
+    island's progress since its anchor onto it, ``global_new + (local -
+    anchor)``, unless the island pushed from that anchor (the delta may be in
+    the new version: the ordinary install).  A syncer that crashed and
+    resumed from an older checkpoint rewinds; the client takes its catch-up
+    (``accept_rewound_catch_up``) and the island rebases onto it, instead of
+    keeping the lost versions as bases the syncer refuses forever.
+
 Only global rank 0 talks to the syncer.  Every boundary starts with one
 ``broadcast_object_list`` of rank 0's plan (fragments to apply, fragments to
 push, finalization, shutdown, error), so every rank runs the same collectives
@@ -168,6 +181,8 @@ RESUME_ANCHOR_DIR = "yeto_diloco_anchors"
 RESUME_FORMAT = 1
 # ``yeto.diloco_sync.resume_fragment_mode`` results (that module imports torch).
 RESUME_OVERWRITE, RESUME_ANCHOR, RESUME_SHIFT = "overwrite", "anchor", "shift"
+# ``yeto.diloco_sync.live_install_mode`` results.
+LIVE_CONFIRM, LIVE_REBASE = "confirm", "rebase"
 
 # ``spent_link`` of an anchor spent by the process the island resumed from.
 _PREVIOUS_PROCESS = "previous-process"
@@ -535,6 +550,7 @@ class _Plan:
     """Rank 0's decision for one boundary, broadcast to every rank."""
 
     applies: list[tuple[int, int]] = field(default_factory=list)  # (fragment, version)
+    modes: dict[int, str] = field(default_factory=dict)  # fragment -> LIVE_* (else ordinary)
     finalizing: bool = False
     shutdown: bool = False
     error: str | None = None
@@ -664,6 +680,10 @@ class MegatronDiLoCoSync:
         # connection and a restarted syncer lost the rounds it was carried to,
         # so the guard is released (``_release_spent_after_reconnect``).
         self.spent_link: list[Any] = [None] * self.num_fragments
+        # The anchor version of each fragment's last PUSH that may have been
+        # delivered (a drop clears it; a redial does not): a newer catch-up
+        # of that fragment may already hold the delta (``live_install_mode``).
+        self.pushed_from: list[int | None] = [None] * self.num_fragments
         # The torch learner's per-fragment counters and versions, kept alike on
         # every rank (anchors live in ``self.anchors``, sharded, not here).
         self.state = DiLoCoSyncState.create(self.num_fragments, track_anchors=False)
@@ -713,7 +733,9 @@ class MegatronDiLoCoSync:
     def _connect(self, syncer: str, hmac_key_path: str | None, wan_streams: int, client_factory):
         from yeto.diloco_sync import connect_syncer
 
-        kwargs = {"session_contract_hash": self.contract}
+        # A syncer resumed from an older checkpoint rewinds; its catch-up is
+        # taken (and the island rebased onto it) instead of being dropped.
+        kwargs = {"session_contract_hash": self.contract, "accept_rewound_catch_up": True}
         key = _read_hmac_key(hmac_key_path)
         if key is not None:
             kwargs["hmac_key"] = key
@@ -794,7 +816,10 @@ class MegatronDiLoCoSync:
             updates = self._take_updates(plan) if self.rank == 0 else {}
             for fid, version in plan.applies:
                 data = updates.pop(fid) if self.rank == 0 else None
-                self._apply_first_or_blend(fid, data, version)
+                live = plan.modes.get(fid)
+                if live == LIVE_CONFIRM:
+                    continue
+                self._apply_first_or_blend(fid, data, version, live=live)
                 del data
                 self.state.fragment_versions[fid] = version
                 self.state.global_step = max(self.state.global_step, version)
@@ -810,12 +835,21 @@ class MegatronDiLoCoSync:
                      sum(self.anchored), self.num_fragments, time.monotonic() - started)
 
     # ------------------------------------------------------------------ resume
-    def _apply_first_or_blend(self, fid: int, data: Any, version: int) -> str | None:
+    def _apply_first_or_blend(self, fid: int, data: Any, version: int, *, live: str | None = None) -> str | None:
         """Apply a broadcast; the first one of a fragment after a resume by
-        ``resume_fragment_mode``.  Returns that mode (None: not a resumed
-        first install) and records it in ``self.resumed``."""
+        ``resume_fragment_mode``, an anchored one by ``live`` (``_plan``:
+        ``LIVE_REBASE`` or the ordinary install).  Returns the resume mode
+        (None: not a resumed first install) and records it in
+        ``self.resumed``."""
 
         mode = None
+        if live == LIVE_REBASE and self.anchored[fid]:
+            if self.rank == 0:
+                log.info("fragment %d: catch-up version %d onto anchor %d -> rebase (local progress kept)",
+                         fid, version, self.state.fragment_versions[fid])
+            self._apply_fragment(fid, data, self.bulk_torch, blend=False, mode=LIVE_REBASE)
+            self.stats["rebased"] = self.stats.get("rebased", 0) + 1
+            return None
         if self.resume_record is not None and not self.anchored[fid] and fid not in self.resumed:
             from yeto.diloco_sync import resume_fragment_mode
 
@@ -843,6 +877,7 @@ class MegatronDiLoCoSync:
             # Pushed by the previous process, on a link that is gone: released
             # at the first boundary like any spent anchor after a reconnect.
             self.spent_link[fid] = None if spent is None else _PREVIOUS_PROCESS
+            self.pushed_from[fid] = None if spent is None else int(spent[0])
 
     def _resume_paths(self, resume_dir: str) -> tuple[str, str]:
         return (os.path.join(resume_dir, RESUME_STATE_FILE),
@@ -1134,14 +1169,29 @@ class MegatronDiLoCoSync:
                 n = int(shard.param.numel())
                 pieces.append(incoming[at:at + n].view(shard.local_shape))
                 at += n
-        targets = []
+        targets, previous = [], []
         for shard, whole in zip(local, pieces, strict=True):
             raw = whole.to(dtype=torch.float32).contiguous()
+            previous.append(self.anchors.get(id(shard.param)))
             self.anchors[id(shard.param)] = whole.to(device="cpu", dtype=self.anchor_dtype).contiguous().clone()
             targets.append(raw)
         if mode == RESUME_ANCHOR:
             return  # the broadcast is the checkpoint's own anchor: keep the local values
-        if mode == RESUME_SHIFT:
+        if mode == LIVE_REBASE:
+            # The island's progress since its anchor moves onto the catch-up;
+            # a shard whose global did not change keeps its values bit for bit.
+            from yeto.diloco_sync import shifted_resume_value
+
+            moved = [i for i, (s, old) in enumerate(zip(local, previous, strict=True))
+                     if old is None or not torch.equal(old, self.anchors[id(s.param)])]
+            if not moved:
+                return
+            local = [local[i] for i in moved]
+            masters = self._masters(local)
+            targets = [targets[i] if previous[i] is None else shifted_resume_value(targets[i], m, previous[i])
+                       for i, m in zip(moved, masters, strict=True)]
+            del masters
+        elif mode == RESUME_SHIFT:
             from yeto.diloco_sync import shifted_resume_value
 
             masters = self._masters(local)
@@ -1233,11 +1283,17 @@ class MegatronDiLoCoSync:
         updates = self._take_updates(plan) if self.rank == 0 else {}
         for fid, version in plan.applies:
             data = updates.get(fid) if self.rank == 0 else None
+            live = plan.modes.get(fid)
+            if live == LIVE_CONFIRM:  # a replay of the anchor: nothing changes
+                self.stats["confirmed"] = self.stats.get("confirmed", 0) + 1
+                self.events.append((iteration, "confirm", fid, version))
+                continue
             started = time.perf_counter()
-            mode = self._apply_first_or_blend(fid, data, version)
+            mode = self._apply_first_or_blend(fid, data, version, live=live)
             self.stats["apply_s"] += time.perf_counter() - started
-            state.steps_at_reset[fid] = iteration
-            state.units_at_reset[fid] = self.units_total
+            if live != LIVE_REBASE:  # a rebased fragment keeps its local progress and clock
+                state.steps_at_reset[fid] = iteration
+                state.units_at_reset[fid] = self.units_total
             if mode is not None:
                 self._restore_counters(fid, mode)
             state.fragment_versions[fid] = version
@@ -1290,18 +1346,34 @@ class MegatronDiLoCoSync:
             if plan.finalizing:
                 return plan
             self._updates = {}
+            catch_up: set[int] = set()
             for update in client.drain_updates():
-                # A later broadcast of the same fragment supersedes an earlier one.
+                # A later broadcast of the same fragment supersedes an earlier
+                # one; a catch-up among them is still the syncer's current value.
                 self._updates[update.fragment_id] = update
+                if getattr(update, "catch_up", False):
+                    catch_up.add(update.fragment_id)
             for fid, update in self._updates.items():
                 # Checked here, before the plan goes out: a bad payload found
                 # while applying would fail rank 0 inside the chunk broadcasts.
                 self._check_payload(fid, update.data, self.bulk_torch)
             plan.applies = sorted((fid, int(u.version)) for fid, u in self._updates.items())
+            plan.modes = self._live_modes(plan.applies, catch_up)
             plan.shutdown = bool(client.shutdown.is_set())
         except Exception as exc:
             plan.error = f"{type(exc).__name__}: {exc}"
         return plan
+
+    def _live_modes(self, applies: Sequence[tuple[int, int]], catch_up: set[int]) -> dict[int, str]:
+        from yeto.diloco_sync import live_install_mode
+
+        modes = {}
+        for fid, version in applies:
+            mode = live_install_mode(anchored=self.anchored[fid], current_version=self.state.fragment_versions[fid],
+                                     version=version, catch_up=fid in catch_up, pushed_from=self.pushed_from[fid])
+            if mode is not None:
+                modes[fid] = mode
+        return modes
 
     def _ready_pushes(self) -> list[tuple[int, int, int, int, int]] | str:
         """Rank 0: the pulls answered now, by the torch learner's rule
@@ -1377,6 +1449,8 @@ class MegatronDiLoCoSync:
         if self.spent[fid] == (base, step):
             self.spent[fid] = None
             self.spent_link[fid] = None
+        if self.pushed_from[fid] == base:
+            self.pushed_from[fid] = None
 
     def _push_sent(self, fid: int) -> None:
         """Sender thread, before the PUSH is queued: the link it goes out on."""
@@ -1401,6 +1475,7 @@ class MegatronDiLoCoSync:
         head = (fid, step, attempt, self.state.fragment_versions[fid], self.iteration, c_steps, c_units)
         self.spent[fid] = (self.state.fragment_versions[fid], step)
         self.spent_link[fid] = None  # set by the sender once it goes out
+        self.pushed_from[fid] = self.state.fragment_versions[fid]
         if self.wire == DTYPE_Q4:
             # q4 blocks span tensors: the shared encoder takes the whole delta.
             self.sender.submit(head, payload=encode_push_delta(self.client, torch.cat(parts)))
