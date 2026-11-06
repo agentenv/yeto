@@ -128,6 +128,19 @@ def _hms(text: Any) -> float | None:
     return total if seen else None
 
 
+def _secs(ms: Any) -> float | None:
+    v = finite(ms)
+    return None if v is None else v / 1000.0
+
+
+def merge_seconds(m: dict) -> float | None:
+    """Time the syncer spent merging one round (``sync/merge_seconds``, else
+    ``sync_ms``). The record's ``ms`` is the round's open-to-done wall time,
+    which includes waiting for the quorum, and is not a merge time."""
+    v = finite(m.get("sync/merge_seconds"))
+    return v if v is not None else _secs(m.get("sync_ms"))
+
+
 def from_swift_log(rec: dict, island: str) -> dict | None:
     it = rec.get("iteration")
     step = total = None
@@ -466,7 +479,10 @@ class SftState:
             else:
                 expect = p50 or refs["sft_ref_step_s"]
                 status = "ok" if age < 2 * expect + 300 else ("warn" if age < 4 * expect + 600 else "stale")
-            push = next((r for r in reversed(rows) if r[14]), None)
+            # the plugin pushes from a background thread, so ``pushes_sent`` (pushes
+            # finished inside the step) is almost always 0; a push step is one that
+            # spent time exporting the fragment
+            push = next((r for r in reversed(rows) if r[14] or (r[10] or 0) > 0), None)
             apply = next((r for r in reversed(rows) if r[15]), None)
             host = {n: [[x[0], x[1], x[2]] for x in list(ser)[-2000:]] for n, ser in isl["host"].items()}
             islands.append({
@@ -483,9 +499,9 @@ class SftState:
                   if e[1] not in ("rejected", "timeout") or e[3] == rej_origin]
         merge_rows = []
         for m in merges:
-            ms = finite(m.get("sync/merge_seconds"))
-            merge_rows.append([finite(m.get("time_unix")), m.get("step"), m.get("fragment"), ms,
-                               finite(m.get("gnorm", m.get("sync/global_delta_norm"))), finite(m.get("ms"))])
+            merge_rows.append([finite(m.get("time_unix")), m.get("step"), m.get("fragment"), merge_seconds(m),
+                               finite(m.get("gnorm", m.get("sync/global_delta_norm"))), _secs(m.get("ms")),
+                               _secs(m.get("quorum_ms"))])
         outer = sorted(self.outer, key=lambda x: (x[0] or 0))
         cur = max([x[1] for x in outer if isinstance(x[1], int)] +
                   [x[1] for x in merge_rows if isinstance(x[1], int)], default=None)

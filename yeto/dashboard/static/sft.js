@@ -54,7 +54,14 @@ function chart(id,opts){
   if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;return}
   var stack=opts.kind==="stack"||opts.kind==="bars",span=t1-t0,bk=opts.bucket||Math.max(60,span/72);
   if(span/bk<4)bk=span<=3600?300:600; // range shorter than a few buckets: 5-10 min buckets
-  if(stack){ // bucket every series on a shared grid
+  if(opts.kind==="stack"&&opts.hold){ // step-hold resample on a shared grid: each series takes its last sample
+    var gs=Math.max(30,span/180),gx=[],lo0=Math.min.apply(null,ser.map(function(s){return s.pts[0][0]}));
+    for(var gt=Math.ceil(Math.max(t0,lo0)/gs)*gs;gt<=t1;gt+=gs)gx.push(gt);
+    var acc2=gx.map(function(){return 0});
+    ser.forEach(function(s){var P=s.pts,j=-1,gap=[];for(var q=1;q<P.length;q++)gap.push(P[q][0]-P[q-1][0]);gap.sort(function(a,b){return a-b});
+      var age=Math.max(2*gs,3*(gap.length?gap[Math.floor(gap.length/2)]:opts.hold));
+      s.pts=gx.map(function(x,gi){while(j+1<P.length&&P[j+1][0]<=x)j++;var v=(j>=0&&x-P[j][0]<=age)?P[j][1]:0,lo=acc2[gi];acc2[gi]=lo+v;return [x,lo+v,lo,v]})});
+  }else if(stack){ // bucket every series on a shared grid
     var keys={};ser.forEach(function(s){var b={};s.pts.forEach(function(p){var x=Math.floor(p[0]/bk)*bk;b[x]=(b[x]||0)+p[1];keys[x]=1});s.b=b});
     var xs=Object.keys(keys).map(Number).sort(function(a,b){return a-b}),acc={};
     ser.forEach(function(s){s.pts=xs.map(function(x){var lo=acc[x]||0,v=s.b[x]||0;acc[x]=lo+v;return [Math.min(t1,Math.max(t0,x+bk/2)),lo+v,lo,v]})});var NB=xs.length;
@@ -177,10 +184,10 @@ function sft(S){
   // fleet charts
   $("sFleetH").textContent="Fleet over the last "+rangeLabel();
   var g=[["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
-    ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; bench tokens_per_s"],
+    ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; bench tokens_per_s held from each step on a shared time grid"],
     ["fHbm","HBM peak","max reserved over ranks per step; dashed: "+hbmLim+" GiB line"],["fHost","Host available memory","MemAvailable per node, sampled by the collector"],
-    ["fSync","Sync overhead per step","export_s (solid) and apply_s (dashed) on steps that pushed / applied"],
-    ["fMerge","Syncer merge time","sync/merge_seconds per merge; outer step_seconds dashed"],["fGnorm","Outer gnorm by fragment","global delta norm per merge, colour by fragment"],
+    ["fSync","Sync overhead per step","export_s (solid) on steps that exported a fragment, apply_s (dashed) on steps that applied a broadcast"],
+    ["fMerge","Syncer merge time","sync/merge_seconds (sync_ms) per merge: the merge itself, no waiting"],["fRound","Syncer round time","per merge: quorum wait (quorum_ms) and round open-to-done total (ms)"],["fGnorm","Outer gnorm by fragment","global delta norm per merge, colour by fragment"],
     ["fRss","Syncer RSS","VmRSS of the syncer; dashed: "+bytes(cap)+" cap"],["fEv","Syncer problems","rejected / timeout / not carried / stale / disconnect per bucket"]];
   $("sFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var total={name:"Fleet total",color:GREY,dash:true};
@@ -188,14 +195,15 @@ function sft(S){
   chart("fGn",{series:series(S,isls,"grad_norm"),yfmt:function(v){return v.toFixed(2)}});
   chart("fLr",{series:series(S,isls,"lr"),yfmt:function(v){return v.toExponential(1)}});
   chart("fStep",{series:series(S,isls,"step_s"),refs:[{y:ref,label:"production "+dur(ref),legend:"Production"}],yfmt:dur});
-  chart("fTps",{kind:"stack",series:series(S,isls,"tps"),bucket:bucketFor(isls),yfmt:k});
+  chart("fTps",{kind:"stack",hold:bucketFor(isls),series:series(S,isls,"tps"),yfmt:k});
   chart("fHbm",{series:series(S,isls,"hbm_gib"),refs:[{y:hbmLim,label:hbmLim+" GiB",legend:"Limit",color:"#eab308"}],yfmt:function(v){return v.toFixed(0)+" G"},y0:false,ymin:0.8*hbmLim});
   var hs=[];isls.forEach(function(I,i){Object.keys(I.host||{}).forEach(function(n,j){hs.push({name:n,color:PAL[(i*3+j)%PAL.length],pts:I.host[n].map(function(p){return [p[0],gib(p[1])]})})})});
   chart("fHost",{series:hs,yfmt:function(v){return v.toFixed(0)+" G"}});
-  var ss=[];isls.forEach(function(I,i){ss.push({name:I.name+" export",color:islColor(i),pts:I.rows.filter(function(r){return r[C("pushes")]}).map(function(r){return [r[1],r[C("export_s")]]})},
-    {name:I.name+" apply",color:islColor(i),dash:true,pts:I.rows.filter(function(r){return r[C("applies")]}).map(function(r){return [r[1],r[C("apply_s")]]})})});
+  var ss=[];isls.forEach(function(I,i){ss.push({name:I.name+" export",color:islColor(i),pts:I.rows.filter(function(r){return r[C("export_s")]>0}).map(function(r){return [r[1],r[C("export_s")]]})},
+    {name:I.name+" apply",color:islColor(i),dash:true,pts:I.rows.filter(function(r){return r[C("applies")]||r[C("apply_s")]>0}).map(function(r){return [r[1],r[C("apply_s")]]})})});
   chart("fSync",{series:ss,yfmt:dur,dots:false});
-  chart("fMerge",{series:[{name:"merge",color:PAL[0],pts:(sy.merges||[]).map(function(m){return [m[0],m[3]]})},{name:"outer step",color:PAL[1],dash:true,pts:(sy.outer||[]).map(function(o){return [o[0],o[3]]})}],yfmt:dur});
+  chart("fMerge",{dots:true,series:[{name:"merge (sync_ms)",color:PAL[0],pts:(sy.merges||[]).map(function(m){return [m[0],m[3]]})}],yfmt:dur});
+  chart("fRound",{dots:true,series:[{name:"quorum wait",color:PAL[1],pts:(sy.merges||[]).map(function(m){return [m[0],m[6]]})},{name:"round total (ms)",color:PAL[2],dash:true,pts:(sy.merges||[]).map(function(m){return [m[0],m[5]]})}],yfmt:dur});
   var fr={};(sy.merges||[]).forEach(function(m){var f=m[2]==null?"?":m[2];(fr[f]=fr[f]||[]).push([m[0],m[4]])});
   var fk=Object.keys(fr);chart("fGnorm",{dots:true,series:fk.map(function(f,i){return {name:"fragment "+f,color:PAL[(+f||i)%PAL.length],pts:fr[f],legend:fk.length<=8}}),yfmt:function(v){return v.toFixed(2)}});
   chart("fRss",{series:[{name:"syncer RSS",color:PAL[3],pts:rss.map(function(p){return [p[0],p[1]]})}],refs:[{y:cap,label:bytes(cap)+" cap",legend:"Cap"}],yfmt:bytes});

@@ -149,7 +149,8 @@ def test_export_page_renders_sft(tmp_path):
 SMOKE_SFT = (SMOKE.read_text().split("eval(appM[1]);")[0] + """
 eval(appM[1]);
 process.stdout.write(JSON.stringify({title: els.title.innerHTML, kpis: els.sKpis.innerHTML,
-  nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, tps: els.fTps.innerHTML, dist: els.sDist.innerHTML,
+  nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, tps: els.fTps.innerHTML, sync: els.fSync.innerHTML,
+  merge: els.fMerge.innerHTML, round: els.fRound.innerHTML, dist: els.sDist.innerHTML,
   cost: els.sCostK.innerHTML, sft_hidden: els.sftRoot.hidden, rl_hidden: els.rlRoot.hidden}));
 """).replace("process.argv[2]", "process.argv[1]")
 
@@ -216,3 +217,68 @@ def test_stack_skips_island_without_data(tmp_path):
     page = json.loads(subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True,
                                      timeout=60).stdout)
     assert "slow island 1 (no data)" in page["tps"] and "#f97316" not in page["tps"].split('<div class="lg">')[0]
+
+
+def _page(tmp_path, root, now):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    out = export_html(r, tmp_path / "s.html", generated_at=now)
+    res = subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def _top_line_ys(svg):
+    """y coordinates of the last stroked path (the top of the stack)."""
+    d = re.findall(r'<path d="([^"]+)" fill="none"', svg)[-1]
+    return [float(p.split(",")[1]) for p in re.split(r"[ML]", d) if p]
+
+
+def test_tps_stack_is_held_on_a_shared_grid(tmp_path):
+    """Two islands stepping half a period apart: the stacked total stays flat
+    while both run (bucket sums of the raw step points saw-tooth)."""
+    root = make_run(tmp_path / "run", steps=12)
+    make_run(tmp_path / "run", steps=12, island="1")
+    rows = [json.loads(x) for x in (root / "island-1" / "yeto_steps.jsonl").read_text().splitlines()]
+    _w(root / "island-1" / "yeto_steps.jsonl", [dict(x, time=x["time"] + 285) for x in rows])
+    page = _page(tmp_path, root, T0 + 570 * 12 + 300)
+    svg = page["tps"].split('<div class="lg">')[0]
+    ys = _top_line_ys(svg)
+    both = [y for y in ys if y == min(ys)]
+    assert len(set(ys)) <= 3 and len(both) > 0.6 * len(ys)  # 0 / one island / both islands
+
+
+def test_push_steps_found_without_pushes_sent(tmp_path):
+    """The plugin pushes from a background thread: pushes_sent is 0 on the step
+    that exported; export_s still marks the push."""
+    root = make_run(tmp_path / "run")
+    rows = [json.loads(x) for x in (root / "island-0" / "yeto_steps.jsonl").read_text().splitlines()]
+    _w(root / "island-0" / "yeto_steps.jsonl", [dict(x, pushes_sent=0) for x in rows])
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    i = r.page_view(now=T0 + 3600)["sft"]["islands"][0]
+    assert i["last_push"]["step"] == 6 and i["last_push"]["export_s"] == 3.0
+    page = _page(tmp_path, root, T0 + 570 * 6 + 60)
+    assert "island 0 export (no data)" not in page["sync"] and "island 0 export" in page["sync"]
+
+
+def test_merge_time_is_not_the_round_wall_time(tmp_path):
+    """``ms`` (round open-to-done, quorum wait included) is not a merge time."""
+    root = make_run(tmp_path / "run")
+    _w(root / "syncer" / "tape.jsonl", [
+        {"step": 1, "fragment": 0, "expected": [0], "responded": [0], "gnorm": 1.1, "ms": 31227139, "quorum_ms": 31220923, "sync_ms": 4118,
+         "time_unix": T0 + 2001},
+        {"step": 3, "fragment": 2, "expected": [1], "responded": [1], "gnorm": 1.0, "ms": 341336, "quorum_ms": 41335, "sync_ms": 4200,
+         "sync/merge_seconds": 4.2, "time_unix": T0 + 2400}])
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    m = r.page_view(now=T0 + 3600)["sft"]["syncer"]["merges"]
+    assert [x[3] for x in m] == [4.118, 4.2]
+    assert m[0][5] == pytest.approx(31227.139) and m[0][6] == pytest.approx(31220.923)
+    page = _page(tmp_path, root, T0 + 3000)
+    ticks = re.findall(r'text-anchor="end">([^<]+)<', page["merge"])
+    assert ticks and all("h" not in t for t in ticks)  # merge axis stays at seconds
+    assert "quorum wait" in page["round"] and "(no data)" not in page["round"]

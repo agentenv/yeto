@@ -196,3 +196,17 @@ numbers restart at 1 per launch and are anchored at the first step logged by
 ms-swift / the yeto plugin. Reference lines are threshold keys:
 `sft_ref_step_s` (571), `sft_hbm_limit_gib` (53.9),
 `sft_syncer_rss_limit_bytes` (1.4e12), `sft_slow_factor` (1.1).
+
+Chart semantics worth knowing:
+
+- "Tokens / s" holds each island's last bench `tokens_per_s` on a shared time
+  grid (zero before an island's first step and after it goes quiet for about
+  three of its own step times) and stacks the held values, so islands that
+  step at different moments do not produce a saw-tooth.
+- "Syncer merge time" is `sync/merge_seconds` (falling back to `sync_ms`) per
+  merge record: the merge itself. The record's `ms` is the round's
+  open-to-done wall time, which includes waiting for the quorum; it is drawn
+  with `quorum_ms` on the separate "Syncer round time" chart.
+- "Sync overhead per step" plots `export_s` on every step with `export_s > 0`.
+  The plugin pushes from a background thread, so `pushes_sent` (pushes that
+  finished inside the step) is almost always 0 and cannot mark push steps.
