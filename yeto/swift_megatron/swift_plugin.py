@@ -71,6 +71,13 @@ ms-swift's argument parser, so environment variables are the only channel):
                                   send INIT_PARAMS only if the syncer sends no
                                   catch-up within this many seconds (an
                                   initialized syncer ignores INIT); default 1800
+  YETO_DILOCO_HEARTBEAT_S         seconds between rank 0's HEARTBEATs to the
+                                  syncer, sent from a thread (independent of
+                                  step ends) so its --island-lease-s can be on;
+                                  default 30, 0 = none
+  YETO_DILOCO_HEARTBEAT_STALL_S   stop heartbeating once the training loop
+                                  made no progress for this long, so a hung
+                                  island loses its lease; default 0 (never)
   YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
                                   rate schedule of a resume that did not load
                                   it (``restore_lr_schedule``)
@@ -138,6 +145,8 @@ class DiLoCoHookConfig:
     resume_dir: Optional[str] = None
     save_anchors: bool = False
     init_probe_s: float = 1800.0
+    heartbeat_s: float = 30.0
+    heartbeat_stall_s: float = 0.0
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -179,6 +188,8 @@ class DiLoCoHookConfig:
             resume_dir=get("RESUME_DIR"),
             save_anchors=(get("SAVE_ANCHORS", default="0") or "").strip().lower() in {"1", "true", "yes", "on"},
             init_probe_s=get_float("INIT_PROBE_S", 1800.0),
+            heartbeat_s=get_float("HEARTBEAT_S", 30.0),
+            heartbeat_stall_s=get_float("HEARTBEAT_STALL_S", 0.0),
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -276,6 +287,8 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
         resume_dir=resume_dir,
         resume_iteration=resume_iteration,
         init_probe_s=cfg.init_probe_s,
+        heartbeat_s=cfg.heartbeat_s,
+        heartbeat_stall_s=cfg.heartbeat_stall_s,
     )
 
 
