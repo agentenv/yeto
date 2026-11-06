@@ -55,8 +55,12 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_HMAC_KEY_PATH       path to the HMAC key file (optional)
   YETO_DILOCO_DISABLE             set to 1 to make the callback a no-op
   YETO_DILOCO_INITIAL_CUT_TIMEOUT seconds to install the syncer's initial cut
-                                  fragment by fragment before training (0 =
-                                  apply it at the boundaries; default 0)
+                                  (or a resumed island's catch-up) fragment by
+                                  fragment before training; default 3600.  0 =
+                                  apply it at the first boundaries instead: the
+                                  whole cut (4 bytes per parameter) then queues
+                                  on rank 0 first, and a resumed island takes it
+                                  only after one more step
   YETO_DILOCO_RESUME_DIR          checkpoint directory whose sync record to
                                   resume from (default: ``args.mcore_model``
                                   when it holds one)
@@ -130,7 +134,7 @@ class DiLoCoHookConfig:
     hmac_key_path: Optional[str] = None
     final_cut_payload: str = "full"
     transport: str = "cpu"
-    initial_cut_timeout: float = 0.0
+    initial_cut_timeout: float = 3600.0
     resume_dir: Optional[str] = None
     save_anchors: bool = False
     init_probe_s: float = 1800.0
@@ -171,7 +175,7 @@ class DiLoCoHookConfig:
             hmac_key_path=get("HMAC_KEY_PATH"),
             final_cut_payload=get("FINAL_CUT_PAYLOAD", default="full"),  # type: ignore[arg-type]
             transport=get("TRANSPORT", default="cpu"),  # type: ignore[arg-type]
-            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
+            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 3600.0),
             resume_dir=get("RESUME_DIR"),
             save_anchors=(get("SAVE_ANCHORS", default="0") or "").strip().lower() in {"1", "true", "yes", "on"},
             init_probe_s=get_float("INIT_PROBE_S", 1800.0),

@@ -373,3 +373,12 @@ def test_callback_rebuilds_the_lr_schedule_on_attach(make):
     cb = sp.YetoDiLoCoCallback(trainer)
     assert trainer.opt_param_scheduler.num_steps == 15 * 384
     cb.close()
+
+
+def test_initial_cut_wait_is_on_by_default(monkeypatch):
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("YETO_DILOCO_INITIAL_CUT_TIMEOUT", raising=False)
+    assert sp.DiLoCoHookConfig.from_env().initial_cut_timeout == 3600.0
+    monkeypatch.setenv("YETO_DILOCO_INITIAL_CUT_TIMEOUT", "0")
+    assert sp.DiLoCoHookConfig.from_env().initial_cut_timeout == 0.0
