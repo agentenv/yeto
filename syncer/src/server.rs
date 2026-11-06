@@ -127,6 +127,9 @@ pub struct Config {
     /// rounds keep merging (`GlobalState::save_checkpoint_in_background`)
     /// instead of on the scheduler. Every other checkpoint waits for it.
     pub background_checkpoint: bool,
+    /// Write the checkpoint once before the first round, unless `resume`
+    /// loaded it (`--checkpoint-on-start`).
+    pub checkpoint_on_start: bool,
     /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
     /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
     /// below `total_steps`. Empty: none.
@@ -1500,6 +1503,28 @@ fn round_grace(
     (grace, floor)
 }
 
+/// `--checkpoint-on-start`: write the checkpoint before the first round.
+/// Without it the first rounds (16 at ~860 s per write on the 120B run) have
+/// no checkpoint, and a restart then loses the INIT and every merge so far.
+/// A resume already has one (the state it loaded); a finished run needs none.
+/// Returns whether a write was started.
+fn save_start_checkpoint(cfg: &Config, st: &GlobalState, resumed: bool, last_step: u64) -> Result<bool> {
+    let Some(path) = cfg.checkpoint_path.as_ref().filter(|_| cfg.checkpoint_on_start) else {
+        return Ok(false);
+    };
+    if resumed || st.global_step >= last_step {
+        return Ok(false);
+    }
+    if cfg.background_checkpoint {
+        st.save_checkpoint_in_background(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint started in the background");
+    } else {
+        st.save_checkpoint(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint written");
+    }
+    Ok(true)
+}
+
 /// Whether step `t` is the last round of its fragment within `total_steps`.
 fn is_terminal_round(schedule: &crate::shard::ShardSchedule, t: u64, total_steps: u64) -> bool {
     schedule.next_merge_of_fragment(t) > total_steps
@@ -1830,6 +1855,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
             "--background-checkpoint needs --checkpoint-path and --checkpoint-every of at least 2, \
              without --policy-sweep-fragments (per-round checkpoints persist before their broadcast)"
         );
+    }
+    if cfg.checkpoint_on_start && cfg.checkpoint_path.is_none() {
+        bail!("--checkpoint-on-start needs --checkpoint-path");
     }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
@@ -4072,6 +4100,8 @@ async fn scheduler(
                 info!(step = st.global_step, path = %path.display(), "checkpoint committed");
             }
         }
+    } else {
+        save_start_checkpoint(&cfg, &st, resumed, last_step)?;
     }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
@@ -9556,6 +9586,7 @@ mod tests {
             checkpoint_every: 0,
             checkpoint_at_steps: Vec::new(),
             background_checkpoint: false,
+            checkpoint_on_start: false,
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -11220,6 +11251,41 @@ mod tests {
             validate_resumed_policy_sweep(&config, &resumed).unwrap();
             assert_eq!(resumed.versions, vec![3, 4]);
         }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn checkpoint_on_start_covers_the_rounds_before_the_first_periodic_one() {
+        let directory = unique_test_directory("start-checkpoint");
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("start-{background}.ckpt"));
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 4;
+            config.background_checkpoint = background;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            // Off: nothing before the first periodic checkpoint.
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            assert!(!checkpoint.exists());
+            config.checkpoint_on_start = true;
+            validate_config(&config).unwrap();
+            // A resume already holds the state on disk; a finished run needs none.
+            assert!(!save_start_checkpoint(&config, &state, true, 8).unwrap());
+            state.global_step = 8;
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.global_step = 0;
+            assert!(!checkpoint.exists());
+            assert!(save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.wait_for_background_checkpoint().unwrap();
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!((on_disk.global_step, on_disk.versions.clone()), (0, state.versions.clone()));
+        }
+        let mut config = round_test_config(8);
+        config.checkpoint_on_start = true;
+        assert!(validate_config(&config).is_err(), "needs a checkpoint path");
         std::fs::remove_dir_all(&directory).ok();
     }
 
