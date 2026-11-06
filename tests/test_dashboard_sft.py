@@ -119,6 +119,31 @@ def test_bench_restart_continues(tmp_path):
     assert [r[0] for r in st.island_rows(st.islands["0"])] == [1, 2, 3]
 
 
+def test_bench_restart_after_a_crash_maps_onto_the_resumed_steps():
+    # launch 1 logs steps 1..7 and crashes; launch 2 resumes from checkpoint-5
+    # and logs 6..9; bench counts 1..7 then 1..4.
+    st = sft.SftState()
+    for s in [*range(1, 8), *range(6, 10)]:
+        st.fold({"event": "sft_train_log", "island_id": "0", "step": s, "loss": float(s)}, None)
+    for s in [*range(1, 8), *range(1, 5)]:
+        st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s, "wall_s": 100.0 + s}, None)
+    bench, base = st._bench_by_step(st.islands["0"])
+    assert base == 0 and sorted(bench) == list(range(1, 10))
+    assert bench[6]["wall_s"] == 101.0 and bench[9]["wall_s"] == 104.0  # launch 2's own records
+    assert bench[5]["wall_s"] == 105.0  # launch 1's step 5 is kept
+    rows = st.island_rows(st.islands["0"])
+    assert [r[0] for r in rows] == list(range(1, 10))
+
+
+def test_bench_of_a_resumed_first_launch_starts_at_the_checkpoint():
+    st = sft.SftState()
+    for s in (16, 17):
+        st.fold({"event": "sft_train_log", "island_id": "0", "step": s}, None)
+    for s in (1, 2):
+        st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s}, None)
+    assert sorted(st._bench_by_step(st.islands["0"])[0]) == [16, 17]
+
+
 def test_rl_view_has_no_sft(tmp_path):
     r = Reducer()
     load_all(r, [str(FX / "kill44")])

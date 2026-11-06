@@ -349,7 +349,7 @@ class SftSource:
 
 def _new_island(iid: str) -> dict:
     return {"id": iid, "meta": {}, "log": {}, "sync": {}, "bench": [], "health": {}, "host": {},
-            "steps_total": None}
+            "steps_total": None, "log_starts": [], "log_last": None}
 
 
 class SftState:
@@ -389,6 +389,11 @@ class SftState:
         if ev == "sft_island_meta":
             isl["meta"].update({k: v for k, v in r.items() if k not in ("event", "island_id") and v is not None})
         elif ev == "sft_train_log":
+            # ms-swift appends to logging.jsonl: a step not above the last one
+            # starts a new launch (a resume from an earlier checkpoint).
+            if isl["log_last"] is None or r["step"] <= isl["log_last"]:
+                isl["log_starts"].append(r["step"])
+            isl["log_last"] = r["step"]
             isl["log"][r["step"]] = r
             if r.get("steps_total"):
                 isl["steps_total"] = r["steps_total"]
@@ -425,15 +430,20 @@ class SftState:
     @staticmethod
     def _bench_by_step(isl: dict) -> dict[int, dict]:
         """bench / health ``step`` restarts at 1 in each launch: map each launch
-        segment onto absolute steps, anchored at the first step logged by ms-swift
-        or the yeto plugin (resume segments continue after the previous one)."""
+        segment onto absolute steps. Launch k starts at the first step of the
+        k-th ms-swift log segment (a resume from checkpoint N logs N+1 again
+        after a crash at a later step); without one it continues after the
+        last mapped step. The first launch falls back to the first step logged
+        by ms-swift or the yeto plugin."""
         known = sorted(set(isl["log"]) | set(isl["sync"]))
-        base = (known[0] - 1) if known else 0
-        out, prev, offset = {}, None, base
+        starts = isl.get("log_starts") or []
+        base = (starts[0] - 1) if starts else ((known[0] - 1) if known else 0)
+        out, prev, offset, seg = {}, None, base, 0
         for b in isl["bench"]:
             s = b["seg_step"]
-            if prev is not None and s <= prev:  # a new launch continues after the last mapped step
-                offset = max(out)
+            if prev is not None and s <= prev:  # a new launch
+                seg += 1
+                offset = starts[seg] - 1 if seg < len(starts) else max(out)
             out[s + offset] = b
             prev = s
         return out, base
