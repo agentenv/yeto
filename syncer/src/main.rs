@@ -159,6 +159,13 @@ struct Args {
     /// during the write) host memory peaks at about twice params + momentum.
     #[arg(long)]
     background_checkpoint: bool,
+    /// Write --checkpoint-path once before the first round (after INIT or
+    /// --resume), so the rounds before the first --checkpoint-every one are
+    /// covered too. Skipped when --resume found that checkpoint (it is the
+    /// state just loaded). On a background thread with
+    /// --background-checkpoint.
+    #[arg(long)]
+    checkpoint_on_start: bool,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -513,6 +520,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         checkpoint_at_steps: args.checkpoint_at_steps,
         background_checkpoint: args.background_checkpoint,
+        checkpoint_on_start: args.checkpoint_on_start,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
