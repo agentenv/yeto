@@ -609,7 +609,8 @@ class MegatronDiLoCoSync:
                  transport: str = "cpu", parallel_context: ParallelContext | None = None,
                  client_factory=None, observer: Callable[[dict], None] | None = None,
                  initial_cut_timeout: float = 0.0, resume_dir: str | None = None,
-                 resume_iteration: int | None = None, init_probe_s: float = 1800.0) -> None:
+                 resume_iteration: int | None = None, init_probe_s: float = 1800.0,
+                 heartbeat_s: float = 30.0, heartbeat_stall_s: float = 0.0) -> None:
         import torch
         import torch.distributed as dist
 
@@ -717,6 +718,13 @@ class MegatronDiLoCoSync:
                       "deferred_pushes": 0, "apply_s": 0.0, "export_s": 0.0}
         self._observed_push_bytes = 0  # rank 0: push_bytes at the last observer report
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
+        # Rank 0: HEARTBEAT every ``heartbeat_s`` from a thread, so the syncer
+        # can lease the island (``--island-lease-s``) across ~10 min steps,
+        # INIT and checkpoint saves; ``_progress_at`` is the last sign of life
+        # of the training loop (``heartbeat_stall_s``: none for that long and
+        # the heartbeats stop, so a hung island loses its lease).
+        self.heartbeat: _Heartbeat | None = None
+        self._progress_at = time.monotonic()
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
         self.events: deque[tuple[int, str, int, int]] = deque(maxlen=4096)
         # Resume (``resume_dir``): the record ``save_state`` wrote with the
@@ -738,6 +746,9 @@ class MegatronDiLoCoSync:
             try:
                 self.client = self._connect(syncer, hmac_key_path, wan_streams, client_factory)
                 self.sender = _PushSender(self.client, self.stats, self._push_dropped, self._push_sent)
+                if heartbeat_s > 0:
+                    self.heartbeat = _Heartbeat(self.client, float(heartbeat_s), float(heartbeat_stall_s),
+                                                lambda: self.iteration, lambda: self._progress_at)
             except Exception as exc:  # raised on every rank below
                 error = f"{type(exc).__name__}: {exc}"
         self._raise_if(self._bcast_object(error))
@@ -815,6 +826,7 @@ class MegatronDiLoCoSync:
                 if pending is not None:
                     jobs.put((fid, pending))
                 for parts in self._export_fragment_chunks(fid, delta=False):
+                    self._progress_at = time.monotonic()
                     if pending is None:
                         continue
                     if error is None and self._export_error is not None:
@@ -854,6 +866,7 @@ class MegatronDiLoCoSync:
         started = time.monotonic()
         init_pending = init_probe is not None  # resumed learner 0: INIT only if the syncer needs it
         while not all(self.anchored):
+            self._progress_at = time.monotonic()
             plan = self._plan() if self.rank == 0 else None
             if self.rank == 0:
                 waited = time.monotonic() - started
@@ -1337,6 +1350,7 @@ class MegatronDiLoCoSync:
 
         if self.finished or self._closed:
             return
+        self._progress_at = time.monotonic()
         state = self.state
         iteration = int(iteration)
         if not self._counters_started:  # count from the (possibly resumed) first step
@@ -1622,6 +1636,8 @@ class MegatronDiLoCoSync:
         if self._closed:
             return
         self._closed = True
+        if self.heartbeat is not None:
+            self.heartbeat.stop()
         if self.sender is not None:
             self.sender.stop()
         client, self.client = self.client, None
@@ -1650,6 +1666,40 @@ def session_dtype(name: str) -> int:
                          "int4, int8, int4-log, push-bf16")
     code = FULL_PARAMETER_PUSH_DTYPES[key]
     return code | DTYPE_FLAG_TENSOR_BLOCKS if key != "bf16" else code
+
+
+class _Heartbeat:
+    """Rank 0's HEARTBEAT thread (``client.heartbeat(local_step)`` every
+    ``interval`` seconds): the syncer renews the island's lease on it, so a
+    lease can be on although a step (or an INIT, a checkpoint save) takes far
+    longer.  ``stall`` > 0: no heartbeat once the training loop showed no
+    progress (``progress_at``) for that long.  A send during an outage is
+    dropped by the client; the next one goes out after the redial."""
+
+    def __init__(self, client: Any, interval: float, stall: float, step: Callable[[], int],
+                 progress_at: Callable[[], float]) -> None:
+        import threading
+
+        self.client, self.interval, self.stall = client, interval, stall
+        self.step, self.progress_at = step, progress_at
+        self.sent = 0
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="yeto-swift-heartbeat", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            if self.stall > 0 and time.monotonic() - self.progress_at() > self.stall:
+                continue
+            try:
+                self.client.heartbeat(int(self.step()))
+                self.sent += 1
+            except Exception as exc:  # never take the island down for a heartbeat
+                log.debug("heartbeat not sent: %s", exc)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.thread.join(timeout=5.0)
 
 
 class _PushSender:

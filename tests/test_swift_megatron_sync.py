@@ -74,6 +74,33 @@ def test_chunks_are_bounded_and_keep_order():
 
 
 # ----------------------------------------------------------------------------- fake Megatron island
+def test_heartbeat_thread_beats_between_steps_and_stops_on_a_stall():
+    class Beats:
+        def __init__(self):
+            self.steps = []
+
+        def heartbeat(self, step):
+            self.steps.append(step)
+
+    client, progress = Beats(), [time.monotonic()]
+    beat = sm._Heartbeat(client, 0.02, 0.3, lambda: 7, lambda: progress[0])
+    deadline = time.monotonic() + 5
+    while len(client.steps) < 3:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert set(client.steps) == {7}
+    time.sleep(0.5)  # no progress for longer than the stall limit: silence
+    quiet = len(client.steps)
+    time.sleep(0.2)
+    assert len(client.steps) == quiet
+    progress[0] = time.monotonic()
+    while len(client.steps) == quiet:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    beat.stop()
+    assert not beat.thread.is_alive()
+
+
 class _LinkClient:
     """The client surface ``_PushSender`` and ``_ready_pushes`` use: a link
     generation the test bumps, and a push result it chooses."""
@@ -959,7 +986,8 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, 
     syncer = sm.MegatronDiLoCoSync([chunk], opt, syncer=f"127.0.0.1:{syncer_port}", learner_id=island,
                                    num_learners=2, fragments=3, sync_interval_steps=2,
                                    wire_dtype=opts.get("wire", "bf16"),
-                                   chunk_numel=64, parallel_context=ctx, final_cut_payload="full")
+                                   chunk_numel=64, parallel_context=ctx, final_cut_payload="full",
+                                   heartbeat_s=opts.get("heartbeat_s", 30.0))
     it = 0
     dropped = False
     started = time.monotonic()
@@ -992,7 +1020,7 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, 
     if rank == 0:
         torch.save({"names": names, "values": dict(zip(names, values, strict=True)),
                     "events": list(syncer.events), "stats": dict(syncer.stats), "dropped": dropped,
-                    "timeline": timeline,
+                    "timeline": timeline, "lease_expiries": syncer.client.lease_expiries,
                     "fragments": [[n for n, _ in f.tensors] for f in syncer.layout.fragments]},
                    Path(out_dir, f"island{island}.pt"))
     syncer.close()
@@ -1217,3 +1245,42 @@ def test_islands_keep_merging_across_a_syncer_restart(tmp_path, stop):
     if stop == "sigkill":
         assert sum(i["stats"].get("rebased", 0) for i in islands) > 0, "no island was rewound"
     print(json.dumps([i["stats"] for i in islands]))
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("heartbeat_s", [0.3, 0.0])
+def test_heartbeats_keep_a_stalled_island_inside_its_lease(tmp_path, heartbeat_s):
+    """--island-lease-s 2 with an island that makes no boundary for 4 s:
+    rank 0's heartbeat thread keeps its lease; without heartbeats the syncer
+    expires it (the island redials as a re-JOIN)."""
+
+    binary = build_syncer()
+    from process_groups import group_popen
+
+    port = free_port()
+    final_state = tmp_path / "final.bin"
+    proc = group_popen([str(binary), "--port", str(port), "--learners", "2", "--grace-ms", "200",
+                        "--terminal-grace-ms", "2000", "--total-steps", "30", "--final-state", str(final_state),
+                        "--island-lease-s", "2", *DECOUPLED_SYNCER_FLAGS],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    procs = []
+    try:
+        procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None,
+                      {"step_s": 0.05, "heartbeat_s": heartbeat_s})
+        procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None,
+                      {"step_s": 0.05, "stall_at": 6, "stall_s": 4.0, "heartbeat_s": heartbeat_s})
+        _join(procs, 240, tmp_path)
+        assert proc.wait(timeout=60) == 0, "syncer exited nonzero"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+        if proc.poll() is None:
+            proc.kill()
+        log = proc.stdout.read() if proc.stdout else ""
+        (tmp_path / "syncer.log").write_text(log)
+    islands = [torch.load(tmp_path / f"island{i}.pt") for i in range(2)]
+    for name in islands[0]["names"]:
+        assert torch.equal(islands[0]["values"][name], islands[1]["values"][name]), name
+    expired = '"reason":"lease_expired"' in log or islands[1]["lease_expiries"] > 0
+    assert expired == (heartbeat_s == 0), (islands[1]["lease_expiries"], heartbeat_s)
