@@ -5979,10 +5979,11 @@ fn route_push(
 /// same fragment against its own base, weighted by its counters (and the
 /// carry discount), as long as its base lag stays within `--max-base-lag`.
 ///
-/// A delta counts once: after the syncer carries or gathers a delta from an
-/// anchor (fragment version), a later push of that island from the same or
-/// an older anchor of that fragment is refused (`anchor_reused`), on any of
-/// its connections. An island that redials (a WAN drop, a syncer it lost
+/// A delta counts once: after the syncer carries a delta from an anchor
+/// (fragment version), a later push of that island from the same or an
+/// older anchor of that fragment is refused (`anchor_reused`) on any of its
+/// connections; after it gathers one, the same holds for the island's later
+/// connections. An island that redials (a WAN drop, a syncer it lost
 /// for a while) releases the anchors its lost pushes held, so it may answer
 /// the next pull from an anchor whose delta did reach this syncer; that
 /// second delta repeats the first one's local steps and must not be merged
@@ -5995,8 +5996,8 @@ struct LateCarry {
     /// Newest base version of a carried delta per island and fragment.
     anchors: HashMap<(u32, usize), u64>,
     /// Newest base version of a delta gathered by its own round, per island
-    /// and fragment.
-    gathered: HashMap<(u32, usize), u64>,
+    /// and fragment, with the connection generation that pushed it.
+    gathered: HashMap<(u32, usize), (u64, u64)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -6024,14 +6025,19 @@ impl LateCarry {
         }
     }
 
-    /// True when `push` reuses an anchor whose delta this island already
-    /// had carried or gathered (by any of its connections).
+    /// True when `push` reuses an anchor whose delta this island already had
+    /// carried (on any connection) or gathered on an earlier connection. One
+    /// connection may answer consecutive rounds from the same anchor (an
+    /// asynchronous learner that has not installed the newer version yet);
+    /// a redialed one repeating the anchor resends a delta already taken.
     fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
         let key = (member.learner_id, push.fragment_id as usize);
-        [self.anchors.get(&key), self.gathered.get(&key)]
-            .into_iter()
-            .flatten()
-            .any(|&taken| push.base_version <= taken)
+        let carried = self.anchors.get(&key).is_some_and(|&taken| push.base_version <= taken);
+        let gathered = self
+            .gathered
+            .get(&key)
+            .is_some_and(|&(taken, generation)| push.base_version <= taken && member.generation != generation);
+        carried || gathered
     }
 
     fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
@@ -6040,19 +6046,21 @@ impl LateCarry {
     }
 
     fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let taken = self.gathered.entry((member.learner_id, fragment)).or_insert(0);
-        *taken = (*taken).max(base_version);
+        let taken = self.gathered.entry((member.learner_id, fragment)).or_insert((0, member.generation));
+        if base_version >= taken.0 {
+            *taken = (base_version, member.generation);
+        }
     }
 
     /// A restarted round drops its gathered pushes; their islands answer the
     /// new attempt from the same anchor, so the anchor is free again.
     fn release_anchor(&mut self, member: Member, push: &Push) {
         let key = (member.learner_id, push.fragment_id as usize);
-        if self.gathered.get(&key) == Some(&push.base_version) {
+        if let Some(taken) = self.gathered.get_mut(&key).filter(|taken| taken.0 == push.base_version) {
             if push.base_version == 0 {
                 self.gathered.remove(&key);
             } else {
-                self.gathered.insert(key, push.base_version - 1);
+                taken.0 = push.base_version - 1;
             }
         }
     }
@@ -6082,7 +6090,7 @@ impl LateCarry {
         if self
             .gathered
             .get(&(member.learner_id, p))
-            .is_some_and(|&taken| push.base_version <= taken)
+            .is_some_and(|&(taken, _)| push.base_version <= taken)
         {
             return CarryOutcome::Rejected(PushDisposition::Duplicate);
         }
@@ -12614,7 +12622,9 @@ mod tests {
         carry.note_gathered(old, 1, 5);
         let again = test_push_for(1, 5);
         assert!(carry.reuses_anchor(new, &again));
-        assert!(carry.reuses_anchor(old, &again));
+        // The connection that pushed it may answer the next round from the
+        // same anchor (it has not installed the newer version yet).
+        assert!(!carry.reuses_anchor(old, &again));
         // From the broadcast it then gets (version 7) it pushes again.
         assert!(!carry.reuses_anchor(new, &test_push_for(1, 7)));
         // A restart of that round drops the gathered delta: the anchor is
