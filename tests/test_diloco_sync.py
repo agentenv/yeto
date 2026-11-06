@@ -399,3 +399,20 @@ def test_resume_record_round_trips_and_picks_the_install_mode():
     assert fresh.steps_at_reset == [15, 12, 15] and fresh.units_at_reset == [0, 500, 0]
     new, local, old = torch.tensor([1.0, 2.0]), torch.tensor([0.5, 0.75]), torch.tensor([0.25, 1.0])
     assert torch.equal(shifted_resume_value(new, local, old), torch.tensor([1.25, 1.75]))
+
+
+def test_live_install_mode_keeps_a_running_islands_progress_through_a_catch_up():
+    from yeto.diloco_sync import LIVE_CONFIRM, LIVE_REBASE, live_install_mode
+
+    def mode(version, catch_up, pushed_from=None, anchored=True):
+        return live_install_mode(anchored=anchored, current_version=5, version=version,
+                                 catch_up=catch_up, pushed_from=pushed_from)
+
+    assert mode(9, False, anchored=False) is None and mode(9, True, anchored=False) is None
+    assert mode(5, False) == LIVE_CONFIRM  # a replay of the anchor
+    assert mode(9, False) is None  # an ordinary merge broadcast
+    assert mode(9, True) == LIVE_REBASE  # a merge missed while away, not pushed from this anchor
+    assert mode(9, True, pushed_from=5) is None  # its delta may be in it
+    assert mode(9, True, pushed_from=3) == LIVE_REBASE
+    assert mode(3, True, pushed_from=5) == LIVE_REBASE  # a rewound syncer
+    assert mode(5, True) == LIVE_REBASE  # same number, other values (the client compared the bytes)

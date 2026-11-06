@@ -194,6 +194,36 @@ def resume_fragment_mode(record: dict | None, fid: int, version: int, *, have_an
     return RESUME_SHIFT if have_anchor else RESUME_OVERWRITE
 
 
+# What a running island does with a broadcast of a fragment it already
+# holds an anchor of (``live_install_mode``); None = the ordinary install.
+LIVE_CONFIRM = "confirm"  # a replay of its anchor: nothing to install
+LIVE_REBASE = "rebase"    # a catch-up: global_new + (local - anchor)
+
+
+def live_install_mode(*, anchored: bool, current_version: int, version: int, catch_up: bool,
+                      pushed_from: int | None) -> str | None:
+    """How a running island installs a broadcast of a fragment.
+
+    A broadcast of the version the island is anchored at is a replay of
+    that anchor (``LIVE_CONFIRM``): the local parameters stay bit for bit.
+    The first broadcast after a redial (``catch_up``) is the syncer's
+    current value, not the merge of a round the island answered: the
+    island's progress since its anchor is moved onto it (``LIVE_REBASE``),
+    also when the version went backwards (a syncer resumed from an older
+    checkpoint) or kept its number with other values.  The exception is a
+    newer catch-up of a fragment the island pushed from its current anchor
+    (``pushed_from``): that delta may already be merged into it, so it is
+    installed like any merge broadcast.  None: the ordinary install."""
+    if not anchored:
+        return None
+    if not catch_up:
+        return LIVE_CONFIRM if int(version) == int(current_version) else None
+    if int(version) > int(current_version) and pushed_from is not None \
+            and int(pushed_from) == int(current_version):
+        return None
+    return LIVE_REBASE
+
+
 def shifted_resume_value(global_new: torch.Tensor, local: torch.Tensor, anchor_old: torch.Tensor) -> torch.Tensor:
     """``global_new + (local - anchor_old)`` in FP32: the island's progress since
     its checkpointed anchor, moved onto the newer global."""

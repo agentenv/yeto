@@ -1010,6 +1010,10 @@ class BcastFragment:
     payload_hash: bytes | None = field(default=None, compare=False)
     stored: bool = field(default=False, compare=False)
     discard: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    # The first broadcast of this fragment after a redial: the syncer's
+    # current value sent as the re-HELLO catch-up (or a newer one), not
+    # necessarily a merge of a round this island answered.
+    catch_up: bool = field(default=False, compare=False)
 
 
 @dataclass
@@ -1172,8 +1176,18 @@ class SyncerClient:
         recover: bool = False,
         owned_fragments: range | None = None,
         expert_tokens: bool = False,
+        accept_rewound_catch_up: bool = False,
     ):
-        """``syncer_epoch``: the syncer incarnation this island was launched
+        """``accept_rewound_catch_up``: after a redial, take the first
+        broadcast of a fragment even when its version is older than (or equal
+        to, with other bytes) one already received: a syncer that crashed and
+        resumed from an older checkpoint has rewound, and its catch-up is the
+        only global it will merge pushes against (the island rebases onto it;
+        otherwise every push from the lost version is refused as a future
+        base).  Off: such a broadcast is dropped (older) or a protocol error
+        (same version), the historical behaviour.
+
+        ``syncer_epoch``: the syncer incarnation this island was launched
         for; a syncer with a newer epoch refuses it (not retried). ``recover``:
         this island lost its trainer state; every HELLO asks for peer recovery
         until the syncer sends RECOVERY_DONE (see ``yeto.rl.peer_recovery``).
@@ -1305,6 +1319,10 @@ class SyncerClient:
             None
         ] * layout.num_fragments
         self._bcast_lock = threading.Lock()
+        # Set for every fragment on each redial; cleared by its first BCAST.
+        self._catch_up_pending = [False] * layout.num_fragments
+        self.accept_rewound_catch_up = bool(accept_rewound_catch_up)
+        self.rewound_catch_ups = 0
         # Raw globals are retained independently of the drain queue so a
         # final fragment that outruns its control-stream manifest can be
         # re-applied exactly after the manifest arrives.
@@ -1438,6 +1456,9 @@ class SyncerClient:
                 _close_socket(s)
             raise
         with self._lock:
+            if self.connection_generation != 0:  # a redial: the syncer catches us up
+                with self._bcast_lock:
+                    self._catch_up_pending = [True] * self.layout.num_fragments
             self._gen += 1
             gen = self._gen
             self.connection_generation = connection_generation
@@ -2792,6 +2813,33 @@ class SyncerClient:
             # then publish a stale terminal manifest or shutdown afterward.
             self._dispatch_live(gen, msg_type, payload)
 
+    def _admit_bcast_locked(self, fid: int, version: int, digest: bytes) -> bool | None:
+        """Under ``_bcast_lock``: whether a BCAST of ``fid`` is queued (its
+        ``catch_up`` flag) or dropped (None).  Versions only move forward;
+        a replay of the version already held (same bytes) is dropped, other
+        bytes under that version are a protocol error, except for the first
+        BCAST after a redial with ``accept_rewound_catch_up`` (a rewound
+        syncer's catch-up, taken as the fragment's new global)."""
+        first = self._catch_up_pending[fid]
+        self._catch_up_pending[fid] = False
+        seen = self._bcast_seen[fid]
+        if seen is not None:
+            seen_version, seen_digest = seen
+            if version == seen_version and digest == seen_digest:
+                return None
+            if version <= seen_version:
+                if not (first and self.accept_rewound_catch_up and self._downlink is None):
+                    if version < seen_version:
+                        return None
+                    raise ProtocolError(
+                        f"conflicting BCAST_FRAGMENT payloads for fragment {fid} version {version}"
+                    )
+                self.rewound_catch_ups += 1
+                _connect_log(f"fragment {fid}: the syncer rewound from version {seen_version} to "
+                             f"{version} (resumed from an older checkpoint); taking its catch-up")
+        self._bcast_seen[fid] = (version, digest)
+        return first
+
     def _dispatch_streamed(
         self,
         gen: int,
@@ -2811,25 +2859,16 @@ class SyncerClient:
         digest = committed.payload_hash
         if inbound.msg_type == MSG_BCAST_FRAGMENT:
             with self._bcast_lock:
-                seen = self._bcast_seen[fragment_id]
-                if seen is not None:
-                    seen_version, seen_digest = seen
-                    if version < seen_version:
-                        if committed.discard is not None:
-                            committed.discard()
-                        return
-                    if version == seen_version:
-                        if digest != seen_digest:
-                            if committed.discard is not None:
-                                committed.discard()
-                            raise ProtocolError(
-                                "conflicting BCAST_FRAGMENT payloads for fragment "
-                                f"{fragment_id} version {version}"
-                            )
-                        if committed.discard is not None:
-                            committed.discard()
-                        return
-                self._bcast_seen[fragment_id] = (version, digest)
+                try:
+                    catch_up = self._admit_bcast_locked(fragment_id, version, digest)
+                except ProtocolError:
+                    if committed.discard is not None:
+                        committed.discard()
+                    raise
+                if catch_up is None:
+                    if committed.discard is not None:
+                        committed.discard()
+                    return
                 self._bcasts.put(
                     BcastFragment(
                         fragment_id,
@@ -2838,6 +2877,7 @@ class SyncerClient:
                         payload_hash=digest,
                         stored=True,
                         discard=committed.discard,
+                        catch_up=catch_up,
                     )
                 )
             return
@@ -2965,24 +3005,14 @@ class SyncerClient:
                 data = payload[12:]
             digest = hashlib.sha256(data).digest()
             with self._bcast_lock:
-                seen = self._bcast_seen[fid]
-                if seen is not None:
-                    seen_version, seen_digest = seen
-                    if version < seen_version:
-                        return
-                    if version == seen_version:
-                        if digest != seen_digest:
-                            raise ProtocolError(
-                                f"conflicting BCAST_FRAGMENT payloads for fragment "
-                                f"{fid} version {version}"
-                            )
-                        return
-                self._bcast_seen[fid] = (version, digest)
+                catch_up = self._admit_bcast_locked(fid, version, digest)
+                if catch_up is None:
+                    return
                 # Receiver threads run once per striped socket. Queue the
                 # accepted update under the same lock as the monotonicity
                 # check so two versions cannot validate in order but enqueue
                 # in reverse order after a thread reschedule.
-                self._bcasts.put(BcastFragment(fid, version, data))
+                self._bcasts.put(BcastFragment(fid, version, data, catch_up=catch_up))
         elif msg_type == MSG_FINAL_FRAGMENT:
             if len(payload) < 12:
                 self._set_protocol_error("truncated FINAL_FRAGMENT")

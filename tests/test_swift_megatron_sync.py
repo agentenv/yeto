@@ -124,7 +124,7 @@ def _bare_sync(client, fragments=2):
     sync.state = DiLoCoSyncState.create(fragments, track_anchors=False)
     sync.state.fragment_versions = [5] * fragments
     sync.anchored = [True] * fragments
-    sync.spent, sync.spent_link = [None] * fragments, [None] * fragments
+    sync.spent, sync.spent_link, sync.pushed_from = [None] * fragments, [None] * fragments, [None] * fragments
     sync.iteration, sync.units_total, sync.stats = 20, 100, {"deferred_pushes": 0}
     return sync
 
@@ -738,6 +738,121 @@ def test_resumed_island_keeps_its_checkpoint_through_the_rejoin_catch_up(tmp_pat
     _join(procs, 200, tmp_path)
 
 
+def _catch_up_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"catch-up-{rank}", lambda: _catch_up_body(rank, world, port, out_dir))
+
+
+def _catch_up_body(rank, world, port, out_dir):
+    """A running island redials and gets the syncer's catch-up: a replay of
+    its anchor changes nothing (bit for bit), a rewound or newer catch-up of
+    a fragment it did not push from keeps its local progress (global_new +
+    (local - anchor)), a newer one of a fragment it pushed from its anchor is
+    installed as an ordinary merge."""
+
+    from yeto.diloco_sync import shifted_resume_value
+    from yeto.protocol import BcastFragment, PullRequest
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full_shapes = _global_shapes(2, 1)
+    old_g = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    new_g = {n: (_full(n, s) - 0.25).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        assert kwargs["accept_rewound_catch_up"] is True
+        client = _ScriptedClient(layout, script)
+        script[("layout",)] = layout
+        return client
+
+    def bcast(fid, version, values, catch_up):
+        layout = script[("layout",)]
+        return BcastFragment(fid, version, pack_tensor(_flat(layout, fid, values), 2), catch_up=catch_up)
+
+    plan = {1: [(fid, 4, old_g, False) for fid in range(3)],  # the initial cut
+            3: "pull",                                         # iteration 2: a pull of fragment 2
+            5: [(0, 4, old_g, False), (1, 2, new_g, True), (2, 9, new_g, True)],
+            6: [(0, 9, new_g, True)]}
+
+    class _Script(dict):  # call -> scripted pulls / broadcasts (packed once the layout is known)
+        def get(self, key, default=None):
+            kind, call = key
+            entry = plan.get(call)
+            if kind == "pull":
+                return [PullRequest(2, 7, 1)] if entry == "pull" else []
+            if isinstance(entry, list):
+                return [bcast(*row) for row in entry]
+            return []
+
+    script = _Script()
+    sync = sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=1, num_learners=2,
+                                 fragments=3, sync_interval_steps=1, chunk_numel=40, parallel_context=ctx,
+                                 client_factory=factory, initial_cut_timeout=60)
+    fid_of = {name: fid for fid, frag in enumerate(sync.layout.fragments) for name, _ in frag.tensors}
+    for it in (1, 2, 3):
+        opt.step({id(p): _local_update(p, 1, it, tp, 2) for p in trainable})
+        sync.after_optimizer_step(it, 10)
+    if rank == 0:
+        assert sync.sender.wait_idle(10) and sync.stats["pushed"] == 1 and sync.pushed_from == [None, None, 4]
+    master = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned}
+    param = {id(p): p.detach().clone() for p in trainable}
+
+    def shard(full, p):
+        if getattr(p, "tensor_model_parallel", False):
+            size = p._full_shape[p.partition_dim] // 2
+            full = full.narrow(p.partition_dim, tp * size, size)
+        return full
+
+    def owned(p, full):
+        s, e, _ = opt.owned[id(p)]
+        return shard(full, p).reshape(-1)[s:e]
+
+    sync.after_optimizer_step(4, 10)  # call 5: no local step since the snapshot
+    for p in trainable:
+        fid = fid_of[p._full_name]
+        if fid == 0:  # a replay of its anchor: untouched
+            assert torch.equal(p.detach(), param[id(p)]), p._full_name
+            if id(p) in opt.owned:
+                assert torch.equal(opt.master(p), master[id(p)])
+            assert torch.equal(sync.anchors[id(p)].float(), shard(old_g[p._full_name], p))
+            continue
+        assert torch.equal(sync.anchors[id(p)].float(), shard(new_g[p._full_name], p)), p._full_name
+        if id(p) not in opt.owned:
+            continue
+        if fid == 1:  # rewound to version 2: rebased exactly
+            want = shifted_resume_value(owned(p, new_g[p._full_name]), master[id(p)], owned(p, old_g[p._full_name]))
+            assert not torch.equal(want, owned(p, new_g[p._full_name]))
+        else:  # newer, pushed from its anchor: the ordinary install
+            want = owned(p, new_g[p._full_name])
+        assert torch.equal(opt.master(p), want), (fid, p._full_name)
+        assert torch.equal(p.detach().reshape(-1)[opt.owned[id(p)][0]:opt.owned[id(p)][1]], want.to(torch.bfloat16))
+    assert sync.state.fragment_versions == [4, 2, 9]
+    assert sync.state.steps_at_reset[1] == 0 and sync.state.steps_at_reset[2] == 4, sync.state.steps_at_reset
+    before = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned and fid_of[p._full_name] == 0}
+    sync.after_optimizer_step(5, 10)  # call 6: a newer catch-up of fragment 0, never pushed: rebased
+    for p in trainable:
+        if fid_of[p._full_name] == 0 and id(p) in opt.owned:
+            want = shifted_resume_value(owned(p, new_g[p._full_name]), before[id(p)], owned(p, old_g[p._full_name]))
+            assert torch.equal(opt.master(p), want), p._full_name
+    if rank == 0:
+        assert sync.stats["confirmed"] == 1 and sync.stats["rebased"] == 2, sync.stats
+    sync.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_running_island_keeps_its_progress_through_a_catch_up(tmp_path):
+    procs = _run(_catch_up_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
@@ -954,15 +1069,19 @@ def test_decoupled_quorum_one_keeps_the_fast_island_merging_while_the_other_stal
 
 
 @pytest.mark.timeout(300)
-def test_islands_keep_merging_across_a_syncer_restart_from_its_shutdown_checkpoint(tmp_path):
-    """The syncer is stopped (SIGTERM: it writes its checkpoint and exits)
-    while both islands keep training and answering the pulls they already
-    hold, then comes back with --resume on the same port.  During the outage
-    a PUSH is not queued at all (``push_fragment_parts`` returns False) and is
-    a drop; a PUSH that went out on the old connection holds an anchor whose
-    round the restarted syncer no longer has, and is released once the
-    island redials.  Both islands must reach the restarted syncer's final cut
-    instead of refusing its pulls forever."""
+@pytest.mark.parametrize("stop", ["sigterm", "sigkill"])
+def test_islands_keep_merging_across_a_syncer_restart(tmp_path, stop):
+    """The syncer is stopped while both islands keep training and answering
+    the pulls they already hold, then comes back with --resume on the same
+    port.  ``sigterm``: it writes its checkpoint and exits.  During the
+    outage a PUSH is not queued at all (``push_fragment_parts`` returns
+    False) and is a drop; a PUSH that went out on the old connection holds an
+    anchor whose round the restarted syncer no longer has, and is released
+    once the island redials.  ``sigkill``: a crash; the syncer resumes from
+    its last periodic checkpoint, older than what the islands hold, and its
+    catch-up rewinds them (rebased onto it) instead of being dropped while
+    every push from the lost versions is refused as a future base.  Both
+    islands must reach the restarted syncer's final cut."""
 
     import signal
 
@@ -994,12 +1113,17 @@ def test_islands_keep_merging_across_a_syncer_restart_from_its_shutdown_checkpoi
         procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
         procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
         deadline = time.monotonic() + 120
-        while read(0, first).count("outer step") < 8:
-            assert time.monotonic() < deadline, "the first syncer never merged 8 rounds"
+        # sigkill: past a periodic checkpoint (every 4 rounds), not on one.
+        while read(0, first).count("outer step") < (8 if stop == "sigterm" else 10):
+            assert time.monotonic() < deadline, "the first syncer never merged enough rounds"
             assert first.poll() is None, "the first syncer exited early"
             time.sleep(0.05)
-        first.send_signal(signal.SIGTERM)
-        assert first.wait(timeout=60) == 0, "SIGTERM did not end in a clean checkpoint"
+        if stop == "sigterm":
+            first.send_signal(signal.SIGTERM)
+            assert first.wait(timeout=60) == 0, "SIGTERM did not end in a clean checkpoint"
+        else:
+            first.kill()
+            first.wait(timeout=60)
         assert ckpt.exists()
         time.sleep(3.0)  # the outage: both islands keep stepping
         second = start(["--resume"])
@@ -1024,4 +1148,6 @@ def test_islands_keep_merging_across_a_syncer_restart_from_its_shutdown_checkpoi
     for fid, frag_names in enumerate(islands[0]["fragments"]):
         assert torch.equal(torch.cat([islands[0]["values"][n].reshape(-1) for n in frag_names]), final[fid])
     assert "outer step" in logs[1], "the restarted syncer merged nothing"
+    if stop == "sigkill":
+        assert sum(i["stats"].get("rebased", 0) for i in islands) > 0, "no island was rewound"
     print(json.dumps([i["stats"] for i in islands]))
