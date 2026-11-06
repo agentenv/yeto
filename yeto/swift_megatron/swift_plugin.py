@@ -63,6 +63,10 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
                                   with each checkpoint (~2 bytes per local
                                   parameter per rank for bf16); default 0
+  YETO_DILOCO_INIT_PROBE_S        resumed learner 0 with an initial-cut wait:
+                                  send INIT_PARAMS only if the syncer sends no
+                                  catch-up within this many seconds (an
+                                  initialized syncer ignores INIT); default 1800
   YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
                                   rate schedule of a resume that did not load
                                   it (``restore_lr_schedule``)
@@ -129,6 +133,7 @@ class DiLoCoHookConfig:
     initial_cut_timeout: float = 0.0
     resume_dir: Optional[str] = None
     save_anchors: bool = False
+    init_probe_s: float = 1800.0
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -169,6 +174,7 @@ class DiLoCoHookConfig:
             initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
             resume_dir=get("RESUME_DIR"),
             save_anchors=(get("SAVE_ANCHORS", default="0") or "").strip().lower() in {"1", "true", "yes", "on"},
+            init_probe_s=get_float("INIT_PROBE_S", 1800.0),
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -265,6 +271,7 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
         initial_cut_timeout=cfg.initial_cut_timeout,
         resume_dir=resume_dir,
         resume_iteration=resume_iteration,
+        init_probe_s=cfg.init_probe_s,
     )
 
 
