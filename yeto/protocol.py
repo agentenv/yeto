@@ -2684,7 +2684,7 @@ class SyncerClient:
 
     def _reassemble(
         self, gen: int, payload: bytes | bytearray
-    ) -> tuple[int, memoryview, bytes | None] | _StreamedInboundFragment | None:
+    ) -> tuple[int, memoryview] | tuple[int, memoryview, bytes] | _StreamedInboundFragment | None:
         if len(payload) < _CHUNK_HEAD.size:
             raise ValueError("chunk header truncated")
         msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
@@ -2765,7 +2765,9 @@ class SyncerClient:
             if digest is not None:
                 digest.cancel()
             raise ValueError("corrupt reassembled frame")
-        return msg_type, memoryview(buf)[_HEADER.size :], None if digest is None else digest.finish()
+        if digest is None:
+            return msg_type, memoryview(buf)[_HEADER.size :]
+        return msg_type, memoryview(buf)[_HEADER.size :], digest.finish()
 
     def _stream_chunk_locked(
         self,
