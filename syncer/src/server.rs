@@ -5949,21 +5949,24 @@ fn route_push(
 /// same fragment against its own base, weighted by its counters (and the
 /// carry discount), as long as its base lag stays within `--max-base-lag`.
 ///
-/// A carried delta counts once: after the syncer carries a delta from an
-/// anchor (fragment version), a later push of that island connection from
-/// the same or an older anchor of that fragment is refused
-/// (`anchor_reused`), and a late push from an anchor whose delta was
-/// already merged is not carried. Pushes that never involve a carry keep
-/// the existing stale-base rules.
+/// A delta counts once: after the syncer carries or gathers a delta from an
+/// anchor (fragment version), a later push of that island from the same or
+/// an older anchor of that fragment is refused (`anchor_reused`), on any of
+/// its connections. An island that redials (a WAN drop, a syncer it lost
+/// for a while) releases the anchors its lost pushes held, so it may answer
+/// the next pull from an anchor whose delta did reach this syncer; that
+/// second delta repeats the first one's local steps and must not be merged
+/// again. A round restart frees the anchors of the pushes it dropped
+/// (`release_anchor`). Pushes from newer anchors keep the stale-base rules.
 struct LateCarry {
     limit: u64,
     /// Late pushes waiting for their fragment's next round.
     queued: HashMap<usize, Vec<(Member, Push)>>,
-    /// Newest base version of a carried delta per island connection and
-    /// fragment.
-    anchors: HashMap<(Member, usize), u64>,
-    /// Newest base version of a delta gathered by its own round.
-    gathered: HashMap<(Member, usize), u64>,
+    /// Newest base version of a carried delta per island and fragment.
+    anchors: HashMap<(u32, usize), u64>,
+    /// Newest base version of a delta gathered by its own round, per island
+    /// and fragment.
+    gathered: HashMap<(u32, usize), u64>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5991,27 +5994,30 @@ impl LateCarry {
         }
     }
 
-    /// True when `push` reuses an anchor this connection already spent.
+    /// True when `push` reuses an anchor whose delta this island already
+    /// had carried or gathered (by any of its connections).
     fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
-        self.anchors
-            .get(&(member, push.fragment_id as usize))
-            .is_some_and(|&spent| push.base_version <= spent)
+        let key = (member.learner_id, push.fragment_id as usize);
+        [self.anchors.get(&key), self.gathered.get(&key)]
+            .into_iter()
+            .flatten()
+            .any(|&taken| push.base_version <= taken)
     }
 
     fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let spent = self.anchors.entry((member, fragment)).or_insert(0);
+        let spent = self.anchors.entry((member.learner_id, fragment)).or_insert(0);
         *spent = (*spent).max(base_version);
     }
 
     fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let taken = self.gathered.entry((member, fragment)).or_insert(0);
+        let taken = self.gathered.entry((member.learner_id, fragment)).or_insert(0);
         *taken = (*taken).max(base_version);
     }
 
     /// A restarted round drops its gathered pushes; their islands answer the
     /// new attempt from the same anchor, so the anchor is free again.
     fn release_anchor(&mut self, member: Member, push: &Push) {
-        let key = (member, push.fragment_id as usize);
+        let key = (member.learner_id, push.fragment_id as usize);
         if self.gathered.get(&key) == Some(&push.base_version) {
             if push.base_version == 0 {
                 self.gathered.remove(&key);
@@ -6045,7 +6051,7 @@ impl LateCarry {
         }
         if self
             .gathered
-            .get(&(member, p))
+            .get(&(member.learner_id, p))
             .is_some_and(|&taken| push.base_version <= taken)
         {
             return CarryOutcome::Rejected(PushDisposition::Duplicate);
@@ -12532,6 +12538,30 @@ mod tests {
     }
 
     #[test]
+    fn a_gathered_anchor_yields_one_delta_across_reconnects() {
+        // Island 1 answered round t=7 of fragment 1 from anchor 5; the delta
+        // is gathered. The link drops, the learner redials (generation 11),
+        // releases its spent anchor and answers the next pull from the same
+        // anchor 5 before the round's broadcast reached it: refused.
+        let mut carry = LateCarry::new(Some(4), false).unwrap();
+        let (old, new) = (member(1, 10), member(1, 11));
+        carry.note_gathered(old, 1, 5);
+        let again = test_push_for(1, 5);
+        assert!(carry.reuses_anchor(new, &again));
+        assert!(carry.reuses_anchor(old, &again));
+        // From the broadcast it then gets (version 7) it pushes again.
+        assert!(!carry.reuses_anchor(new, &test_push_for(1, 7)));
+        // A restart of that round drops the gathered delta: the anchor is
+        // free for the new attempt, from either connection.
+        carry.release_anchor(old, &test_push_for(1, 5));
+        assert!(!carry.reuses_anchor(new, &again));
+        // A restarted syncer starts with nothing taken: the delta it lost is
+        // merged once when the island answers from that anchor again.
+        let fresh = LateCarry::new(Some(4), false).unwrap();
+        assert!(!fresh.reuses_anchor(new, &again));
+    }
+
+    #[test]
     fn a_carried_anchor_yields_one_delta() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let island = member(1, 10);
@@ -12541,8 +12571,14 @@ mod tests {
         assert!(carry.reuses_anchor(island, &push));
         assert!(carry.reuses_anchor(island, &test_push_for(1, 3)));
         assert!(!carry.reuses_anchor(island, &test_push_for(1, 7)));
-        // Another connection or fragment is unaffected.
-        assert!(!carry.reuses_anchor(member(1, 11), &push));
+        // The island's next connection may not spend it again (a redialed
+        // learner answers from the same anchor); another island or
+        // fragment is unaffected.
+        assert!(carry.reuses_anchor(member(1, 11), &push));
+        assert!(!carry.reuses_anchor(member(3, 10), &test_push_for(1, 5)));
+        let mut elsewhere = test_push_for(1, 5);
+        elsewhere.fragment_id += 1;
+        assert!(!carry.reuses_anchor(island, &elsewhere));
         // A late push from an anchor already merged by its own round is not
         // carried; a restart clears the gathered push and frees the anchor.
         let other = member(2, 10);

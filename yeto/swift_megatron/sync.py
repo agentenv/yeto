@@ -169,6 +169,9 @@ RESUME_FORMAT = 1
 # ``yeto.diloco_sync.resume_fragment_mode`` results (that module imports torch).
 RESUME_OVERWRITE, RESUME_ANCHOR, RESUME_SHIFT = "overwrite", "anchor", "shift"
 
+# ``spent_link`` of an anchor spent by the process the island resumed from.
+_PREVIOUS_PROCESS = "previous-process"
+
 _LAYER_MODULE_RE = re.compile(r"(^|\.)decoder\.layers\.(\d+)$")
 _GROUPED_EXPERT_RE = re.compile(r"^(.*?)(weight|bias)(\d+)$")
 
@@ -656,6 +659,11 @@ class MegatronDiLoCoSync:
         # for a newer broadcast instead of a gather that would be refused.  A
         # restarted attempt of the same round may reuse it.
         self.spent: list[tuple[int, int] | None] = [None] * self.num_fragments
+        # The syncer link (connection generation) each spent PUSH went out on:
+        # once the link is replaced, an undelivered delta is gone with the old
+        # connection and a restarted syncer lost the rounds it was carried to,
+        # so the guard is released (``_release_spent_after_reconnect``).
+        self.spent_link: list[Any] = [None] * self.num_fragments
         # The torch learner's per-fragment counters and versions, kept alike on
         # every rank (anchors live in ``self.anchors``, sharded, not here).
         self.state = DiLoCoSyncState.create(self.num_fragments, track_anchors=False)
@@ -692,7 +700,7 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             try:
                 self.client = self._connect(syncer, hmac_key_path, wan_streams, client_factory)
-                self.sender = _PushSender(self.client, self.stats, self._push_dropped)
+                self.sender = _PushSender(self.client, self.stats, self._push_dropped, self._push_sent)
             except Exception as exc:  # raised on every rank below
                 error = f"{type(exc).__name__}: {exc}"
         self._raise_if(self._bcast_object(error))
@@ -832,6 +840,9 @@ class MegatronDiLoCoSync:
         if mode == RESUME_ANCHOR:
             spent = self.resume_record["spent"][fid]
             self.spent[fid] = None if spent is None else (int(spent[0]), int(spent[1]))
+            # Pushed by the previous process, on a link that is gone: released
+            # at the first boundary like any spent anchor after a reconnect.
+            self.spent_link[fid] = None if spent is None else _PREVIOUS_PROCESS
 
     def _resume_paths(self, resume_dir: str) -> tuple[str, str]:
         return (os.path.join(resume_dir, RESUME_STATE_FILE),
@@ -1310,6 +1321,7 @@ class MegatronDiLoCoSync:
             if state.pending_pulls:
                 self.stats["deferred_pushes"] += 1
             return []
+        self._release_spent_after_reconnect()
         ready = take_ready_pulls(state, steps_total=self.iteration, units_total=self.units_total,
                                  anchored=self.anchored.__getitem__, min_steps=self.interval)
         # One fragment per boundary: its PUSH streams in the background while
@@ -1323,6 +1335,38 @@ class MegatronDiLoCoSync:
             out.append((int(pull.fragment_id), int(pull.global_step), int(pull.round_attempt), c_steps, c_units))
         return out
 
+    def link_of(self, fid: int) -> Any:
+        """Rank 0: the connection generation fragment ``fid`` is pushed on
+        (None for a client that does not expose it)."""
+        client = self.client
+        of = getattr(client, "connection_generation_of", None)
+        if of is not None:
+            return of(fid)
+        return getattr(client, "connection_generation", None)
+
+    def _release_spent_after_reconnect(self) -> None:
+        """Rank 0, sender idle: free every spent anchor whose PUSH went out
+        on a connection that has since been replaced.
+
+        Without this an island that pushed just before a syncer restart (or
+        whose PUSH was carried into a round the restarted syncer no longer
+        has) refuses every pull of that fragment until a newer broadcast,
+        which no syncer sends once every island waits like this.  Answering
+        from the same anchor again cannot double-count it: a syncer that
+        still holds the delta refuses the second one per island
+        (``anchor_reused``, syncer ``LateCarry``), and one that lost it
+        merges it once."""
+        for fid, spent in enumerate(self.spent):
+            if spent is None or self.spent_link[fid] is None:
+                continue
+            link = self.link_of(fid)
+            if link is not None and link != self.spent_link[fid]:
+                log.info("fragment %d: anchor %d released after a reconnect (push of step %d)",
+                         fid, spent[0], spent[1])
+                self.spent[fid] = None
+                self.spent_link[fid] = None
+                self.stats["released_anchors"] = self.stats.get("released_anchors", 0) + 1
+
     def _pushable(self, pull: Any) -> bool:
         fid = int(pull.fragment_id)
         spent = self.spent[fid]
@@ -1332,6 +1376,11 @@ class MegatronDiLoCoSync:
         """Sender thread: a dropped PUSH never reached the syncer, so its anchor is not spent."""
         if self.spent[fid] == (base, step):
             self.spent[fid] = None
+            self.spent_link[fid] = None
+
+    def _push_sent(self, fid: int) -> None:
+        """Sender thread, before the PUSH is queued: the link it goes out on."""
+        self.spent_link[fid] = self.link_of(fid)
 
     def _take_updates(self, plan: _Plan) -> dict[int, Any]:
         updates, self._updates = self._updates, {}
@@ -1351,6 +1400,7 @@ class MegatronDiLoCoSync:
             return f"PUSH fragment {fid}: {self._export_error}"
         head = (fid, step, attempt, self.state.fragment_versions[fid], self.iteration, c_steps, c_units)
         self.spent[fid] = (self.state.fragment_versions[fid], step)
+        self.spent_link[fid] = None  # set by the sender once it goes out
         if self.wire == DTYPE_Q4:
             # q4 blocks span tensors: the shared encoder takes the whole delta.
             self.sender.submit(head, payload=encode_push_delta(self.client, torch.cat(parts)))
@@ -1456,11 +1506,12 @@ class _PushSender:
     push (the syncer re-requests it after the redial); any other failure is
     re-raised by the next boundary on every rank."""
 
-    def __init__(self, client: Any, stats: dict, on_drop: Callable[[int, int, int], None]) -> None:
+    def __init__(self, client: Any, stats: dict, on_drop: Callable[[int, int, int], None],
+                 on_sent: Callable[[int], None] | None = None) -> None:
         import queue
         import threading
 
-        self.client, self.stats, self.on_drop = client, stats, on_drop
+        self.client, self.stats, self.on_drop, self.on_sent = client, stats, on_drop, on_sent
         self.jobs: queue.Queue = queue.Queue()
         self.idle = threading.Event()
         self.idle.set()
@@ -1488,6 +1539,11 @@ class _PushSender:
         self.thread.join(timeout=5.0)
 
     def _run(self) -> None:
+        from yeto.protocol import PartialMessageGenerationLost
+
+        # A torso on a dead connection generation is dropped by the syncer,
+        # so all three mean the delta was never delivered.
+        undelivered = (ConnectionError, OSError, PartialMessageGenerationLost)
         while True:
             job = self.jobs.get()
             if job is None:
@@ -1496,14 +1552,17 @@ class _PushSender:
             fid = head[0]
             try:
                 if payload is not None:
-                    self.client.push_fragment(*head, payload)
-                    nbytes = len(payload)
-                else:
-                    self.client.push_fragment_parts(*head, parts)
-                    nbytes = sum(len(part) for part in parts)
+                    parts = [payload]  # q4: already wire bytes, sent unchanged
+                nbytes = sum(len(part) for part in parts)
+                if self.on_sent is not None:
+                    self.on_sent(fid)  # before the send: the link it is queued on
+                if self.client.push_fragment_parts(*head, parts) is False:
+                    # Nothing was queued: the link is down (an outage, a syncer
+                    # restart).  The syncer never sees this delta.
+                    raise ConnectionError("syncer link down, nothing queued")
                 self.stats["pushed"] += 1
                 self.stats["push_bytes"] += nbytes
-            except (ConnectionError, OSError) as exc:
+            except undelivered as exc:  # the anchor is not spent
                 self.stats["dropped_pushes"] += 1
                 self.on_drop(fid, head[3], head[1])
                 log.warning("push of fragment %d dropped (%s); the syncer re-requests it", fid, exc)

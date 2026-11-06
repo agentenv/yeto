@@ -74,6 +74,98 @@ def test_chunks_are_bounded_and_keep_order():
 
 
 # ----------------------------------------------------------------------------- fake Megatron island
+class _LinkClient:
+    """The client surface ``_PushSender`` and ``_ready_pushes`` use: a link
+    generation the test bumps, and a push result it chooses."""
+
+    def __init__(self, result=True):
+        self.connection_generation, self.result, self.pushes, self.pulls = 1, result, [], []
+
+    def push_fragment_parts(self, *head_and_parts):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        self.pushes.append(head_and_parts[:-1])
+        return self.result
+
+    def drain_pulls(self):
+        pulls, self.pulls = self.pulls, []
+        return pulls
+
+
+@pytest.mark.parametrize("outcome", ["not-queued", "torso-lost", "socket-error"])
+def test_push_sender_treats_an_undelivered_push_as_a_drop(outcome):
+    """``push_fragment_parts`` returns False when the link is down (nothing
+    queued) and raises PartialMessageGenerationLost when the connection died
+    mid-message: neither reaches the syncer, so the anchor is released
+    instead of blocking that fragment's later pulls (or failing the island)."""
+
+    from yeto.protocol import PartialMessageGenerationLost
+
+    result = {"not-queued": False,
+              "torso-lost": PartialMessageGenerationLost(connection_generation=1, connection_epoch=1,
+                                                         queued_chunks=1, operation="PUSH_FRAGMENT"),
+              "socket-error": ConnectionResetError("reset")}[outcome]
+    stats = {"pushed": 0, "push_bytes": 0, "dropped_pushes": 0}
+    dropped, sent = [], []
+    sender = sm._PushSender(_LinkClient(result), stats, lambda *a: dropped.append(a), sent.append)
+    sender.submit((2, 9, 1, 7, 40, 3, 300), parts=[b"\0" * 8])
+    assert sender.wait_idle(5)
+    sender.stop()
+    assert dropped == [(2, 7, 9)] and sent == [2]
+    assert stats["dropped_pushes"] == 1 and stats["pushed"] == 0
+    sender.raise_error()  # not an island failure
+
+
+def _bare_sync(client, fragments=2):
+    from yeto.diloco_sync import DiLoCoSyncState
+
+    sync = object.__new__(sm.MegatronDiLoCoSync)
+    sync.client, sync.sender, sync.interval = client, None, 1
+    sync.state = DiLoCoSyncState.create(fragments, track_anchors=False)
+    sync.state.fragment_versions = [5] * fragments
+    sync.anchored = [True] * fragments
+    sync.spent, sync.spent_link = [None] * fragments, [None] * fragments
+    sync.iteration, sync.units_total, sync.stats = 20, 100, {"deferred_pushes": 0}
+    return sync
+
+
+def test_a_spent_anchor_is_released_once_the_island_redials():
+    """A PUSH queued on a connection that later died may never have reached
+    the syncer, and a restarted syncer has lost the round it was carried
+    into; after the redial the next pull of that fragment is answered from
+    the same anchor (the syncer refuses it if it does hold that delta)."""
+
+    from yeto.protocol import PullRequest
+
+    client = _LinkClient()
+    sync = _bare_sync(client)
+    sync.spent[0] = (5, 7)  # pushed from anchor 5 for round 7, on link 1
+    sync._push_sent(0)
+    assert sync.spent_link[0] == 1
+    client.pulls = [PullRequest(0, 9, 1)]  # another round of the same anchor
+    assert sync._ready_pushes() == []  # same link: the syncer has the delta
+    assert sync.state.pending_pulls == [PullRequest(0, 9, 1)]
+    client.connection_generation = 2  # the link was replaced
+    assert [p[:3] for p in sync._ready_pushes()] == [(0, 9, 1)]
+    assert sync.spent == [None, None] and sync.stats["released_anchors"] == 1
+    # A record from the process the island resumed from: released likewise.
+    sync.spent[1], sync.spent_link[1] = (5, 4), sm._PREVIOUS_PROCESS
+    client.pulls = [PullRequest(1, 10, 1)]
+    assert [p[:3] for p in sync._ready_pushes()] == [(1, 10, 1)]
+
+
+def test_a_dropped_push_frees_its_anchor_on_the_same_link():
+    from yeto.protocol import PullRequest
+
+    client = _LinkClient()
+    sync = _bare_sync(client)
+    sync.spent[0] = (5, 7)
+    sync._push_sent(0)
+    sync._push_dropped(0, 5, 7)
+    client.pulls = [PullRequest(0, 9, 1)]
+    assert [p[:3] for p in sync._ready_pushes()] == [(0, 9, 1)]
+
+
 def _full(name: str, shape) -> torch.Tensor:
     """The initial full value of a global tensor (bf16-exact, so INIT is lossless)."""
 
@@ -859,3 +951,77 @@ def test_decoupled_quorum_one_keeps_the_fast_island_merging_while_the_other_stal
     # A late-carried delta counts towards its round's quorum, so the fast
     # island's rounds keep closing while the other island stalls.
     assert merged_during >= 3, merged_during
+
+
+@pytest.mark.timeout(300)
+def test_islands_keep_merging_across_a_syncer_restart_from_its_shutdown_checkpoint(tmp_path):
+    """The syncer is stopped (SIGTERM: it writes its checkpoint and exits)
+    while both islands keep training and answering the pulls they already
+    hold, then comes back with --resume on the same port.  During the outage
+    a PUSH is not queued at all (``push_fragment_parts`` returns False) and is
+    a drop; a PUSH that went out on the old connection holds an anchor whose
+    round the restarted syncer no longer has, and is released once the
+    island redials.  Both islands must reach the restarted syncer's final cut
+    instead of refusing its pulls forever."""
+
+    import signal
+
+    binary = build_syncer()
+    from process_groups import group_popen
+
+    port = free_port()
+    final_state = tmp_path / "final.bin"
+    ckpt = tmp_path / "syncer.ckpt"
+    flags = [str(binary), "--port", str(port), "--learners", "2", "--grace-ms", "200",
+             "--terminal-grace-ms", "2000", "--total-steps", "30", "--final-state", str(final_state),
+             "--checkpoint-path", str(ckpt), "--checkpoint-every", "4", "--shutdown-timeout-s", "5",
+             *DECOUPLED_SYNCER_FLAGS]
+    logs: list[str] = []
+
+    def start(extra):
+        proc = group_popen(flags + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        logs.append("")
+        return proc
+
+    def read(i, proc):  # the log file written so far
+        logs[i] += proc.stdout.read()
+        return logs[i]
+
+    first = start([])
+    second = None
+    procs = []
+    try:
+        procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
+        procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
+        deadline = time.monotonic() + 120
+        while read(0, first).count("outer step") < 8:
+            assert time.monotonic() < deadline, "the first syncer never merged 8 rounds"
+            assert first.poll() is None, "the first syncer exited early"
+            time.sleep(0.05)
+        first.send_signal(signal.SIGTERM)
+        assert first.wait(timeout=60) == 0, "SIGTERM did not end in a clean checkpoint"
+        assert ckpt.exists()
+        time.sleep(3.0)  # the outage: both islands keep stepping
+        second = start(["--resume"])
+        _join(procs, 240, tmp_path)
+        assert second.wait(timeout=60) == 0, "the restarted syncer exited nonzero"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+        for i, proc in enumerate((first, second)):
+            if proc is not None:
+                if proc.poll() is None:
+                    proc.kill()
+                read(i, proc)
+                (tmp_path / f"syncer{i}.log").write_text(logs[i])
+        print(logs[-1][-4000:])
+
+    islands = [torch.load(tmp_path / f"island{i}.pt") for i in range(2)]
+    for name in islands[0]["names"]:
+        assert torch.equal(islands[0]["values"][name], islands[1]["values"][name]), name
+    final = read_final_state(final_state)
+    for fid, frag_names in enumerate(islands[0]["fragments"]):
+        assert torch.equal(torch.cat([islands[0]["values"][n].reshape(-1) for n in frag_names]), final[fid])
+    assert "outer step" in logs[1], "the restarted syncer merged nothing"
+    print(json.dumps([i["stats"] for i in islands]))
