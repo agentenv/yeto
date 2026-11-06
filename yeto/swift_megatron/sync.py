@@ -168,19 +168,44 @@ from typing import Any
 log = logging.getLogger("swift-megatron-sync")
 
 
-def _ensure_visible_logs() -> None:
-    """ms-swift configures only its own ``swift`` logger, so with an
-    unconfigured root this module's INFO lines (``resume: fragment ...``,
-    per-fragment installs) were dropped and only WARNING reached stderr
-    through logging's last resort.  Give the module a stderr handler at INFO
-    unless the process configured logging itself."""
-    if log.handlers or logging.getLogger().handlers:
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("[swift-megatron-sync] %(asctime)s %(levelname)s %(message)s"))
-    log.addHandler(handler)
-    if log.level == logging.NOTSET:
-        log.setLevel(logging.INFO)
+def _emits_info(logger: logging.Logger) -> bool:
+    """Whether an INFO record of ``logger`` reaches some handler that prints it."""
+    if not logger.isEnabledFor(logging.INFO):
+        return False
+    node: logging.Logger | None = logger
+    while node is not None:
+        if any(handler.level <= logging.INFO for handler in node.handlers):
+            return True
+        if not node.propagate:
+            return False
+        node = node.parent  # type: ignore[assignment]
+    return False
+
+
+def ensure_visible_logs(*loggers: logging.Logger) -> None:
+    """Make these loggers' INFO lines reach stderr.
+
+    ms-swift configures only its own ``swift`` logger, and the Megatron SFT
+    entry point leaves the root logger with a single stdout handler at ERROR:
+    every INFO *and* WARNING of a yeto module (``resume: fragment ...``,
+    ``INIT_PARAMS skipped``, ``anchor ... released after a reconnect``, the LR
+    schedule rebuild) propagated into that handler and was dropped, and
+    logging's last resort never fires once root has a handler.  A logger whose
+    records some handler on its propagation path already prints at INFO is
+    left alone; any other gets its own stderr handler at INFO and stops
+    propagating (so an ERROR is not printed twice)."""
+    for logger in loggers or (log,):
+        if logger.handlers or _emits_info(logger):
+            continue
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(f"[{logger.name}] %(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        if logger.level == logging.NOTSET or logger.level > logging.INFO:
+            logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+
+_ensure_visible_logs = ensure_visible_logs
 
 # Megatron's tied/untied output projection is an embedding-like tensor for the
 # direct-averaged fragment, as ``lm_head`` is for the torch learner.
