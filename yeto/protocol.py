@@ -575,7 +575,7 @@ def write_frame(sock: socket.socket, msg_type: int, payload: bytes) -> None:
     sock.sendall(_HEADER.pack(MAGIC, msg_type, len(payload)) + payload)
 
 
-def _read_exact(sock: socket.socket, n: int) -> bytes:
+def _read_exact(sock: socket.socket, n: int, *, copy: bool = True) -> bytes | bytearray:
     buf = bytearray(n)
     view = memoryview(buf)
     got = 0
@@ -584,14 +584,18 @@ def _read_exact(sock: socket.socket, n: int) -> bytes:
         if r == 0:
             raise ConnectionError("syncer closed connection")
         got += r
-    return bytes(buf)
+    return bytes(buf) if copy else buf
 
 
 def read_frame(
     sock: socket.socket,
     max_payload: int | Callable[[int], int] = MAX_HANDSHAKE_FRAME,
+    *,
+    raw_types: tuple[int, ...] = (),
 ) -> tuple[int, bytes]:
-    """Read one frame after checking its type-aware limit before allocation."""
+    """Read one frame after checking its type-aware limit before allocation.
+    The payload of a type in ``raw_types`` is the receive buffer itself (a
+    bytearray, one copy less), every other payload is bytes."""
     magic, msg_type, length = _HEADER.unpack(_read_exact(sock, _HEADER.size))
     if magic != MAGIC:
         raise ValueError(f"bad magic {magic:#x}")
@@ -600,7 +604,7 @@ def read_frame(
         raise ValueError(
             f"frame type {msg_type} has length {length}, exceeds limit {limit}"
         )
-    return msg_type, _read_exact(sock, length)
+    return msg_type, _read_exact(sock, length, copy=msg_type not in raw_types)
 
 
 HELLO_MAC_DOMAIN = b"yeto-hello-mac-v1\0"
@@ -1052,6 +1056,113 @@ class _StagedInboundChunk:
     token: object | None
 
 
+# Digest of a BCAST_FRAGMENT payload on the in-memory receive path: SHA-256
+# over the SHA-256 of every BCAST_DIGEST_BLOCK bytes, so the blocks of a
+# large payload are hashed in parallel (hashlib releases the GIL) while its
+# chunks still arrive.  It only ever meets digests of this client's own
+# receive path (``_bcast_seen``): a replay of the version held is one with
+# the same digest, another payload under that version a conflict, as with a
+# flat SHA-256.
+BCAST_DIGEST_BLOCK = 32 << 20
+BCAST_DIGEST_THREADS = 4
+_BCAST_DIGEST_DOMAIN = b"yeto-bcast-blocks-sha256-v1\0"
+
+
+def _block_digest_join(nbytes: int, blocks: Sequence[bytes]) -> bytes:
+    return hashlib.sha256(_BCAST_DIGEST_DOMAIN + struct.pack("<Q", nbytes) + b"".join(blocks)).digest()
+
+
+def bcast_payload_digest(data: bytes | bytearray | memoryview) -> bytes:
+    """``_BlockDigest``'s digest of ``data``, computed in one call."""
+    view = memoryview(data).cast("B")
+    blocks = [hashlib.sha256(view[i:i + BCAST_DIGEST_BLOCK]).digest()
+              for i in range(0, view.nbytes, BCAST_DIGEST_BLOCK)]
+    return _block_digest_join(view.nbytes, blocks)
+
+
+class _BlockDigest:
+    """``bcast_payload_digest(buf[start:])``, computed while a chunked
+    message arrives: each block is hashed on the client's digest pool as
+    soon as all its bytes are in."""
+
+    def __init__(self, buf: bytearray, start: int, submit: Callable[[Callable[[], None]], None]) -> None:
+        self.view = memoryview(buf)[start:]
+        self.start = start
+        self.nbytes = self.view.nbytes
+        count = -(-self.nbytes // BCAST_DIGEST_BLOCK)
+        self.missing = [min(BCAST_DIGEST_BLOCK, self.nbytes - i * BCAST_DIGEST_BLOCK) for i in range(count)]
+        self.blocks: list[bytes | None] = [None] * count
+        self.submit = submit
+        self.lock = threading.Lock()
+        self.done = threading.Condition(self.lock)
+        self.pending = 0  # submitted, not yet hashed
+        self.cancelled = False
+
+    def arrived(self, offset: int, end: int) -> None:
+        """``buf[offset:end]`` is in (called once per chunk, under the
+        reassembly lock): queue every block it completes."""
+        lo, hi = max(offset - self.start, 0), max(end - self.start, 0)
+        ready = []
+        with self.lock:
+            for block in range(lo // BCAST_DIGEST_BLOCK, -(-hi // BCAST_DIGEST_BLOCK)):
+                first = block * BCAST_DIGEST_BLOCK
+                self.missing[block] -= min(hi, first + BCAST_DIGEST_BLOCK) - max(lo, first)
+                if self.missing[block] == 0:
+                    ready.append(block)
+            self.pending += len(ready)
+        for block in ready:
+            self.submit(lambda block=block: self._hash(block))
+
+    def _hash(self, block: int) -> None:
+        try:
+            if not self.cancelled:
+                at = block * BCAST_DIGEST_BLOCK
+                self.blocks[block] = hashlib.sha256(self.view[at:at + BCAST_DIGEST_BLOCK]).digest()
+        finally:
+            with self.lock:
+                self.pending -= 1
+                self.done.notify_all()
+
+    def finish(self) -> bytes:
+        """Every byte arrived: wait for the last blocks, return the digest."""
+        with self.lock:
+            while self.pending:
+                self.done.wait()
+        for block, digest in enumerate(self.blocks):  # a block the pool never got (e.g. closed)
+            if digest is None:
+                at = block * BCAST_DIGEST_BLOCK
+                self.blocks[block] = hashlib.sha256(self.view[at:at + BCAST_DIGEST_BLOCK]).digest()
+        self.view.release()
+        return _block_digest_join(self.nbytes, self.blocks)  # type: ignore[arg-type]
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _Reassembly:
+    """One chunked inbound message being put together in memory."""
+
+    __slots__ = ("buf", "filled", "ranges", "digest")
+
+    def __init__(self, total: int, digest_start: int | None, submit=None) -> None:
+        self.buf = bytearray(total)
+        self.filled = 0
+        self.ranges: list[tuple[int, int]] = []  # sorted, disjoint
+        self.digest = None if digest_start is None else _BlockDigest(self.buf, digest_start, submit)
+
+    def overlaps(self, offset: int, end: int) -> bool:
+        import bisect
+
+        i = bisect.bisect_left(self.ranges, (offset, end))
+        return (i > 0 and self.ranges[i - 1][1] > offset) or (i < len(self.ranges) and self.ranges[i][0] < end)
+
+    def add(self, offset: int, end: int) -> None:
+        import bisect
+
+        bisect.insort(self.ranges, (offset, end))
+        self.filled += end - offset
+
+
 @dataclass
 class _StreamedReassembly:
     total: int
@@ -1315,7 +1426,9 @@ class SyncerClient:
         self._threads: list[threading.Thread] = []
         self._pulls: queue.Queue[PullRequest] = queue.Queue()
         self._bcasts: queue.Queue[BcastFragment] = queue.Queue()
-        self._bcast_seen: list[tuple[int, bytes] | None] = [
+        # (version, digest, digest kind) of each fragment's newest BCAST: the
+        # in-memory path's block digest or a streamed sink's payload hash.
+        self._bcast_seen: list[tuple[int, bytes, str] | None] = [
             None
         ] * layout.num_fragments
         self._bcast_lock = threading.Lock()
@@ -1332,11 +1445,9 @@ class SyncerClient:
         self.finalizing = threading.Event()
         self.finalized = threading.Event()
         self._final_cond = threading.Condition()
-        self._reasm: dict[
-            int,
-            tuple[bytearray, list[int], list[tuple[int, int]]]
-            | _StreamedReassembly,
-        ] = {}
+        self._reasm: dict[int, _Reassembly | _StreamedReassembly] = {}
+        # Hashes the blocks of large inbound BCAST payloads (_BlockDigest).
+        self._digest_pool: Any = None
         self._reasm_lock = threading.Lock()
         self._reasm_touched: dict[int, float] = {}  # msg_id -> last chunk (monotonic)
         self._inbound_chunk_sink: object | None = None
@@ -1559,6 +1670,10 @@ class SyncerClient:
     def close(self) -> None:
         self._closed.set()
         self._failure.set()  # unblock the supervisor so it exits instead of redialing
+        with self._reasm_lock:
+            pool, self._digest_pool = self._digest_pool, None
+        if pool is not None:
+            pool.shutdown(wait=False)  # queued block hashes still run: a finish() may wait on them
         with self._lock:
             queues, socks = list(self._queues), list(self._socks)
         for q in queues:
@@ -2518,7 +2633,7 @@ class SyncerClient:
             sock = _RateLimitedSocket(sock, test_rate)
         try:
             while True:
-                msg_type, payload = read_frame(sock, self._incoming_frame_limit)
+                msg_type, payload = read_frame(sock, self._incoming_frame_limit, raw_types=(MSG_CHUNK,))
                 if msg_type == MSG_CHUNK:
                     inner = self._reassemble(gen, payload)
                     if inner is not None:
@@ -2526,6 +2641,7 @@ class SyncerClient:
                             self._dispatch_streamed(gen, inner)
                         else:
                             self._dispatch(gen, *inner)
+                    del inner, payload
                 else:
                     self._dispatch(gen, msg_type, payload)
         except (ValueError, ProtocolError) as e:
@@ -2554,13 +2670,25 @@ class SyncerClient:
         except KeyError:
             raise ValueError(f"unexpected syncer message type {msg_type}") from None
 
+    def _submit_digest(self, job: Callable[[], None]) -> None:
+        """Run one block hash of a ``_BlockDigest`` on the digest pool
+        (called under ``_reasm_lock``, which also guards the lazy start)."""
+        if self._digest_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._digest_pool = ThreadPoolExecutor(BCAST_DIGEST_THREADS, thread_name_prefix="yeto-digest")
+        try:
+            self._digest_pool.submit(job)
+        except RuntimeError:  # the client closed its pool
+            job()
+
     def _reassemble(
-        self, gen: int, payload: bytes
-    ) -> tuple[int, memoryview] | _StreamedInboundFragment | None:
+        self, gen: int, payload: bytes | bytearray
+    ) -> tuple[int, memoryview, bytes | None] | _StreamedInboundFragment | None:
         if len(payload) < _CHUNK_HEAD.size:
             raise ValueError("chunk header truncated")
         msg_id, total, offset = _CHUNK_HEAD.unpack_from(payload)
-        data = payload[_CHUNK_HEAD.size :]
+        data = memoryview(payload)[_CHUNK_HEAD.size :]
         if not data:
             raise ValueError("empty chunk")
         if total < _HEADER.size:
@@ -2580,7 +2708,11 @@ class SyncerClient:
                 if len(self._reasm) >= MAX_PARTIAL_MESSAGES:
                     raise ValueError("too many partial chunked messages")
                 if self._inbound_chunk_sink is None:
-                    self._reasm[msg_id] = (bytearray(total), [0], [])
+                    # The digest of a large BCAST / FINAL payload (the bytes
+                    # after its 12-byte head) runs while the chunks arrive.
+                    start = _HEADER.size + 12
+                    big = total - start >= 2 * BCAST_DIGEST_BLOCK
+                    self._reasm[msg_id] = _Reassembly(total, start if big else None, self._submit_digest)
                 else:
                     sink = self._inbound_chunk_sink
                     self._reasm[msg_id] = _StreamedReassembly(
@@ -2610,24 +2742,30 @@ class SyncerClient:
                     self._reasm.pop(msg_id, None)
                     self._reasm_touched.pop(msg_id, None)
                 return completed
-            buf, filled, ranges = partial
+            buf = partial.buf
             if len(buf) != total:
                 raise ValueError("chunk total changed within one message")
-            if any(offset < old_end and old_start < end for old_start, old_end in ranges):
+            if partial.overlaps(offset, end):
                 raise ValueError("overlapping chunk")
             buf[offset:end] = data
-            filled[0] += len(data)
-            ranges.append((offset, end))
-            if filled[0] < total:
-                return None
-            if filled[0] != total:
-                raise ValueError("chunk byte count exceeds frame length")
-            del self._reasm[msg_id]
-            self._reasm_touched.pop(msg_id, None)
+            partial.add(offset, end)
+            digest = partial.digest
+            if digest is not None:
+                digest.arrived(offset, end)
+            complete = partial.filled >= total
+            if complete:
+                if partial.filled != total:
+                    raise ValueError("chunk byte count exceeds frame length")
+                del self._reasm[msg_id]
+                self._reasm_touched.pop(msg_id, None)
+        if not complete:
+            return None
         magic, msg_type, length = _HEADER.unpack_from(buf)
         if magic != MAGIC or length != total - _HEADER.size:
+            if digest is not None:
+                digest.cancel()
             raise ValueError("corrupt reassembled frame")
-        return msg_type, memoryview(buf)[_HEADER.size :]
+        return msg_type, memoryview(buf)[_HEADER.size :], None if digest is None else digest.finish()
 
     def _stream_chunk_locked(
         self,
@@ -2793,6 +2931,8 @@ class SyncerClient:
             self._reasm.clear()
             self._reasm_touched.clear()
         for partial in partials:
+            if isinstance(partial, _Reassembly) and partial.digest is not None:
+                partial.digest.cancel()
             if isinstance(partial, _StreamedReassembly):
                 try:
                     self._abort_streamed_partial(partial)
@@ -2802,8 +2942,10 @@ class SyncerClient:
                     self._last_err = exc
 
     def _dispatch(
-        self, gen: int, msg_type: int, payload: bytes | memoryview
+        self, gen: int, msg_type: int, payload: bytes | memoryview, digest: bytes | None = None
     ) -> None:
+        """``digest``: SHA-256 of ``payload[12:]`` already computed while a
+        chunked BCAST payload arrived (``_BlockDigest``)."""
         with self._lock:
             if gen != self._gen:
                 return  # late message from a dead group
@@ -2811,21 +2953,23 @@ class SyncerClient:
             # atomic with respect to teardown/redial. Otherwise an obsolete
             # receiver could pass the check, lose the race to a reconnect,
             # then publish a stale terminal manifest or shutdown afterward.
-            self._dispatch_live(gen, msg_type, payload)
+            self._dispatch_live(gen, msg_type, payload, digest)
 
-    def _admit_bcast_locked(self, fid: int, version: int, digest: bytes) -> bool | None:
+    def _admit_bcast_locked(self, fid: int, version: int, digest: bytes, kind: str = "blocks") -> bool | None:
         """Under ``_bcast_lock``: whether a BCAST of ``fid`` is queued (its
         ``catch_up`` flag) or dropped (None).  Versions only move forward;
         a replay of the version already held (same bytes) is dropped, other
         bytes under that version are a protocol error, except for the first
         BCAST after a redial with ``accept_rewound_catch_up`` (a rewound
-        syncer's catch-up, taken as the fragment's new global)."""
+        syncer's catch-up, taken as the fragment's new global).  Digests of
+        two kinds (a sink installed in between) cannot be compared: the same
+        version is then taken as a replay."""
         first = self._catch_up_pending[fid]
         self._catch_up_pending[fid] = False
         seen = self._bcast_seen[fid]
         if seen is not None:
-            seen_version, seen_digest = seen
-            if version == seen_version and digest == seen_digest:
+            seen_version, seen_digest, seen_kind = seen
+            if version == seen_version and (digest == seen_digest or kind != seen_kind):
                 return None
             if version <= seen_version:
                 if not (first and self.accept_rewound_catch_up and self._downlink is None):
@@ -2837,7 +2981,7 @@ class SyncerClient:
                 self.rewound_catch_ups += 1
                 _connect_log(f"fragment {fid}: the syncer rewound from version {seen_version} to "
                              f"{version} (resumed from an older checkpoint); taking its catch-up")
-        self._bcast_seen[fid] = (version, digest)
+        self._bcast_seen[fid] = (version, digest, kind)
         return first
 
     def _dispatch_streamed(
@@ -2860,7 +3004,7 @@ class SyncerClient:
         if inbound.msg_type == MSG_BCAST_FRAGMENT:
             with self._bcast_lock:
                 try:
-                    catch_up = self._admit_bcast_locked(fragment_id, version, digest)
+                    catch_up = self._admit_bcast_locked(fragment_id, version, digest, "sink")
                 except ProtocolError:
                     if committed.discard is not None:
                         committed.discard()
@@ -2924,7 +3068,7 @@ class SyncerClient:
         )
 
     def _dispatch_live(
-        self, gen: int, msg_type: int, payload: bytes | memoryview
+        self, gen: int, msg_type: int, payload: bytes | memoryview, raw_digest: bytes | None = None
     ) -> None:
         if msg_type == MSG_ERROR:
             message = bytes(payload).decode("utf-8", errors="replace")
@@ -2991,6 +3135,7 @@ class SyncerClient:
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"BCAST_FRAGMENT for unknown fragment {fid}")
             if self._downlink is not None:
+                raw_digest = None  # the digest is of the decoded values
                 data = self._downlink.decode_whole(
                     fid, version, payload[12:], self.layout.fragments[fid].numel)
             else:
@@ -3003,7 +3148,7 @@ class SyncerClient:
                         f"expected {expected}"
                     )
                 data = payload[12:]
-            digest = hashlib.sha256(data).digest()
+            digest = raw_digest if raw_digest is not None else bcast_payload_digest(data)
             with self._bcast_lock:
                 catch_up = self._admit_bcast_locked(fid, version, digest)
                 if catch_up is None:

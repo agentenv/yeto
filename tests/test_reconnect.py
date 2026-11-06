@@ -493,3 +493,60 @@ def test_a_rewound_catch_up_with_the_same_version_and_other_bytes_is_taken_on_re
     _redial(client)
     client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 3) + b)
     assert [(u.version, u.data, u.catch_up) for u in client.drain_updates()] == [(3, b, True)]
+
+
+def _chunk_frames(fid, version, data, msg_id=7):
+    """The CHUNK payloads of one BCAST_FRAGMENT, as the syncer stripes them."""
+    from yeto.protocol import _CHUNK_HEAD, _HEADER, CHUNK_SIZE, MAGIC
+
+    inner = _HEADER.pack(MAGIC, MSG_BCAST_FRAGMENT, 12 + len(data)) + struct.pack("<IQ", fid, version) + data
+    return [bytearray(_CHUNK_HEAD.pack(msg_id, len(inner), off) + inner[off:off + CHUNK_SIZE])
+            for off in range(0, len(inner), CHUNK_SIZE)]
+
+
+def test_block_digest_is_computed_while_chunks_arrive_in_any_order():
+    import random
+
+    from yeto.protocol import BCAST_DIGEST_BLOCK, bcast_payload_digest
+
+    numel = (2 * BCAST_DIGEST_BLOCK + 3 * 1024 * 1024 + 4) // 4  # not a whole number of blocks
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("w", numel)])])
+    data = bytes(random.Random(0).randbytes(4 * numel))
+    want = bcast_payload_digest(data)
+    assert want != bcast_payload_digest(data[:-1] + b"\x01")
+    for seed in (1, 2):
+        client = SyncerClient(("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0)
+        client._gen = 1
+        seen = []
+        client._dispatch = lambda gen, msg_type, payload, digest=None: seen.append((bytes(payload[12:]), digest))
+        frames = _chunk_frames(0, 3, data)
+        random.Random(seed).shuffle(frames)
+        out = [client._reassemble(1, frame) for frame in frames]
+        assert all(o is None for o in out[:-1])
+        client._dispatch(1, *out[-1])
+        assert seen == [(data, want)]
+        client.close()
+
+
+def test_chunked_and_direct_broadcasts_share_the_replay_and_conflict_checks():
+    from yeto.protocol import BCAST_DIGEST_BLOCK
+
+    numel = 2 * BCAST_DIGEST_BLOCK // 4
+    layout = FragmentLayout([Fragment(MERGE_RDA, [("w", numel)])])
+    data = bytes(4 * numel)
+    other = b"\x01" + data[1:]
+    client = SyncerClient(("127.0.0.1", 1), LEARNER_ID, layout, dtype=DTYPE_F32, num_streams=0)
+    client._gen = 1
+    for frame in _chunk_frames(0, 3, data):
+        inner = client._reassemble(1, frame)
+    client._dispatch(1, *inner)
+    assert [u.version for u in client.drain_updates()] == [3]
+    # The same version again, unchunked: a replay, dropped.
+    client._dispatch(1, MSG_BCAST_FRAGMENT, struct.pack("<IQ", 0, 3) + data)
+    assert client.drain_updates() == []
+    # Other bytes under it, chunked: a conflict.
+    for frame in _chunk_frames(0, 3, other, msg_id=8):
+        inner = client._reassemble(1, frame)
+    with pytest.raises(ProtocolError, match="conflicting BCAST_FRAGMENT"):
+        client._dispatch(1, *inner)
+    client.close()
