@@ -382,3 +382,67 @@ def test_initial_cut_wait_is_on_by_default(monkeypatch):
     assert sp.DiLoCoHookConfig.from_env().initial_cut_timeout == 3600.0
     monkeypatch.setenv("YETO_DILOCO_INITIAL_CUT_TIMEOUT", "0")
     assert sp.DiLoCoHookConfig.from_env().initial_cut_timeout == 0.0
+
+
+def _logger_under(root_handler_level):
+    """A logger whose root mimics the Megatron SFT entry point's: one stdout
+    handler at ``root_handler_level`` (ERROR in the real process)."""
+    import io
+    import logging
+
+    root = logging.RootLogger(logging.INFO)
+    sink = io.StringIO()
+    handler = logging.StreamHandler(sink)
+    handler.setLevel(root_handler_level)
+    root.addHandler(handler)
+    logger = logging.Logger("yeto-test-visible")
+    logger.parent = root
+    return logger, sink
+
+
+def test_logs_are_made_visible_when_the_root_handler_drops_them(capsys):
+    import logging
+
+    from yeto.swift_megatron.sync import ensure_visible_logs
+
+    logger, root_sink = _logger_under(logging.ERROR)
+    ensure_visible_logs(logger)
+    logger.info("info line")
+    logger.warning("warning line")
+    logger.error("error line")
+    err = capsys.readouterr().err
+    assert "info line" in err and "warning line" in err and err.count("error line") == 1
+    assert root_sink.getvalue() == ""  # no longer propagated (no double ERROR)
+    ensure_visible_logs(logger)  # idempotent
+    assert len(logger.handlers) == 1
+
+
+def test_logs_are_left_alone_when_the_process_prints_info(capsys):
+    import logging
+
+    from yeto.swift_megatron.sync import ensure_visible_logs
+
+    logger, root_sink = _logger_under(logging.INFO)
+    ensure_visible_logs(logger)
+    assert logger.handlers == [] and logger.propagate
+    logger.info("via root")
+    assert "via root" in root_sink.getvalue() and capsys.readouterr().err == ""
+
+
+def test_the_lr_rebuild_warning_survives_an_error_level_root(make, monkeypatch, capsys):
+    import logging
+
+    import yeto.swift_megatron.sync as sync_mod
+
+    plugin_logger, _ = _logger_under(logging.ERROR)
+    sync_logger, _ = _logger_under(logging.ERROR)
+    monkeypatch.setattr(sp, "logger", plugin_logger)
+    monkeypatch.setattr(sync_mod, "log", sync_logger)
+    trainer = FakeTrainer([([1], True)], start_iteration=15)
+    trainer.args.global_batch_size = 384
+    trainer.opt_param_scheduler = _Scheduler([{}], warmup=10 * 384, decay=1000 * 384)
+    cb = sp.YetoDiLoCoCallback(trainer)
+    err = capsys.readouterr().err
+    assert "restored no LR schedule; stepped it by 5760" in err
+    assert sync_logger.handlers and not sync_logger.propagate
+    cb.close()

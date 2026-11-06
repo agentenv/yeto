@@ -347,6 +347,17 @@ def restore_lr_schedule(trainer) -> Optional[int]:
     return samples
 
 
+def _visible_logs() -> None:
+    """This module's and the sync core's WARNING/INFO lines would otherwise
+    go to the root handler the Megatron entry point leaves at ERROR."""
+    _ensure_repo_on_path()
+    try:
+        from yeto.swift_megatron.sync import ensure_visible_logs, log as sync_log
+    except ImportError:  # pragma: no cover - the sync core needs torch
+        return
+    ensure_visible_logs(logger, sync_log)
+
+
 def _model_chunks(trainer) -> list:
     # Pass the DDP-wrapped chunks: the sync core needs the grad/param buffers
     # and the DistributedOptimizer's mapping, both keyed on the wrapped models.
@@ -390,6 +401,7 @@ class YetoDiLoCoCallback(_CallbackBase):
             logger.warning("yeto DiLoCo callback disabled via %sDISABLE", ENV_PREFIX)
             return
         self.config = DiLoCoHookConfig.from_env()
+        _visible_logs()
         restore_lr_schedule(trainer)
         self._wrap_train_step()
         # Build here (not in on_train_begin) so a bad config fails before data
