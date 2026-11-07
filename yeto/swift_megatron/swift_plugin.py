@@ -67,6 +67,17 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
                                   with each checkpoint (~2 bytes per local
                                   parameter per rank for bf16); default 0
+  YETO_DILOCO_RESUME_ANCHOR_MMAP  1 (default) = map the saved anchor file on
+                                  resume instead of reading it into anonymous
+                                  memory.  Same values, but the shards the
+                                  restart never needs stay out of RSS (120B
+                                  pp0: ~30 GiB per rank, ~240 GiB per host).
+                                  0 restores the eager read.
+  YETO_DILOCO_ANCHOR_DTYPE        fp32 | bf16; default: the broadcast dtype
+                                  (FP32 for an int4/int8 push session).  bf16
+                                  halves the resident anchors but rounds the
+                                  pushed delta and the resume shift -- only
+                                  for an island that otherwise does not fit.
   YETO_DILOCO_INIT_PROBE_S        resumed learner 0 with an initial-cut wait:
                                   send INIT_PARAMS only if the syncer sends no
                                   catch-up within this many seconds (an
@@ -147,6 +158,8 @@ class DiLoCoHookConfig:
     init_probe_s: float = 1800.0
     heartbeat_s: float = 30.0
     heartbeat_stall_s: float = 0.0
+    anchor_dtype: Optional[str] = None
+    resume_anchor_mmap: bool = True
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -190,6 +203,9 @@ class DiLoCoHookConfig:
             init_probe_s=get_float("INIT_PROBE_S", 1800.0),
             heartbeat_s=get_float("HEARTBEAT_S", 30.0),
             heartbeat_stall_s=get_float("HEARTBEAT_STALL_S", 0.0),
+            anchor_dtype=get("ANCHOR_DTYPE"),
+            resume_anchor_mmap=(get("RESUME_ANCHOR_MMAP", default="1") or "").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -289,6 +305,8 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
         init_probe_s=cfg.init_probe_s,
         heartbeat_s=cfg.heartbeat_s,
         heartbeat_stall_s=cfg.heartbeat_stall_s,
+        anchor_dtype=cfg.anchor_dtype,
+        resume_anchor_mmap=cfg.resume_anchor_mmap,
     )
 
 
