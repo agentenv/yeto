@@ -1160,6 +1160,12 @@ impl Push {
         }
     }
 
+    /// A push that joins a round keeps its decoded gradient only: the wire
+    /// copy exists for a push that waits in the late-carry queue.
+    fn release_wire(&mut self) {
+        self.wire = None;
+    }
+
     /// Undo `compress`: decode the wire bytes exactly as on receipt, so the
     /// gradient is bit-identical to the one dropped.
     fn expand(&mut self) {
@@ -3388,7 +3394,7 @@ fn decode_init_params(group: &Group, payload: &[u8]) -> Result<(u32, [u8; 32], V
     let (sha256, values) = std::thread::scope(|scope| {
         let digest = scope.spawn(|| crate::sha256::digest(bytes));
         let mut values = Vec::new();
-        let decoded = decode_tensor(bulk_dtype(group.dtype), bytes, &mut values);
+        let decoded = decode_tensor_with(crate::par::default_threads(), bulk_dtype(group.dtype), bytes, &mut values);
         (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
     });
     Ok((fragment_id, sha256, values?))
@@ -5754,9 +5760,10 @@ fn route_push(
         // let the round close with the remaining responders. The refused work
         // is not lost: the island's next push is still relative to its raw
         // anchor. A fixed roster never merges a partial roster, so it keeps
-        // the slot; so does a round with a fold, which was sized for the full
-        // expected roster and may already have consumed pushes.
-        if !fixed_roster && round.fold.is_none() {
+        // the slot; so does a round with an exact fold, whose order and
+        // weights were fixed for the full expected roster. A streaming fold
+        // normalises over whatever it folded, so it may close without it.
+        if !fixed_roster && !matches!(round.fold, Some(RoundFold::Exact(_))) {
             round.forget_unanswered(member);
         }
         return PushDisposition::StaleBase;
@@ -5772,6 +5779,8 @@ fn route_push(
     if duplicate {
         return PushDisposition::Duplicate;
     }
+    let mut push = push;
+    push.release_wire();
     round.pushes.insert(member, push);
     advance_fold(round, member);
     PushDisposition::Accepted
@@ -5983,6 +5992,8 @@ fn attach_carry(
     if lag > limit {
         return Err(PushDisposition::StaleBase);
     }
+    let mut push = push;
+    push.release_wire();
     round.carried.push((member, push));
     Ok(lag)
 }
@@ -13891,6 +13902,50 @@ mod tests {
             .unwrap();
         st.commit_merge(merge).unwrap();
         st.params[0].to_vec()
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_of_a_streaming_fold_round() {
+        // Async carry needs a streaming fold, and that is where stale bases
+        // happen: the refused island must not hold the round until timeout.
+        let cfg = streaming_cfg();
+        let mut st = fold_test_state(crate::state::MERGE_AVG);
+        st.versions[0] = 15;
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Streaming(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, fast, push(0, 15), Some(8), false), PushDisposition::Accepted);
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+        prepare_round_compute(&cfg, &st, &mut rounds[0]).unwrap().finish_inline().unwrap();
+    }
+
+    #[test]
+    fn stale_base_rejection_keeps_the_slot_of_an_exact_fold_round() {
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        let st = fold_test_state(crate::state::MERGE_AVG);
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Exact(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast, slow]);
     }
 
     #[test]

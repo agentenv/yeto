@@ -452,9 +452,11 @@ pub fn decode_budget_done(payload: &[u8]) -> Result<u64> {
     Ok(local_steps)
 }
 
-/// Decode a tensor payload into f32s.
+/// Decode a tensor payload into f32s on the calling thread. PUSH payloads
+/// decode here, once per connection; only INIT_PARAMS (a whole fragment,
+/// off the read loop) asks for threads through `decode_tensor_with`.
 pub fn decode_tensor(dtype: u8, bytes: &[u8], out: &mut Vec<f32>) -> Result<()> {
-    decode_tensor_with(crate::par::default_threads(), dtype, bytes, out)
+    decode_tensor_with(1, dtype, bytes, out)
 }
 
 /// Values below which a decode stays on the calling thread.

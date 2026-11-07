@@ -152,7 +152,10 @@ struct Args {
     /// rounds keep merging, instead of stopping the scheduler for the whole
     /// write (a 120B state is ~1 TB; minutes per checkpoint). A crash during
     /// the write resumes from the previous checkpoint. Per-round checkpoints
-    /// (--checkpoint-every 1) and policy sweeps are unaffected.
+    /// (--checkpoint-every 1) and policy sweeps are unaffected. Memory: the
+    /// writer holds the snapshot, so a fragment committed before the writer
+    /// reached it is copied once; in the worst case (every fragment commits
+    /// during the write) host memory peaks at about twice params + momentum.
     #[arg(long)]
     background_checkpoint: bool,
     /// Policy sweep: write per-round checkpoints off the scheduler; each

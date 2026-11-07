@@ -107,6 +107,8 @@ impl Hasher {
         match self {
             #[cfg(target_arch = "aarch64")]
             Self::Hw { state, buf, used, len } => {
+                // Only `new` builds Hw, after the feature check (cached).
+                debug_assert!(hw::available());
                 *len += data.len() as u64;
                 if *used > 0 {
                     let take = (64 - *used).min(data.len());
@@ -135,6 +137,7 @@ impl Hasher {
         match self {
             #[cfg(target_arch = "aarch64")]
             Self::Hw { mut state, mut buf, used, len } => {
+                debug_assert!(hw::available());
                 buf[used] = 0x80;
                 buf[used + 1..].fill(0);
                 if used >= 56 {
