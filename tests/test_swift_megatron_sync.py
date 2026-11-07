@@ -1361,7 +1361,9 @@ def test_saved_anchors_are_mapped_rather_than_read_into_anonymous_memory(tmp_pat
     # pages count against the host, file-backed ones are reclaimable.
     if os.uname().sysname == "Linux":
         assert all(_backing_file(t) == str(path) for t in mapped["values"])
-        assert all(_backing_file(t) == "" for t in read["values"])
+        # Small eager reads may land in the brk heap ("[heap]") rather than an
+        # unnamed mapping; either way they are not backed by the anchor file.
+        assert all(_backing_file(t) in ("", "[heap]") for t in read["values"])
 
 
 def _backing_file(tensor) -> str | None:
