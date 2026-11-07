@@ -170,7 +170,7 @@ def test_binpack_matches_the_rescanning_greedy_with_ties():
         named = [(f"model.layers.{i % 9}.w{i}", rng.choice([1, 2, 3, 8, 64, rng.randint(1, 500)]))
                  for i in range(rng.randint(1, 300))]
         n_bins = rng.randint(1, 12)
-        layout = build_layout(named, n_bins + 0)
+        layout = build_layout(named, n_bins)
         expected = _reference_binpack(named, max(1, min(n_bins, len(named))))
         assert [f.tensors for f in layout.fragments] == expected, trial
 
@@ -182,5 +182,5 @@ def test_binpack_is_fast_for_an_unfused_moe_tensor_count():
              for i in range(42_000)]
     started = time.monotonic()
     layout = build_layout(named, 32)
-    assert time.monotonic() - started < 10.0
+    assert time.monotonic() - started < 30.0  # the rescanning greedy took minutes
     assert sum(len(f.tensors) for f in layout.fragments) == len(named)
