@@ -24,7 +24,15 @@ default ``0``; the syncer's files live in a ``syncer`` directory):
 ``cmdline.txt``             the syncer's argv (``--total-steps`` and friends)
 syncer ``tape.jsonl``       merge records (already understood by the reducer) and
                             ``kind`` records: outer_step / delta_* / pool_*
+``eval/rows.jsonl``         held-out eval per syncer checkpoint: step / loss / ppl /
+                            ``vs_base`` / ``vs_ckpt100`` / ``vs_prev`` (re-read whole
+                            on change; one row per step, the last line of a step wins)
 ==========================  =========================================================
+
+Eval comparisons: ``dloss`` is this checkpoint's loss minus the reference's loss
+(negative is better), so the reference loss is ``loss - dloss``. ``mean`` / ``se``
+are the per-sample paired difference and its standard error (a different weighting
+than ``dloss``), and ``better`` the share of samples where this checkpoint wins.
 
 Side samples written by an external, read-only collector are already ``sft_*``
 records: ``sft_syncer_rss`` (``rss_bytes``) and ``sft_host_mem``
@@ -54,6 +62,8 @@ DEFAULT_REFS = {"sft_ref_step_s": 571.0, "sft_hbm_limit_gib": 53.9, "sft_syncer_
                 "sft_slow_factor": 1.1}
 STEP_COLS = ("step", "ts", "loss", "grad_norm", "lr", "step_s", "tps", "tokens", "target_tokens",
              "sync_s", "export_s", "apply_s", "hbm_gib", "mfu", "pushes", "applies")
+EVAL_REFS = ("vs_base", "vs_ckpt100", "vs_prev")
+EVAL_FIELDS = ("dloss", "mean", "se", "better")
 SAMPLES_MAX = 20000
 EVENTS_MAX = 20000
 
@@ -110,6 +120,8 @@ def role(path: Path) -> str | None:
         return "health"
     if name == "island.json":
         return name
+    if name == "rows.jsonl" and path.parent.name == "eval":
+        return "eval"
     if name == "args.json" and any((path.parent / f).exists() for f in SIBLINGS):
         return name
     return None
@@ -250,6 +262,48 @@ def from_cmdline(text: str) -> dict:
     return out
 
 
+def eval_row(rec: dict) -> dict | None:
+    """One ``eval/rows.jsonl`` row -> the fields the page draws, or None without a step."""
+    step = rec.get("step")
+    if isinstance(step, bool) or not isinstance(step, int):
+        return None
+    loss = finite(rec.get("loss"))
+    out: dict[str, Any] = {"step": step, "loss": loss, "ppl": finite(rec.get("ppl")),
+                           "ckpt_written": rec.get("ckpt_written") if isinstance(rec.get("ckpt_written"), str) else None,
+                           "prev_step": rec.get("prev_step") if isinstance(rec.get("prev_step"), int) else None,
+                           "merges_total": finite(rec.get("merges_total"))}
+    for ref in EVAL_REFS:
+        cmp_ = rec.get(ref)
+        if not isinstance(cmp_, dict):
+            out[ref] = None
+            continue
+        c = {f: finite(cmp_.get(f)) for f in EVAL_FIELDS}
+        c["ref_loss"] = loss - c["dloss"] if loss is not None and c["dloss"] is not None else None
+        out[ref] = c
+    return out
+
+
+def from_eval_rows(text: str) -> tuple[dict, int]:
+    """Whole ``eval/rows.jsonl`` -> (``sft_eval`` record with rows sorted by step, bad lines)."""
+    by_step: dict[int, dict] = {}
+    bad = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            bad += 1
+            continue
+        row = eval_row(rec) if isinstance(rec, dict) else None
+        if row is None:
+            bad += 1
+            continue
+        by_step[row["step"]] = row
+    return {"event": "sft_eval", "rows": [by_step[s] for s in sorted(by_step)]}, bad
+
+
 # -- source ---------------------------------------------------------------------
 
 class SftSource:
@@ -300,9 +354,14 @@ class SftSource:
 
     def records(self) -> Iterator[tuple[int | None, dict]]:
         k = self.kind
-        if k in ("args.json", "island.json", "cmdline.txt"):
+        if k in ("args.json", "island.json", "cmdline.txt", "eval"):
             text = self._whole()
             if text is None:
+                return
+            if k == "eval":
+                rec, bad = from_eval_rows(text)
+                self.bad_lines += bad
+                yield None, rec
                 return
             if k == "cmdline.txt":
                 yield None, from_cmdline(text)
@@ -359,6 +418,7 @@ class SftState:
         self.rss: deque = deque(maxlen=SAMPLES_MAX)
         self.outer: list[list] = []
         self.events: deque = deque(maxlen=EVENTS_MAX)  # [ts, category, learner, origin]
+        self.eval: list[dict] = []  # held-out eval rows by step (eval/rows.jsonl, replaced whole)
         self.log_seen = False
         self.records = 0
 
@@ -379,6 +439,10 @@ class SftState:
             return
         if ev == "sft_syncer_meta":
             self.syncer_meta.update({k: v for k, v in r.items() if k != "event"})
+            return
+        if ev == "sft_eval":
+            rows = r.get("rows")
+            self.eval = list(rows) if isinstance(rows, list) else []
             return
         if ev == "sft_syncer_rss":
             v = finite(r.get("rss_bytes"))
@@ -528,4 +592,5 @@ class SftState:
                        "outer": outer[-5000:], "merges": merge_rows[-5000:], "rss": list(self.rss)[-5000:],
                        "events": events[-5000:], "log_seen": self.log_seen,
                        "problem_categories": list(PROBLEM_CATEGORIES)},
+            "eval": {"rows": list(self.eval)},
         }

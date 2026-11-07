@@ -98,6 +98,53 @@ function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=b
   cx.setAttribute("x1",c.x(bestT));cx.setAttribute("x2",c.x(bestT));cx.setAttribute("visibility","visible");
   tt.innerHTML='<div class="th">'+esc(day(bestT))+'</div>'+rows.join("");tt.style.display="block";
   var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"}
+/* held-out eval per syncer checkpoint: x = syncer outer step (not time, so the range buttons do not apply),
+   y = held-out loss; references are loss - dloss of each row. Error bars: +-1 se of the paired per-sample
+   difference vs ckpt100, drawn around the checkpoint's loss. */
+var EV_C={loss:PAL[0],ck:PAL[1],base:PAL[6]};
+function sgn(v,d){return fin(v)?(v>=0?"+":"")+v.toFixed(d==null?4:d):"n/a"}
+function evalCmp(c){if(!c||!fin(c.dloss))return "n/a";return "\u0394 "+sgn(c.dloss)+(fin(c.mean)?" (per-sample "+sgn(c.mean)+(fin(c.se)?" \u00b1 "+c.se.toFixed(4):"")+")":"")}
+function evalTip(r){return '<div class="th">step '+esc(r.step)+(r.ckpt_written?" \u00b7 "+esc(String(r.ckpt_written).replace("T"," ").slice(0,16))+" UTC":"")+'</div>'+
+  '<div><i style="background:'+EV_C.loss+'"></i>loss<b>'+(fin(r.loss)?r.loss.toFixed(4):"n/a")+'</b></div>'+
+  '<div><i style="background:'+EV_C.ck+'"></i>vs ckpt100<b>'+esc(evalCmp(r.vs_ckpt100))+'</b></div>'+
+  '<div><i style="background:'+EV_C.base+'"></i>vs base<b>'+esc(evalCmp(r.vs_base))+'</b></div>'}
+function evalChart(id,E){
+  var box=$(id);if(!box)return;var R=((E&&E.rows)||[]).filter(function(r){return r&&fin(r.step)&&fin(r.loss)});
+  var ref=function(r,k){return r[k]&&fin(r[k].ref_loss)?r[k].ref_loss:null},ck=R.filter(function(r){return fin(ref(r,"vs_ckpt100"))}),bs=R.filter(function(r){return fin(ref(r,"vs_base"))});
+  var leg=function(baseNote){return '<div class="lg"><span><i style="background:'+EV_C.loss+'"></i>held-out loss</span>'+
+    (ck.length?'<span><i style="background:'+EV_C.ck+'"></i>ckpt100 (loss \u2212 \u0394)</span>':'<span class="nd"><i style="background:#4b4b52"></i>ckpt100 (no data)</span>')+
+    (bs.length?'<span><i style="background:'+EV_C.base+'"></i>base'+(baseNote||"")+'</span>':'<span class="nd"><i style="background:#4b4b52"></i>base (no data)</span>')+'</div>'};
+  if(!R.length){box.innerHTML='<div class="empty">no held-out eval yet</div>'+leg();box.onmousemove=null;return}
+  var se=function(r){var c=r.vs_ckpt100;return c&&fin(c.se)?c.se:0};
+  var vals=[];R.forEach(function(r){vals.push(r.loss-se(r),r.loss+se(r))});ck.forEach(function(r){vals.push(ref(r,"vs_ckpt100"))});
+  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=Math.max(hi-lo,Math.abs(hi)*0.002,1e-6);
+  // base sits far above the checkpoints (~0.08 vs ~0.005 spreads): keep it on the axis only when it does not flatten the detail
+  var bv=bs.map(function(r){return ref(r,"vs_base")}),bOn=bv.length&&Math.max.apply(null,bv)<=hi+3*span&&Math.min.apply(null,bv)>=lo-3*span;
+  if(bOn)bv.forEach(function(v){vals.push(v)});lo=Math.min.apply(null,vals);hi=Math.max.apply(null,vals);span=Math.max(hi-lo,Math.abs(hi)*0.002,1e-6);
+  var yt=nice(lo-span*0.08,hi+span*0.08,4);lo=yt[0];hi=yt[yt.length-1];var td=Math.max(3,Math.ceil(-Math.log10(yt[1]-yt[0])-1e-9));
+  var s0=R[0].step,s1=R[R.length-1].step;if(s1-s0<2){s0-=1;s1+=1}var xt=nice(s0,s1,5).filter(function(v){return v>=s0&&v<=s1&&v===Math.round(v)});
+  var x=function(v){return M.l+8+(v-s0)*(W-M.l-M.r-16)/(s1-s0)},y=function(v){return M.t+(hi-v)/(hi-lo)*(H-M.t-M.b)};
+  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="Held-out eval loss">'];
+  yt.forEach(function(v){o.push('<line class="gl" x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(M.l-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(v.toFixed(td))+'</text>')});
+  xt.forEach(function(v){o.push('<text x="'+x(v).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(v)+'</text>')});
+  var path=function(L,k){return L.map(function(r,i){return (i?"L":"M")+x(r.step).toFixed(1)+","+y(ref(r,k)).toFixed(1)}).join("")};
+  var flat=function(L,k){return L.length===1?"M"+(M.l)+","+y(ref(L[0],k)).toFixed(1)+"L"+(W-M.r)+","+y(ref(L[0],k)).toFixed(1):path(L,k)};
+  if(ck.length)o.push('<path class="evck" d="'+flat(ck,"vs_ckpt100")+'" fill="none" stroke="'+EV_C.ck+'" stroke-width="1.2" stroke-dasharray="4 3"/>');
+  if(bOn)o.push('<path class="evbase" d="'+flat(bs,"vs_base")+'" fill="none" stroke="'+EV_C.base+'" stroke-width="1.2" stroke-dasharray="4 3"/>');
+  R.forEach(function(r){var e=se(r);if(e>0)o.push('<line class="eveb" x1="'+x(r.step).toFixed(1)+'" x2="'+x(r.step).toFixed(1)+'" y1="'+y(r.loss-e).toFixed(1)+'" y2="'+y(r.loss+e).toFixed(1)+'" stroke="'+EV_C.loss+'" stroke-opacity=".6" stroke-width="1"/>')});
+  if(R.length>1)o.push('<path class="evloss" d="'+R.map(function(r,i){return (i?"L":"M")+x(r.step).toFixed(1)+","+y(r.loss).toFixed(1)}).join("")+'" fill="none" stroke="'+EV_C.loss+'" stroke-width="1.5" stroke-linejoin="round"/>');
+  R.forEach(function(r){o.push('<circle cx="'+x(r.step).toFixed(1)+'" cy="'+y(r.loss).toFixed(1)+'" r="2.5" fill="'+EV_C.loss+'"/>')});
+  var note="";if(bs.length&&!bOn){var lb=bs[bs.length-1];note=" "+ref(lb,"vs_base").toFixed(4)+" (off scale)";
+    o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+9)+'" text-anchor="end" class="rt" fill="'+EV_C.base+'">base '+esc(ref(lb,"vs_base").toFixed(4))+(ref(lb,"vs_base")>hi?" \u2191":" \u2193")+'</text>')}
+  o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
+  box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg(note);
+  box.onmousemove=function(e){if(!box.querySelector)return;var svg=box.querySelector("svg"),tt=box.querySelector(".tt"),cx=box.querySelector(".cx");if(!svg||!tt)return;
+    var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width,best=null,bd=1e18;
+    R.forEach(function(r){var d=Math.abs(x(r.step)-vx);if(d<bd){bd=d;best=r}});if(!best||bd>40){tt.style.display="none";return}
+    if(cx){cx.setAttribute("x1",x(best.step));cx.setAttribute("x2",x(best.step));cx.setAttribute("visibility","visible")}
+    tt.innerHTML=evalTip(best);tt.style.display="block";var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"};
+  box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
+}
 function card(id,title,sub,wide){return '<div class="cc'+(wide?" wide":"")+'"><div class="ct">'+esc(title)+'</div><div class="cs">'+esc(sub||"")+'</div><div id="'+id+'"></div></div>'}
 
 /* histogram on a log axis, dashed p10/p90/p99, solid p50, outer 0.2% tails not drawn */
@@ -185,7 +232,8 @@ function sft(S){
       '<td>'+(I.last_apply?dur(I.last_apply.apply_s)+'<div class="ns">step '+I.last_apply.step+' · '+ago(I.last_apply.ts)+'</div>':"none yet")+'</td><td>'+esc(I.dataset||"n/a")+'</td></tr>'}).join("")+'</table>';
   // fleet charts
   $("sFleetH").textContent="Fleet over the last "+rangeLabel();
-  var g=[["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
+  var g=[["fEval","Held-out eval loss","per syncer checkpoint, x = outer step (all checkpoints, not the time range); dashed: ckpt100 / base reference (loss \u2212 \u0394); bars \u00b11 se vs ckpt100"],
+    ["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
     ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; bench tokens_per_s held from each step on a shared time grid"],
     ["fHbm","HBM peak","max reserved over ranks per step; dashed: "+hbmLim+" GiB line"],["fHost","Host available memory","MemAvailable per node, sampled by the collector"],
     ["fSync","Sync overhead per step","export_s (solid) on steps that exported a fragment, apply_s (dashed) on steps that applied a broadcast"],
@@ -193,6 +241,7 @@ function sft(S){
     ["fRss","Syncer RSS","VmRSS of the syncer; dashed: "+bytes(cap)+" cap"],["fEv","Syncer problems","rejected / timeout / not carried / stale / disconnect per bucket"]];
   $("sFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var total={name:"Fleet total",color:GREY,dash:true};
+  evalChart("fEval",S.eval);
   chart("fLoss",{series:series(S,isls,"loss"),yfmt:function(v){return v.toFixed(3)},y0:false});
   chart("fGn",{series:series(S,isls,"grad_norm"),yfmt:function(v){return v.toFixed(2)}});
   chart("fLr",{series:series(S,isls,"lr"),yfmt:function(v){return v.toExponential(1)}});
@@ -282,5 +331,5 @@ function render(view,offline){
     sft(S)}
   else rlDist(V);
 }
-return {bins:bins,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {bins:bins,evalTip:evalTip,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();

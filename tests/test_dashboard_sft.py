@@ -176,7 +176,7 @@ eval(appM[1]);
 process.stdout.write(JSON.stringify({title: els.title.innerHTML, kpis: els.sKpis.innerHTML,
   nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, tps: els.fTps.innerHTML, sync: els.fSync.innerHTML,
   merge: els.fMerge.innerHTML, round: els.fRound.innerHTML, dist: els.sDist.innerHTML,
-  cost: els.sCostK.innerHTML, sft_hidden: els.sftRoot.hidden, rl_hidden: els.rlRoot.hidden}));
+  cost: els.sCostK.innerHTML, eval: els.fEval.innerHTML, sft_hidden: els.sftRoot.hidden, rl_hidden: els.rlRoot.hidden}));
 """).replace("process.argv[2]", "process.argv[1]")
 
 
@@ -307,3 +307,112 @@ def test_merge_time_is_not_the_round_wall_time(tmp_path):
     ticks = re.findall(r'text-anchor="end">([^<]+)<', page["merge"])
     assert ticks and all("h" not in t for t in ticks)  # merge axis stays at seconds
     assert "quorum wait" in page["round"] and "(no data)" not in page["round"]
+
+
+def _eval_row(step, loss, d_ck, d_base, se=0.0004, prev=None):
+    return {"step": step, "ckpt_written": "2026-11-06T04:22:49Z", "loss": loss, "ppl": 2.0,
+            "vs_base": {"dloss": d_base, "mean": d_base - 0.009, "se": 0.0015, "better": 1.0},
+            "vs_ckpt100": {"dloss": d_ck, "mean": d_ck - 0.001, "se": se, "better": 0.3},
+            "vs_prev": None if prev is None else {"dloss": -0.001, "mean": -0.001, "se": 0.0002, "better": 0.6},
+            "prev_step": prev, "merges_total": step}
+
+
+# rows shaped like the run's eval/rows.jsonl: the references are constant (loss - dloss)
+CK100, BASE = 0.6723, 0.7558
+EVAL_ROWS = [_eval_row(s, l, l - CK100, l - BASE, prev=p) for s, l, p in
+             ((32, 0.6824, None), (48, 0.6747, 32), (96, 0.6768, 48), (112, 0.6744, 96))]
+
+
+def _write_eval(root, rows, extra=""):
+    p = root / "eval" / "rows.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows) + extra)
+    return p
+
+
+def test_eval_rows_dedup_sort_and_bad_lines():
+    dup = _eval_row(48, 0.6750, 0.6750 - CK100, 0.6750 - BASE, prev=32)
+    text = "\n".join([json.dumps(EVAL_ROWS[2]), "{not json", json.dumps(EVAL_ROWS[1]), "[1, 2]",
+                      json.dumps({"loss": 0.7}), json.dumps({"step": True, "loss": 0.7}), "",
+                      json.dumps(EVAL_ROWS[0]), json.dumps(dup)]) + "\n"
+    rec, bad = sft.from_eval_rows(text)
+    assert rec["event"] == "sft_eval" and bad == 4
+    rows = rec["rows"]
+    assert [r["step"] for r in rows] == [32, 48, 96]
+    assert rows[1]["loss"] == 0.6750  # the last line of a step wins
+    for r in rows:  # dloss = ckpt loss - reference loss, so the reference is loss - dloss
+        assert r["vs_ckpt100"]["ref_loss"] == pytest.approx(CK100)
+        assert r["vs_base"]["ref_loss"] == pytest.approx(BASE)
+    assert rows[0]["vs_prev"] is None and rows[0]["prev_step"] is None and rows[1]["prev_step"] == 32
+    assert sft.from_eval_rows("")[0]["rows"] == []
+    nan = sft.eval_row({"step": 8, "loss": float("nan"), "vs_base": {"dloss": "x", "se": 0.1}})
+    assert nan["loss"] is None and nan["vs_base"]["dloss"] is None and nan["vs_base"]["ref_loss"] is None
+    assert nan["vs_ckpt100"] is None
+
+
+def test_eval_in_view_and_rewrite_replaces(tmp_path):
+    root = make_run(tmp_path / "run", steps=3)
+    p = _write_eval(root, EVAL_ROWS[2:] + EVAL_ROWS[:2], extra='{"step": 9, "loss"')  # torn tail is a bad line
+    assert p in discover([str(root)])
+    from yeto.dashboard.serve import DashboardState
+
+    st = DashboardState(Reducer(), [str(root)])
+    st.poll()
+    ev = st.reducer.page_view(now=T0 + 3600)["sft"]["eval"]["rows"]
+    assert [r["step"] for r in ev] == [32, 48, 96, 112]
+    assert st.reducer.sft.islands.keys() == {"0"}  # eval rows never create an island
+    _write_eval(root, [EVAL_ROWS[0], dict(EVAL_ROWS[3], loss=0.6740), EVAL_ROWS[0]])
+    st.poll()
+    st.poll()
+    ev = st.reducer.sft_view(T0)["eval"]["rows"]
+    assert [r["step"] for r in ev] == [32, 112] and ev[1]["loss"] == 0.6740
+    _write_eval(root, [])
+    st.poll()
+    assert st.reducer.sft_view(T0)["eval"]["rows"] == []
+
+
+def test_eval_chart_renders_and_empty_state(tmp_path):
+    root = make_run(tmp_path / "run")
+    page = _page(tmp_path, root, T0 + 3600)  # no eval file
+    assert "no held-out eval yet" in page["eval"] and "<svg" not in page["eval"]
+    _write_eval(root, [])
+    page = _page(tmp_path, root, T0 + 3600)
+    assert "no held-out eval yet" in page["eval"]
+    _write_eval(root, EVAL_ROWS)
+    svg = _page(tmp_path, root, T0 + 3600)["eval"]
+    assert 'class="evloss"' in svg and 'class="evck"' in svg and svg.count('class="eveb"') == 4
+    assert svg.count("<circle") == 4
+    # base is ~0.08 above while the checkpoints spread ~0.01: noted off scale, not drawn
+    assert 'class="evbase"' not in svg and "base 0.7558" in svg and "off scale" in svg
+    ticks = re.findall(r'text-anchor="middle">(\d+)<', svg)
+    assert ticks and int(ticks[0]) >= 32 and int(ticks[-1]) <= 112  # x is the outer step
+    near = [_eval_row(s, l, l - CK100, l - 0.684) for s, l in ((32, 0.6824), (48, 0.6747))]
+    _write_eval(root, near)
+    svg = _page(tmp_path, root, T0 + 3600)["eval"]
+    assert 'class="evbase"' in svg and "off scale" not in svg
+    _write_eval(root, [EVAL_ROWS[0]])
+    svg = _page(tmp_path, root, T0 + 3600)["eval"]
+    assert svg.count("<circle") == 1 and 'class="evck"' in svg
+
+
+TIP_JS = """
+const fs=require('fs');global.localStorage={getItem(){return null},setItem(){}};global.location={hash:''};
+global.document={getElementById(){return null},body:null};
+eval(fs.readFileSync(process.argv[1],'utf8')+';global.YE=YetoExt;');
+process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).map(r=>YE.evalTip(r))));
+"""
+
+
+def test_eval_tooltip_shows_step_loss_and_deltas():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = FX.parent.parent.parent / "yeto" / "dashboard" / "static" / "sft.js"
+    rows = sft.from_eval_rows(json.dumps(EVAL_ROWS[3]) + "\n" + json.dumps({"step": 5, "loss": 0.7}) + "\n")[0]["rows"]
+    res = subprocess.run([node, "-e", TIP_JS, str(js), json.dumps(rows)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    bare, full = json.loads(res.stdout)
+    assert "step 112" in full and "0.6744" in full and "2026-11-06 04:22 UTC" in full
+    assert "vs ckpt100<b>\u0394 +0.0021 (per-sample +0.0011 \u00b1 0.0004)" in full
+    assert "vs base<b>\u0394 -0.0814 (per-sample -0.0904 \u00b1 0.0015)" in full
+    assert "step 5" in bare and bare.count("n/a") == 2
