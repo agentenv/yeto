@@ -838,6 +838,8 @@ def test_local_syncer_command_matches_cluster_syncer_flags():
     assert "--resume" in cmd
     assert "--mark-final-checkpoint" in cmd
     assert f"--port {launcher.SYNCER_PORT}" in cmd
+    # The SFT preset: periodic checkpoints off the scheduler, one before the first round.
+    assert "--background-checkpoint" in cmd and "--checkpoint-on-start" in cmd
 
 
 def test_rl_launch_records_the_run_under_its_own_name(fake_sky, monkeypatch, tmp_path):

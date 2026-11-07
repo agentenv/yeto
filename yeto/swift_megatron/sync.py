@@ -76,6 +76,19 @@ Write (BCAST, final cut)
     param all-gather reads).  The Adam moments are kept, exactly as the torch
     learner keeps its AdamW state when ``apply_fragment`` overwrites a fragment.
 
+Redial (catch-up)
+    After a redial the syncer sends every fragment's current value.  The
+    client drops a replay of a version already held (same bytes), so an
+    unchanged fragment stays bit for bit; a broadcast of the anchored
+    version that does reach the sync is only confirmed.  The first broadcast
+    of a fragment after the redial (``BcastFragment.catch_up``) moves the
+    island's progress since its anchor onto it, ``global_new + (local -
+    anchor)``, unless the island pushed from that anchor (the delta may be in
+    the new version: the ordinary install).  A syncer that crashed and
+    resumed from an older checkpoint rewinds; the client takes its catch-up
+    (``accept_rewound_catch_up``) and the island rebases onto it, instead of
+    keeping the lost versions as bases the syncer refuses forever.
+
 Only global rank 0 talks to the syncer.  Every boundary starts with one
 ``broadcast_object_list`` of rank 0's plan (fragments to apply, fragments to
 push, finalization, shutdown, error), so every rank runs the same collectives
@@ -142,7 +155,9 @@ objects that need them.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import re
 import time
 from collections import deque
@@ -152,12 +167,65 @@ from typing import Any
 
 log = logging.getLogger("swift-megatron-sync")
 
+
+def _emits_info(logger: logging.Logger) -> bool:
+    """Whether an INFO record of ``logger`` reaches some handler that prints it."""
+    if not logger.isEnabledFor(logging.INFO):
+        return False
+    node: logging.Logger | None = logger
+    while node is not None:
+        if any(handler.level <= logging.INFO for handler in node.handlers):
+            return True
+        if not node.propagate:
+            return False
+        node = node.parent  # type: ignore[assignment]
+    return False
+
+
+def ensure_visible_logs(*loggers: logging.Logger) -> None:
+    """Make these loggers' INFO lines reach stderr.
+
+    ms-swift configures only its own ``swift`` logger, and the Megatron SFT
+    entry point leaves the root logger with a single stdout handler at ERROR:
+    every INFO *and* WARNING of a yeto module (``resume: fragment ...``,
+    ``INIT_PARAMS skipped``, ``anchor ... released after a reconnect``, the LR
+    schedule rebuild) propagated into that handler and was dropped, and
+    logging's last resort never fires once root has a handler.  A logger whose
+    records some handler on its propagation path already prints at INFO is
+    left alone; any other gets its own stderr handler at INFO and stops
+    propagating (so an ERROR is not printed twice)."""
+    for logger in loggers or (log,):
+        if logger.handlers or _emits_info(logger):
+            continue
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(f"[{logger.name}] %(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        if logger.level == logging.NOTSET or logger.level > logging.INFO:
+            logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+
+_ensure_visible_logs = ensure_visible_logs
+
 # Megatron's tied/untied output projection is an embedding-like tensor for the
 # direct-averaged fragment, as ``lm_head`` is for the torch learner.
 OUTPUT_LAYER_AVG_REGEX = r"(^|\.)output_layer\.weight$"
 DEFAULT_CHUNK_NUMEL = 1 << 28
 CONTRACT_DOMAIN = b"yeto-swift-megatron-native-v1\0"
 FINAL_CUT_PAYLOADS = ("full", "manifest")
+# Island checkpoint record of the sync (``save_state`` / ``resume_dir``), next
+# to the trainer's checkpoint: the JSON on global rank 0, the optional anchor
+# values one file per rank.
+RESUME_STATE_FILE = "yeto_diloco_state.json"
+RESUME_ANCHOR_DIR = "yeto_diloco_anchors"
+RESUME_FORMAT = 1
+# ``yeto.diloco_sync.resume_fragment_mode`` results (that module imports torch).
+RESUME_OVERWRITE, RESUME_ANCHOR, RESUME_SHIFT = "overwrite", "anchor", "shift"
+# ``yeto.diloco_sync.live_install_mode`` results.
+LIVE_CONFIRM, LIVE_REBASE = "confirm", "rebase"
+
+# ``spent_link`` of an anchor spent by the process the island resumed from.
+_PREVIOUS_PROCESS = "previous-process"
 
 _LAYER_MODULE_RE = re.compile(r"(^|\.)decoder\.layers\.(\d+)$")
 _GROUPED_EXPERT_RE = re.compile(r"^(.*?)(weight|bias)(\d+)$")
@@ -522,8 +590,10 @@ class _Plan:
     """Rank 0's decision for one boundary, broadcast to every rank."""
 
     applies: list[tuple[int, int]] = field(default_factory=list)  # (fragment, version)
+    modes: dict[int, str] = field(default_factory=dict)  # fragment -> LIVE_* (else ordinary)
     finalizing: bool = False
     shutdown: bool = False
+    send_init: bool = False  # initial-cut wait of a resumed learner 0: the syncer needs INIT
     error: str | None = None
 
 
@@ -563,7 +633,9 @@ class MegatronDiLoCoSync:
                  final_cut_payload: str = "full", chunk_numel: int = DEFAULT_CHUNK_NUMEL,
                  transport: str = "cpu", parallel_context: ParallelContext | None = None,
                  client_factory=None, observer: Callable[[dict], None] | None = None,
-                 initial_cut_timeout: float = 0.0) -> None:
+                 initial_cut_timeout: float = 0.0, resume_dir: str | None = None,
+                 resume_iteration: int | None = None, init_probe_s: float = 1800.0,
+                 heartbeat_s: float = 30.0, heartbeat_stall_s: float = 0.0) -> None:
         import torch
         import torch.distributed as dist
 
@@ -585,6 +657,7 @@ class MegatronDiLoCoSync:
             raise ValueError("the ms-swift Megatron sync talks to one syncer; sharded syncers are not supported")
         if not dist.is_initialized():
             raise SwiftMegatronSyncError("torch.distributed must be initialized (Megatron does this)")
+        _ensure_visible_logs()
         self.ctx = parallel_context or ParallelContext.from_megatron()
         self.rank, self.world = self.ctx.rank, self.ctx.world
         self.chunks = list(model_chunks)
@@ -645,6 +718,15 @@ class MegatronDiLoCoSync:
         # for a newer broadcast instead of a gather that would be refused.  A
         # restarted attempt of the same round may reuse it.
         self.spent: list[tuple[int, int] | None] = [None] * self.num_fragments
+        # The syncer link (connection generation) each spent PUSH went out on:
+        # once the link is replaced, an undelivered delta is gone with the old
+        # connection and a restarted syncer lost the rounds it was carried to,
+        # so the guard is released (``_release_spent_after_reconnect``).
+        self.spent_link: list[Any] = [None] * self.num_fragments
+        # The anchor version of each fragment's last PUSH that may have been
+        # delivered (a drop clears it; a redial does not): a newer catch-up
+        # of that fragment may already hold the delta (``live_install_mode``).
+        self.pushed_from: list[int | None] = [None] * self.num_fragments
         # The torch learner's per-fragment counters and versions, kept alike on
         # every rank (anchors live in ``self.anchors``, sharded, not here).
         self.state = DiLoCoSyncState.create(self.num_fragments, track_anchors=False)
@@ -661,8 +743,25 @@ class MegatronDiLoCoSync:
                       "deferred_pushes": 0, "apply_s": 0.0, "export_s": 0.0}
         self._observed_push_bytes = 0  # rank 0: push_bytes at the last observer report
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
+        # Rank 0: HEARTBEAT every ``heartbeat_s`` from a thread, so the syncer
+        # can lease the island (``--island-lease-s``) across ~10 min steps,
+        # INIT and checkpoint saves; ``_progress_at`` is the last sign of life
+        # of the training loop (``heartbeat_stall_s``: none for that long and
+        # the heartbeats stop, so a hung island loses its lease).
+        self.heartbeat: _Heartbeat | None = None
+        self._progress_at = time.monotonic()
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
         self.events: deque[tuple[int, str, int, int]] = deque(maxlen=4096)
+        # Resume (``resume_dir``): the record ``save_state`` wrote with the
+        # checkpoint the trainer resumed from, the old anchor of every local
+        # shard when it was saved too, and how each fragment's first broadcast
+        # after the restart was installed (fid -> mode, same on every rank).
+        self.resume_record: dict | None = None
+        self._resume_anchors: dict[int, Any] = {}  # id(param) -> old anchor (host)
+        self._resume_has_anchors = False
+        self.resumed: dict[int, str] = {}
+        if resume_dir:
+            self._load_resume(resume_dir, resume_iteration)
 
         if self.rank == 0:
             log.info("swift-megatron sync: %d trainable tensors (%.2f B elements) -> %d fragments",
@@ -671,20 +770,32 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             try:
                 self.client = self._connect(syncer, hmac_key_path, wan_streams, client_factory)
-                self.sender = _PushSender(self.client, self.stats, self._push_dropped)
+                self.sender = _PushSender(self.client, self.stats, self._push_dropped, self._push_sent)
+                if heartbeat_s > 0:
+                    self.heartbeat = _Heartbeat(self.client, float(heartbeat_s), float(heartbeat_stall_s),
+                                                lambda: self.iteration, lambda: self._progress_at)
             except Exception as exc:  # raised on every rank below
                 error = f"{type(exc).__name__}: {exc}"
         self._raise_if(self._bcast_object(error))
-        if self.learner_id == 0:
+        # A resumed learner 0 (it holds a record, so the syncer of this session
+        # was initialized) first waits for the syncer's catch-up and sends
+        # INIT_PARAMS (~4 bytes per parameter, 480 GB for 120B) only if nothing
+        # arrives within ``init_probe_s``: an initialized syncer ignores INIT,
+        # and receiving the catch-up while gathering INIT doubled rank 0's RSS.
+        defer_init = self.learner_id == 0 and self.resume_record is not None and initial_cut_timeout > 0
+        if self.learner_id == 0 and not defer_init:
             self._send_init()
         if initial_cut_timeout > 0:
-            self._install_initial_cut(float(initial_cut_timeout))
+            self._install_initial_cut(float(initial_cut_timeout),
+                                      init_probe=float(init_probe_s) if defer_init else None)
 
     # ------------------------------------------------------------------ setup
     def _connect(self, syncer: str, hmac_key_path: str | None, wan_streams: int, client_factory):
         from yeto.diloco_sync import connect_syncer
 
-        kwargs = {"session_contract_hash": self.contract}
+        # A syncer resumed from an older checkpoint rewinds; its catch-up is
+        # taken (and the island rebased onto it) instead of being dropped.
+        kwargs = {"session_contract_hash": self.contract, "accept_rewound_catch_up": True}
         key = _read_hmac_key(hmac_key_path)
         if key is not None:
             kwargs["hmac_key"] = key
@@ -696,53 +807,94 @@ class MegatronDiLoCoSync:
     def _send_init(self) -> None:
         """INIT_PARAMS of every fragment from this island's current masters.
 
-        Rank 0 streams fragment k on a background thread while every rank
-        gathers fragment k + 1, so the island's gather and the link overlap;
-        at most two fragments' wire parts are on rank 0's host."""
+        Streamed chunk by chunk: rank 0 hands each exported chunk to a
+        background sender, which writes it into the fragment's INIT_PARAMS
+        frame and drops it, while every rank gathers the next chunk.  At most
+        a few chunks (``chunk_numel`` elements each) are on rank 0's host
+        instead of whole fragments."""
 
         import queue
         import threading
 
+        end = object()
         jobs: queue.Queue = queue.Queue(maxsize=1)
         failure: list[str] = []
         sender = None
         if self.rank == 0:
+            def chunks_of(pending: queue.Queue, ended: list):
+                while (item := pending.get()) is not end:
+                    if isinstance(item, BaseException):
+                        raise item
+                    yield from item
+                ended.append(True)
+
             def send() -> None:
                 while (job := jobs.get()) is not None:
-                    fid, parts = job
-                    if failure:
-                        continue  # drain: the gathers go on until the error is broadcast
+                    fid, pending = job
+                    ended: list = []
                     try:
-                        self.client.send_init_parts(fid, parts)
+                        if not failure and self.client.send_init_parts(fid, chunks_of(pending, ended)) is False:
+                            failure.append(f"INIT fragment {fid}: syncer link down")
                     except Exception as exc:
                         failure.append(f"INIT fragment {fid}: {type(exc).__name__}: {exc}")
-                    del parts, job
+                    # Drain what was not sent: the gathers go on until the error is broadcast.
+                    while not ended and pending.get() is not end:
+                        pass
+                    del job, pending
 
             sender = threading.Thread(target=send, name="yeto-swift-init", daemon=True)
             sender.start()
         error = None
+        current = None  # rank 0: the queue of the fragment being exported
+        aborted = False
         try:
             for fid in range(self.num_fragments):
-                parts = self._export_fragment(fid, delta=False)
-                if self.rank == 0 and error is None:
-                    if self._export_error is not None:
+                pending = queue.Queue(maxsize=2) if self.rank == 0 else None
+                current = pending
+                if pending is not None:
+                    jobs.put((fid, pending))
+                for parts in self._export_fragment_chunks(fid, delta=False):
+                    self._progress_at = time.monotonic()
+                    if pending is None:
+                        continue
+                    if error is None and self._export_error is not None:
                         error = f"INIT fragment {fid}: {self._export_error}"
-                    elif failure:
+                        failure.append(error)  # the sender skips the fragments after it
+                        pending.put(SwiftMegatronSyncError(error))
+                    elif error is None:
+                        pending.put(parts)
+                    del parts
+                if pending is not None:
+                    pending.put(end)
+                    current = None
+                    if error is None and failure:
                         error = failure[0]
-                    else:
-                        jobs.put((fid, parts))
-                del parts
+        except BaseException:
+            # An export that raised (a collective timeout) leaves the sender
+            # waiting for the rest of the fragment: end it so the error, not
+            # a hang, reaches the caller.
+            aborted = True
+            if current is not None:
+                failure.append("INIT aborted")
+                try:
+                    current.put(end, timeout=60)
+                except queue.Full:
+                    pass
+            raise
         finally:
             if sender is not None:
-                jobs.put(None)
-                sender.join()
+                try:
+                    jobs.put(None, timeout=60 if aborted else None)
+                except queue.Full:
+                    pass
+                sender.join(timeout=60 if aborted else None)
         if self.rank == 0 and error is None and failure:
             error = failure[0]
         self._raise_if(self._bcast_object(error))
         if self.rank == 0:
             log.info("sent INIT_PARAMS for %d fragments", self.num_fragments)
 
-    def _install_initial_cut(self, timeout: float) -> None:
+    def _install_initial_cut(self, timeout: float, *, init_probe: float | None = None) -> None:
         """Apply the syncer's first broadcast of every fragment as it arrives,
         before training starts (collective: every rank loops together).
 
@@ -756,16 +908,34 @@ class MegatronDiLoCoSync:
         import time
 
         started = time.monotonic()
+        init_pending = init_probe is not None  # resumed learner 0: INIT only if the syncer needs it
         while not all(self.anchored):
+            self._progress_at = time.monotonic()
             plan = self._plan() if self.rank == 0 else None
-            if self.rank == 0 and time.monotonic() - started > timeout and not plan.applies:
-                plan.shutdown = True  # only ends the wait; the client's flag is unchanged
+            if self.rank == 0:
+                waited = time.monotonic() - started
+                if init_pending and not plan.applies and waited > init_probe:
+                    plan.send_init = True
+                elif not init_pending and waited > timeout and not plan.applies:
+                    plan.shutdown = True  # only ends the wait; the client's flag is unchanged
             plan = self._bcast_object(plan)
             self._raise_if(plan.error)
+            if init_pending and (plan.applies or plan.send_init):
+                init_pending = False
+                if plan.send_init:
+                    if self.rank == 0:
+                        log.warning("no catch-up from the syncer within %.0f s: sending INIT_PARAMS", init_probe)
+                    self._send_init()
+                elif self.rank == 0:
+                    log.warning("the syncer is initialized (catch-up arriving): INIT_PARAMS skipped")
+                started = time.monotonic()
             updates = self._take_updates(plan) if self.rank == 0 else {}
             for fid, version in plan.applies:
                 data = updates.pop(fid) if self.rank == 0 else None
-                self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+                live = plan.modes.get(fid)
+                if live == LIVE_CONFIRM:
+                    continue
+                self._apply_first_or_blend(fid, data, version, live=live)
                 del data
                 self.state.fragment_versions[fid] = version
                 self.state.global_step = max(self.state.global_step, version)
@@ -776,9 +946,191 @@ class MegatronDiLoCoSync:
                 break
             if not plan.applies:
                 time.sleep(0.2)
+        if init_pending:  # the wait ended before the probe did: keep the old order's guarantee
+            self._send_init()
         if self.rank == 0:
-            log.info("initial cut: %d of %d fragments installed before training in %.0f s",
-                     sum(self.anchored), self.num_fragments, time.monotonic() - started)
+            log.warning("initial cut: %d of %d fragments installed before training in %.0f s",
+                        sum(self.anchored), self.num_fragments, time.monotonic() - started)
+
+    # ------------------------------------------------------------------ resume
+    def _apply_first_or_blend(self, fid: int, data: Any, version: int, *, live: str | None = None) -> str | None:
+        """Apply a broadcast; the first one of a fragment after a resume by
+        ``resume_fragment_mode``, an anchored one by ``live`` (``_plan``:
+        ``LIVE_REBASE`` or the ordinary install).  Returns the resume mode
+        (None: not a resumed first install) and records it in
+        ``self.resumed``."""
+
+        mode = None
+        if live == LIVE_REBASE and self.anchored[fid]:
+            if self.rank == 0:
+                log.info("fragment %d: catch-up version %d onto anchor %d -> rebase (local progress kept)",
+                         fid, version, self.state.fragment_versions[fid])
+            self._apply_fragment(fid, data, self.bulk_torch, blend=False, mode=LIVE_REBASE)
+            self.stats["rebased"] = self.stats.get("rebased", 0) + 1
+            return None
+        if self.resume_record is not None and not self.anchored[fid] and fid not in self.resumed:
+            from yeto.diloco_sync import resume_fragment_mode
+
+            mode = resume_fragment_mode(self.resume_record, fid, version, have_anchor=self._resume_has_anchors)
+            self.resumed[fid] = mode
+            if self.rank == 0:
+                log.info("resume: fragment %d version %d (checkpoint anchor %d) -> %s", fid, version,
+                         self.resume_record["versions"][fid], mode)
+        self._apply_fragment(fid, data, self.bulk_torch, blend=True, mode=mode)
+        if mode is not None and len(self.resumed) == self.num_fragments:
+            self._resume_anchors.clear()  # every old anchor is used or no longer needed
+            if self.rank == 0:
+                counts = {m: list(self.resumed.values()).count(m) for m in (RESUME_ANCHOR, RESUME_SHIFT, RESUME_OVERWRITE)}
+                log.warning("resume: all %d fragments installed: anchor %d, shift %d, overwrite %d",
+                            self.num_fragments, counts[RESUME_ANCHOR], counts[RESUME_SHIFT], counts[RESUME_OVERWRITE])
+        return mode
+
+    def _restore_counters(self, fid: int, mode: str) -> None:
+        """A fragment whose checkpointed progress was kept (anchor / shift)
+        keeps its H-gate and token counters, and an unchanged anchor its
+        spent-anchor guard; an overwritten one starts afresh."""
+
+        if mode == RESUME_OVERWRITE:
+            return
+        self.state.restore_fragment(self.resume_record, fid)
+        if mode == RESUME_ANCHOR:
+            spent = self.resume_record["spent"][fid]
+            self.spent[fid] = None if spent is None else (int(spent[0]), int(spent[1]))
+            # Pushed by the previous process, on a link that is gone: released
+            # at the first boundary like any spent anchor after a reconnect.
+            self.spent_link[fid] = None if spent is None else _PREVIOUS_PROCESS
+            self.pushed_from[fid] = None if spent is None else int(spent[0])
+
+    def _resume_paths(self, resume_dir: str) -> tuple[str, str]:
+        return (os.path.join(resume_dir, RESUME_STATE_FILE),
+                os.path.join(resume_dir, RESUME_ANCHOR_DIR, f"rank{self.rank:05d}.pt"))
+
+    def _shard_keys(self) -> list[tuple[str, int]]:
+        return [(s.name, s.tp_rank) for s in self.shards]
+
+    def _load_resume(self, resume_dir: str, resume_iteration: int | None) -> None:
+        """Read the record ``save_state`` left in ``resume_dir`` (collective).
+
+        A missing or foreign record (another learner, layout, parallel shape
+        or iteration) is a cold start: every fragment takes the global as
+        before.  Old anchors are used only if every rank has its file."""
+
+        import torch
+
+        record, reason = None, None
+        if self.rank == 0:
+            path = self._resume_paths(resume_dir)[0]
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    record = json.load(handle)
+            except FileNotFoundError:
+                reason = f"no {RESUME_STATE_FILE} in {resume_dir}"
+            except (OSError, ValueError) as exc:
+                reason = f"unreadable {path}: {exc}"
+            if record is not None:
+                checks = [
+                    (record.get("format") == RESUME_FORMAT, "format"),
+                    (record.get("learner_id") == self.learner_id, "learner id"),
+                    # A hand-written bridge record (an island checkpoint from before
+                    # these records) may leave the contract out.
+                    (record.get("contract", self.contract.hex()) == self.contract.hex(),
+                     "layout / parallel shape"),
+                    (len(record.get("versions", ())) == self.num_fragments, "fragment count"),
+                    (resume_iteration is None or record.get("iteration") == int(resume_iteration), "iteration"),
+                ]
+                bad = [what for ok, what in checks if not ok]
+                if bad:
+                    reason = f"{path} does not match this island ({', '.join(bad)})"
+                    record = None
+            if record is None:
+                log.warning("resume: %s; the syncer's cut replaces every fragment (cold start)", reason)
+        record = self._bcast_object(record)
+        if record is None:
+            return
+        loaded: dict[int, Any] = {}
+        ok = bool(record.get("anchors"))
+        if ok:
+            try:
+                saved = torch.load(self._resume_paths(resume_dir)[1], map_location="cpu", weights_only=True)
+                if saved["keys"] != [list(k) for k in self._shard_keys()]:
+                    raise ValueError("shard list differs")
+                for shard, value in zip(self.shards, saved["values"], strict=True):
+                    if tuple(value.shape) != tuple(shard.local_shape):
+                        raise ValueError(f"{shard.name} has shape {tuple(value.shape)}")
+                    loaded[id(shard.param)] = value
+            except Exception as exc:  # agreed on below; a missing anchor file is not fatal
+                log.warning("resume: rank %d cannot use its saved anchors: %s", self.rank, exc)
+                ok = False
+        ok = all(self._gather_object(ok))
+        self.resume_record = record
+        self._resume_has_anchors = ok
+        self._resume_anchors = loaded if ok else {}
+        self.units_total = int(record["units_total"])
+        self.state.global_step = int(record["global_step"])
+        if self.rank == 0:
+            log.info("resume: island record of iteration %s (anchor versions %s..%s, old anchors %s)",
+                     record.get("iteration"), min(record["versions"]), max(record["versions"]),
+                     "loaded" if ok else "not saved: a newer fragment takes the global")
+
+    def _gather_object(self, value: Any) -> list[Any]:
+        import torch.distributed as dist
+
+        if self.world == 1:
+            return [value]
+        out: list[Any] = [None] * self.world
+        dist.all_gather_object(out, value, group=self.comm.world)
+        return out
+
+    def save_state(self, output_dir: str, *, iteration: int, save_anchors: bool = False) -> bool:
+        """Record the sync's per-fragment state next to the trainer checkpoint
+        ``output_dir`` of ``iteration`` (call it on every rank after the
+        checkpoint is written; collective only with ``save_anchors``).
+
+        Global rank 0 writes ``RESUME_STATE_FILE``: each fragment's anchor
+        version, the H-gate / token counters and the spent-anchor guard.
+        ``save_anchors`` also writes every rank's anchor shards (the
+        broadcast dtype, ~``2 * n_r`` bytes per rank for bf16) to
+        ``RESUME_ANCHOR_DIR``; only with them can a fragment that the syncer
+        moved past the checkpoint's anchor keep the island's local progress
+        (``global_new + (local - anchor_old)``).  Never raises on an I/O
+        error (training goes on); returns whether rank 0 wrote the record
+        (True on the other ranks)."""
+
+        import torch
+
+        anchors_ok = False
+        if save_anchors:
+            path = self._resume_paths(output_dir)[1]
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                values = [self.anchors.get(id(s.param)) for s in self.shards]
+                if any(v is None for v in values):
+                    raise ValueError("a local shard has no anchor yet")
+                tmp = f"{path}.tmp"
+                torch.save({"keys": [list(k) for k in self._shard_keys()], "values": values}, tmp)
+                os.replace(tmp, path)
+                anchors_ok = True
+            except Exception as exc:
+                log.warning("save_state: rank %d cannot write its anchors: %s", self.rank, exc)
+        anchors_ok = all(self._gather_object(anchors_ok)) if save_anchors else False
+        written = True
+        if self.rank == 0:
+            record = {"format": RESUME_FORMAT, "learner_id": self.learner_id, "iteration": int(iteration),
+                      "contract": self.contract.hex(), "anchors": anchors_ok,
+                      **self.state.resume_record(anchored=self.anchored, units_total=self.units_total,
+                                                 spent=self.spent)}
+            path = self._resume_paths(output_dir)[0]
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                tmp = f"{path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(record, handle)
+                os.replace(tmp, path)
+                log.info("save_state: %s (iteration %d, anchors %s)", path, iteration, anchors_ok)
+            except OSError as exc:
+                log.warning("save_state: cannot write %s: %s", path, exc)
+                written = False
+        return written
 
     # ------------------------------------------------------------------ collectives
     def _bcast_object(self, value: Any) -> Any:
@@ -855,23 +1207,36 @@ class MegatronDiLoCoSync:
         """The fragment's values on rank 0 as wire byte parts (INIT, or PUSH
         for bf16/f32 sessions) or, for a q4 push, one f32 tensor."""
 
+        parts: list[Any] | None = [] if self.rank == 0 else None
+        for chunk in self._export_fragment_chunks(fid, delta=delta):
+            if parts is not None:
+                parts.extend(chunk)
+        return parts
+
+    def _export_fragment_chunks(self, fid: int, *, delta: bool):
+        """``_export_fragment`` one chunk at a time (collective): yields each
+        chunk's parts on rank 0, None elsewhere; ``_export_error`` is set once
+        a non-finite value was seen."""
+
         from yeto.protocol import DTYPE_Q4
         from yeto.tensor_io import pack_tensor
 
-        parts: list[Any] | None = [] if self.rank == 0 else None
         self._export_error = None
         q4 = delta and self.wire == DTYPE_Q4
         for names in self.fragment_chunks[fid]:
             tensors = self._export_chunk(names, delta=delta)
-            if parts is None:
+            if tensors is None:
+                yield None
                 continue
+            parts = []
             for tensor in tensors:
                 if self._export_error is None and not bool(tensor.isfinite().all()):
                     # Raised on every rank by the caller's error broadcast.
                     self._export_error = f"fragment {fid} holds a non-finite value"
                 parts.append(tensor.reshape(-1) if q4 else
                              pack_tensor(tensor.reshape(-1), self.bulk if not delta else self._push_part_dtype()))
-        return parts
+            del tensors
+            yield parts
 
     def _push_part_dtype(self) -> int:
         """The dtype of the PUSH parts handed to the client: f32 on the
@@ -882,9 +1247,16 @@ class MegatronDiLoCoSync:
 
         return DTYPE_F32 if bulk_dtype(self.wire) == DTYPE_F32 else push_wire_dtype(self.wire)
 
-    def _apply_chunk(self, names: Sequence[str], flat: Any | None, dtype: Any, *, blend: bool) -> None:
+    def _apply_chunk(self, names: Sequence[str], flat: Any | None, dtype: Any, *, blend: bool,
+                     mode: str | None = None) -> None:
         """Install the raw global values of ``names`` (``flat`` on rank 0, in the
-        broadcast dtype) as every rank's anchor, master and model copy."""
+        broadcast dtype) as every rank's anchor, master and model copy.
+
+        A resumed island's first install of a fragment (``mode``,
+        ``yeto.diloco_sync.resume_fragment_mode``): ``"anchor"`` only records
+        the anchor and leaves the master and model copy untouched,
+        ``"shift"`` writes ``global + (master - old anchor)``; ``"overwrite"``
+        (or None) is the ordinary install."""
 
         import torch
         import torch.distributed as dist
@@ -932,12 +1304,36 @@ class MegatronDiLoCoSync:
                 n = int(shard.param.numel())
                 pieces.append(incoming[at:at + n].view(shard.local_shape))
                 at += n
-        targets = []
+        targets, previous = [], []
         for shard, whole in zip(local, pieces, strict=True):
             raw = whole.to(dtype=torch.float32).contiguous()
+            previous.append(self.anchors.get(id(shard.param)))
             self.anchors[id(shard.param)] = whole.to(device="cpu", dtype=self.anchor_dtype).contiguous().clone()
             targets.append(raw)
-        if blend and self.merge_alpha > 0:
+        if mode == RESUME_ANCHOR:
+            return  # the broadcast is the checkpoint's own anchor: keep the local values
+        if mode == LIVE_REBASE:
+            # The island's progress since its anchor moves onto the catch-up;
+            # a shard whose global did not change keeps its values bit for bit.
+            from yeto.diloco_sync import shifted_resume_value
+
+            moved = [i for i, (s, old) in enumerate(zip(local, previous, strict=True))
+                     if old is None or not torch.equal(old, self.anchors[id(s.param)])]
+            if not moved:
+                return
+            local = [local[i] for i in moved]
+            masters = self._masters(local)
+            targets = [targets[i] if previous[i] is None else shifted_resume_value(targets[i], m, previous[i])
+                       for i, m in zip(moved, masters, strict=True)]
+            del masters
+        elif mode == RESUME_SHIFT:
+            from yeto.diloco_sync import shifted_resume_value
+
+            masters = self._masters(local)
+            targets = [shifted_resume_value(t, m, self._resume_anchors.pop(id(s.param)))
+                       for s, m, t in zip(local, masters, targets, strict=True)]
+            del masters
+        elif blend and self.merge_alpha > 0:
             masters = self._masters(local)
             targets = [self.merge_alpha * m.to(torch.float32) + (1.0 - self.merge_alpha) * t
                        for m, t in zip(masters, targets, strict=True)]
@@ -961,8 +1357,10 @@ class MegatronDiLoCoSync:
         if nbytes != expected:
             raise SwiftMegatronSyncError(f"fragment {fid} payload has {nbytes} bytes, expected {expected}")
 
-    def _apply_fragment(self, fid: int, data: Any, dtype: Any, *, blend: bool) -> None:
-        """Apply one fragment's payload (``data`` on rank 0) chunk by chunk."""
+    def _apply_fragment(self, fid: int, data: Any, dtype: Any, *, blend: bool,
+                        mode: str | None = None) -> None:
+        """Apply one fragment's payload (``data`` on rank 0) chunk by chunk
+        (``mode``: a resumed island's first install, ``_apply_chunk``)."""
 
         import torch
 
@@ -974,7 +1372,7 @@ class MegatronDiLoCoSync:
             flat = None
             if view is not None:
                 flat = torch.frombuffer(bytearray(view[offset:offset + nbytes]), dtype=torch.uint8).view(dtype)
-            self._apply_chunk(names, flat, dtype, blend=blend)
+            self._apply_chunk(names, flat, dtype, blend=blend, mode=mode)
             offset += nbytes
 
     # ------------------------------------------------------------------ boundary
@@ -996,10 +1394,15 @@ class MegatronDiLoCoSync:
 
         if self.finished or self._closed:
             return
+        self._progress_at = time.monotonic()
         state = self.state
         iteration = int(iteration)
         if not self._counters_started:  # count from the (possibly resumed) first step
             state.steps_at_reset = [iteration - 1] * self.num_fragments
+            # A fragment that kept its checkpointed progress keeps its clock:
+            # the H gate is not restarted by the island's own restart.
+            for fid, mode in self.resumed.items():
+                self._restore_counters(fid, mode)
             self._counters_started = True
         self.iteration = iteration
         if update_successful:
@@ -1016,11 +1419,19 @@ class MegatronDiLoCoSync:
         updates = self._take_updates(plan) if self.rank == 0 else {}
         for fid, version in plan.applies:
             data = updates.get(fid) if self.rank == 0 else None
+            live = plan.modes.get(fid)
+            if live == LIVE_CONFIRM:  # a replay of the anchor: nothing changes
+                self.stats["confirmed"] = self.stats.get("confirmed", 0) + 1
+                self.events.append((iteration, "confirm", fid, version))
+                continue
             started = time.perf_counter()
-            self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+            mode = self._apply_first_or_blend(fid, data, version, live=live)
             self.stats["apply_s"] += time.perf_counter() - started
-            state.steps_at_reset[fid] = iteration
-            state.units_at_reset[fid] = self.units_total
+            if live != LIVE_REBASE:  # a rebased fragment keeps its local progress and clock
+                state.steps_at_reset[fid] = iteration
+                state.units_at_reset[fid] = self.units_total
+            if mode is not None:
+                self._restore_counters(fid, mode)
             state.fragment_versions[fid] = version
             self.anchored[fid] = True
             state.global_step = max(state.global_step, version)
@@ -1071,18 +1482,34 @@ class MegatronDiLoCoSync:
             if plan.finalizing:
                 return plan
             self._updates = {}
+            catch_up: set[int] = set()
             for update in client.drain_updates():
-                # A later broadcast of the same fragment supersedes an earlier one.
+                # A later broadcast of the same fragment supersedes an earlier
+                # one; a catch-up among them is still the syncer's current value.
                 self._updates[update.fragment_id] = update
+                if getattr(update, "catch_up", False):
+                    catch_up.add(update.fragment_id)
             for fid, update in self._updates.items():
                 # Checked here, before the plan goes out: a bad payload found
                 # while applying would fail rank 0 inside the chunk broadcasts.
                 self._check_payload(fid, update.data, self.bulk_torch)
             plan.applies = sorted((fid, int(u.version)) for fid, u in self._updates.items())
+            plan.modes = self._live_modes(plan.applies, catch_up)
             plan.shutdown = bool(client.shutdown.is_set())
         except Exception as exc:
             plan.error = f"{type(exc).__name__}: {exc}"
         return plan
+
+    def _live_modes(self, applies: Sequence[tuple[int, int]], catch_up: set[int]) -> dict[int, str]:
+        from yeto.diloco_sync import live_install_mode
+
+        modes = {}
+        for fid, version in applies:
+            mode = live_install_mode(anchored=self.anchored[fid], current_version=self.state.fragment_versions[fid],
+                                     version=version, catch_up=fid in catch_up, pushed_from=self.pushed_from[fid])
+            if mode is not None:
+                modes[fid] = mode
+        return modes
 
     def _ready_pushes(self) -> list[tuple[int, int, int, int, int]] | str:
         """Rank 0: the pulls answered now, by the torch learner's rule
@@ -1102,6 +1529,7 @@ class MegatronDiLoCoSync:
             if state.pending_pulls:
                 self.stats["deferred_pushes"] += 1
             return []
+        self._release_spent_after_reconnect()
         ready = take_ready_pulls(state, steps_total=self.iteration, units_total=self.units_total,
                                  anchored=self.anchored.__getitem__, min_steps=self.interval)
         # One fragment per boundary: its PUSH streams in the background while
@@ -1115,6 +1543,38 @@ class MegatronDiLoCoSync:
             out.append((int(pull.fragment_id), int(pull.global_step), int(pull.round_attempt), c_steps, c_units))
         return out
 
+    def link_of(self, fid: int) -> Any:
+        """Rank 0: the connection generation fragment ``fid`` is pushed on
+        (None for a client that does not expose it)."""
+        client = self.client
+        of = getattr(client, "connection_generation_of", None)
+        if of is not None:
+            return of(fid)
+        return getattr(client, "connection_generation", None)
+
+    def _release_spent_after_reconnect(self) -> None:
+        """Rank 0, sender idle: free every spent anchor whose PUSH went out
+        on a connection that has since been replaced.
+
+        Without this an island that pushed just before a syncer restart (or
+        whose PUSH was carried into a round the restarted syncer no longer
+        has) refuses every pull of that fragment until a newer broadcast,
+        which no syncer sends once every island waits like this.  Answering
+        from the same anchor again cannot double-count it: a syncer that
+        still holds the delta refuses the second one per island
+        (``anchor_reused``, syncer ``LateCarry``), and one that lost it
+        merges it once."""
+        for fid, spent in enumerate(self.spent):
+            if spent is None or self.spent_link[fid] is None:
+                continue
+            link = self.link_of(fid)
+            if link is not None and link != self.spent_link[fid]:
+                log.info("fragment %d: anchor %d released after a reconnect (push of step %d)",
+                         fid, spent[0], spent[1])
+                self.spent[fid] = None
+                self.spent_link[fid] = None
+                self.stats["released_anchors"] = self.stats.get("released_anchors", 0) + 1
+
     def _pushable(self, pull: Any) -> bool:
         fid = int(pull.fragment_id)
         spent = self.spent[fid]
@@ -1124,6 +1584,13 @@ class MegatronDiLoCoSync:
         """Sender thread: a dropped PUSH never reached the syncer, so its anchor is not spent."""
         if self.spent[fid] == (base, step):
             self.spent[fid] = None
+            self.spent_link[fid] = None
+        if self.pushed_from[fid] == base:
+            self.pushed_from[fid] = None
+
+    def _push_sent(self, fid: int) -> None:
+        """Sender thread, before the PUSH is queued: the link it goes out on."""
+        self.spent_link[fid] = self.link_of(fid)
 
     def _take_updates(self, plan: _Plan) -> dict[int, Any]:
         updates, self._updates = self._updates, {}
@@ -1143,6 +1610,8 @@ class MegatronDiLoCoSync:
             return f"PUSH fragment {fid}: {self._export_error}"
         head = (fid, step, attempt, self.state.fragment_versions[fid], self.iteration, c_steps, c_units)
         self.spent[fid] = (self.state.fragment_versions[fid], step)
+        self.spent_link[fid] = None  # set by the sender once it goes out
+        self.pushed_from[fid] = self.state.fragment_versions[fid]
         if self.wire == DTYPE_Q4:
             # q4 blocks span tensors: the shared encoder takes the whole delta.
             self.sender.submit(head, payload=encode_push_delta(self.client, torch.cat(parts)))
@@ -1211,6 +1680,8 @@ class MegatronDiLoCoSync:
         if self._closed:
             return
         self._closed = True
+        if self.heartbeat is not None:
+            self.heartbeat.stop()
         if self.sender is not None:
             self.sender.stop()
         client, self.client = self.client, None
@@ -1241,6 +1712,40 @@ def session_dtype(name: str) -> int:
     return code | DTYPE_FLAG_TENSOR_BLOCKS if key != "bf16" else code
 
 
+class _Heartbeat:
+    """Rank 0's HEARTBEAT thread (``client.heartbeat(local_step)`` every
+    ``interval`` seconds): the syncer renews the island's lease on it, so a
+    lease can be on although a step (or an INIT, a checkpoint save) takes far
+    longer.  ``stall`` > 0: no heartbeat once the training loop showed no
+    progress (``progress_at``) for that long.  A send during an outage is
+    dropped by the client; the next one goes out after the redial."""
+
+    def __init__(self, client: Any, interval: float, stall: float, step: Callable[[], int],
+                 progress_at: Callable[[], float]) -> None:
+        import threading
+
+        self.client, self.interval, self.stall = client, interval, stall
+        self.step, self.progress_at = step, progress_at
+        self.sent = 0
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="yeto-swift-heartbeat", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            if self.stall > 0 and time.monotonic() - self.progress_at() > self.stall:
+                continue
+            try:
+                self.client.heartbeat(int(self.step()))
+                self.sent += 1
+            except Exception as exc:  # never take the island down for a heartbeat
+                log.debug("heartbeat not sent: %s", exc)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.thread.join(timeout=5.0)
+
+
 class _PushSender:
     """Rank 0's background PUSH streaming: one PUSH in flight at a time, so a
     slow link or syncer never holds a training step (decoupled DiLoCo, as the
@@ -1248,11 +1753,12 @@ class _PushSender:
     push (the syncer re-requests it after the redial); any other failure is
     re-raised by the next boundary on every rank."""
 
-    def __init__(self, client: Any, stats: dict, on_drop: Callable[[int, int, int], None]) -> None:
+    def __init__(self, client: Any, stats: dict, on_drop: Callable[[int, int, int], None],
+                 on_sent: Callable[[int], None] | None = None) -> None:
         import queue
         import threading
 
-        self.client, self.stats, self.on_drop = client, stats, on_drop
+        self.client, self.stats, self.on_drop, self.on_sent = client, stats, on_drop, on_sent
         self.jobs: queue.Queue = queue.Queue()
         self.idle = threading.Event()
         self.idle.set()
@@ -1280,6 +1786,11 @@ class _PushSender:
         self.thread.join(timeout=5.0)
 
     def _run(self) -> None:
+        from yeto.protocol import PartialMessageGenerationLost
+
+        # A torso on a dead connection generation is dropped by the syncer,
+        # so all three mean the delta was never delivered.
+        undelivered = (ConnectionError, OSError, PartialMessageGenerationLost)
         while True:
             job = self.jobs.get()
             if job is None:
@@ -1288,14 +1799,17 @@ class _PushSender:
             fid = head[0]
             try:
                 if payload is not None:
-                    self.client.push_fragment(*head, payload)
-                    nbytes = len(payload)
-                else:
-                    self.client.push_fragment_parts(*head, parts)
-                    nbytes = sum(len(part) for part in parts)
+                    parts = [payload]  # q4: already wire bytes, sent unchanged
+                nbytes = sum(len(part) for part in parts)
+                if self.on_sent is not None:
+                    self.on_sent(fid)  # before the send: the link it is queued on
+                if self.client.push_fragment_parts(*head, parts) is False:
+                    # Nothing was queued: the link is down (an outage, a syncer
+                    # restart).  The syncer never sees this delta.
+                    raise ConnectionError("syncer link down, nothing queued")
                 self.stats["pushed"] += 1
                 self.stats["push_bytes"] += nbytes
-            except (ConnectionError, OSError) as exc:
+            except undelivered as exc:  # the anchor is not spent
                 self.stats["dropped_pushes"] += 1
                 self.on_drop(fid, head[3], head[1])
                 log.warning("push of fragment %d dropped (%s); the syncer re-requests it", fid, exc)

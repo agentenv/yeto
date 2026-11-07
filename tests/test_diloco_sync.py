@@ -364,3 +364,62 @@ def test_a_resent_pull_of_the_same_attempt_is_answered_once():
     state.pending_pulls = [pull, PullRequest(fragment_id=0, global_step=3, round_attempt=1)]
     ready = take_ready_pulls(state, steps_total=5, units_total=50, anchored=lambda fid: True)
     assert [p for p, _, _ in ready] == [pull] and state.pending_pulls == []
+
+
+def test_resume_record_round_trips_and_picks_the_install_mode():
+    import json
+
+    from yeto.diloco_sync import (
+        RESUME_ANCHOR,
+        RESUME_OVERWRITE,
+        RESUME_SHIFT,
+        resume_fragment_mode,
+        shifted_resume_value,
+    )
+
+    state = DiLoCoSyncState.create(3, track_anchors=False)
+    state.fragment_versions = [4, 7, 0]
+    state.steps_at_reset = [0, 12, 0]
+    state.units_at_reset = [0, 500, 0]
+    state.global_step = 7
+    record = json.loads(json.dumps(state.resume_record(
+        anchored=[True, True, False], units_total=900, spent=[None, (7, 9), None])))
+    assert record["spent"] == [None, [7, 9], None] and record["units_total"] == 900
+    # Same version: the broadcast is the checkpoint's own anchor.
+    assert resume_fragment_mode(record, 0, 4, have_anchor=False) == RESUME_ANCHOR
+    # Newer, after a push from that anchor: the delta may be merged into it,
+    # so it is installed as is rather than counted twice.
+    assert resume_fragment_mode(record, 1, 9, have_anchor=True) == RESUME_OVERWRITE
+    # Newer, nothing pushed from the anchor: move the local progress, only
+    # when the old anchor is at hand.
+    unspent = dict(record, spent=[None, None, None])
+    assert resume_fragment_mode(unspent, 1, 9, have_anchor=True) == RESUME_SHIFT
+    assert resume_fragment_mode(unspent, 1, 9, have_anchor=False) == RESUME_OVERWRITE
+    # A rewound global (a syncer resumed from an older checkpoint) still shifts.
+    assert resume_fragment_mode(record, 1, 5, have_anchor=True) == RESUME_SHIFT
+    # Never anchored before the checkpoint, or no record at all: a cold start.
+    assert resume_fragment_mode(record, 2, 0, have_anchor=True) == RESUME_OVERWRITE
+    assert resume_fragment_mode(None, 0, 4, have_anchor=True) == RESUME_OVERWRITE
+    fresh = DiLoCoSyncState.create(3, track_anchors=False)
+    fresh.steps_at_reset = [15, 15, 15]
+    fresh.restore_fragment(record, 1)
+    assert fresh.steps_at_reset == [15, 12, 15] and fresh.units_at_reset == [0, 500, 0]
+    new, local, old = torch.tensor([1.0, 2.0]), torch.tensor([0.5, 0.75]), torch.tensor([0.25, 1.0])
+    assert torch.equal(shifted_resume_value(new, local, old), torch.tensor([1.25, 1.75]))
+
+
+def test_live_install_mode_keeps_a_running_islands_progress_through_a_catch_up():
+    from yeto.diloco_sync import LIVE_CONFIRM, LIVE_REBASE, live_install_mode
+
+    def mode(version, catch_up, pushed_from=None, anchored=True):
+        return live_install_mode(anchored=anchored, current_version=5, version=version,
+                                 catch_up=catch_up, pushed_from=pushed_from)
+
+    assert mode(9, False, anchored=False) is None and mode(9, True, anchored=False) is None
+    assert mode(5, False) == LIVE_CONFIRM  # a replay of the anchor
+    assert mode(9, False) is None  # an ordinary merge broadcast
+    assert mode(9, True) == LIVE_REBASE  # a merge missed while away, not pushed from this anchor
+    assert mode(9, True, pushed_from=5) is None  # its delta may be in it
+    assert mode(9, True, pushed_from=3) == LIVE_REBASE
+    assert mode(3, True, pushed_from=5) == LIVE_REBASE  # a rewound syncer
+    assert mode(5, True) == LIVE_REBASE  # same number, other values (the client compared the bytes)

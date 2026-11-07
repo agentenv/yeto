@@ -880,6 +880,9 @@ def _sft_syncer_command(args, num_learners: int, binary: str,
         f" --total-steps {args.total_steps}"
         f"{_syncer_outer_optimizer(args)}"
         f" --checkpoint-path {checkpoint}"
+        # The SFT preset writes its periodic checkpoints (every 8 rounds by
+        # default) off the scheduler, and one before the first round.
+        f" --background-checkpoint --checkpoint-on-start"
         f" {_resume_if_exists(checkpoint)}"
         f" --mark-final-checkpoint"
         f" --event-tape {_shard_path(SYNCER_EVENT_TAPE, index)}"

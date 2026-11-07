@@ -104,6 +104,8 @@ pub struct Config {
     pub quorum_timeout_s: u64,
     /// Bounded wait for learners to apply and acknowledge the terminal cut.
     pub final_ack_timeout_s: u64,
+    /// Graceful stop (`crate::shutdown`); None: signals keep their default action.
+    pub shutdown: Option<Arc<crate::shutdown::Shutdown>>,
     pub total_steps: u64,
     /// Strict dense-policy mode: one logical local step contributes every
     /// fragment in a serial sweep.  None preserves the legacy independent
@@ -125,6 +127,9 @@ pub struct Config {
     /// rounds keep merging (`GlobalState::save_checkpoint_in_background`)
     /// instead of on the scheduler. Every other checkpoint waits for it.
     pub background_checkpoint: bool,
+    /// Write the checkpoint once before the first round, unless `resume`
+    /// loaded it (`--checkpoint-on-start`).
+    pub checkpoint_on_start: bool,
     /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
     /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
     /// below `total_steps`. Empty: none.
@@ -1498,6 +1503,28 @@ fn round_grace(
     (grace, floor)
 }
 
+/// `--checkpoint-on-start`: write the checkpoint before the first round.
+/// Without it the first rounds (16 at ~860 s per write on the 120B run) have
+/// no checkpoint, and a restart then loses the INIT and every merge so far.
+/// A resume already has one (the state it loaded); a finished run needs none.
+/// Returns whether a write was started.
+fn save_start_checkpoint(cfg: &Config, st: &GlobalState, resumed: bool, last_step: u64) -> Result<bool> {
+    let Some(path) = cfg.checkpoint_path.as_ref().filter(|_| cfg.checkpoint_on_start) else {
+        return Ok(false);
+    };
+    if resumed || st.global_step >= last_step {
+        return Ok(false);
+    }
+    if cfg.background_checkpoint {
+        st.save_checkpoint_in_background(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint started in the background");
+    } else {
+        st.save_checkpoint(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint written");
+    }
+    Ok(true)
+}
+
 /// Whether step `t` is the last round of its fragment within `total_steps`.
 fn is_terminal_round(schedule: &crate::shard::ShardSchedule, t: u64, total_steps: u64) -> bool {
     schedule.next_merge_of_fragment(t) > total_steps
@@ -1829,6 +1856,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
              without --policy-sweep-fragments (per-round checkpoints persist before their broadcast)"
         );
     }
+    if cfg.checkpoint_on_start && cfg.checkpoint_path.is_none() {
+        bail!("--checkpoint-on-start needs --checkpoint-path");
+    }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
             bail!("--async-checkpoint requires --policy-sweep-fragments");
@@ -2080,6 +2110,9 @@ fn check_and_record_profile(cfg: &Config, profile: &[u8; 32]) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    if let Some(stop) = &cfg.shutdown {
+        stop.install_signal_handlers()?;
+    }
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
     check_and_record_profile(&cfg, &semantic_profile_hash)?;
@@ -3848,14 +3881,20 @@ async fn scheduler(
                 break;
             }
         }
-        match recv_init_event(
-            &mut events,
-            &budget_cutoff,
-            budget_reports.len(),
-            cfg.learners,
-        )
-        .await?
-        {
+        let init_event = recv_init_event(&mut events, &budget_cutoff, budget_reports.len(), cfg.learners);
+        let event = match cfg.shutdown.as_deref() {
+            Some(stop) => tokio::select! {
+                biased;
+                _ = stop.requested() => {
+                    // Nothing merged yet: the checkpoint on disk (if any) is current.
+                    info!("stop requested before training started; exiting");
+                    return Ok(());
+                }
+                event = init_event => event?,
+            },
+            None => init_event.await?,
+        };
+        match event {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                 bail!("RL strict failure {metric}: {message}");
@@ -4061,6 +4100,8 @@ async fn scheduler(
                 info!(step = st.global_step, path = %path.display(), "checkpoint committed");
             }
         }
+    } else {
+        save_start_checkpoint(&cfg, &st, resumed, last_step)?;
     }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
@@ -4134,6 +4175,9 @@ async fn scheduler(
     if dynamic {
         write_pool_status(&cfg, &registry, st.global_step, "running");
     }
+    // A stop signal (`crate::shutdown`): set once every round has drained.
+    let mut stopped = false;
+    let mut stop_logged = false;
     'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
@@ -4143,6 +4187,55 @@ async fn scheduler(
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
             break 'outer;
+        }
+        let stop_deadline = cfg.shutdown.as_ref().and_then(|stop| stop.deadline());
+        if let Some(deadline) = stop_deadline {
+            if !stop_logged {
+                stop_logged = true;
+                info!(
+                    step = st.global_step,
+                    gathering = inflight.len(),
+                    computing = computing.len() + ready.len(),
+                    "stopping: no new rounds; waiting for the rounds in flight"
+                );
+            }
+            if Instant::now() >= deadline && !inflight.is_empty() {
+                // A gathering round has not touched the state; after --resume
+                // its step is launched again.
+                let dropped: Vec<u64> = inflight.iter().map(|round| round.t).collect();
+                warn!(steps = ?dropped, "stop timeout: abandoning the rounds still gathering");
+                for round in inflight.drain(..) {
+                    busy_fragments.remove(&round.p);
+                }
+            } else if !inflight.is_empty() {
+                // A round that holds no delta and none of whose islands is
+                // still connected cannot close: do not wait the timeout out.
+                let orphaned: Vec<usize> = {
+                    let registry = registry.lock().unwrap();
+                    inflight
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, round)| {
+                            round.pushes.is_empty()
+                                && round.carried.is_empty()
+                                && !round.expected_members.iter().any(|m| registry.groups.contains_key(m))
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+                if !orphaned.is_empty() {
+                    let steps: Vec<u64> = orphaned.iter().map(|&i| inflight[i].t).collect();
+                    warn!(?steps, "stopping: abandoning gathering rounds whose islands are all gone");
+                    for &i in orphaned.iter().rev() {
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                    }
+                }
+            }
+            if inflight.is_empty() && computing.is_empty() && ready.is_empty() && publishing.is_none() {
+                stopped = true;
+                break 'outer;
+            }
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
         for member in &expired {
@@ -4241,6 +4334,7 @@ async fn scheduler(
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && Instant::now() >= next_launch
         {
             if !budget_cutoff.try_linearize_work() {
@@ -4371,6 +4465,13 @@ async fn scheduler(
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
                         break 'outer;
+                    }
+                    if stop_deadline.is_some() {
+                        // Stopping: no new attempt; the round is launched again after --resume.
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                        warn!(step = round.t, "stop: quorum timeout, round abandoned");
+                        continue;
                     }
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
@@ -4569,6 +4670,7 @@ async fn scheduler(
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
@@ -4580,6 +4682,11 @@ async fn scheduler(
         if !resends.is_empty() {
             // Check the background resends for drained ones a few times a second.
             let check = deadline_now + RESEND_CHECK_INTERVAL;
+            earliest = Some(earliest.map_or(check, |d| d.min(check)));
+        }
+        if cfg.shutdown.is_some() {
+            // Notice a stop signal (and its timeout) within a fraction of a second.
+            let check = deadline_now + SHUTDOWN_CHECK_INTERVAL;
             earliest = Some(earliest.map_or(check, |d| d.min(check)));
         }
         let wake = if let Some(pending) = publishing.as_mut() {
@@ -5106,6 +5213,24 @@ async fn scheduler(
     } else {
         resends.stop(&registry)
     };
+
+    if stopped {
+        drop(forwarders); // a catch-up in progress is resent after the restart
+        st.drain_iso_backend().await?;
+        eval_checkpoints.finish().await?;
+        if let Some(path) = &cfg.checkpoint_path {
+            // Waits for a background checkpoint first, then writes this cut.
+            st.save_checkpoint(path)?;
+            info!(step = st.global_step, path = %path.display(), "stop: checkpoint written");
+        } else {
+            warn!(step = st.global_step, "stop without --checkpoint-path: the merged state is not saved");
+        }
+        if dynamic {
+            write_pool_status(&cfg, &registry, st.global_step, "stopped");
+        }
+        info!(step = st.global_step, "stopped; restart with --resume to continue");
+        return Ok(());
+    }
 
     if cfg.learner_budget_steps.is_some() {
         wait_forwarders(std::mem::take(&mut forwarders)).await;
@@ -5794,21 +5919,25 @@ fn route_push(
 /// same fragment against its own base, weighted by its counters (and the
 /// carry discount), as long as its base lag stays within `--max-base-lag`.
 ///
-/// A carried delta counts once: after the syncer carries a delta from an
-/// anchor (fragment version), a later push of that island connection from
-/// the same or an older anchor of that fragment is refused
-/// (`anchor_reused`), and a late push from an anchor whose delta was
-/// already merged is not carried. Pushes that never involve a carry keep
-/// the existing stale-base rules.
+/// A delta counts once: after the syncer carries a delta from an anchor
+/// (fragment version), a later push of that island from the same or an
+/// older anchor of that fragment is refused (`anchor_reused`) on any of its
+/// connections; after it gathers one, the same holds for the island's later
+/// connections. An island that redials (a WAN drop, a syncer it lost
+/// for a while) releases the anchors its lost pushes held, so it may answer
+/// the next pull from an anchor whose delta did reach this syncer; that
+/// second delta repeats the first one's local steps and must not be merged
+/// again. A round restart frees the anchors of the pushes it dropped
+/// (`release_anchor`). Pushes from newer anchors keep the stale-base rules.
 struct LateCarry {
     limit: u64,
     /// Late pushes waiting for their fragment's next round.
     queued: HashMap<usize, Vec<(Member, Push)>>,
-    /// Newest base version of a carried delta per island connection and
-    /// fragment.
-    anchors: HashMap<(Member, usize), u64>,
-    /// Newest base version of a delta gathered by its own round.
-    gathered: HashMap<(Member, usize), u64>,
+    /// Newest base version of a carried delta per island and fragment.
+    anchors: HashMap<(u32, usize), u64>,
+    /// Newest base version of a delta gathered by its own round, per island
+    /// and fragment, with the connection generation that pushed it.
+    gathered: HashMap<(u32, usize), (u64, u64)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5836,32 +5965,42 @@ impl LateCarry {
         }
     }
 
-    /// True when `push` reuses an anchor this connection already spent.
+    /// True when `push` reuses an anchor whose delta this island already had
+    /// carried (on any connection) or gathered on an earlier connection. One
+    /// connection may answer consecutive rounds from the same anchor (an
+    /// asynchronous learner that has not installed the newer version yet);
+    /// a redialed one repeating the anchor resends a delta already taken.
     fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
-        self.anchors
-            .get(&(member, push.fragment_id as usize))
-            .is_some_and(|&spent| push.base_version <= spent)
+        let key = (member.learner_id, push.fragment_id as usize);
+        let carried = self.anchors.get(&key).is_some_and(|&taken| push.base_version <= taken);
+        let gathered = self
+            .gathered
+            .get(&key)
+            .is_some_and(|&(taken, generation)| push.base_version <= taken && member.generation != generation);
+        carried || gathered
     }
 
     fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let spent = self.anchors.entry((member, fragment)).or_insert(0);
+        let spent = self.anchors.entry((member.learner_id, fragment)).or_insert(0);
         *spent = (*spent).max(base_version);
     }
 
     fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let taken = self.gathered.entry((member, fragment)).or_insert(0);
-        *taken = (*taken).max(base_version);
+        let taken = self.gathered.entry((member.learner_id, fragment)).or_insert((0, member.generation));
+        if base_version >= taken.0 {
+            *taken = (base_version, member.generation);
+        }
     }
 
     /// A restarted round drops its gathered pushes; their islands answer the
     /// new attempt from the same anchor, so the anchor is free again.
     fn release_anchor(&mut self, member: Member, push: &Push) {
-        let key = (member, push.fragment_id as usize);
-        if self.gathered.get(&key) == Some(&push.base_version) {
+        let key = (member.learner_id, push.fragment_id as usize);
+        if let Some(taken) = self.gathered.get_mut(&key).filter(|taken| taken.0 == push.base_version) {
             if push.base_version == 0 {
                 self.gathered.remove(&key);
             } else {
-                self.gathered.insert(key, push.base_version - 1);
+                taken.0 = push.base_version - 1;
             }
         }
     }
@@ -5890,8 +6029,8 @@ impl LateCarry {
         }
         if self
             .gathered
-            .get(&(member, p))
-            .is_some_and(|&taken| push.base_version <= taken)
+            .get(&(member.learner_id, p))
+            .is_some_and(|&(taken, _)| push.base_version <= taken)
         {
             return CarryOutcome::Rejected(PushDisposition::Duplicate);
         }
@@ -7586,6 +7725,8 @@ impl<G: Clone> CatchUps<G> {
 
 /// How often the scheduler checks background resends while any is active.
 const RESEND_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the scheduler looks for a stop signal while it waits.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// At the end of the round loop, wait this long for a forwarder to hand
 /// over the fragment it is sending before it is aborted.
 const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
@@ -9355,6 +9496,7 @@ mod tests {
             delta_correction: false,
             quorum_timeout_s: 1,
             final_ack_timeout_s: 1,
+            shutdown: None,
             total_steps,
             policy_sweep_fragments: None,
             outer_lr: 1.0,
@@ -9366,6 +9508,7 @@ mod tests {
             checkpoint_every: 0,
             checkpoint_at_steps: Vec::new(),
             background_checkpoint: false,
+            checkpoint_on_start: false,
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -11033,6 +11176,41 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    #[test]
+    fn checkpoint_on_start_covers_the_rounds_before_the_first_periodic_one() {
+        let directory = unique_test_directory("start-checkpoint");
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("start-{background}.ckpt"));
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 4;
+            config.background_checkpoint = background;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            // Off: nothing before the first periodic checkpoint.
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            assert!(!checkpoint.exists());
+            config.checkpoint_on_start = true;
+            validate_config(&config).unwrap();
+            // A resume already holds the state on disk; a finished run needs none.
+            assert!(!save_start_checkpoint(&config, &state, true, 8).unwrap());
+            state.global_step = 8;
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.global_step = 0;
+            assert!(!checkpoint.exists());
+            assert!(save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.wait_for_background_checkpoint().unwrap();
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!((on_disk.global_step, on_disk.versions.clone()), (0, state.versions.clone()));
+        }
+        let mut config = round_test_config(8);
+        config.checkpoint_on_start = true;
+        assert!(validate_config(&config).is_err(), "needs a checkpoint path");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[tokio::test]
     async fn background_checkpoint_keeps_rounds_going_and_writes_the_same_cuts() {
         let directory = unique_test_directory("background-checkpoint");
@@ -12348,6 +12526,32 @@ mod tests {
     }
 
     #[test]
+    fn a_gathered_anchor_yields_one_delta_across_reconnects() {
+        // Island 1 answered round t=7 of fragment 1 from anchor 5; the delta
+        // is gathered. The link drops, the learner redials (generation 11),
+        // releases its spent anchor and answers the next pull from the same
+        // anchor 5 before the round's broadcast reached it: refused.
+        let mut carry = LateCarry::new(Some(4), false).unwrap();
+        let (old, new) = (member(1, 10), member(1, 11));
+        carry.note_gathered(old, 1, 5);
+        let again = test_push_for(1, 5);
+        assert!(carry.reuses_anchor(new, &again));
+        // The connection that pushed it may answer the next round from the
+        // same anchor (it has not installed the newer version yet).
+        assert!(!carry.reuses_anchor(old, &again));
+        // From the broadcast it then gets (version 7) it pushes again.
+        assert!(!carry.reuses_anchor(new, &test_push_for(1, 7)));
+        // A restart of that round drops the gathered delta: the anchor is
+        // free for the new attempt, from either connection.
+        carry.release_anchor(old, &test_push_for(1, 5));
+        assert!(!carry.reuses_anchor(new, &again));
+        // A restarted syncer starts with nothing taken: the delta it lost is
+        // merged once when the island answers from that anchor again.
+        let fresh = LateCarry::new(Some(4), false).unwrap();
+        assert!(!fresh.reuses_anchor(new, &again));
+    }
+
+    #[test]
     fn a_carried_anchor_yields_one_delta() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let island = member(1, 10);
@@ -12357,8 +12561,14 @@ mod tests {
         assert!(carry.reuses_anchor(island, &push));
         assert!(carry.reuses_anchor(island, &test_push_for(1, 3)));
         assert!(!carry.reuses_anchor(island, &test_push_for(1, 7)));
-        // Another connection or fragment is unaffected.
-        assert!(!carry.reuses_anchor(member(1, 11), &push));
+        // The island's next connection may not spend it again (a redialed
+        // learner answers from the same anchor); another island or
+        // fragment is unaffected.
+        assert!(carry.reuses_anchor(member(1, 11), &push));
+        assert!(!carry.reuses_anchor(member(3, 10), &test_push_for(1, 5)));
+        let mut elsewhere = test_push_for(1, 5);
+        elsewhere.fragment_id += 1;
+        assert!(!carry.reuses_anchor(island, &elsewhere));
         // A late push from an anchor already merged by its own round is not
         // carried; a restart clears the gathered push and frees the anchor.
         let other = member(2, 10);

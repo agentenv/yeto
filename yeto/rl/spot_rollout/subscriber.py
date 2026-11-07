@@ -106,7 +106,7 @@ class SubscriberClient(SyncerClient):
         self._beats = threading.Event()
         self._run_finished = threading.Event()
 
-    def _dispatch(self, gen: int, msg_type: int, payload) -> None:
+    def _dispatch(self, gen: int, msg_type: int, payload, digest: bytes | None = None) -> None:
         # The end-of-run notice counts on any connection generation. The
         # syncer closes the data streams right after it; when their end reaches
         # the client first, the client starts a new generation and the base class
@@ -116,7 +116,7 @@ class SubscriberClient(SyncerClient):
             self._run_finished.set()
             self._closed.set()  # no redial: the run is over
             self._failure.set()
-        super()._dispatch(gen, msg_type, payload)
+        super()._dispatch(gen, msg_type, payload, digest)
 
     def _hello_body_suffix(self) -> bytes:
         return self._trailer

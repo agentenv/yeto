@@ -48,7 +48,8 @@ POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")
 def test_fixed_roster_syncer_command_is_byte_identical(head_launcher):
     """secret-handling-hardening: the only change to the fixed-roster RL line is the
     island HMAC key check in front (the key itself is a secret env); SFT only
-    gains the explicit --allow-unauthenticated-islands."""
+    gains the explicit --allow-unauthenticated-islands and its background and
+    start checkpoints."""
     args = _args()
     # The default data split (the dispenser) adds --dispense flags on purpose;
     # the row slots keep the line this test compares
@@ -61,8 +62,10 @@ def test_fixed_roster_syncer_command_is_byte_identical(head_launcher):
         commands = launcher.role_syncer_commands(args, n)
         assert list(commands) == ["actor"]
         assert launcher.syncer_command(args, n).endswith(HMAC_CHECK + commands["actor"])
+    checkpoints = " --background-checkpoint --checkpoint-on-start"
     assert launcher.syncer_command(_sft(), 2) == (
-        head_launcher.syncer_command(_sft(), 2) + " --allow-unauthenticated-islands")
+        head_launcher.syncer_command(_sft(), 2).replace(
+            " $(test -f", checkpoints + " $(test -f", 1) + " --allow-unauthenticated-islands")
 
 
 def test_fixed_roster_learner_flags_unchanged():
