@@ -28,6 +28,7 @@ from typing import Any, Iterable
 
 from . import alerts as alerts_mod
 from . import cost as cost_mod
+from . import sft as sft_mod
 
 FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "cost_tick"})
 POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
@@ -114,6 +115,8 @@ def record_ts(record: dict) -> float | None:
 
 def classify(record: dict) -> str:
     event = record.get("event")
+    if isinstance(event, str) and event.startswith("sft_"):
+        return "sft"
     if event in FLEET_EVENTS:
         return "fleet"
     if "kind" in record and "seq" in record and event is None:
@@ -236,6 +239,7 @@ class Reducer:
         self._run_meta_cache: tuple | None = None
         self.label: str | None = None  # display label when compared (7.6)
         self.compare: list["Reducer"] = []  #
+        self.sft = sft_mod.SftState()  # ms-swift SFT islands + syncer side streams (sft.py)
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -255,12 +259,16 @@ class Reducer:
         if record.get("event") in SPOT_EVENTS:
             self.spot.append(_spot_row(record))
         kind = classify(record)
-        self.counts[kind] += 1
+        self.counts[kind] = self.counts.get(kind, 0) + 1
         ts = record_ts(record)
         if ts is not None:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
         iid = _iid(record.get("island_id", record.get("learner_id"))) or island
+        if kind != "sft" and sft_mod.is_syncer_tape(record):
+            # The syncer writes the same tape for RL and SFT runs: the SFT page
+            # reads it too, but it alone does not make a run an SFT run.
+            self.sft.fold(record, ts)
         getattr(self, "_feed_" + kind)(record, iid, ts)
         self.event_seq += 1
         etype = record.get("event") or (("journal:" + str(record.get("kind"))) if kind == "journal"
@@ -619,6 +627,9 @@ class Reducer:
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
         view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
                 "label": self.label, "spot": list(self.spot)}
+        sft = self.sft_view(now)
+        if sft is not None:
+            view["sft"] = sft
         if self.compare:
             # other runs, utilization only (side by side / overlay)
             view["compare"] = [{"label": c.label, "run": c.run_name()[0],
@@ -804,6 +815,17 @@ class Reducer:
             if isl["open_ts"] is not None:
                 isl["closed_s"] += max(0.0, ts - isl["open_ts"])
                 isl["open_ts"] = None
+
+    def _feed_sft(self, r: dict, iid: str | None, ts: float | None) -> None:
+        self.sft.fold(r, ts)
+
+    def sft_view(self, now: float) -> dict | None:
+        """SFT islands (ms-swift) and the syncer as the page draws them; None for RL runs."""
+        if not self.sft.islands and not self.counts.get("sft"):
+            return None
+        refs = {k: self.thresholds.get(k, v) for k, v in sft_mod.DEFAULT_REFS.items()}
+        refs = {k: v for k, v in refs.items() if v > 0}  # unset references are not drawn
+        return self.sft.view(now=now, merges=self.merges, refs=refs)
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
         if iid is not None:

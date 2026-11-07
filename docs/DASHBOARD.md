@@ -170,3 +170,55 @@ yeto dashboard export --tapes <A tapes...> --compare <B tapes...> --label "A ove
 
 The page switches between "side by side" and "overlay" (overlay applies only to
 the completion curve), and between "all rounds overlaid" and "round N".
+
+## SFT runs (ms-swift Megatron + decoupled DiLoCo)
+
+`yeto/dashboard/sft.py` adapts the native files of ms-swift islands and the
+syncer into `sft_*` records for the same reducer; the page switches to the
+metrics layout (KPI row, "Islands now", fleet charts, distributions,
+cost / efficiency, syncer events) when the view carries an `sft` key. RL runs
+keep their panels with the same styling plus a round-duration distribution.
+The header range (1h / 6h / 24h / 7d / 30d) filters every SFT chart and
+percentile client-side; cost KPIs compare with the previous window of the same
+length.
+
+Local directory layout read by `yeto dashboard serve|export --tapes <dir>`:
+
+```
+<dir>/island-<N>/logging.jsonl  yeto_steps.jsonl  bench_metrics.jsonl  health.rank*.jsonl
+                 args.json  island.json (name, nodes)  hostmem.jsonl (sft_host_mem)
+<dir>/syncer/    syncer.log  tape.jsonl  cmdline.txt (syncer argv)  rss.jsonl (sft_syncer_rss)
+```
+
+Pull the files with any read-only incremental copier (byte offsets); the
+dashboard itself never connects to the nodes. `bench_metrics` / `health` step
+numbers restart at 1 per launch and are anchored at the first step logged by
+ms-swift / the yeto plugin. Reference lines are threshold keys, unset (0, no
+line) by default: `sft_ref_step_s` (the recipe's expected step time),
+`sft_hbm_limit_gib` (the accelerator's HBM limit), `sft_syncer_rss_limit_bytes`
+(the syncer host's memory cap); `sft_slow_factor` (1.1) marks steps slower than
+the reference.
+
+Chart semantics worth knowing:
+
+- "Tokens / s" interpolates each island's bench `tokens_per_s` linearly onto
+  one time grid and stacks the interpolated values, so islands that step at
+  different moments do not produce a saw-tooth. Samples just outside the time
+  range anchor its edges (no ramp from zero at the left edge). Across a gap
+  longer than ~2.5 of the island's step times the island counts as down (zero),
+  except for one step after its last and before its next sample.
+- Syncer round timing: a merge record's `ms` is the round's open-to-done wall
+  time = quorum wait (`quorum_ms`) + grace wait for stragglers + the merge
+  (`sync/merge_seconds`, falling back to `sync_ms`). "Syncer merge time" draws
+  only the merge; "Syncer round wait" draws the quorum wait and the grace wait
+  (`ms - quorum_ms - sync_ms`); the syncer distribution card shows merge and
+  wait (`ms - sync_ms`) per round. When a tape record lacks `ms` / `quorum_ms`
+  they are taken from syncer.log (`outer step ... ms=`, `grace window armed ...
+  quorum_secs=`). A few rounds far above the rest (the first round waits hours
+  for the first push) are marked off scale instead of setting the axis.
+- Duration axes label every tick in one unit (s, min or h) with round values.
+- The live server sends the page build (hash of the page code) with each
+  `/api/view`; a tab opened before a redeploy reloads itself once.
+- "Sync overhead per step" plots `export_s` on every step with `export_s > 0`.
+  The plugin pushes from a background thread, so `pushes_sent` (pushes that
+  finished inside the step) is almost always 0 and cannot mark push steps.

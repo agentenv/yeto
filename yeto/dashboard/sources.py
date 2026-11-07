@@ -52,6 +52,18 @@ def host_island_hint(path: Path) -> str | None:
     return None
 
 
+# non-JSONL files of ms-swift SFT islands and the syncer (see sft.py)
+_SFT_EXTRA = ("syncer.log", "args.json", "island.json", "cmdline.txt")
+
+
+def make_source(path):
+    """A ``TapeSource``, or an ``SftSource`` for ms-swift / syncer native files."""
+    from .sft import SftSource, role
+
+    kind = role(Path(path))
+    return SftSource(path, kind) if kind else TapeSource(path)
+
+
 def discover(paths: list[str], max_depth: int = 2) -> list[Path]:
     """Files given directly plus ``*.jsonl`` up to ``max_depth`` below each dir."""
     out: list[Path] = []
@@ -63,15 +75,24 @@ def discover(paths: list[str], max_depth: int = 2) -> list[Path]:
         elif p.is_dir():
             cands = []
             for depth in range(max_depth + 1):
-                cands += sorted(p.glob("/".join(["*"] * depth + ["*.jsonl"])))
+                for pat in ("*.jsonl",) + _SFT_EXTRA:
+                    cands += sorted(p.glob("/".join(["*"] * depth + [pat])))
         else:
             cands = []
         for c in cands:
             r = c.resolve()
+            if c != p and c.suffix != ".jsonl" and not _sft_role(c):
+                continue
             if r not in seen and r.is_file():
                 seen.add(r)
                 out.append(c)
     return out
+
+
+def _sft_role(path: Path) -> str | None:
+    from .sft import role
+
+    return role(path)
 
 
 class TapeSource:
@@ -123,7 +144,7 @@ class TapeSource:
 
 
 def load_all(reducer, paths: list[str]) -> list[TapeSource]:
-    sources = [TapeSource(p) for p in discover(paths)]
+    sources = [make_source(p) for p in discover(paths)]
     for s in sources:
         s.pump(reducer)
     for rec in operator_stops_near(paths):
