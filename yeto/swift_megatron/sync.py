@@ -146,7 +146,16 @@ elements of rank r's local parameter shards, C = ``chunk_numel``, t = TP size):
   the FP32 PUSH parts and FP32 broadcasts, ~30 GB each, ~90-120 GB).  A
   full-payload final cut holds every fragment in FP32 (``4 * N`` = 480 GB) on
   rank 0's host: run the syncer with ``--final-cut-payload manifest`` and
-  ``final_cut_payload="manifest"`` for a 120B island.
+  ``final_cut_payload="manifest"`` for a 120B island;
+* a resume with saved anchors (``save_anchors``) needs the *old* anchor of
+  every shard of the fragments the syncer moved past, beside the new anchors
+  the catch-up installs.  Read eagerly that is a second full set, ~30 GiB per
+  rank (~240 GiB per 8-card host) held from the restart until the last
+  fragment is installed -- the tightest point of a restart.
+  ``resume_anchor_mmap`` (the default) maps the file instead: the shards the
+  restart never needs stay out of RSS, and the ones it touches are
+  reclaimable file-backed pages.  ``anchor_dtype="bf16"`` halves the resident
+  set as well, but rounds the pushed delta and the resume shift.
 
 Torch, Megatron-Core and the syncer client are imported lazily by the
 objects that need them.
@@ -539,6 +548,28 @@ class Transport:
 
 
 # ----------------------------------------------------------------------------- helpers
+ANCHOR_DTYPES = ("fp32", "f32", "float32", "bf16", "bfloat16")
+
+
+def _anchor_torch_dtype(name: str) -> Any:
+    """The torch dtype of an explicit ``anchor_dtype``.
+
+    Only the two dtypes an anchor can be held in: FP32 (exact for every
+    broadcast this learner can receive) and bf16 (half the resident bytes,
+    rounded).  Deliberately not the wire-dtype names -- an anchor is never
+    quantized, and ``q4`` as an anchor dtype would silently mean bf16.
+    """
+
+    import torch
+
+    key = name.strip().lower()
+    if key in ("fp32", "f32", "float32"):
+        return torch.float32
+    if key in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    raise ValueError(f"anchor_dtype must be one of {ANCHOR_DTYPES}, got {name!r}")
+
+
 def _torch_wire(code: int) -> Any:
     import torch
 
@@ -635,7 +666,8 @@ class MegatronDiLoCoSync:
                  client_factory=None, observer: Callable[[dict], None] | None = None,
                  initial_cut_timeout: float = 0.0, resume_dir: str | None = None,
                  resume_iteration: int | None = None, init_probe_s: float = 1800.0,
-                 heartbeat_s: float = 30.0, heartbeat_stall_s: float = 0.0) -> None:
+                 heartbeat_s: float = 30.0, heartbeat_stall_s: float = 0.0,
+                 anchor_dtype: str | None = None, resume_anchor_mmap: bool = True) -> None:
         import torch
         import torch.distributed as dist
 
@@ -671,7 +703,13 @@ class MegatronDiLoCoSync:
         self.wire = session_dtype(wire_dtype)
         self.bulk = bulk_dtype(self.wire)
         self.bulk_torch = _torch_wire(self.bulk)
-        self.anchor_dtype = self.bulk_torch  # the raw global is exact in the broadcast dtype
+        # The raw global is exact in the broadcast dtype, so that is the default.
+        # ``anchor_dtype="bf16"`` halves the resident anchors (20.0 -> 10.0 GiB per
+        # rank for the 120B pp0 stage) at the cost of rounding ``local - anchor``
+        # and ``global_new + (local - anchor_old)`` to bf16: only for an island
+        # that would otherwise not fit, never by default.
+        self.anchor_dtype = self.bulk_torch if anchor_dtype is None else _anchor_torch_dtype(anchor_dtype)
+        self.resume_anchor_mmap = bool(resume_anchor_mmap)
 
         self.shards = local_shards(self.chunks, self.ctx, trainable_filter)
         self.by_name: dict[str, list[LocalShard]] = {}
@@ -1051,7 +1089,7 @@ class MegatronDiLoCoSync:
         ok = bool(record.get("anchors"))
         if ok:
             try:
-                saved = torch.load(self._resume_paths(resume_dir)[1], map_location="cpu", weights_only=True)
+                saved = self._load_anchor_file(self._resume_paths(resume_dir)[1])
                 if saved["keys"] != [list(k) for k in self._shard_keys()]:
                     raise ValueError("shard list differs")
                 for shard, value in zip(self.shards, saved["values"], strict=True):
@@ -1071,6 +1109,31 @@ class MegatronDiLoCoSync:
             log.info("resume: island record of iteration %s (anchor versions %s..%s, old anchors %s)",
                      record.get("iteration"), min(record["versions"]), max(record["versions"]),
                      "loaded" if ok else "not saved: a newer fragment takes the global")
+
+    def _load_anchor_file(self, path: str) -> dict:
+        """This rank's saved anchor shards.
+
+        ``resume_anchor_mmap`` (the default) maps the file instead of reading
+        it into anonymous memory.  The old anchors are only needed for the
+        fragments the syncer moved past (``shift``), one shard at a time as
+        ``_apply_chunk`` pops them, so mapping keeps the untouched majority
+        out of RSS entirely and makes the pages it does touch reclaimable
+        file-backed ones instead of AnonPages.  For the 120B pp0 stage the
+        eager read costs ~30 GiB per rank (~240 GiB per 8-card host) at the
+        moment the island restarts, which is the restart's tightest point.
+        The values are identical either way -- this is a residency change,
+        not a numerical one.
+        """
+
+        import torch
+
+        if self.resume_anchor_mmap:
+            try:
+                return torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+            except Exception as exc:  # a torch without mmap=, or a non-zipfile checkpoint
+                log.warning("resume: rank %d cannot map %s (%s); reading it instead",
+                            self.rank, path, exc)
+        return torch.load(path, map_location="cpu", weights_only=True)
 
     def _gather_object(self, value: Any) -> list[Any]:
         import torch.distributed as dist
@@ -1117,6 +1180,9 @@ class MegatronDiLoCoSync:
         if self.rank == 0:
             record = {"format": RESUME_FORMAT, "learner_id": self.learner_id, "iteration": int(iteration),
                       "contract": self.contract.hex(), "anchors": anchors_ok,
+                      # Diagnostics only: a resume reads whatever dtype the file holds, and
+                      # either one is the anchor the island really pushed from.
+                      "anchor_dtype": str(self.anchor_dtype).removeprefix("torch."),
                       **self.state.resume_record(anchored=self.anchored, units_total=self.units_total,
                                                  spent=self.spent)}
             path = self._resume_paths(output_dir)[0]

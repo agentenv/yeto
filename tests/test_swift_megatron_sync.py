@@ -1324,3 +1324,202 @@ def test_heartbeats_keep_a_stalled_island_inside_its_lease(tmp_path, heartbeat_s
         assert torch.equal(islands[0]["values"][name], islands[1]["values"][name]), name
     expired = '"reason":"lease_expired"' in log or islands[1]["lease_expiries"] > 0
     assert expired == (heartbeat_s == 0), (islands[1]["lease_expiries"], heartbeat_s)
+
+
+# ----------------------------------------------------------------------------- anchor residency
+def test_anchor_dtype_accepts_only_the_two_dtypes_an_anchor_can_hold():
+    assert sm._anchor_torch_dtype("fp32") is torch.float32
+    assert sm._anchor_torch_dtype("f32") is torch.float32
+    assert sm._anchor_torch_dtype("Float32") is torch.float32
+    assert sm._anchor_torch_dtype("bf16") is torch.bfloat16
+    assert sm._anchor_torch_dtype(" bfloat16 ") is torch.bfloat16
+    for bad in ("int4", "q4", "int8", "fp16", ""):
+        with pytest.raises(ValueError, match="anchor_dtype"):
+            sm._anchor_torch_dtype(bad)
+
+
+def test_saved_anchors_are_mapped_rather_than_read_into_anonymous_memory(tmp_path):
+    """``resume_anchor_mmap`` must map the anchor file: the shards a restart
+    never needs then stay out of RSS, and the ones it touches are reclaimable
+    file-backed pages instead of AnonPages.  The values are the same either
+    way -- the 120B fast island's eager read costs ~30 GiB per rank."""
+
+    path = tmp_path / "rank00000.pt"
+    values = [torch.arange(64, dtype=torch.float32).reshape(8, 8) + i for i in range(4)]
+    torch.save({"keys": [[f"t{i}", 0] for i in range(4)], "values": values}, path)
+
+    def load(mmap: bool) -> dict:
+        holder = SimpleNamespace(resume_anchor_mmap=mmap, rank=0)
+        return sm.MegatronDiLoCoSync._load_anchor_file(holder, str(path))
+
+    mapped, read = load(True), load(False)
+    assert mapped["keys"] == read["keys"] == [[f"t{i}", 0] for i in range(4)]
+    for want, got_mapped, got_read in zip(values, mapped["values"], read["values"], strict=True):
+        assert torch.equal(got_mapped, want) and torch.equal(got_read, want)
+    # The mapped storages live in a file-backed mapping of the anchor file, the
+    # eagerly read ones in anonymous memory.  That is the whole point: anonymous
+    # pages count against the host, file-backed ones are reclaimable.
+    if os.uname().sysname == "Linux":
+        assert all(_backing_file(t) == str(path) for t in mapped["values"])
+        assert all(_backing_file(t) == "" for t in read["values"])
+
+
+def _backing_file(tensor) -> str | None:
+    """The pathname of the mapping holding ``tensor``'s storage ("" = anonymous)."""
+
+    addr = tensor.untyped_storage().data_ptr()
+    with open("/proc/self/maps", encoding="utf-8") as handle:
+        for line in handle:
+            bounds = line.split(" ", 1)[0]
+            low, high = (int(x, 16) for x in bounds.split("-"))
+            if low <= addr < high:
+                fields = line.split()
+                return fields[5] if len(fields) > 5 else ""
+    return None
+
+
+def test_an_unmappable_anchor_file_falls_back_to_the_eager_read(tmp_path, caplog):
+    """A checkpoint torch cannot map (an old non-zipfile one) must still
+    resume: the mapped read falls back instead of losing the anchors."""
+
+    path = tmp_path / "rank00000.pt"
+    values = [torch.arange(16, dtype=torch.float32)]
+    torch.save({"keys": [["t0", 0]], "values": values}, path, _use_new_zipfile_serialization=False)
+    holder = SimpleNamespace(resume_anchor_mmap=True, rank=0)
+    with caplog.at_level("WARNING"):
+        got = sm.MegatronDiLoCoSync._load_anchor_file(holder, str(path))
+    assert torch.equal(got["values"][0], values[0]) and got["keys"] == [["t0", 0]]
+    assert "cannot map" in caplog.text and "reading it instead" in caplog.text
+
+
+def _anchor_residency_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"anchor-residency-{rank}", lambda: _anchor_residency_body(rank, world, port, out_dir))
+
+
+def _anchor_residency_body(rank, world, port, out_dir):
+    """resume-validation V1 for the anchor-residency fixes: mapping the saved
+    anchors, and holding them in bf16, must leave the resume exactly where the
+    eager FP32 read leaves it -- the shift being ``global_new + (local -
+    anchor_old)`` recomputed offline, bit for bit for FP32 anchors."""
+
+    from yeto.diloco_sync import shifted_resume_value
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    single = dist.new_group([0])
+    ctx = sm.ParallelContext(0, 1, single, 0, 1, single, 0, 1)
+    chunk = _chunk(tp=0, pp=0, tp_size=1, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=0, dp_size=1, dp_group=single)
+    full_shapes = _global_shapes(1, 1)
+    old_g = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    new_g = {n: (_full(n, s) - 0.25).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    cut: dict = {}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        bcasts = [BcastFragment(fid, v, pack_tensor(_flat(layout, fid, values), 2))
+                  for fid, (v, values) in sorted(cut.items())]
+        return _ScriptedClient(layout, {("bcast", 1): bcasts})
+
+    def make(resume_dir=None, resume_iteration=None, **kw):
+        return sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=0, num_learners=1,
+                                     fragments=3, sync_interval_steps=100, chunk_numel=40, parallel_context=ctx,
+                                     client_factory=factory, initial_cut_timeout=60, resume_dir=resume_dir,
+                                     resume_iteration=resume_iteration, **kw)
+
+    # Without anchor_dtype the anchors follow the broadcast dtype, as before.
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    plain = make()
+    assert plain.anchor_dtype is plain.bulk_torch is torch.bfloat16  # a bf16 session
+    plain.close()
+
+    # The first run: the initial cut (version 4), three local steps, a checkpoint with
+    # anchors.  FP32 anchors, as the production int4 push session has.
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    first = make(anchor_dtype="fp32")
+    assert first.anchor_dtype is torch.float32
+    for it in (1, 2, 3):
+        opt.step({id(p): _local_update(p, 0, it, 0, 1) for p in trainable})
+        first.after_optimizer_step(it, 10)
+    ckpt = Path(out_dir, "checkpoint-3")
+    assert first.save_state(str(ckpt), iteration=3, save_anchors=True)
+    first.close()
+    saved_master = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned}
+    saved_param = {id(p): p.detach().clone() for p in trainable}
+    record = json.loads((ckpt / sm.RESUME_STATE_FILE).read_text())
+    assert record["anchors"] and record["anchor_dtype"] == "float32"
+
+    def restart():
+        for p in trainable:
+            if id(p) in opt.owned:
+                opt.master(p).copy_(saved_master[id(p)])
+            p.data.copy_(saved_param[id(p)])
+
+    def resume_and_collect(**kw):
+        restart()
+        cut.update({fid: (9, new_g) for fid in range(3)})
+        sync = make(str(ckpt), 3, anchor_dtype="fp32", **kw)
+        assert set(sync.resumed.values()) == {"shift"} and not sync._resume_anchors
+        out = {id(p): (opt.master(p).clone() if id(p) in opt.owned else None, p.detach().clone())
+               for p in trainable}
+        sync.close()
+        return out
+
+    # (a) The mapped read and the eager read land on exactly the same values.
+    mapped = resume_and_collect(resume_anchor_mmap=True)
+    eager = resume_and_collect(resume_anchor_mmap=False)
+    for p in trainable:
+        want_master, want_param = eager[id(p)]
+        got_master, got_param = mapped[id(p)]
+        if want_master is not None:
+            assert torch.equal(got_master, want_master), p._full_name
+        assert torch.equal(got_param, want_param), p._full_name
+
+    # (b) And both equal global_new + (local - anchor_old) recomputed offline.
+    for p in trainable:
+        if id(p) not in opt.owned:
+            continue
+        s, e, _ = opt.owned[id(p)]
+        want = shifted_resume_value(new_g[p._full_name].reshape(-1)[s:e], saved_master[id(p)],
+                                    old_g[p._full_name].reshape(-1)[s:e])
+        assert torch.equal(mapped[id(p)][0], want), p._full_name
+        assert not torch.equal(want, new_g[p._full_name].reshape(-1)[s:e]), p._full_name
+
+    # (c) bf16 anchors halve the resident bytes.  The anchor is then the bf16
+    # rounding of the raw global, and the resume shift is exactly the formula
+    # evaluated on that rounded anchor -- lossy against FP32 by design, which is
+    # why anchor_dtype defaults to the broadcast dtype and bf16 is opt-in.
+    restart()
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    half = make(anchor_dtype="bf16")
+    assert half.anchor_dtype is torch.bfloat16
+    assert all(t.dtype is torch.bfloat16 for t in half.anchors.values())
+    assert sum(t.numel() * t.element_size() for t in half.anchors.values()) * 2 == sum(
+        t.numel() * 4 for t in half.anchors.values())
+    for p in trainable:  # TP size 1 here, so a local shard is the whole tensor
+        assert torch.equal(half.anchors[id(p)], old_g[p._full_name].to(torch.bfloat16)), p._full_name
+    half_ckpt = Path(out_dir, "checkpoint-3-bf16")
+    assert half.save_state(str(half_ckpt), iteration=3, save_anchors=True)
+    assert json.loads((half_ckpt / sm.RESUME_STATE_FILE).read_text())["anchor_dtype"] == "bfloat16"
+    half.close()
+
+    restart()
+    cut.update({fid: (9, new_g) for fid in range(3)})
+    shifted = make(str(half_ckpt), 3, anchor_dtype="bf16")
+    assert set(shifted.resumed.values()) == {"shift"}
+    for p in trainable:
+        if id(p) not in opt.owned:
+            continue
+        s, e, _ = opt.owned[id(p)]
+        want = shifted_resume_value(new_g[p._full_name].reshape(-1)[s:e], saved_master[id(p)],
+                                    old_g[p._full_name].reshape(-1)[s:e].to(torch.bfloat16).float())
+        assert torch.equal(opt.master(p), want), p._full_name
+    shifted.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_mapped_and_bf16_anchors_resume_exactly_where_the_eager_fp32_read_does(tmp_path):
+    procs = _run(_anchor_residency_worker, 1, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
