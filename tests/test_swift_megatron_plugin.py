@@ -219,3 +219,39 @@ def test_repo_root_on_sys_path():
     root = os.path.dirname(os.path.dirname(os.path.abspath(sp.__file__)))
     assert os.path.dirname(root) in sys.path or any(
         os.path.abspath(p) == os.path.dirname(root) for p in sys.path)
+
+
+def test_step_log_records_sync_time_and_counters(make, monkeypatch, tmp_path):
+    import json
+
+    path = tmp_path / "steps.jsonl"
+    monkeypatch.setenv("YETO_DILOCO_STEP_LOG", str(path))
+    trainer, cb = make([([3], True), ([2], True)])
+    sync = FakeSync.instances[0]
+    sync.rank = 0
+    sync.stats = {"applied": 0, "pushed": 0, "apply_s": 0.0, "export_s": 0.0}
+    original = sync.after_optimizer_step
+
+    def step(iteration, target_tokens, *, update_successful=True):
+        original(iteration, target_tokens, update_successful=update_successful)
+        if iteration == 2:
+            sync.stats["applied"] += 1
+            sync.stats["apply_s"] += 1.5
+            sync.stats["export_s"] += 0.25
+
+    sync.after_optimizer_step = step
+    trainer.train()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["iteration"] for r in rows] == [1, 2]
+    assert rows[0]["applies"] == 0 and rows[0]["apply_s"] == 0
+    assert rows[1]["applies"] == 1 and rows[1]["apply_s"] == 1.5 and rows[1]["export_s"] == 0.25
+    assert rows[1]["target_tokens"] == 4 and rows[1]["sync_s"] >= 0
+
+
+def test_step_log_only_on_sync_rank_zero(make, monkeypatch, tmp_path):
+    path = tmp_path / "steps.jsonl"
+    monkeypatch.setenv("YETO_DILOCO_STEP_LOG", str(path))
+    trainer, cb = make([([3], True)])
+    FakeSync.instances[0].rank = 5
+    trainer.train()
+    assert not path.exists()

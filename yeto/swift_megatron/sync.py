@@ -144,6 +144,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -561,7 +562,8 @@ class MegatronDiLoCoSync:
                  fragment_pattern: str = "binpack", wan_streams: int = 4,
                  final_cut_payload: str = "full", chunk_numel: int = DEFAULT_CHUNK_NUMEL,
                  transport: str = "cpu", parallel_context: ParallelContext | None = None,
-                 client_factory=None, observer: Callable[[dict], None] | None = None) -> None:
+                 client_factory=None, observer: Callable[[dict], None] | None = None,
+                 initial_cut_timeout: float = 0.0) -> None:
         import torch
         import torch.distributed as dist
 
@@ -609,6 +611,17 @@ class MegatronDiLoCoSync:
             self.device = _current_accelerator()
         self.comm = Transport(transport, self.ctx, optimizer, self.device)
         self.table = GlobalTable.build(self.shards, self.comm.world)
+        # Rank 0 scatters each applied chunk as per-rank slices (see _apply_chunk),
+        # so it needs every rank's (name, TP partition) list, in that rank's order.
+        self.peer_shards: list[list[tuple[str, int, int, int]]] = [[] for _ in range(self.world)]
+        mine = [(s.name, s.part_dim, s.tp_rank, s.local_shape[s.part_dim] if s.part_dim >= 0 else 0)
+                for s in self.shards]
+        if self.world > 1:
+            gathered: list[Any] = [None] * self.world
+            dist.all_gather_object(gathered, mine, group=self.comm.world)
+            self.peer_shards = [list(rows) for rows in gathered]
+        else:
+            self.peer_shards = [mine]
         names = sorted(self.table.shapes)
         if not names:
             raise SwiftMegatronSyncError("no trainable parameter to synchronize")
@@ -645,7 +658,7 @@ class MegatronDiLoCoSync:
         self._closed = False
         self.client = None
         self.stats = {"applied": 0, "pushed": 0, "push_bytes": 0, "dropped_pushes": 0,
-                      "deferred_pushes": 0}
+                      "deferred_pushes": 0, "apply_s": 0.0, "export_s": 0.0}
         self._observed_push_bytes = 0  # rank 0: push_bytes at the last observer report
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
@@ -664,6 +677,8 @@ class MegatronDiLoCoSync:
         self._raise_if(self._bcast_object(error))
         if self.learner_id == 0:
             self._send_init()
+        if initial_cut_timeout > 0:
+            self._install_initial_cut(float(initial_cut_timeout))
 
     # ------------------------------------------------------------------ setup
     def _connect(self, syncer: str, hmac_key_path: str | None, wan_streams: int, client_factory):
@@ -679,21 +694,91 @@ class MegatronDiLoCoSync:
         return client
 
     def _send_init(self) -> None:
-        """INIT_PARAMS of every fragment from this island's current masters."""
+        """INIT_PARAMS of every fragment from this island's current masters.
 
+        Rank 0 streams fragment k on a background thread while every rank
+        gathers fragment k + 1, so the island's gather and the link overlap;
+        at most two fragments' wire parts are on rank 0's host."""
+
+        import queue
+        import threading
+
+        jobs: queue.Queue = queue.Queue(maxsize=1)
+        failure: list[str] = []
+        sender = None
+        if self.rank == 0:
+            def send() -> None:
+                while (job := jobs.get()) is not None:
+                    fid, parts = job
+                    if failure:
+                        continue  # drain: the gathers go on until the error is broadcast
+                    try:
+                        self.client.send_init_parts(fid, parts)
+                    except Exception as exc:
+                        failure.append(f"INIT fragment {fid}: {type(exc).__name__}: {exc}")
+                    del parts, job
+
+            sender = threading.Thread(target=send, name="yeto-swift-init", daemon=True)
+            sender.start()
         error = None
-        for fid in range(self.num_fragments):
-            parts = self._export_fragment(fid, delta=False)
-            if self.rank == 0 and error is None:
-                try:
+        try:
+            for fid in range(self.num_fragments):
+                parts = self._export_fragment(fid, delta=False)
+                if self.rank == 0 and error is None:
                     if self._export_error is not None:
-                        raise SwiftMegatronSyncError(self._export_error)
-                    self.client.send_init_parts(fid, parts)
-                except Exception as exc:
-                    error = f"INIT fragment {fid}: {type(exc).__name__}: {exc}"
+                        error = f"INIT fragment {fid}: {self._export_error}"
+                    elif failure:
+                        error = failure[0]
+                    else:
+                        jobs.put((fid, parts))
+                del parts
+        finally:
+            if sender is not None:
+                jobs.put(None)
+                sender.join()
+        if self.rank == 0 and error is None and failure:
+            error = failure[0]
         self._raise_if(self._bcast_object(error))
         if self.rank == 0:
             log.info("sent INIT_PARAMS for %d fragments", self.num_fragments)
+
+    def _install_initial_cut(self, timeout: float) -> None:
+        """Apply the syncer's first broadcast of every fragment as it arrives,
+        before training starts (collective: every rank loops together).
+
+        Without this the whole initial cut (``4 * N`` bytes on an f32-bulk
+        session, ~480 GB for 120B) queues in rank 0's client until the
+        first boundary drains it, one optimizer step after INIT. Here each
+        fragment is installed and freed as it lands. Gives up after
+        ``timeout`` seconds (the rest is applied at the boundaries as
+        before), and stops early at finalization or shutdown."""
+
+        import time
+
+        started = time.monotonic()
+        while not all(self.anchored):
+            plan = self._plan() if self.rank == 0 else None
+            if self.rank == 0 and time.monotonic() - started > timeout and not plan.applies:
+                plan.shutdown = True  # only ends the wait; the client's flag is unchanged
+            plan = self._bcast_object(plan)
+            self._raise_if(plan.error)
+            updates = self._take_updates(plan) if self.rank == 0 else {}
+            for fid, version in plan.applies:
+                data = updates.pop(fid) if self.rank == 0 else None
+                self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+                del data
+                self.state.fragment_versions[fid] = version
+                self.state.global_step = max(self.state.global_step, version)
+                self.anchored[fid] = True
+                self.stats["applied"] += 1
+                self.events.append((0, "apply", fid, version))
+            if plan.finalizing or plan.shutdown:
+                break
+            if not plan.applies:
+                time.sleep(0.2)
+        if self.rank == 0:
+            log.info("initial cut: %d of %d fragments installed before training in %.0f s",
+                     sum(self.anchored), self.num_fragments, time.monotonic() - started)
 
     # ------------------------------------------------------------------ collectives
     def _bcast_object(self, value: Any) -> Any:
@@ -806,26 +891,49 @@ class MegatronDiLoCoSync:
 
         from yeto.rl.megatron_masters import has_complete_master, write_masters
 
-        total = sum(self.table.numel(name) for name in names)
-        if self.rank == 0:
-            buffer = flat.to(device=self.comm.buffer_device)
-        else:
-            buffer = torch.empty(total, dtype=dtype, device=self.comm.buffer_device)
-        if self.world > 1:
-            dist.broadcast(buffer, src=0, group=self.comm.world)
+        wanted = set(names)
         offsets, offset = {}, 0
         for name in names:
             offsets[name] = offset
             offset += self.table.numel(name)
-        wanted = set(names)
+
+        def piece(buffer, name, part_dim, tp_rank, size):
+            whole = buffer[offsets[name]:offsets[name] + self.table.numel(name)].view(self.table.shapes[name])
+            if part_dim >= 0:
+                whole = whole.narrow(part_dim, tp_rank * size, size)
+            return whole
+
+        # Point-to-point scatter instead of a world broadcast: every rank gets
+        # only its own TP slices of this chunk (about DP copies of the chunk
+        # cross the wire in total, not world copies).
         local = [s for s in self.shards if s.name in wanted]
+        pieces = []
+        if self.rank == 0:
+            buffer = flat.to(device=self.comm.buffer_device)
+            pending = []
+            for peer in range(1, self.world):
+                rows = [row for row in self.peer_shards[peer] if row[0] in wanted]
+                if not rows:
+                    continue
+                out = torch.cat([piece(buffer, *row).reshape(-1) for row in rows])
+                pending.append((dist.isend(out, dst=peer, group=self.comm.world), out))
+            for shard in local:
+                pieces.append(piece(buffer, shard.name, shard.part_dim, shard.tp_rank,
+                                    shard.local_shape[shard.part_dim] if shard.part_dim >= 0 else 0))
+            for work, _ in pending:
+                work.wait()
+            del pending
+        elif local:
+            total = sum(int(s.param.numel()) for s in local)
+            incoming = torch.empty(total, dtype=dtype, device=self.comm.buffer_device)
+            dist.recv(incoming, src=0, group=self.comm.world)
+            at = 0
+            for shard in local:
+                n = int(shard.param.numel())
+                pieces.append(incoming[at:at + n].view(shard.local_shape))
+                at += n
         targets = []
-        for shard in local:
-            start = offsets[shard.name]
-            whole = buffer[start:start + self.table.numel(shard.name)].view(self.table.shapes[shard.name])
-            if shard.part_dim >= 0:
-                size = shard.local_shape[shard.part_dim]
-                whole = whole.narrow(shard.part_dim, shard.tp_rank * size, size)
+        for shard, whole in zip(local, pieces, strict=True):
             raw = whole.to(dtype=torch.float32).contiguous()
             self.anchors[id(shard.param)] = whole.to(device="cpu", dtype=self.anchor_dtype).contiguous().clone()
             targets.append(raw)
@@ -908,7 +1016,9 @@ class MegatronDiLoCoSync:
         updates = self._take_updates(plan) if self.rank == 0 else {}
         for fid, version in plan.applies:
             data = updates.get(fid) if self.rank == 0 else None
+            started = time.perf_counter()
             self._apply_fragment(fid, data, self.bulk_torch, blend=True)
+            self.stats["apply_s"] += time.perf_counter() - started
             state.steps_at_reset[fid] = iteration
             state.units_at_reset[fid] = self.units_total
             state.fragment_versions[fid] = version
@@ -922,7 +1032,9 @@ class MegatronDiLoCoSync:
             self._raise_if(pushes)
         error = None
         for fid, step, attempt, c_steps, c_units in pushes:
+            started = time.perf_counter()
             parts = self._export_fragment(fid, delta=True)
+            self.stats["export_s"] += time.perf_counter() - started
             self.events.append((iteration, "push", fid, step))
             if self.rank == 0 and error is None:
                 error = self._push(fid, step, attempt, c_steps, c_units, parts)

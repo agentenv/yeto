@@ -439,6 +439,65 @@ def test_tp2_dp2_island_reads_masters_writes_masters_and_pushes_raw_anchor_delta
     _join(procs, 200, tmp_path)
 
 
+def _initial_cut_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"initial-cut-{rank}", lambda: _initial_cut_body(rank, world, port, out_dir))
+
+
+def _initial_cut_body(rank, world, port, out_dir):
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full_shapes = _global_shapes(2, 1)
+    globals_g = {name: (_full(name, shape) + 0.125).to(torch.bfloat16).float()
+                 for name, shape in full_shapes.items()}
+    holder = {}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        # The initial cut trickles in: fragment 0 at the first poll, the rest later.
+        cut = [BcastFragment(fid, 0, pack_tensor(_flat(layout, fid, globals_g), 2))
+               for fid in range(layout.num_fragments)]
+        holder["client"] = client = _ScriptedClient(layout, {("bcast", 1): cut[:1], ("bcast", 4): cut[1:]})
+        return client
+
+    syncer = sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=1, num_learners=2,
+                                   fragments=3, sync_interval_steps=1, chunk_numel=40,
+                                   parallel_context=ctx, client_factory=factory, initial_cut_timeout=60)
+    # Installed before the first step, fragment by fragment, as raw globals.
+    assert syncer.anchored == [True] * syncer.num_fragments
+    assert [(e[0], e[1], e[3]) for e in syncer.events] == [(0, "apply", 0)] * syncer.num_fragments
+    for p in trainable:
+        full = globals_g[p._full_name]
+        if getattr(p, "tensor_model_parallel", False):
+            size = p._full_shape[p.partition_dim] // 2
+            full = full.narrow(p.partition_dim, tp * size, size)
+        if id(p) in opt.owned:
+            s, e, _ = opt.owned[id(p)]
+            assert torch.equal(opt.master(p), full.reshape(-1)[s:e]), p._full_name
+        assert torch.equal(p.detach(), full.to(torch.bfloat16)), p._full_name
+    if rank == 0:
+        assert holder["client"].calls >= 4 and not holder["client"].inits  # learner 1 sends no INIT
+    # The boundary finds nothing left to apply.
+    syncer.after_optimizer_step(1, 10)
+    assert syncer.stats["applied"] == syncer.num_fragments
+    syncer.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_initial_cut_is_installed_fragment_by_fragment_before_training(tmp_path):
+    procs = _run(_initial_cut_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
