@@ -6,7 +6,7 @@ global parameters never reach the island.  They live in the syncer's
 ``--checkpoint-path`` and ``--final-state``.  This module turns either of
 those into HuggingFace safetensors in the same layout as a
 ``swift export --mcore_model ... --to_hf true`` run, so the result is
-comparable with ``/data/models/nemotron-sft-step100-{hf,llm}`` under the same
+comparable with an ms-swift export of the same recipe under the same
 evaluation.
 
 Pipeline
@@ -52,7 +52,7 @@ TP-fused tensors
     permuted back.  :func:`tp_deinterleave` does that from the chunk sizes
     alone, and :func:`fused_chunk_sizes` derives the chunk sizes from the mcore
     ``TransformerConfig`` of the model being written into -- no name table.
-    With ``tp_size == 1`` (and the production ``ETP == 1`` for experts) the
+    With ``tp_size == 1`` (and ``ETP == 1`` for experts, the usual setting) the
     permutation is the identity and none of this runs.
 
 Commands::
@@ -64,22 +64,22 @@ Commands::
 
     # offline, from the syncer's artifacts
     python -m yeto.swift_megatron.export_hf inspect \
-        --checkpoint /data/yeto-diloco/syncer/<run>/syncer.ckpt --table table.json
+        --checkpoint <syncer-dir>/syncer.ckpt --table table.json
 
     python -m yeto.swift_megatron.export_hf to-hf \
-        --final-state /data/yeto-diloco/syncer/<run>/final_state.f32 \
+        --final-state <syncer-dir>/final_state.f32 \
         --table table.json \
-        --mcore-model /data/yeto-diloco/runs120b/<run>/checkpoint-3300 \
-        --model /data/models/Nemotron-3.5-Super-VL-120B-A12B-BF16 \
+        --mcore-model <run-dir>/checkpoint-<step> \
+        --model <hf-base-model-dir> \
         --model-type nemotron_h_omni \
-        --output-dir /data/.../nemotron-diloco-step3300-hf
+        --output-dir <out>/diloco-hf
 
-    # LLM-only twin of the full VL export, byte-for-byte the key layout of
-    # /data/models/nemotron-sft-step100-llm
+    # LLM-only twin of the full VL export, with the key layout of an
+    # ms-swift LLM-only export (its config is copied from --config-from)
     python -m yeto.swift_megatron.export_hf strip-vision \
-        --hf-dir .../nemotron-diloco-step3300-hf \
-        --output-dir .../nemotron-diloco-step3300-llm \
-        --config-from /data/models/nemotron-sft-step100-llm
+        --hf-dir <out>/diloco-hf \
+        --output-dir <out>/diloco-llm \
+        --config-from <llm-only-export-dir>
 """
 
 from __future__ import annotations
@@ -117,10 +117,25 @@ def _read_exact(handle, size: int) -> bytes:
 
 
 def _f32(handle, numel: int):
+    """``numel`` f32 values read straight into one buffer (no second copy:
+    a 120B fragment is ~15 GB)."""
     import torch
 
-    data = _read_exact(handle, 4 * numel)
-    return torch.frombuffer(bytearray(data), dtype=torch.float32, count=numel)
+    buf = bytearray(4 * numel)
+    view, got = memoryview(buf), 0
+    while got < len(buf):
+        n = handle.readinto(view[got:])
+        if not n:
+            raise ExportError(f"truncated syncer artifact: wanted {len(buf)} bytes, got {got}")
+        got += n
+    return torch.frombuffer(buf, dtype=torch.float32, count=numel)
+
+
+def _skip(handle, size: int) -> None:
+    """Seek past ``size`` bytes that must exist (the momentum is never read)."""
+    handle.seek(size, os.SEEK_CUR)
+    if handle.tell() > os.fstat(handle.fileno()).st_size:
+        raise ExportError("truncated syncer artifact: the momentum runs past the end of the file")
 
 
 @dataclass
@@ -173,7 +188,7 @@ def read_syncer_checkpoint(path: str) -> SyncerState:
             (numel,) = struct.unpack("<Q", _read_exact(handle, 8))
             versions.append(int(version))
             fragments.append(_f32(handle, numel))
-            _read_exact(handle, 4 * numel)  # momentum
+            _skip(handle, 4 * numel)  # momentum
     return SyncerState(fragments, global_step=int(global_step), versions=versions,
                        layout_fingerprint=fingerprint, source=f"checkpoint:{path}")
 
@@ -503,7 +518,7 @@ def register_model_chunks(model_chunks: Sequence[Any]) -> None:
         class DumpTable(MegatronCallback):
             def on_train_begin(self):
                 export_hf.register_model_chunks(self.trainer.wrapped_models)
-                export_hf.main(["dump-table", "--out", "/data/.../table.json",
+                export_hf.main(["dump-table", "--out", "<out>/table.json",
                                 "--fragments", "32"])
 
         megatron_callbacks_map["yeto_dump_table"] = DumpTable
@@ -611,8 +626,8 @@ LLM_PREFIX = "language_model."
 def llm_only_key(key: str) -> str | None:
     """The LLM-only name of a full-VL export key, or ``None`` to drop it.
 
-    Verified against ``/data/models/nemotron-sft-step100-{hf,llm}``: the VL
-    export has 42101 keys under ``language_model / mlp1 / vision_model /
+    Verified against an ms-swift VL / LLM-only export pair of the 120B model:
+    the VL export has 42101 keys under ``language_model / mlp1 / vision_model /
     vision_projector``, the LLM-only one 41643 under ``backbone / lm_head``,
     and 42101 - 41643 = 458 is exactly the non-``language_model`` set.
     """

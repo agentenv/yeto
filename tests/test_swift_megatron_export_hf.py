@@ -176,6 +176,16 @@ def test_a_truncated_artifact_is_refused(tmp_path):
         read_final_state(str(tmp_path / "cut.f32"))
 
 
+def test_a_checkpoint_cut_inside_the_momentum_is_refused(tmp_path):
+    table = shapes_table()
+    fragments = pack_fragments(table, reference_tensors(table))
+    write_checkpoint(tmp_path / "s.ckpt", fragments, b"\0" * 32, global_step=1)
+    data = (tmp_path / "s.ckpt").read_bytes()
+    (tmp_path / "cut.ckpt").write_bytes(data[: len(data) - 5])
+    with pytest.raises(ExportError, match="truncated"):
+        read_syncer_checkpoint(str(tmp_path / "cut.ckpt"))
+
+
 def test_exactly_one_source_is_required(tmp_path):
     with pytest.raises(ExportError, match="exactly one"):
         read_syncer_state()
@@ -462,7 +472,7 @@ def test_the_whole_path_from_a_checkpoint_to_the_model(tmp_path):
 
 
 # ------------------------------------------------------------------- LLM-only
-def test_llm_only_key_matches_the_production_export_pair():
+def test_llm_only_key_matches_an_ms_swift_export_pair():
     assert llm_only_key("language_model.backbone.embeddings.weight") == "backbone.embeddings.weight"
     assert llm_only_key("language_model.lm_head.weight") == "lm_head.weight"
     assert llm_only_key("vision_model.encoder.layers.0.attn.qkv.weight") is None
