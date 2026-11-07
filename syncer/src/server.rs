@@ -4207,6 +4207,30 @@ async fn scheduler(
                 for round in inflight.drain(..) {
                     busy_fragments.remove(&round.p);
                 }
+            } else if !inflight.is_empty() {
+                // A round that holds no delta and none of whose islands is
+                // still connected cannot close: do not wait the timeout out.
+                let orphaned: Vec<usize> = {
+                    let registry = registry.lock().unwrap();
+                    inflight
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, round)| {
+                            round.pushes.is_empty()
+                                && round.carried.is_empty()
+                                && !round.expected_members.iter().any(|m| registry.groups.contains_key(m))
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+                if !orphaned.is_empty() {
+                    let steps: Vec<u64> = orphaned.iter().map(|&i| inflight[i].t).collect();
+                    warn!(?steps, "stopping: abandoning gathering rounds whose islands are all gone");
+                    for &i in orphaned.iter().rev() {
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                    }
+                }
             }
             if inflight.is_empty() && computing.is_empty() && ready.is_empty() && publishing.is_none() {
                 stopped = true;
