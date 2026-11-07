@@ -5752,9 +5752,11 @@ struct JoinedPull {
 /// Skipped: a round that already completed, one where this learner has a
 /// slot, a push, or a carried delta (a reconnect is rebound, never pulled
 /// twice), one whose base version the member was not caught up to
-/// (`floor`), and an exact fold that already holds pushes (its roster is
-/// fixed; an empty one is rebuilt for the new roster). Fixed rosters never
-/// call this: every logical learner is expected from launch.
+/// (`floor`), a round under a capacity quorum (its threshold assumes an
+/// expected set that only shrinks), and an exact fold that already holds
+/// pushes (its roster is fixed; an empty one is rebuilt for the new roster).
+/// Fixed rosters never call this: every logical learner is expected from
+/// launch.
 fn join_gathering_rounds(
     cfg: &Config,
     st: &GlobalState,
@@ -5779,6 +5781,12 @@ fn join_gathering_rounds(
             || floor.get(round.p).is_none_or(|version| *version < round.base_version)
             || round_action(round, now) == RoundAction::Complete
         {
+            continue;
+        }
+        // A capacity quorum is a share of the expected capacity, which may
+        // only shrink while a round gathers: a joiner would raise the bar of
+        // a quorum already reached (and an armed grace) instead of helping.
+        if round.capacity_quorum.is_some() {
             continue;
         }
         let rebuild_fold = matches!(round.fold, Some(RoundFold::Exact(_)));
@@ -13023,6 +13031,25 @@ mod tests {
         fresh[0].base_version = 0;
         assert!(join_gathering_rounds(&cfg, &st, &registry, &mut fresh, member(2, 1), &[0, 0], Instant::now())
             .is_empty());
+    }
+
+    /// A capacity quorum's threshold is a share of the expected capacity:
+    /// a joiner would raise it under a round that already reached it.
+    #[test]
+    fn caught_up_learner_does_not_join_a_capacity_quorum_round() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let mut cfg = round_test_config(4);
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![first]);
+        round.base_version = 0;
+        round.capacity_quorum = cfg.membership.round_quorum();
+        assert!(round.capacity_quorum.is_some());
+        let mut rounds = vec![round];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first]);
     }
 
     /// A reconnect of a learner the round already expects is the rebind's
