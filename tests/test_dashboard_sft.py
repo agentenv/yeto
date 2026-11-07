@@ -149,7 +149,7 @@ def test_export_page_renders_sft(tmp_path):
 SMOKE_SFT = (SMOKE.read_text().split("eval(appM[1]);")[0] + """
 eval(appM[1]);
 process.stdout.write(JSON.stringify({title: els.title.innerHTML, kpis: els.sKpis.innerHTML,
-  nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, dist: els.sDist.innerHTML,
+  nodes: els.sNodes.innerHTML, fleet: els.fLoss.innerHTML, tps: els.fTps.innerHTML, dist: els.sDist.innerHTML,
   cost: els.sCostK.innerHTML, sft_hidden: els.sftRoot.hidden, rl_hidden: els.rlRoot.hidden}));
 """).replace("process.argv[2]", "process.argv[1]")
 
@@ -201,3 +201,18 @@ def test_kpi_p50_equals_distribution_p50(tmp_path):
     kpi = re.search(r"Fast island step p50</div><div class=\"kv\">([^<]+)<", page["kpis"]).group(1)
     dist = re.search(r'<tr class="b"><td>p50</td><td>([^<]+)</td>', page["dist"]).group(1)
     assert kpi == dist == "573 s"
+
+
+def test_stack_skips_island_without_data(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    root = make_run(tmp_path / "run")
+    (root / "island-1").mkdir()
+    (root / "island-1" / "island.json").write_text(json.dumps({"island": "1", "name": "slow island 1"}))
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    out = export_html(r, tmp_path / "s.html", generated_at=T0)
+    page = json.loads(subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True,
+                                     timeout=60).stdout)
+    assert "slow island 1 (no data)" in page["tps"] and "#f97316" not in page["tps"].split('<div class="lg">')[0]

@@ -46,9 +46,11 @@ function chart(id,opts){
   var box=$(id);if(!box)return;var t1=NOW,t0=NOW-RANGE_H*3600;
   var ser=(opts.series||[]).map(function(s){return {name:s.name,color:s.color,dash:s.dash,width:s.width,legend:s.legend!==false,
     pts:(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])&&p[0]>=t0&&p[0]<=t1}).sort(function(a,b){return a[0]-b[0]})}});
-  var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return '<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>'}).join("")+
+  var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return s.pts.length?'<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>':
+    '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' (no data)</span>'}).join("")+
     (opts.refs||[]).filter(function(r){return r.legend}).map(function(r){return '<span><i style="background:'+(r.color||GREY)+'"></i>'+esc(r.legend)+'</span>'}).join("")+'</div>';
   var any=ser.some(function(s){return s.pts.length});
+  ser=ser.filter(function(s){return s.pts.length}); // series without data are neither stacked nor drawn
   if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;return}
   var stack=opts.kind==="stack"||opts.kind==="bars",span=t1-t0,bk=opts.bucket||Math.max(60,span/72);
   if(span/bk<4)bk=span<=3600?300:600; // range shorter than a few buckets: 5-10 min buckets
