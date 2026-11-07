@@ -152,21 +152,23 @@ function statusDot(s){return '<i class="dot '+({ok:"g",done:"m",warn:"y",stale:"
 function spec(I){return [I.nodes&&I.nodes.length?I.nodes.join("+"):null,I.layout,fin(I.cards)?I.cards+" cards":null].filter(Boolean).join(" · ")}
 function series(S,isls,c,fn){var ci=col(S,c);return isls.map(function(I,i){return {name:I.name,color:islColor(i),pts:I.rows.map(function(r){return [r[1],fn?fn(r):r[ci]]})}})}
 
+function lossCell(row,c,cur,d){if(!row)return "n/a";var v=k(row[c],d);return row[0]!=null&&cur!=null&&row[0]!==cur?v+'<div class="ns">step '+row[0]+'</div>':v}
 function sft(S){
   var isls=S.islands||[],sy=S.syncer||{},refs=S.refs||{},C=function(n){return col(S,n)};
   var t1=NOW,t0=NOW-RANGE_H*3600,tp=t0-RANGE_H*3600;
   var active=isls.filter(function(I){return I.status==="ok"||I.status==="warn"});
   var fast=isls[0]||null,last=function(I){return I&&I.rows.length?I.rows[I.rows.length-1]:null};
+  var lastWith=function(I,c){if(!I)return null;for(var j=I.rows.length-1;j>=0;j--){if(fin(I.rows[j][c]))return I.rows[j]}return null};
   // KPIs
   var tps=sum(active.map(function(I){var r=last(I);return r?r[C("tps")]:null})),mfu=active.map(function(I){var r=last(I);return r?r[C("mfu")]:null}).filter(fin);
   var fs=fast?rowsIn(fast,t0,t1).map(function(r){return r[C("step_s")]}).filter(fin).sort(function(a,b){return a-b}):[],fp50=pctl(fs,0.5),ref=refs.sft_ref_step_s;
   var ev=(sy.events||[]),hr=ev.filter(function(e){return inRange(e[0],NOW-3600,NOW)}),cnt=function(c){return hr.filter(function(e){return e[1]===c}).length};
   var rss=(sy.rss||[]),rl=rss.length?rss[rss.length-1]:null,cap=refs.sft_syncer_rss_limit_bytes;
-  var losses=isls.map(function(I){var r=last(I);return r&&fin(r[C("loss")])?I.name.replace("island ","")+" "+r[C("loss")].toFixed(4):null}).filter(Boolean);
+  var losses=isls.map(function(I){var r=lastWith(I,C("loss"));return r&&fin(r[C("loss")])?I.name.replace("island ","")+" "+r[C("loss")].toFixed(4):null}).filter(Boolean);
   var kp=[["Islands active / total",active.length+" / "+isls.length,isls.map(function(I){return I.name+" "+I.status}).join(" · ")],
     ["Fleet tokens / s",k(tps),mfu.length?"MFU "+(sum(mfu)/mfu.length).toFixed(1)+"% (6N), last step":"no bench data"],
     ["Fast island step p50",dur(fp50),fin(fp50)&&ref?((fp50/ref-1)*100>=0?"+":"")+((fp50/ref-1)*100).toFixed(1)+"% vs production "+ref.toFixed(0)+" s · "+fs.length+" steps":"production "+dur(ref)],
-    ["Latest loss",fast&&last(fast)?k(last(fast)[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
+    ["Latest loss",lastWith(fast,C("loss"))?k(lastWith(fast,C("loss"))[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
     ["Syncer outer step",(sy.outer_step==null?"0":sy.outer_step)+" / "+(sy.total_steps==null?"n/a":sy.total_steps),sy.eta_ts?"ETA final cut "+day(sy.eta_ts):(sy.outer_step==null?"waiting for the first outer step":"ETA n/a")],
     ["Rejected / timeout / not carried",cnt("rejected")+" / "+cnt("timeout")+" / "+cnt("not_carried"),"last hour, from "+(sy.log_seen?"syncer.log":"the syncer tape")],
     ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl&&cap?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · sampled "+ago(rl[0]):"not sampled"]];
@@ -175,9 +177,9 @@ function sft(S){
   var hbmLim=refs.sft_hbm_limit_gib,hbmMax=Math.max(64,hbmLim*1.15);
   $("sNodesNote").textContent="last step "+ago(Math.max.apply(null,isls.map(function(I){return I.last_ts||0}).concat([0])))+" · syncer outer step "+(sy.outer_step==null?"none yet":sy.outer_step);
   $("sNodes").innerHTML='<table class="nt"><tr><th>Island</th><th>Step</th><th>Loss</th><th>grad_norm</th><th>Step time</th><th>Tokens/s</th><th class="bar">HBM peak vs '+hbmLim+' GiB</th><th>Last push (export)</th><th>Last apply</th><th>Data</th></tr>'+
-    isls.map(function(I,i){var r=last(I)||[],h=r[C("hbm_gib")],pc=fin(h)?Math.min(100,100*h/hbmMax):0,lim=100*hbmLim/hbmMax;
+    isls.map(function(I,i){var r=last(I)||[],hr=lastWith(I,C("hbm_gib")),h=hr?hr[C("hbm_gib")]:null,pc=fin(h)?Math.min(100,100*h/hbmMax):0,lim=100*hbmLim/hbmMax;
       return '<tr><td><div class="nn">'+statusDot(I.status)+'<i class="sq" style="background:'+islColor(i)+'"></i>'+esc(I.name)+'</div><div class="ns">'+esc(spec(I)||"n/a")+'</div></td>'+
-      '<td>'+(r[0]==null?"n/a":r[0])+' / '+(I.steps_total||"n/a")+'<div class="ns">'+ago(I.last_ts)+'</div></td><td>'+k(r[C("loss")],4)+'</td><td>'+k(r[C("grad_norm")],3)+'</td><td>'+dur(r[C("step_s")])+'</td><td>'+k(r[C("tps")])+'</td>'+
+      '<td>'+(r[0]==null?"n/a":r[0])+' / '+(I.steps_total||"n/a")+'<div class="ns">'+ago(I.last_ts)+'</div></td><td>'+lossCell(lastWith(I,C("loss")),C("loss"),r[0],4)+'</td><td>'+lossCell(lastWith(I,C("grad_norm")),C("grad_norm"),r[0],3)+'</td><td>'+dur(r[C("step_s")])+'</td><td>'+k(r[C("tps")])+'</td>'+
       '<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB":"n/a")+'</div><div class="bt"><div class="bf'+(fin(h)&&h>=hbmLim?" over":"")+'" style="width:'+pc.toFixed(1)+'%"></div><div class="bm" style="left:'+lim.toFixed(1)+'%"></div></div></td>'+
       '<td>'+(I.last_push?dur(I.last_push.export_s)+'<div class="ns">step '+I.last_push.step+' · '+ago(I.last_push.ts)+'</div>':"none yet")+'</td>'+
       '<td>'+(I.last_apply?dur(I.last_apply.apply_s)+'<div class="ns">step '+I.last_apply.step+' · '+ago(I.last_apply.ts)+'</div>':"none yet")+'</td><td>'+esc(I.dataset||"n/a")+'</td></tr>'}).join("")+'</table>';
