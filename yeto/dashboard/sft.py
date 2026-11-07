@@ -27,7 +27,7 @@ default ``0``; the syncer's files live in a ``syncer`` directory):
 syncer ``tape.jsonl``       merge records (already understood by the reducer) and
                             ``kind`` records: outer_step / delta_* / pool_*
 ``eval/rows.jsonl``         held-out eval per syncer checkpoint: step / loss / ppl /
-                            ``vs_base`` / ``vs_ckpt100`` / ``vs_prev`` (re-read whole
+                            ``vs_<reference>`` (e.g. ``vs_base``) / ``vs_prev`` (re-read whole
                             on change; one row per step, the last line of a step wins)
 ==========================  =========================================================
 
@@ -67,13 +67,22 @@ SFT_FILES = ("logging.jsonl", "yeto_steps.jsonl", "bench_metrics.jsonl", "args.j
 SIBLINGS = ("logging.jsonl", "bench_metrics.jsonl", "yeto_steps.jsonl")
 SYNCER_TAPE_KINDS = frozenset({"outer_step", "delta_accepted", "delta_rejected", "delta_carried_over",
                                "pool_join", "pool_leave"})
-# Reference lines drawn on the page; overridable with --thresholds.
-DEFAULT_REFS = {"sft_ref_step_s": 571.0, "sft_hbm_limit_gib": 53.9, "sft_syncer_rss_limit_bytes": 1.4e12,
+
+
+def is_syncer_tape(record: dict) -> bool:
+    """A syncer event-tape record (outer steps, deltas, pool changes) the SFT page reads."""
+    return record.get("event") is None and record.get("kind") in SYNCER_TAPE_KINDS and "seq" not in record
+
+
+# Reference lines drawn on the page; set with --thresholds (0 = no line).
+DEFAULT_REFS = {"sft_ref_step_s": 0.0, "sft_hbm_limit_gib": 0.0, "sft_syncer_rss_limit_bytes": 0.0,
                 "sft_slow_factor": 1.1}
+# Stale-island check when neither a step time nor a reference is known yet.
+FALLBACK_STEP_S = 600.0
 STEP_COLS = ("step", "ts", "loss", "grad_norm", "lr", "step_s", "tps", "tokens", "target_tokens",
              "sync_s", "export_s", "apply_s", "hbm_gib", "mfu", "pushes", "applies")
 MERGE_COLS = ("ts", "step", "fragment", "merge_s", "gnorm", "round_s", "quorum_s", "grace_s", "wait_s")
-EVAL_REFS = ("vs_base", "vs_ckpt100", "vs_prev")
+EVAL_REF_PREFIX = "vs_"
 EVAL_FIELDS = ("dloss", "mean", "se", "better")
 SAMPLES_MAX = 20000
 EVENTS_MAX = 20000
@@ -229,10 +238,21 @@ def from_args(rec: dict, island: str) -> dict:
 
 
 def from_island_json(rec: dict, island: str) -> dict:
+    """island.json is written by hand or by a launcher: keep only well-typed fields
+    (strings, a list of node names, positive integers) so the page can trust them."""
     out = {"event": "sft_island_meta", "island_id": str(rec.get("island", island))}
-    for k in ("name", "nodes", "dataset", "layout", "cards", "steps_total"):
-        if rec.get(k) is not None:
+    for k in ("name", "dataset", "layout"):
+        if isinstance(rec.get(k), str):
             out[k] = rec[k]
+    nodes = rec.get("nodes")
+    if isinstance(nodes, str):
+        nodes = [nodes]
+    if isinstance(nodes, list) and all(isinstance(n, str) for n in nodes):
+        out["nodes"] = nodes
+    for k in ("cards", "steps_total"):
+        v = rec.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            out[k] = v
     return out
 
 
@@ -291,10 +311,10 @@ def eval_row(rec: dict) -> dict | None:
                            "ckpt_written": rec.get("ckpt_written") if isinstance(rec.get("ckpt_written"), str) else None,
                            "prev_step": rec.get("prev_step") if isinstance(rec.get("prev_step"), int) else None,
                            "merges_total": finite(rec.get("merges_total"))}
-    for ref in EVAL_REFS:
+    # every ``vs_<name>`` comparison is a reference (``vs_prev``: the previous row)
+    for ref in sorted(k for k in rec if isinstance(k, str) and k.startswith(EVAL_REF_PREFIX)):
         cmp_ = rec.get(ref)
         if not isinstance(cmp_, dict):
-            out[ref] = None
             continue
         c = {f: finite(cmp_.get(f)) for f in EVAL_FIELDS}
         c["ref_loss"] = loss - c["dloss"] if loss is not None and c["dloss"] is not None else None
@@ -426,8 +446,9 @@ class SftSource:
 # -- folding --------------------------------------------------------------------
 
 def _new_island(iid: str) -> dict:
-    return {"id": iid, "meta": {}, "log": {}, "sync": {}, "bench": [], "health": {}, "host": {},
-            "steps_total": None, "log_starts": [], "log_last": None}
+    # health: (launch, seg_step) -> {rank: peak GiB}; health_last: rank -> (launch, last seg_step)
+    return {"id": iid, "meta": {}, "log": {}, "sync": {}, "bench": [], "health": {}, "health_last": {},
+            "host": {}, "steps_total": None, "log_starts": [], "log_last": None}
 
 
 class SftState:
@@ -493,10 +514,16 @@ class SftState:
         elif ev == "sft_bench":
             isl["bench"].append(r)
         elif ev == "sft_health":
-            seg = isl["health"].setdefault(r.get("seg_step"), {})
+            # Each rank's health file counts from 1 in every launch, like the
+            # bench: a step not above that rank's previous one starts a launch.
+            rank, step = str(r.get("rank")), r.get("seg_step")
+            launch, last = isl["health_last"].get(rank, (0, None))
+            if last is not None and isinstance(step, int) and step <= last:
+                launch += 1
+            isl["health_last"][rank] = (launch, step)
             v = finite(r.get("reserved_peak_gib"))
             if v is not None:
-                seg[str(r.get("rank"))] = v
+                isl["health"].setdefault((launch, step), {})[rank] = v
         elif ev == "sft_host_mem":
             node = str(r.get("node") or "?")
             avail, total = finite(r.get("avail_bytes")), finite(r.get("total_bytes"))
@@ -519,34 +546,54 @@ class SftState:
 
     # -- view -------------------------------------------------------------------
     @staticmethod
-    def _bench_by_step(isl: dict) -> dict[int, dict]:
+    def _bench_by_step(isl: dict) -> tuple[dict[int, dict], list[int]]:
         """bench / health ``step`` restarts at 1 in each launch: map each launch
         segment onto absolute steps. Launch k starts at the first step of the
         k-th ms-swift log segment (a resume from checkpoint N logs N+1 again
         after a crash at a later step); without one it continues after the
         last mapped step. The first launch falls back to the first step logged
-        by ms-swift or the yeto plugin."""
+        by ms-swift or the yeto plugin. Returns the mapped bench records and
+        each launch's step offset."""
         known = sorted(set(isl["log"]) | set(isl["sync"]))
         starts = isl.get("log_starts") or []
         base = (starts[0] - 1) if starts else ((known[0] - 1) if known else 0)
-        out, prev, offset, seg = {}, None, base, 0
+        out, prev, offsets = {}, None, [base]
         for b in isl["bench"]:
             s = b["seg_step"]
             if prev is not None and s <= prev:  # a new launch
-                seg += 1
-                offset = starts[seg] - 1 if seg < len(starts) else max(out)
-            out[s + offset] = b
+                seg = len(offsets)
+                offsets.append(starts[seg] - 1 if seg < len(starts) else max(out))
+            out[s + offsets[-1]] = b
             prev = s
-        return out, base
+        return out, offsets
+
+    @staticmethod
+    def _health_by_step(isl: dict, offsets: list[int]) -> dict[int, dict]:
+        """Health per absolute step, with the launch offsets of the bench (a
+        launch the bench has not seen starts at its ms-swift log segment)."""
+        starts = isl.get("log_starts") or []
+        out: dict[int, dict] = {}
+        for (launch, step), ranks in isl["health"].items():
+            if not isinstance(step, int):
+                continue
+            if launch < len(offsets):
+                off = offsets[launch]
+            elif launch < len(starts):
+                off = starts[launch] - 1
+            else:
+                continue  # no anchor for this launch: better no value than a wrong step
+            out.setdefault(step + off, {}).update(ranks)
+        return out
 
     def island_rows(self, isl: dict) -> list[list]:
-        bench, base = self._bench_by_step(isl)
+        bench, offsets = self._bench_by_step(isl)
+        health = self._health_by_step(isl, offsets)
         steps = sorted(set(isl["log"]) | set(isl["sync"]) | set(bench))
         rows, prev_ts = [], None
         for s in steps:
             lg, sy, bn = isl["log"].get(s, {}), isl["sync"].get(s, {}), bench.get(s, {})
             ts = finite(sy.get("time_unix"))
-            hp = isl["health"].get(s - base) if isl["health"] else None
+            hp = health.get(s)
             hbm = max(hp.values()) if hp else finite(lg.get("memory_gib"))
             step_s = finite(bn.get("wall_s"))
             if step_s is None and ts is not None and prev_ts is not None and s - 1 in isl["sync"]:
@@ -609,7 +656,7 @@ class SftState:
             elif age is None:
                 status = "unknown"
             else:
-                expect = p50 or refs["sft_ref_step_s"]
+                expect = p50 or refs.get("sft_ref_step_s") or FALLBACK_STEP_S
                 status = "ok" if age < 2 * expect + 300 else ("warn" if age < 4 * expect + 600 else "stale")
             # the plugin pushes from a background thread, so ``pushes_sent`` (pushes
             # finished inside the step) is almost always 0; a push step is one that

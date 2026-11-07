@@ -127,8 +127,8 @@ def test_bench_restart_after_a_crash_maps_onto_the_resumed_steps():
         st.fold({"event": "sft_train_log", "island_id": "0", "step": s, "loss": float(s)}, None)
     for s in [*range(1, 8), *range(1, 5)]:
         st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s, "wall_s": 100.0 + s}, None)
-    bench, base = st._bench_by_step(st.islands["0"])
-    assert base == 0 and sorted(bench) == list(range(1, 10))
+    bench, offsets = st._bench_by_step(st.islands["0"])
+    assert offsets == [0, 5] and sorted(bench) == list(range(1, 10))
     assert bench[6]["wall_s"] == 101.0 and bench[9]["wall_s"] == 104.0  # launch 2's own records
     assert bench[5]["wall_s"] == 105.0  # launch 1's step 5 is kept
     rows = st.island_rows(st.islands["0"])
@@ -144,6 +144,52 @@ def test_bench_of_a_resumed_first_launch_starts_at_the_checkpoint():
     assert sorted(st._bench_by_step(st.islands["0"])[0]) == [16, 17]
 
 
+def test_health_of_a_resumed_launch_maps_onto_the_resumed_steps():
+    # launch 1 logs steps 1..3 and crashes; launch 2 resumes from checkpoint-2
+    # and logs 3..4; every rank's health counts 1..3 then 1..2.
+    st = sft.SftState()
+    for s in (1, 2, 3, 3, 4):
+        st.fold({"event": "sft_train_log", "island_id": "0", "step": s}, None)
+    for s in (1, 2, 3, 1, 2):
+        st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s, "wall_s": 10.0}, None)
+    for launch, peaks in ((1, (11.0, 12.0, 13.0)), (2, (51.0, 52.0))):
+        for s, gib in enumerate(peaks, start=1):
+            for rank in (0, 8):
+                st.fold({"event": "sft_health", "island_id": "0", "seg_step": s, "rank": rank,
+                         "reserved_peak_gib": gib + rank / 8}, None)
+    hbm = {r[0]: r[12] for r in st.island_rows(st.islands["0"])}
+    assert hbm == {1: 12.0, 2: 13.0, 3: 52.0, 4: 53.0}
+
+
+def test_references_are_not_drawn_unless_configured(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    r = Reducer(run="sft")
+    load_all(r, [str(make_run(tmp_path / "run"))])
+    assert set(r.sft_view(T0)["refs"]) == {"sft_slow_factor"}
+    out = export_html(r, tmp_path / "s.html", generated_at=T0)
+    page = json.loads(subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True,
+                                     timeout=60).stdout)
+    assert "reference" not in page["kpis"] and "HBM peak</th>" in page["nodes"] and "NaN" not in page["nodes"]
+
+
+def test_island_json_fields_are_typed():
+    rec = sft.from_island_json({"name": "a", "nodes": "node-a", "steps_total": "<img src=x>", "cards": 8,
+                                "layout": ["x"]}, "0")
+    assert rec["nodes"] == ["node-a"] and rec["cards"] == 8
+    assert "steps_total" not in rec and "layout" not in rec
+
+
+def test_rl_tape_with_pool_events_has_no_sft():
+    """The syncer writes outer_step / pool_join / delta_* without seq for RL runs too."""
+    r = Reducer()
+    r.feed({"kind": "pool_join", "island_id": 1, "time_unix": T0})
+    r.feed({"kind": "outer_step", "step": 1, "fragment": 0, "time_unix": T0 + 1})
+    r.feed({"kind": "delta_rejected", "island_id": 1, "time_unix": T0 + 2})
+    assert "sft" not in r.page_view()
+
+
 def test_rl_view_has_no_sft(tmp_path):
     r = Reducer()
     load_all(r, [str(FX / "kill44")])
@@ -153,7 +199,7 @@ def test_rl_view_has_no_sft(tmp_path):
 def test_export_page_renders_sft(tmp_path):
     root = make_run(tmp_path / "run")
     make_run(tmp_path / "run", island="1", v2=True)
-    r = Reducer(run="sft")
+    r = Reducer(run="sft", thresholds={"sft_ref_step_s": 571, "sft_hbm_limit_gib": 53.9})
     load_all(r, [str(root)])
     out = export_html(r, tmp_path / "s.html", generated_at=T0)
     html = out.read_text()
@@ -166,7 +212,8 @@ def test_export_page_renders_sft(tmp_path):
     page = json.loads(res.stdout)
     assert "yeto metrics" in page["title"] and page["sft_hidden"] is False and page["rl_hidden"] is True
     assert "TP4/EP8/PP3" in page["nodes"] and "v2" in page["nodes"] and "island 1" in page["nodes"]
-    assert "960" in page["kpis"] and "571" in page["kpis"]
+    assert "960" in page["kpis"] and "vs reference 571 s" in page["kpis"]
+    assert "HBM peak vs 53.9 GiB" in page["nodes"]
     assert "<svg" in page["fleet"] and "p50" in page["dist"] and "Card-hours" in page["cost"]
 
 
@@ -224,7 +271,7 @@ def test_kpi_p50_equals_distribution_p50(tmp_path):
     out = export_html(r, tmp_path / "s.html", generated_at=T0)
     res = subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True, timeout=60)
     page = json.loads(res.stdout)
-    kpi = re.search(r"Fast island step p50</div><div class=\"kv\">([^<]+)<", page["kpis"]).group(1)
+    kpi = re.search(r"island 0 step p50</div><div class=\"kv\">([^<]+)<", page["kpis"]).group(1)
     dist = re.search(r'<tr class="b"><td>p50</td><td>([^<]+)</td>', page["dist"]).group(1)
     assert kpi == dist == "573 s"
 
@@ -477,11 +524,11 @@ def test_eval_rows_dedup_sort_and_bad_lines():
     for r in rows:  # dloss = ckpt loss - reference loss, so the reference is loss - dloss
         assert r["vs_ckpt100"]["ref_loss"] == pytest.approx(CK100)
         assert r["vs_base"]["ref_loss"] == pytest.approx(BASE)
-    assert rows[0]["vs_prev"] is None and rows[0]["prev_step"] is None and rows[1]["prev_step"] == 32
+    assert rows[0].get("vs_prev") is None and rows[0]["prev_step"] is None and rows[1]["prev_step"] == 32
     assert sft.from_eval_rows("")[0]["rows"] == []
     nan = sft.eval_row({"step": 8, "loss": float("nan"), "vs_base": {"dloss": "x", "se": 0.1}})
     assert nan["loss"] is None and nan["vs_base"]["dloss"] is None and nan["vs_base"]["ref_loss"] is None
-    assert nan["vs_ckpt100"] is None
+    assert "vs_ckpt100" not in nan  # only the comparisons a row has
 
 
 def test_eval_in_view_and_rewrite_replaces(tmp_path):
@@ -514,19 +561,19 @@ def test_eval_chart_renders_and_empty_state(tmp_path):
     assert "no held-out eval yet" in page["eval"]
     _write_eval(root, EVAL_ROWS)
     svg = _page(tmp_path, root, T0 + 3600)["eval"]
-    assert 'class="evloss"' in svg and 'class="evck"' in svg and svg.count('class="eveb"') == 4
+    assert 'class="evloss"' in svg and 'data-ref="ckpt100"' in svg and svg.count('class="eveb"') == 4
     assert svg.count("<circle") == 4
     # base is ~0.08 above while the checkpoints spread ~0.01: noted off scale, not drawn
-    assert 'class="evbase"' not in svg and "base 0.7558" in svg and "off scale" in svg
+    assert 'data-ref="base"' not in svg and "base 0.7558" in svg and "off scale" in svg
     ticks = re.findall(r'text-anchor="middle">(\d+)<', svg)
     assert ticks and int(ticks[0]) >= 32 and int(ticks[-1]) <= 112  # x is the outer step
     near = [_eval_row(s, l, l - CK100, l - 0.684) for s, l in ((32, 0.6824), (48, 0.6747))]
     _write_eval(root, near)
     svg = _page(tmp_path, root, T0 + 3600)["eval"]
-    assert 'class="evbase"' in svg and "off scale" not in svg
+    assert 'data-ref="base"' in svg and "off scale" not in svg
     _write_eval(root, [EVAL_ROWS[0]])
     svg = _page(tmp_path, root, T0 + 3600)["eval"]
-    assert svg.count("<circle") == 1 and 'class="evck"' in svg
+    assert svg.count("<circle") == 1 and 'data-ref="ckpt100"' in svg
 
 
 TIP_JS = """
@@ -549,4 +596,4 @@ def test_eval_tooltip_shows_step_loss_and_deltas():
     assert "step 112" in full and "0.6744" in full and "2026-11-06 04:22 UTC" in full
     assert "vs ckpt100<b>\u0394 +0.0021 (per-sample +0.0011 \u00b1 0.0004)" in full
     assert "vs base<b>\u0394 -0.0814 (per-sample -0.0904 \u00b1 0.0015)" in full
-    assert "step 5" in bare and bare.count("n/a") == 2
+    assert "step 5" in bare and "vs " not in bare and "n/a" not in bare

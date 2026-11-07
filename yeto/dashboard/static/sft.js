@@ -124,28 +124,35 @@ function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=b
   tt.innerHTML='<div class="th">'+esc(day(bestT))+'</div>'+rows.join("");tt.style.display="block";
   var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"}
 /* held-out eval per syncer checkpoint: x = syncer outer step (not time, so the range buttons do not apply),
-   y = held-out loss; references are loss - dloss of each row. Error bars: +-1 se of the paired per-sample
-   difference vs ckpt100, drawn around the checkpoint's loss. */
-var EV_C={loss:PAL[0],ck:PAL[1],base:PAL[6]};
+   y = held-out loss; every vs_<name> comparison of a row is a reference drawn at loss - dloss (vs_prev, the
+   previous row, is only listed in the tooltip). Error bars: +-1 se of the paired per-sample difference vs the
+   primary reference (the first one that is not "base"), drawn around the checkpoint's loss. */
+var EV_C={loss:PAL[0]},EV_PAL=[PAL[1],PAL[6],PAL[3],PAL[4],PAL[5]];
 function sgn(v,d){return fin(v)?(v>=0?"+":"")+v.toFixed(d==null?4:d):"n/a"}
 function evalCmp(c){if(!c||!fin(c.dloss))return "n/a";return "\u0394 "+sgn(c.dloss)+(fin(c.mean)?" (per-sample "+sgn(c.mean)+(fin(c.se)?" \u00b1 "+c.se.toFixed(4):"")+")":"")}
-function evalTip(r){return '<div class="th">step '+esc(r.step)+(r.ckpt_written?" \u00b7 "+esc(String(r.ckpt_written).replace("T"," ").slice(0,16))+" UTC":"")+'</div>'+
+function evalRefs(R){var seen={};R.forEach(function(r){Object.keys(r).forEach(function(k){if(k.indexOf("vs_")===0&&k!=="vs_prev"&&r[k]&&typeof r[k]==="object")seen[k.slice(3)]=1})});
+  return Object.keys(seen).sort(function(a,b){return (a==="base")-(b==="base")||(a<b?-1:a>b?1:0)})} // base last: the primary reference is the first other one
+function evalColor(names,n){return EV_PAL[Math.max(0,names.indexOf(n))%EV_PAL.length]}
+function evalTip(r,names){names=names||evalRefs([r]);return '<div class="th">step '+esc(r.step)+(r.ckpt_written?" \u00b7 "+esc(String(r.ckpt_written).replace("T"," ").slice(0,16))+" UTC":"")+'</div>'+
   '<div><i style="background:'+EV_C.loss+'"></i>loss<b>'+(fin(r.loss)?r.loss.toFixed(4):"n/a")+'</b></div>'+
-  '<div><i style="background:'+EV_C.ck+'"></i>vs ckpt100<b>'+esc(evalCmp(r.vs_ckpt100))+'</b></div>'+
-  '<div><i style="background:'+EV_C.base+'"></i>vs base<b>'+esc(evalCmp(r.vs_base))+'</b></div>'}
+  names.map(function(n){return '<div><i style="background:'+evalColor(names,n)+'"></i>vs '+esc(n)+'<b>'+esc(evalCmp(r["vs_"+n]))+'</b></div>'}).join("")}
 function evalChart(id,E){
   var box=$(id);if(!box)return;var R=((E&&E.rows)||[]).filter(function(r){return r&&fin(r.step)&&fin(r.loss)});
-  var ref=function(r,k){return r[k]&&fin(r[k].ref_loss)?r[k].ref_loss:null},ck=R.filter(function(r){return fin(ref(r,"vs_ckpt100"))}),bs=R.filter(function(r){return fin(ref(r,"vs_base"))});
-  var leg=function(baseNote){return '<div class="lg"><span><i style="background:'+EV_C.loss+'"></i>held-out loss</span>'+
-    (ck.length?'<span><i style="background:'+EV_C.ck+'"></i>ckpt100 (loss \u2212 \u0394)</span>':'<span class="nd"><i style="background:#4b4b52"></i>ckpt100 (no data)</span>')+
-    (bs.length?'<span><i style="background:'+EV_C.base+'"></i>base'+(baseNote||"")+'</span>':'<span class="nd"><i style="background:#4b4b52"></i>base (no data)</span>')+'</div>'};
+  var names=evalRefs(R),primary=names.filter(function(n){return n!=="base"})[0]||names[0]||null;
+  var ref=function(r,n){var c=r["vs_"+n];return c&&fin(c.ref_loss)?c.ref_loss:null};
+  var pts={};names.forEach(function(n){pts[n]=R.filter(function(r){return fin(ref(r,n))})});
+  var leg=function(notes){notes=notes||{};return '<div class="lg"><span><i style="background:'+EV_C.loss+'"></i>held-out loss</span>'+
+    names.map(function(n){return pts[n].length?'<span><i style="background:'+evalColor(names,n)+'"></i>'+esc(n)+(n===primary?" (loss \u2212 \u0394)":"")+esc(notes[n]||"")+'</span>':
+      '<span class="nd"><i style="background:#4b4b52"></i>'+esc(n)+' (no data)</span>'}).join("")+'</div>'};
   if(!R.length){box.innerHTML='<div class="empty">no held-out eval yet</div>'+leg();box.onmousemove=null;return}
-  var se=function(r){var c=r.vs_ckpt100;return c&&fin(c.se)?c.se:0};
-  var vals=[];R.forEach(function(r){vals.push(r.loss-se(r),r.loss+se(r))});ck.forEach(function(r){vals.push(ref(r,"vs_ckpt100"))});
+  var se=function(r){var c=primary?r["vs_"+primary]:null;return c&&fin(c.se)?c.se:0};
+  var vals=[];R.forEach(function(r){vals.push(r.loss-se(r),r.loss+se(r))});if(primary)pts[primary].forEach(function(r){vals.push(ref(r,primary))});
   var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),span=Math.max(hi-lo,Math.abs(hi)*0.002,1e-6);
-  // base sits far above the checkpoints (~0.08 vs ~0.005 spreads): keep it on the axis only when it does not flatten the detail
-  var bv=bs.map(function(r){return ref(r,"vs_base")}),bOn=bv.length&&Math.max.apply(null,bv)<=hi+3*span&&Math.min.apply(null,bv)>=lo-3*span;
-  if(bOn)bv.forEach(function(v){vals.push(v)});lo=Math.min.apply(null,vals);hi=Math.max.apply(null,vals);span=Math.max(hi-lo,Math.abs(hi)*0.002,1e-6);
+  // a reference far from the checkpoints (a base model ~0.08 above a ~0.005 spread) stays on the axis only when it does not flatten the detail
+  var on={};names.forEach(function(n){if(n===primary){on[n]=true;return}var v=pts[n].map(function(r){return ref(r,n)});
+    on[n]=v.length&&Math.max.apply(null,v)<=hi+3*span&&Math.min.apply(null,v)>=lo-3*span});
+  names.forEach(function(n){if(on[n]&&n!==primary)pts[n].forEach(function(r){vals.push(ref(r,n))})});
+  lo=Math.min.apply(null,vals);hi=Math.max.apply(null,vals);span=Math.max(hi-lo,Math.abs(hi)*0.002,1e-6);
   var yt=nice(lo-span*0.08,hi+span*0.08,4);lo=yt[0];hi=yt[yt.length-1];var td=Math.max(3,Math.ceil(-Math.log10(yt[1]-yt[0])-1e-9));
   var s0=R[0].step,s1=R[R.length-1].step;if(s1-s0<2){s0-=1;s1+=1}var xt=nice(s0,s1,5).filter(function(v){return v>=s0&&v<=s1&&v===Math.round(v)});
   var x=function(v){return M.l+8+(v-s0)*(W-M.l-M.r-16)/(s1-s0)},y=function(v){return M.t+(hi-v)/(hi-lo)*(H-M.t-M.b)};
@@ -154,20 +161,19 @@ function evalChart(id,E){
   xt.forEach(function(v){o.push('<text x="'+x(v).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(v)+'</text>')});
   var path=function(L,k){return L.map(function(r,i){return (i?"L":"M")+x(r.step).toFixed(1)+","+y(ref(r,k)).toFixed(1)}).join("")};
   var flat=function(L,k){return L.length===1?"M"+(M.l)+","+y(ref(L[0],k)).toFixed(1)+"L"+(W-M.r)+","+y(ref(L[0],k)).toFixed(1):path(L,k)};
-  if(ck.length)o.push('<path class="evck" d="'+flat(ck,"vs_ckpt100")+'" fill="none" stroke="'+EV_C.ck+'" stroke-width="1.2" stroke-dasharray="4 3"/>');
-  if(bOn)o.push('<path class="evbase" d="'+flat(bs,"vs_base")+'" fill="none" stroke="'+EV_C.base+'" stroke-width="1.2" stroke-dasharray="4 3"/>');
+  names.forEach(function(n){if(on[n]&&pts[n].length)o.push('<path class="evref" data-ref="'+esc(n)+'" d="'+flat(pts[n],n)+'" fill="none" stroke="'+evalColor(names,n)+'" stroke-width="1.2" stroke-dasharray="4 3"/>')});
   R.forEach(function(r){var e=se(r);if(e>0)o.push('<line class="eveb" x1="'+x(r.step).toFixed(1)+'" x2="'+x(r.step).toFixed(1)+'" y1="'+y(r.loss-e).toFixed(1)+'" y2="'+y(r.loss+e).toFixed(1)+'" stroke="'+EV_C.loss+'" stroke-opacity=".6" stroke-width="1"/>')});
   if(R.length>1)o.push('<path class="evloss" d="'+R.map(function(r,i){return (i?"L":"M")+x(r.step).toFixed(1)+","+y(r.loss).toFixed(1)}).join("")+'" fill="none" stroke="'+EV_C.loss+'" stroke-width="1.5" stroke-linejoin="round"/>');
   R.forEach(function(r){o.push('<circle cx="'+x(r.step).toFixed(1)+'" cy="'+y(r.loss).toFixed(1)+'" r="2.5" fill="'+EV_C.loss+'"/>')});
-  var note="";if(bs.length&&!bOn){var lb=bs[bs.length-1];note=" "+ref(lb,"vs_base").toFixed(4)+" (off scale)";
-    o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+9)+'" text-anchor="end" class="rt" fill="'+EV_C.base+'">base '+esc(ref(lb,"vs_base").toFixed(4))+(ref(lb,"vs_base")>hi?" \u2191":" \u2193")+'</text>')}
+  var notes={},row=0;names.forEach(function(n){if(on[n]||!pts[n].length)return;var lv=ref(pts[n][pts[n].length-1],n);notes[n]=" "+lv.toFixed(4)+" (off scale)";
+    o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+9+12*row++)+'" text-anchor="end" class="rt" fill="'+evalColor(names,n)+'">'+esc(n)+' '+esc(lv.toFixed(4))+(lv>hi?" \u2191":" \u2193")+'</text>')});
   o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
-  box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg(note);
+  box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg(notes);
   box.onmousemove=function(e){if(!box.querySelector)return;var svg=box.querySelector("svg"),tt=box.querySelector(".tt"),cx=box.querySelector(".cx");if(!svg||!tt)return;
     var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width,best=null,bd=1e18;
     R.forEach(function(r){var d=Math.abs(x(r.step)-vx);if(d<bd){bd=d;best=r}});if(!best||bd>40){tt.style.display="none";return}
     if(cx){cx.setAttribute("x1",x(best.step));cx.setAttribute("x2",x(best.step));cx.setAttribute("visibility","visible")}
-    tt.innerHTML=evalTip(best);tt.style.display="block";var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"};
+    tt.innerHTML=evalTip(best,names);tt.style.display="block";var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"};
   box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
 }
 function card(id,title,sub,wide){return '<div class="cc'+(wide?" wide":"")+'"><div class="ct">'+esc(title)+'</div><div class="cs">'+esc(sub||"")+'</div><div id="'+id+'"></div></div>'}
@@ -221,7 +227,7 @@ function inRange(t,a,b){return fin(t)&&t>a&&t<=b}
 function rowsIn(isl,a,b){return isl.rows.filter(function(r){return inRange(r[1],a,b)})}
 function islColor(i){return PAL[i%PAL.length]}
 function statusDot(s){return '<i class="dot '+({ok:"g",done:"m",warn:"y",stale:"r",unknown:"m"}[s]||"m")+'" title="'+esc(s)+'"></i>'}
-function spec(I){return [I.nodes&&I.nodes.length?I.nodes.join("+"):null,I.layout,fin(I.cards)?I.cards+" cards":null].filter(Boolean).join(" · ")}
+function spec(I){return [Array.isArray(I.nodes)&&I.nodes.length?I.nodes.join("+"):null,I.layout,fin(I.cards)?I.cards+" cards":null].filter(Boolean).join(" · ")}
 function series(S,isls,c,fn){var ci=col(S,c);return isls.map(function(I,i){return {name:I.name,color:islColor(i),pts:I.rows.map(function(r){return [r[1],fn?fn(r):r[ci]]})}})}
 
 function lossCell(row,c,cur,d){if(!row)return "n/a";var v=k(row[c],d);return row[0]!=null&&cur!=null&&row[0]!==cur?v+'<div class="ns">step '+row[0]+'</div>':v}
@@ -239,40 +245,40 @@ function sft(S){
   var losses=isls.map(function(I){var r=lastWith(I,C("loss"));return r&&fin(r[C("loss")])?I.name.replace("island ","")+" "+r[C("loss")].toFixed(4):null}).filter(Boolean);
   var kp=[["Islands active / total",active.length+" / "+isls.length,isls.map(function(I){return I.name+" "+I.status}).join(" · ")],
     ["Fleet tokens / s",k(tps),mfu.length?"MFU "+(sum(mfu)/mfu.length).toFixed(1)+"% (6N), last step":"no bench data"],
-    ["Fast island step p50",dur(fp50),fin(fp50)&&ref?((fp50/ref-1)*100>=0?"+":"")+((fp50/ref-1)*100).toFixed(1)+"% vs production "+ref.toFixed(0)+" s · "+fs.length+" steps":"production "+dur(ref)],
+    [(fast?fast.name:"Island")+" step p50",dur(fp50),fin(fp50)&&fin(ref)?((fp50/ref-1)*100>=0?"+":"")+((fp50/ref-1)*100).toFixed(1)+"% vs reference "+ref.toFixed(0)+" s · "+fs.length+" steps":fs.length+" steps"],
     ["Latest loss",lastWith(fast,C("loss"))?k(lastWith(fast,C("loss"))[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
     ["Syncer outer step",(sy.outer_step==null?"0":sy.outer_step)+" / "+(sy.total_steps==null?"n/a":sy.total_steps),sy.eta_ts?"ETA final cut "+day(sy.eta_ts):(sy.outer_step==null?"waiting for the first outer step":"ETA n/a")],
     ["Rejected / timeout / not carried",cnt("rejected")+" / "+cnt("timeout")+" / "+cnt("not_carried"),"last hour, from "+(sy.log_seen?"syncer.log":"the syncer tape")],
-    ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl&&cap?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · sampled "+ago(rl[0]):"not sampled"]];
+    ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl?(fin(cap)?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · ":"")+"sampled "+ago(rl[0]):"not sampled"]];
   $("sKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
   // islands now
-  var hbmLim=refs.sft_hbm_limit_gib,hbmMax=Math.max(64,hbmLim*1.15);
+  var hbmLim=refs.sft_hbm_limit_gib,hasLim=fin(hbmLim),hbmMax=Math.max(64,hasLim?hbmLim*1.15:0); // no limit configured: no limit marker
   $("sNodesNote").textContent="last step "+ago(Math.max.apply(null,isls.map(function(I){return I.last_ts||0}).concat([0])))+" · syncer outer step "+(sy.outer_step==null?"none yet":sy.outer_step);
-  $("sNodes").innerHTML='<table class="nt"><tr><th>Island</th><th>Step</th><th>Loss</th><th>grad_norm</th><th>Step time</th><th>Tokens/s</th><th class="bar">HBM peak vs '+hbmLim+' GiB</th><th>Last push (export)</th><th>Last apply</th><th>Data</th></tr>'+
-    isls.map(function(I,i){var r=last(I)||[],hr=lastWith(I,C("hbm_gib")),h=hr?hr[C("hbm_gib")]:null,pc=fin(h)?Math.min(100,100*h/hbmMax):0,lim=100*hbmLim/hbmMax;
+  $("sNodes").innerHTML='<table class="nt"><tr><th>Island</th><th>Step</th><th>Loss</th><th>grad_norm</th><th>Step time</th><th>Tokens/s</th><th class="bar">HBM peak'+(hasLim?' vs '+hbmLim+' GiB':'')+'</th><th>Last push (export)</th><th>Last apply</th><th>Data</th></tr>'+
+    isls.map(function(I,i){var r=last(I)||[],hr=lastWith(I,C("hbm_gib")),h=hr?hr[C("hbm_gib")]:null,pc=fin(h)?Math.min(100,100*h/hbmMax):0,lim=hasLim?100*hbmLim/hbmMax:null;
       return '<tr><td><div class="nn">'+statusDot(I.status)+'<i class="sq" style="background:'+islColor(i)+'"></i>'+esc(I.name)+'</div><div class="ns">'+esc(spec(I)||"n/a")+'</div></td>'+
-      '<td>'+(r[0]==null?"n/a":r[0])+' / '+(I.steps_total||"n/a")+'<div class="ns">'+ago(I.last_ts)+'</div></td><td>'+lossCell(lastWith(I,C("loss")),C("loss"),r[0],4)+'</td><td>'+lossCell(lastWith(I,C("grad_norm")),C("grad_norm"),r[0],3)+'</td><td>'+dur(r[C("step_s")])+'</td><td>'+k(r[C("tps")])+'</td>'+
-      '<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB":"n/a")+'</div><div class="bt"><div class="bf'+(fin(h)&&h>=hbmLim?" over":"")+'" style="width:'+pc.toFixed(1)+'%"></div><div class="bm" style="left:'+lim.toFixed(1)+'%"></div></div></td>'+
+      '<td>'+(r[0]==null?"n/a":r[0])+' / '+esc(I.steps_total||"n/a")+'<div class="ns">'+ago(I.last_ts)+'</div></td><td>'+lossCell(lastWith(I,C("loss")),C("loss"),r[0],4)+'</td><td>'+lossCell(lastWith(I,C("grad_norm")),C("grad_norm"),r[0],3)+'</td><td>'+dur(r[C("step_s")])+'</td><td>'+k(r[C("tps")])+'</td>'+
+      '<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB":"n/a")+'</div><div class="bt"><div class="bf'+(fin(h)&&hasLim&&h>=hbmLim?" over":"")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(lim===null?'':'<div class="bm" style="left:'+lim.toFixed(1)+'%"></div>')+'</div></td>'+
       '<td>'+(I.last_push?dur(I.last_push.export_s)+'<div class="ns">step '+I.last_push.step+' · '+ago(I.last_push.ts)+'</div>':"none yet")+'</td>'+
       '<td>'+(I.last_apply?dur(I.last_apply.apply_s)+'<div class="ns">step '+I.last_apply.step+' · '+ago(I.last_apply.ts)+'</div>':"none yet")+'</td><td>'+esc(I.dataset||"n/a")+'</td></tr>'}).join("")+'</table>';
   // fleet charts
   $("sFleetH").textContent="Fleet over the last "+rangeLabel();
-  var g=[["fEval","Held-out eval loss","per syncer checkpoint, x = outer step (all checkpoints, not the time range); dashed: ckpt100 / base reference (loss \u2212 \u0394); bars \u00b11 se vs ckpt100"],
+  var g=[["fEval","Held-out eval loss","per syncer checkpoint, x = outer step (all checkpoints, not the time range); dashed: each vs_<name> reference (loss \u2212 \u0394); bars \u00b11 se vs the first reference other than base"],
     ["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
-    ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; each island's bench tokens_per_s interpolated onto one time grid, then summed"],
-    ["fHbm","HBM peak","max reserved over ranks per step; dashed: "+hbmLim+" GiB line"],["fHost","Host available memory","MemAvailable per node, sampled by the collector"],
+    ["fStep","Step time","bench wall_s per step"+(fin(ref)?"; dashed: reference "+dur(ref):"")],["fTps","Tokens / s","stacked by island; each island's bench tokens_per_s interpolated onto one time grid, then summed"],
+    ["fHbm","HBM peak","max reserved over ranks per step"+(hasLim?"; dashed: "+hbmLim+" GiB line":"")],["fHost","Host available memory","MemAvailable per node, sampled by the collector"],
     ["fSync","Sync overhead per step","export_s (solid) on steps that exported a fragment, apply_s (dashed) on steps that applied a broadcast"],
     ["fMerge","Syncer merge time","sync_ms (sync/merge_seconds) per round: the merge itself, waiting excluded"],["fRound","Syncer round wait","per round: quorum wait (quorum_ms) and grace wait (ms \u2212 quorum_ms \u2212 sync_ms); merge excluded"],["fGnorm","Outer gnorm by fragment","global delta norm per merge, colour by fragment"],
-    ["fRss","Syncer RSS","VmRSS of the syncer; dashed: "+bytes(cap)+" cap"],["fEv","Syncer problems","rejected / timeout / not carried / stale / disconnect per bucket"]];
+    ["fRss","Syncer RSS","VmRSS of the syncer"+(fin(cap)?"; dashed: "+bytes(cap)+" cap":"")],["fEv","Syncer problems","rejected / timeout / not carried / stale / disconnect per bucket"]];
   $("sFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var total={name:"Fleet total",color:GREY,dash:true};
   evalChart("fEval",S.eval);
   chart("fLoss",{series:series(S,isls,"loss"),yfmt:function(v){return v.toFixed(3)},y0:false});
   chart("fGn",{series:series(S,isls,"grad_norm"),yfmt:function(v){return v.toFixed(2)}});
   chart("fLr",{series:series(S,isls,"lr"),yfmt:function(v){return v.toExponential(1)}});
-  chart("fStep",{series:series(S,isls,"step_s"),refs:[{y:ref,label:"production "+dur(ref),legend:"Production"}],yfmt:dur});
+  chart("fStep",{series:series(S,isls,"step_s"),refs:fin(ref)?[{y:ref,label:"reference "+dur(ref),legend:"Reference"}]:[],yfmt:dur});
   chart("fTps",{kind:"stack",interp:bucketFor(isls),series:series(S,isls,"tps"),yfmt:k});
-  chart("fHbm",{series:series(S,isls,"hbm_gib"),refs:[{y:hbmLim,label:hbmLim+" GiB",legend:"Limit",color:"#eab308"}],yfmt:function(v){return v.toFixed(0)+" G"},y0:false,ymin:0.8*hbmLim});
+  chart("fHbm",{series:series(S,isls,"hbm_gib"),refs:hasLim?[{y:hbmLim,label:hbmLim+" GiB",legend:"Limit",color:"#eab308"}]:[],yfmt:function(v){return v.toFixed(0)+" G"},y0:false,ymin:hasLim?0.8*hbmLim:null});
   var hs=[];isls.forEach(function(I,i){Object.keys(I.host||{}).forEach(function(n,j){hs.push({name:n,color:PAL[(i*3+j)%PAL.length],pts:I.host[n].map(function(p){return [p[0],gib(p[1])]})})})});
   chart("fHost",{series:hs,yfmt:function(v){return v.toFixed(0)+" G"}});
   var ss=[];isls.forEach(function(I,i){ss.push({name:I.name+" export",color:islColor(i),pts:I.rows.filter(function(r){return r[C("export_s")]>0}).map(function(r){return [r[1],r[C("export_s")]]})},
@@ -284,14 +290,14 @@ function sft(S){
   chart("fRound",{dots:true,clip:true,series:[{name:"quorum wait",color:PAL[1],pts:mser("quorum_s")},{name:"grace wait",color:PAL[5],pts:mser("grace_s")}],yfmt:dur});
   var fr={};(sy.merges||[]).forEach(function(m){var f=m[2]==null?"?":m[2];(fr[f]=fr[f]||[]).push([m[0],m[4]])});
   var fk=Object.keys(fr);chart("fGnorm",{dots:true,series:fk.map(function(f,i){return {name:"fragment "+f,color:PAL[(+f||i)%PAL.length],pts:fr[f],legend:fk.length<=8}}),yfmt:function(v){return v.toFixed(2)}});
-  chart("fRss",{series:[{name:"syncer RSS",color:PAL[3],pts:rss.map(function(p){return [p[0],p[1]]})}],refs:[{y:cap,label:bytes(cap)+" cap",legend:"Cap"}],yfmt:bytes});
+  chart("fRss",{series:[{name:"syncer RSS",color:PAL[3],pts:rss.map(function(p){return [p[0],p[1]]})}],refs:fin(cap)?[{y:cap,label:bytes(cap)+" cap",legend:"Cap"}]:[],yfmt:bytes});
   var cats=[["rejected",PAL[8]],["timeout",PAL[1]],["not_carried",PAL[5]],["stale",PAL[3]],["disconnect",GREY]];
   chart("fEv",{kind:"bars",series:cats.map(function(c){return {name:c[0].replace("_"," "),color:c[1],pts:ev.filter(function(e){return e[1]===c[0]}).map(function(e){return [e[0],1]})}}),yfmt:function(v){return +v.toFixed(1)+""}});
   // distribution
   $("sDistH").textContent="Distribution over the last "+rangeLabel();
-  var slowT=ref*(refs.sft_slow_factor||1.1),dc=isls.map(function(I,i){var R=rowsIn(I,t0,t1);
-    return distCard(islColor(i),I.name,spec(I),[{title:"Step time",short:"Step time",vals:R.map(function(r){return r[C("step_s")]}),fmt:dur,slow:[slowT,"over "+dur(slowT)],count:"Steps"},
-      {title:"Sync blocking per step (sync_s)",short:"sync_s",vals:R.map(function(r){return r[C("sync_s")]}),fmt:dur,slow:[ref*0.05,"over 5% of a step"]}])});
+  var slowT=fin(ref)?ref*(refs.sft_slow_factor||1.1):null,dc=isls.map(function(I,i){var R=rowsIn(I,t0,t1);
+    return distCard(islColor(i),I.name,spec(I),[{title:"Step time",short:"Step time",vals:R.map(function(r){return r[C("step_s")]}),fmt:dur,slow:fin(slowT)?[slowT,"over "+dur(slowT)]:null,count:"Steps"},
+      {title:"Sync blocking per step (sync_s)",short:"sync_s",vals:R.map(function(r){return r[C("sync_s")]}),fmt:dur,slow:fin(ref)?[ref*0.05,"over 5% of a step"]:null}])});
   var mr=MG.filter(function(m){return inRange(m[0],t0,t1)}),mg=mr.map(function(m){return m[mc("merge_s")]}),ms=mg.filter(fin).sort(function(a,b){return a-b}),mp=pctl(ms,0.5);
   var os=mr.map(function(m){return m[mc("wait_s")]}); // ms - sync_ms: quorum + grace wait (outer step_seconds is the quorum wait only)
   dc.push(distCard(GREY,"syncer",(sy.meta&&sy.meta.learners!=null?"learners "+sy.meta.learners+" · ":"")+"H="+((sy.meta||{}).sync_interval||"n/a"),

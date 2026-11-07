@@ -193,9 +193,11 @@ Local directory layout read by `yeto dashboard serve|export --tapes <dir>`:
 Pull the files with any read-only incremental copier (byte offsets); the
 dashboard itself never connects to the nodes. `bench_metrics` / `health` step
 numbers restart at 1 per launch and are anchored at the first step logged by
-ms-swift / the yeto plugin. Reference lines are threshold keys:
-`sft_ref_step_s` (571), `sft_hbm_limit_gib` (53.9),
-`sft_syncer_rss_limit_bytes` (1.4e12), `sft_slow_factor` (1.1).
+ms-swift / the yeto plugin. Reference lines are threshold keys, unset (0, no
+line) by default: `sft_ref_step_s` (the recipe's expected step time),
+`sft_hbm_limit_gib` (the accelerator's HBM limit), `sft_syncer_rss_limit_bytes`
+(the syncer host's memory cap); `sft_slow_factor` (1.1) marks steps slower than
+the reference.
 
 Chart semantics worth knowing:
 

@@ -115,8 +115,7 @@ def record_ts(record: dict) -> float | None:
 
 def classify(record: dict) -> str:
     event = record.get("event")
-    if (isinstance(event, str) and event.startswith("sft_")) or (
-            event is None and record.get("kind") in sft_mod.SYNCER_TAPE_KINDS and "seq" not in record):
+    if isinstance(event, str) and event.startswith("sft_"):
         return "sft"
     if event in FLEET_EVENTS:
         return "fleet"
@@ -266,6 +265,10 @@ class Reducer:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
         iid = _iid(record.get("island_id", record.get("learner_id"))) or island
+        if kind != "sft" and sft_mod.is_syncer_tape(record):
+            # The syncer writes the same tape for RL and SFT runs: the SFT page
+            # reads it too, but it alone does not make a run an SFT run.
+            self.sft.fold(record, ts)
         getattr(self, "_feed_" + kind)(record, iid, ts)
         self.event_seq += 1
         etype = record.get("event") or (("journal:" + str(record.get("kind"))) if kind == "journal"
@@ -821,6 +824,7 @@ class Reducer:
         if not self.sft.islands and not self.counts.get("sft"):
             return None
         refs = {k: self.thresholds.get(k, v) for k, v in sft_mod.DEFAULT_REFS.items()}
+        refs = {k: v for k, v in refs.items() if v > 0}  # unset references are not drawn
         return self.sft.view(now=now, merges=self.merges, refs=refs)
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
