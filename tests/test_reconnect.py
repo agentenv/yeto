@@ -550,3 +550,15 @@ def test_chunked_and_direct_broadcasts_share_the_replay_and_conflict_checks():
     with pytest.raises(ProtocolError, match="conflicting BCAST_FRAGMENT"):
         client._dispatch(1, *inner)
     client.close()
+
+
+def test_subclass_dispatch_overrides_take_the_block_digest():
+    """A reassembled BCAST of two or more digest blocks reaches ``_dispatch``
+    with its block digest; every override must accept it."""
+    import inspect
+
+    from yeto.protocol import SyncerClient
+    from yeto.rl.spot_rollout.subscriber import SubscriberClient
+
+    for cls in (SyncerClient, SubscriberClient):
+        inspect.signature(cls._dispatch).bind(None, 0, 0, b"", b"\0" * 32)
