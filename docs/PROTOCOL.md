@@ -595,7 +595,8 @@ periodic interval still leaves an atomic final checkpoint.
 
 SIGTERM or SIGINT stops the syncer gracefully: it launches no new round,
 gives the rounds still gathering `--shutdown-timeout-s` (default 600) to
-close, then abandons the rest (they have not touched the state, so a resumed
+close (a round with no delta whose islands are all disconnected is abandoned
+at once), then abandons the rest (they have not touched the state, so a resumed
 run launches those steps again), commits every computed round, writes
 `--checkpoint-path` synchronously (after any background checkpoint) and exits
 0 with `stop: checkpoint written step=<t>`. The checkpoint's global step is
