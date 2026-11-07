@@ -58,8 +58,14 @@ def test_syncer_address_and_hmac_key_file(tmp_path):
     assert sm._syncer_spec("a:1, tcp://b:2") == "a:1,b:2"
     key = tmp_path / "hmac.key"
     key.write_text("s3cret\n")
-    assert sm._read_hmac_key(str(key)) == b"s3cret"  # the YETO_ISLAND_HMAC_KEY encoding
+    assert sm._read_hmac_key(str(key)) == b"s3cret"  # same encoding as YETO_ISLAND_HMAC_KEY
     assert sm._read_hmac_key(None) is None
+
+
+def test_a_sharded_syncer_is_refused_before_connecting():
+    with pytest.raises(ValueError, match="sharded syncers"):
+        sm.MegatronDiLoCoSync([], None, syncer="a:1,b:2", learner_id=0, num_learners=1, fragments=1,
+                              sync_interval_steps=1)
 
 
 def test_chunks_are_bounded_and_keep_order():
@@ -563,7 +569,6 @@ def test_two_tp2_pp2_islands_merge_to_the_syncer_final_state_through_a_connectio
             if kind == "apply":
                 assert version >= versions.get(fid, -1), "fragment versions went backwards"
                 versions[fid] = version
-    print(json.dumps([i["stats"] for i in islands]))
 
 
 def test_write_masters_also_sets_a_distinct_hdo_host_copy():

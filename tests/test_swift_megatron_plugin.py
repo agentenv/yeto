@@ -97,6 +97,20 @@ def test_called_once_per_optimizer_step_with_global_tokens(make):
     assert sync.closed == 1
 
 
+def test_training_ends_at_the_step_that_installed_the_final_cut(make):
+    trainer, cb = make([([1], True)] * 5)
+    sync = FakeSync.instances[0]
+    original = sync.after_optimizer_step
+
+    def step(iteration, target_tokens, **kw):
+        original(iteration, target_tokens, **kw)
+        sync.finished = iteration == 2
+
+    sync.after_optimizer_step = step
+    trainer.train()
+    assert [c[0] for c in sync.calls] == [1, 2] and trainer.args.train_iters == 2 and sync.closed == 1
+
+
 def test_skipped_step_still_calls_with_zero_tokens(make):
     trainer, cb = make([([3], True), ([7], False), ([1], True)])
     trainer.train()

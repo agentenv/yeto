@@ -15,9 +15,10 @@ resumed iteration.
 
 If adding ``--callbacks`` to the production command line is not possible, set
 ``YETO_DILOCO_AUTO_ATTACH=1``: the import then wraps
-``BaseMegatronTrainer.__init__`` so the callback is appended automatically.
+``BaseMegatronTrainer.__init__`` so the callback is added automatically, ahead
+of ms-swift's own callbacks.
 
-Call contract (see INTERFACE.md):
+Call contract:
   * every rank calls ``sync.after_optimizer_step(iteration, target_tokens)``
     exactly once per ``optimizer.step()``, including skipped steps
     (loss-scale overflow / NaN grad norm), where ``target_tokens`` is 0;
@@ -32,7 +33,9 @@ Call contract (see INTERFACE.md):
 
 The sync runs inside ``on_step_end``, i.e. before ms-swift's own
 ``default_flow`` callback decides to save, so a checkpoint written at that
-step already contains the merged base.
+step already contains the merged base. Once the syncer's final cut is
+installed the callback ends training at that step (ms-swift then saves), so
+later local steps cannot overwrite the final global parameters.
 
 Configuration (environment variable / ``--yeto_*`` style is not accepted by
 ms-swift's argument parser, so environment variables are the only channel):
@@ -42,7 +45,13 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_NUM_LEARNERS        number of learners (int, required)
   YETO_DILOCO_FRAGMENTS           fragment count (int, default 1)
   YETO_DILOCO_SYNC_INTERVAL_STEPS inner steps per round (int, required)
-  YETO_DILOCO_WIRE_DTYPE          bf16 | fp32 | ... (default bf16)
+  YETO_DILOCO_WIRE_DTYPE          bf16 | fp32 | int8 | int4 | int4-log | push-bf16
+                                  (default bf16)
+  YETO_DILOCO_FINAL_CUT_PAYLOAD   full | manifest (default full; a large island
+                                  should use manifest: the full final cut is
+                                  every fragment in FP32 on rank 0's host)
+  YETO_DILOCO_TRANSPORT           cpu | device: where the sync's collectives
+                                  run (default cpu, gloo mirrors)
   YETO_DILOCO_HMAC_KEY_PATH       path to the HMAC key file (optional)
   YETO_DILOCO_DISABLE             set to 1 to make the callback a no-op
 """
@@ -262,8 +271,8 @@ class YetoDiLoCoCallback(_CallbackBase):
         self.config = DiLoCoHookConfig.from_env()
         self._wrap_train_step()
         # Build here (not in on_train_begin) so a bad config fails before data
-        # loading; the trainer has already loaded the resume checkpoint, so the
-        # sync core snapshots the resumed weights as its initial base.
+        # loading; the trainer has already loaded the resume checkpoint, which
+        # is what learner 0's INIT_PARAMS carries.
         self.sync = type(self).sync_factory(_model_chunks(trainer), trainer.optimizer, self.config)
         atexit.register(self.close)
         logger.info("yeto DiLoCo sync attached: learner %d/%d, interval %d, fragments %d, start iteration %d",
@@ -307,6 +316,12 @@ class YetoDiLoCoCallback(_CallbackBase):
         target_tokens = global_tokens if update_successful else 0
         self.sync.after_optimizer_step(iteration, target_tokens,
                                        update_successful=update_successful)
+        if getattr(self.sync, "finished", False) and iteration < int(self.args.train_iters):
+            # The final cut is installed: stop here (ms-swift's default_flow
+            # saves at train_iters) instead of training past the global result.
+            logger.warning("yeto DiLoCo: final cut installed at iteration %d; ending training (train_iters %d)",
+                           iteration, int(self.args.train_iters))
+            self.args.train_iters = iteration
 
     def on_train_end(self):
         self.close()

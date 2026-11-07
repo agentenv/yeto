@@ -577,6 +577,10 @@ class MegatronDiLoCoSync:
             raise ValueError(f"learner_id {learner_id} outside [0, {num_learners})")
         if final_cut_payload not in FINAL_CUT_PAYLOADS:
             raise ValueError(f"final_cut_payload must be one of {FINAL_CUT_PAYLOADS}")
+        if "," in _syncer_spec(syncer):
+            # Checked on every rank, before rank 0 connects: the chunked INIT
+            # and push streaming are not routed per shard owner.
+            raise ValueError("the ms-swift Megatron sync talks to one syncer; sharded syncers are not supported")
         if not dist.is_initialized():
             raise SwiftMegatronSyncError("torch.distributed must be initialized (Megatron does this)")
         self.ctx = parallel_context or ParallelContext.from_megatron()
@@ -642,6 +646,7 @@ class MegatronDiLoCoSync:
         self.client = None
         self.stats = {"applied": 0, "pushed": 0, "push_bytes": 0, "dropped_pushes": 0,
                       "deferred_pushes": 0}
+        self._observed_push_bytes = 0  # rank 0: push_bytes at the last observer report
         self.sender: _PushSender | None = None  # rank 0: background PUSH streaming
         # (iteration, "apply" | "push", fragment, version | pull step), same on every rank.
         self.events: deque[tuple[int, str, int, int]] = deque(maxlen=4096)
@@ -836,6 +841,18 @@ class MegatronDiLoCoSync:
                 if has_complete_master(param) and param.dtype != torch.float32:
                     param.data.copy_(target.to(dtype=param.dtype))
 
+    def _check_payload(self, fid: int, data: Any, dtype: Any) -> None:
+        """Rank 0: refuse a fragment payload of the wrong size (or none)."""
+
+        import torch
+
+        if data is None:
+            raise SwiftMegatronSyncError(f"fragment {fid} has no payload")
+        nbytes = len(memoryview(data).cast("B"))
+        expected = self.layout.fragments[fid].numel * torch.empty((), dtype=dtype).element_size()
+        if nbytes != expected:
+            raise SwiftMegatronSyncError(f"fragment {fid} payload has {nbytes} bytes, expected {expected}")
+
     def _apply_fragment(self, fid: int, data: Any, dtype: Any, *, blend: bool) -> None:
         """Apply one fragment's payload (``data`` on rank 0) chunk by chunk."""
 
@@ -843,9 +860,6 @@ class MegatronDiLoCoSync:
 
         view = memoryview(data).cast("B") if self.rank == 0 else None
         itemsize = torch.empty((), dtype=dtype).element_size()
-        expected = self.layout.fragments[fid].numel * itemsize
-        if view is not None and len(view) != expected:
-            raise SwiftMegatronSyncError(f"fragment {fid} payload has {len(view)} bytes, expected {expected}")
         offset = 0
         for names in self.fragment_chunks[fid]:
             nbytes = sum(self.table.numel(name) for name in names) * itemsize
@@ -915,9 +929,14 @@ class MegatronDiLoCoSync:
         if pushes:
             self._raise_if(self._bcast_object(error))
         if self.observer is not None and self.rank == 0 and (plan.applies or pushes):
-            self.observer(boundary_metrics(state, merges=len(plan.applies), pushes=len(pushes),
-                                           push_bytes=self.stats["push_bytes"], push_delta_norm=0.0,
-                                           steps_total=iteration))
+            # push_bytes: what the sender finished since the last report (the
+            # torch learner reports its boundary's bytes, not a running total)
+            sent, self._observed_push_bytes = (self.stats["push_bytes"] - self._observed_push_bytes,
+                                               self.stats["push_bytes"])
+            metrics = boundary_metrics(state, merges=len(plan.applies), pushes=len(pushes),
+                                       push_bytes=sent, push_delta_norm=0.0, steps_total=iteration)
+            metrics.pop("sync/push_delta_norm", None)  # not computed: the delta is never materialized whole
+            self.observer(metrics)
 
     @property
     def shutdown(self) -> bool:
@@ -943,6 +962,10 @@ class MegatronDiLoCoSync:
             for update in client.drain_updates():
                 # A later broadcast of the same fragment supersedes an earlier one.
                 self._updates[update.fragment_id] = update
+            for fid, update in self._updates.items():
+                # Checked here, before the plan goes out: a bad payload found
+                # while applying would fail rank 0 inside the chunk broadcasts.
+                self._check_payload(fid, update.data, self.bulk_torch)
             plan.applies = sorted((fid, int(u.version)) for fid, u in self._updates.items())
             plan.shutdown = bool(client.shutdown.is_set())
         except Exception as exc:
@@ -1030,6 +1053,15 @@ class MegatronDiLoCoSync:
                 if self.final_cut_payload == "full":
                     manifest, broadcasts = self.client.wait_for_final_fragments()
                     finals = {update.fragment_id: update for update in broadcasts}
+                    # Checked before the outcome is broadcast, so a mismatch
+                    # fails every rank instead of rank 0 alone.
+                    for fid in range(self.num_fragments):
+                        update = finals.get(fid)
+                        if update is None or update.version != manifest.versions[fid]:
+                            raise SwiftMegatronSyncError(
+                                f"final fragment {fid} has version {None if update is None else update.version}, "
+                                f"expected {manifest.versions[fid]}")
+                        self._check_payload(fid, update.data, torch.float32)
                 else:
                     manifest = self.client.wait_for_final_manifest()
             except Exception as exc:
@@ -1042,9 +1074,6 @@ class MegatronDiLoCoSync:
         if self.final_cut_payload == "full":
             for fid in range(self.num_fragments):
                 update = finals.get(fid) if self.rank == 0 else None
-                if self.rank == 0 and update is not None and update.version != manifest.versions[fid]:
-                    raise SwiftMegatronSyncError(f"final fragment {fid} has version {update.version}, "
-                                                 f"expected {manifest.versions[fid]}")
                 self._apply_fragment(fid, None if update is None else update.data, torch.float32, blend=False)
                 self.state.fragment_versions[fid] = manifest.versions[fid]
         if self.world > 1:
