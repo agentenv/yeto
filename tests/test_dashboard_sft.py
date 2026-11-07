@@ -127,8 +127,8 @@ def test_bench_restart_after_a_crash_maps_onto_the_resumed_steps():
         st.fold({"event": "sft_train_log", "island_id": "0", "step": s, "loss": float(s)}, None)
     for s in [*range(1, 8), *range(1, 5)]:
         st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s, "wall_s": 100.0 + s}, None)
-    bench, offsets = st._bench_by_step(st.islands["0"])
-    assert offsets == [0, 5] and sorted(bench) == list(range(1, 10))
+    bench = st._bench_by_step(st.islands["0"])
+    assert sorted(bench) == list(range(1, 10))
     assert bench[6]["wall_s"] == 101.0 and bench[9]["wall_s"] == 104.0  # launch 2's own records
     assert bench[5]["wall_s"] == 105.0  # launch 1's step 5 is kept
     rows = st.island_rows(st.islands["0"])
@@ -141,7 +141,7 @@ def test_bench_of_a_resumed_first_launch_starts_at_the_checkpoint():
         st.fold({"event": "sft_train_log", "island_id": "0", "step": s}, None)
     for s in (1, 2):
         st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s}, None)
-    assert sorted(st._bench_by_step(st.islands["0"])[0]) == [16, 17]
+    assert sorted(st._bench_by_step(st.islands["0"])) == [16, 17]
 
 
 def test_health_of_a_resumed_launch_maps_onto_the_resumed_steps():
@@ -167,7 +167,7 @@ def test_references_are_not_drawn_unless_configured(tmp_path):
         pytest.skip("node not installed")
     r = Reducer(run="sft")
     load_all(r, [str(make_run(tmp_path / "run"))])
-    assert set(r.sft_view(T0)["refs"]) == {"sft_slow_factor"}
+    assert set(r.sft_view(T0)["refs"]) == {"sft_slow_factor", "sft_stop_factor", "sft_stop_slack_s"}  # no lines
     out = export_html(r, tmp_path / "s.html", generated_at=T0)
     page = json.loads(subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True,
                                      timeout=60).stdout)

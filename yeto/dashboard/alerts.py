@@ -40,6 +40,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "sft_hbm_limit_gib": 0.0,
     "sft_syncer_rss_limit_bytes": 0.0,
     "sft_slow_factor": 1.1,
+    # SFT island status: "stopped" after no step for factor x step time p50 + slack
+    "sft_stop_factor": 1.5,
+    "sft_stop_slack_s": 300.0,
 }
 
 
