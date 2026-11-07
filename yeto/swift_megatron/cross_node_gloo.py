@@ -15,8 +15,10 @@ With this module installed (``YETO_CROSS_NODE_GLOO=1``):
   host copies of the device tensors; results are copied back to the device.
 
 Rank-to-node mapping assumes torchrun's contiguous layout
-(``rank // LOCAL_WORLD_SIZE``).  Load as an ms-swift external plugin before
-Megatron builds its parallel state.
+(``rank // LOCAL_WORLD_SIZE``; ``YETO_CROSS_NODE_LOCAL_WORLD`` overrides the
+ranks per node). A group whose backend string names gloo (a mixed one too)
+is created as requested, without host staging. Load as an ms-swift external
+plugin before Megatron builds its parallel state.
 """
 
 from __future__ import annotations
