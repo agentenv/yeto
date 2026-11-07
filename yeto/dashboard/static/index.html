@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -25,7 +25,7 @@ nav .brand{font-weight:700;color:var(--accent);margin-bottom:18px;letter-spacing
 nav a{display:block;padding:7px 10px;border-radius:8px;color:var(--ink2);text-decoration:none}
 nav a:hover,nav a.on{background:var(--panel);color:var(--ink)}
 nav .sub{font-size:12px;color:var(--ink2);margin-top:18px}
-main{padding:22px 24px 60px;max-width:1720px}
+main{padding:22px 20px 60px;width:100%;max-width:none;min-width:0}
 header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:16px}
 h1{font-size:20px;margin:0;font-weight:600;letter-spacing:-.01em}
 h2{font-size:15px;margin:0 0 10px}
@@ -110,10 +110,10 @@ td.bar,th.bar{text-align:left!important;min-width:200px}.bl{font-size:11px;margi
 .bt{position:relative;height:5px;background:#3a3a40;border-radius:3px}.bf{height:5px;background:#facc15;border-radius:3px}.bf.over{background:var(--bad)}
 .bm{position:absolute;top:-2px;width:2px;height:9px;background:var(--ink)}
 .sh{margin:26px 0 12px;border-top:1px solid var(--line);padding-top:18px}.sh h2{font-size:15px;margin:0;font-weight:600}.sh .cs{margin-top:3px}
-.cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(max(330px,calc((100% - 56px) / 5)),1fr));gap:14px}
 .cc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px;min-width:0}
 .ct{font-size:12.5px;font-weight:600}.cs{font-size:11px;color:var(--ink2);margin:2px 0 8px}
-.cw{position:relative}svg.ch,svg.hs{display:block;width:100%;height:auto}
+.cw{position:relative;overflow:hidden}.cc{overflow:hidden}svg.ch,svg.hs{display:block;width:100%;height:auto}
 svg.ch text,svg.hs text{fill:var(--ink2);font:9.5px var(--sans)}svg .gl{stroke:var(--line);stroke-width:.8}svg .cx{stroke:var(--ink2);stroke-dasharray:2 2}
 svg text.rt{fill:#c9cad0;font-size:9px}
 .lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--ink);margin:8px 0 2px}.lg i,.tt i,.dh i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}

@@ -6,7 +6,7 @@
 var node=document.getElementById("yeto-data"),INLINE=null;
 if(node){try{INLINE=JSON.parse(node.textContent)}catch(e){INLINE=null}}
 var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG namespace id, not a request
-var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=0,pinned=false;
+var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
 var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
 var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","KL"],["grad_norm","grad_norm"],
@@ -28,9 +28,9 @@ function stBadge(s){var m={ok:["ok","healthy"],starting:["wn","starting"],stoppe
 
 /* theme + layout */
 var THEMES=["auto","light","dark"];
-try{var saved=localStorage.getItem("yeto-theme");if(saved)themeI=Math.max(0,THEMES.indexOf(saved))}catch(e){}
+try{var saved=localStorage.getItem("yeto-theme-v2");if(saved)themeI=Math.max(0,THEMES.indexOf(saved))}catch(e){}
 function applyTheme(){var t=THEMES[themeI];if(t==="auto")document.documentElement.removeAttribute("data-theme");else document.documentElement.setAttribute("data-theme",t);
-  $("themeBtn").textContent="Theme: "+{auto:"system",light:"light",dark:"dark"}[t];try{localStorage.setItem("yeto-theme",t)}catch(e){}}
+  $("themeBtn").textContent="Theme: "+{auto:"system",light:"light",dark:"dark"}[t];try{localStorage.setItem("yeto-theme-v2",t)}catch(e){}}
 $("themeBtn").onclick=function(){themeI=(themeI+1)%3;applyTheme()};applyTheme();
 $("layoutBtn").onclick=function(){layout=layout==="auto"?(O.run_kind==="single_island"?"multi_island":"single_island"):"auto";render()};
 
