@@ -26,6 +26,26 @@ function sum(a){var s=0;a.forEach(function(v){if(fin(v))s+=v});return s}
 function nice(lo,hi,n){if(!(hi>lo)){hi=lo+1}var step=Math.pow(10,Math.floor(Math.log10((hi-lo)/n))),err=(hi-lo)/n/step;
   step*=err>=7.5?10:err>=3.5?5:err>=1.5?2:1;var a=Math.floor(lo/step)*step,b=Math.ceil(hi/step)*step,t=[];for(var v=a;v<=b+step/2;v+=step)t.push(+v.toPrecision(12));return t}
 
+/* duration axis labels: one unit for every tick of an axis (dur() switches unit per value) */
+function durUnit(m){m=Math.abs(m);return m<1?[0.001,"ms"]:m<=600?[1,"s"]:m<3*3600?[60,"min"]:m<2*86400?[3600,"h"]:[86400,"d"]}
+function durTicks(lo,hi,n){var u=durUnit(Math.max(Math.abs(lo),Math.abs(hi)))[0];return nice(lo/u,hi/u,n).map(function(v){return +(v*u).toPrecision(12)})} // round numbers in the label unit
+function durAxis(ticks){var m=Math.max.apply(null,ticks.map(Math.abs)),u=durUnit(m),st=ticks.length>1?Math.abs(ticks[1]-ticks[0]):m||1,q=st/u[0],
+    dec=q>=0.999?0:Math.min(3,Math.ceil(-Math.log10(q)-1e-9));
+  return function(v){return v===0?"0":(v/u[0]).toFixed(dec)+" "+u[1]}}
+/* stacked series on one time grid: each series is linearly interpolated between its own samples
+   (islands step at different moments, so summing raw step points saw-tooths). Samples outside the
+   range anchor the edges. Inside a gap longer than brk the series holds for one step after its last
+   sample and from one step before its next one, else 0 (island down). Returns per grid point
+   [t, top, bottom, own value]. */
+function interpStack(list,grid,fallbackGap,minBrk){var acc=grid.map(function(){return 0});
+  return list.map(function(P){var gap=[];for(var q=1;q<P.length;q++)gap.push(P[q][0]-P[q-1][0]);gap.sort(function(a,b){return a-b});
+    var med=gap.length?gap[Math.floor(gap.length/2)]:fallbackGap,brk=Math.max(minBrk||0,2.5*med),j=-1;
+    return grid.map(function(x,gi){while(j+1<P.length&&P[j+1][0]<=x)j++;var v=0,a=j>=0?P[j]:null,b=j+1<P.length?P[j+1]:null;
+      if(a&&b&&b[0]-a[0]<=brk)v=a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0]||1);
+      else if(a&&x-a[0]<=(b?1.5*med:brk))v=a[1];
+      else if(b&&b[0]-x<=med)v=b[1];
+      var lo=acc[gi];acc[gi]=lo+v;return [x,lo+v,lo,v]})})}
+
 /* ---------- header controls ---------- */
 function controls(offline,reload){
   onReload=reload;var box=$("rangeBox");if(!box)return;
@@ -44,8 +64,9 @@ function axisX(t0,t1){var span=t1-t0,steps=[60,300,600,900,1800,3600,7200,10800,
 /* opts: series [{name,color,pts:[[t,v]],dash,width}], kind line|stack|bars, refs [{y,label}], yfmt, y0 (force 0 baseline), bucket (bars, s) */
 function chart(id,opts){
   var box=$(id);if(!box)return;var t1=NOW,t0=NOW-RANGE_H*3600;
-  var ser=(opts.series||[]).map(function(s){return {name:s.name,color:s.color,dash:s.dash,width:s.width,legend:s.legend!==false,
-    pts:(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])&&p[0]>=t0&&p[0]<=t1}).sort(function(a,b){return a[0]-b[0]})}});
+  var ser=(opts.series||[]).map(function(s){var all=(s.pts||[]).filter(function(p){return fin(p[0])&&fin(p[1])}).sort(function(a,b){return a[0]-b[0]});
+    return {name:s.name,color:s.color,dash:s.dash,width:s.width,legend:s.legend!==false,all:all,
+    pts:all.filter(function(p){return p[0]>=t0&&p[0]<=t1})}});
   var leg='<div class="lg">'+ser.filter(function(s){return s.legend}).map(function(s){return s.pts.length?'<span><i style="background:'+s.color+'"></i>'+esc(s.name)+'</span>':
     '<span class="nd"><i style="background:#4b4b52"></i>'+esc(s.name)+' (no data)</span>'}).join("")+
     (opts.refs||[]).filter(function(r){return r.legend}).map(function(r){return '<span><i style="background:'+(r.color||GREY)+'"></i>'+esc(r.legend)+'</span>'}).join("")+'</div>';
@@ -54,24 +75,25 @@ function chart(id,opts){
   if(!any){box.innerHTML='<div class="empty">no data in the last '+rangeLabel()+'</div>'+leg;CH[id]=null;return}
   var stack=opts.kind==="stack"||opts.kind==="bars",span=t1-t0,bk=opts.bucket||Math.max(60,span/72);
   if(span/bk<4)bk=span<=3600?300:600; // range shorter than a few buckets: 5-10 min buckets
-  if(opts.kind==="stack"&&opts.hold){ // step-hold resample on a shared grid: each series takes its last sample
-    var gs=Math.max(30,span/180),gx=[],lo0=Math.min.apply(null,ser.map(function(s){return s.pts[0][0]}));
-    for(var gt=Math.ceil(Math.max(t0,lo0)/gs)*gs;gt<=t1;gt+=gs)gx.push(gt);
-    var acc2=gx.map(function(){return 0});
-    ser.forEach(function(s){var P=s.pts,j=-1,gap=[];for(var q=1;q<P.length;q++)gap.push(P[q][0]-P[q-1][0]);gap.sort(function(a,b){return a-b});
-      var age=Math.max(2*gs,3*(gap.length?gap[Math.floor(gap.length/2)]:opts.hold));
-      s.pts=gx.map(function(x,gi){while(j+1<P.length&&P[j+1][0]<=x)j++;var v=(j>=0&&x-P[j][0]<=age)?P[j][1]:0,lo=acc2[gi];acc2[gi]=lo+v;return [x,lo+v,lo,v]})});
+  if(opts.kind==="stack"&&opts.interp){ // interpolate every series on one grid, then stack
+    var gs=Math.max(30,span/180),gx=[];for(var gt=Math.ceil(t0/gs)*gs;gt<t1;gt+=gs)gx.push(gt);gx.push(t1);
+    var lo0=Math.min.apply(null,ser.map(function(s){return s.pts[0][0]})),first=Math.max(t0,lo0-opts.interp);
+    gx=gx.filter(function(x){return x>=first}); // no zero ramp before the first island has data
+    var stk=interpStack(ser.map(function(s){return s.all}),gx,opts.interp,2*gs);ser.forEach(function(s,i){s.pts=stk[i]});
   }else if(stack){ // bucket every series on a shared grid
     var keys={};ser.forEach(function(s){var b={};s.pts.forEach(function(p){var x=Math.floor(p[0]/bk)*bk;b[x]=(b[x]||0)+p[1];keys[x]=1});s.b=b});
     var xs=Object.keys(keys).map(Number).sort(function(a,b){return a-b}),acc={};
     ser.forEach(function(s){s.pts=xs.map(function(x){var lo=acc[x]||0,v=s.b[x]||0;acc[x]=lo+v;return [Math.min(t1,Math.max(t0,x+bk/2)),lo+v,lo,v]})});var NB=xs.length;
   }
   var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if(p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
+  var off=null;if(opts.clip&&!stack&&vals.length>=10){var sv=vals.slice().sort(function(a,b){return a-b}),q9=rank(sv,0.9),mx=sv[sv.length-1];
+    if(q9>0&&mx>4*q9){var cap=1.5*q9;off={cap:cap,max:mx,n:0};vals=vals.filter(function(v){return v<=cap});vals.push(cap)}} // a few huge values (8 h first round) would flatten the rest
   var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals);if(opts.y0!==false&&(stack||opts.y0||lo>=0&&lo<hi*0.35))lo=Math.min(0,lo);if(fin(opts.ymin))lo=Math.min(lo,opts.ymin);if(hi-lo<=Math.abs(hi)*0.02||hi===lo){var c=(hi+lo)/2,dd=Math.abs(c)*0.1||1;hi=c+dd;lo=(c>=0&&c-dd<0)?0:c-dd}
-  var ticks=nice(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
-  var x=function(t){return M.l+(t-t0)*(W-M.l-M.r)/(t1-t0)},y=function(v){return M.t+(hi-v)/(hi-lo)*(H-M.t-M.b)};
+  var ticks=(opts.yfmt===dur?durTicks:nice)(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
+  var x=function(t){return M.l+(t-t0)*(W-M.l-M.r)/(t1-t0)},y=function(v){return M.t+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-M.t-M.b)};
   var yf=opts.yfmt||function(v){return k(v)},o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+M.l+'" y="'+M.t+'" width="'+(W-M.l-M.r)+'" height="'+(H-M.t-M.b)+'"/></clipPath></defs>'];
-  ticks.forEach(function(v){o.push('<line class="gl" x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(M.l-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yf(v))+'</text>')});
+  var yl=yf===dur?durAxis(ticks):yf;
+  ticks.forEach(function(v){o.push('<line class="gl" x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(M.l-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yl(v))+'</text>')});
   var ax=axisX(t0,t1);ax.ticks.forEach(function(t){o.push('<text x="'+x(t).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(ax.fmt(t))+'</text>')});
   var PW=W-M.l-M.r,bw=Math.max(1,Math.min(PW*bk/span*0.8,PW/Math.max(1,NB||1)*0.8));
   o.push('<g clip-path="url(#cp-'+id+')">');
@@ -80,9 +102,12 @@ function chart(id,opts){
     var line=P.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("");
     if(opts.kind==="stack"){var base=P.slice().reverse().map(function(p){return "L"+x(p[0]).toFixed(1)+","+y(p[2]).toFixed(1)}).join("");
       o.push('<path d="'+line+base+'Z" fill="'+s.color+'" fill-opacity=".32"/>')}
-    if(P.length===1||opts.dots)P.forEach(function(p){o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(opts.dots?1.6:2.5)+'" fill="'+s.color+'"/>')});
+    if(P.length===1||opts.dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
+        o.push('<path class="off" d="M'+(cx0-3.5).toFixed(1)+','+(cy0+6)+'L'+(cx0+3.5).toFixed(1)+','+(cy0+6)+'L'+cx0.toFixed(1)+','+cy0+'Z" fill="'+s.color+'"/>');return}
+      o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(opts.dots?1.6:2.5)+'" fill="'+s.color+'"/>')});
     if(P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="3 3"':"")+' stroke-linejoin="round"/>')});
   o.push('</g>');
+  if(off&&off.n)o.push('<text x="'+(M.l+4)+'" y="'+(M.t+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
   (opts.refs||[]).forEach(function(r){if(!fin(r.y)||r.y<lo||r.y>hi)return;o.push('<line x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(r.y).toFixed(1)+'" y2="'+y(r.y).toFixed(1)+'" stroke="'+(r.color||GREY)+'" stroke-dasharray="4 3" stroke-width="1"/>'+
     (r.label?'<text x="'+(W-M.r-2)+'" y="'+(y(r.y)-4).toFixed(1)+'" text-anchor="end" class="rt">'+esc(r.label)+'</text>':""))});
   o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
@@ -234,10 +259,10 @@ function sft(S){
   $("sFleetH").textContent="Fleet over the last "+rangeLabel();
   var g=[["fEval","Held-out eval loss","per syncer checkpoint, x = outer step (all checkpoints, not the time range); dashed: ckpt100 / base reference (loss \u2212 \u0394); bars \u00b11 se vs ckpt100"],
     ["fLoss","Loss","per island, ms-swift logging.jsonl"],["fGn","grad_norm","per island, before clipping"],["fLr","Learning rate","per island schedule"],
-    ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; bench tokens_per_s held from each step on a shared time grid"],
+    ["fStep","Step time","bench wall_s per step; dashed: production "+dur(ref)],["fTps","Tokens / s","stacked by island; each island's bench tokens_per_s interpolated onto one time grid, then summed"],
     ["fHbm","HBM peak","max reserved over ranks per step; dashed: "+hbmLim+" GiB line"],["fHost","Host available memory","MemAvailable per node, sampled by the collector"],
     ["fSync","Sync overhead per step","export_s (solid) on steps that exported a fragment, apply_s (dashed) on steps that applied a broadcast"],
-    ["fMerge","Syncer merge time","sync/merge_seconds (sync_ms) per merge: the merge itself, no waiting"],["fRound","Syncer round time","per merge: quorum wait (quorum_ms) and round open-to-done total (ms)"],["fGnorm","Outer gnorm by fragment","global delta norm per merge, colour by fragment"],
+    ["fMerge","Syncer merge time","sync_ms (sync/merge_seconds) per round: the merge itself, waiting excluded"],["fRound","Syncer round wait","per round: quorum wait (quorum_ms) and grace wait (ms \u2212 quorum_ms \u2212 sync_ms); merge excluded"],["fGnorm","Outer gnorm by fragment","global delta norm per merge, colour by fragment"],
     ["fRss","Syncer RSS","VmRSS of the syncer; dashed: "+bytes(cap)+" cap"],["fEv","Syncer problems","rejected / timeout / not carried / stale / disconnect per bucket"]];
   $("sFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
   var total={name:"Fleet total",color:GREY,dash:true};
@@ -246,15 +271,17 @@ function sft(S){
   chart("fGn",{series:series(S,isls,"grad_norm"),yfmt:function(v){return v.toFixed(2)}});
   chart("fLr",{series:series(S,isls,"lr"),yfmt:function(v){return v.toExponential(1)}});
   chart("fStep",{series:series(S,isls,"step_s"),refs:[{y:ref,label:"production "+dur(ref),legend:"Production"}],yfmt:dur});
-  chart("fTps",{kind:"stack",hold:bucketFor(isls),series:series(S,isls,"tps"),yfmt:k});
+  chart("fTps",{kind:"stack",interp:bucketFor(isls),series:series(S,isls,"tps"),yfmt:k});
   chart("fHbm",{series:series(S,isls,"hbm_gib"),refs:[{y:hbmLim,label:hbmLim+" GiB",legend:"Limit",color:"#eab308"}],yfmt:function(v){return v.toFixed(0)+" G"},y0:false,ymin:0.8*hbmLim});
   var hs=[];isls.forEach(function(I,i){Object.keys(I.host||{}).forEach(function(n,j){hs.push({name:n,color:PAL[(i*3+j)%PAL.length],pts:I.host[n].map(function(p){return [p[0],gib(p[1])]})})})});
   chart("fHost",{series:hs,yfmt:function(v){return v.toFixed(0)+" G"}});
   var ss=[];isls.forEach(function(I,i){ss.push({name:I.name+" export",color:islColor(i),pts:I.rows.filter(function(r){return r[C("export_s")]>0}).map(function(r){return [r[1],r[C("export_s")]]})},
     {name:I.name+" apply",color:islColor(i),dash:true,pts:I.rows.filter(function(r){return r[C("applies")]||r[C("apply_s")]>0}).map(function(r){return [r[1],r[C("apply_s")]]})})});
   chart("fSync",{series:ss,yfmt:dur,dots:false});
-  chart("fMerge",{dots:true,series:[{name:"merge (sync_ms)",color:PAL[0],pts:(sy.merges||[]).map(function(m){return [m[0],m[3]]})}],yfmt:dur});
-  chart("fRound",{dots:true,series:[{name:"quorum wait",color:PAL[1],pts:(sy.merges||[]).map(function(m){return [m[0],m[6]]})},{name:"round total (ms)",color:PAL[2],dash:true,pts:(sy.merges||[]).map(function(m){return [m[0],m[5]]})}],yfmt:dur});
+  var MG=sy.merges||[],mc=function(n){var i=(sy.merge_cols||[]).indexOf(n);return i<0?{merge_s:3,round_s:5,quorum_s:6,grace_s:7,wait_s:8}[n]:i};
+  var mser=function(n){var i=mc(n);return MG.map(function(m){return [m[0],m[i]]})};
+  chart("fMerge",{dots:true,series:[{name:"merge (sync_ms)",color:PAL[0],pts:mser("merge_s")}],yfmt:dur});
+  chart("fRound",{dots:true,clip:true,series:[{name:"quorum wait",color:PAL[1],pts:mser("quorum_s")},{name:"grace wait",color:PAL[5],pts:mser("grace_s")}],yfmt:dur});
   var fr={};(sy.merges||[]).forEach(function(m){var f=m[2]==null?"?":m[2];(fr[f]=fr[f]||[]).push([m[0],m[4]])});
   var fk=Object.keys(fr);chart("fGnorm",{dots:true,series:fk.map(function(f,i){return {name:"fragment "+f,color:PAL[(+f||i)%PAL.length],pts:fr[f],legend:fk.length<=8}}),yfmt:function(v){return v.toFixed(2)}});
   chart("fRss",{series:[{name:"syncer RSS",color:PAL[3],pts:rss.map(function(p){return [p[0],p[1]]})}],refs:[{y:cap,label:bytes(cap)+" cap",legend:"Cap"}],yfmt:bytes});
@@ -265,10 +292,10 @@ function sft(S){
   var slowT=ref*(refs.sft_slow_factor||1.1),dc=isls.map(function(I,i){var R=rowsIn(I,t0,t1);
     return distCard(islColor(i),I.name,spec(I),[{title:"Step time",short:"Step time",vals:R.map(function(r){return r[C("step_s")]}),fmt:dur,slow:[slowT,"over "+dur(slowT)],count:"Steps"},
       {title:"Sync blocking per step (sync_s)",short:"sync_s",vals:R.map(function(r){return r[C("sync_s")]}),fmt:dur,slow:[ref*0.05,"over 5% of a step"]}])});
-  var mg=(sy.merges||[]).filter(function(m){return inRange(m[0],t0,t1)}).map(function(m){return m[3]}),ms=mg.filter(fin).sort(function(a,b){return a-b}),mp=pctl(ms,0.5);
-  var os=(sy.outer||[]).filter(function(o){return inRange(o[0],t0,t1)}).map(function(o){return o[3]});
+  var mr=MG.filter(function(m){return inRange(m[0],t0,t1)}),mg=mr.map(function(m){return m[mc("merge_s")]}),ms=mg.filter(fin).sort(function(a,b){return a-b}),mp=pctl(ms,0.5);
+  var os=mr.map(function(m){return m[mc("wait_s")]}); // ms - sync_ms: quorum + grace wait (outer step_seconds is the quorum wait only)
   dc.push(distCard(GREY,"syncer",(sy.meta&&sy.meta.learners!=null?"learners "+sy.meta.learners+" · ":"")+"H="+((sy.meta||{}).sync_interval||"n/a"),
-    [{title:"Merge time per round",short:"merge",vals:mg,fmt:dur,slow:fin(mp)?[2*mp,"over 2x p50"]:null,count:"Rounds"},{title:"Outer step time",short:"outer step",vals:os,fmt:dur,slow:null}]));
+    [{title:"Merge time per round",short:"merge",vals:mg,fmt:dur,slow:fin(mp)?[2*mp,"over 2x p50"]:null,count:"Rounds"},{title:"Wait per round (round \u2212 merge)",short:"wait",vals:os,fmt:dur,slow:null}]));
   $("sDist").innerHTML=dc.join("");
   // cost / efficiency
   $("sCostH").textContent="Cost / efficiency over the last "+rangeLabel();
@@ -331,5 +358,5 @@ function render(view,offline){
     sft(S)}
   else rlDist(V);
 }
-return {bins:bins,evalTip:evalTip,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();

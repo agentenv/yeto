@@ -262,18 +262,89 @@ def _top_line_ys(svg):
     return [float(p.split(",")[1]) for p in re.split(r"[ML]", d) if p]
 
 
-def test_tps_stack_is_held_on_a_shared_grid(tmp_path):
-    """Two islands stepping half a period apart: the stacked total stays flat
-    while both run (bucket sums of the raw step points saw-tooth)."""
-    root = make_run(tmp_path / "run", steps=12)
-    make_run(tmp_path / "run", steps=12, island="1")
-    rows = [json.loads(x) for x in (root / "island-1" / "yeto_steps.jsonl").read_text().splitlines()]
-    _w(root / "island-1" / "yeto_steps.jsonl", [dict(x, time=x["time"] + 285) for x in rows])
-    page = _page(tmp_path, root, T0 + 570 * 12 + 300)
-    svg = page["tps"].split('<div class="lg">')[0]
-    ys = _top_line_ys(svg)
-    both = [y for y in ys if y == min(ys)]
-    assert len(set(ys)) <= 3 and len(both) > 0.6 * len(ys)  # 0 / one island / both islands
+def _stack_top(svg):
+    """(x, y) of the top of the stack: the last stroked path."""
+    d = re.findall(r'<path d="([^"]+)" fill="none"', svg)[-1]
+    return [tuple(float(v) for v in p.split(",")) for p in re.split(r"[ML]", d) if p]
+
+
+def _island_steps(root, island, period, start, tps):
+    d = root / f"island-{island}"
+    n = len((d / "yeto_steps.jsonl").read_text().splitlines())
+    _w(d / "yeto_steps.jsonl", [{"iteration": s, "time": start + period * s, "sync_s": 0.1, "export_s": 0.0,
+                                 "apply_s": 0.0} for s in range(1, n + 1)])
+    _w(d / "bench_metrics.jsonl", [{"step": s, "tokens": tps * period, "wall_s": period, "tokens_per_s": tps}
+                                   for s in range(1, n + 1)])
+
+
+def test_tps_stack_is_flat_for_islands_with_different_step_periods(tmp_path):
+    """Islands stepping every 570 s and every 315 s, half a step apart, at constant tokens/s:
+    interpolated on one grid the stacked total is flat (summing raw step points per bucket
+    saw-tooths between one and two samples of the fast stepper)."""
+    root = make_run(tmp_path / "run", steps=60)
+    make_run(tmp_path / "run", steps=110, island="1")
+    _island_steps(root, "0", 570.0, T0, 1.75e4)
+    _island_steps(root, "1", 315.0, T0 + 140, 1.1e4)
+    page = _page(tmp_path, root, T0 + 570 * 59)
+    pts = _stack_top(page["tps"].split('<div class="lg">')[0])
+    inner = [y for x, y in pts if x > 60]  # past the first grid points, both islands run
+    assert max(inner) - min(inner) < 0.5, (min(inner), max(inner))
+
+
+def test_tps_stack_has_no_ramp_at_the_range_start(tmp_path):
+    """Data older than the range anchors its left edge: the first grid point already carries
+    every island (the range filter used to drop the samples before t0 -> a ramp from 0)."""
+    root = make_run(tmp_path / "run", steps=200)
+    make_run(tmp_path / "run", steps=200, island="1")
+    _island_steps(root, "0", 570.0, T0, 1.75e4)
+    _island_steps(root, "1", 570.0, T0 + 285, 1.1e4)
+    page = _page(tmp_path, root, T0 + 570 * 199)  # 24 h range starts around step 48
+    pts = _stack_top(page["tps"].split('<div class="lg">')[0])
+    ys = [y for _, y in pts]
+    assert pts[0][0] <= 47 and max(ys) - min(ys) < 0.5
+
+
+INTERP_JS = """
+const fs=require('fs');global.localStorage={getItem(){return null},setItem(){}};global.location={hash:''};
+global.document={getElementById(){return null},body:null};
+eval(fs.readFileSync(process.argv[1],'utf8')+';global.YE=YetoExt;');
+const a=JSON.parse(process.argv[2]);
+process.stdout.write(JSON.stringify({stack:YE.interpStack(a.series,a.grid,600,60),
+  axes:a.axes.map(function(r){var t=YE.durTicks(r[0],r[1],4),f=YE.durAxis(t);return t.map(f)})}));
+"""
+
+
+def _node_js(src, arg):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = FX.parent.parent.parent / "yeto" / "dashboard" / "static" / "sft.js"
+    res = subprocess.run([node, "-e", src, str(js), json.dumps(arg)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_interp_stack_interpolates_holds_and_drops_gaps():
+    # A: 100 -> 200 over [0, 600], then a 3 h gap (down), back at 11400
+    a = [[0, 100], [600, 200], [1200, 200], [11400, 300], [12000, 300]]
+    grid = [300, 900, 1500, 2400, 6000, 10900, 11700]
+    out = _node_js(INTERP_JS, {"series": [a], "grid": grid, "axes": []})["stack"][0]
+    own = [p[3] for p in out]
+    assert own[0] == 150 and own[1] == 200  # linear between samples
+    assert own[2] == 200  # one step after the last sample before the gap: still that step
+    assert own[3] == 0 and own[4] == 0  # inside the gap: down
+    assert own[5] == 300  # within one step before the next sample
+    assert own[6] == 300
+
+
+def test_duration_axis_uses_one_unit_and_round_ticks():
+    axes = _node_js(INTERP_JS, {"series": [], "grid": [], "axes": [[250, 550], [0, 1100], [3, 9], [0, 31823],
+                                                                    [250, 790]]})["axes"]
+    assert axes[0] == ["200 s", "300 s", "400 s", "500 s", "600 s"]
+    assert axes[4] == ["4 min", "6 min", "8 min", "10 min", "12 min", "14 min"]  # not 5/7/8 min (rounded s)
+    assert all(t == "0" or t.endswith(" min") for t in axes[1]) and "20 min" in axes[1]
+    assert axes[2] == ["2 s", "4 s", "6 s", "8 s", "10 s"]
+    assert all(t == "0" or t.endswith(" h") for t in axes[3])
 
 
 def test_push_steps_found_without_pushes_sent(tmp_path):
@@ -306,7 +377,70 @@ def test_merge_time_is_not_the_round_wall_time(tmp_path):
     page = _page(tmp_path, root, T0 + 3000)
     ticks = re.findall(r'text-anchor="end">([^<]+)<', page["merge"])
     assert ticks and all("h" not in t for t in ticks)  # merge axis stays at seconds
-    assert "quorum wait" in page["round"] and "(no data)" not in page["round"]
+    assert "quorum wait" in page["round"] and "grace wait" in page["round"] and "(no data)" not in page["round"]
+
+
+def test_round_wait_split_into_quorum_grace_and_merge(tmp_path):
+    """ms = quorum wait + grace wait + merge; the page plots the waits apart from the merge and
+    marks the 8.7 h first round off scale instead of flattening every other round."""
+    root = make_run(tmp_path / "run")
+    rows = [{"step": 1, "fragment": 0, "expected": [0], "responded": [0], "gnorm": 1.1, "ms": 31227139,
+             "quorum_ms": 31220923, "sync_ms": 4118, "time_unix": T0 + 600}]
+    rows += [{"step": s, "fragment": s % 4, "expected": [0, 1], "responded": [1], "gnorm": 1.0,
+              "ms": 474896, "quorum_ms": 5720, "sync_ms": 7283, "time_unix": T0 + 600 + 300 * s} for s in range(2, 14)]
+    _w(root / "syncer" / "tape.jsonl", rows)
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    sy = r.page_view(now=T0 + 5000)["sft"]["syncer"]
+    c = sy["merge_cols"]
+    m = {x[c.index("step")]: x for x in sy["merges"]}
+    assert m[2][c.index("quorum_s")] == pytest.approx(5.72)
+    assert m[2][c.index("grace_s")] == pytest.approx(474.896 - 5.72 - 7.283)
+    assert m[2][c.index("wait_s")] == pytest.approx(474.896 - 7.283)
+    assert m[1][c.index("wait_s")] == pytest.approx(31227.139 - 4.118)
+    page = _page(tmp_path, root, T0 + 5000)
+    assert "1 off scale" in page["round"] and "8.7 h" in page["round"]
+    ticks = re.findall(r'text-anchor="end">([^<]+)<', page["round"])
+    assert ticks and all(t == "0" or t.endswith(" min") for t in ticks)
+    assert "Wait per round" in page["dist"] and "Outer step time" not in page["dist"]
+
+
+SYNCER_ROUND_LOG = (
+    "2026-11-07T02:36:46.696019Z  INFO yeto_syncer::server: grace window armed step=208 fragment=15 "
+    "step_secs=Some(590.8) quorum_secs=5.72008911 sync_secs=7.35 grace_ms=600000 grace_floor_ms=0 terminal=false\n"
+    "2026-11-07T02:44:35.872551Z  INFO yeto_syncer::server: outer step step=208 fragment=15 "
+    "responders=[Member { learner_id: 1, generation: 6 }] gnorm=\"2.0\" ms=474896\n"
+    "2026-11-07T02:49:28.467323Z  INFO yeto_syncer::server: grace window armed step=210 fragment=17 "
+    "step_secs=Some(581.4) quorum_secs=6.356455203 sync_secs=7.28 grace_ms=600000 grace_floor_ms=0 terminal=false\n"
+    "2026-11-07T02:56:11.548825Z  INFO yeto_syncer::server: outer step step=210 fragment=17 "
+    "responders=[Member { learner_id: 1, generation: 6 }] gnorm=\"2.7\" ms=409437\n")
+
+
+def test_syncer_log_round_lines():
+    armed, done = (sft.from_syncer_log_line(x) for x in SYNCER_ROUND_LOG.splitlines()[:2])
+    assert armed["event"] == "sft_syncer_round" and armed["phase"] == "armed" and armed["step"] == 208
+    assert armed["quorum_s"] == pytest.approx(5.72008911)
+    assert done["phase"] == "done" and done["fragment"] == 15 and done["round_s"] == pytest.approx(474.896)
+
+
+def test_round_timing_falls_back_to_syncer_log(tmp_path):
+    """A tape merge without ms / quorum_ms takes them from syncer.log; a round only in the log
+    still gets a row (merge time unknown)."""
+    root = make_run(tmp_path / "run")
+    with open(root / "syncer" / "syncer.log", "a") as fh:
+        fh.write(SYNCER_ROUND_LOG)
+    _w(root / "syncer" / "tape.jsonl", [{"step": 208, "fragment": 15, "expected": [1], "responded": [1],
+                                         "sync/merge_seconds": 7.283, "gnorm": 2.0, "time_unix": 1794019475.87}])
+    r = Reducer(run="sft")
+    load_all(r, [str(root)])
+    sy = r.page_view(now=1794020200.0)["sft"]["syncer"]
+    c = sy["merge_cols"]
+    m = {x[c.index("step")]: x for x in sy["merges"]}
+    assert m[208][c.index("round_s")] == pytest.approx(474.896)
+    assert m[208][c.index("quorum_s")] == pytest.approx(5.72008911)
+    assert m[208][c.index("grace_s")] == pytest.approx(474.896 - 5.72008911 - 7.283)
+    assert m[210][c.index("merge_s")] is None and m[210][c.index("round_s")] == pytest.approx(409.437)
+    assert m[210][c.index("quorum_s")] == pytest.approx(6.356455203) and m[210][c.index("wait_s")] is None
 
 
 def _eval_row(step, loss, d_ck, d_base, se=0.0004, prev=None):

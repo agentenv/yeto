@@ -20,7 +20,9 @@ default ``0``; the syncer's files live in a ``syncer`` directory):
                             cached_dataset (``_v2`` in a path -> data v2)
 ``island.json``             optional side file: ``name`` / ``nodes`` / ``dataset``
 ``syncer.log``              syncer text log: rejections, timeouts, not-carried pushes,
-                            stale bases, late pushes, disconnects, checkpoints
+                            stale bases, late pushes, disconnects, checkpoints; round
+                            timing from ``grace window armed`` (``quorum_secs``) and
+                            ``outer step`` (``ms``) lines
 ``cmdline.txt``             the syncer's argv (``--total-steps`` and friends)
 syncer ``tape.jsonl``       merge records (already understood by the reducer) and
                             ``kind`` records: outer_step / delta_* / pool_*
@@ -38,7 +40,15 @@ Side samples written by an external, read-only collector are already ``sft_*``
 records: ``sft_syncer_rss`` (``rss_bytes``) and ``sft_host_mem``
 (``node`` / ``avail_bytes`` / ``total_bytes``).
 
-Missing values stay ``None``; nothing is interpolated.
+Syncer round timing (one merge row per outer step): ``ms`` is the round's
+open-to-done wall time, ``quorum_ms`` the wait until the quorum arrived and
+``sync_ms`` (``sync/merge_seconds``) the merge itself; what is left
+(``ms - quorum_ms - sync_ms``) is the grace window spent waiting for stragglers.
+The wait of a round is ``ms - sync_ms``. When the tape lacks ``ms`` / ``quorum_ms``
+they come from the syncer.log lines of the same step.
+
+Missing values stay ``None``; nothing is interpolated here (the page resamples
+the stacked tokens/s on a shared time grid).
 """
 
 from __future__ import annotations
@@ -62,6 +72,7 @@ DEFAULT_REFS = {"sft_ref_step_s": 571.0, "sft_hbm_limit_gib": 53.9, "sft_syncer_
                 "sft_slow_factor": 1.1}
 STEP_COLS = ("step", "ts", "loss", "grad_norm", "lr", "step_s", "tps", "tokens", "target_tokens",
              "sync_s", "export_s", "apply_s", "hbm_gib", "mfu", "pushes", "applies")
+MERGE_COLS = ("ts", "step", "fragment", "merge_s", "gnorm", "round_s", "quorum_s", "grace_s", "wait_s")
 EVAL_REFS = ("vs_base", "vs_ckpt100", "vs_prev")
 EVAL_FIELDS = ("dloss", "mean", "se", "better")
 SAMPLES_MAX = 20000
@@ -73,6 +84,8 @@ _LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z?\s+(TRACE|
 _LEARNER = re.compile(r"learner_id=(\d+)")
 _SECONDS = re.compile(r"seconds=([0-9.]+)")
 _STEP_KV = re.compile(r"\bstep=(\d+)")
+_ARMED = re.compile(r"^grace window armed step=(\d+) fragment=(\d+).*?\bquorum_secs=([0-9.]+)")
+_OUTER = re.compile(r"^outer step step=(\d+) fragment=(\d+).*?\bms=(\d+)")
 # syncer.log message -> category, first match wins
 LOG_CATEGORIES = (
     ("rejected", re.compile(r"reject", re.I)),
@@ -237,6 +250,12 @@ def from_syncer_log_line(line: str) -> dict | None:
     if not m:
         return None
     ts, level, _target, msg = m.groups()
+    rm = _ARMED.match(msg) or _OUTER.match(msg)
+    if rm:
+        armed = rm.re is _ARMED
+        return {"event": "sft_syncer_round", "time_unix": _iso(ts), "phase": "armed" if armed else "done",
+                "step": int(rm.group(1)), "fragment": int(rm.group(2)),
+                ("quorum_s" if armed else "round_s"): float(rm.group(3)) if armed else int(rm.group(3)) / 1000.0}
     cat = next((c for c, rx in LOG_CATEGORIES if rx.search(msg)), None)
     if cat is None and level not in ("WARN", "ERROR"):
         return None
@@ -419,6 +438,7 @@ class SftState:
         self.outer: list[list] = []
         self.events: deque = deque(maxlen=EVENTS_MAX)  # [ts, category, learner, origin]
         self.eval: list[dict] = []  # held-out eval rows by step (eval/rows.jsonl, replaced whole)
+        self.log_rounds: dict[int, dict] = {}  # syncer.log round timing by outer step
         self.log_seen = False
         self.records = 0
 
@@ -436,6 +456,13 @@ class SftState:
         if ev == "sft_syncer_log":
             self.log_seen = True
             self.events.append([ts, r.get("category"), r.get("learner"), "log", r.get("seconds")])
+            return
+        if ev == "sft_syncer_round":
+            rd = self.log_rounds.setdefault(r["step"], {"fragment": r.get("fragment")})
+            rd["armed" if r["phase"] == "armed" else "done"] = ts
+            for k in ("quorum_s", "round_s"):
+                if r.get(k) is not None:
+                    rd[k] = r[k]
             return
         if ev == "sft_syncer_meta":
             self.syncer_meta.update({k: v for k, v in r.items() if k != "event"})
@@ -534,6 +561,37 @@ class SftState:
             prev_ts = ts if ts is not None else prev_ts
         return rows
 
+    def merge_rows(self, merges: list[dict]) -> list[list]:
+        """One row per merge: [ts, step, fragment, merge_s, gnorm, round_s, quorum_s, grace_s, wait_s].
+
+        ``round_s`` / ``quorum_s`` come from the tape (``ms`` / ``quorum_ms``), else from
+        the syncer.log lines of the step (``outer step ... ms=`` and ``grace window armed
+        ... quorum_secs=``); a round only in the log still gets a row (merge_s unknown).
+        ``wait_s = round_s - merge_s``; ``grace_s = wait_s - quorum_s`` (clamped at 0)."""
+        rows, seen = [], set()
+        for m in merges:
+            step = m.get("step")
+            lg = self.log_rounds.get(step, {}) if isinstance(step, int) else {}
+            rnd = _secs(m.get("ms"))
+            q = _secs(m.get("quorum_ms"))
+            rows.append(self._round_row(finite(m.get("time_unix")), step, m.get("fragment"), merge_seconds(m),
+                                        finite(m.get("gnorm", m.get("sync/global_delta_norm"))),
+                                        rnd if rnd is not None else lg.get("round_s"),
+                                        q if q is not None else lg.get("quorum_s")))
+            seen.add(step)
+        for step, lg in self.log_rounds.items():
+            if step not in seen and lg.get("done") is not None:
+                rows.append(self._round_row(lg["done"], step, lg.get("fragment"), None, None, lg.get("round_s"),
+                                            lg.get("quorum_s")))
+        rows.sort(key=lambda x: (x[0] is None, x[0] or 0))
+        return rows
+
+    @staticmethod
+    def _round_row(ts, step, frag, merge, gnorm, rnd, quorum) -> list:
+        wait = max(0.0, rnd - merge) if rnd is not None and merge is not None else None
+        grace = max(0.0, wait - quorum) if wait is not None and quorum is not None else None
+        return [ts, step, frag, merge, gnorm, rnd, quorum, grace, wait]
+
     def view(self, *, now: float, merges: list[dict], refs: dict) -> dict:
         islands = []
         for iid in sorted(self.islands, key=lambda i: (0, int(i)) if i.isdigit() else (1, i)):
@@ -571,11 +629,7 @@ class SftState:
         rej_origin = "log" if self.log_seen else "tape"
         events = [e for e in self.events
                   if e[1] not in ("rejected", "timeout") or e[3] == rej_origin]
-        merge_rows = []
-        for m in merges:
-            merge_rows.append([finite(m.get("time_unix")), m.get("step"), m.get("fragment"), merge_seconds(m),
-                               finite(m.get("gnorm", m.get("sync/global_delta_norm"))), _secs(m.get("ms")),
-                               _secs(m.get("quorum_ms"))])
+        merge_rows = self.merge_rows(merges)
         outer = sorted(self.outer, key=lambda x: (x[0] or 0))
         cur = max([x[1] for x in outer if isinstance(x[1], int)] +
                   [x[1] for x in merge_rows if isinstance(x[1], int)], default=None)
@@ -589,7 +643,7 @@ class SftState:
         return {
             "now": now, "refs": dict(refs), "cols": list(STEP_COLS), "islands": islands,
             "syncer": {"meta": dict(self.syncer_meta), "total_steps": total, "outer_step": cur, "eta_ts": eta,
-                       "outer": outer[-5000:], "merges": merge_rows[-5000:], "rss": list(self.rss)[-5000:],
+                       "outer": outer[-5000:], "merges": merge_rows[-5000:], "merge_cols": list(MERGE_COLS), "rss": list(self.rss)[-5000:],
                        "events": events[-5000:], "log_seen": self.log_seen,
                        "problem_categories": list(PROBLEM_CATEGORIES)},
             "eval": {"rows": list(self.eval)},

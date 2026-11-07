@@ -361,9 +361,14 @@ function render(){
   header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();spot();
   if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
 }
+// the server runs newer page code than this tab (redeployed): reload once per build, else say so
+function stale(b){if(!b||typeof YETO_BUILD!=="string"||b===YETO_BUILD)return;var done=null;
+  try{done=sessionStorage.getItem("yeto-build-reload")}catch(e){}
+  if(done!==b){try{sessionStorage.setItem("yeto-build-reload",b)}catch(e){}location.reload();return}
+  var t=document.title;if(t.indexOf("[reload]")<0)document.title="[reload] "+t}
 function load(){
   if(OFFLINE){V=INLINE.page;EVENTS=(INLINE.events||{}).events||[];render();return}
-  Promise.all([fetch("/api/view",{cache:"no-store"}).then(function(r){return r.json()}),
+  Promise.all([fetch("/api/view",{cache:"no-store"}).then(function(r){stale(r.headers&&r.headers.get&&r.headers.get("X-Yeto-Build"));return r.json()}),
     fetch("/api/events?after="+EV_CURSOR+"&limit=1000",{cache:"no-store"}).then(function(r){return r.json()})]).then(function(x){
     V=x[0];EVENTS=EVENTS.concat(x[1].events||[]).slice(-3000);EV_CURSOR=x[1].cursor||EV_CURSOR;render()}).catch(function(e){$("sub").textContent="fetch failed: "+e})
 }

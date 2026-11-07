@@ -147,3 +147,20 @@ def test_old_tape_renders_no_data_in_the_page(tmp_path):
     assert "Island 3" in page["wall"] and page["svg_nodes"] > 0
     assert "Round 0" in page["tip_key"] and "Island 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
     assert "Single-island overview" in page["title_after_switch"] and page["wall_hidden_after_switch"] is True
+
+
+def test_view_carries_the_page_build_so_open_tabs_reload(server, tmp_path, monkeypatch):
+    """An open tab keeps its page code across a redeploy; /api/view names the server's build
+    (hash of index.html + sft.js + app.js) and the page embeds its own to compare."""
+    base, _ = server
+    with urllib.request.urlopen(base + "/api/view", timeout=5) as resp:
+        build = resp.headers.get("X-Yeto-Build")
+    page = get(base + "/")[2].decode()
+    assert build and f'var YETO_BUILD="{build}";' in page
+    assert "X-Yeto-Build" in page  # app.js reads the header
+    from yeto.dashboard import export as export_mod
+    ext = tmp_path / "sft.js"
+    ext.write_text(export_mod.EXT.read_text() + "\n// changed\n")
+    monkeypatch.setattr(export_mod, "EXT", ext)
+    with urllib.request.urlopen(base + "/api/view", timeout=5) as resp:
+        assert resp.headers.get("X-Yeto-Build") != build

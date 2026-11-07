@@ -199,14 +199,24 @@ ms-swift / the yeto plugin. Reference lines are threshold keys:
 
 Chart semantics worth knowing:
 
-- "Tokens / s" holds each island's last bench `tokens_per_s` on a shared time
-  grid (zero before an island's first step and after it goes quiet for about
-  three of its own step times) and stacks the held values, so islands that
-  step at different moments do not produce a saw-tooth.
-- "Syncer merge time" is `sync/merge_seconds` (falling back to `sync_ms`) per
-  merge record: the merge itself. The record's `ms` is the round's
-  open-to-done wall time, which includes waiting for the quorum; it is drawn
-  with `quorum_ms` on the separate "Syncer round time" chart.
+- "Tokens / s" interpolates each island's bench `tokens_per_s` linearly onto
+  one time grid and stacks the interpolated values, so islands that step at
+  different moments do not produce a saw-tooth. Samples just outside the time
+  range anchor its edges (no ramp from zero at the left edge). Across a gap
+  longer than ~2.5 of the island's step times the island counts as down (zero),
+  except for one step after its last and before its next sample.
+- Syncer round timing: a merge record's `ms` is the round's open-to-done wall
+  time = quorum wait (`quorum_ms`) + grace wait for stragglers + the merge
+  (`sync/merge_seconds`, falling back to `sync_ms`). "Syncer merge time" draws
+  only the merge; "Syncer round wait" draws the quorum wait and the grace wait
+  (`ms - quorum_ms - sync_ms`); the syncer distribution card shows merge and
+  wait (`ms - sync_ms`) per round. When a tape record lacks `ms` / `quorum_ms`
+  they are taken from syncer.log (`outer step ... ms=`, `grace window armed ...
+  quorum_secs=`). A few rounds far above the rest (the first round waits hours
+  for the first push) are marked off scale instead of setting the axis.
+- Duration axes label every tick in one unit (s, min or h) with round values.
+- The live server sends the page build (hash of the page code) with each
+  `/api/view`; a tab opened before a redeploy reloads itself once.
 - "Sync overhead per step" plots `export_s` on every step with `export_s > 0`.
   The plugin pushes from a background thread, so `pushes_sent` (pushes that
   finished inside the step) is almost always 0 and cannot mark push steps.
