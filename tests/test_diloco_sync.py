@@ -387,9 +387,16 @@ def test_resume_record_round_trips_and_picks_the_install_mode():
     assert record["spent"] == [None, [7, 9], None] and record["units_total"] == 900
     # Same version: the broadcast is the checkpoint's own anchor.
     assert resume_fragment_mode(record, 0, 4, have_anchor=False) == RESUME_ANCHOR
-    # Newer: move the local progress only when the old anchor is at hand.
-    assert resume_fragment_mode(record, 1, 9, have_anchor=True) == RESUME_SHIFT
-    assert resume_fragment_mode(record, 1, 9, have_anchor=False) == RESUME_OVERWRITE
+    # Newer, after a push from that anchor: the delta may be merged into it,
+    # so it is installed as is rather than counted twice.
+    assert resume_fragment_mode(record, 1, 9, have_anchor=True) == RESUME_OVERWRITE
+    # Newer, nothing pushed from the anchor: move the local progress, only
+    # when the old anchor is at hand.
+    unspent = dict(record, spent=[None, None, None])
+    assert resume_fragment_mode(unspent, 1, 9, have_anchor=True) == RESUME_SHIFT
+    assert resume_fragment_mode(unspent, 1, 9, have_anchor=False) == RESUME_OVERWRITE
+    # A rewound global (a syncer resumed from an older checkpoint) still shifts.
+    assert resume_fragment_mode(record, 1, 5, have_anchor=True) == RESUME_SHIFT
     # Never anchored before the checkpoint, or no record at all: a cold start.
     assert resume_fragment_mode(record, 2, 0, have_anchor=True) == RESUME_OVERWRITE
     assert resume_fragment_mode(None, 0, 4, have_anchor=True) == RESUME_OVERWRITE

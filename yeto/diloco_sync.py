@@ -186,11 +186,18 @@ def resume_fragment_mode(record: dict | None, fid: int, version: int, *, have_an
     *is* that anchor, so the local parameters stay as they are.  Any other
     version moves the island's local progress onto the new global, which
     needs the old anchor value (``have_anchor``); without it the fragment
-    falls back to the cold-start overwrite."""
+    falls back to the cold-start overwrite.  As in ``live_install_mode``, a
+    newer global of a fragment the island had pushed from that anchor
+    (``record["spent"]``) is installed as is: the pushed delta may already be
+    merged into it, and shifting would count it twice."""
     if record is None or not record["anchored"][fid]:
         return RESUME_OVERWRITE
-    if int(version) == int(record["versions"][fid]):
+    anchor = int(record["versions"][fid])
+    if int(version) == anchor:
         return RESUME_ANCHOR
+    spent = (record.get("spent") or [None] * len(record["versions"]))[fid]
+    if int(version) > anchor and spent is not None and int(spent[0]) == anchor:
+        return RESUME_OVERWRITE
     return RESUME_SHIFT if have_anchor else RESUME_OVERWRITE
 
 
