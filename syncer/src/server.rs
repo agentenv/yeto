@@ -5725,6 +5725,82 @@ fn rebind_current_unanswered_rounds(
     repulls
 }
 
+/// A PULL that a member gets on joining a round launched without it.
+#[derive(Debug, Eq, PartialEq)]
+struct JoinedPull {
+    t: u64,
+    p: usize,
+    attempt: u32,
+    base_version: u64,
+    pull: bytes::Bytes,
+}
+
+/// Admit a member that just left its catch-up (or recovery replay) to the
+/// rounds still gathering that were launched without any generation of it.
+///
+/// A round's expected set is frozen at launch to the members not held by a
+/// catch-up then. Without this, a learner that finishes its catch-up after
+/// the launch is pulled only when the quorum timeout relaunches the round,
+/// so one expected learner that cannot answer yet (an H-gate far from
+/// satisfied) stalls the round, and every later commit behind it, for the
+/// whole timeout. Joining is what the launch would have done had the member
+/// been ready then: the member becomes expected in the current attempt and
+/// gets that attempt's pull; quorum size, attempt, base version and the
+/// quorum, soft and grace deadlines stay as they are (a grace window already
+/// armed is not extended, the joiner's push counts if it arrives before it).
+///
+/// Skipped: a round that already completed, one where this learner has a
+/// slot, a push, or a carried delta (a reconnect is rebound, never pulled
+/// twice), one whose base version the member was not caught up to
+/// (`floor`), and an exact fold that already holds pushes (its roster is
+/// fixed; an empty one is rebuilt for the new roster). Fixed rosters never
+/// call this: every logical learner is expected from launch.
+fn join_gathering_rounds(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    rounds: &mut [Round],
+    member: Member,
+    floor: &[u64],
+    now: Instant,
+) -> Vec<JoinedPull> {
+    // Same lock discipline as the rebind: a newer generation cannot become
+    // current between the check and the membership rewrites.
+    let registry = registry.lock().unwrap();
+    if registry.current.get(&member.learner_id) != Some(&member) {
+        return Vec::new();
+    }
+    let mut joined = Vec::new();
+    for round in rounds {
+        let same_learner = |other: &Member| other.learner_id == member.learner_id;
+        if round.expected_members.iter().any(same_learner)
+            || round.pushes.keys().any(same_learner)
+            || round.carried.iter().any(|(other, _)| same_learner(other))
+            || floor.get(round.p).is_none_or(|version| *version < round.base_version)
+            || round_action(round, now) == RoundAction::Complete
+        {
+            continue;
+        }
+        let rebuild_fold = matches!(round.fold, Some(RoundFold::Exact(_)));
+        if rebuild_fold && !round.pushes.is_empty() {
+            continue;
+        }
+        round.expected_members.push(member);
+        round.expected_members.sort_unstable();
+        if rebuild_fold {
+            round.fold = round_fold(cfg, st, round.p, &round.expected_members, round.quorum_size);
+        }
+        joined.push(JoinedPull {
+            t: round.t,
+            p: round.p,
+            attempt: round.attempt,
+            base_version: round.base_version,
+            pull: round.pull.clone(),
+        });
+    }
+    joined
+}
+
 fn route_push(
     rounds: &mut [Round],
     member: Member,
@@ -6799,12 +6875,19 @@ async fn admit_recovering_outside_training(registry: &Registry, group: &Arc<Grou
     send_recovery(registry, out).await;
 }
 
-/// Rebind the unanswered pulls of existing rounds to `group` (a reconnected
-/// or recovered generation). False when the budget cutoff closed the gate.
+/// Pull a member that just left its catch-up or recovery replay into every
+/// round still gathering: rebind the slots of its earlier generation, then
+/// join the rounds launched without it (`join_gathering_rounds`). `floor` is
+/// the per-fragment versions it was caught up to. False when the budget
+/// cutoff was established.
+#[allow(clippy::too_many_arguments)]
 async fn repull_rounds_for(
+    cfg: &Config,
+    st: &GlobalState,
     group: &Arc<Group>,
     registry: &Registry,
     inflight: &mut [Round],
+    floor: &[u64],
     fixed_roster: bool,
     budget_cutoff: &BudgetCutoff,
 ) -> bool {
@@ -6812,6 +6895,11 @@ async fn repull_rounds_for(
         fixed_roster_repulls(inflight, group.member)
     } else {
         rebind_current_unanswered_rounds(registry, inflight, group.member)
+    };
+    let joins = if fixed_roster {
+        Vec::new()
+    } else {
+        join_gathering_rounds(cfg, st, registry, inflight, group.member, floor, Instant::now())
     };
     for repull in repulls {
         if !send_small_until_cutoff(group, MSG_PULL_REQ, repull.pull, budget_cutoff).await {
@@ -6826,6 +6914,20 @@ async fn repull_rounds_for(
             attempt = repull.attempt,
             base_version = repull.base_version,
             "rebound outstanding pull to reconnected learner generation"
+        );
+    }
+    for join in joins {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, join.pull, budget_cutoff).await {
+            return false;
+        }
+        info!(
+            learner_id = group.member.learner_id,
+            generation = group.member.generation,
+            step = join.t,
+            fragment = join.p,
+            attempt = join.attempt,
+            base_version = join.base_version,
+            "caught-up learner joined a round launched without it"
         );
     }
     true
@@ -8307,7 +8409,7 @@ async fn finish_catch_up(
             );
             write_pool_status(cfg, registry, st.global_step, "running");
         }
-        if !repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await {
+        if !repull_rounds_for(cfg, st, group, registry, inflight, floor, fixed_roster, budget_cutoff).await {
             return false;
         }
     }
@@ -8385,7 +8487,7 @@ async fn finish_recovery_replay(
         );
         write_pool_status(cfg, registry, st.global_step, "running");
     }
-    repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await
+    repull_rounds_for(cfg, st, group, registry, inflight, &st.versions, fixed_roster, budget_cutoff).await
 }
 
 async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
@@ -12882,6 +12984,275 @@ mod tests {
         assert_eq!(preserved_push.learner_id, 1);
         assert_eq!(preserved_push.base_version, 16);
         assert_eq!(preserved_push.local_step, 77);
+    }
+
+    /// A round launched while a learner was still in its catch-up: the
+    /// learner joins it once the catch-up is done, exactly once per round.
+    #[test]
+    fn caught_up_learner_joins_a_round_launched_without_it_once() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![first]);
+        round.base_version = 0;
+        round.pull = encode_pull(1, 7, 1);
+        let quorum_deadline = round.quorum_deadline;
+        let mut rounds = vec![round];
+
+        let joined = join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now());
+        assert_eq!(
+            joined,
+            vec![JoinedPull { t: 7, p: 1, attempt: 1, base_version: 0, pull: encode_pull(1, 7, 1) }]
+        );
+        assert_eq!(rounds[0].expected_members, vec![first, late]);
+        assert_eq!((rounds[0].attempt, rounds[0].quorum_size), (1, 1));
+        assert_eq!(rounds[0].quorum_deadline, quorum_deadline);
+        // The tail runs again (a second catch-up of the same generation, a
+        // recovery replay): no second pull, no second slot.
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, late).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first, late]);
+        // The joiner's push is now accepted for this attempt.
+        let mut push = test_push_for(1, 0);
+        push.base_version = 0;
+        assert_eq!(route_push(&mut rounds, late, push, Some(64), false), PushDisposition::Accepted);
+        // A generation that is not current never joins.
+        let mut fresh = vec![test_round(vec![first])];
+        fresh[0].base_version = 0;
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut fresh, member(2, 1), &[0, 0], Instant::now())
+            .is_empty());
+    }
+
+    /// A reconnect of a learner the round already expects is the rebind's
+    /// job: the new generation is pulled once, by the rebind, and only after
+    /// the captured generation is gone.
+    #[test]
+    fn reconnected_generation_is_rebound_not_joined() {
+        let captured = member(1, 20);
+        let replacement = member(1, 21);
+        let registry = registry_with_current(replacement);
+        registry.lock().unwrap().groups.insert(captured, test_group(captured));
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![member(0, 10), captured]);
+        round.base_version = 0;
+        let mut rounds = vec![round];
+
+        // The captured generation is still connected: neither path pulls.
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, replacement, &[0, 0], Instant::now())
+            .is_empty());
+        assert_eq!(rounds[0].expected_members, vec![member(0, 10), captured]);
+        // Once it is gone, the rebind moves the slot and pulls once; the
+        // join then sees the learner expected and adds nothing.
+        registry.lock().unwrap().groups.remove(&captured);
+        assert_eq!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(), 1);
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, replacement, &[0, 0], Instant::now())
+            .is_empty());
+        assert_eq!(rounds[0].expected_members, vec![member(0, 10), replacement]);
+    }
+
+    /// A round in its grace window takes a joiner's push until the grace
+    /// deadline, which the join does not move; a completed round takes no
+    /// joiner.
+    #[test]
+    fn joiner_counts_in_an_armed_grace_window_until_its_deadline() {
+        let answered = member(0, 10);
+        let silent = member(2, 30);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![answered, silent]);
+        round.base_version = 0;
+        let mut first_push = test_push_for(0, 0);
+        first_push.base_version = 0;
+        round.pushes.insert(answered, first_push);
+        assert!(round.quorum_reached());
+        let now = Instant::now();
+        let grace_deadline = now + Duration::from_secs(60);
+        round.grace_deadline = Some(grace_deadline);
+        let mut rounds = vec![round];
+
+        assert_eq!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], now).len(), 1);
+        assert_eq!(rounds[0].grace_deadline, Some(grace_deadline));
+        assert_eq!(round_action(&rounds[0], now), RoundAction::Wait);
+        let mut push = test_push_for(1, 0);
+        push.base_version = 0;
+        assert_eq!(route_push(&mut rounds, late, push, Some(64), false), PushDisposition::Accepted);
+        assert_eq!(rounds[0].pushes.len(), 2);
+        // Still waiting for the silent one until the unchanged deadline.
+        assert_eq!(round_action(&rounds[0], now), RoundAction::Wait);
+        assert_eq!(round_action(&rounds[0], grace_deadline), RoundAction::Complete);
+
+        // Past its grace deadline the round is complete: no join.
+        let mut closed = test_round(vec![answered, silent]);
+        closed.base_version = 0;
+        closed.pushes.insert(answered, test_push_for(0, 0));
+        closed.grace_deadline = Some(now);
+        let mut closed = vec![closed];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut closed, late, &[0, 0], now).is_empty());
+        assert_eq!(closed[0].expected_members, vec![answered, silent]);
+    }
+
+    /// No join where the learner already counts (a carried delta), where its
+    /// catch-up did not reach the round's base, or where an exact fold has
+    /// already taken pushes; an empty exact fold is rebuilt for the roster.
+    #[test]
+    fn join_skips_carried_stale_and_started_exact_rounds() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let mut cfg = round_test_config(4);
+        cfg.max_base_lag = Some(64);
+        let st = resend_test_state(2);
+
+        let mut carried = test_round(vec![first]);
+        carried.base_version = 0;
+        carried.carried.push((member(1, 19), test_push_for(1, 0)));
+        let mut behind = test_round(vec![first]);
+        behind.base_version = 3;
+        let mut rounds = vec![carried, behind];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[2, 2], Instant::now()).is_empty());
+        assert!(rounds.iter().all(|round| round.expected_members == vec![first]));
+
+        // Exact fold of the launch roster [0] with quorum 2: rebuilt for [0, 1].
+        let exact = |expected: &[Member]| round_fold(&cfg, &st, 1, expected, 2);
+        assert!(matches!(exact(&[first]), Some(RoundFold::Exact(_))));
+        let mut empty = test_round(vec![first]);
+        empty.base_version = 0;
+        empty.quorum_size = 2;
+        empty.fold = exact(&[first]);
+        let mut rounds = vec![empty];
+        assert_eq!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).len(), 1);
+        let Some(RoundFold::Exact(fold)) = &rounds[0].fold else { panic!("exact fold expected") };
+        assert_eq!(fold.next_learner(), Some(0));
+        let mut push = test_push_for(0, 0);
+        push.outer_gradient = vec![1.0; 4];
+        assert_eq!(route_push(&mut rounds, first, push, Some(64), false), PushDisposition::Accepted);
+        let Some(RoundFold::Exact(fold)) = &rounds[0].fold else { panic!("exact fold expected") };
+        assert_eq!(fold.next_learner(), Some(1), "the rebuilt roster waits for the joiner");
+
+        // An exact fold that already holds a push keeps its roster.
+        let mut started = test_round(vec![first, member(2, 30)]);
+        started.base_version = 0;
+        started.quorum_size = 2;
+        started.fold = exact(&[first, member(2, 30)]);
+        let mut push = test_push_for(0, 0);
+        push.outer_gradient = vec![1.0; 4];
+        let mut rounds = vec![started];
+        assert_eq!(route_push(&mut rounds, first, push, Some(64), false), PushDisposition::Accepted);
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first, member(2, 30)]);
+    }
+
+    fn scheduler_test_group(member: Member, layout: &Layout, control: mpsc::Sender<OutFrame>) -> Arc<Group> {
+        let group = Arc::try_unwrap(test_group_with_control(member, control)).ok().unwrap();
+        Arc::new(Group { layout: layout.clone(), ..group })
+    }
+
+    /// (fragment, step, attempt) of the next PULL on a learner's control
+    /// stream; other frames (the catch-up) are skipped.
+    async fn next_pull(frames: &mut mpsc::Receiver<OutFrame>) -> (u32, u64, u32) {
+        loop {
+            let frame = frames.recv().await.expect("control stream closed");
+            if frame.msg_type == MSG_PULL_REQ {
+                let payload = &frame.parts[0];
+                return (
+                    u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+                    u64::from_le_bytes(payload[4..12].try_into().unwrap()),
+                    u32::from_le_bytes(payload[12..16].try_into().unwrap()),
+                );
+            }
+        }
+    }
+
+    /// The resumed-fleet stall: the first learner done with its catch-up is
+    /// the only one a round is launched to, and its H-gate keeps it from
+    /// answering. The learner that finishes its catch-up next is pulled into
+    /// that round and its push commits it well before the quorum timeout
+    /// (before the fix it was pulled only when the timeout relaunched it).
+    #[tokio::test]
+    async fn round_commits_from_a_learner_that_finished_its_catch_up_after_the_launch() {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let directory = unique_test_directory("late-joiner-pull");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 1;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(64);
+        cfg.carry_answers_round = true;
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership = crate::membership::MembershipConfig { max_learners: Some(2), ..Default::default() };
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (first, late) = (member(0, 1), member(1, 1));
+        let (first_control, mut first_frames) = mpsc::channel(1024);
+        let (late_control, mut late_frames) = mpsc::channel(1024);
+        let first_group = scheduler_test_group(first, &layout, first_control);
+        let late_group = scheduler_test_group(late, &layout, late_control);
+
+        registry.lock().unwrap().register_group(first_group.clone(), Instant::now()).unwrap();
+        events.send(Event::Hello { group: first_group }).await.unwrap();
+        for fragment_id in 0..2 {
+            let init = Event::Init { member: first, fragment_id, values: vec![0.0; 4], sha256: [0; 32] };
+            events.send(init).await.unwrap();
+        }
+        let driver = async {
+            // Learner 0 alone gets the pull of step 1 and never answers it.
+            let pull = next_pull(&mut first_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            registry.lock().unwrap().register_group(late_group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group: late_group }).await.unwrap();
+            let joined = tokio::time::timeout(Duration::from_secs(10), next_pull(&mut late_frames))
+                .await
+                .expect("the learner that caught up after the launch was not pulled into the round");
+            assert_eq!(joined, pull);
+            let mut push = test_push_for(1, 0);
+            push.fragment_id = pull.0;
+            push.global_step = 1;
+            push.round_attempt = 1;
+            push.outer_gradient = vec![0.5; 4];
+            events.send(Event::Push { member: late, push }).await.unwrap();
+            let committed = async {
+                loop {
+                    let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                    if let Some(line) = text.lines().find(|line| line.contains("\"sync/responders\"") && line.contains("\"step\":1,")) {
+                        return line.to_string();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            let record = tokio::time::timeout(Duration::from_secs(10), committed)
+                .await
+                .expect("step 1 did not commit before the quorum timeout");
+            for field in [
+                "\"attempt\":1,",
+                "\"expected\":[0,1],",
+                "\"responded\":[1],",
+                "\"missed_members\":[{\"id\":0,\"generation\":1}],",
+            ] {
+                assert!(record.contains(field), "{field} missing from {record}");
+            }
+        };
+        tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            () = driver => {}
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

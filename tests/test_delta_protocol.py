@@ -362,7 +362,7 @@ def test_fresh_and_one_version_stale_deltas_ignore_global_drift(
 
 
 @pytest.mark.timeout(30)
-def test_mid_round_join_cannot_count_toward_frozen_membership(
+def test_mid_round_join_is_pulled_into_the_round_after_its_catch_up(
     syncer_binary, tmp_path
 ):
     proc, final_state = launch_syncer(
@@ -389,8 +389,10 @@ def test_mid_round_join_cannot_count_toward_frozen_membership(
 
         _, step, attempt = first.recv_pull(2)
         joined = RawLearner(proc.port, 1, 202, one_value_layout())
-        # Learner 1 joined after attempt 1 of step 2 launched. Guessing its
-        # fields cannot add it to the frozen member set.
+        # Learner 1 rejoined after attempt 1 of step 2 launched without it.
+        # Once its catch-up is done it is pulled into that same attempt and
+        # its answer counts: (-100 + -1) / 2 on top of round 1's -1.
+        assert joined.recv_pull(2) == (0, step, attempt)
         joined.send_delta(
             torch.tensor([-100.0]), step=step, attempt=attempt, base_version=1
         )
@@ -400,7 +402,7 @@ def test_mid_round_join_cannot_count_toward_frozen_membership(
         first.acknowledge_finalization()
         joined.acknowledge_finalization()
         assert proc.wait(timeout=10) == 0
-        assert read_final_scalar(final_state) == pytest.approx(-2.0)
+        assert read_final_scalar(final_state) == pytest.approx(-51.5)
     finally:
         if first is not None:
             first.close()
