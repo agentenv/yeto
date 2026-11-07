@@ -880,10 +880,20 @@ def _prepare_rl_args(
         raise ValueError("RL v0 supports only causal language models")
     from ..rl.engine import sample_roles
 
-    if args.tuning != "lora" and not sample_roles.buffer_full_parameter(args):
-        raise ValueError("RL v0 requires --tuning lora (--tuning full: only with "
-                         "--rl-single-island-no-sync)")
-    if args.lora_r <= 0:
+    full_tuning = args.tuning == "full"
+    if full_tuning and not (sample_roles.buffer_full_parameter(args)
+                            or sample_roles.synced_full_parameter(args)):
+        raise ValueError(
+            "RL --tuning full needs a full-parameter sync preset "
+            f"(--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
+            f"--rl-sync-full-parameter-rounds async is the asynchronous multi-fragment "
+            "counterpart of decoupled) or --rl-single-island-no-sync; strict-avg and "
+            "decoupled merge the canonical LoRA layout (requires --tuning lora)")
+    if full_tuning and int(getattr(args, "expert_full_count", 0) or 0):
+        raise ValueError("--expert-full-count is the attention-LoRA hybrid: it needs --tuning lora")
+    if args.tuning != "lora" and not full_tuning:
+        raise ValueError(f"unknown --tuning {args.tuning!r}")
+    if not full_tuning and args.lora_r <= 0:
         raise ValueError("RL v0 requires a positive LoRA rank")
     if args.total_steps <= 0:
         raise ValueError("RL v0 requires --total-steps > 0")

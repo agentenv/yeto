@@ -13,6 +13,13 @@ Two explicit synchronization presets are available:
 | `strict-avg` | default correctness baseline | one complete LoRA fragment; every island waits for full-roster equal-weight FedAvg after every local round |
 | `decoupled` | Decoupled DiLoCo RL | deterministic multi-fragment LoRA; local RL continues while exact-base fragment rounds are in flight |
 
+Both presets merge the canonical LoRA layout. Full-parameter training uses
+`--rl-sync-preset full-parameter` (whole-model fragments; `--tuning full` may
+be given explicitly, and the preset alone already selects full parameter
+mode), whose `--rl-sync-full-parameter-rounds async` profile is the
+asynchronous multi-fragment counterpart of `decoupled`; `sao-streaming-full`
+syncs a full actor and critic.
+
 Selecting `decoupled` is intentional. The launcher never infers it from the
 model, island count, or generic DiLoCo flags.
 
@@ -27,7 +34,7 @@ The supported model and runtime contract is deliberately narrow:
 | dimension | supported value |
 | --- | --- |
 | model | causal language model |
-| tuning | LoRA only |
+| tuning | LoRA (`strict-avg`, `decoupled`); full parameters (`--tuning full`) with the `full-parameter` or `sao-streaming-full` preset, or on a `--rl-single-island-no-sync` island |
 | learner | pinned Miles with Megatron-Core |
 | rollout | colocated SGLang (`--rl-placement fixed-partition` is also available for LoRA and is used by the multi-node and elastic paths) |
 | optimization | GRPO plus the declared GRPO-family mechanisms (see [RL_ALGORITHMS.md](RL_ALGORITHMS.md)); critic algorithms (PPO, VAPO, SAO, CompactionRL) run on a single island without outer sync only |
@@ -787,9 +794,10 @@ with an `rl_engine_selected` event (`rl_engine=ports`, Miles commit,
 
 `yeto.rl.engine.selection.ports_rejections` lists every combination that is
 refused before startup, each with its reason: non-causal models,
-full-parameter training under elastic island scheduling (the elastic syncer
-has no fragment frames yet), expert-full tuning without the `full-parameter`
-sync preset, `--use-critic` or an advantage estimator other than GRPO/PPO,
+SAO streaming under elastic island scheduling (the SAO island session has no
+pool membership; the `full-parameter` preset takes membership options with
+`--rl-sync-full-parameter-rounds async`), expert-full tuning without the
+`full-parameter` sync preset, `--use-critic` or an advantage estimator other than GRPO/PPO,
 and fixed partition requested through pass-through argv instead of
 `--rl-placement fixed-partition`. Full-parameter training
 (`--rl-sync-preset full-parameter`, alias `dense-full`), SAO streaming
