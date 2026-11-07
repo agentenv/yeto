@@ -92,6 +92,12 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
                                   rate schedule of a resume that did not load
                                   it (``restore_lr_schedule``)
+  YETO_DILOCO_STEP_LOG            path: sync rank 0 appends one JSON line per
+                                  step (sync time, export / apply split,
+                                  push / apply counts)
+  YETO_DILOCO_HOST_MEM_CENSUS     1 = add this rank's and the node's host
+                                  memory (``host_memory_census``) to each
+                                  step log line; default 0
 
 Resume: every checkpoint also gets the sync's record (``on_save`` ->
 ``MegatronDiLoCoSync.save_state``): each fragment's anchor version and
@@ -252,16 +258,15 @@ def _pinned_host_stats() -> dict:
       cached); ``host_empty_cache()`` is what brings it down.
     * ``active_bytes.current`` is NOT.  ``active_bytes.freed`` stays 0, so
       "current" is every byte ever handed out and rises for the life of the
-      process by construction.  On the 120B fast island it rose +0.155 GiB
-      per rank per step for 90 steps while the gauge sat at 28 GiB and the
+      process by construction.  On a 120B island it rose +0.155 GiB per
+      rank per step for 90 steps while the gauge sat at 28 GiB and the
       node's MemAvailable did not fall at all.
 
     So emit ``.current`` beside ``.freed`` and ``.peak`` for every byte
-    counter: a reader (or a later Claude) can then tell a gauge from a
-    running total by looking at whether ``.freed`` ever moves, instead of
-    assuming.  No derived "idle" -- the ops-side callback derived one from
-    these two keys, got a permanently negative number, and never released
-    anything.
+    counter: a reader can then tell a gauge from a running total by looking
+    at whether ``.freed`` ever moves, instead of assuming.  No derived
+    "idle": subtracting the running total from the gauge gives a number
+    that goes negative and stays there.
     """
 
     try:
@@ -286,7 +291,7 @@ def _pinned_host_stats() -> dict:
 def host_memory_census() -> dict:
     """One flat dict of this rank's host-memory footprint and the node's.
 
-    Costs four small /proc reads and one allocator query, so it is safe to
+    Costs three small /proc reads and one allocator query, so it is safe to
     call every step; ``YETO_DILOCO_HOST_MEM_CENSUS=1`` adds it to the step
     log.  Never raises: a missing file or a torch without the NPU host
     allocator just leaves those keys out.

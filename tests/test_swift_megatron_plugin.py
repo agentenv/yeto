@@ -497,7 +497,8 @@ def test_step_log_carries_the_host_memory_census_only_when_asked(make, monkeypat
     plain = rows(None)
     assert plain and not any(k.startswith(("rss_", "node_", "pinned_")) for k in plain[0])
     assert rows("0")[0].keys() == plain[0].keys(), "0 must not change the record"
+    if os.uname().sysname != "Linux":  # no /proc: stand in for the census
+        monkeypatch.setattr(sp, "host_memory_census", lambda: {"rss_gib": 1.0, "node_memavailable_gib": 2.0})
     with_census = rows("1")[0]
     assert with_census.keys() > plain[0].keys()
-    if os.uname().sysname == "Linux":
-        assert with_census["rss_gib"] > 0 and with_census["node_memavailable_gib"] > 0
+    assert with_census["rss_gib"] > 0 and with_census["node_memavailable_gib"] > 0
