@@ -245,7 +245,11 @@ function sft(S){
   var ev=(sy.events||[]),hr=ev.filter(function(e){return inRange(e[0],NOW-3600,NOW)}),cnt=function(c){return hr.filter(function(e){return e[1]===c}).length};
   var rss=(sy.rss||[]),rl=rss.length?rss[rss.length-1]:null,cap=refs.sft_syncer_rss_limit_bytes;
   var losses=isls.map(function(I){var r=lastWith(I,C("loss"));return r&&fin(r[C("loss")])?I.name.replace("island ","")+" "+r[C("loss")].toFixed(4):null}).filter(Boolean);
+  // tokens trained: every island's per-step tokens, one row per step (a resumed island re-runs steps; the newest row wins)
+  var stepTok=function(I,c){var m={};I.rows.forEach(function(r){if(fin(r[c]))m[r[0]]=r[c]});return sum(Object.keys(m).map(function(s){return m[s]}))||0};
+  var totTok=sum(isls.map(function(I){return stepTok(I,C("tokens"))}))||0,totTgt=sum(isls.map(function(I){return stepTok(I,C("target_tokens"))}))||0;
   var kp=[["Islands active / total",active.length+" / "+isls.length,isls.map(function(I){return I.name+" "+statusText(I.status)}).join(" · ")],
+    ["Tokens trained",k(totTok),totTgt?k(totTgt)+" loss tokens ("+(100*totTgt/totTok).toFixed(1)+"%) · all islands":"all islands"],
     ["Fleet tokens / s",k(tps),mfu.length?"MFU "+(sum(mfu)/mfu.length).toFixed(1)+"% (6N), last step":"no bench data"],
     [(fast?fast.name:"Island")+" step p50",dur(fp50),fin(fp50)&&fin(ref)?((fp50/ref-1)*100>=0?"+":"")+((fp50/ref-1)*100).toFixed(1)+"% vs reference "+ref.toFixed(0)+" s · "+fs.length+" steps":fs.length+" steps"],
     ["Latest loss",lastWith(fast,C("loss"))?k(lastWith(fast,C("loss"))[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
