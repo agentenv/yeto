@@ -845,9 +845,12 @@ class MegatronDiLoCoSync:
             sender = threading.Thread(target=send, name="yeto-swift-init", daemon=True)
             sender.start()
         error = None
+        current = None  # rank 0: the queue of the fragment being exported
+        aborted = False
         try:
             for fid in range(self.num_fragments):
                 pending = queue.Queue(maxsize=2) if self.rank == 0 else None
+                current = pending
                 if pending is not None:
                     jobs.put((fid, pending))
                 for parts in self._export_fragment_chunks(fid, delta=False):
@@ -863,12 +866,28 @@ class MegatronDiLoCoSync:
                     del parts
                 if pending is not None:
                     pending.put(end)
+                    current = None
                     if error is None and failure:
                         error = failure[0]
+        except BaseException:
+            # An export that raised (a collective timeout) leaves the sender
+            # waiting for the rest of the fragment: end it so the error, not
+            # a hang, reaches the caller.
+            aborted = True
+            if current is not None:
+                failure.append("INIT aborted")
+                try:
+                    current.put(end, timeout=60)
+                except queue.Full:
+                    pass
+            raise
         finally:
             if sender is not None:
-                jobs.put(None)
-                sender.join()
+                try:
+                    jobs.put(None, timeout=60 if aborted else None)
+                except queue.Full:
+                    pass
+                sender.join(timeout=60 if aborted else None)
         if self.rank == 0 and error is None and failure:
             error = failure[0]
         self._raise_if(self._bcast_object(error))

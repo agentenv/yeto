@@ -946,6 +946,46 @@ def test_a_resumed_learner_zero_sends_init_only_when_the_syncer_needs_it(tmp_pat
     _join(procs, 200, tmp_path)
 
 
+def _init_abort_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"init-abort-{rank}", lambda: _init_abort_body(rank, world, port))
+
+
+def _init_abort_body(rank, world, port):
+    dist = _init_dist(rank, world, port)
+    single = dist.new_group([0])
+    ctx = sm.ParallelContext(0, 1, single, 0, 1, single, 0, 1)
+    chunk = _chunk(tp=0, pp=0, tp_size=1, pp_size=1)
+    opt = _DistOpt([p for p in chunk.parameters() if p.requires_grad], dp_rank=0, dp_size=1, dp_group=single)
+    holder = {}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        holder["client"] = _ScriptedClient(layout, {})
+        return holder["client"]
+
+    # learner 1: no INIT from the constructor; the test sends it by hand
+    sync = sm.MegatronDiLoCoSync([chunk], opt, syncer="127.0.0.1:1", learner_id=1, num_learners=2,
+                                 fragments=2, sync_interval_steps=1, chunk_numel=16,
+                                 parallel_context=ctx, client_factory=factory)
+    original = sync._export_fragment_chunks
+
+    def failing(fid, delta):
+        for i, parts in enumerate(original(fid, delta=delta)):
+            if i == 1:
+                raise RuntimeError("collective timed out")
+            yield parts
+
+    sync._export_fragment_chunks = failing
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="collective timed out"):
+        sync._send_init()
+    assert time.monotonic() - started < 30
+
+
+def test_an_init_export_that_raises_fails_instead_of_hanging(tmp_path):
+    procs = _run(_init_abort_worker, 1, free_port(), str(tmp_path))
+    _join(procs, 120, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
