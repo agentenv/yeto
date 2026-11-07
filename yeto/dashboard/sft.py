@@ -457,7 +457,7 @@ class SftState:
             last = rows[-1] if rows else None
             last_ts = max((r[1] for r in rows if r[1] is not None), default=None)
             steps_s = sorted(r[5] for r in rows[-20:] if r[5] is not None)
-            p50 = steps_s[len(steps_s) // 2] if steps_s else None
+            p50 = steps_s[max(0, math.ceil(0.5 * len(steps_s)) - 1)] if steps_s else None  # nearest rank, as the page
             age = (now - last_ts) if last_ts is not None else None
             if last and total and last[0] >= total:
                 status = "done"

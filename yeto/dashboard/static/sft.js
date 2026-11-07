@@ -21,7 +21,7 @@ function p2(n){return (n<10?"0":"")+n}
 function clock(t,sec){if(!fin(t))return "n/a";var d=new Date(t*1000);return p2(d.getHours())+":"+p2(d.getMinutes())+(sec?":"+p2(d.getSeconds()):"")}
 function day(t){if(!fin(t))return "n/a";var d=new Date(t*1000);return (d.getMonth()+1)+"/"+d.getDate()+" "+clock(t)}
 function ago(t){return fin(t)?dur(Math.max(0,NOW-t))+" ago":"n/a"}
-function pctl(sorted,q){if(!sorted.length)return null;var i=(sorted.length-1)*q,lo=Math.floor(i),hi=Math.ceil(i);return sorted[lo]+(sorted[hi]-sorted[lo])*(i-lo)}
+function pctl(sorted,q){return rank(sorted,q)} // one quantile rule for the whole page (nearest rank)
 function sum(a){var s=0;a.forEach(function(v){if(fin(v))s+=v});return s}
 function nice(lo,hi,n){if(!(hi>lo)){hi=lo+1}var step=Math.pow(10,Math.floor(Math.log10((hi-lo)/n))),err=(hi-lo)/n/step;
   step*=err>=7.5?10:err>=3.5?5:err>=1.5?2:1;var a=Math.floor(lo/step)*step,b=Math.ceil(hi/step)*step,t=[];for(var v=a;v<=b+step/2;v+=step)t.push(+v.toPrecision(12));return t}

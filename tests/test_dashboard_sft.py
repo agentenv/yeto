@@ -185,3 +185,19 @@ def test_histogram_bins_cover_samples_and_quantiles(vals):
         lo, hi = b["edges"][q["bin"]], b["edges"][q["bin"] + 1]
         assert lo * (1 - 1e-9) <= q["v"] <= hi * (1 + 1e-9), name
         assert b["pct"][q["bin"]] > 0, name  # the quantile's own bin has a bar
+
+
+def test_kpi_p50_equals_distribution_p50(tmp_path):
+    """One quantile rule (nearest rank) on the whole page: 6 steps of 571..576 s -> p50 573 s
+    (interpolation would give 573.5 s)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    r = Reducer(run="sft")
+    load_all(r, [str(make_run(tmp_path / "run"))])
+    out = export_html(r, tmp_path / "s.html", generated_at=T0)
+    res = subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True, timeout=60)
+    page = json.loads(res.stdout)
+    kpi = re.search(r"Fast island step p50</div><div class=\"kv\">([^<]+)<", page["kpis"]).group(1)
+    dist = re.search(r'<tr class="b"><td>p50</td><td>([^<]+)</td>', page["dist"]).group(1)
+    assert kpi == dist == "573 s"
