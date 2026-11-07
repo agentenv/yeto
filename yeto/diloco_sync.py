@@ -55,13 +55,21 @@ def supersede_pull_attempts(pulls: list[PullRequest]) -> list[PullRequest]:
     A round the syncer reopens after a quorum timeout sends a new pull with
     a higher ``round_attempt``; a push answering the old attempt would be
     rejected as out of round, so only the newest attempt is kept, in order.
+    A repeat of the same attempt (resent after a redial) is kept once, so the
+    fragment is not pushed twice for it.
     """
     newest: dict[tuple[int, int], int] = {}
     for pull in pulls:
         key = (int(pull.fragment_id), int(pull.global_step))
         newest[key] = max(newest.get(key, -1), int(pull.round_attempt))
-    return [pull for pull in pulls
-            if int(pull.round_attempt) == newest[(int(pull.fragment_id), int(pull.global_step))]]
+    kept, seen = [], set()
+    for pull in pulls:
+        key = (int(pull.fragment_id), int(pull.global_step))
+        attempt = int(pull.round_attempt)
+        if attempt == newest[key] and (key, attempt) not in seen:
+            seen.add((key, attempt))
+            kept.append(pull)
+    return kept
 
 
 def take_ready_pulls(

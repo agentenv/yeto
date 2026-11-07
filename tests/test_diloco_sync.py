@@ -354,3 +354,13 @@ def test_superseded_pull_is_dropped_while_its_fragment_waits():
     state.pending_pulls.append(PullRequest(fragment_id=0, global_step=3, round_attempt=1))
     assert take_ready_pulls(state, steps_total=0, units_total=0, anchored=lambda fid: True) == []
     assert state.pending_pulls == [PullRequest(fragment_id=0, global_step=3, round_attempt=1)]
+
+
+def test_a_resent_pull_of_the_same_attempt_is_answered_once():
+    from yeto.diloco_sync import take_ready_pulls
+
+    state = DiLoCoSyncState.create(1, track_anchors=False)
+    pull = PullRequest(fragment_id=0, global_step=3, round_attempt=1)
+    state.pending_pulls = [pull, PullRequest(fragment_id=0, global_step=3, round_attempt=1)]
+    ready = take_ready_pulls(state, steps_total=5, units_total=50, anchored=lambda fid: True)
+    assert [p for p, _, _ in ready] == [pull] and state.pending_pulls == []
