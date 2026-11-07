@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .data_split import DataSlot  # noqa: F401 - re-exported (callers import it from here)
-from .selection import FULL_PARAMETER_SYNC_PRESET
+from .selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
@@ -151,8 +151,9 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
     if is_convertible_pool(args):
         raise ValueError("synced trainers do not combine with convertible nodes")
     if getattr(args, "tuning", "lora") != "lora" and not synced_full_parameter(args):
-        raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
-                         "--tuning full needs --rl-sync-preset full-parameter")
+        raise ValueError("synced trainers merge LoRA deltas or run a full-parameter preset: "
+                         f"--tuning full needs --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} "
+                         f"or {SAO_STREAMING_SYNC_PRESET}")
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
             getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
         # The strict sweep publishes in lockstep (policy age 0); a synced trainer
