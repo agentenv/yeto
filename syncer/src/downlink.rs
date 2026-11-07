@@ -31,7 +31,6 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use sha2::{Digest, Sha256};
 
 use crate::protocol::{DTYPE_BF16, DTYPE_F32};
 
@@ -68,7 +67,7 @@ pub struct DownlinkAnchors {
 }
 
 pub fn digest_f32(values: &[f32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
+    let mut hasher = crate::sha256::Hasher::new();
     // Hash in bounded slices to avoid a second full-size byte buffer.
     let mut buf = Vec::with_capacity(4 * 65536);
     for chunk in values.chunks(65536) {
@@ -78,7 +77,7 @@ pub fn digest_f32(values: &[f32]) -> [u8; 32] {
         }
         hasher.update(&buf);
     }
-    hasher.finalize().into()
+    hasher.finalize()
 }
 
 /// The header of a FULL that carries `params` exactly (no anchor
