@@ -67,6 +67,17 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
                                   with each checkpoint (~2 bytes per local
                                   parameter per rank for bf16); default 0
+  YETO_DILOCO_RESUME_ANCHOR_MMAP  1 (default) = map the saved anchor file on
+                                  resume instead of reading it into anonymous
+                                  memory.  Same values, but the shards the
+                                  restart never needs stay out of RSS (120B
+                                  pp0: ~30 GiB per rank, ~240 GiB per host).
+                                  0 restores the eager read.
+  YETO_DILOCO_ANCHOR_DTYPE        fp32 | bf16; default: the broadcast dtype
+                                  (FP32 for an int4/int8 push session).  bf16
+                                  halves the resident anchors but rounds the
+                                  pushed delta and the resume shift -- only
+                                  for an island that otherwise does not fit.
   YETO_DILOCO_INIT_PROBE_S        resumed learner 0 with an initial-cut wait:
                                   send INIT_PARAMS only if the syncer sends no
                                   catch-up within this many seconds (an
@@ -81,6 +92,12 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
                                   rate schedule of a resume that did not load
                                   it (``restore_lr_schedule``)
+  YETO_DILOCO_STEP_LOG            path: sync rank 0 appends one JSON line per
+                                  step (sync time, export / apply split,
+                                  push / apply counts)
+  YETO_DILOCO_HOST_MEM_CENSUS     1 = add this rank's and the node's host
+                                  memory (``host_memory_census``) to each
+                                  step log line; default 0
 
 Resume: every checkpoint also gets the sync's record (``on_save`` ->
 ``MegatronDiLoCoSync.save_state``): each fragment's anchor version and
@@ -147,6 +164,8 @@ class DiLoCoHookConfig:
     init_probe_s: float = 1800.0
     heartbeat_s: float = 30.0
     heartbeat_stall_s: float = 0.0
+    anchor_dtype: Optional[str] = None
+    resume_anchor_mmap: bool = True
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -190,6 +209,9 @@ class DiLoCoHookConfig:
             init_probe_s=get_float("INIT_PROBE_S", 1800.0),
             heartbeat_s=get_float("HEARTBEAT_S", 30.0),
             heartbeat_stall_s=get_float("HEARTBEAT_STALL_S", 0.0),
+            anchor_dtype=get("ANCHOR_DTYPE"),
+            resume_anchor_mmap=(get("RESUME_ANCHOR_MMAP", default="1") or "").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -204,6 +226,90 @@ class DiLoCoHookConfig:
         if cfg.hmac_key_path is not None and not os.path.isfile(cfg.hmac_key_path):
             raise ValueError(f"{ENV_PREFIX}HMAC_KEY_PATH does not exist: {cfg.hmac_key_path}")
         return cfg
+
+
+_PROC_GIB = 1024.0 * 1024.0  # /proc reports kB
+
+
+def _proc_gib(path: str, keys) -> dict:
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                name, _, rest = line.partition(":")
+                if name in keys:
+                    out[name] = round(int(rest.split()[0]) / _PROC_GIB, 3)
+    except (OSError, ValueError, IndexError):
+        return {}
+    return out
+
+
+def _pinned_host_stats() -> dict:
+    """The accelerator's host (pinned) allocator counters, in GiB.
+
+    torch_npu's caching host allocator is where the CPU-offloaded optimizer's
+    D2H/H2D staging lives.  Those bytes are driver memory and do not move with
+    ``malloc_trim``, so they are worth watching -- but only two of these
+    counters are gauges, and mistaking the others for gauges is exactly how
+    this allocator produces a leak that is not there.  Measured on one card:
+
+    * ``allocated_bytes.current`` IS a gauge: the bytes the allocator holds
+      from the OS.  Freeing a tensor leaves it unchanged (the block is
+      cached); ``host_empty_cache()`` is what brings it down.
+    * ``active_bytes.current`` is NOT.  ``active_bytes.freed`` stays 0, so
+      "current" is every byte ever handed out and rises for the life of the
+      process by construction.  On a 120B island it rose +0.155 GiB per
+      rank per step for 90 steps while the gauge sat at 28 GiB and the
+      node's MemAvailable did not fall at all.
+
+    So emit ``.current`` beside ``.freed`` and ``.peak`` for every byte
+    counter: a reader can then tell a gauge from a running total by looking
+    at whether ``.freed`` ever moves, instead of assuming.  No derived
+    "idle": subtracting the running total from the gauge gives a number
+    that goes negative and stays there.
+    """
+
+    try:
+        import torch
+
+        stats = dict(torch.npu.host_memory_stats())  # type: ignore[attr-defined]
+    except Exception:
+        return {}
+    out = {}
+    try:
+        for key, value in stats.items():
+            name = str(key)
+            if not name.endswith((".current", ".freed", ".peak")) or "_bytes" not in name:
+                continue
+            if isinstance(value, (int, float)):
+                out["pinned_" + name.replace(".", "_")] = round(value / 2**30, 3)
+    except Exception:
+        return {}
+    return out
+
+
+def host_memory_census() -> dict:
+    """One flat dict of this rank's host-memory footprint and the node's.
+
+    Costs three small /proc reads and one allocator query, so it is safe to
+    call every step; ``YETO_DILOCO_HOST_MEM_CENSUS=1`` adds it to the step
+    log.  Never raises: a missing file or a torch without the NPU host
+    allocator just leaves those keys out.
+    """
+
+    status = _proc_gib("/proc/self/status", ("VmRSS", "VmHWM"))
+    roll = _proc_gib("/proc/self/smaps_rollup", ("Anonymous", "Private_Dirty"))
+    node = _proc_gib("/proc/meminfo", ("MemAvailable", "AnonPages"))
+    out = {}
+    if "VmRSS" in status:
+        out["rss_gib"], out["hwm_gib"] = status["VmRSS"], status.get("VmHWM", 0.0)
+    if "Anonymous" in roll:
+        out["anon_gib"], out["private_dirty_gib"] = roll["Anonymous"], roll.get("Private_Dirty", 0.0)
+    if "MemAvailable" in node:
+        out["node_memavailable_gib"] = node["MemAvailable"]
+        out["node_anonpages_gib"] = node.get("AnonPages", 0.0)
+    out.update(_pinned_host_stats())
+    return out
 
 
 def _env_flag(name: str) -> bool:
@@ -289,6 +395,8 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
         init_probe_s=cfg.init_probe_s,
         heartbeat_s=cfg.heartbeat_s,
         heartbeat_stall_s=cfg.heartbeat_stall_s,
+        anchor_dtype=cfg.anchor_dtype,
+        resume_anchor_mmap=cfg.resume_anchor_mmap,
     )
 
 
@@ -480,6 +588,8 @@ class YetoDiLoCoCallback(_CallbackBase):
                   "apply_s": round(stats.get("apply_s", 0) - before["apply_s"], 4),
                   "pushes_sent": stats.get("pushed", 0) - before["pushed"],
                   "applies": stats.get("applied", 0) - before["applied"]}
+        if _env_flag("HOST_MEM_CENSUS"):
+            record.update(host_memory_census())
         try:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")

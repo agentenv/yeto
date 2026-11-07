@@ -446,3 +446,59 @@ def test_the_lr_rebuild_warning_survives_an_error_level_root(make, monkeypatch, 
     assert "restored no LR schedule; stepped it by 5760" in err
     assert sync_logger.handlers and not sync_logger.propagate
     cb.close()
+
+
+# ----------------------------------------------------------------------------- host-memory census
+def test_host_memory_census_reports_this_rank_and_the_node():
+    """The census is what makes a host-memory leak visible from inside the
+    learner.  It must never raise, and on Linux it must actually find the
+    /proc numbers (a silently empty census would hide the leak it is for)."""
+    import os
+
+    census = sp.host_memory_census()
+    assert isinstance(census, dict)
+    if os.uname().sysname != "Linux":
+        return
+    assert census["rss_gib"] > 0 and census["hwm_gib"] >= census["rss_gib"]
+    assert census["anon_gib"] > 0 and census["private_dirty_gib"] > 0
+    assert census["node_memavailable_gib"] > 0 and census["node_anonpages_gib"] > 0
+    # Byte counters come with .freed and .peak beside .current, so a gauge can
+    # be told from a running total (active_bytes.freed never moves, which is
+    # why active_bytes.current looked like a leak) instead of assumed.
+    pinned = {k for k in census if k.startswith("pinned_")}
+    assert all("_bytes_" in k for k in pinned), pinned
+    for base in {k.rsplit("_", 1)[0] for k in pinned}:
+        assert {f"{base}_current", f"{base}_freed", f"{base}_peak"} <= pinned, base
+
+
+def test_bad_proc_reads_leave_the_census_empty_rather_than_raising(monkeypatch):
+    monkeypatch.setattr(sp, "_proc_gib", lambda *a, **k: {})
+    monkeypatch.setattr(sp, "_pinned_host_stats", lambda: {})
+    assert sp.host_memory_census() == {}
+
+
+def test_step_log_carries_the_host_memory_census_only_when_asked(make, monkeypatch, tmp_path):
+    import json
+    import os
+
+    def rows(census: str | None):
+        path = tmp_path / f"steps-{census}.jsonl"
+        monkeypatch.setenv("YETO_DILOCO_STEP_LOG", str(path))
+        if census is None:
+            monkeypatch.delenv("YETO_DILOCO_HOST_MEM_CENSUS", raising=False)
+        else:
+            monkeypatch.setenv("YETO_DILOCO_HOST_MEM_CENSUS", census)
+        FakeSync.instances.clear()
+        trainer, _ = make([([3], True)])
+        FakeSync.instances[0].rank = 0
+        trainer.train()
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    plain = rows(None)
+    assert plain and not any(k.startswith(("rss_", "node_", "pinned_")) for k in plain[0])
+    assert rows("0")[0].keys() == plain[0].keys(), "0 must not change the record"
+    if os.uname().sysname != "Linux":  # no /proc: stand in for the census
+        monkeypatch.setattr(sp, "host_memory_census", lambda: {"rss_gib": 1.0, "node_memavailable_gib": 2.0})
+    with_census = rows("1")[0]
+    assert with_census.keys() > plain[0].keys()
+    assert with_census["rss_gib"] > 0 and with_census["node_memavailable_gib"] > 0
