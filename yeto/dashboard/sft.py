@@ -116,7 +116,7 @@ _OUTER = re.compile(r"^outer step step=(\d+) fragment=(\d+).*?\bms=(\d+)")
 # syncer.log message -> category, first match wins
 LOG_CATEGORIES = (
     ("rejected", re.compile(r"reject", re.I)),
-    ("timeout", re.compile(r"time(?:d)?[ _-]?out", re.I)),
+    ("timeout", re.compile(r"timed[ _-]?out|\btime[ _-]?out\b", re.I)),   # WARN/ERROR only (see below)
     ("not_carried", re.compile(r"not carried|left out of the final cut", re.I)),
     ("stale", re.compile(r"stale base", re.I)),
     ("late", re.compile(r"late push", re.I)),
@@ -305,6 +305,9 @@ def from_syncer_log_line(line: str) -> dict | None:
                 "step": int(rm.group(1)), "fragment": int(rm.group(2)),
                 ("quorum_s" if armed else "round_s"): float(rm.group(3)) if armed else int(rm.group(3)) / 1000.0}
     cat = next((c for c, rx in LOG_CATEGORIES if rx.search(msg)), None)
+    if cat == "timeout" and level not in ("WARN", "ERROR"):
+        # e.g. INFO "quorum clock: the round's timeout counts from ..." describes a deadline, not a timeout
+        cat = next((c for c, rx in LOG_CATEGORIES if c != "timeout" and rx.search(msg)), None)
     if cat is None and level not in ("WARN", "ERROR"):
         return None
     lm, sm, st = _LEARNER.search(msg), _SECONDS.search(msg), _STEP_KV.search(msg)

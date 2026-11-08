@@ -69,6 +69,14 @@ def test_converters():
     e = sft.from_syncer_log_line("2026-09-21T14:00:00.5Z  WARN yeto_syncer::server: quorum timed out learner_id=2")
     assert e["category"] == "timeout" and e["learner"] == 2 and e["time_unix"] > 0
     assert sft.from_syncer_log_line("2026-09-21T14:00:00Z  INFO x: wire bytes per learner") is None
+    # an INFO line that only names a deadline is not a timeout; a WARN stop timeout is, a timeout_s field is not
+    assert sft.from_syncer_log_line("2026-11-08T14:24:57.0Z  INFO yeto_syncer::server: quorum clock: the round's "
+                                    "timeout counts from when its islands can first push step=571 fragment=58") is None
+    e = sft.from_syncer_log_line("2026-11-08T12:36:00Z  WARN yeto_syncer::server: stop: quorum timeout, round abandoned")
+    assert e["category"] == "timeout"
+    e = sft.from_syncer_log_line("2026-11-08T12:16:28Z  WARN yeto_syncer::shutdown: stop requested: no new rounds "
+                                 'signal="SIGTERM" timeout_s=1200')
+    assert e["category"] == "warn"
     assert sft.from_cmdline("a --total-steps 960 --learners=2")["total_steps"] == 960
     assert sft.dataset_tag(["/d/split/island2_v2/shard-3/train"]) == "v2"
     assert sft.dataset_tag(["/d/split/island0/shard-3/train"]) == "v1"
