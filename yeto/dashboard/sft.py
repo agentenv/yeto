@@ -108,6 +108,9 @@ LOG_CATEGORIES = (
 )
 # categories the page counts as problems (KPI "rejected / timed out / not carried")
 PROBLEM_CATEGORIES = ("rejected", "timeout", "not_carried")
+# Records read from syncer.log: an RL run's syncer writes the same log (e.g. next to its
+# event tape), so these alone do not make a run an SFT run.
+SHARED_SYNCER_EVENTS = frozenset({"sft_syncer_log", "sft_syncer_round"})
 
 
 def finite(v: Any) -> float | None:
@@ -462,6 +465,7 @@ class SftState:
         self.log_rounds: dict[int, dict] = {}  # syncer.log round timing by outer step
         self.log_seen = False
         self.records = 0
+        self.sft_records = 0  # records only an SFT run writes (not the shared syncer tape / log)
 
     def island(self, iid: Any) -> dict:
         iid = str(iid if iid is not None else "0")
@@ -474,6 +478,8 @@ class SftState:
         ev = r.get("event")
         if ev is None and r.get("kind") in SYNCER_TAPE_KINDS:
             return self._tape(r, ts)
+        if isinstance(ev, str) and ev.startswith("sft_") and ev not in SHARED_SYNCER_EVENTS:
+            self.sft_records += 1
         if ev == "sft_syncer_log":
             self.log_seen = True
             self.events.append([ts, r.get("category"), r.get("learner"), "log", r.get("seconds")])

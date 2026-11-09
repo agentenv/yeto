@@ -16,6 +16,10 @@
   --bg:#f6f6f7;--panel:#ffffff;--ink:#18181b;--ink2:#6b6b73;--line:#e3e3e7;--accent:#2563eb;
   --good:#16a34a;--warn:#ca8a04;--bad:#dc2626;--band:rgba(139,92,246,.16)}
 :root[data-theme="dark"]{--bg:#111113;--panel:#19191c;--ink:#ececee;--ink2:#8e8f96;--line:#2a2a2f}
+@media (prefers-color-scheme:light){:root:not([data-theme]){
+  --bg:#f6f6f7;--panel:#ffffff;--ink:#18181b;--ink2:#6b6b73;--line:#e3e3e7;--accent:#2563eb;
+  --good:#16a34a;--warn:#ca8a04;--bad:#dc2626;--band:rgba(139,92,246,.16)}
+  :root:not([data-theme]) .seg button.on{background:#e7e7ea}}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans)}
 .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}

@@ -196,6 +196,25 @@ def test_rl_view_has_no_sft(tmp_path):
     assert "sft" not in r.page_view()
 
 
+def test_rl_run_with_a_syncer_log_has_no_sft(tmp_path):
+    """The RL ssh harness keeps syncer.log next to the syncer's event tape: its WARN /
+    rejection lines are read, but alone they do not turn an RL run into an SFT page."""
+    shutil.copytree(FX / "kill44", tmp_path / "run")
+    state = tmp_path / "run" / "state"
+    state.mkdir()
+    (state / "syncer.log").write_text(
+        "2026-09-21T14:00:00Z  WARN yeto_syncer::server: delta rejected learner_id=1\n"
+        "2026-09-21T14:00:01Z  INFO yeto_syncer::server: grace window armed step=1 fragment=0 quorum_secs=2.5\n")
+    r = Reducer()
+    load_all(r, [str(tmp_path / "run")])
+    assert r.sft.log_seen and r.sft.log_rounds
+    assert "sft" not in r.page_view()
+    (state / "island.json").write_text(json.dumps({"name": "island 0"}))  # an SFT-only file
+    r2 = Reducer()
+    load_all(r2, [str(tmp_path / "run")])
+    assert "sft" in r2.page_view()
+
+
 def test_export_page_renders_sft(tmp_path):
     root = make_run(tmp_path / "run")
     make_run(tmp_path / "run", island="1", v2=True)
