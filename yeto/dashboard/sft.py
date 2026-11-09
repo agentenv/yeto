@@ -47,6 +47,21 @@ open-to-done wall time, ``quorum_ms`` the wait until the quorum arrived and
 The wait of a round is ``ms - sync_ms``. When the tape lacks ``ms`` / ``quorum_ms``
 they come from the syncer.log lines of the same step.
 
+Resumed launches: ms-swift appends to the same files after a restart from a
+checkpoint, so steps after the checkpoint appear twice (a resume from checkpoint 165:
+``166..173`` of the dead launch, then ``166..`` of the new one), and bench /
+health ``step`` restarts at 1. A step at or below the newest one starts a new
+launch that supersedes everything from that step on (the dead launch's tail is
+dropped, also from bench / health), so the curves never fold back and the last
+row is the newest launch's newest step. Bench / health launch segments are
+placed on the resumed step by walking the ``yeto_steps`` (else ``logging``)
+step sequence segment by segment (one launch = one run of records).
+
+Island status: ``ok`` while a step arrived within ``sft_stop_factor`` x the
+island's step time p50 (+ ``sft_stop_slack_s`` for the collector cadence and a
+checkpoint save); after that ``stopped`` (stopped or restarting; the page greys
+the island out and does not count it as active), ``done`` at the last step.
+
 Missing values stay ``None``; nothing is interpolated here (the page resamples
 the stacked tokens/s on a shared time grid).
 """
@@ -74,11 +89,14 @@ def is_syncer_tape(record: dict) -> bool:
     return record.get("event") is None and record.get("kind") in SYNCER_TAPE_KINDS and "seq" not in record
 
 
-# Reference lines drawn on the page; set with --thresholds (0 = no line).
+# Reference lines drawn on the page; set with --thresholds (0 = no line). An island with no
+# new step for sft_stop_factor x its step time + sft_stop_slack_s is shown as stopped.
 DEFAULT_REFS = {"sft_ref_step_s": 0.0, "sft_hbm_limit_gib": 0.0, "sft_syncer_rss_limit_bytes": 0.0,
-                "sft_slow_factor": 1.1}
-# Stale-island check when neither a step time nor a reference is known yet.
+                "sft_slow_factor": 1.1, "sft_stop_factor": 1.5, "sft_stop_slack_s": 300.0}
+REF_LINES = ("sft_ref_step_s", "sft_hbm_limit_gib", "sft_syncer_rss_limit_bytes")  # 0 = no line
+# Stopped-island check when neither a step time nor a reference is known yet.
 FALLBACK_STEP_S = 600.0
+LAUNCH_TAIL_TOL = 2  # records a stream may be off by at a launch boundary (crash between two files' writes)
 STEP_COLS = ("step", "ts", "loss", "grad_norm", "lr", "step_s", "tps", "tokens", "target_tokens",
              "sync_s", "export_s", "apply_s", "hbm_gib", "mfu", "pushes", "applies")
 MERGE_COLS = ("ts", "step", "fragment", "merge_s", "gnorm", "round_s", "quorum_s", "grace_s", "wait_s")
@@ -98,13 +116,20 @@ _OUTER = re.compile(r"^outer step step=(\d+) fragment=(\d+).*?\bms=(\d+)")
 # syncer.log message -> category, first match wins
 LOG_CATEGORIES = (
     ("rejected", re.compile(r"reject", re.I)),
-    ("timeout", re.compile(r"time(?:d)?[ _-]?out", re.I)),
+    ("timeout", re.compile(r"timed[ _-]?out|\btime[ _-]?out\b", re.I)),   # WARN/ERROR only (see below)
     ("not_carried", re.compile(r"not carried|left out of the final cut", re.I)),
     ("stale", re.compile(r"stale base", re.I)),
     ("late", re.compile(r"late push", re.I)),
     ("disconnect", re.compile(r"disconnect|connection ended|broken pipe|reset by peer", re.I)),
     ("checkpoint", re.compile(r"checkpoint written", re.I)),
     ("joined", re.compile(r"learner connected", re.I)),
+    # syncer (re)start and the catch-up that follows (a stalled outer step is expected while these
+    # are recent): "syncer listening", "resumed from checkpoint step=K", "initial cut: ...",
+    # "background resend started ... kind=CatchUp" -> "... drained" / "... caught up"
+    ("started", re.compile(r"syncer listening", re.I)),
+    ("resumed", re.compile(r"resumed from checkpoint", re.I)),
+    ("caught_up", re.compile(r"background resend (?:caught up|drained)", re.I)),
+    ("catch_up", re.compile(r"background resend started|initial cut:", re.I)),
 )
 # categories the page counts as problems (KPI "rejected / timed out / not carried")
 PROBLEM_CATEGORIES = ("rejected", "timeout", "not_carried")
@@ -280,6 +305,9 @@ def from_syncer_log_line(line: str) -> dict | None:
                 "step": int(rm.group(1)), "fragment": int(rm.group(2)),
                 ("quorum_s" if armed else "round_s"): float(rm.group(3)) if armed else int(rm.group(3)) / 1000.0}
     cat = next((c for c, rx in LOG_CATEGORIES if rx.search(msg)), None)
+    if cat == "timeout" and level not in ("WARN", "ERROR"):
+        # e.g. INFO "quorum clock: the round's timeout counts from ..." describes a deadline, not a timeout
+        cat = next((c for c, rx in LOG_CATEGORIES if c != "timeout" and rx.search(msg)), None)
     if cat is None and level not in ("WARN", "ERROR"):
         return None
     lm, sm, st = _LEARNER.search(msg), _SECONDS.search(msg), _STEP_KV.search(msg)
@@ -449,9 +477,81 @@ class SftSource:
 # -- folding --------------------------------------------------------------------
 
 def _new_island(iid: str) -> dict:
-    # health: (launch, seg_step) -> {rank: peak GiB}; health_last: rank -> (launch, last seg_step)
-    return {"id": iid, "meta": {}, "log": {}, "sync": {}, "bench": [], "health": {}, "health_last": {},
-            "host": {}, "steps_total": None, "log_starts": [], "log_last": None}
+    # log / sync: step -> record of the newest launch; *_seq: every step in arrival order (launch segmentation);
+    # health: rank -> [[seg_step, value], ...] in arrival order (``step`` restarts at 1 per launch)
+    return {"id": iid, "meta": {}, "log": {}, "sync": {}, "log_seq": [], "sync_seq": [], "sync_launch": 0,
+            "bench": [], "health": {}, "host": {}, "steps_total": None}
+
+
+def _put_step(d: dict, step: int, rec: dict) -> bool:
+    """Insert ``rec`` at ``step``; a step at or below the newest one is a resumed launch, which
+    supersedes every step from ``step`` on (dropped here). Returns True when that happened."""
+    resumed = bool(d) and step <= next(reversed(d))
+    if resumed:
+        for k in [k for k in d if k >= step]:
+            del d[k]
+    d[step] = rec
+    return resumed
+
+
+def _segments(seq: list) -> list[list]:
+    """Split a step sequence at every step that does not go forward (one segment per launch)."""
+    out: list[list] = []
+    for s in seq:
+        if not out or s <= out[-1][-1]:
+            out.append([])
+        out[-1].append(s)
+    return out
+
+
+def _launch_starts(lens: list[int], anchor: list[list[int]], tol: int = LAUNCH_TAIL_TOL) -> list[int]:
+    """Absolute first step of each launch segment of a per-launch counter (bench / health), given the
+    segment lengths and the anchor stream's segments (absolute steps). Segments are consumed in
+    order: a counter segment that starts where the current anchor segment is (nearly) used up begins
+    the next anchor segment (a resume, possibly from an earlier step); otherwise it continues inside
+    the current one (a launch that resumed exactly where the previous stopped leaves no step gap in
+    the anchor stream). Without an anchor the launches simply follow each other."""
+    starts: list[int] = []
+    j, used, prev_n = 0, 0, 0
+    for n in lens:
+        if j < len(anchor):
+            if used and len(anchor[j]) - used <= tol and j + 1 < len(anchor):
+                j, used = j + 1, 0
+            seg = anchor[j]
+            starts.append(seg[used] if used < len(seg) else seg[-1] + 1 + (used - len(seg)))
+        else:
+            starts.append(starts[-1] + prev_n if starts else 1)
+        used += n
+        prev_n = n
+    return starts
+
+
+def _place(segs: list[list], starts: list[int]) -> dict[int, Any]:
+    """Counter segments [[(seg_step, value), ...], ...] -> {absolute step: value}; a later launch
+    supersedes the earlier ones from its first step on."""
+    out: dict[int, Any] = {}
+    for seg, start in zip(segs, starts):
+        if not seg:
+            continue
+        off = start - seg[0][0]
+        first = seg[0][0] + off
+        for k in [k for k in out if k >= first]:
+            del out[k]
+        for s, v in seg:
+            out[s + off] = v
+    return out
+
+
+def _counter_segments(items: list, key) -> list[list]:
+    segs: list[list] = []
+    prev = None
+    for it in items:
+        s = key(it)
+        if prev is None or s <= prev:
+            segs.append([])
+        segs[-1].append((s, it))
+        prev = s
+    return segs
 
 
 class SftState:
@@ -507,29 +607,22 @@ class SftState:
         if ev == "sft_island_meta":
             isl["meta"].update({k: v for k, v in r.items() if k not in ("event", "island_id") and v is not None})
         elif ev == "sft_train_log":
-            # ms-swift appends to logging.jsonl: a step not above the last one
-            # starts a new launch (a resume from an earlier checkpoint).
-            if isl["log_last"] is None or r["step"] <= isl["log_last"]:
-                isl["log_starts"].append(r["step"])
-            isl["log_last"] = r["step"]
-            isl["log"][r["step"]] = r
+            _put_step(isl["log"], r["step"], r)
+            isl["log_seq"].append(r["step"])
             if r.get("steps_total"):
                 isl["steps_total"] = r["steps_total"]
         elif ev == "sft_sync_step":
-            isl["sync"][r["step"]] = r
+            prev = next(reversed(isl["sync"])) if isl["sync"] else None
+            if prev is not None and r["step"] <= prev:
+                isl["sync_launch"] += 1
+            _put_step(isl["sync"], r["step"], dict(r, launch=isl["sync_launch"]))
+            isl["sync_seq"].append(r["step"])
         elif ev == "sft_bench":
             isl["bench"].append(r)
         elif ev == "sft_health":
-            # Each rank's health file counts from 1 in every launch, like the
-            # bench: a step not above that rank's previous one starts a launch.
-            rank, step = str(r.get("rank")), r.get("seg_step")
-            launch, last = isl["health_last"].get(rank, (0, None))
-            if last is not None and isinstance(step, int) and step <= last:
-                launch += 1
-            isl["health_last"][rank] = (launch, step)
-            v = finite(r.get("reserved_peak_gib"))
-            if v is not None:
-                isl["health"].setdefault((launch, step), {})[rank] = v
+            if isinstance(r.get("seg_step"), int):
+                isl["health"].setdefault(str(r.get("rank")), []).append(
+                    [r["seg_step"], finite(r.get("reserved_peak_gib"))])
         elif ev == "sft_host_mem":
             node = str(r.get("node") or "?")
             avail, total = finite(r.get("avail_bytes")), finite(r.get("total_bytes"))
@@ -552,57 +645,62 @@ class SftState:
 
     # -- view -------------------------------------------------------------------
     @staticmethod
-    def _bench_by_step(isl: dict) -> tuple[dict[int, dict], list[int]]:
-        """bench / health ``step`` restarts at 1 in each launch: map each launch
-        segment onto absolute steps. Launch k starts at the first step of the
-        k-th ms-swift log segment (a resume from checkpoint N logs N+1 again
-        after a crash at a later step); without one it continues after the
-        last mapped step. The first launch falls back to the first step logged
-        by ms-swift or the yeto plugin. Returns the mapped bench records and
-        each launch's step offset."""
-        known = sorted(set(isl["log"]) | set(isl["sync"]))
-        starts = isl.get("log_starts") or []
-        base = (starts[0] - 1) if starts else ((known[0] - 1) if known else 0)
-        out, prev, offsets = {}, None, [base]
-        for b in isl["bench"]:
-            s = b["seg_step"]
-            if prev is not None and s <= prev:  # a new launch
-                seg = len(offsets)
-                offsets.append(starts[seg] - 1 if seg < len(starts) else max(out))
-            out[s + offsets[-1]] = b
-            prev = s
-        return out, offsets
+    def _anchor(isl: dict) -> list[list[int]]:
+        return _segments(isl["sync_seq"] or isl["log_seq"])
 
-    @staticmethod
-    def _health_by_step(isl: dict, offsets: list[int]) -> dict[int, dict]:
-        """Health per absolute step, with the launch offsets of the bench (a
-        launch the bench has not seen starts at its ms-swift log segment)."""
-        starts = isl.get("log_starts") or []
-        out: dict[int, dict] = {}
-        for (launch, step), ranks in isl["health"].items():
-            if not isinstance(step, int):
-                continue
-            if launch < len(offsets):
-                off = offsets[launch]
-            elif launch < len(starts):
-                off = starts[launch] - 1
-            else:
-                continue  # no anchor for this launch: better no value than a wrong step
-            out.setdefault(step + off, {}).update(ranks)
+    def _bench_by_step(self, isl: dict) -> dict[int, dict]:
+        """bench ``step`` restarts at 1 in each launch: place each launch segment on absolute
+        steps (see ``_launch_starts``); a later launch supersedes the earlier ones."""
+        segs = _counter_segments(isl["bench"], lambda b: b["seg_step"])
+        starts = _launch_starts([len(x) for x in segs], self._anchor(isl))
+        return _place(segs, starts)
+
+    def _hbm_by_step(self, isl: dict) -> dict[int, float]:
+        """max ``reserved_peak_gib`` over ranks per absolute step (each rank's file is segmented
+        on its own, like bench)."""
+        anchor, out = self._anchor(isl), {}
+        for recs in isl["health"].values():
+            segs = _counter_segments(recs, lambda x: x[0])
+            for s, rec in _place(segs, _launch_starts([len(x) for x in segs], anchor)).items():
+                if rec[1] is not None and (out.get(s) is None or rec[1] > out[s]):
+                    out[s] = rec[1]
         return out
 
+    @staticmethod
+    def _settled(isl: dict) -> tuple[dict, dict]:
+        """logging.jsonl (last PP stage node) and yeto_steps.jsonl (rank0 node) are pulled
+        separately, so right after a resume one of them can already show the new launch while
+        the other still ends with the dead launch's tail. Drop the lagging stream's steps from
+        the restart step on until it shows the restart too."""
+        log, sync = isl["log"], isl["sync"]
+        if not log or not sync:
+            return log, sync
+        ls, ss = _segments(isl["log_seq"])[-1][0], _segments(isl["sync_seq"])[-1][0]
+        if ls < ss:  # sync restarted at ss, log has not yet: its steps >= ss are the dead launch's
+            log = {k: v for k, v in log.items() if k < ss}
+        elif ss < ls:
+            sync = {k: v for k, v in sync.items() if k < ls}
+        return log, sync
+
     def island_rows(self, isl: dict) -> list[list]:
-        bench, offsets = self._bench_by_step(isl)
-        health = self._health_by_step(isl, offsets)
-        steps = sorted(set(isl["log"]) | set(isl["sync"]) | set(bench))
+        bench, hbm_steps = self._bench_by_step(isl), self._hbm_by_step(isl)
+        log, sync = self._settled(isl)
+        newest = max([next(reversed(d)) for d in (log, sync) if d], default=None)
+        steps = sorted(set(log) | set(sync) | set(bench))
+        if newest is not None:  # bench rows past the newest logged step belong to a superseded launch
+            ahead = [s for s in bench if s > newest]
+            if ahead and len(ahead) > LAUNCH_TAIL_TOL:
+                steps = [s for s in steps if s <= newest]
         rows, prev_ts = [], None
         for s in steps:
-            lg, sy, bn = isl["log"].get(s, {}), isl["sync"].get(s, {}), bench.get(s, {})
+            lg, sy, bn = log.get(s, {}), sync.get(s, {}), bench.get(s, {})
             ts = finite(sy.get("time_unix"))
-            hp = health.get(s)
-            hbm = max(hp.values()) if hp else finite(lg.get("memory_gib"))
+            hbm = hbm_steps.get(s)
+            if hbm is None:
+                hbm = finite(lg.get("memory_gib"))
             step_s = finite(bn.get("wall_s"))
-            if step_s is None and ts is not None and prev_ts is not None and s - 1 in isl["sync"]:
+            if (step_s is None and ts is not None and prev_ts is not None and s - 1 in sync
+                    and sync[s - 1].get("launch") == sy.get("launch")):  # never across a restart
                 step_s = ts - prev_ts
             tps = finite(bn.get("tokens_per_s"))
             if tps is None and finite(bn.get("tokens")) and step_s:
@@ -645,6 +743,16 @@ class SftState:
         grace = max(0.0, wait - quorum) if wait is not None and quorum is not None else None
         return [ts, step, frag, merge, gnorm, rnd, quorum, grace, wait]
 
+    @staticmethod
+    def token_totals(rows: list[list]) -> dict:
+        """Tokens of one island's rows (one row per global iteration, the newest launch's record
+        where a resumed launch re-ran a step, so a re-run step counts once):
+        ``input`` = bench ``tokens`` (packed input tokens without padding, including context that
+        carries no loss), ``loss`` = yeto plugin ``target_tokens`` (tokens that carry the loss)."""
+        ti, tl = STEP_COLS.index("tokens"), STEP_COLS.index("target_tokens")
+        return {"input": sum(r[ti] for r in rows if r[ti] is not None),
+                "loss": sum(r[tl] for r in rows if r[tl] is not None)}
+
     def view(self, *, now: float, merges: list[dict], refs: dict) -> dict:
         islands = []
         for iid in sorted(self.islands, key=lambda i: (0, int(i)) if i.isdigit() else (1, i)):
@@ -661,9 +769,11 @@ class SftState:
                 status = "done"
             elif age is None:
                 status = "unknown"
-            else:
+            else:  # no new step for ~1.5 step times: stopped or restarting (grey, not counted as active)
                 expect = p50 or refs.get("sft_ref_step_s") or FALLBACK_STEP_S
-                status = "ok" if age < 2 * expect + 300 else ("warn" if age < 4 * expect + 600 else "stale")
+                stop = refs.get("sft_stop_factor", DEFAULT_REFS["sft_stop_factor"]) * expect \
+                    + refs.get("sft_stop_slack_s", DEFAULT_REFS["sft_stop_slack_s"])
+                status = "ok" if age <= stop else "stopped"
             # the plugin pushes from a background thread, so ``pushes_sent`` (pushes
             # finished inside the step) is almost always 0; a push step is one that
             # spent time exporting the fragment
@@ -678,7 +788,7 @@ class SftState:
                 "last_push": None if push is None else {"step": push[0], "ts": push[1], "export_s": push[10],
                                                          "sync_s": push[9]},
                 "last_apply": None if apply is None else {"step": apply[0], "ts": apply[1], "apply_s": apply[11]},
-                "rows": rows, "host": host})
+                "tokens": self.token_totals(rows), "rows": rows, "host": host})
         rej_origin = "log" if self.log_seen else "tape"
         events = [e for e in self.events
                   if e[1] not in ("rejected", "timeout") or e[3] == rej_origin]
@@ -695,6 +805,7 @@ class SftState:
                 eta = b[0] + (total - cur) * (b[0] - a[0]) / (b[1] - a[1])
         return {
             "now": now, "refs": dict(refs), "cols": list(STEP_COLS), "islands": islands,
+            "tokens": {k: sum(i["tokens"][k] for i in islands) for k in ("input", "loss")},
             "syncer": {"meta": dict(self.syncer_meta), "total_steps": total, "outer_step": cur, "eta_ts": eta,
                        "outer": outer[-5000:], "merges": merge_rows[-5000:], "merge_cols": list(MERGE_COLS), "rss": list(self.rss)[-5000:],
                        "events": events[-5000:], "log_seen": self.log_seen,

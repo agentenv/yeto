@@ -69,6 +69,14 @@ def test_converters():
     e = sft.from_syncer_log_line("2026-09-21T14:00:00.5Z  WARN yeto_syncer::server: quorum timed out learner_id=2")
     assert e["category"] == "timeout" and e["learner"] == 2 and e["time_unix"] > 0
     assert sft.from_syncer_log_line("2026-09-21T14:00:00Z  INFO x: wire bytes per learner") is None
+    # an INFO line that only names a deadline is not a timeout; a WARN stop timeout is, a timeout_s field is not
+    assert sft.from_syncer_log_line("2026-11-08T14:24:57.0Z  INFO yeto_syncer::server: quorum clock: the round's "
+                                    "timeout counts from when its islands can first push step=571 fragment=58") is None
+    e = sft.from_syncer_log_line("2026-11-08T12:36:00Z  WARN yeto_syncer::server: stop: quorum timeout, round abandoned")
+    assert e["category"] == "timeout"
+    e = sft.from_syncer_log_line("2026-11-08T12:16:28Z  WARN yeto_syncer::shutdown: stop requested: no new rounds "
+                                 'signal="SIGTERM" timeout_s=1200')
+    assert e["category"] == "warn"
     assert sft.from_cmdline("a --total-steps 960 --learners=2")["total_steps"] == 960
     assert sft.dataset_tag(["/d/split/island2_v2/shard-3/train"]) == "v2"
     assert sft.dataset_tag(["/d/split/island0/shard-3/train"]) == "v1"
@@ -127,8 +135,8 @@ def test_bench_restart_after_a_crash_maps_onto_the_resumed_steps():
         st.fold({"event": "sft_train_log", "island_id": "0", "step": s, "loss": float(s)}, None)
     for s in [*range(1, 8), *range(1, 5)]:
         st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s, "wall_s": 100.0 + s}, None)
-    bench, offsets = st._bench_by_step(st.islands["0"])
-    assert offsets == [0, 5] and sorted(bench) == list(range(1, 10))
+    bench = st._bench_by_step(st.islands["0"])
+    assert sorted(bench) == list(range(1, 10))
     assert bench[6]["wall_s"] == 101.0 and bench[9]["wall_s"] == 104.0  # launch 2's own records
     assert bench[5]["wall_s"] == 105.0  # launch 1's step 5 is kept
     rows = st.island_rows(st.islands["0"])
@@ -141,7 +149,7 @@ def test_bench_of_a_resumed_first_launch_starts_at_the_checkpoint():
         st.fold({"event": "sft_train_log", "island_id": "0", "step": s}, None)
     for s in (1, 2):
         st.fold({"event": "sft_bench", "island_id": "0", "seg_step": s}, None)
-    assert sorted(st._bench_by_step(st.islands["0"])[0]) == [16, 17]
+    assert sorted(st._bench_by_step(st.islands["0"])) == [16, 17]
 
 
 def test_health_of_a_resumed_launch_maps_onto_the_resumed_steps():
@@ -167,7 +175,7 @@ def test_references_are_not_drawn_unless_configured(tmp_path):
         pytest.skip("node not installed")
     r = Reducer(run="sft")
     load_all(r, [str(make_run(tmp_path / "run"))])
-    assert set(r.sft_view(T0)["refs"]) == {"sft_slow_factor"}
+    assert set(r.sft_view(T0)["refs"]) == {"sft_slow_factor", "sft_stop_factor", "sft_stop_slack_s"}  # no lines
     out = export_html(r, tmp_path / "s.html", generated_at=T0)
     page = json.loads(subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True,
                                      timeout=60).stdout)
@@ -616,3 +624,52 @@ def test_eval_tooltip_shows_step_loss_and_deltas():
     assert "vs ckpt100<b>\u0394 +0.0021 (per-sample +0.0011 \u00b1 0.0004)" in full
     assert "vs base<b>\u0394 -0.0814 (per-sample -0.0904 \u00b1 0.0015)" in full
     assert "step 5" in bare and "vs " not in bare and "n/a" not in bare
+
+
+def _token_state():
+    """Two islands. Island 0 logs steps 1..4, crashes and resumes from checkpoint-2 (steps 3..5
+    again, bench / plugin values differ per launch); island 1 runs steps 1..3 once."""
+    st = sft.SftState()
+    t = T0
+    for launch, steps in ((1, [1, 2, 3, 4]), (2, [3, 4, 5])):
+        for seg, s in enumerate(steps, start=1):
+            t += 10
+            st.fold({"event": "sft_train_log", "island_id": "0", "step": s, "loss": 1.0}, None)
+            st.fold({"event": "sft_sync_step", "island_id": "0", "step": s, "time_unix": t,
+                     "target_tokens": 100 * s if launch == 1 else 500 + s}, t)
+            st.fold({"event": "sft_bench", "island_id": "0", "seg_step": seg,
+                     "tokens": 1000 * s if launch == 1 else 10000 + seg, "wall_s": 10.0}, None)
+    for s in (1, 2, 3):
+        st.fold({"event": "sft_train_log", "island_id": "1", "step": s, "loss": 1.0}, None)
+        st.fold({"event": "sft_sync_step", "island_id": "1", "step": s, "time_unix": T0 + 10 * s,
+                 "target_tokens": 300}, T0 + 10 * s)
+        st.fold({"event": "sft_bench", "island_id": "1", "seg_step": s, "tokens": 2000, "wall_s": 10.0}, None)
+    return st
+
+
+def test_input_and_loss_token_totals_count_a_rerun_step_once():
+    v = _token_state().view(now=T0 + 100, merges=[], refs={})
+    by_id = {i["id"]: i["tokens"] for i in v["islands"]}
+    # island 0: launch 1's steps 1, 2, then launch 2's steps 3, 4, 5 (its re-run of 3, 4 replaces launch 1's)
+    assert by_id["0"] == {"input": 1000 + 2000 + 10001 + 10002 + 10003, "loss": 100 + 200 + 503 + 504 + 505}
+    assert by_id["1"] == {"input": 3 * 2000, "loss": 3 * 300}
+    assert v["tokens"] == {"input": 33006 + 6000, "loss": 1812 + 900}
+
+
+def test_input_and_loss_token_tiles(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    r = Reducer(run="sft")
+    st = _token_state()
+    r.sft = st
+    out = export_html(r, tmp_path / "s.html", generated_at=T0 + 100)
+    res = subprocess.run([node, "-e", SMOKE_SFT, str(out)], capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stderr
+    kpis = json.loads(res.stdout)["kpis"]
+    assert "Tokens trained" not in kpis
+    m = re.search(r'<div class="kc" title="([^"]+)"><div class="kt">Input tokens</div><div class="kv">([^<]+)<', kpis)
+    assert m and m.group(2) == "39.0k" and "padding excluded" in m.group(1) and "counts once" in m.group(1)
+    m = re.search(r'<div class="kc" title="([^"]+)"><div class="kt">Loss tokens</div><div class="kv">([^<]+)'
+                  r'</div><div class="ks">([^<]+)<', kpis)
+    assert m and m.group(2) == "2712" and "target_tokens" in m.group(1) and m.group(3).startswith("7.0% of input")

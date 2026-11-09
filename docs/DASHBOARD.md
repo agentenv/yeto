@@ -199,6 +199,19 @@ line) by default: `sft_ref_step_s` (the recipe's expected step time),
 (the syncer host's memory cap); `sft_slow_factor` (1.1) marks steps slower than
 the reference.
 
+A resumed launch re-runs the steps after its checkpoint: a step at or below the
+newest one supersedes everything from that step on, so each island has one row
+per iteration (the newest launch's). An island is `stopped` (greyed out, not
+counted as active) once no step arrived for `sft_stop_factor` (1.5) x its step
+time p50 + `sft_stop_slack_s` (300 s).
+
+Token tiles (whole run, all islands, one value per island iteration so a step
+re-run after a restart counts once): "Input tokens" sums the bench `tokens`
+(packed input tokens without padding, including context that carries no loss);
+"Loss tokens" sums the yeto plugin's `target_tokens` (the tokens the loss is
+computed on). The cost / efficiency tiles use the same two sums over the
+selected time range.
+
 Chart semantics worth knowing:
 
 - "Tokens / s" interpolates each island's bench `tokens_per_s` linearly onto

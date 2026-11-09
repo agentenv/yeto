@@ -824,7 +824,7 @@ class Reducer:
         if not self.sft.islands and not self.sft.sft_records:
             return None  # RL run (its syncer tape / syncer.log alone do not make an SFT run)
         refs = {k: self.thresholds.get(k, v) for k, v in sft_mod.DEFAULT_REFS.items()}
-        refs = {k: v for k, v in refs.items() if v > 0}  # unset references are not drawn
+        refs = {k: v for k, v in refs.items() if v > 0 or k not in sft_mod.REF_LINES}  # unset lines are not drawn
         return self.sft.view(now=now, merges=self.merges, refs=refs)
 
     def _feed_other(self, r: dict, iid: str | None, ts: float | None) -> None:
