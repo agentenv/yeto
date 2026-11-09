@@ -1,25 +1,27 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>yeto dashboard</title>
 <style>
 :root{
-  --bg:#F3EEE7;--panel:#FBF8F3;--ink:#2A221C;--ink2:#7A6B5E;--line:#E4DACD;--accent:#C8641E;
-  --good:#4F7A5A;--warn:#C9952A;--bad:#B2432F;
-  --R:#C47A2C;--T:#6A4FA0;--S:#A8998A;--P:#5E5248;--band:rgba(106,79,160,.14);--i0:#6A4FA0;--i1:#C47A2C;--i2:#1E8C6E;--i3:#8A7D70;
+  --bg:#111113;--panel:#19191c;--ink:#ececee;--ink2:#8e8f96;--line:#2a2a2f;--accent:#3b82f6;
+  --good:#22c55e;--warn:#eab308;--bad:#ef4444;
+  --R:#f97316;--T:#8b5cf6;--S:#6b7280;--P:#14b8a6;--band:rgba(139,92,246,.22);--i0:#3b82f6;--i1:#f97316;--i2:#14b8a6;--i3:#8b5cf6;
   --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
-  --sans:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
 }
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
-  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18);--i0:#9C82D4;--i1:#C98038;--i2:#3DA585;--i3:#9A8C7E}}
-:root[data-theme="dark"]{
-  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
-  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18);--i0:#9C82D4;--i1:#C98038;--i2:#3DA585;--i3:#9A8C7E}
+:root[data-theme="light"]{
+  --bg:#f6f6f7;--panel:#ffffff;--ink:#18181b;--ink2:#6b6b73;--line:#e3e3e7;--accent:#2563eb;
+  --good:#16a34a;--warn:#ca8a04;--bad:#dc2626;--band:rgba(139,92,246,.16)}
+:root[data-theme="dark"]{--bg:#111113;--panel:#19191c;--ink:#ececee;--ink2:#8e8f96;--line:#2a2a2f}
+@media (prefers-color-scheme:light){:root:not([data-theme]){
+  --bg:#f6f6f7;--panel:#ffffff;--ink:#18181b;--ink2:#6b6b73;--line:#e3e3e7;--accent:#2563eb;
+  --good:#16a34a;--warn:#ca8a04;--bad:#dc2626;--band:rgba(139,92,246,.16)}
+  :root:not([data-theme]) .seg button.on{background:#e7e7ea}}
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans)}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans)}
 .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 .app{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:100vh}
 nav{position:sticky;top:0;align-self:start;height:100vh;padding:20px 14px;border-right:1px solid var(--line)}
@@ -27,9 +29,9 @@ nav .brand{font-weight:700;color:var(--accent);margin-bottom:18px;letter-spacing
 nav a{display:block;padding:7px 10px;border-radius:8px;color:var(--ink2);text-decoration:none}
 nav a:hover,nav a.on{background:var(--panel);color:var(--ink)}
 nav .sub{font-size:12px;color:var(--ink2);margin-top:18px}
-main{padding:20px 24px 60px;max-width:1280px}
+main{padding:22px 20px 60px;width:100%;max-width:none;min-width:0}
 header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:16px}
-h1{font-size:20px;margin:0}
+h1{font-size:20px;margin:0;font-weight:600;letter-spacing:-.01em}
 h2{font-size:15px;margin:0 0 10px}
 .tag{display:inline-block;padding:1px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--ink2);margin-left:6px}
 .btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
@@ -37,7 +39,7 @@ h2{font-size:15px;margin:0 0 10px}
 .kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .kpi .k{font-size:12px;color:var(--ink2)}
-.kpi .v{font-size:22px;font-weight:600;font-family:var(--mono)}
+.kpi .v{font-size:20px;font-weight:600}
 .kpi .s{font-size:12px;color:var(--ink2)}
 .kpi.main{border-color:var(--accent)}
 .grid2{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:14px}
@@ -85,6 +87,51 @@ h3{font-size:13px;margin:14px 0 6px}
 .ucols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
 .ucols .rl{font-size:12px;font-weight:600;margin-bottom:2px}
 .alerts div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}
+
+/* ops metrics layout (sft.js) */
+body.sftmode .app{grid-template-columns:minmax(0,1fr)}body.sftmode nav,body.sftmode #layoutBtn{display:none}
+.hdr-r{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{border:0;background:transparent;color:var(--ink2);font:inherit;padding:3px 10px;border-radius:6px;cursor:pointer}
+.seg button.on{background:#2c2c31;color:var(--ink);font-weight:600}
+:root[data-theme="light"] .seg button.on{background:#e7e7ea}
+.btn.rl{background:#26262a;border-color:var(--line)}.btn[disabled]{opacity:.5;cursor:default}
+.tg{display:inline-block;margin-left:8px;padding:1px 8px;border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--ink2);vertical-align:3px;font-weight:400}
+.krow{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0 14px}
+.kc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 10px;min-width:0}
+.kc .kt{font-size:12px;color:var(--ink)}.kc .kv{font-size:19px;font-weight:600;margin:6px 0 4px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kc .ks{font-size:11px;color:var(--ink2);overflow-wrap:anywhere}.kc .dl{display:block;font-size:11px;color:var(--ink2);margin-top:6px}.dl.up::first-letter{color:var(--good)}
+.blk{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 6px;margin-bottom:14px;overflow-x:auto}
+.bh{display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:8px}.bh b{font-size:13px}.bh span{font-size:11px;color:var(--ink2)}
+table.nt{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+table.nt th{font-weight:500;color:var(--ink);text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.nt td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.nt tr:last-child td{border-bottom:0}table.nt th:first-child,table.nt td:first-child{text-align:left}
+.nn{display:flex;align-items:center;gap:6px;white-space:nowrap}.ns{font-size:11px;color:var(--ink2);margin-top:1px}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}.dot.g{background:var(--good)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}.dot.m{background:var(--ink2)}
+.sq{width:8px;height:8px;border-radius:2px;display:inline-block;flex:none}
+td.bar,th.bar{text-align:left!important;min-width:200px}.bl{font-size:11px;margin-bottom:3px}
+.bt{position:relative;height:5px;background:#3a3a40;border-radius:3px}.bf{height:5px;background:#facc15;border-radius:3px}.bf.over{background:var(--bad)}
+.bm{position:absolute;top:-2px;width:2px;height:9px;background:var(--ink)}
+.sh{margin:26px 0 12px;border-top:1px solid var(--line);padding-top:18px}.sh h2{font-size:15px;margin:0;font-weight:600}.sh .cs{margin-top:3px}
+.cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(max(330px,calc((100% - 56px) / 5)),1fr));gap:14px}
+.cc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px;min-width:0}
+.ct{font-size:12.5px;font-weight:600}.cs{font-size:11px;color:var(--ink2);margin:2px 0 8px}
+.cw{position:relative;overflow:hidden}.cc{overflow:hidden}svg.ch,svg.hs{display:block;width:100%;height:auto}
+svg.ch text,svg.hs text{fill:var(--ink2);font:9.5px var(--sans)}svg .gl{stroke:var(--line);stroke-width:.8}svg .cx{stroke:var(--ink2);stroke-dasharray:2 2}
+svg text.rt{fill:#c9cad0;font-size:9px}
+.lg{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--ink);margin:8px 0 2px}.lg i,.tt i,.dh i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+.tt{position:absolute;display:none;pointer-events:none;background:#202024;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;min-width:150px;z-index:4;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.tt .th{color:var(--ink2);margin-bottom:3px}.tt div{display:flex;align-items:center;gap:2px}.tt b{margin-left:auto;padding-left:10px;font-weight:500}
+.lg .nd{color:var(--ink2)}.empty{color:var(--ink2);font-size:12px;padding:28px 0;text-align:center}
+.dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(560px,1fr));gap:14px}
+.dc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 0 0;min-width:0}
+.dh{display:flex;justify-content:space-between;padding:0 12px;font-weight:600;font-size:12.5px}.dh .cs{font-weight:400;margin:0}
+.dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:10px 12px 4px}.dt{font-size:12px;margin-bottom:2px}
+table.qt{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+table.qt th{text-align:right;font-weight:500;padding:6px 12px;border-bottom:1px solid var(--line)}table.qt td{text-align:right;padding:5px 12px;border-top:1px solid var(--line)}
+table.qt td:first-child,table.qt th:first-child{text-align:left;color:var(--ink2)}table.qt tr.b td{font-weight:700}table.qt tr.m td{font-size:11px}
+@media (max-width:700px){.dgrid{grid-template-columns:1fr}.dg{grid-template-columns:1fr}.cg{grid-template-columns:1fr}main{padding:14px 16px}}
 </style>
 </head>
 <body>
@@ -98,9 +145,23 @@ h3{font-size:13px;margin:14px 0 6px}
 <main>
 <header id="overview">
   <div><h1 id="title">yeto dashboard</h1><div class="note" id="sub"></div></div>
-  <div><button class="btn" id="layoutBtn" title="Chosen from run_kind; click to view the other layout temporarily">Layout: auto</button>
+  <div class="hdr-r"><span id="rangeBox"></span><button class="btn" id="layoutBtn" title="Chosen from run_kind; click to view the other layout temporarily">Layout: auto</button>
   <button class="btn" id="themeBtn">Theme: system</button></div>
 </header>
+<div id="sftRoot" hidden>
+  <section class="krow" id="sKpis" aria-label="Key figures"></section>
+  <section class="blk"><div class="bh"><b>Islands now</b><span id="sNodesNote"></span></div><div id="sNodes"></div></section>
+  <div class="sh"><h2 id="sFleetH">Fleet</h2><div class="cs">per island and in total; points are training steps, syncer merges and collector samples</div></div>
+  <div class="cg" id="sFleet"></div>
+  <div class="sh"><h2 id="sDistH">Distribution</h2><div class="cs">share of steps per bin on a log axis; dashed lines p10 / p90 / p99, solid p50; the outer 0.2% tails are not drawn</div></div>
+  <div class="dgrid" id="sDist"></div>
+  <div class="sh"><h2 id="sCostH">Cost / efficiency</h2><div class="cs">card time = cards × step wall time; compared with the previous window of the same length</div></div>
+  <section class="krow" id="sCostK"></section>
+  <div class="cg" id="sCost"></div>
+  <div class="sh"><h2>Syncer events</h2><div class="cs">from syncer.log (or the syncer tape when no log is collected), newest first</div></div>
+  <section class="blk" id="sEvents"></section>
+</div>
+<div id="rlRoot">
 <section class="kpis" id="kpis" aria-label="Key figures"></section>
 <section class="panel alerts" id="alertBox" hidden></section>
 
@@ -146,8 +207,11 @@ h3{font-size:13px;margin:14px 0 6px}
 <section class="panel" id="cost"><h2>Cost (estimate, not billing data)</h2><div id="costBox"></div></section>
 <section class="panel" id="events"><h2>Event stream</h2><div class="ev" id="evs"></div></section>
 </div>
+<div class="sh"><h2 id="rlDistH">Distribution</h2><div class="cs">share of rounds per bin on a log axis; dashed lines p10 / p90 / p99, solid p50; the outer 0.2% tails are not drawn</div></div>
+<div class="dgrid" id="rlDist" style="margin-bottom:14px"></div>
 <section class="panel" id="cmds"><h2>Commands</h2><div id="cmdBox"></div></section>
 <section class="panel" id="unused"><h2>Panels not used in this run</h2><div id="foldBox"></div></section>
+</div>
 </main>
 </div>
 <!--YETO-DATA-->

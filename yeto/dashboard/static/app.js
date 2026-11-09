@@ -6,7 +6,7 @@
 var node=document.getElementById("yeto-data"),INLINE=null;
 if(node){try{INLINE=JSON.parse(node.textContent)}catch(e){INLINE=null}}
 var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG namespace id, not a request
-var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=0,pinned=false;
+var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
 var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
 var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","KL"],["grad_norm","grad_norm"],
@@ -28,9 +28,9 @@ function stBadge(s){var m={ok:["ok","healthy"],starting:["wn","starting"],stoppe
 
 /* theme + layout */
 var THEMES=["auto","light","dark"];
-try{var saved=localStorage.getItem("yeto-theme");if(saved)themeI=Math.max(0,THEMES.indexOf(saved))}catch(e){}
+try{var saved=localStorage.getItem("yeto-theme-v2");if(saved)themeI=Math.max(0,THEMES.indexOf(saved))}catch(e){}
 function applyTheme(){var t=THEMES[themeI];if(t==="auto")document.documentElement.removeAttribute("data-theme");else document.documentElement.setAttribute("data-theme",t);
-  $("themeBtn").textContent="Theme: "+{auto:"system",light:"light",dark:"dark"}[t];try{localStorage.setItem("yeto-theme",t)}catch(e){}}
+  $("themeBtn").textContent="Theme: "+{auto:"system",light:"light",dark:"dark"}[t];try{localStorage.setItem("yeto-theme-v2",t)}catch(e){}}
 $("themeBtn").onclick=function(){themeI=(themeI+1)%3;applyTheme()};applyTheme();
 $("layoutBtn").onclick=function(){layout=layout==="auto"?(O.run_kind==="single_island"?"multi_island":"single_island"):"auto";render()};
 
@@ -359,12 +359,19 @@ function render(){
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
   $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· island "+SEL:"";
   header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();spot();
+  if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
 }
+// the server runs newer page code than this tab (redeployed): reload once per build, else say so
+function stale(b){if(!b||typeof YETO_BUILD!=="string"||b===YETO_BUILD)return;var done=null;
+  try{done=sessionStorage.getItem("yeto-build-reload")}catch(e){}
+  if(done!==b){try{sessionStorage.setItem("yeto-build-reload",b)}catch(e){}location.reload();return}
+  var t=document.title;if(t.indexOf("[reload]")<0)document.title="[reload] "+t}
 function load(){
   if(OFFLINE){V=INLINE.page;EVENTS=(INLINE.events||{}).events||[];render();return}
-  Promise.all([fetch("/api/view",{cache:"no-store"}).then(function(r){return r.json()}),
+  Promise.all([fetch("/api/view",{cache:"no-store"}).then(function(r){stale(r.headers&&r.headers.get&&r.headers.get("X-Yeto-Build"));return r.json()}),
     fetch("/api/events?after="+EV_CURSOR+"&limit=1000",{cache:"no-store"}).then(function(r){return r.json()})]).then(function(x){
     V=x[0];EVENTS=EVENTS.concat(x[1].events||[]).slice(-3000);EV_CURSOR=x[1].cursor||EV_CURSOR;render()}).catch(function(e){$("sub").textContent="fetch failed: "+e})
 }
+if(typeof YetoExt!=="undefined")YetoExt.setReload(load);
 load();if(!OFFLINE)setInterval(load,POLL_MS);
 })();

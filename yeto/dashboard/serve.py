@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import export as export_mod
 from .reducer import Reducer
-from .sources import TapeSource, discover, operator_stops_near
+from .sources import TapeSource, discover, make_source, operator_stops_near
 
 LOOPBACK_NAMES = ("localhost",)
 
@@ -59,7 +59,7 @@ class DashboardState:
         for p in discover(self.paths):  # new island tapes appear mid-run
             key = str(p)
             if key not in self.sources:
-                self.sources[key] = TapeSource(p)
+                self.sources[key] = make_source(p)
         with self.lock:
             for src in self.sources.values():
                 n += src.pump(self.reducer)
@@ -87,9 +87,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, obj: Any, code: int = 200) -> None:
+    def _json(self, obj: Any, code: int = 200, extra: dict | None = None) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"),
-                   "application/json; charset=utf-8")
+                   "application/json; charset=utf-8", extra)
 
     def _not_allowed(self) -> None:
         self._send(405, b'{"error":"read-only dashboard: only GET is allowed"}',
@@ -108,7 +108,7 @@ class _Handler(BaseHTTPRequestHandler):
                 body = export_mod.render_page(None).encode("utf-8")
                 return self._send(200, body, "text/html; charset=utf-8")
             if path == "/api/view":  # everything the page draws (section 9)
-                return self._json(r.page_view(live=self.live))
+                return self._json(r.page_view(live=self.live), extra={"X-Yeto-Build": export_mod.build_id()})
             if path == "/api/overview":
                 return self._json(r.overview(live=self.live))
             if path.startswith("/api/islands/"):
