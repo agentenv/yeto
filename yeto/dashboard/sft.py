@@ -743,6 +743,16 @@ class SftState:
         grace = max(0.0, wait - quorum) if wait is not None and quorum is not None else None
         return [ts, step, frag, merge, gnorm, rnd, quorum, grace, wait]
 
+    @staticmethod
+    def token_totals(rows: list[list]) -> dict:
+        """Tokens of one island's rows (one row per global iteration, the newest launch's record
+        where a resumed launch re-ran a step, so a re-run step counts once):
+        ``input`` = bench ``tokens`` (packed input tokens without padding, including context that
+        carries no loss), ``loss`` = yeto plugin ``target_tokens`` (tokens that carry the loss)."""
+        ti, tl = STEP_COLS.index("tokens"), STEP_COLS.index("target_tokens")
+        return {"input": sum(r[ti] for r in rows if r[ti] is not None),
+                "loss": sum(r[tl] for r in rows if r[tl] is not None)}
+
     def view(self, *, now: float, merges: list[dict], refs: dict) -> dict:
         islands = []
         for iid in sorted(self.islands, key=lambda i: (0, int(i)) if i.isdigit() else (1, i)):
@@ -778,7 +788,7 @@ class SftState:
                 "last_push": None if push is None else {"step": push[0], "ts": push[1], "export_s": push[10],
                                                          "sync_s": push[9]},
                 "last_apply": None if apply is None else {"step": apply[0], "ts": apply[1], "apply_s": apply[11]},
-                "rows": rows, "host": host})
+                "tokens": self.token_totals(rows), "rows": rows, "host": host})
         rej_origin = "log" if self.log_seen else "tape"
         events = [e for e in self.events
                   if e[1] not in ("rejected", "timeout") or e[3] == rej_origin]
@@ -795,6 +805,7 @@ class SftState:
                 eta = b[0] + (total - cur) * (b[0] - a[0]) / (b[1] - a[1])
         return {
             "now": now, "refs": dict(refs), "cols": list(STEP_COLS), "islands": islands,
+            "tokens": {k: sum(i["tokens"][k] for i in islands) for k in ("input", "loss")},
             "syncer": {"meta": dict(self.syncer_meta), "total_steps": total, "outer_step": cur, "eta_ts": eta,
                        "outer": outer[-5000:], "merges": merge_rows[-5000:], "merge_cols": list(MERGE_COLS), "rss": list(self.rss)[-5000:],
                        "events": events[-5000:], "log_seen": self.log_seen,

@@ -245,18 +245,20 @@ function sft(S){
   var ev=(sy.events||[]),hr=ev.filter(function(e){return inRange(e[0],NOW-3600,NOW)}),cnt=function(c){return hr.filter(function(e){return e[1]===c}).length};
   var rss=(sy.rss||[]),rl=rss.length?rss[rss.length-1]:null,cap=refs.sft_syncer_rss_limit_bytes;
   var losses=isls.map(function(I){var r=lastWith(I,C("loss"));return r&&fin(r[C("loss")])?I.name.replace("island ","")+" "+r[C("loss")].toFixed(4):null}).filter(Boolean);
-  // tokens trained: every island's per-step tokens, one row per step (a resumed island re-runs steps; the newest row wins)
-  var stepTok=function(I,c){var m={};I.rows.forEach(function(r){if(fin(r[c]))m[r[0]]=r[c]});return sum(Object.keys(m).map(function(s){return m[s]}))||0};
-  var totTok=sum(isls.map(function(I){return stepTok(I,C("tokens"))}))||0,totTgt=sum(isls.map(function(I){return stepTok(I,C("target_tokens"))}))||0;
+  // run totals from the reducer (S.tokens): one row per island iteration, a step re-run after a restart counts once
+  var TK=S.tokens||{},totTok=fin(TK.input)?TK.input:0,totTgt=fin(TK.loss)?TK.loss:0;
+  var TIP_IN="Sum over all islands of each step's packed input tokens (bench tokens, padding excluded), including context tokens that carry no loss. One value per island iteration: a step re-run after a restart counts once.";
+  var TIP_LOSS="Sum over all islands of each step's loss-bearing tokens (yeto plugin target_tokens). One value per island iteration: a step re-run after a restart counts once.";
   var kp=[["Islands active / total",active.length+" / "+isls.length,isls.map(function(I){return I.name+" "+statusText(I.status)}).join(" · ")],
-    ["Tokens trained",k(totTok),totTgt?k(totTgt)+" loss tokens ("+(100*totTgt/totTok).toFixed(1)+"%) · all islands":"all islands"],
+    ["Input tokens",k(totTok),"packed, no padding · whole run, all islands",TIP_IN],
+    ["Loss tokens",k(totTgt),(totTok&&totTgt?(100*totTgt/totTok).toFixed(1)+"% of input · ":"")+"whole run, all islands",TIP_LOSS],
     ["Fleet tokens / s",k(tps),mfu.length?"MFU "+(sum(mfu)/mfu.length).toFixed(1)+"% (6N), last step":"no bench data"],
     [(fast?fast.name:"Island")+" step p50",dur(fp50),fin(fp50)&&fin(ref)?((fp50/ref-1)*100>=0?"+":"")+((fp50/ref-1)*100).toFixed(1)+"% vs reference "+ref.toFixed(0)+" s · "+fs.length+" steps":fs.length+" steps"],
     ["Latest loss",lastWith(fast,C("loss"))?k(lastWith(fast,C("loss"))[C("loss")],4):"n/a",losses.join(" · ")||"no data"],
     ["Syncer outer step",(sy.outer_step==null?"0":sy.outer_step)+" / "+(sy.total_steps==null?"n/a":sy.total_steps),sy.eta_ts?"ETA final cut "+day(sy.eta_ts):(sy.outer_step==null?"waiting for the first outer step":"ETA n/a")],
     ["Rejected / timeout / not carried",cnt("rejected")+" / "+cnt("timeout")+" / "+cnt("not_carried"),"last hour, from "+(sy.log_seen?"syncer.log":"the syncer tape")],
     ["Syncer RSS",rl?bytes(rl[1]):"n/a",rl?(fin(cap)?(100*rl[1]/cap).toFixed(0)+"% of the "+bytes(cap)+" cap · ":"")+"sampled "+ago(rl[0]):"not sampled"]];
-  $("sKpis").innerHTML=kp.map(function(x){return '<div class="kc"><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
+  $("sKpis").innerHTML=kp.map(function(x){return '<div class="kc"'+(x[3]?' title="'+esc(x[3])+'"':'')+'><div class="kt">'+esc(x[0])+'</div><div class="kv">'+esc(x[1])+'</div><div class="ks">'+esc(x[2])+'</div></div>'}).join("");
   // islands now
   var hbmLim=refs.sft_hbm_limit_gib,hasLim=fin(hbmLim),hbmMax=Math.max(64,hasLim?hbmLim*1.15:0); // no limit configured: no limit marker
   $("sNodesNote").textContent="last step "+ago(Math.max.apply(null,isls.map(function(I){return I.last_ts||0}).concat([0])))+" · syncer outer step "+(sy.outer_step==null?"none yet":sy.outer_step);
@@ -320,7 +322,7 @@ function sft(S){
     return '<span class="dl '+(d>=0?"up":"dn")+'">'+(d>=0?"&uarr; +":"&darr; ")+esc(fmt(d))+' · '+(p>=0?"+":"")+p.toFixed(0)+'% vs previous '+rangeLabel()+'</span>'}
   var etas=isls.map(function(I){var r=last(I),R=I.rows.slice(-20).map(function(x){return x[C("step_s")]}).filter(fin).sort(function(a,b){return a-b}),p=pctl(R,0.5);
     return r&&I.steps_total&&fin(p)&&fin(I.last_ts)?I.last_ts+(I.steps_total-r[0])*p:null}).filter(fin),eta=etas.length?Math.max.apply(null,etas):null;
-  var ck=[["Tokens trained",k(A.tok),"bench tokens, all islands",delta(A.tok,B.tok,k)],["Target tokens",k(A.tgt),"loss-bearing tokens (yeto plugin)",delta(A.tgt,B.tgt,k)],
+  var ck=[["Input tokens",k(A.tok),"packed, no padding, all islands",delta(A.tok,B.tok,k)],["Loss tokens",k(A.tgt),"loss-bearing (target_tokens), all islands",delta(A.tgt,B.tgt,k)],
     ["Card-hours",k(A.ch,1),"cards × step wall time",delta(A.ch,B.ch,function(v){return k(v,1)})],["Tokens / card·s",k(A.tpc),"tokens ÷ card-seconds",delta(A.tpc,B.tpc,k)],
     ["MFU (6N)",fin(A.mfu)?A.mfu.toFixed(1)+"%":"n/a","step-time weighted",delta(A.mfu,B.mfu,function(v){return v.toFixed(2)+" pt"})],
     ["Sync overhead",fin(A.share)?(100*A.share).toFixed(2)+"%":"n/a","sync_s ÷ step time",delta(A.share,B.share,function(v){return (100*v).toFixed(2)+" pt"})],
