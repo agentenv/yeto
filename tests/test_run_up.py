@@ -321,3 +321,15 @@ def test_a_trainer_restart_sets_the_earlier_ledger_aside(make_run, monkeypatch):
     run.calls = []
     run.preflight()  # the dry run checks the argv the restart uses
     assert any("--rl-ledger-set-aside-before" in argv for argv in run.calls)
+
+
+def test_preflight_refuses_a_zero_budget_with_prices_set(make_run, monkeypatch):
+    """The guide's template has budget.usd 0; a customer who fills in the prices and
+    keeps it would see the trainer stopped at the first estimated dollar."""
+    monkeypatch.setattr(launch_preflight, "modal_sdk_problem", lambda env: None)
+    run = make_run(usd=0)
+    assert run.preflight() is False and run.calls == []
+    run = make_run(usd=0, nc_usd_per_h=0)
+    run.cfg["trainer"]["usd_per_h"] = 0  # the template as is: nothing priced, nothing to cap
+    assert run.preflight() is True
+    assert make_run(usd=450).preflight() is True

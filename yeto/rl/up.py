@@ -161,6 +161,11 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
+        problem = self.budget_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         if self.stall_timeout_s() <= 0:
             _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
                  "(the monitor's silence backstop is 4x this timeout)")
@@ -348,6 +353,16 @@ class Run:
             self.state["breaker"] = {"at": _now(), "why": why}
             self.save()
         return why
+
+    def budget_problem(self) -> str | None:
+        """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
+        template value) with a price set, so the first estimated dollar is a breach."""
+        b = self.cfg.get("budget") or {}
+        priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
+        if "usd" in b and float(b["usd"]) <= 0 and priced:
+            return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
+                    "the first estimated dollar would stop the run; set the spend cap")
+        return None
 
     def stall_timeout_s(self) -> float:
         """The trainer's ``--rl-stall-timeout`` (seconds; the launcher's default when unset)."""
