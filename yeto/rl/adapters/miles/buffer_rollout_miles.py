@@ -251,6 +251,7 @@ class _BufferRound:
         # (short groups, pruned groups) is filled with loss-free padding groups
         missing = max(0, self.groups * self.samples_per_group - sum(len(group) for group in samples))
         report.padded_samples = missing
+        report.padded_fraction = missing / max(1, self.groups * self.samples_per_group)
         record_round_metadata(self.args, int(input.rollout_id),
                               buffer_stale_groups=int(report.stale_groups) + pruned,
                               buffer_incomplete_groups=int(getattr(report, "incomplete_groups", 0)),

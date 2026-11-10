@@ -544,6 +544,8 @@ def test_reader_round_pads_a_short_round_to_exactly_the_global_batch(monkeypatch
     assert samples[1][0]["group_index"] == 1 and samples[2][0]["remove_sample"]
     assert samples[2][0]["loss_mask"] == [0, 0, 0]
     assert out["metrics"]["sample_buffer/padded_samples"] == 1.0
+    # F2: the real samples' gradient shrinks by this fraction (documented, not rescaled)
+    assert out["metrics"]["sample_buffer/padded_fraction"] == 1 / 8
 
 
 def test_engine_sampler_sample_gets_one_miles_version_span():

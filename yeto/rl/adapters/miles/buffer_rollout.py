@@ -480,6 +480,9 @@ class TakeReport:
     # rest is filled with padding samples (loss mask 0, a group of their own)
     carried_over_groups: int = 0
     padded_samples: int = 0
+    # padded_samples over the round's global batch: Miles divides the round's loss by the
+    # full batch, so the real samples' gradient shrinks by this fraction (not rescaled)
+    padded_fraction: float = 0.0
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -495,7 +498,8 @@ class TakeReport:
                 "sample_buffer/incomplete_groups": float(self.incomplete_groups),
                 "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
                 "sample_buffer/carried_over_groups": float(self.carried_over_groups),
-                "sample_buffer/padded_samples": float(self.padded_samples)}
+                "sample_buffer/padded_samples": float(self.padded_samples),
+                "sample_buffer/padded_fraction": float(self.padded_fraction)}
 
 
 MIN_GROUP_SAMPLES = 2  # fewer: no in-group spread, no group-relative advantage

@@ -1090,6 +1090,21 @@ publishes policy releases to separate rollout islands.
   engine sampler island restarts as a trainer process. Unlike the pool,
   `--tuning full` is accepted on convertible nodes and on synced K3.1
   trainers (`--rl-model-recipe kimi_k31`), which release whole checkpoints.
+- **Short rounds and padding** (buffer reader): Miles trains exactly
+  `rollout_batch_size x n_samples_per_prompt` samples. A round the buffer
+  cannot fill with whole groups (short groups, groups dropped as too small,
+  a group carried over to the next take) is topped up with padding samples:
+  copies of the round's shortest real sample with `loss_mask` 0,
+  `remove_sample` set and `metadata.yeto_padding`, each in a one-sample group
+  of its own (advantage 0). They add no loss term, but Miles still divides
+  the round's loss by the full global batch, so **the real samples' gradient
+  shrinks by the padded fraction** (a round 25% padded trains its real
+  samples with 0.75 of their gradient). yeto does not rescale it. Watch
+  `sample_buffer/padded_fraction` (and `sample_buffer/padded_samples`) on the
+  trainer's metrics: a fraction that stays high means the samplers do not
+  keep up (raise the sampler count or `max_policy_age`) and the effective
+  learning rate is lower by that factor. The rollout metrics
+  (`rollout/*`) leave padding samples out.
 
 Spot rollout islands on Nebius have four operator tools in
 `yeto/rl/spot/` (each with `--help`):
