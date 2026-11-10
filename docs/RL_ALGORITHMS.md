@@ -486,10 +486,9 @@ fork.
 SAO math, the tied-embedding critic value head and `--critic-updates-per-step`
 exist only in a fork branch. `yeto/rl/algos/critic_fork.py` pins it as
 `CRITIC_FORK_PIN` (`FORK_COMMITS`) and the spec-level `*_not_at_pin`
-rejections check it. The island image does not carry these flags; they reach
-the island only through the setup-time overlay (`--rl-miles-overlay auto`,
-patches in `yeto/rl/adapters/miles/overlays/`, see "Clouds, controller and
-images" in [MILES_RL.md](MILES_RL.md#clouds-controller-and-images)).
+rejections check it. The island image does not carry these flags, and no
+setup-time source overlay exists any more: these algorithms run only once the
+critic fork is part of the pinned Miles lineage.
 
 ### Spec fields and defaults
 

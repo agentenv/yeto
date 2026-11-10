@@ -82,6 +82,208 @@ from Modal's cluster info. Facts to keep in mind:
 - Manual join: launch with `--external-learners 1`, then
   `python -m yeto.modal_runner --learner-id N --num-learners M --syncer-addr H:P --run-script <file> ...`.
 
+## Default container images
+
+RL islands and engine samplers run digest-pinned images (`yeto-miles-k31`,
+`yeto-miles-ports`, `yeto-sampler-k31`) from `ghcr.io/agentenv` by default.
+The digest is fixed in the code; only the registry prefix is configurable:
+
+```bash
+export YETO_IMAGE_REGISTRY=<registry>/<org>   # a mirror holding the same digests
+```
+
+| Image | Used by |
+|---|---|
+| `yeto-miles-k31@sha256:63ad0d2a…` | RL trainer default (Kimi-K3.1 LoRA and other recipes) |
+| `yeto-miles-k31@sha256:2de5d796…` | Kimi-K3.1 `--tuning full` trainer default |
+| `vllm-openai-rocm@sha256:5f47cc10…` | Kimi-K3.1 A-card vLLM sampler |
+
+`--rl-image docker:<repository>@sha256:<digest>` replaces the image of one
+run, and a sampler spec's `image` replaces the sampler's.
+
+**The packages are private for now.** Pulls need a registry token with
+`read:packages` on the organization:
+
+```bash
+export SKYPILOT_DOCKER_SERVER=ghcr.io          # or your mirror's host
+export SKYPILOT_DOCKER_USERNAME=<github-user>
+export SKYPILOT_DOCKER_PASSWORD=<token-with-read:packages>
+yeto launch ... --rl-image-private             # forward the login to the islands
+```
+
+The same variables (or a `ghcr.io` entry in `~/.docker/config.json`) serve SkyPilot
+VMs and Modal islands (yeto passes them to Modal as a registry secret). An A-card
+sampler node pulls with `docker login <registry>` using the same token before
+`docker pull`. Without credentials the pull fails with an authorization error.
+
+## Modal B300 clusters (Kimi K3.1 trainer)
+
+A K3.1 trainer island is a Modal clustered function on whole B300 nodes,
+`--gpu modal:6x8xb300` (`MODAL_GPUS["B300"]`, 8 per container like the other
+whole-node types). Facts to keep in mind:
+
+- The decorator is `modal.clustered(size=N, rdma=True)` (Modal Clusters GA);
+  a client that only has `modal.experimental.clustered` is used through the
+  same path (`modal_runner.clustered_decorator`). Modal sets the NCCL
+  interface variables for RDMA itself; yeto exports `NCCL_IB_DISABLE=0` and
+  nothing about `NCCL_IB_HCA` / `NCCL_SOCKET_IFNAME`.
+- Every Modal island gets `NCCL_RAS_ENABLE=0` (`MODAL_ISLAND_DEFAULT_ENVS`):
+  NCCL 2.30's RAS thread crashes the process after the first engine memory
+  release. `--modal-env KEY=VALUE` overrides any default; VM-passthrough hosts
+  need `--modal-env NCCL_NVLS_ENABLE=0`.
+- A preempted or failed container restarts the whole cluster. With a
+  `modal-volume://` or `s3://` checkpoint store the re-run is a resume from
+  the store's `LATEST` (`storage.resumes_in_new_container`), not a failure.
+- Image: `docker/miles-k31/` (one overlay on `radixark/miles:kimi-k31`, CUDA
+  13.0.3, NCCL 2.30.7). Modal's GPU page says "B300 requires CUDA 13.1+"
+  while the image toolkit is 13.0.3; the Modal host driver (610.x, CUDA 13.3)
+  runs 13.x runtimes. Whether the 13.0.3 toolkit satisfies the B300 JIT paths
+  (flashinfer, deep_gemm, triton) is open until the first smoke test on two
+  `B300:8` containers; the fallback is a 13.1 toolchain layer with
+  `CUDA_HOME` pointed at it. The same test decides IB verbs vs EFA hosts
+  (`experimental_options={"efa_disabled": True}` forces IB).
+- Shape planning (`yeto shape`) does not price B300 on Modal: the price table
+  (`MODAL_GPU_USD_PER_SECOND`) has no entry and none is guessed; `yeto launch
+  --gpu modal:...xb300` works.
+
+## S3-compatible stores (Cloudflare R2) on Modal
+
+A Modal island takes an `s3://BUCKET[/PREFIX]` `--rl-checkpoint-store`. Modal
+mounts no bucket, so every node keeps a local stage of the store and moves
+the whole store by object (`yeto.cloud.s3_store`, `STAGE_ENV`): round cuts,
+`LATEST`, the sample buffer, policy releases and trainer commands. The head
+(trainer scheduler, convertible pool) reads the same store by object key.
+
+- Endpoint: `--rl-object-store-endpoint https://<account>.r2.cloudflarestorage.com`
+  (or `AWS_ENDPOINT_URL` in the launcher environment). The region becomes
+  `auto` unless one is configured; the launcher exports the endpoint to its
+  own environment too so every launcher-side boto3 client (head object API,
+  code pack store) talks to the same endpoint.
+- A standard AWS setup works as is. The endpoint is, in order:
+  `YETO_RL_STORE_S3_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL`,
+  then `endpoint_url` of the store's AWS profile (top level or in its `s3`
+  section). The region is `YETO_RL_STORE_S3_REGION`, `AWS_REGION` /
+  `AWS_DEFAULT_REGION`, the profile's `region`, else `auto` for an R2 endpoint.
+  The profile is `YETO_RL_STORE_S3_PROFILE`, else `AWS_PROFILE`; `yeto launch
+  --rl-object-store-profile NAME` sets it for a launch. The head reads with the
+  profile, and without `--modal-store-secret` its key, endpoint and region are
+  shipped to the islands (an island has no profile to read). A profile for R2:
+
+  ```ini
+  # ~/.aws/config
+  [profile my-r2]
+  region = auto
+  endpoint_url = https://<account>.r2.cloudflarestorage.com
+  ```
+
+  with the key pair under `[my-r2]` in `~/.aws/credentials`. Store CLIs
+  (`python -m yeto.rl.engine.store_dispense status`) take `--endpoint-url` and
+  `--profile`. A credential or endpoint error names what to set: for example,
+  an R2 key sent to AWS S3 because no endpoint was set reports
+  `AWS S3 (no endpoint set) refused the credentials (InvalidAccessKeyId)` and
+  the endpoint variables.
+- Credentials: `--modal-store-secret NAME` attaches a Modal Secret holding
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optionally
+  `AWS_ENDPOINT_URL`, `AWS_REGION`) to the island function; the island reads
+  that pair because the launch says so (`YETO_RL_STORE_S3_CREDENTIALS=aws-env`).
+  Create it once:
+  `modal secret create NAME AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret> AWS_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com AWS_REGION=auto`
+  (an R2 API token with Object Read & Write on the bucket).
+  Without the flag the launcher's store credential (`YETO_RL_STORE_S3_*`) is
+  shipped as on sky. The launcher's own `AWS_*` variables are never a store
+  credential, and no island uses the default credential chain.
+- Uploads: a file larger than one part (`YETO_RL_STORE_PART_MB`, default 64)
+  goes as a resumable multipart upload. The UploadId and acknowledged parts
+  are journaled next to the source (`<file>.upload.tmp`); a failed try
+  continues from the parts already stored, up to `YETO_RL_STORE_UPLOAD_ATTEMPTS`
+  tries (default 3), and a later push or a restarted rank continues it too.
+- Part checksums, `YETO_RL_STORE_PART_CHECKSUM` (forwarded to every island):
+  `1` sends a SHA-256 with every part and checks the store's composite
+  checksum after the upload; `0` sends none; `auto` (the default) sends them
+  except to a Cloudflare R2 endpoint (`*.r2.cloudflarestorage.com`), which
+  answers `NotImplemented` to a checksummed `UploadPart`. Any other endpoint
+  that answers `NotImplemented` turns checksums off for that store with one
+  warning per process (`does not take SHA-256 part checksums`) and the file
+  is uploaded again without them; set `0` for such an endpoint to skip the
+  probe. Without part checksums a cut is still checked by size and by the
+  manifest's SHA-256 when it is read.
+- Account ids, bucket names and endpoints live in the launch flags, the
+  environment or the Secret, never in the code.
+- Open until a run: the per-node stage of a multi-node trainer (each node
+  pushes its own shards and pulls every subtree it does not have) and the
+  store throughput from Modal to R2.
+
+## National Compute sampler nodes (MI355X, ROCm)
+
+An account holds one 8-card node at a time. A lease is granted for up to 4
+hours and cannot be renewed. Nodes can be preempted, and the local disk is
+destroyed at release. The rollout side of a K3.1 run is therefore a set of
+short-lived sampler islands over the object store.
+
+> **Billing warning.** A lease does **not** end on its own at `lease_until`.
+> When `lease_until` passes, the ticket stays `active` and **keeps billing**
+> until it is deleted. Each node must be released explicitly:
+>
+> - `python -m yeto.launch.nc pool-stop --config <pool.json>` releases every
+>   node of a pool;
+> - `python -m yeto.launch.nc down --account <account> --ticket <ticket>`
+>   releases a single node.
+>
+> The pool does this for you only while its control loop runs. A lease recorded
+> in a run's resource ledger is also shown by `yeto cost --run RUN`, deleted by
+> `yeto cleanup --run RUN` / `yeto down RUN`, and deleted by the cost guard 5
+> minutes after its `lease_until` ([COST_GUARD.md](COST_GUARD.md)).
+
+**Recommended path:** the vLLM sampler pool, `python -m yeto.launch.nc pool`.
+It orders the nodes, starts and replaces the samplers, and releases the nodes
+before their leases end. The pool config, `--dry-run`, `pool-status`,
+`pool-stop` and the control-host requirement are covered in
+[NC_POOL.md](NC_POOL.md). The task dispenser that its samplers share is
+covered in [DISPENSER.md](DISPENSER.md).
+
+**Legacy path (manual SGLang node scripts).** `scripts/sampler_node/` holds
+scripts that set up one node by hand with the SGLang server. Each value is a
+parameter; no site, account or model name is written in them. Nothing
+releases a node set up this way except `down` (see the billing warning
+above). The scripts:
+
+- `nc_lease.sh --account N` polls `nc-query status` until the ticket is
+  active, writes `node.json` (ip, user, host key, lease_until, rate) and pins
+  the host key.
+- `bootstrap.sh --image IMAGE --model MODEL` reports the host (a node without
+  `amd-smi` or `rocm-smi` is refused: the launcher cannot check its cards),
+  makes the NVMe directories, pulls the SGLang ROCm image and fetches the
+  base model (HF repo, HF bucket, or `--peer user@host:/path` from a node
+  that has it) in the background. With `--release-store DIR --release-prefix
+  RUN [--release-peers host:port,...] [--serve-port P]` it also starts the
+  policy release puller (`python -m yeto.rl.spot.s3_delivery pull-loop`):
+  releases come from the peer nodes first (near-region fan-out,
+  `yeto.rl.spot.peer_fanout`) and from the store only when no peer has them,
+  and the node serves its own placed releases on `--serve-port`. The bucket,
+  endpoint and credentials come from `--r2-env-file` (mode 0600; rclone takes
+  the endpoint through `RCLONE_S3_ENDPOINT`).
+- `run_sglang.sh --image IMAGE --model-dir DIR --tp 8` starts the server in
+  docker with the K3.1 contract on: `--enable-return-routed-experts`,
+  `--enable-fp32-lm-head`, `--attn-dp-size TP`, `--moe-a2a-backend deepep`
+  (each a parameter), and the ROCm environment
+  `ROCM_QUICK_REDUCE_QUANTIZATION=NONE SGLANG_ROCM_RUNTIME_RESERVE_GB=10
+  AITER_SITUV2_A8W4=1 HSA_NO_SCRATCH_RECLAIM=1` (no `MX_PATCH`); the store env
+  file goes in as the container environment and must be mode 0600.
+- `run_engine_sampler.sh --spec SPEC.json` starts
+  `python -m yeto.rl.engine.engine_sampler` with the spec; the store
+  credentials come from `--r2-env-file`; the interpreter must import
+  `safetensors` and `boto3` (`--pip-install` adds them).
+
+Launcher side, an MI355X node of an SSH inventory is a `rocm` device-family
+node (`yeto/gpu_spec.py`): the card preflight runs `amd-smi static --json`,
+then `rocm-smi --showproductname --showmeminfo vram --json`, and compares the
+cards, count and HBM (288 GiB) with the inventory (`yeto/hw/card_tools.py`).
+The JSON shapes follow the ROCm documentation and are confirmed on the first
+lease. `scripts/prune_layers.py` cuts the first N layers of a checkpoint
+(K3.1: `--layers 4` keeps the dense layer, two KDA layers and the first
+MLA/DSA layer with all 896 experts, 7 of 96 shards) for CPU and single-node
+checks.
+
 ## Verified on real machines
 
 Verification results decide runtime behaviour: the planner only plans RL
@@ -96,7 +298,7 @@ for multi-node islands only on `RDMA_CLOUDS` (all in
 | RunPod | yes | yes | not verified | single node |
 | Nebius | yes | not verified | not verified (the S3-compatible store needs `aws configure --profile nebius`) | not verified (InfiniBand expected on 8-GPU SXM) |
 | Verda | not verified | not verified | not available in sky | single node |
-| Modal | yes | yes (8xH100, single container) | not verified (Modal Volume) | not verified (RoCE, whole nodes) |
+| Modal | yes | yes (8xH100, single container) | not verified (Modal Volume); `s3://` (R2) wired, not verified | not verified (RoCE, whole nodes; B300 clusters wired, not verified) |
 
 A mixed fleet (learner islands on Nebius and Modal, syncer head on AWS) and a
 manual Modal join next to a Nebius island have also run to completion, with

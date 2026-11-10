@@ -121,10 +121,19 @@ resources):
 
 ```bash
 yeto launch --training-mode rl --gpu aws:8xa100@us-east-1,aws:8xa100@us-west-2 \
-  --model org/model --data org/prompts \
-  --reward-function project.rewards:score \
+  --model Qwen/Qwen3-1.7B --model-revision 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e \
+  --data HuggingFaceH4/MATH-500 --data-revision 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be \
+  --rl-prompt-column problem --rl-label-column answer \
+  --reward-function yeto.rl.math_reward:reward_func --trust-remote-code \
+  --tuning lora --lora-targets attention --inner-lr 1e-5 \
   --rollout-batch-size 16 --n-samples-per-prompt 4 --total-steps 8
 ```
+
+RL needs immutable inputs: pass the 40-character Hub commits with
+`--model-revision` / `--data-revision`. `--reward-function` takes a built-in
+reward (`yeto.rl.*`, listed in [examples/README.md](examples/README.md)), any
+`package.module:function` importable from the repository root or the
+environment, or a `path/to/file.py:function` inside the repository.
 
 The `--gpu` grammar, data formats, `--output`, QLoRA, resume/branch and every
 flag are described in [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
@@ -161,6 +170,8 @@ learners directly; see
 | [MILES_RL.md](docs/MILES_RL.md) | Miles RL: rollout/training boundaries, recovery, export, all RL flags |
 | [RL_ALGORITHMS.md](docs/RL_ALGORITHMS.md) | RL algorithm specs |
 | [CLOUDS.md](docs/CLOUDS.md) | per-cloud credentials, regions, planner signals, Modal islands |
+| [NC_POOL.md](docs/NC_POOL.md) | National Compute sampler pool: config, dry run, status, stop, billing |
+| [DISPENSER.md](docs/DISPENSER.md) | task dispenser over a shared bucket (store dispenser) |
 | [ASCEND.md](docs/ASCEND.md) | Ascend NPU islands and a pure-Ascend fleet |
 | [MEGATRON.md](docs/MEGATRON.md) | Megatron-Core island backend for large MoE |
 | [MLX.md](docs/MLX.md) | Apple-silicon islands |

@@ -432,12 +432,21 @@ store-coupled pair or a convertible pool (no syncer), and `--rl-data-passes`.
   `/opt/yeto/image-manifest.json` records every SHA. `--rl-image` overrides
   the image; a private one takes its login from `SKYPILOT_DOCKER_*` or
   `--rl-image-private`.
-- **Fork overlay.** Some critic-family Miles flags are not in the pinned image
-  commit. With `--rl-miles-overlay auto` (default) the island setup applies a
-  sha256-checked patch from `yeto/rl/adapters/miles/overlays/` over the
-  image's Miles checkout, only when the algorithm spec uses a fork-only flag;
-  `critic-c357` forces it, `off` never applies it. The run manifest then
-  records the overlay sha256.
+- **Sampler-side SGLang pin (separate).** The engine sampler
+  (`yeto.rl.engine.engine_sampler` with the `sglang-server` adapter) drives a
+  stand-alone SGLang HTTP server and only needs its public RL surface, so it
+  follows upstream `sgl-project/sglang` main, not the Miles fork:
+  `SGLANG_SAMPLER_UPSTREAM_COMMIT` / `SGLANG_SAMPLER_BASE_IMAGE_CUDA` (the
+  `lmsysorg/sglang` nightly the yeto sampler image `SGLANG_SAMPLER_IMAGE_CUDA`
+  is built on), `SGLANG_SAMPLER_IMAGE_ROCM` (the upstream MI35x dev image of
+  PR #48427; yeto is pip-installed on the node). The adapter records the
+  server's `SGLANG_BUILD_COMMIT` in `server_info` and whether it matches the
+  pin (`sglang_pin_match`; a mismatch is recorded, not refused). Moving the
+  sampler pin never moves `SGLANG_K31_COMMIT` (the Miles rollout worker's
+  SGLang) and vice versa.
+- **No source overlay.** The island runs exactly the image's pinned Miles
+  checkout; critic-family flags that only a fork branch carries are refused
+  by their spec-level `*_not_at_pin` rejections until that fork is in the pin.
 
 ### Variance-aware GRPO sampling
 
@@ -877,7 +886,7 @@ the adapter declares it) and accepted with them.
 {"schema": "yeto-rl-algorithm-spec-v2",
  "correction": {"method": "custom", "tis_clip_low": 0.5, "tis_clip": 5.0,
    "mismatch_metrics": true,
-   "function": {"path": "miles.backends.training_utils.loss_hub.corrections.icepop_function",
+   "function": {"path": "miles.backends.training_utils.loss.hub.corrections.icepop_function",
                 "sha256": "971ccb0bf00b43b0582839c5b8dc05e91162c878ab7ec0ca878e3b1e668f5318"}}}
 ```
 
@@ -900,7 +909,7 @@ the adapter declares it) and accepted with them.
  "correction": {"method": "custom", "mis_level": "geometric", "mis_mode": "mask",
    "mis_lower_bound": 0.9999, "mis_upper_bound": 1.0001,
    "function": {"path": "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp",
-                "sha256": "5c1dce0763f645f7491140e45c6c2b47774364f81ecd7c724cc71560424fefb4"}}}
+                "sha256": "5f0fc101735dbe49e2c20e0758f9746b64535c7511fa234e789966c1f8bcbf93"}}}
 ```
 
 ## Flash-Next (Qwen3.8-Flash-Next) path
@@ -1010,6 +1019,33 @@ budget (`scripts/benchmark_rl.py --arms single,federated,decoupled` runs
 both). Held-out reward and pass@k must not regress beyond seed noise, and the
 invariants in the [Development Guide](#development-guide) must hold.
 
+## Kimi-K3.1 trainable forms
+
+`--rl-model-recipe kimi_k31` trains one of two forms:
+
+- `--tuning full` (production): the routed experts named by
+  `--rl-expert-selection` train in place (64 of 896 per MoE layer is the
+  production setting; any count `--expert-parallel` divides works), next to the
+  frozen MXFP4 experts. The launcher validates the selection file (schema,
+  sha256, EP size, and the MoE layers when the checkpoint's `config.json` is
+  readable) and the dry run prints `kimi_k31_full.memory`, a rough per-GPU
+  budget with warnings for long sequences (for example 262144 tokens with
+  `--context-parallel 1`). Build a selection with
+  `python -m yeto.rl.adapters.miles.models.partial_experts.selection`
+  (`--validate FILE` checks one).
+- `--tuning lora` (infrastructure tests): an adapter over the frozen checkpoint.
+  `--lora-targets auto` is `attention`. `all-linear` also adapts the dense MLP,
+  the shared expert and every routed expert; an A-card vLLM sampler keeps the
+  routed experts as MXFP4 bytes and merges each release into BF16 weights, so it
+  can only apply attention (and BF16 dense/shared) adapters. A
+  `--rl-sample-role trainer` launch therefore refuses `all-linear` unless
+  `--rl-sampler-engine sglang` declares samplers that serve MoE LoRA; with
+  `--rl-sampler-engine vllm` it names the reason. Behind the syncer only
+  `attention` is accepted.
+
+A trainer island (`--rl-sample-role trainer`) reads groups from the store, not
+`--data` rows: its `--data` may be a local file without a revision.
+
 ## Buffer-trainer releases and spot rollout islands
 
 These options apply to a buffer trainer (`--rl-sample-role trainer`) that
@@ -1034,6 +1070,26 @@ publishes policy releases to separate rollout islands.
   config.json --gpus N --gpu CARD` prints one JSON line per trained round
   (`step_mfu`, `wall_mfu`) from the trainer's event tape, for models whose
   framework MFU counter does not cover them (Nemotron-H).
+
+- **Role switch of an engine sampler island** (`python -m
+  yeto.rl.engine.role_switch --spec SPEC`, `yeto/rl/engine/role_switch.py`):
+  the island starts as an engine sampler (its spec plus a `role_switch`
+  section) and, when the section's trigger fires at a round boundary
+  (`after_seconds`, `after_groups` written by this node, the local marker
+  `$YETO_ROLE_SWITCH_MARKER`, or the store marker
+  `convertible/<node>/switch.json` that `role_switch.write_switch_marker`
+  writes), stops its engine process, checks the device memory is free and
+  runs `role_switch.trainer.command` (the trainer island's learner command,
+  `--rl-sample-role trainer --rl-single-island-no-sync --tuning full`) in the
+  same container. The trainer reads every island's buffer shard from the
+  newest cut's watermark; the role record `convertible/<node>/role.json`
+  carries the watermark per shard. With `then_sampler` the node comes back
+  as a sampler on the newest release (`base_dir`/`base_version`, gated by the
+  spec's `expert_selection_sha256`). This is the full-parameter sibling of
+  the convertible pool below: a Miles colocated node converts in place; an
+  engine sampler island restarts as a trainer process. Unlike the pool,
+  `--tuning full` is accepted on convertible nodes and on synced K3.1
+  trainers (`--rl-model-recipe kimi_k31`), which release whole checkpoints.
 
 Spot rollout islands on Nebius have four operator tools in
 `yeto/rl/spot/` (each with `--help`):

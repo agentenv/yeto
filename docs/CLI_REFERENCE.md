@@ -166,6 +166,13 @@ Inspect and end runs. Each takes the run name (its `--cluster-prefix`).
 | `yeto logs RUN` | follow a run log | `--no-follow`: print what is captured so far and exit |
 | `yeto down RUN` | tear down every cluster of a run | — |
 | `yeto stop-run RUN` | stop a run cleanly | — |
+| `yeto cost --run RUN` | cost per resource and per UTC hour, GPU effective utilization ([COST_GUARD.md](COST_GUARD.md)) | `--json`, `--no-billing`, `--prices FILE`, `--tapes GLOB...`, `--gap-minutes` |
+| `yeto cleanup --run RUN` | release every resource the run's ledger still lists, each by its exact id | `--dry-run` |
+| `yeto breaker --trainer-log LOG` | read-only health breakers over a run's event tapes; exit 1 on a trip ([BREAKER.md](BREAKER.md)) | `--sampler-tapes`, `--sampler-hardware`, `--noise-floor`, `--logprob-warn`, `--logprob-act`, `--window`, `--flips`, `--json` |
+
+`yeto down RUN` also releases what the run's resource ledger still lists (sampler
+apps, NC leases). The launch flags of the cost guard (`--budget-usd`, idle
+shutdown, `--no-cost-guard`) are in [COST_GUARD.md](COST_GUARD.md).
 
 ### `yeto merge`
 
@@ -517,10 +524,11 @@ injection and are omitted here.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--reward-function` | — | reward callable `package.module:function` |
+| `--reward-function` | — | reward callable `package.module:function`, or `path/file.py:function` inside the repository |
 | `--rl-prompt-column` | — | prompt column (default: `messages`, `prompt` or `input`) |
 | `--rl-label-column` | — | label column passed to the reward (default `label`) |
 | `--rl-allow-local-data` | off | accept a local prompt file for `--data` |
+| `--rl-sampler-engine` | — | `sglang` or `vllm`: engine of the separate samplers of a `--rl-sample-role trainer` run (checks Kimi-K3.1 LoRA targets) |
 | `--n-samples-per-prompt` | `4` | group size |
 | `--rollout-batch-size` | `32` | prompts per rollout round |
 | `--rollout-max-response-len` | `32768` | max generated tokens per response |
