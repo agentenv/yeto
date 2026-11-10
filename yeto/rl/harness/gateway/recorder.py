@@ -51,7 +51,7 @@ from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from yeto.rl.agentic import HarnessConfigError, TokenAlignmentError, TokenTurn
+from yeto.rl.agentic import HarnessConfigError, SessionAlreadyOpen, TokenAlignmentError, TokenTurn
 
 from .proxy import RecordsProxy
 from . import records_env
@@ -162,7 +162,7 @@ class ProxyTokenRecorder:
     async def open(self, trajectory_id: str, sampling_params: Mapping[str, Any]) -> str:
         self.check_sampling(sampling_params)
         if trajectory_id in self._open:
-            raise HarnessConfigError(f"recorder session {trajectory_id!r} is already open")
+            raise SessionAlreadyOpen(f"recorder session {trajectory_id!r} is already open")
         base = await self._base()
         self.proxy.open(trajectory_id)  # issues the session's own token
         self._open.add(trajectory_id)

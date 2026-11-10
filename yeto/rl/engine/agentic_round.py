@@ -111,6 +111,7 @@ def resolve_weight_switch(switch: str, engine: Any) -> str:
 
 
 LOST_DRAIN = "drain_timeout"  # cancelled when a drain reached its timeout
+LOST_SESSION_COLLISION = "session_collision"  # its recorder session id was already open
 WEIGHT_SWITCHES = ("auto", "drain", "live")
 GROUP_EVENT = "rl_agentic_group"
 RETRY_EVENT = "rl_agentic_trial_retry"
@@ -369,6 +370,7 @@ class AgenticRound(EngineRound):
         self._rounds: dict[int, _RoundState] = {}
         self._wake = threading.Event()
         self._error: BaseException | None = None
+        self.session_collisions = 0  # trials lost to a recorder session id already open
         self._open_started = 0  # groups with a trial started and one not ended
         self._paused = False  # draining: no new group starts
         self._cancel_reason = LOST_DRAIN
@@ -506,10 +508,16 @@ class AgenticRound(EngineRound):
         if task.cancelled():
             result: Any = _Lost(self._cancel_reason)
         elif task.exception() is not None:
+            from yeto.rl.agentic import SessionAlreadyOpen
+
             error = task.exception()
-            if self._error is None:  # raised on the calling thread: the island stops
-                self._error = error
-            result = _Lost(type(error).__name__)
+            if isinstance(error, SessionAlreadyOpen):  # this trial only: lost and counted
+                self.session_collisions += 1
+                result = _Lost(LOST_SESSION_COLLISION)
+            else:
+                if self._error is None:  # raised on the calling thread: the island stops
+                    self._error = error
+                result = _Lost(type(error).__name__)
         else:
             result = task.result()
         if self._retry(group, j, result):
@@ -789,7 +797,8 @@ class AgenticRound(EngineRound):
                    # trials run again after an infra failure / trials missing from their group
                    "retried_trials": sum(tally.retried.values()), "lost_trials": n_lost,
                    "infra_retries_total": dict(sorted(self.retries_total.items())),
-                   "infra_retries_exhausted_total": self.retries_exhausted}
+                   "infra_retries_exhausted_total": self.retries_exhausted,
+                   "session_collisions_total": self.session_collisions}
         self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=self.engine.served_version(),
                   groups=tally.written, samples=tally.samples, response_tokens=tally.tokens,
                   finish=dict(sorted(tally.finish.items())), source=self.provenance.key(),

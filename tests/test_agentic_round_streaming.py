@@ -692,3 +692,33 @@ def test_a_row_dispensed_twice_in_one_round_gets_its_own_sessions_and_group(tmp_
     entries, _ = _entries(tmp_path)
     assert sorted(e.sample_id for e in entries) == ["s-132f9179-r410-row7", "s-132f9179-r410-row7-p75"]
     assert sorted(c[1] for c in prompts.calls) == [[74], [75]]
+
+
+def test_a_recorder_session_already_open_loses_that_trial_not_the_island(tmp_path):
+    from yeto.rl.agentic import HarnessConfigError, SessionAlreadyOpen
+    from yeto.rl.engine.agentic_round import LOST_SESSION_COLLISION
+
+    harness = Harness({"a": 0.0})
+    prompts = Prompts({0: ["a"], 1: ["a"]})
+
+    class Colliding(Recorder):
+        async def open(self, trajectory_id, sampling_params):
+            if trajectory_id.endswith("-r0-a-1"):
+                raise SessionAlreadyOpen(f"recorder session {trajectory_id!r} is already open")
+            return await super().open(trajectory_id, sampling_params)
+
+    assert issubclass(SessionAlreadyOpen, HarnessConfigError)
+    rnd, engine, events = _round(tmp_path, harness, prompts, incarnation="i")
+    rnd.recorder = Colliding(engine)
+    try:
+        rnd(0)
+        rnd(1)  # the island keeps going
+        rnd.flush()
+    finally:
+        rnd.close()
+    assert rnd.session_collisions == 1
+    groups = {f["rollout_id"]: f for n, f in events if n == GROUP_EVENT}
+    assert groups[0]["lost"] == {LOST_SESSION_COLLISION: 1} and groups[0]["kept"] == N - 1
+    assert groups[1]["kept"] == N
+    rounds = [f for n, f in events if n == ROUND_EVENT]
+    assert rounds[-1]["agentic"]["session_collisions_total"] == 1

@@ -32,6 +32,12 @@ class HarnessConfigError(ValueError):
     """The harness cannot run this task as configured (missing task dir, bad settings)."""
 
 
+class SessionAlreadyOpen(HarnessConfigError):
+    """A recorder session id that is still open was opened again: that one trial
+    cannot be recorded, the island's configuration is fine (the caller loses the
+    trial, it does not stop)."""
+
+
 class AgentHarness(Protocol):
     """Runs one trial of ``task``; the agent calls the model at ``endpoint`` (OpenAI base URL)."""
 
