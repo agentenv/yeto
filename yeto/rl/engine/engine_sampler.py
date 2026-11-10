@@ -355,6 +355,9 @@ class EngineRound:
         return written
 
 
+DEFAULT_RELOAD_MAX_DEFER_S = 600.0  # spec reload_max_defer_s (EngineSamplerConfig)
+
+
 @dataclass
 class EngineSamplerConfig:
     """What the run config gives an engine sampler island."""
@@ -369,6 +372,9 @@ class EngineSamplerConfig:
     min_round_s: float | None = None
     poll_s: float = 5.0
     live_poll_s: float | None = None  # store poll during a round (engines that update live); None: poll_s
+    # the longest a ready release waits on a streaming round's running trials before it is
+    # loaded anyway (PolicyFollower.max_defer_s); None: no bound
+    reload_max_defer_s: float | None = DEFAULT_RELOAD_MAX_DEFER_S
     loop_guard: LoopGuard | None = None
     max_consecutive_load_failures: int = 3
     # the partial-experts selection the run trains (Kimi-K3.1): releases of another
@@ -445,7 +451,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     # background download: a 207 GB Kimi-K3.1 release took longer to fetch than a
     # trainer step, and the engines idled through it
     follower = PolicyFollower(releases, loader, version=int(config.base_version),
-                              live_update=updates_during_generation(engine), background_download=True)
+                              live_update=updates_during_generation(engine), background_download=True,
+                              max_defer_s=config.reload_max_defer_s)
     follower.release = started_on_release(releases, int(config.base_version))
     engine_round = (make_round or EngineRound)(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,

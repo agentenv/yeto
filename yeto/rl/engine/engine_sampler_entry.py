@@ -28,6 +28,8 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   release, ``role_switch.sampler_spec_on_release``, so a restarted sampler does
   not generate its first round on the base weights),
   ``min_round_s``, ``poll_s``, ``live_poll_s``, ``max_consecutive_load_failures``;
+  ``reload_max_defer_s`` (default 600; null: no bound): the longest a release
+  waits on running agentic trials before it is loaded anyway;
 * ``store``: the run's checkpoint store (``store_for``; an ``oss://`` store
   needs the store environment of :mod:`yeto.cloud.oss_store`);
   ``release_dir``: the release directory the sampler follows (optional,
@@ -96,7 +98,8 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
+from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, EngineSamplerConfig, PromptItem, Reward,
+                             build_engine_sampler)
 from .sampler_checks import PostLoadChecks
 from .data_split import DataSlot
 from .sampler_engine import (
@@ -473,6 +476,8 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
         live_poll_s=None if spec.get("live_poll_s") is None else float(spec["live_poll_s"]),
+        reload_max_defer_s=(None if "reload_max_defer_s" in spec and spec["reload_max_defer_s"] is None
+                            else float(spec.get("reload_max_defer_s", DEFAULT_RELOAD_MAX_DEFER_S))),
         max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)),
         expert_selection_sha256=(None if spec.get("expert_selection_sha256") is None
                                  else str(spec["expert_selection_sha256"])),
