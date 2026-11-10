@@ -589,7 +589,7 @@ injection and are omitted here.
 | `--rl-sample-relay` | off | the syncer relays spot sampler groups to the trainer |
 | `--rl-spot-subscribers` | `0` | receive-only spot sampler subscribers on the syncer |
 | `--rl-release-delta-full-every` | `0` | upload releases as bf16 deltas, with a full release every N |
-| `--rl-sample-wait-s` | — | trainer: max wait for one full round from the buffer (default 3600) |
+| `--rl-sample-wait-s` | — | trainer: max seconds without a new group while a round fills (default 3600) |
 
 **Checkpoints, recovery and resume**
 
