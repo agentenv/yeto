@@ -557,6 +557,40 @@ def _member_incarnation_env(env: Any, incarnation: str, *, shard: Any = None):
                 env[k] = v
 
 
+POOL_FENCE_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: the lease a pool fence writes
+
+
+def predecessor_fenced(member_store: Any, predecessor: str) -> bool:
+    """Whether a pool fence holds ``predecessor``'s incarnation lease (its node is
+    taken for gone: no incarnation of it writes again)."""
+    from .incarnation_lease import read_lease  # noqa: PLC0415
+
+    try:
+        lease = read_lease(member_store, predecessor) or {}
+    except Exception:  # noqa: BLE001 - unknown: not fenced (nothing is swept)
+        return False
+    return str(lease.get("incarnation") or "").startswith(POOL_FENCE_PREFIX)
+
+
+def sweep_predecessor(prompts: Any, member_store: Any, predecessor: str, left: bool,
+                      emit: Callable[..., None]) -> int:
+    """A replacement (``continues_shard``) runs in a new shard id, so the stale sweep
+    of its own shard never reaches the trial containers the predecessor left on the
+    sandbox host (a node evicted or killed runs no teardown). Once the predecessor
+    left or a pool fence holds its lease, remove them (``rl_sandbox_orphans_removed``
+    with ``shard``). A predecessor still running unfenced is left alone."""
+    sweep = getattr(getattr(prompts, "gate", None), "sweep_shard", None)
+    if not callable(sweep):
+        return 0
+    if not (left or predecessor_fenced(member_store, predecessor)):
+        return 0
+    removed = int(sweep(predecessor) or 0)
+    if removed:
+        emit("rl_sandbox_orphans_removed", removed=removed, shard=predecessor,
+             why="predecessor_left" if left else "predecessor_fenced")
+    return removed
+
+
 def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          environ: Mapping[str, str] | None, resource_sampler: Callable[[Callable[..., None]], Any] | None,
          stop: Callable[[], bool] | None, on_event: Callable[..., None] | None,
@@ -701,6 +735,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             start, detail = handoff_start(member_store, str(predecessor), config.sampler_id, predecessor_entries,
                                           wait_s=float(spec.get("handoff_wait_s") or 900.0))
             emit(HANDOFF_EVENT, **detail)
+            sweep_predecessor(prompts, member_store, str(predecessor), bool(detail.get("predecessor_left")), emit)
         rounds = 0 if buffer.data_ended else island.run(start)
         if handed_off() and not buffer.data_ended and not reclaimed():
             # a successor continues the prompts in its own shard: this shard gets no more

@@ -132,3 +132,57 @@ def test_recover_sweeps_earlier_incarnations(tmp_path):
     p.recover()
     assert sorted(daemon.removed) == ["old1", "old2"]
     assert ("rl_sandbox_orphans_removed", "removed") in [(e, next(iter(f.keys() - {"backend", "namespace"}), None)) for e, f in events]
+
+
+def test_sweep_shard_removes_every_incarnation_of_that_shard_only():
+    from yeto.sandbox.trial_labels import sweep_shard
+
+    daemon = _host()
+    assert sweep_shard(DockerHost("ssh://h1", runner=daemon), "r1", "s1") == 1
+    assert daemon.removed == ["othershard"] and daemon.net_rm == ["net-p4"]
+    assert sweep_shard(DockerHost("ssh://h1", runner=daemon), "", "s0") == 0
+
+
+def test_gate_sweep_shard_refuses_own_shard_and_needs_owner():
+    import pytest
+
+    daemon = _host()
+    gate = _gate(daemon, Owner("r1", "s2", "i-new"))
+    assert gate.sweep_shard("s0") == 4  # old1, old2, cur, noinc: all incarnations of the predecessor
+    assert "otherrun" in daemon.containers and "othershard" in daemon.containers
+    with pytest.raises(ValueError):
+        gate.sweep_shard("s2")
+    assert _gate(_host(), None).sweep_shard("s0") == 0
+
+
+class _Lease:
+    def __init__(self, records):
+        self.records = records
+
+
+def test_replacement_sweeps_predecessor_only_when_left_or_fenced(monkeypatch):
+    from yeto.rl.engine import engine_sampler_entry as e
+    from yeto.rl.engine import incarnation_lease
+
+    leases = {}
+    monkeypatch.setattr(incarnation_lease, "read_lease", lambda store, sampler: leases.get(sampler))
+
+    class Prompts:
+        def __init__(self):
+            self.daemon = _host()
+            self.gate = _gate(self.daemon, Owner("r1", "s2", "i-new"))
+
+    events = []
+    emit = lambda ev, **f: events.append((ev, f))  # noqa: E731
+    p = Prompts()  # predecessor still running, lease its own: untouched
+    leases["s0"] = {"incarnation": "i-old"}
+    assert e.sweep_predecessor(p, None, "s0", False, emit) == 0 and p.daemon.removed == []
+    leases["s0"] = {"incarnation": "pool-fence:ticket1"}  # evicted: a pool fence holds the lease
+    assert e.sweep_predecessor(p, None, "s0", False, emit) == 4
+    assert events[-1] == ("rl_sandbox_orphans_removed",
+                          {"removed": 4, "shard": "s0", "why": "predecessor_fenced"})
+    p = Prompts()
+    leases.clear()
+    assert e.sweep_predecessor(p, None, "s0", True, emit) == 4  # predecessor left (handoff)
+    assert events[-1][1]["why"] == "predecessor_left"
+    assert e.sweep_predecessor(object(), None, "s0", True, emit) == 0  # no gate

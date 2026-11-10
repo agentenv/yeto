@@ -17,6 +17,11 @@ Every trial container therefore carries its owner (``remote_docker_env``):
 run and shard equal ours and whose incarnation is set and differs from ours.
 A container of another run, another shard, without an incarnation label, or of
 the current incarnation is never touched.
+
+A replacement node continues a fenced shard in a new shard id (an NC pool:
+``continues_shard``), so no later incarnation of the fenced shard ever starts.
+:func:`sweep_shard` removes every container of such a predecessor shard; the
+replacement sampler calls it once the predecessor left or was fenced.
 """
 
 from __future__ import annotations
@@ -79,6 +84,31 @@ def trial_labels(session: str | None = None, environ: Mapping[str, str] | None =
     return labels
 
 
+def _remove(docker: Any, rows: list[dict[str, Any]]) -> int:
+    docker.remove([r["id"] for r in rows])
+    projects = sorted({r["labels"].get(PROJECT_KEY) for r in rows} - {None, ""})
+    for project in projects:
+        docker.remove_networks(f"label={PROJECT_KEY}={project}")
+    return len(rows)
+
+
+def sweep_shard(docker: Any, run: str, shard: str) -> int:
+    """Remove every trial container (any incarnation) of ``run``'s ``shard`` and
+    their compose networks: the orphans of a predecessor shard that left or was
+    fenced (module doc); the number of containers removed."""
+    run, shard = str(run or "").strip(), str(shard or "").strip()
+    if not run or not shard:
+        return 0
+    rows = docker.labelled_containers(OWNER_KEYS, f"label={RUN_KEY}={run}", f"label={SHARD_KEY}={shard}",
+                                      all_=True)
+    rows = [r for r in rows if r["labels"].get(RUN_KEY) == run and r["labels"].get(SHARD_KEY) == shard]
+    if not rows:
+        return 0
+    n = _remove(docker, rows)
+    logger.warning("sandbox: removed %d trial container(s) of run %s predecessor shard %s", n, run, shard)
+    return n
+
+
 def sweep_stale(docker: Any, owner: Owner | None) -> int:
     """Remove ``owner``'s shard's containers of other incarnations and their
     compose networks; the number of containers removed."""
@@ -89,10 +119,7 @@ def sweep_stale(docker: Any, owner: Owner | None) -> int:
     stale = [r for r in rows if owner.is_stale(r["labels"])]
     if not stale:
         return 0
-    docker.remove([r["id"] for r in stale])
-    projects = sorted({r["labels"].get(PROJECT_KEY) for r in stale} - {None, ""})
-    for project in projects:
-        docker.remove_networks(f"label={PROJECT_KEY}={project}")
+    _remove(docker, stale)
     logger.warning("sandbox: removed %d trial container(s) of run %s shard %s from earlier incarnations %s",
                    len(stale), owner.run, owner.shard, sorted({r["labels"].get(INC_KEY) for r in stale}))
     return len(stale)

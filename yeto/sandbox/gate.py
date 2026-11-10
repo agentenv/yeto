@@ -24,6 +24,8 @@ asks before a claim pass:
   (logged when the host has no room, and on the ``rl_dispense_wait_capacity``
   event).
 * ``sweep_stale()``: the same removal at sampler start (dispenser recover).
+* ``sweep_shard(shard)``: remove every container of a predecessor shard this
+  sampler continues (:func:`.trial_labels.sweep_shard`).
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from typing import Any
 from .docker import DockerHost
 from .envs import EnvsConfig, HostConfig, parse_envs
 from .ready import ReadyView, read_manifest
-from .trial_labels import OWNER_KEYS, RUN_KEY, Owner, owner_from_env, sweep_stale
+from .trial_labels import OWNER_KEYS, RUN_KEY, Owner, owner_from_env, sweep_shard, sweep_stale
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,21 @@ class SandboxGate:
     def free_groups(self) -> int | None:
         rooms = [r for r in (self._process_free(), self._host_free()) if r is not None]
         return None if not rooms else min(rooms) // self.group_size
+
+    def sweep_shard(self, shard: str) -> int:
+        """Remove the trial containers of ``shard`` of this run (a predecessor this
+        sampler continues, after it left or was fenced); 0 without an owner."""
+        if self.docker is None or self.owner is None or not hasattr(self.docker, "labelled_containers"):
+            return 0
+        if str(shard) == self.owner.shard:
+            raise ValueError("sweep_shard names this sampler's own shard")
+        try:
+            n = sweep_shard(self.docker, self.owner.run, shard)
+        except Exception as error:  # noqa: BLE001 - orphans only cost room; the gate counts them
+            logger.warning("sandbox gate: predecessor sweep of %s failed: %r", shard, error)
+            return 0
+        self._probe = None
+        return n
 
 
 def gate_from_spec(spec: Mapping[str, Any], objects: Any, *, environ: Mapping[str, str] | None = None,
