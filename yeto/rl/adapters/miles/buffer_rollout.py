@@ -281,6 +281,30 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
     return out
 
 
+def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samples_per_group: int,
+                 r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None
+                 ) -> tuple[list[tuple[int, list[dict[str, Any]]]], list[str]]:
+    """The taken groups renumbered (:func:`renumber_group`) and in Miles' sample form
+    (``buffer_payload.miles_sample_dict``), and why each group that cannot be converted
+    was left out. One malformed sample (an R3 routing row that mixes pads and ids, an
+    expert id past the model's, a layer count of another model) leaves its group out
+    of the round, which is padded instead, rather than stopping the trainer (the caller
+    takes again when no group of a take converts, and fails after a few such takes)."""
+    from yeto.rl.engine.buffer_payload import miles_sample_dict  # noqa: PLC0415
+
+    kept, problems = [], []
+    for position, group in groups:
+        try:
+            kept.append((position, [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
+                                    for d in renumber_group(group, position=position,
+                                                            samples_per_group=samples_per_group)]))
+        except SampleBufferRolloutError as error:
+            problems.append(f"buffer position {position}: {error}")
+    for problem in problems:
+        print(f"[sample-buffer] WARNING: group left out of the round: {problem}", flush=True)
+    return kept, problems
+
+
 PADDING_GROUP_BASE = 1 << 40  # group_index of padding samples: past any buffer position
 PADDING_KEY = "yeto_padding"
 

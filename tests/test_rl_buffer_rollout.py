@@ -843,3 +843,17 @@ def test_padding_is_never_a_copy_of_an_empty_response():
     assert pad["response_length"] == 3 and pad["loss_mask"] == [0, 0, 0]
     groups[0][1].update(tokens=[1, 2], response_length=0, loss_mask=[])
     assert br.padding_samples(groups, 1, samples_per_group=4)[0]["response_length"] == 0  # nothing else
+
+
+def test_a_group_that_does_not_convert_to_miles_samples_is_left_out():
+    """One malformed R3 row (pads and ids mixed) leaves its group out of the round
+    instead of stopping the trainer; a round where nothing converts still raises."""
+    good, bad = _short(0, 1, 2), _short(1, 1, 2)
+    routing = numpy.zeros((5, 3, 2), dtype=numpy.uint16)
+    bad[1]["rollout_routed_experts"] = routing.copy()
+    bad[1]["rollout_routed_experts"][2, 1, 0] = 65535  # one pad next to an id
+    good[0]["rollout_routed_experts"] = routing.copy()
+    kept, problems = br.miles_groups([(0, good), (1, bad)], samples_per_group=2, r3_num_experts=8)
+    assert [pos for pos, _ in kept] == [0] and len(problems) == 1 and "position 1" in problems[0]
+    assert [d["index"] for d in kept[0][1]] == [0, 1] and kept[0][1][0]["rollout_routed_experts"].dtype == numpy.int32
+    assert br.miles_groups([(1, bad)], samples_per_group=2)[0] == []

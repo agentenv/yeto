@@ -46,6 +46,7 @@ from .buffer_rollout import (
     check_xhw_downweight,
     convertible_mode,
     merged_release_mode,
+    miles_groups,
     open_buffer,
     open_lane_log,
     padding_samples,
@@ -53,7 +54,6 @@ from .buffer_rollout import (
     r3_num_experts,
     register_reader,
     reader_basis_version,
-    renumber_group,
     stamp_merged_release_cuts,
     xhw_round,
 )
@@ -64,6 +64,9 @@ from yeto.rl.engine.task_dispense import DISPENSE_POSITION_KEY
 from .proc_state import set_proc_state
 from .rollout_meta_hook import current_policy_token, data_cursor, record_round_metadata
 from .task_dispense import written as dispense_written
+
+# takes in a row whose every group is malformed before the round fails (a systematic cause)
+MAX_UNCONVERTIBLE_TAKES = 8
 
 # the boat VM pools of the Harbor agentic path (``close_pools_now``, also used by .harbor_rollout)
 BOAT_POOL_MODULE = "yeto.rl.harness.harbor.boat_pool"
@@ -222,10 +225,26 @@ class _BufferRound:
             raise SampleBufferRolloutError("the sample buffer reader does not evaluate; "
                                            "set --eval-function-path or disable eval")
         # the driver's basis (its published policy token), not Miles' weight_version
-        groups, report = self.reader.take(input.rollout_id, self.groups,
-                                          current_version=self._basis_version(input))
-        groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
-                  for position, group in groups]
+        r3_layers, num_experts = self._r3_layers()
+        unconvertible: list[str] = []
+        for _attempt in range(MAX_UNCONVERTIBLE_TAKES):
+            groups, report = self.reader.take(input.rollout_id, self.groups,
+                                              current_version=self._basis_version(input))
+            groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
+                      for position, group in groups]
+            converted, problems = miles_groups(groups, samples_per_group=self.samples_per_group,
+                                               r3_layers=r3_layers, r3_num_experts=num_experts)
+            unconvertible += problems
+            if converted:
+                break
+            # every group of this take was malformed: its positions are consumed, take again
+        else:
+            raise SampleBufferRolloutError(
+                f"rollout {input.rollout_id}: {MAX_UNCONVERTIBLE_TAKES} takes in a row with no group that "
+                f"converts to Miles samples: {unconvertible[-1]}")
+        if problems:  # left out of the round (padded instead): the padding copies kept groups only
+            kept_positions = {position for position, _ in converted}
+            groups = [(position, group) for position, group in groups if position in kept_positions]
         groups, xhw_meta = xhw_round(groups, report, getattr(self.reader, "xhw_actions", {}),
                                      std_normalized=bool(getattr(self.args, "grpo_std_normalization", True)),
                                      enabled=bool((os.environ.get(XHW_ENV) or "").strip()
@@ -244,11 +263,7 @@ class _BufferRound:
             (payload_source_sample(d) for _, group in groups for d in group),
             rollout_id=input.rollout_id, backend="miles",
             trainer_version=-1 if input.weight_version is None else int(input.weight_version))
-        r3_layers, num_experts = self._r3_layers()
-        samples = [[Sample.from_dict(miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=num_experts))
-                    for d in renumber_group(
-            group, position=position, samples_per_group=self.samples_per_group)]
-            for position, group in groups]
+        samples = [[Sample.from_dict(d) for d in group] for _, group in converted]
         # Miles trains exactly rollout_batch_size * n samples: a round short of them
         # (short groups, pruned groups) is filled with loss-free padding groups
         missing = max(0, self.groups * self.samples_per_group - sum(len(group) for group in samples))
@@ -277,7 +292,9 @@ class _BufferRound:
                                    samples_per_group=self.samples_per_group)
             samples.extend([Sample.from_dict(miles_sample_dict(d, r3_layers=r3_layers,
                                                                r3_num_experts=num_experts))] for d in pads)
-        return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
+        return RolloutFnTrainOutput(samples=samples, metrics={
+            **report.metrics(), "sample_buffer/unconvertible_groups": float(len(unconvertible)),
+            **flat_metrics(source)})
 
     @staticmethod
     def _basis_version(input: RolloutFnInput) -> int | None:
