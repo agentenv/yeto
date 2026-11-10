@@ -4,6 +4,7 @@ K3.1 presets and the in-place reload calls. The legacy line (vllm-ascend) keeps 
 from __future__ import annotations
 
 import base64
+import dataclasses
 import io
 import json
 import re
@@ -449,3 +450,22 @@ def test_spec_with_routed_experts_drops_dcp_from_extra_args(tmp_path):
     assert _cp_sizes(with_r3.argv(base)) == [] and len(with_r3.cp_overrides) == 2
     without = from_spec.build({**section, "rollout_fields": {"routed_experts": False}})
     assert _cp_sizes(without.argv(base)) == [("--decode-context-parallel-size", "8")] * 2
+
+
+def test_a_release_is_served_with_the_tokenizer_of_the_base_checkpoint(tmp_path):
+    """Found by the Qwen3-0.6B trainer + vLLM sampler rehearsal: the trainer's HF export
+    writes tokenizer_config.json in its transformers-5 form (``extra_special_tokens`` a
+    list); the restart of a vLLM 0.11 sampler (transformers 4.x) on that release died at
+    start ten times in a row ('list' object has no attribute 'keys'). A release is now
+    served with the base checkpoint's tokenizer, on both vLLM lines."""
+    for platform in ("cuda", None):  # the upstream line and the legacy one
+        engine, _ = _engine(tmp_path, platform)
+        base = engine.config.base_dir
+        assert "--tokenizer" not in engine.argv(base)  # the cold start reads the base itself
+        argv = engine.argv(tmp_path / "r1-v1")
+        assert argv[argv.index("--tokenizer") + 1] == str(base), platform
+    pinned = _config(tmp_path, card_model="B300", device_family="nvidia")
+    pinned = dataclasses.replace(pinned, extra_args=("--tokenizer", "/own/tokenizer"))
+    engine, _ = _engine(tmp_path, config=pinned)
+    argv = engine.argv(tmp_path / "r1-v1")
+    assert argv.count("--tokenizer") == 1 and argv[argv.index("--tokenizer") + 1] == "/own/tokenizer"

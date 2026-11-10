@@ -489,7 +489,18 @@ class VllmServerEngine(ServerEngine):
                 "--trust-remote-code"]
         if o.max_num_seqs is not None:
             argv += ["--max-num-seqs", str(int(o.max_num_seqs))]
-        return argv + list(c.extra_args)
+        return argv + self.base_tokenizer_argv(model_dir) + list(c.extra_args)
+
+    def base_tokenizer_argv(self, model_dir: Path) -> list[str]:
+        """A release is served with the tokenizer of the base checkpoint: RL never
+        changes the tokenizer, and the trainer's HF export rewrites its files in the
+        trainer's transformers format (transformers 5 writes ``extra_special_tokens``
+        as a list, which the 4.x tokenizer of a sampler image cannot read: the
+        restart of the engine on that release then fails at start). ``--tokenizer``
+        in ``extra_args`` wins."""
+        if "--tokenizer" in self.config.extra_args or Path(model_dir) == Path(self.config.base_dir):
+            return []
+        return ["--tokenizer", str(self.config.base_dir)]
 
     def _upstream_argv(self, model_dir: Path) -> list[str]:
         c, o = self.config, self.options
@@ -502,6 +513,7 @@ class VllmServerEngine(ServerEngine):
             argv += ["--decode-context-parallel-size", str(o.tp)]
         if o.max_num_seqs is not None:
             argv += ["--max-num-seqs", str(int(o.max_num_seqs))]
+        argv += self.base_tokenizer_argv(model_dir)
         preset_args = list(self.preset.get("args") or ())
         argv += drop_cp_sizes(preset_args)[0] if r3 else preset_args
         if self.top_logprobs_num > DEFAULT_MAX_LOGPROBS and "--max-logprobs" not in c.extra_args:

@@ -746,6 +746,9 @@ class SGLangServerEngine(ServerEngine):
                 "--host", c.host, "--port", str(c.port), "--tp", str(o.tp),
                 "--context-length", str(c.max_model_len),
                 "--served-model-name", o.served_model_name, "--trust-remote-code"]
+        if "--tokenizer-path" not in c.extra_args and Path(model_dir) != Path(c.base_dir):
+            # a release is served with the base checkpoint's tokenizer (VllmServerEngine.base_tokenizer_argv)
+            argv += ["--tokenizer-path", str(c.base_dir)]
         if is_dp_attention(c.topology):
             argv += dp_attention_argv(self._resolve_dp_flag(), o.tp)
         if o.nextn:
