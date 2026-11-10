@@ -170,6 +170,7 @@ learners directly; see
 | [MILES_RL.md](docs/MILES_RL.md) | Miles RL: rollout/training boundaries, recovery, export, all RL flags |
 | [RL_ALGORITHMS.md](docs/RL_ALGORITHMS.md) | RL algorithm specs |
 | [CLOUDS.md](docs/CLOUDS.md) | per-cloud credentials, regions, planner signals, Modal islands |
+| [KIMI_K31_ASYNC_RL_GUIDE.md](docs/KIMI_K31_ASYNC_RL_GUIDE.md) | Kimi K3.1 async GRPO (agentic RL) end to end: Modal trainer, NC samplers, run config, dashboard, operations |
 | [NC_POOL.md](docs/NC_POOL.md) | National Compute sampler pool: config, dry run, status, stop, billing |
 | [DISPENSER.md](docs/DISPENSER.md) | task dispenser over a shared bucket (store dispenser) |
 | [ASCEND.md](docs/ASCEND.md) | Ascend NPU islands and a pure-Ascend fleet |
