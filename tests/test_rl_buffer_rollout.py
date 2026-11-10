@@ -772,3 +772,31 @@ def test_a_carried_group_that_ages_out_counts_as_stale(tmp_path):
     assert report.carried_over_groups == 1 and report.stale_groups == 0
     groups, report = reader.take(1, 2, current_version=3)  # the carried group (v1) is now too old
     assert [pos for pos, _ in groups] == [3, 4] and report.stale_groups == 1
+
+
+def test_a_group_with_a_non_finite_reward_is_consumed_not_trained(tmp_path):
+    """One NaN (or missing) reward makes the group's centered advantages NaN in Miles
+    (a non-finite loss), and an all-NaN group stops the driver (nonfinite_reward): the
+    reader passes such a group over, in the main selection and in the top-up."""
+    written = _buffer(tmp_path)
+    writer = br.GroupWriter(written, "s0")
+    for g, (k, bad) in enumerate(((4, None), (4, float("nan")), (4, None), (3, "none"), (1, None), (4, None))):
+        group = _short(g, 1, k)
+        for j, d in enumerate(group):
+            d["reward"] = float(j % 2)
+        if bad == "none":
+            group[0]["reward"] = None
+        elif bad is not None:
+            group[1]["reward"] = bad
+        writer.write(group, group_key=f"g{g}")
+    written.mark_data_end()
+    reader = _reader(tmp_path)
+    groups, report = reader.take(0, 2, current_version=1)
+    assert [pos for pos, _ in groups] == [0, 2] and report.nonfinite_reward_groups == 1
+    groups, report = reader.take(1, 2, current_version=1)
+    # g3 (None reward) is passed over in the selection, g4 (one sample) is too small
+    assert [pos for pos, _ in groups] == [5] and report.nonfinite_reward_groups == 1
+    assert report.dropped_small_groups == 1 and report.metrics()["sample_buffer/nonfinite_reward_groups"] == 1.0
+    assert br.finite_rewards([{"reward": {"acc": 1.0}}, {"index": 0}]) is True
+    assert br.finite_rewards([{"reward": float("inf")}]) is False
+

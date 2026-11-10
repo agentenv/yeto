@@ -483,6 +483,9 @@ class TakeReport:
     # padded_samples over the round's global batch: Miles divides the round's loss by the
     # full batch, so the real samples' gradient shrinks by this fraction (not rescaled)
     padded_fraction: float = 0.0
+    # groups with a sample whose reward is missing or not finite (a failed reward call):
+    # consumed, never trained (one NaN reward makes the whole group's advantages NaN)
+    nonfinite_reward_groups: int = 0
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -499,7 +502,8 @@ class TakeReport:
                 "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
                 "sample_buffer/carried_over_groups": float(self.carried_over_groups),
                 "sample_buffer/padded_samples": float(self.padded_samples),
-                "sample_buffer/padded_fraction": float(self.padded_fraction)}
+                "sample_buffer/padded_fraction": float(self.padded_fraction),
+                "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups)}
 
 
 def _dispense_position(entry: Any) -> int | None:
@@ -509,6 +513,25 @@ def _dispense_position(entry: Any) -> int | None:
 
 
 MIN_GROUP_SAMPLES = 2  # fewer: no in-group spread, no group-relative advantage
+
+
+def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every sample of a decoded group has a finite reward. A missing
+    (None) or NaN/inf scalar reward (a reward call that failed) makes the group's
+    centered advantages NaN in Miles, hence a non-finite loss, or the driver's
+    ``nonfinite_reward`` stop; such a group is consumed, never trained. A reward
+    dict (a multi-key reward Miles reads by ``reward_key``) is not judged here."""
+    import math
+
+    for sample in group:
+        if "reward" not in sample:
+            continue  # a payload without the field (not a Miles Sample.to_dict()): not judged
+        reward = sample["reward"]
+        if isinstance(reward, Mapping):
+            continue
+        if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+            return False
+    return True
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
 
@@ -584,6 +607,7 @@ class BatchReader:
         # a whole group selected by a take that did not fit its round:
         # (position, decoded group, behavior version, tokens, source, dispense position)
         self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
+        self._nonfinite = 0
 
     def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         self.xhw_actions = {str(k): dict(v) for k, v in (actions or {}).items()}
@@ -633,6 +657,7 @@ class BatchReader:
         current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else age_floor(int(current_version), self.max_policy_age)
         dropped_small = 0
+        self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
         carried_in, self._carry = self._carry, None
         if carried_in is not None:  # selected by the last take; its position is that round's end
             position, group, version, tokens, source, dispensed = carried_in
@@ -687,7 +712,8 @@ class BatchReader:
         end = self.buffer.read_cursor
         carried_out = padded = 0
         if self.group_size is not None and chosen:
-            skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0}
+            skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
+                                       "nonfinite": 0}
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
                 source_groups, source_tokens, position_sources, skipped)
@@ -696,17 +722,19 @@ class BatchReader:
             stale_positions += skipped["stale_positions"]
             fenced += skipped["fenced"]
             quarantined += skipped["quarantined"]
+            self._nonfinite += skipped["nonfinite"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
         read_s += self._settle([read for _, read, _ in chosen])
         begun = self.clock()
         out = [(position, decoded[position] if position in decoded else decode_group(read.result()))
                for position, read, _ in chosen]
         decode_s = self.clock() - begun
+        nonfinite = self._nonfinite
         if not out:
             raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
                                         f"with no trainable group (position {end}, {stale} passed "
                                         f"over as too old, {fenced} from fenced incarnations, "
-                                        f"{dropped_small} too small)")
+                                        f"{dropped_small} too small, {nonfinite} without a finite reward)")
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
             positions_of = getattr(self.buffer, "shard_positions", None)
@@ -727,7 +755,7 @@ class BatchReader:
                                position_sources=position_sources, quarantined_groups=quarantined,
                                stale_incarnation_groups=fenced, incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
-                               padded_samples=padded)
+                               padded_samples=padded, nonfinite_reward_groups=nonfinite)
 
     @staticmethod
     def _choose(position: int, group: list, version: int, tokens: int, source: str, chosen: list,
@@ -781,6 +809,9 @@ class BatchReader:
             if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
                 dropped += 1
                 continue
+            if not finite_rewards(group):
+                skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
+                continue
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
             if len(group) > missing:
                 self._carry = (position, group, version, tokens, source, _dispense_position(item.entry))
@@ -793,19 +824,24 @@ class BatchReader:
     def _drop_incomplete(self, chosen: list, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
                          source_tokens: dict, position_sources: dict) -> int:
         """Decode the chosen groups not yet decoded; drop (in place) those whose
-        sample count is not ``group_size`` and undo their accounting. Returns the
-        number dropped. Their positions stay consumed (the cursor moved past them)."""
+        sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a non-finite
+        reward (:func:`finite_rewards`, counted apart) and undo their accounting.
+        Returns the number dropped for their size. Their positions stay consumed (the
+        cursor moved past them)."""
         fresh = [(position, read) for position, read, _ in chosen if position not in decoded]
         low, high = MIN_GROUP_SAMPLES, int(self.group_size)
         if not fresh:
             return 0
         self._settle([read for _, read in fresh])
         drop: set[int] = set()
+        nonfinite = 0
         for position, read in fresh:
             group = decode_group(read.result())
-            if low <= len(group) <= high:
+            if low <= len(group) <= high and finite_rewards(group):
                 decoded[position] = group
                 continue
+            if low <= len(group) <= high:
+                nonfinite += 1
             drop.add(position)
             version, tokens = accounted.pop(int(position))
             versions[version] -= 1
@@ -820,7 +856,8 @@ class BatchReader:
                     source_tokens.pop(source, None)
         if drop:
             chosen[:] = [c for c in chosen if c[0] not in drop]
-        return len(drop)
+        self._nonfinite += nonfinite
+        return len(drop) - nonfinite
 
     def _shard_at(self, position: int) -> str | None:
         shard_at = getattr(self.buffer, "shard_at", None)
