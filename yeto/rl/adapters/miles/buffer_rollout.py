@@ -502,6 +502,12 @@ class TakeReport:
                 "sample_buffer/padded_fraction": float(self.padded_fraction)}
 
 
+def _dispense_position(entry: Any) -> int | None:
+    """The task-dispenser position of a buffer entry (its sampler had a dispenser)."""
+    position = (getattr(entry, "sampler_round", None) or {}).get("dispense_position")
+    return position if isinstance(position, int) and not isinstance(position, bool) else None
+
+
 MIN_GROUP_SAMPLES = 2  # fewer: no in-group spread, no group-relative advantage
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
@@ -576,8 +582,8 @@ class BatchReader:
         self.gate = incarnation_gate
         self.group_size = None if group_size is None else int(group_size)
         # a whole group selected by a take that did not fit its round:
-        # (position, decoded group, behavior version, tokens, source)
-        self._carry: tuple[int, list[dict[str, Any]], int, int, str] | None = None
+        # (position, decoded group, behavior version, tokens, source, dispense position)
+        self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
 
     def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         self.xhw_actions = {str(k): dict(v) for k, v in (actions or {}).items()}
@@ -629,10 +635,12 @@ class BatchReader:
         dropped_small = 0
         carried_in, self._carry = self._carry, None
         if carried_in is not None:  # selected by the last take; its position is that round's end
-            position, group, version, tokens, source = carried_in
+            position, group, version, tokens, source, dispensed = carried_in
             start = min(start, position)
-            if floor is not None and version < floor:
+            if floor is not None and version < floor:  # aged out while it waited: stale
                 stale += 1
+                if dispensed is not None:
+                    stale_positions.append(dispensed)
             else:
                 self._choose(position, group, version, tokens, source, chosen, decoded, accounted,
                              versions, source_groups, source_tokens, position_sources)
@@ -645,8 +653,8 @@ class BatchReader:
             for item in selected:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
-                    position = (item.entry.sampler_round or {}).get("dispense_position")
-                    if isinstance(position, int) and not isinstance(position, bool):
+                    position = _dispense_position(item.entry)
+                    if position is not None:
                         stale_positions.append(position)
                     continue
                 if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
@@ -679,10 +687,15 @@ class BatchReader:
         end = self.buffer.read_cursor
         carried_out = padded = 0
         if self.group_size is not None and chosen:
+            skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0}
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
-                source_groups, source_tokens, position_sources)
+                source_groups, source_tokens, position_sources, skipped)
             dropped_small += more_small
+            stale += skipped["stale"]
+            stale_positions += skipped["stale_positions"]
+            fenced += skipped["fenced"]
+            quarantined += skipped["quarantined"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
         read_s += self._settle([read for _, read, _ in chosen])
         begun = self.clock()
@@ -733,12 +746,16 @@ class BatchReader:
 
     def _fill(self, target: int, end: int, rollout_id: int, floor: int | None, chosen: list, decoded: dict,
               accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
-              position_sources: dict) -> tuple[int, int, int, int]:
+              position_sources: dict, skipped: dict | None = None) -> tuple[int, int, int, int]:
         """Top the chosen groups up to ``target`` samples with whole groups selected
         one by one, without waiting (what is not in the buffer yet is padded). The
         first group that would overflow is carried over (``self._carry``) and the
         round ends at its position, so the watermark never passes it untrained.
-        Returns ``(end, carried groups, padded samples, groups dropped as too small)``."""
+        Returns ``(end, carried groups, padded samples, groups dropped as too small)``; the
+        groups passed over (too old, a fenced incarnation's, quarantined) are counted in
+        ``skipped`` like the main selection counts them."""
+        skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
+                                                       "quarantined": 0}
         missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
         dropped = 0
         while missing > 0:
@@ -748,11 +765,17 @@ class BatchReader:
             item = selected[0]
             end = self.buffer.read_cursor
             if floor is not None and item.entry.behavior_version < floor:
-                continue  # too old: consumed unread, as in the main selection
+                skipped["stale"] += 1  # too old: consumed unread, as in the main selection
+                dispensed = _dispense_position(item.entry)
+                if dispensed is not None:
+                    skipped["stale_positions"].append(dispensed)
+                continue
             if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+                skipped["fenced"] += 1
                 continue
             source = source_key(item.entry.provenance, self._shard_at(item.position))
             if self._quarantined(source, rollout_id):
+                skipped["quarantined"] += 1
                 continue
             group = decode_group(self.buffer.read_payload(item.entry.payload_ref))
             if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
@@ -760,7 +783,7 @@ class BatchReader:
                 continue
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
             if len(group) > missing:
-                self._carry = (position, group, version, tokens, source)
+                self._carry = (position, group, version, tokens, source, _dispense_position(item.entry))
                 return position, 1, missing, dropped
             self._choose(position, group, version, tokens, source, chosen, decoded, accounted, versions,
                          source_groups, source_tokens, position_sources)

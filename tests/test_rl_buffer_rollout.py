@@ -749,3 +749,26 @@ def test_the_reader_rollout_log_leaves_the_padding_samples_out(monkeypatch):
     # nothing padded: Miles logs as usual
     assert plugin.log_rollout_data(5, args, real, None, 2.0) is False and len(logged) == 1
     assert br.is_padding({"metadata": {br.PADDING_KEY: True}}) and not br.is_padding({"metadata": None})
+
+
+def test_groups_the_top_up_passes_over_count_as_stale(tmp_path):
+    """F3: a too-old group the short-round top-up (_fill) consumes unread is stale,
+    as in the main selection."""
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, (version, k) in enumerate(((2, 4), (2, 3), (0, 4), (2, 1))):
+        writer.write(_short(g, version, k), group_key=f"g{g}")
+    groups, report = _reader(tmp_path).take(0, 2, current_version=2)
+    assert [pos for pos, _ in groups] == [0, 1]
+    assert (report.stale_groups, report.dropped_small_groups, report.padded_samples) == (1, 1, 1)
+    assert report.metrics()["sample_buffer/stale_groups"] == 1.0
+
+
+def test_a_carried_group_that_ages_out_counts_as_stale(tmp_path):
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, (version, k) in enumerate(((1, 4), (1, 3), (1, 2), (3, 4), (3, 4))):
+        writer.write(_short(g, version, k), group_key=f"g{g}")
+    reader = _reader(tmp_path)
+    _, report = reader.take(0, 2, current_version=1)
+    assert report.carried_over_groups == 1 and report.stale_groups == 0
+    groups, report = reader.take(1, 2, current_version=3)  # the carried group (v1) is now too old
+    assert [pos for pos, _ in groups] == [3, 4] and report.stale_groups == 1
