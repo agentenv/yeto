@@ -34,6 +34,7 @@ STUB = "ecb33cbaa2b8eac25de24f443e3861113cbbd2ff"  # k31/full-stub: FULL + stub-
 FULL_B = "83d5db6b60677e9c8372ee505bdd6bb5713047e7"
 FULL_C = "690ebe4910337cf0a96542e9d057c1baaee5ae16"
 FULL_D = "c351a33c643326c478a9edaf9bae6c43299508fb"
+FULL_E = "1f29e43043e4c9aace8287a445eca3851e8b52c7"  # k31/integ-trainer: the full-form image's Miles
 # branch heads the rebase replaced; nothing may pin them any more
 REPLACED = ("a019deded8cbb9bc10ad5ef55ea8ad3088123c61", "640de460", "fa1a4607", "daf21371", "033f97e7")
 B4_FEATURES = ("placement_map", "membership_epoch", "router_cordon", "member_publish", "trainer_rebuild")
@@ -48,7 +49,7 @@ def _pin(monkeypatch, commit):
 def test_k31_lineage_is_linear_and_ends_at_full():
     assert (pins.MILES_K31_F1_COMMIT, pins.MILES_K31_B2_COMMIT, pins.MILES_K31_B3B7_COMMIT,
             pins.MILES_K31_B4_COMMIT, pins.MILES_K31_B8_COMMIT) == (F1, B2, B3B7, B4, B8)
-    assert pins.MILES_LINEAGES["k31"].commits == (F1, B2, B3B7, B4, B8, GPUA, FULL, STUB, FULL_B, FULL_C, FULL_D)
+    assert pins.MILES_LINEAGES["k31"].commits == (F1, B2, B3B7, B4, B8, GPUA, FULL, STUB, FULL_B, FULL_C, FULL_D, FULL_E)
     assert pins.MILES_NEXT_COMMIT == FULL_D == pins.MILES_NEXT_PINS.commit
     from yeto import rl
 
