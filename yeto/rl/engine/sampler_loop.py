@@ -39,7 +39,9 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 
 ``rl_sampler_policy_loaded`` carries the release latency fields: the trainer's
 ``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
-``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
+``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`),
+and ``deferred_s`` (how long the in-flight rule deferred it) and ``forced``
+True when the follower's deferral bound (``max_defer_s``) loaded it.
 
 After the last round it calls ``generate.flush()`` when the round has one (a
 streaming agentic round writes the groups still in flight) and marks the data end, so the trainer stops after reading
@@ -188,7 +190,11 @@ class SamplerLoop:
                       weights=loaded.weights, sha256=loaded.sha256,
                       released_at=loaded.released_at, seen_at=self.follower.seen_at,
                       follower_timings=self.follower.last_timings,
-                      **({"in_flight": True} if in_flight else {}), **self.loaded_fields())
+                      **({"in_flight": True} if in_flight else {}),
+                      **({"forced": True} if getattr(self.follower, "last_forced", False) else {}),
+                      **({} if getattr(self.follower, "last_deferred_s", None) is None
+                         else {"deferred_s": self.follower.last_deferred_s}),
+                      **self.loaded_fields())
 
     @contextmanager
     def _live_refresh(self) -> Iterator[None]:

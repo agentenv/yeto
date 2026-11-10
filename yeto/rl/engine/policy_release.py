@@ -962,7 +962,9 @@ class FollowerCounters:
     refreshes refused because a round was generating on engines that cannot
     update their weights mid-generation; ``rebuild_failures``: tries whose
     rebuilt (delta) or downloaded (full, ``file_sha256``) files were not the
-    released ones (nothing is loaded)."""
+    released ones (nothing is loaded); ``forced_loads``: loads made while
+    ``hold()`` was True because the newest release had been deferred for
+    ``max_defer_s`` (the in-flight rule's bound, :class:`PolicyFollower`)."""
 
     loaded: int = 0
     superseded: int = 0
@@ -970,6 +972,7 @@ class FollowerCounters:
     lineage_resets: int = 0
     deferred_in_flight: int = 0
     rebuild_failures: int = 0
+    forced_loads: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -1040,6 +1043,17 @@ class PolicyFollower:
     the loop's rounds; while it returns True and ``live_update`` is off, a
     refresh loads nothing either).
 
+    Deferral bound (``max_defer_s``): a streaming agentic round may always hold
+    a group whose trials run for tens of minutes, so ``hold()`` alone can defer
+    a release forever. Once a ready release has been deferred by ``hold()`` for
+    ``max_defer_s`` seconds (``timer``), :meth:`refresh` loads it anyway
+    (``last_forced`` True, ``last_deferred_s`` the wait; ``counters.forced_loads``).
+    The trials still running are then served by two versions; the round keeps
+    the one-version rule of its groups (``drain``: such a trial is lost as
+    ``served_by_other_version``, a turn a reload fell inside is ABORTED by the
+    records proxy). A round marked by :meth:`generating` is never forced.
+    None: no bound.
+
     Rebuild failures: a delta release whose rebuilt files fail their digest
     check (``ReleaseDeltaError``), or a full release whose files fail their
     ``file_sha256`` (:class:`ReleaseDigestMismatch`), is not loaded; the engines
@@ -1071,7 +1085,8 @@ class PolicyFollower:
                  wall: Callable[[], float] = time.time,
                  max_rebuild_failures: int = MAX_REBUILD_FAILURES,
                  background_download: bool = False,
-                 download_retry_s: float = DOWNLOAD_RETRY_S) -> None:
+                 download_retry_s: float = DOWNLOAD_RETRY_S,
+                 max_defer_s: float | None = None) -> None:
         if int(max_rebuild_failures) < 1:
             raise ValueError("max_rebuild_failures must be >= 1")
         self.max_rebuild_failures = int(max_rebuild_failures)
@@ -1096,6 +1111,12 @@ class PolicyFollower:
         self.background_download = bool(background_download)
         self.download_retry_s = float(download_retry_s)
         self._fetch: _Fetch | None = None
+        if max_defer_s is not None and float(max_defer_s) <= 0:
+            raise ValueError("max_defer_s must be > 0 (None: no bound)")
+        self.max_defer_s = None if max_defer_s is None else float(max_defer_s)
+        self._deferred_since: float | None = None  # first hold() deferral of the pending release
+        self.last_forced = False  # the last load ignored hold() (deferral bound)
+        self.last_deferred_s: float | None = None  # how long the last load was deferred
 
     @contextmanager
     def generating(self) -> Iterator[None]:
@@ -1147,9 +1168,16 @@ class PolicyFollower:
             fetched = self._fetched(latest)
             if fetched is None:  # still downloading, or waiting to retry: keep generating
                 return None
+        forced = False
         if (self._in_flight or self.hold()) and not self.live_update:
-            self.counters.deferred_in_flight += 1
-            return None
+            now = self.timer()
+            if self._deferred_since is None:
+                self._deferred_since = now
+            if (self._in_flight or self.max_defer_s is None
+                    or now - self._deferred_since < self.max_defer_s):
+                self.counters.deferred_in_flight += 1
+                return None
+            forced = True  # deferral bound reached (class doc)
         if fetched is not None:
             directory = fetched.directory
             self._fetch = None
@@ -1180,6 +1208,12 @@ class PolicyFollower:
             mark(latest)
         previous = self.release
         self.counters.loaded += 1
+        self.last_forced = forced
+        self.last_deferred_s = (None if self._deferred_since is None
+                                else round(self.timer() - self._deferred_since, 3))
+        self._deferred_since = None
+        if forced:
+            self.counters.forced_loads += 1
         if previous is not None:
             self.counters.superseded += latest.seq - previous.seq - 1
             if latest.version < self.version:
