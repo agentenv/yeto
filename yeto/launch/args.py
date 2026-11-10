@@ -8,7 +8,7 @@ from ..gpu_spec import ClusterSpec, parse_gpu_spec
 from . import REPO_ROOT
 from .rl_backend import resolve_default_rl_image
 from .loss import pickled_loss_path, resolve_loss_function
-from .storage import modal_checkpoint_store
+from .storage import apply_object_store_endpoint, modal_checkpoint_store, modal_store_secret_name
 from .rl_args import _prepare_rl_args
 from .harness_env import modal_sandbox_secret_name
 
@@ -114,6 +114,7 @@ def prepare_launch_args(
             )
         args.diffusion_adapter_sha256 = adapter_sha256
     resolve_default_rl_image(args)
+    apply_object_store_endpoint(args)
     if getattr(args, "gpu", None):
         check_cloud_prerequisites(parse_gpu_spec(args.gpu), args=args)
     _prepare_rl_args(
@@ -145,6 +146,9 @@ def check_cloud_prerequisites(
     if args is not None and getattr(args, "modal_sandbox_secret", None):
         for s in specs:
             modal_sandbox_secret_name(args, s)  # non-Modal islands: refused
+    if args is not None and getattr(args, "modal_store_secret", None):
+        for s in specs:
+            modal_store_secret_name(args, s)  # non-Modal islands: refused
     nebius_regions = sorted({s.region for s in specs if s.cloud == "nebius" and s.region})
     if nebius_regions:
         from ..shape.providers import SKY_CONFIG_PATH, nebius_project_ids

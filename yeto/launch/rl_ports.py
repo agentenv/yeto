@@ -57,7 +57,12 @@ def _prepare_ports_algorithm(args) -> None:
                 f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
             )
     try:
-        spec = resolve_ports_algorithm(args)
+        # The island resolves the same way (island_entry.resolve_algorithm_with_loss):
+        # the --rl-loss family may turn a spec that is rejected alone (e.g. bounded
+        # staleness without a correction) into an accepted one.
+        from ..rl.algos.score_centering import spec_from_rl_loss_args
+
+        spec = spec_from_rl_loss_args(args, resolve_ports_algorithm(args))
         problems = spec.rejections()
         # Run-configuration checks of the follow-up changes and the Miles
         # adapter's declaration, before any cloud resource exists (the learner
@@ -540,6 +545,11 @@ def _check_ports_infra_switches(args) -> None:
     if ref_load is not None and (not ref_load.startswith("/")
                                  or any(c.isspace() for c in ref_load)):
         raise ValueError("--rl-megatron-ref-load needs an absolute path without whitespace")
+    if (getattr(args, "rl_precision_aware_optimizer", False)
+            and float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0):
+        # the island's run_config refuses it after the GPUs are up; refuse it at launch
+        raise ValueError("--rl-precision-aware-optimizer and --rl-optimizer-offload-fraction "
+                         "are exclusive (the offload already runs the precision-aware path)")
     if getattr(args, "rl_boot_only", False) and not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
     check_verify_every(args)
@@ -708,6 +718,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
+    if not getattr(args, "rl_host_sync_free", True):  # default on: nothing forwarded
+        flags += " --no-rl-host-sync-free"
     if getattr(args, "rl_lora_dropout", None) is not None:
         flags += f" --rl-lora-dropout {float(args.rl_lora_dropout)!r}"
     if getattr(args, "rl_lora_expert_rank", None) is not None:

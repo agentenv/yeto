@@ -7,8 +7,11 @@ function returns a new spec with the engine settings of the tier filled in:
 
 * tier 1, ``sglang-server`` only: ``--quantization fp8`` (KV cache BF16) and ``SGLANG_FP8_IGNORED_LAYERS`` from the checked online plan of
   ``base_dir`` (:func:`yeto.rl.quant.tiers.online_plan`). ``vllm-server`` is
-  refused: stand-alone vLLM online FP8 has no ignore list, so it would quantize
-  attention (verl passes one through its own FP8 path instead);
+  refused: vLLM online FP8 on the legacy line (vllm-ascend / the verl image) has
+  no ignore list, so it would quantize attention (verl passes one through its own
+  FP8 path instead). Upstream vLLM main (``platform`` cuda / rocm) has one
+  (``--quantization-config`` ``ignore`` / ``targets``, docs/features/quantization/
+  online.md), but no yeto plan maps onto it and no gate measured it: refused too;
 * tier 2, both adapters: ``base_dir`` is converted to the FP8 scheme in
   ``work_dir`` (the engine must start on the layout later releases load into);
   ``quant_scheme`` / ``expected_format`` / ``release_dir`` follow the FP8
@@ -34,6 +37,7 @@ APPLY = "yeto.rl.adapters.sampler_engines.quant_tier:apply"
 FP8_FORMAT = "float-quantized"
 SGLANG = "sglang-server"
 VLLM = "vllm-server"
+VLLM_UPSTREAM_PLATFORMS = ("cuda", "rocm")  # vllm_server.UPSTREAM_PLATFORMS
 
 
 class QuantTierSpecError(ValueError):
@@ -64,8 +68,12 @@ def apply(spec: Mapping[str, Any], *, work_dir: Path | None = None) -> dict[str,
     base = Path(server["base_dir"])
     if tier == tiers.TIER_ONLINE_FP8:
         if adapter != SGLANG:
-            raise QuantTierSpecError(f"{tiers.FLAG} 1 on {adapter}: stand-alone vLLM online FP8 has no ignore "
-                                     "list and would quantize attention; use sglang-server or tier 2")
+            upstream = (engine.get("options") or {}).get("platform") in VLLM_UPSTREAM_PLATFORMS \
+                or out.get("platform") in VLLM_UPSTREAM_PLATFORMS
+            reason = ("upstream vLLM's --quantization-config ignore list is not mapped from the tier 1 plan "
+                      "nor gated" if upstream else
+                      "stand-alone vLLM online FP8 has no ignore list and would quantize attention")
+            raise QuantTierSpecError(f"{tiers.FLAG} 1 on {adapter}: {reason}; use sglang-server or tier 2")
         plan = tiers.online_plan(base)
         server["extra_args"] = [*(server.get("extra_args") or ()), "--quantization", "fp8"]
         server["extra_env"] = {**(server.get("extra_env") or {}), **tiers.sglang_online_env(plan)}

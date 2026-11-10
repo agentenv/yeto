@@ -117,10 +117,11 @@ class TaskFacts:
     cpus: int
     memory_mb: int
     workdir: str
+    benchmark: str = BENCHMARK
 
     @property
     def eval_bucket(self) -> str | None:
-        return f"{BENCHMARK}-{self.difficulty}" if self.difficulty in DIFFICULTIES else None
+        return f"{self.benchmark}-{self.difficulty}" if self.difficulty in DIFFICULTIES else None
 
 
 class HarborTaskSet:
@@ -128,17 +129,26 @@ class HarborTaskSet:
 
     ``version``: ``tb2@<rev>`` for the TB2 layout, ``tb2.1@<rev>`` for TB2.1
     (``tasks/`` subdirectory); ``<rev>`` is the checkout's short git revision.
+
+    ``benchmark``: the name of a task set that is not Terminal-Bench (any
+    directory of Harbor tasks); it names the eval buckets (``<name>-<difficulty>``)
+    and the default version (``<name>@<rev>``).
     """
 
     name = BENCHMARK
 
-    def __init__(self, root: str | os.PathLike[str], *, version: str | None = None) -> None:
+    def __init__(self, root: str | os.PathLike[str], *, version: str | None = None,
+                 benchmark: str | None = None) -> None:
         self.root = Path(root).expanduser().resolve()
         nested = self.root / "tasks"
         self.tasks_dir = nested if nested.is_dir() and any(nested.glob("*/task.toml")) else self.root
         if not any(self.tasks_dir.glob("*/task.toml")):
             raise FileNotFoundError(f"{self.root}: no <task>/task.toml (not a Harbor task checkout)")
-        family = "tb2.1" if self.tasks_dir != self.root else "tb2"
+        if benchmark is not None:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", benchmark):
+                raise ValueError(f"bad benchmark name {benchmark!r}")
+            self.name = benchmark
+        family = benchmark or ("tb2.1" if self.tasks_dir != self.root else "tb2")
         self.version = version or f"{family}@{_git_rev(self.root) or 'unknown'}"
         self._facts: dict[str, TaskFacts] = {}
 
@@ -167,13 +177,14 @@ class HarborTaskSet:
             cpus=int(env.get("cpus", 1)),
             memory_mb=int(env.get("memory_mb", 0)),
             workdir=workdirs[-1] if workdirs else "",
+            benchmark=self.name,
         )
         self._facts[task_id] = facts
         return facts
 
     def task_spec(self, task_id: str) -> bm.TaskSpec:
         f = self.facts(task_id)
-        return bm.TaskSpec(benchmark=BENCHMARK, task_id=task_id, base_image=f.docker_image, cpus=f.cpus,
+        return bm.TaskSpec(benchmark=self.name, task_id=task_id, base_image=f.docker_image, cpus=f.cpus,
                            memory_mb=f.memory_mb, workdir=f.workdir, agent_timeout_s=f.agent_timeout_s,
                            judge_timeout_s=f.verifier_timeout_s, benchmark_version=self.version,
                            difficulty=f.difficulty, difficulty_source="tb2-task.toml", eval_bucket=f.eval_bucket)
@@ -189,7 +200,21 @@ def build_tb2_lists(tasks: HarborTaskSet, *, unusable: Mapping[str, str] | None 
     the hold-out pool.  Unknown task ids and an id in both maps fail closed.
     """
     unusable = dict(unusable or {})
-    exclude = smoke6_exclusions() if exclude is None else dict(exclude)
+    return build_lists(tasks, quotas=HOLDOUT_QUOTAS, seed=HOLDOUT_SEED,
+                       rule=HOLDOUT_RULE_UNUSABLE if unusable else HOLDOUT_RULE, unusable=unusable,
+                       exclude=smoke6_exclusions() if exclude is None else exclude)
+
+
+def build_lists(tasks: HarborTaskSet, *, quotas: Mapping[str, int | None], seed: int, rule: str,
+                unusable: Mapping[str, str] | None = None,
+                exclude: Mapping[str, str] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(holdout, train)`` of any Harbor task set (the TB2 rule is :func:`build_tb2_lists`).
+
+    ``quotas``: hold-out tasks per eval bucket (``<benchmark>-<difficulty>``;
+    None: all of the bucket); same meaning of ``unusable`` / ``exclude`` as there.
+    """
+    unusable = dict(unusable or {})
+    exclude = dict(exclude or {})
     known = set(tasks.task_ids())
     for label, ids in (("unusable", unusable), ("excluded", exclude)):
         unknown = sorted(set(ids) - known)
@@ -198,9 +223,7 @@ def build_tb2_lists(tasks: HarborTaskSet, *, unusable: Mapping[str, str] | None 
     clash = sorted(set(unusable) & set(exclude))
     if clash:
         raise ValueError(f"tasks both in the exclusion list and the unusable table: {clash}")
-    holdout = bm.build_holdout(tasks, HOLDOUT_QUOTAS, seed=HOLDOUT_SEED,
-                               rule=HOLDOUT_RULE_UNUSABLE if unusable else HOLDOUT_RULE,
-                               exclude={**exclude, **unusable})
+    holdout = bm.build_holdout(tasks, dict(quotas), seed=seed, rule=rule, exclude={**exclude, **unusable})
     train = bm.build_train_split(tasks, holdout, exclude=unusable)
     return holdout, train
 
@@ -375,18 +398,37 @@ def _label(tasks: HarborTaskSet, task_id: str) -> str:
     return f"{tasks.version.split('@')[0].upper()} task {task_id}"
 
 
-def miles_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "codex") -> list[dict[str, Any]]:
+def task_images(tasks: HarborTaskSet, task_ids: Sequence[str]) -> list[str]:
+    """The prebuilt images of ``task_ids`` (sorted, unique), to pre-pull on the sandbox hosts.
+
+    A task without ``environment.docker_image`` is refused: its sandbox would
+    be built on the host at trial time."""
+    missing = [t for t in task_ids if not tasks.facts(t).docker_image]
+    if missing:
+        raise ValueError(f"tasks without a prebuilt docker_image: {missing}")
+    return sorted({tasks.facts(t).docker_image for t in task_ids})
+
+
+def miles_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "codex",
+               provider: str | None = None, holdout: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Miles rows (also the agentic engine sampler's, ``task_key: metadata``).
+
+    ``provider``: the row's sandbox provider (unset: the worker's ``HARBOR_ENV_TYPE``);
+    ``holdout``: a hold-out list the ids must not touch (raises on a leak).
+    """
+    if holdout is not None:
+        assert_no_holdout(task_ids, holdout)
     out = []
     for tid in task_ids:
         f = tasks.facts(tid)
         out.append({"prompt": _label(tasks, tid), "metadata": {
             "instance_id": tid, "agent_name": agent, "difficulty": f.difficulty, "eval_bucket": f.eval_bucket,
-            "benchmark_version": tasks.version}})
+            "benchmark_version": tasks.version, **({"provider": provider} if provider else {})}})
     return out
 
 
 def verl_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "codex",
-              data_source: str = BENCHMARK) -> list[dict[str, Any]]:
+              data_source: str = BENCHMARK, provider: str | None = None) -> list[dict[str, Any]]:
     out = []
     for index, tid in enumerate(task_ids):
         f = tasks.facts(tid)
@@ -395,9 +437,52 @@ def verl_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "co
                     "reward_model": {"style": "rule", "ground_truth": ""},
                     "extra_info": {"index": index, "difficulty": f.difficulty, "eval_bucket": f.eval_bucket,
                                    "benchmark_version": tasks.version,
-                                   "agent_task": {"task_id": tid, "agent": agent}}})
+                                   "agent_task": {"task_id": tid, "agent": agent,
+                                                  **({"provider": provider} if provider else {})}}})
     return out
 
 
 def dump_jsonl(rows: Iterable[Mapping[str, Any]]) -> str:
     return "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
+
+
+# --- command line ---------------------------------------------------------------------
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m yeto.rl.harness.harbor.task_lists rows|images ...`` (any Harbor task directory)."""
+    import argparse
+
+    p = argparse.ArgumentParser(prog="python -m yeto.rl.harness.harbor.task_lists")
+    p.add_argument("what", choices=("rows", "images"))
+    p.add_argument("--tasks-dir", required=True)
+    p.add_argument("--benchmark", help="task set name (default: tb2 / tb2.1 by layout)")
+    p.add_argument("--ids", help="file with one task id per line (default: every task in --tasks-dir)")
+    p.add_argument("--holdout", help="hold-out list JSON; its tasks are refused")
+    p.add_argument("--agent", default="pi")
+    p.add_argument("--provider")
+    p.add_argument("--format", choices=("miles", "verl"), default="miles")
+    p.add_argument("--out", help="output file (default: stdout)")
+    args = p.parse_args(argv)
+    tasks = HarborTaskSet(args.tasks_dir, benchmark=args.benchmark)
+    ids = ([line.strip() for line in Path(args.ids).read_text().splitlines() if line.strip()
+            and not line.startswith("#")] if args.ids else tasks.task_ids())
+    unknown = sorted(set(ids) - set(tasks.task_ids()))
+    if unknown:
+        raise SystemExit(f"task ids not in {tasks.tasks_dir}: {unknown}")
+    if args.holdout:
+        assert_no_holdout(ids, json.loads(Path(args.holdout).read_text()))
+    if args.what == "images":
+        text = "".join(f"{image}\n" for image in task_images(tasks, ids))
+    elif args.format == "miles":
+        text = dump_jsonl(miles_rows(tasks, ids, agent=args.agent, provider=args.provider))
+    else:
+        text = dump_jsonl(verl_rows(tasks, ids, agent=args.agent, data_source=tasks.name, provider=args.provider))
+    if args.out:
+        Path(args.out).write_text(text)
+    else:
+        print(text, end="")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -70,7 +70,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -121,7 +121,28 @@ from .publish import (
 from .release_plugin import WRITE_LORA_ADAPTER, full_checkpoint_writer
 from .remote_code_prewarm import prewarm_remote_code
 
-SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
+# Miles post-processes each round for the trainer's data-parallel layout
+# (``RolloutExecutor.set_train_parallel_config``), which a trainer actor sets;
+# a sampler island has none. The buffer trainer is DP=1 without context
+# parallelism, virtual pipeline or an independent-DP schedule. Upstream reads
+# this as a pydantic ``miles.utils.dp_schedule.TrainParallelConfig``
+# (``postprocess_rollout_data`` reads attributes); the dict mirrors its six
+# required fields and :func:`sampler_train_parallel_config` builds the model.
+SAMPLER_TRAIN_PARALLEL_CONFIG = {
+    "dp_size": 1,
+    "cp_size": 1,
+    "vpp_size": None,
+    "microbatch_group_size_per_vp_stage": None,
+    "independent_dp": False,
+    "supports_precomputed_schedule": False,
+}
+
+
+def sampler_train_parallel_config() -> Any:
+    """The upstream ``TrainParallelConfig`` of a sampler island (DP=1)."""
+    from miles.utils.dp_schedule import TrainParallelConfig
+
+    return TrainParallelConfig(**SAMPLER_TRAIN_PARALLEL_CONFIG)
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
 STAGING_ENV = "YETO_RL_RELEASE_STAGING"  # local directory of staged releases (default: system temp)
 # "miles": a staged release is written by Miles' export_hf (rank 0 writes) instead of
@@ -166,7 +187,9 @@ def prepare_quantized_base(miles_args: Any, work_dir: Path) -> Path:
     stats = requantize_checkpoint(base, template, out, AwqSmoothing.none())
     check_release_scope(out)
     print(f"[rl] {describe(TIER_TRAINER_FP8)}: base {base} -> {out} {stats}", flush=True)
-    miles_args.hf_checkpoint = str(out)
+    from .island_args import override_native
+
+    override_native(miles_args, hf_checkpoint=str(out))  # a native Miles field: before the slice
     return out
 
 
@@ -382,7 +405,8 @@ class EngineReleaseLoader:
             with self._phase("unlock_s"):
                 if ok:
                     await self.controller.end_update_weights(
-                        snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
+                        snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes,
+                        failed_cell_ids=())
                 else:
                     await self.controller.abort_update_weights()
         await _maybe_await(self.executor.set_weight_version(int(version)))
@@ -415,7 +439,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     the container (at most :data:`LEAVE_HOLD_S`)."""
     from miles.ray.placement_group import create_rollout_components
     from miles.utils.async_utils import Disposer
-    from miles.utils.orchestration_utils import init_orchestration_script
+    from miles.utils.orchestration_utils import ArgvOrchestratorStartupInfo, init_orchestration_script
 
     from yeto.rl.pool_client import LeaveReason
     from yeto.rl.engine.events import append_tape_event
@@ -479,15 +503,24 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     metadata = RayMetadataSink()
     runner = LoopRunner()
     disposer = Disposer()
+    from .island_args import miles_config
+
+    startup_info = ArgvOrchestratorStartupInfo.create(miles_config(miles_args))  # the config behind the facade
+    orch = startup_info.args
 
     async def init() -> tuple[Any, Any]:
         await disposer.__aenter__()
-        init_orchestration_script(miles_args, disposer=disposer)
-        controller, executor, _ = await create_rollout_components(miles_args)
+        capability = init_orchestration_script(startup_info, disposer=disposer)
+        # --debug-rollout-only builds no trainer: upstream uses trainer_handles only
+        # to wait for every trainer to go idle when a hot restart takes the
+        # inference controller over; an empty dict is "no trainer to wait for"
+        # (create_trainer_handles(orch, trainer_configs=[], ...) returns the same {}).
+        controller, executor, _ = await create_rollout_components(
+            orch, capability=capability, trainer_handles={})
         disposer.add(controller, executor)
         # Miles post-processes each round for the trainer's data-parallel layout, which a
         # trainer actor sets; a sampler has none. The buffer trainer is DP=1.
-        await executor.set_train_parallel_config(SAMPLER_TRAIN_PARALLEL_CONFIG)
+        await executor.set_train_parallel_config(sampler_train_parallel_config())
         return controller, executor
 
     async def generate(rollout_id: int) -> None:
@@ -687,8 +720,11 @@ class ReleasingPublisher:
                  read_shards_from_thread: Callable[[], dict[str, int] | None] | None = None,
                  delta: DeltaChain | None = None,
                  resumed_base: int | None = None,
-                 timer: Callable[[], float] = time.perf_counter) -> None:
-        """``delta``: staged releases go out as bf16 deltas along this chain
+                 timer: Callable[[], float] = time.perf_counter,
+                 manifest: Mapping[str, Any] | None = None,
+                 release_every: int = 1, skip_busy: bool = False) -> None:
+        """``manifest``: every release record's ``manifest`` (``PolicyRelease``:
+        the partial-experts selection of a Kimi-K3.1 run). ``delta``: staged releases go out as bf16 deltas along this chain
         (``policy_release`` module doc, delta releases). ``read_shards``: the
         trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
@@ -702,6 +738,16 @@ class ReleasingPublisher:
         versions up to it are the store's already and are not released again."""
         if (staging is None) != (releaser is None):
             raise ValueError("staging and releaser go together")
+        if int(release_every) < 1:
+            raise ValueError("release_every must be >= 1")
+        if skip_busy and releaser is None:
+            raise ValueError("skip_busy needs staged releases (a background releaser)")
+        # Fewer releases (module doc, release cadence): every release_every-th version,
+        # and (skip_busy) none while the previous upload is still in flight. A version
+        # not released waits in _pending; drain_releases releases the last one.
+        self.release_every = int(release_every)
+        self.skip_busy = bool(skip_busy)
+        self._pending: tuple[Any, float] | None = None
         if delta is not None and staging is None:
             raise ValueError("delta releases need staged releases")
         self.delta = delta
@@ -722,6 +768,7 @@ class ReleasingPublisher:
         self.skip_base = bool(skip_base)
         self.resumed_base = None if resumed_base is None else int(resumed_base)
         self.timer = timer
+        self.manifest = None if manifest is None else dict(manifest)
 
     def _engine_checksum(self) -> str | None:
         checksums = getattr(self.inner, "last_engine_checksums", None)
@@ -733,6 +780,27 @@ class ReleasingPublisher:
         started = self.timer()
         result = self.inner.publish(state, **kwargs)
         publish_s = round(self.timer() - started, 3)  # the trainer's own engines
+        version = int(self.version_of(state))
+        reason = self._cadence_skip(version)
+        if reason is not None:
+            self._pending = (state, publish_s)
+            self.emit("rl_policy_release_skipped", policy_version=version,
+                      local_version=int(state.policy_version), latest_version=None, reason=reason,
+                      release_every=self.release_every)
+            return result
+        self._pending = None
+        self._release(state, publish_s)
+        return result
+
+    def _cadence_skip(self, version: int) -> str | None:
+        """Why ``version`` is not released now (None: release it)."""
+        if self.release_every > 1 and version % self.release_every != 0:
+            return "release_every"
+        if self.skip_busy and self.releaser is not None and self.releaser.busy:
+            return "upload_in_flight"  # latest wins: the trainer never waits for an upload
+        return None
+
+    def _release(self, state: Any, publish_s: float) -> None:
         # an upload in flight ends first: the store is read below, and releases stay in order
         waited_s = 0.0 if self.releaser is None else round(self.releaser.wait(), 3)
         version = int(self.version_of(state))
@@ -743,21 +811,22 @@ class ReleasingPublisher:
                           local_version=int(state.policy_version),
                           latest_version=None if latest is None else latest.version,
                           reason="not_newer_than_latest")
-                return result
+                return
         if self.resumed_base is not None and version <= self.resumed_base:
             # the store holds vK already and nothing newer is trained yet: releasing it
             # would give vK a second set of weights (module doc, relaunch)
             self.emit("rl_policy_release_skipped", policy_version=version,
                       local_version=int(state.policy_version), latest_version=self.resumed_base,
                       reason="resumed_base_version")
-            return result
+            return
         if self.skip_base and version == BASE_POLICY_VERSION and self.releases.latest() is None:
             self.emit("rl_policy_release_skipped", policy_version=version,
                       local_version=int(state.policy_version), latest_version=None,
                       reason="base_policy")
-            return result
+            return
         fields = {"weights": self.weights, "engine_checksum": self._engine_checksum(),
-                  "origin": None if self.origin is None else self.origin(state)}
+                  "origin": None if self.origin is None else self.origin(state),
+                  "manifest": self.manifest}
         policy_hash = state.policy_tensor_hash()
         event = {"policy_version": version, "local_version": int(state.policy_version),
                  "publish_s": publish_s}
@@ -767,7 +836,7 @@ class ReleasingPublisher:
                                             lambda directory: self.export(version, directory),
                                             buffer_selected=position, buffer_shards=shards, **fields)
             self._emit_released(release, event, self.releases.last_timings)
-            return result
+            return
         staged = self._stage(version)
         export_started = self.timer()
         try:
@@ -801,7 +870,7 @@ class ReleasingPublisher:
                                 {**stage, **self.releases.last_timings})
 
         self.releaser.submit(upload)
-        return result
+        return
 
     def _positions(self, read_position: Callable[[], int | None],
                    read_shards: Callable[[], dict[str, int] | None] | None
@@ -834,8 +903,13 @@ class ReleasingPublisher:
                   release_bytes=sum((release.files or {}).values()), **event)
 
     def drain_releases(self) -> None:
-        """Wait for the staged release in flight (the driver calls it before the run
-        ends); raises its error. No-op without staging."""
+        """Release the last version a cadence skipped (the trained policy always
+        reaches the store at the end of a run), then wait for the staged release in
+        flight (the driver calls it before the run ends); raises its error."""
+        if self._pending is not None:
+            state, publish_s = self._pending
+            self._pending = None
+            self._release(state, publish_s)
         if self.releaser is not None:
             self.releaser.drain()
 
@@ -849,15 +923,21 @@ class GateVersionPublisher:
     version (``set_gate_version(version)``). Every other attribute is the wrapped
     publisher's."""
 
-    def __init__(self, inner: Any, set_gate_version: Callable[[int], Any],
-                 version_of: Callable[[Any], int]) -> None:
+    def __init__(self, inner: Any, set_gate_version: Callable[..., Any],
+                 version_of: Callable[[Any], int], *, with_state: bool = False) -> None:
         self.inner = inner
         self.set_gate_version = set_gate_version
         self.version_of = version_of
+        self.with_state = with_state  # set_gate_version(version, state)
+        self.gate_version: int | None = None  # the last gate set (the driver's policy-age basis)
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
         result = self.inner.publish(state, **kwargs)
-        self.set_gate_version(int(self.version_of(state)))
+        self.gate_version = int(self.version_of(state))
+        if self.with_state:
+            self.set_gate_version(self.gate_version, state)
+        else:
+            self.set_gate_version(self.gate_version)
         return result
 
     def __getattr__(self, name: str) -> Any:
@@ -881,6 +961,10 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if not callable(in_executor):
         raise SampleBufferRolloutError(f"rollout pool {type(driver.rollout).__name__} cannot "
                                        "run code in the rollout executor")
+    if getattr(driver, "xhw_guard", None) is not None:  # YETO_RL_XHW_GUARD: actions -> the reader
+        from .buffer_rollout import executor_set_xhw_actions
+
+        driver.xhw_actions_sink = lambda actions: in_executor(executor_set_xhw_actions, dict(actions))
     lane = getattr(miles_args, "yeto_rl_sample_lane", None)
     env = os.environ if environ is None else environ
     from yeto.rl.spot_rollout.relay_buffer import RELAY_ADDR_ENV
@@ -923,8 +1007,42 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         releases = release_store(config, environ)
         driver.published_policy_history = lambda: [
             (r.version, r.policy_hash) for r in releases.records() if r.derived_from is None]
-        driver.publisher = GateVersionPublisher(
-            driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
+        if lane.is_own:
+            driver.publisher = GateVersionPublisher(
+                driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
+        else:
+            # The groups were generated by merged releases, not by this island's local
+            # publications (whose versions advance every round): name them as external
+            # merged cuts and count their age in merged versions, as relay mode does.
+            from yeto.rl.engine.external_policy import ExternalMergedCuts
+
+            from .buffer_rollout import executor_set_merged_releases
+
+            driver.external_policy = ExternalMergedCuts()
+            known: dict[int, str] = {}
+
+            def set_merged_gate(version: int, state: Any = None) -> Any:
+                # merged v0 is the initial weights, this island's own v0: a sampler
+                # serves it from the base checkpoint before the publisher's first
+                # release exists (a slow publisher start). The driver records its
+                # publication only after this wrapper returns, so take the state's hash.
+                base = driver.published_policies.hash_of(0)
+                if base is None and state is not None and int(state.policy_version) == 0:
+                    base = state.policy_tensor_hash()
+                if base is not None:
+                    known.setdefault(0, str(base))
+                for record in releases.records():  # the kept releases; seen ones stay known
+                    if record.derived_from is None and record.policy_hash:
+                        known[int(record.version)] = str(record.policy_hash)
+                return in_executor(executor_set_merged_releases, dict(known), int(version),
+                                   str(config.store), release_dir_for(BF16))
+
+            driver.publisher = GateVersionPublisher(driver.publisher, set_merged_gate, version_of,
+                                                    with_state=True)
+        # the published-policy window and the driver's over-age split follow the
+        # reader's gate (own lane: the local version; merged lane: the merged one)
+        gate_publisher = driver.publisher
+        driver.policy_age_basis = lambda: gate_publisher.gate_version
         publisher_island = is_publisher(lane.index, lane.count)
         driver.emit("rl_policy_release_role", learner_id=lane.index, num_learners=lane.count,
                     publisher=publisher_island, own_lane=lane.is_own)
@@ -932,7 +1050,8 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
             return None
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
     else:
-        synced = _resume_single_trainer(driver, release_store(config, environ))
+        synced = _resume_single_trainer(driver, release_store(config, environ),
+                                        init_release=getattr(miles_args, "yeto_rl_init_release", None))
 
     lora = lora_mode(miles_args)
     # module doc: a trainer island stages its full releases unless --rl-release-inline
@@ -965,6 +1084,9 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    read_position_from_thread=lambda: from_thread(executor_read_cursor),
                                    read_shards_from_thread=lambda: from_thread(executor_read_shards),
                                    delta=DeltaChain(delta_every) if staged and delta_every else None,
+                                   manifest=getattr(miles_args, "yeto_rl_release_manifest", None),
+                                   release_every=int(getattr(config, "release_every", 1) or 1),
+                                   skip_busy=bool(staged and getattr(config, "release_skip_busy", False)),
                                    **synced)
     driver.publisher = publisher
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
@@ -972,13 +1094,23 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     return publisher
 
 
-def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore) -> dict[str, Any]:
+def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
+                           init_release: dict[str, Any] | None = None) -> dict[str, Any]:
     """A single trainer relaunched over a store that holds releases (module doc,
     relaunch): its account continues at the highest release vK, and the versions
     below it are restored with the hashes the store recorded. Returns the
-    ``ReleasingPublisher`` keywords ({} for a store without releases)."""
+    ``ReleasingPublisher`` keywords ({} for a store without releases).
+    ``init_release``: the record of the release the trainer loaded
+    (``--rl-init-from-release``); vK must be that release."""
     limit = getattr(driver, "_max_policy_age", None)
     resumed = resumed_releases(releases, int(limit()) if callable(limit) else 0)
+    if init_release is not None:
+        from yeto.rl.engine.init_from_release import check_resumed
+
+        check_resumed(init_release, None if resumed is None else resumed.base_version,
+                      () if resumed is None else resumed.history())
+        driver.emit("rl_trainer_init_from_release", release=init_release["path"],
+                    version=int(init_release["version"]), policy_hash=init_release["policy_hash"])
     if resumed is None:
         return {}
     resume_at = getattr(getattr(driver, "sync", None), "resume_at", None)

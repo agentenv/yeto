@@ -13,7 +13,7 @@ One shard per rank holds (4.1 audit, ``cut-audit.md``):
   parameter of a full-parameter trainer (key ``adapter`` in both cases);
 * the optimizer state keyed by parameter name, including the FP32 main copy
   (``param``), the moments and the step/hyper-parameters -- produced by the
-  fork-M5 helpers ``miles.backends.megatron_utils.lora.dp_invariant_state``
+  the vendored fork-M5 helpers ``yeto.rl.adapters.miles.dp_invariant_state``
   (Float16Optimizer, DistributedOptimizer range shards and plain fp32 are
   covered there);
 * the LR scheduler ``state_dict`` (``num_steps`` in samples);
@@ -34,6 +34,8 @@ holds the whole model copy on every DP rank plus this rank's optimizer range
 """
 
 from __future__ import annotations
+
+import contextlib
 
 import hashlib
 import os
@@ -71,6 +73,18 @@ class CutPluginError(StatePluginError):
 # --------------------------------------------------------------------------
 
 
+def is_adapter_param_name(name: str) -> bool:
+    """Whether a Megatron parameter name belongs to a LoRA adapter.
+
+    The fork's ``lora.utils._is_adapter_param_name`` (removed upstream, where
+    only torchtitan's ``is_adapter_key`` is left), kept here verbatim: LoRA
+    parameters are ``lora_A`` / ``lora_B`` or the bridge adapter's
+    ``.adapter.linear_in`` / ``.adapter.linear_out``. Upstream's native and
+    bridge LoRA keep these names; a GPU smoke dumps ``named_parameters`` once
+    to confirm against the new pin."""
+    return "lora_" in name or (".adapter." in name and ("linear_in" in name or "linear_out" in name))
+
+
 class MilesCutBackend:
     def coord(self) -> dict[str, int]:
         import torch.distributed as dist
@@ -92,12 +106,11 @@ class MilesCutBackend:
         return [(f"chunk{i}.{n}", p) for i, chunk in enumerate(model) for n, p in chunk.named_parameters()]
 
     def is_adapter(self, name: str) -> bool:
-        from miles.backends.megatron_utils.lora.utils import _is_adapter_param_name
-
-        return _is_adapter_param_name(name)
+        return is_adapter_param_name(name)
 
     def _dps(self):
-        from miles.backends.megatron_utils.lora import dp_invariant_state
+        # vendored from the ports-v1 fork (M5); the k31 Miles has no dp_invariant_state
+        from . import dp_invariant_state
 
         return dp_invariant_state
 
@@ -171,7 +184,7 @@ class MilesCutBackend:
                  "ep_rank": ps.ep.rank, "ep_size": ps.ep.size, "etp_rank": ps.etp.rank, "etp_size": ps.etp.size}
         return build_param_layout(named, global_names=global_names, partition_of=partition_of,
                                   is_expert=is_routed_expert_param, ranks=ranks,
-                                  num_experts=getattr(args, "num_experts", None))
+                                  num_experts=megatron_field(args, "num_experts", None))
 
     def set_megatron_counters(self, counters: Mapping[str, int]) -> None:
         if not counters:
@@ -179,8 +192,13 @@ class MilesCutBackend:
         from megatron.training.global_vars import get_args
 
         margs = get_args()
-        for key, value in counters.items():
-            setattr(margs, key, int(value))
+        # Miles' args namespace refuses writes outside its mutable windows (GPU-A it11c: the
+        # resume restore failed on consumed_train_samples); ``iteration`` is not one of its
+        # declared mutable fields, so a restore, which sets the whole counter state, opens all
+        window = getattr(margs, "force_all_mutable", None) or getattr(margs, "mutable", None)
+        with window() if callable(window) else contextlib.nullcontext():
+            for key, value in counters.items():
+                setattr(margs, key, int(value))
 
 
 def _device_export(dps: Any) -> Any:
@@ -310,6 +328,22 @@ def _backend(actor: Any) -> Any:
 # --------------------------------------------------------------------------
 
 
+def megatron_field(args: Any, name: str, default: Any = None) -> Any:
+    """A Megatron field of the Miles configuration.
+
+    Miles (k31) keeps the Megatron fields on ``args.backend`` (the trainer
+    backend config); the ports-v1 namespace carried them flat. Read the typed
+    backend first, then the flat spelling, then ``default``: a plain
+    ``getattr(args, "fp16", ...)`` on the new config silently answers the
+    default, which hides --fp16, the distributed optimizer or EP>1 from the
+    checks below.
+    """
+    backend = getattr(args, "backend", None)
+    if backend is not None and not isinstance(backend, str) and hasattr(backend, name):
+        return getattr(backend, name)
+    return getattr(args, name, default)
+
+
 def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshard: bool = False) -> list[str]:
     """Configurations whose trainer state a cut cannot carry (mirrors fork-M5's parse-time check).
 
@@ -322,17 +356,17 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     different EP ranks share names), no TP/PP>1 with DistributedOptimizer.
     """
     out = []
-    if getattr(args, "fp16", False):
+    if megatron_field(args, "fp16", False):
         out.append("--fp16 keeps a dynamic loss-scaler state that the cut does not carry")
-    if getattr(args, "use_precision_aware_optimizer", False):
+    if megatron_field(args, "use_precision_aware_optimizer", False):
         out += _precision_aware_problems(args)
-    if int(getattr(args, "num_distributed_optimizer_instances", 1) or 1) > 1:
+    if int(megatron_field(args, "num_distributed_optimizer_instances", 1) or 1) > 1:
         out.append("--num-distributed-optimizer-instances > 1 (partial DP optimizer groups)")
-    cp = int((coord or {}).get("cp_size") or getattr(args, "context_parallel_size", 1) or 1)
-    ep = int((coord or {}).get("ep_size") or getattr(args, "expert_model_parallel_size", 1) or 1)
-    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
-    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
-    if reshard and (tp > 1 or pp > 1) and getattr(args, "use_distributed_optimizer", False):
+    cp = int((coord or {}).get("cp_size") or megatron_field(args, "context_parallel_size", 1) or 1)
+    ep = int((coord or {}).get("ep_size") or megatron_field(args, "expert_model_parallel_size", 1) or 1)
+    tp = int(megatron_field(args, "tensor_model_parallel_size", 1) or 1)
+    pp = int(megatron_field(args, "pipeline_model_parallel_size", 1) or 1)
+    if reshard and (tp > 1 or pp > 1) and megatron_field(args, "use_distributed_optimizer", False):
         out.append("DP resharding with TP/PP>1 and DistributedOptimizer-sharded masters is not supported "
                    "(same-shape cuts are)")
     if cp > 1:
@@ -353,11 +387,11 @@ def _precision_aware_problems(args: Any) -> list[str]:
     the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``). On the device the precision-aware path keeps scaled or
     low-precision state, which a cut does not represent.
     """
-    if not getattr(args, "optimizer_cpu_offload", False):
+    if not megatron_field(args, "optimizer_cpu_offload", False):
         return ["--use-precision-aware-optimizer without --optimizer-cpu-offload stores scaled/low-precision "
                 "state (not supported)"]
     low = [name for name in ("main_params_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
-           if str(getattr(args, name, "fp32")) not in _FP32_NAMES]
+           if str(megatron_field(args, name, "fp32")) not in _FP32_NAMES]
     return [f"--optimizer-cpu-offload with non-FP32 {low} (not supported)"] if low else []
 
 
@@ -588,22 +622,37 @@ def optimizer_diff(a: Mapping[str, Any] | None, b: Mapping[str, Any] | None) -> 
 def miles_counters(actor: Any) -> dict[str, int]:
     """Miles trainer-process counters a rebuilt trainer must continue from.
 
-    ``weight_updater.weight_version``: every ``update_weights`` increments it and
-    the rollout executor refuses a version that goes backwards, so a rebuilt
-    trainer starting at 0 fails its first re-publication ("Engine weight version
-    went backwards: 4 -> 1"). Absent attribute -> {}.
+    ``weight_version``: the published weight version, whose only source is the
+    model companion (``full_parameter.rank_state.model_weight_version``; the
+    ports-v1 updater counter is read on that pin). The rollout executor refuses
+    a version that goes backwards, so a rebuilt trainer starting at 0 fails its
+    first re-publication ("Engine weight version went backwards: 4 -> 1"). The
+    companion is saved with the checkpoint and the cut carries it here.
+    No carrier -> {}.
     """
-    updater = getattr(actor, "weight_updater", None)
-    version = getattr(updater, "weight_version", None)
+    from .full_parameter.rank_state import model_weight_version
+
+    version = model_weight_version(actor)
     return {} if version is None else {"weight_version": int(version)}
 
 
 def set_miles_counters(actor: Any, counters: Mapping[str, int]) -> None:
     if "weight_version" in counters:
-        updater = getattr(actor, "weight_updater", None)
-        if updater is None:
-            raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
-        updater.weight_version = int(counters["weight_version"])
+        from .full_parameter.rank_state import can_set_model_weight_version, set_model_weight_version
+
+        if not can_set_model_weight_version(actor):
+            raise CutPluginError(_NO_WEIGHT_VERSION_CARRIER)
+        set_model_weight_version(actor, int(counters["weight_version"]))
+
+
+_NO_WEIGHT_VERSION_CARRIER = ("the cut carries a weight version but the trainer has no model companion "
+                              "(nor a weight_updater counter) to carry it")
+
+
+def _can_carry_weight_version(actor: Any) -> bool:
+    from .full_parameter.rank_state import can_set_model_weight_version
+
+    return can_set_model_weight_version(actor)
 
 
 def train_state_digest(snap: Mapping[str, Any]) -> str:
@@ -1274,10 +1323,15 @@ def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, final)
+    from yeto.rl.engine.cut import push_shard_from_rank
+
+    digest, size = _sha256(final), os.path.getsize(final)  # before the push drops the local copy
+    pushed = push_shard_from_rank(final) or {}  # staged store: this rank uploads its own shard
     return {
+        **pushed,
         "path": name,
-        "sha256": _sha256(final),
-        "bytes": os.path.getsize(final),
+        "sha256": digest,
+        "bytes": size,
         "coord": dict(coord),
         "scheduler_samples": captured["scheduler_samples"],
         "has_optimizer_state": snap["optimizer_named"] is not None,
@@ -1439,7 +1493,9 @@ def rebase_full_parameter_tracking(actor: Any) -> None:
     with "scheduler progress has no local-step receipt": the
     restored progress has no local step behind it on this trainer. A trainer
     without full-parameter tracking (LoRA cut path) is left alone."""
-    if getattr(actor, "_external_full_policy_version", None) is None:
+    from .full_parameter.rank_state import rank_policy_version
+
+    if rank_policy_version(actor) is None:
         return
     try:
         from miles.backends.megatron_utils.full_parameter_state import rebase_full_parameter_scheduler_anchor
@@ -1550,8 +1606,8 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     # Validate against the rebuilt optimizer and scheduler before any write.
     merged = backend.check_optimizer(actor.optimizer, named, states)
     check_scheduler(actor.opt_param_scheduler, shard["scheduler"])
-    if "weight_version" in (shard.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
-        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
+    if "weight_version" in (shard.get("miles_counters") or {}) and not _can_carry_weight_version(actor):
+        raise CutPluginError(_NO_WEIGHT_VERSION_CARRIER)
     progress["written"] = True
     with torch.no_grad():
         for n, p in named:
@@ -1708,8 +1764,8 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
             raise CutPluginError(f"adapter {n!r} shape/dtype differs from the rebuilt trainer")
     merged = backend.check_optimizer(actor.optimizer, named, [s["optimizer_named"] for s in shards])
     check_scheduler(actor.opt_param_scheduler, first["scheduler"])
-    if "weight_version" in (first.get("miles_counters") or {}) and getattr(actor, "weight_updater", None) is None:
-        raise CutPluginError("the cut carries a weight version but the trainer has no weight_updater")
+    if "weight_version" in (first.get("miles_counters") or {}) and not _can_carry_weight_version(actor):
+        raise CutPluginError(_NO_WEIGHT_VERSION_CARRIER)
     # ---- writes ----
     with torch.no_grad():
         for n, p in named:

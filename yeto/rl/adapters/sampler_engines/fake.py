@@ -44,7 +44,22 @@ class FakeEngine:
                  weight_gib: float | None = None, answers: Mapping[str, str] | None = None,
                  tokens_for: Callable[[str, int], int] = lambda prompt, i: 4 + i,
                  token_ids_for: Callable[[str, int, int], list[int]] | None = None,
-                 token_reply: Callable[[tuple[int, ...], int], Sequence[int]] | None = None) -> None:
+                 token_reply: Callable[[tuple[int, ...], int], Sequence[int]] | None = None,
+                 routed_experts: tuple[int, int, int] | None = None,
+                 routed_experts_pad_rows: int = 0,
+                 top_logprobs_num: int = 0, fp32_lm_head: bool = False,
+                 expert_file_update: bool = False) -> None:
+        """``routed_experts``: ``(num_experts, moe_layers, top_k)`` -> every completion
+        carries R3 ids ``uint16[T, moe_layers, top_k]`` drawn below ``num_experts``
+        (T = prompt + response - 1; the fake's text prompts count as one token);
+        ``routed_experts_pad_rows``: the last rows of that array hold the pad id
+        (0xFFFF, positions the engine routed nothing for, as Miles writes -1);
+        ``top_logprobs_num``: K top candidates per response token (the sampled
+        token first, then K-1 others). ``expert_file_update``: ``load`` applies a
+        release the K3.1 way (:mod:`.k31_release`): when the release carries a
+        change manifest naming only routed-expert files, the fake takes the expert
+        tensors file by file (recorded in ``expert_updates``) instead of a full
+        reload; anything else falls back to the full load with the plan's reason."""
         self._identity = identity
         self._max_model_len = int(max_model_len)
         self.in_place = bool(in_place)
@@ -62,6 +77,39 @@ class FakeEngine:
         self.loads: list[tuple[str | None, int]] = []
         self.requests: list[tuple[tuple[str, ...], SamplingParams]] = []
         self.stopped = False
+        self.routed_experts_shape = routed_experts
+        self.routed_experts_pad_rows = int(routed_experts_pad_rows)
+        self.returns_routed_experts = routed_experts is not None
+        self.top_logprobs_num = int(top_logprobs_num)
+        self.fp32_lm_head = bool(fp32_lm_head)
+        self.expert_file_update = bool(expert_file_update)
+        self.expert_updates: list[dict] = []  # one record per file-level expert update taken
+
+    def _arrays(self, key: object, ids: Sequence[int], prompt_tokens: int) -> dict:
+        """The optional per-token arrays of one completion (constructor doc)."""
+        import numpy
+
+        from yeto.rl.engine.buffer_payload import ROUTED_EXPERTS_PAD
+
+        out: dict = {}
+        if self.routed_experts_shape is not None:
+            experts, layers, top_k = self.routed_experts_shape
+            rows = max(prompt_tokens + len(ids) - 1, 0)
+            rng = numpy.random.default_rng(int(_unit(key, "experts") * 2**31))
+            routed = rng.integers(0, experts, size=(rows, layers, top_k), dtype=numpy.uint16)
+            if self.routed_experts_pad_rows > 0 and rows:
+                routed[max(rows - self.routed_experts_pad_rows, 0):] = ROUTED_EXPERTS_PAD
+            out["routed_experts"] = routed
+        if self.top_logprobs_num > 0:
+            k = self.top_logprobs_num
+            top_ids = numpy.zeros((len(ids), k), dtype=numpy.int32)
+            top_vals = numpy.zeros((len(ids), k), dtype=numpy.float32)
+            for t, token in enumerate(ids):
+                top_ids[t, 0] = int(token)
+                top_ids[t, 1:] = [(int(token) + c) % 1000 for c in range(1, k)]
+                top_vals[t] = [-_unit(key, t, c) for c in range(k)]
+            out["top_logprobs_ids"], out["top_logprobs"] = top_ids, top_vals
+        return out
 
     @property
     def identity(self) -> EngineIdentity:
@@ -76,16 +124,38 @@ class FakeEngine:
         return self._serve(release_dir, version, RELOAD_RESTART)
 
     def load(self, release_dir: Path, version: int) -> LoadReport:
-        return self._serve(release_dir, version, RELOAD_IN_PLACE if self.in_place else RELOAD_RESTART)
+        detail = self._expert_file_update(Path(release_dir)) if self.expert_file_update and self.in_place else {}
+        return self._serve(release_dir, version, RELOAD_IN_PLACE if self.in_place else RELOAD_RESTART,
+                           detail=detail)
 
-    def _serve(self, release_dir: Path | None, version: int, mode: str) -> LoadReport:
+    def _expert_file_update(self, release_dir: Path) -> dict:
+        """The K3.1 file-level path over a release directory (constructor doc):
+        the load record of the sglang-server adapter, ``expert_update`` True with
+        the plan's counts, or ``expert_update_fallback`` with the plan's reason."""
+        from . import k31_release
+
+        changed = k31_release.changed_files_of(release_dir)
+        if changed is None:
+            return {"expert_update_fallback": "no_change_manifest"}
+        try:
+            plan = k31_release.expert_update_plan(release_dir, changed)
+        except k31_release.FileSparseUnavailable as error:
+            return {"expert_update_fallback": error.reason, "expert_update_fallback_detail": str(error)[:300]}
+        record = {"expert_update": True, "files": len(plan.files), "tensors": plan.tensor_count,
+                  "experts": plan.expert_count, "layers": sorted(plan.experts)}
+        self.expert_updates.append({"release_dir": str(release_dir), **record,
+                                    "experts_by_layer": {int(k): list(v) for k, v in plan.experts.items()}})
+        return record
+
+    def _serve(self, release_dir: Path | None, version: int, mode: str, *,
+               detail: Mapping[str, object] | None = None) -> LoadReport:
         if self.fail_load is not None:
             message, self.fail_load = self.fail_load, None
             raise SamplerEngineError(message)
         self.release_dir = None if release_dir is None else Path(release_dir)
         self._version = int(version)
         self.loads.append((None if release_dir is None else str(release_dir), int(version)))
-        return LoadReport(reload_mode=mode, pause_s=0.0)
+        return LoadReport(reload_mode=mode, pause_s=0.0, detail=dict(detail or {}))
 
     def served_version(self) -> int | None:
         return self._version
@@ -110,7 +180,7 @@ class FakeEngine:
                 finish = FINISH_LENGTH if len(ids) >= sampling.max_tokens else FINISH_STOP
                 logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
                 group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text=text,
-                                        finish_reason=finish))
+                                        finish_reason=finish, **self._arrays((prompt, i), ids, 1)))
             out.append(group)
         return out
 
@@ -138,7 +208,8 @@ class FakeEngine:
                 finish = FINISH_STOP if (ids and ids[-1] in stops) or len(ids) < sampling.max_tokens else FINISH_LENGTH
                 logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
                 group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text="",
-                                        finish_reason=finish, prompt_token_ids=prompt))
+                                        finish_reason=finish, prompt_token_ids=prompt,
+                                        **self._arrays((prompt, i), ids, len(prompt))))
             out.append(group)
         return out
 

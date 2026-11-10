@@ -145,10 +145,32 @@ def correction_mapping(spec: AlgorithmSpec) -> CorrectionMapping:
                              runtime_attrs=attrs)
 
 
-def refuse_forbidden_argv(argv: Sequence[str]) -> None:
-    """Refuse a Miles argv that holds a :data:`FORBIDDEN` flag (names the flag)."""
+# Losses without a PPO clip anchor: the rollout log-probs are the behaviour
+# policy by construction, so ``--use-rollout-logprobs`` removes no pi_prox
+# (upstream score centering is REINFORCE with centered importance weights).
+LOSSES_WITHOUT_PROX_ANCHOR = frozenset({"score_centering"})
 
-    refuse_forbidden((token.split("=", 1)[0] for token in argv), FORBIDDEN)
+
+def _loss_type(argv: Sequence[str]) -> str | None:
+    tokens = list(argv)
+    for i, token in enumerate(tokens):
+        flag, eq, inline = token.partition("=")
+        if flag == "--loss-type":
+            return inline if eq else (tokens[i + 1] if i + 1 < len(tokens) else None)
+    return None
+
+
+def refuse_forbidden_argv(argv: Sequence[str]) -> None:
+    """Refuse a Miles argv that holds a :data:`FORBIDDEN` flag (names the flag).
+
+    With ``--loss-type`` in :data:`LOSSES_WITHOUT_PROX_ANCHOR` the rollout
+    log-prob switch is part of the loss and not refused.
+    """
+
+    forbidden = FORBIDDEN
+    if _loss_type(argv) in LOSSES_WITHOUT_PROX_ANCHOR:
+        forbidden = tuple(f for f in FORBIDDEN if f.setting != "--use-rollout-logprobs")
+    refuse_forbidden((token.split("=", 1)[0] for token in argv), forbidden)
 
 
 def admission_argv(max_policy_age: int, *, admission_limit: int | None = None) -> tuple[str, ...]:

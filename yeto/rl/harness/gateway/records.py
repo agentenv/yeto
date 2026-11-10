@@ -103,6 +103,12 @@ class TurnRecord:
     stop_added: tuple[int, ...] = ()
     render_diff: int | None = None
     parse_error: str | None = None
+    # engine rollout arrays (None without them): top-K ``[len(completion), K]``,
+    # R3 ``[len(prompt) + len(completion) - 1, L_moe, top_k]``; only the newest
+    # turn of a segment keeps its R3 (it covers every earlier position)
+    top_ids: Any = None
+    top_logprobs: Any = None
+    routed_experts: Any = None
 
 
 @dataclass
@@ -336,7 +342,11 @@ class RecordingBackend:
         segment.last_stop = None if last is None else self.template.stop_text(last)
         segment.last_finish = completion.finish_reason
         provenance = Provenance.of(self.engine.identity, sampler_id=self.sampler_id, sampling=params)
+        if segment.turns:
+            segment.turns[-1].routed_experts = None  # superseded by this turn's rows
         segment.turns.append(TurnRecord(
+            top_ids=completion.top_logprobs_ids, top_logprobs=completion.top_logprobs,
+            routed_experts=completion.routed_experts,
             turn=session.turns, kind=kind, prompt_added=pending.tail, completion=tuple(completion.token_ids),
             logprobs=tuple(completion.logprobs), finish_reason=completion.finish_reason,
             policy_version=version, provenance=provenance.to_record(), render_diff=pending.render_diff))

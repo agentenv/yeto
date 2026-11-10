@@ -119,7 +119,7 @@ class RequantReleaser:
 
         record = self.target.release(src.version, f"{src.policy_hash}+{self.scheme}", write,
                                      buffer_selected=src.buffer_selected, buffer_shards=src.buffer_shards,
-                                     derived_from=derived)
+                                     derived_from=derived, manifest=src.manifest)
         if record is not None:
             self.log(f"[requant] BF16 r{src.seq}-v{src.version} -> {self.target.release_dir}/{record.path} "
                      f"{json.dumps(stats.get('requant'), default=str)}")

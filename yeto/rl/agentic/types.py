@@ -13,7 +13,7 @@ import enum
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 
@@ -137,8 +137,29 @@ class TokenTurn:
     provenance: Mapping[str, str] | None = None
     finish_reason: str | None = None
     policy_error: str | None = None
+    # Rollout arrays of the engine (None when it returned none): top-K
+    # log-probs ``[len(completion), K]`` (ids / values) and R3 routed experts
+    # ``[len(prompt) + len(completion) - 1, L_moe, top_k]`` (the engine's rows
+    # for every position of the call, as a single-turn sample's).
+    completion_top_ids: Any = field(default=None, compare=False)
+    completion_top_logprobs: Any = field(default=None, compare=False)
+    routed_experts: Any = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
+        if (self.completion_top_ids is None) != (self.completion_top_logprobs is None):
+            raise TokenAlignmentError("turn top-K ids and log-probs come together")
+        if self.completion_top_ids is not None:
+            import numpy
+
+            ids, vals = numpy.asarray(self.completion_top_ids), numpy.asarray(self.completion_top_logprobs)
+            if ids.ndim != 2 or ids.shape != vals.shape or ids.shape[0] != len(self.completion_ids):
+                raise TokenAlignmentError(f"turn top-K {ids.shape}/{vals.shape} does not cover "
+                                          f"{len(self.completion_ids)} completion tokens")
+        if self.routed_experts is not None:
+            rows = len(self.prompt_ids) + len(self.completion_ids) - 1
+            shape = getattr(self.routed_experts, "shape", None)
+            if shape is None or len(shape) != 3 or shape[0] != rows:
+                raise TokenAlignmentError(f"turn routed experts {shape} do not cover {rows} positions")
         if len(self.completion_ids) != len(self.completion_logprobs):
             raise TokenAlignmentError(
                 f"turn has {len(self.completion_ids)} completion tokens but "
@@ -148,7 +169,18 @@ class TokenTurn:
 
 
 class TokenAlignmentError(ValueError):
-    """Recorded tokens do not form one consistent token stream."""
+    """Recorded tokens do not form one consistent token stream.
+
+    ``turn``/``position``: the call whose prompt broke the stream and the first
+    differing token index; ``stream``/``prompt``: the recorded stream and that
+    call's prompt ids (for the loss report's decoded context; may be None)."""
+
+    def __init__(self, message: str, *, turn: int | None = None, position: int | None = None,
+                 stream: Sequence[int] | None = None, prompt: Sequence[int] | None = None) -> None:
+        super().__init__(message)
+        self.turn, self.position = turn, position
+        self.stream = None if stream is None else tuple(stream)
+        self.prompt = None if prompt is None else tuple(prompt)
 
 
 @dataclass(frozen=True)
@@ -165,6 +197,16 @@ class TokenSegments:
     response_mask: tuple[int, ...]
     response_logprobs: tuple[float, ...]
     truncated: bool = False
+    # ``[len(response), K]``; mask-0 rows hold id -1 / log-prob -inf (Miles' fill
+    # between turns). R3 ``[len(prompt) + len(response) - 1, L_moe, top_k]``:
+    # the last turn's rows, which cover the whole stream as a single-turn
+    # sample's cover prompt and response (Miles' turn merge keeps the last too).
+    response_top_ids: Any = field(default=None, compare=False)
+    response_top_logprobs: Any = field(default=None, compare=False)
+    routed_experts: Any = field(default=None, compare=False)
+    # calls whose prompt did not extend the stream and restarted it (``join_turns(rebase=True)``):
+    # the earlier completions became mask-0 context; every trained token is still the sampled one
+    rebased_turns: int = field(default=0, compare=False)
 
     def __post_init__(self) -> None:
         n = len(self.response_ids)

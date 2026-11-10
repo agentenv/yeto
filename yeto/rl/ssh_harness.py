@@ -25,10 +25,6 @@ from . import (
     MILES_PEFT_VERSION,
     SGLANG_NEXT_COMMIT,
     SGLANG_NEXT_REPOSITORY,
-    TMS_PRELOAD_BASE_BINARY_SHA256,
-    TMS_PRELOAD_PATCH_BASE_COMMIT,
-    TMS_PRELOAD_PATCH_COMMIT,
-    TMS_PRELOAD_PATCH_REPOSITORY,
 )
 from ..gpu_spec import UnknownCard, canonical_card, device_family_of
 from ..hw import card_tools
@@ -39,10 +35,6 @@ SYNCER_PORT = 29400
 RAY_PORT = 6379
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REMOTE_ROOT = ".cache/yeto-rl-ssh"
-TMS_PRELOAD_PATCH_CONTAINER_PATH = (
-    "/usr/local/lib/python3.12/dist-packages/"
-    "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
-)
 TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
 TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256
 TMS_TRAIN_DISK_BACKUP_ROOT = PurePosixPath("/data/yeto-rl/tms-disk-backup")
@@ -423,74 +415,6 @@ def _syncer_source_sha256() -> str:
     return digest.hexdigest()
 
 
-def _tms_preload_patch(path: str | Path) -> dict[str, str]:
-    """Attest the narrow upstream fix over the pinned Miles image binary."""
-
-    from ..provenance import file_sha256
-
-    source = Path(path).expanduser()
-    if source.is_symlink() or not source.is_file():
-        raise HarnessError("--tms-preload-patch must be a regular, non-symlink file")
-    source = source.resolve()
-    try:
-        relative = source.relative_to(REPO_ROOT.resolve())
-    except ValueError as exc:
-        raise HarnessError(
-            "--tms-preload-patch must be inside the Yeto source tree"
-        ) from exc
-    source_path = relative.as_posix()
-    if (
-        not _REMOTE_PATH.fullmatch(source_path)
-        or ".." in relative.parts
-        or source.suffix != ".so"
-    ):
-        raise HarnessError("--tms-preload-patch has an unsafe source path")
-    return {
-        "repository": TMS_PRELOAD_PATCH_REPOSITORY,
-        "base_commit": TMS_PRELOAD_PATCH_BASE_COMMIT,
-        "patch_commit": TMS_PRELOAD_PATCH_COMMIT,
-        "source_path": source_path,
-        "container_path": TMS_PRELOAD_PATCH_CONTAINER_PATH,
-        "base_binary_sha256": TMS_PRELOAD_BASE_BINARY_SHA256,
-        "binary_sha256": file_sha256(source),
-    }
-
-
-def _validate_tms_preload_patch(value: Any) -> None:
-    if not isinstance(value, dict):
-        raise HarnessError("offloaded training requires an attested TMS preload patch")
-    if set(value) != {
-        "repository",
-        "base_commit",
-        "patch_commit",
-        "source_path",
-        "container_path",
-        "base_binary_sha256",
-        "binary_sha256",
-    }:
-        raise HarnessError("plan has an invalid TMS preload patch contract")
-    if (
-        value.get("repository") != TMS_PRELOAD_PATCH_REPOSITORY
-        or value.get("base_commit") != TMS_PRELOAD_PATCH_BASE_COMMIT
-        or value.get("patch_commit") != TMS_PRELOAD_PATCH_COMMIT
-        or value.get("container_path") != TMS_PRELOAD_PATCH_CONTAINER_PATH
-        or value.get("base_binary_sha256") != TMS_PRELOAD_BASE_BINARY_SHA256
-    ):
-        raise HarnessError("plan does not use the pinned TMS free-while-paused fix")
-    source_path = str(value.get("source_path", ""))
-    relative = PurePosixPath(source_path)
-    if (
-        not source_path
-        or source_path.startswith(("/", "~"))
-        or not _REMOTE_PATH.fullmatch(source_path)
-        or ".." in relative.parts
-        or relative.suffix != ".so"
-    ):
-        raise HarnessError("plan has an invalid TMS preload patch source path")
-    if not _SHA256.fullmatch(str(value.get("binary_sha256", ""))):
-        raise HarnessError("plan has an invalid TMS preload patch SHA256")
-
-
 def _validate_tms_train_disk_backup_root(value: str) -> str:
     path = PurePosixPath(value)
     prefix = TMS_TRAIN_DISK_BACKUP_ROOT
@@ -763,16 +687,15 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     _require_ports_plan(learner)
     if plan.get("secrlenv_daemon") is not None:
         raise HarnessError("secrlenv daemon plans are no longer supported")
-    tms_patch = plan.get("tms_preload_patch")
+    # The TMS free-while-paused preload patch of the ports-v1 image is gone with
+    # the k31 image (INTERFACES 2.8: no TMS preload); a plan naming one is stale.
+    if plan.get("tms_preload_patch") is not None:
+        raise HarnessError("plan carries a tms_preload_patch, which the k31 image does not take")
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if learner.get("rl_offload_train"):
-        _validate_tms_preload_patch(tms_patch)
         _validate_tms_train_disk_backup(tms_train_disk_backup, plan)
-    else:
-        if tms_patch is not None:
-            _validate_tms_preload_patch(tms_patch)
-        if tms_train_disk_backup is not None:
-            raise HarnessError("TMS trainer disk backup requires --rl-offload-train")
+    elif tms_train_disk_backup is not None:
+        raise HarnessError("TMS trainer disk backup requires --rl-offload-train")
     if learner.get("rl_model_recipe", "generic") not in {
         "generic",
         "deepseek-v4-flash",
@@ -1092,10 +1015,6 @@ def prepare(namespace) -> Path:
         if source.is_file():
             data += source.suffix
 
-    tms_patch_path = getattr(namespace, "tms_preload_patch", None)
-    tms_preload_patch = (
-        _tms_preload_patch(tms_patch_path) if tms_patch_path is not None else None
-    )
     tms_train_disk_backup_root = getattr(
         namespace,
         "tms_train_disk_backup_root",
@@ -1103,11 +1022,6 @@ def prepare(namespace) -> Path:
     )
     tms_train_disk_backup = None
     if bool(getattr(args, "rl_offload_train", False)):
-        if tms_preload_patch is None:
-            raise HarnessError(
-                "--rl-offload-train requires --tms-preload-patch with the pinned "
-                "free-while-paused fix"
-            )
         if tms_train_disk_backup_root is None:
             raise HarnessError(
                 "--rl-offload-train requires --tms-train-disk-backup-root"
@@ -1146,7 +1060,6 @@ def prepare(namespace) -> Path:
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
-        "tms_preload_patch": tms_preload_patch,
         # Optional: the HBM GiB per card the operator declares. Set, the
         # device-family preflight also compares the HBM capacity; absent, it
         # compares the card name and the card count only. Older plans have no
@@ -1323,15 +1236,6 @@ def _attest_local(plan: dict[str, Any]) -> None:
     verify_source_tree_sha256(plan["source_sha256"])
     if _syncer_source_sha256() != plan["syncer_source_sha256"]:
         raise HarnessError("syncer source changed after the plan was prepared")
-    tms_patch = plan.get("tms_preload_patch")
-    if tms_patch is not None:
-        patch_path = REPO_ROOT / tms_patch["source_path"]
-        if (
-            patch_path.is_symlink()
-            or not patch_path.is_file()
-            or file_sha256(patch_path) != tms_patch["binary_sha256"]
-        ):
-            raise HarnessError("TMS preload patch changed after the plan was prepared")
     if (
         python_spec_sha256(plan["learner"]["reward_function"], base_dir=REPO_ROOT)
         != plan["reward_sha256"]
@@ -1496,16 +1400,6 @@ def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
         )
     else:
         model_manifest_check = ""
-    tms_patch = plan.get("tms_preload_patch")
-    if tms_patch is not None:
-        tms_patch_check = f"""TMS_PATCH="$RUN/source/{tms_patch['source_path']}"
-test -f "$TMS_PATCH" && test ! -L "$TMS_PATCH"
-printf '%s  %s\n' {shlex.quote(tms_patch['binary_sha256'])} "$TMS_PATCH" | sha256sum --check -
-TMS_BASE_ACTUAL="$(docker run --rm --entrypoint sha256sum {shlex.quote(plan['docker_image'])} {shlex.quote(tms_patch['container_path'])} | awk '{{print $1}}')"
-test "$TMS_BASE_ACTUAL" = {shlex.quote(tms_patch['base_binary_sha256'])}
-"""
-    else:
-        tms_patch_check = ""
     jit_cache = plan.get("jit_cache")
     if jit_cache is not None:
         _require_cuda_jit_cache(plan)
@@ -1546,7 +1440,7 @@ if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; t
   docker pull {shlex.quote(plan['docker_image'])}
 fi
 docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
-{tms_patch_check}{jit_cache_setup}{_source_checkout_script(plan)}"""
+{jit_cache_setup}{_source_checkout_script(plan)}"""
 
 
 def _source_checkout_script(plan: dict[str, Any]) -> str:
@@ -2250,14 +2144,6 @@ def _node_start_script(plan: dict[str, Any], learner_id: int, node_id: int) -> s
         f"  --volume {shlex.quote(f'{mount}:{mount}:ro')} \\\n"
         for mount in learner.get("model_mounts", [])
     )
-    tms_patch = plan.get("tms_preload_patch")
-    tms_patch_volume = (
-        "  --volume "
-        f'"$RUN/source/{tms_patch["source_path"]}:'
-        f'{tms_patch["container_path"]}:ro" \\\n'
-        if tms_patch is not None
-        else ""
-    )
     tms_train_disk_backup = plan.get("tms_train_disk_backup")
     if tms_train_disk_backup is not None:
         target = island["hosts"][node_id]
@@ -2406,7 +2292,7 @@ docker run --detach \
   --env CYBERGYM_TIMEOUT={shlex.quote(str(learner['cybergym_timeout']))} \
   --env CYBERGYM_REWARD_SCHEME={reward_scheme} \
   --env CYBERGYM_REWARD_VIEW={reward_view} \
-{data_volume}{model_volumes}{tms_patch_volume}{tms_disk_volume}{jit_cache_volumes}  --volume "$RUN/source:/workspace/yeto:ro" \
+{data_volume}{model_volumes}{tms_disk_volume}{jit_cache_volumes}  --volume "$RUN/source:/workspace/yeto:ro" \
   --volume "$RUN/sglang:/workspace/sglang:ro" \
   --volume "$RUN/miles:/workspace/miles" \
   --volume "$RUN/island-{learner_id}/state:/workspace/state" \
@@ -3431,7 +3317,6 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--remote-env-file", default=None)
     prepare_parser.add_argument("--final-ack-timeout-s", type=int, default=None)
     prepare_parser.add_argument("--model-manifest-sha256", default=None)
-    prepare_parser.add_argument("--tms-preload-patch", default=None)
     prepare_parser.add_argument(
         "--tms-train-disk-backup-root",
         default=None,

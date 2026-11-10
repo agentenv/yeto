@@ -171,6 +171,7 @@ class CutSource:
             outer={"settled": settled, "policy_version": state.policy_version,
                    "policy_token": token},
             shared_filesystem=self.shared_filesystem,
+            store=getattr(self, "cut_store", None),
             in_flight=in_flight,
         )
 
@@ -230,6 +231,7 @@ class RoundCutCheckpoint:
         self.trainer = trainer  # MilesTrainerGroup: save_cut / restore_cut / actual_layout
         self.root = str(Path(controller.checkpoint_store) / ROUND_CUTS)
         source.cut_root = self.root
+        source.cut_store = getattr(controller, "store", None)  # shards uploaded by other nodes
         self.resumed: dict[str, Any] | None = None
         self.fingerprint = dict(fingerprint) if fingerprint is not None else None
         self.allow_config_change = bool(allow_config_change)
@@ -432,11 +434,37 @@ class RoundCutCheckpoint:
     def _defer(self, final: bool) -> bool:
         """Write the trainer shards and commit the store in the background: periodic
         cuts only (the final cut is complete when the run ends), and not when a sample
-        buffer commits the same store during the round (no two commits at once). The
+        buffer commits the same store during the round (no two commits at once), unless
+        the store commits a cut beside buffer reads
+        (``CheckpointStore.cut_commits_beside_buffer_reads``, a staged s3/oss store:
+        each rank then uploads its shard while the next rounds train). The
         store's first cut is deferred too (with ``--rl-cut-every`` N > 1 it falls in
         the steady rounds); :meth:`_start` marks it first, since a store holding cuts but
         no LATEST refuses to start unless they are all such marked first cuts."""
-        return self.background_commit and not final and self.buffer_watermark is None
+        return self.background_commit and not final and (
+            self.buffer_watermark is None or self._commits_beside_buffer())
+
+    def _commits_beside_buffer(self) -> bool:
+        return bool(getattr(getattr(self.controller, "store", None), "cut_commits_beside_buffer_reads", False))
+
+    def wait_uploads_durable(self, driver: Any = None) -> dict[str, Any]:
+        """The wait point before the trainer stops being the trainer (a role switch
+        to sampler, a stop): returns once no cut upload is in flight. A deferred cut is
+        completed first (its ranks' shard uploads collected, its manifest checked and
+        committed, the pointer moved, the store pushed: :meth:`join_commit` with
+        ``wait``), so every file the committed pointer names is in the object store.
+
+        Returns ``{"in_flight": False, "ok", "cut_id", "pointed_cut_id", "error"}``:
+        ``ok`` False when the last cut failed to commit; the previous cut then stays
+        the committed (and durable) one, as after a crash. ``cut_id`` None: nothing
+        was in flight. Policy releases upload on their own
+        (``policy_release.BackgroundReleaser.drain``)."""
+        result = self.join_commit(driver, wait=True)
+        pointer = self.pointer()
+        ok = True if result is None else bool(result.get("ok", True))
+        return {"in_flight": False, "ok": ok, "cut_id": None if result is None else result.get("cut_id"),
+                "pointed_cut_id": None if pointer is None else pointer.get("cut_id"),
+                "error": None if result is None or ok else result.get("error")}
 
     def _drop_unpointed(self, cut_id: str) -> None:
         import shutil

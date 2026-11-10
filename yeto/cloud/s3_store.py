@@ -32,15 +32,37 @@ this client through its S3-compatible API (``yeto.cloud.oss_store``).
 
 from __future__ import annotations
 
+import functools
 import os
-from collections.abc import Mapping
+import pickle
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror, check_key
 from yeto.rl.engine.resume import STORE_IMPL_ENV, BucketMountStore
+
+# The retryable failures of one streamed range read: the whole class of transfer
+# errors, not one exception at a time (an R2 body cut short has surfaced as botocore
+# ReadTimeoutError, ResponseStreamingError and urllib3 IncompleteRead so far).
+import http.client as _http_client
+
+RANGE_READ_RETRYABLE: tuple[type[BaseException], ...] = (
+    ConnectionError, TimeoutError, _http_client.HTTPException)  # incl. ConnectionResetError, IncompleteRead
+try:  # botocore ships with boto3
+    from botocore.exceptions import (ConnectionError as _BotoConnectionError, HTTPClientError,
+                                     IncompleteReadError, ResponseStreamingError)
+    from urllib3.exceptions import HTTPError as _Urllib3Error  # ProtocolError, IncompleteRead, timeouts
+    RANGE_READ_RETRYABLE += (_BotoConnectionError, HTTPClientError, IncompleteReadError,
+                             ResponseStreamingError, _Urllib3Error)
+except ImportError:  # pragma: no cover - a store without boto3 never reads
+    pass
+RANGE_READ_ATTEMPTS = 5
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
@@ -49,12 +71,21 @@ REGION_ENV = "YETO_RL_STORE_S3_REGION"
 KEY_ID_ENV = "YETO_RL_STORE_S3_ACCESS_KEY_ID"
 SECRET_ENV = "YETO_RL_STORE_S3_SECRET_ACCESS_KEY"
 TOKEN_ENV = "YETO_RL_STORE_S3_SESSION_TOKEN"
+# a named AWS profile (~/.aws/config, ~/.aws/credentials) of a launcher-side client:
+# its keys, endpoint_url and region; AWS_PROFILE is read too
+PROFILE_ENV = "YETO_RL_STORE_S3_PROFILE"
 STAGE_ENV = "YETO_RL_STORE_S3_STAGE"  # a local directory: cuts and releases by object API
 PART_MB_ENV = "YETO_RL_STORE_PART_MB"  # multipart part size (MiB); shared by the S3 and OSS stores
-PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts moved in parallel
+PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts of one file moved in parallel
+FILE_CONCURRENCY_ENV = "YETO_RL_STORE_FILE_CONCURRENCY"  # files of one push tier moved in parallel
+MAX_CONNECTIONS_ENV = "YETO_RL_STORE_MAX_CONNECTIONS"  # HTTP connection pool of the client (default: the threads)
+DOWNLOAD_PROCESSES_ENV = "YETO_RL_STORE_DOWNLOAD_PROCESSES"  # processes of a many-file download (read_files)
+PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
+UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
-SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV)
+SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
+                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
 # cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
@@ -63,6 +94,9 @@ POINTER_FILES = frozenset({"LATEST", "LATEST.json"})
 # record files: uploaded after the data files next to them, before the pointers
 # (policy_release.RECORD lists the release's weight files)
 RECORD_FILES = frozenset({"RELEASE.json"})
+# top-level directories their writer commits by path (policy releases of every scheme,
+# policy_release.PolicyReleaseStore): a cut's commit neither waits for nor uploads them
+INDEPENDENT_DIRS = ("policy-releases",)
 
 # error codes of a conditional write that lost to an existing object (S3; OSS
 # answers FileAlreadyExists to x-oss-forbid-overwrite)
@@ -71,23 +105,156 @@ _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
 _MIB = 1 << 20
 MIN_PART_BYTES = 5 * _MIB  # S3 and OSS: every part but the last is at least 5 MiB
 MAX_PARTS = 10_000  # S3 and OSS: parts of one multipart upload
+# the resume journal of a multipart upload, next to its source file (a stage push
+# skips it: object_store.TMP_SUFFIX); removed when the upload completes
+UPLOAD_JOURNAL_SUFFIX = ".upload.tmp"
+_FALSE = frozenset({"0", "false", "no", "off"})
+_TRUE = frozenset({"1", "true", "yes", "on"})
+# endpoints known to refuse x-amz-checksum-sha256 on UploadPart (NotImplemented):
+# PART_CHECKSUM_ENV=auto sends no part checksums to them
+NO_PART_CHECKSUM_HOSTS = (".r2.cloudflarestorage.com",)
+_PART_CHECKSUM_WARNED = False
+
+
+def part_checksum_default(environ: Mapping[str, str]) -> bool:
+    """:data:`PART_CHECKSUM_ENV`: ``1`` sends a SHA-256 with every part, ``0`` none;
+    unset or ``auto`` sends them except to an endpoint known not to take them
+    (:data:`NO_PART_CHECKSUM_HOSTS`, Cloudflare R2). An endpoint that still answers
+    ``NotImplemented`` turns them off for that store (:meth:`S3ObjectStore.write_file`)."""
+    raw = str(environ.get(PART_CHECKSUM_ENV) or "auto").strip().lower()
+    if raw in _FALSE:
+        return False
+    if raw in _TRUE:
+        return True
+    if raw != "auto":
+        raise ValueError(f"{PART_CHECKSUM_ENV}={raw!r}: expected 1, 0 or auto")
+    return not _is_r2(store_endpoint(environ))
+
+
+def _warn_part_checksums_off(uri: str, error: Exception) -> None:
+    global _PART_CHECKSUM_WARNED
+    if _PART_CHECKSUM_WARNED:
+        return
+    _PART_CHECKSUM_WARNED = True
+    print(f"yeto: warning: {uri} does not take SHA-256 part checksums ({error.__class__.__name__}: "
+          f"NotImplemented); uploading without them (set {PART_CHECKSUM_ENV}=0 to skip this probe)",
+          file=sys.stderr, flush=True)
+
+
+def _b64(digest: bytes) -> str:
+    import base64
+
+    return base64.b64encode(digest).decode("ascii")
+
+
+def composite_sha256(part_digests: Sequence[str]) -> str:
+    """The checksum S3 reports for a multipart object uploaded with SHA-256 part
+    checksums (a COMPOSITE checksum): base64 SHA-256 of the concatenated raw part
+    digests, then ``-<parts>``. ``part_digests``: base64, in part order."""
+    import base64
+    import hashlib
+
+    raw = b"".join(base64.b64decode(d) for d in part_digests)
+    return f"{_b64(hashlib.sha256(raw).digest())}-{len(part_digests)}"
+
+
+class _UploadJournal:
+    """What a multipart upload of one file has sent: its UploadId and, per part
+    number, the ETag and SHA-256 (base64) the store acknowledged. Saved atomically
+    after each part, next to the source (:data:`UPLOAD_JOURNAL_SUFFIX`), so an upload
+    cut short (a failed part, a killed process) continues where it stopped. It
+    belongs to one version of the source: a different key, size, mtime, part size or
+    checksum mode makes it stale."""
+
+    def __init__(self, source: str | os.PathLike[str], identity: dict[str, Any]) -> None:
+        import threading
+
+        self.path = Path(str(source) + UPLOAD_JOURNAL_SUFFIX)
+        self.identity = identity
+        self.upload_id: str | None = None
+        self.parts: dict[int, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self.writable = True
+
+    def load(self) -> dict[str, Any] | None:
+        """The journal on disk: its contents when it belongs to this upload, a dict
+        with only ``stale_upload_id`` when it belongs to another, None when absent."""
+        import json
+
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("identity") != self.identity:
+            return {"stale_upload_id": data.get("upload_id")}
+        return data
+
+    def save(self) -> None:
+        import json
+
+        if not self.writable:
+            return
+        data = {"identity": self.identity, "upload_id": self.upload_id,
+                "parts": {str(n): v for n, v in sorted(self.parts.items())}}
+        tmp = self.path.with_name(self.path.name.removesuffix(".tmp") + ".w.tmp")  # skipped by a push too
+        try:
+            tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:  # a read-only source directory: the upload goes on without resume
+            self.writable = False
+
+    def record(self, number: int, part: dict[str, Any]) -> None:
+        with self._lock:
+            self.parts[int(number)] = part
+            self.save()
+
+    def remove(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
 class TransferSettings:
     """How large files move: a file larger than one part is uploaded in parts of
     ``part_bytes`` (raised so a file needs at most :data:`MAX_PARTS`) and
-    downloaded by ranges of the same size; ``concurrency`` parts move at once
-    (memory: up to ``concurrency`` parts)."""
+    downloaded by ranges of the same size; ``concurrency`` parts of a file move at
+    once, and a staged store's push moves ``file_concurrency`` files at once
+    (memory: up to ``file_concurrency * concurrency`` parts).
+
+    Defaults from an R2 upload measurement (GPU-A, 2 GiB files, 64 MiB parts, one
+    16-core container): one file tops out near 100 MB/s whatever its part
+    concurrency (76 / 109 / 102 MB/s at 8 / 32 / 64 parts); 4 and 8 files of 16
+    parts each reach 255 and 273 MB/s.
+
+    ``download_processes``: a many-file download (:meth:`S3ObjectStore.read_files`,
+    a policy release) splits its files over that many processes. One Python process
+    tops out near 700 MB/s of R2 range reads (MI355X node, 64 threads, nothing
+    written); 4 / 8 processes of 16 threads read 1.7 / 3.0 GB/s. 4 stays well under
+    the ~7 GB/s that dropped an MI355X node off the network (GPU-B section 4.1)."""
 
     part_bytes: int = 64 * _MIB
-    concurrency: int = 8
+    concurrency: int = 16
+    file_concurrency: int = 8
+    download_processes: int = 4
+    # SHA-256 per uploaded part: the store refuses a part whose body does not match
+    # it, and the object's composite checksum is checked after the upload
+    part_checksum: bool = True
+    # tries of one multipart upload in one call; each continues the previous one
+    # (list_parts), and after the last the upload is kept for the next call
+    upload_attempts: int = 3
 
     def __post_init__(self) -> None:
         if self.part_bytes < MIN_PART_BYTES:
             raise ValueError(f"part size {self.part_bytes} B is below the {MIN_PART_BYTES} B minimum")
         if self.concurrency < 1:
             raise ValueError("part concurrency must be >= 1")
+        if self.file_concurrency < 1:
+            raise ValueError("file concurrency must be >= 1")
+        if self.download_processes < 1:
+            raise ValueError("download processes must be >= 1")
+        if self.upload_attempts < 1:
+            raise ValueError("upload attempts must be >= 1")
 
     def part_for(self, size: int) -> int:
         return max(self.part_bytes, -(-int(size) // MAX_PARTS))
@@ -96,7 +263,11 @@ class TransferSettings:
     def from_env(cls, environ: Mapping[str, str]) -> "TransferSettings":
         default = cls()
         return cls(part_bytes=int(float(environ.get(PART_MB_ENV) or default.part_bytes / _MIB) * _MIB),
-                   concurrency=int(environ.get(PART_CONCURRENCY_ENV) or default.concurrency))
+                   concurrency=int(environ.get(PART_CONCURRENCY_ENV) or default.concurrency),
+                   file_concurrency=int(environ.get(FILE_CONCURRENCY_ENV) or default.file_concurrency),
+                   download_processes=int(environ.get(DOWNLOAD_PROCESSES_ENV) or default.download_processes),
+                   part_checksum=part_checksum_default(environ),
+                   upload_attempts=int(environ.get(UPLOAD_ATTEMPTS_ENV) or default.upload_attempts))
 
 
 def parse_s3_uri(uri: str, scheme: str = "s3") -> tuple[str, str]:
@@ -108,24 +279,170 @@ def parse_s3_uri(uri: str, scheme: str = "s3") -> tuple[str, str]:
     return bucket, prefix.strip("/")
 
 
+# The store credential as a Modal Secret carries it (the AWS names;
+# yeto.launch.storage.modal_store_secret_name). An island reads that pair only when
+# the launch says so (:data:`CREDENTIALS_ENV` = :data:`CREDENTIALS_AWS_ENV`): the
+# launcher's own AWS_* variables are never a store credential (secret-handling
+# hardening), and the default credential chain stays unused either way.
+CREDENTIALS_ENV = "YETO_RL_STORE_S3_CREDENTIALS"
+CREDENTIALS_AWS_ENV = "aws-env"  # read AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (a Modal Secret)
+AWS_KEY_ID_ENV = "AWS_ACCESS_KEY_ID"
+AWS_SECRET_ENV = "AWS_SECRET_ACCESS_KEY"
+AWS_TOKEN_ENV = "AWS_SESSION_TOKEN"
+AWS_ENDPOINT_ENV = "AWS_ENDPOINT_URL"
+AWS_REGION_ENVS = ("AWS_REGION", "AWS_DEFAULT_REGION")
+
+
+def store_credentials(environ: Mapping[str, str]) -> tuple[str, str, str | None] | None:
+    """``(key id, secret, session token or None)``: the store credential
+    (:data:`KEY_ID_ENV` / :data:`SECRET_ENV`); with :data:`CREDENTIALS_ENV` set to
+    :data:`CREDENTIALS_AWS_ENV` the AWS-named pair a Secret put in the environment.
+    None when no complete pair applies."""
+    if environ.get(KEY_ID_ENV) and environ.get(SECRET_ENV):
+        return environ[KEY_ID_ENV], environ[SECRET_ENV], environ.get(TOKEN_ENV) or None
+    if (environ.get(CREDENTIALS_ENV) == CREDENTIALS_AWS_ENV and environ.get(AWS_KEY_ID_ENV)
+            and environ.get(AWS_SECRET_ENV)):
+        return environ[AWS_KEY_ID_ENV], environ[AWS_SECRET_ENV], environ.get(AWS_TOKEN_ENV) or None
+    return None
+
+
+def missing_credentials_message() -> str:
+    return (f"s3 store: no store credentials. Set {KEY_ID_ENV} and {SECRET_ENV} (a key limited to the "
+            f"store's bucket), or {PROFILE_ENV} (or --profile) to an AWS profile that holds them; on "
+            f"an island with a Modal Secret, {CREDENTIALS_ENV}={CREDENTIALS_AWS_ENV} reads "
+            f"{AWS_KEY_ID_ENV} and {AWS_SECRET_ENV}; an island uses the store credentials only, never the default AWS chain")
+
+
 def has_store_credentials(environ: Mapping[str, str]) -> bool:
-    return bool(environ.get(KEY_ID_ENV) and environ.get(SECRET_ENV))
+    return store_credentials(environ) is not None
+
+
+AWS_PROFILE_ENV = "AWS_PROFILE"
+AWS_ENDPOINT_S3_ENV = "AWS_ENDPOINT_URL_S3"
+
+
+def store_profile(environ: Mapping[str, str]) -> str | None:
+    """The AWS profile a store client reads: :data:`PROFILE_ENV`, else ``AWS_PROFILE``."""
+    return environ.get(PROFILE_ENV) or environ.get(AWS_PROFILE_ENV) or None
+
+
+@functools.lru_cache(maxsize=16)
+def _profile_config_cached(profile: str, config_file: str | None, credentials_file: str | None) -> dict[str, Any]:
+    import botocore.session
+
+    try:
+        config = dict(botocore.session.Session(profile=profile).get_scoped_config())
+    except Exception as error:  # noqa: BLE001 - botocore ProfileNotFound
+        if type(error).__name__ == "ProfileNotFound":
+            return {"_missing": True}
+        raise
+    s3 = config.get("s3") if isinstance(config.get("s3"), dict) else {}
+    return {"endpoint_url": s3.get("endpoint_url") or config.get("endpoint_url"), "region": config.get("region")}
+
+
+def profile_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """``endpoint_url`` and ``region`` of the store's AWS profile (:func:`store_profile`;
+    the ``s3`` section's endpoint first), ``{}`` without a profile, ``{"_missing": True}``
+    when the profile is not configured on this host (an island)."""
+    profile = store_profile(environ)
+    if not profile:
+        return {}
+    try:
+        return _profile_config_cached(profile, environ.get("AWS_CONFIG_FILE"),
+                                      environ.get("AWS_SHARED_CREDENTIALS_FILE"))
+    except ImportError:  # no botocore: nothing to read
+        return {}
+
+
+def store_endpoint(environ: Mapping[str, str]) -> str | None:
+    """The S3-compatible endpoint: :data:`ENDPOINT_ENV`, else ``AWS_ENDPOINT_URL_S3`` /
+    ``AWS_ENDPOINT_URL``, else the ``endpoint_url`` of the store's AWS profile; None
+    for AWS S3."""
+    return (environ.get(ENDPOINT_ENV) or environ.get(AWS_ENDPOINT_S3_ENV) or environ.get(AWS_ENDPOINT_ENV)
+            or profile_config(environ).get("endpoint_url") or None)
+
+
+def _is_r2(endpoint: str | None) -> bool:
+    from urllib.parse import urlparse
+
+    host = (urlparse(endpoint).hostname or "") if endpoint else ""
+    return any(host.endswith(suffix) for suffix in NO_PART_CHECKSUM_HOSTS)
+
+
+def store_region(environ: Mapping[str, str]) -> str | None:
+    """:data:`REGION_ENV`, else the AWS region variables, else the store profile's
+    region, else ``auto`` for a Cloudflare R2 endpoint; None otherwise (boto3's
+    default). ``yeto.launch.storage.store_client_environ`` sets ``auto`` for an
+    endpoint given by ``--rl-object-store-endpoint`` (what R2 expects)."""
+    for name in (REGION_ENV, *AWS_REGION_ENVS):
+        if environ.get(name):
+            return environ[name]
+    region = profile_config(environ).get("region")
+    if region:
+        return str(region)
+    return "auto" if _is_r2(store_endpoint(environ)) else None
+
+
+def _read_files_here(objects: "S3ObjectStore", items: Sequence[tuple[str, str]], threads: int) -> list[str]:
+    def one(item: tuple[str, str]) -> str | None:
+        return None if objects.read_file(*item) else item[0]
+
+    with ThreadPoolExecutor(max(1, min(int(threads), len(items) or 1))) as pool:
+        return [key for key in pool.map(one, items) if key is not None]
+
+
+def _read_files_child() -> None:
+    """One child process of :meth:`S3ObjectStore.read_files`: its own client; the
+    arguments come pickled on stdin (from the parent only), the missing keys go back
+    pickled on stdout."""
+    uri, client_factory, transfer, threads, items = pickle.loads(sys.stdin.buffer.read())
+    objects = S3ObjectStore(uri, client=client_factory(), transfer=TransferSettings(**transfer))
+    missing = _read_files_here(objects, items, threads)
+    sys.stdout.buffer.write(pickle.dumps(missing))
+    sys.stdout.buffer.flush()
+
+
+READ_FILES_CHILD = "from yeto.cloud.s3_store import _read_files_child; _read_files_child()"
+
+
+BOTOCORE_DEFAULT_POOL = 10  # botocore's max_pool_connections
+
+
+def client_pool_size(environ: Mapping[str, str]) -> int:
+    """HTTP connections of the store's boto3 client: :data:`MAX_CONNECTIONS_ENV`, else
+    one per transfer thread (``file_concurrency * concurrency``). botocore's default
+    pool of 10 serialized the 8 x 16 range reads of a release download (MI355X: a
+    207 GB Kimi-K3.1 release far below the node's R2 bandwidth)."""
+    raw = environ.get(MAX_CONNECTIONS_ENV)
+    if raw:
+        return max(1, int(raw))
+    t = TransferSettings.from_env(environ)
+    return max(BOTOCORE_DEFAULT_POOL, t.file_concurrency * t.concurrency)
 
 
 def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
     import boto3
+    from botocore.config import Config
 
-    if has_store_credentials(environ):
-        session = boto3.session.Session(aws_access_key_id=environ[KEY_ID_ENV],
-                                        aws_secret_access_key=environ[SECRET_ENV],
-                                        aws_session_token=environ.get(TOKEN_ENV) or None)
+    creds = store_credentials(environ)
+    profile = store_profile(environ)
+    if profile and profile_config(environ).get("_missing"):
+        if environ.get(PROFILE_ENV) or (creds is None and require_credentials):
+            raise ObjectStoreError(f"s3 store: AWS profile {profile!r} ({PROFILE_ENV if environ.get(PROFILE_ENV) else AWS_PROFILE_ENV}) "
+                                   "is not configured on this host (~/.aws/config, ~/.aws/credentials)")
+        profile = None  # AWS_PROFILE of another host: not this store's
+    if creds is not None:
+        key, secret, token = creds
+        session = boto3.session.Session(aws_access_key_id=key, aws_secret_access_key=secret,
+                                        aws_session_token=token)
+    elif profile:
+        session = boto3.session.Session(profile_name=profile)
     elif require_credentials:
-        raise ObjectStoreError(f"s3 store: {KEY_ID_ENV} and {SECRET_ENV} are not set (an island "
-                               "uses the store credentials only, never the default AWS chain)")
+        raise ObjectStoreError(missing_credentials_message())
     else:
         session = boto3.session.Session()
-    return session.client("s3", endpoint_url=environ.get(ENDPOINT_ENV) or None,
-                          region_name=environ.get(REGION_ENV) or None)
+    return session.client("s3", endpoint_url=store_endpoint(environ), region_name=store_region(environ),
+                          config=Config(max_pool_connections=client_pool_size(environ)))
 
 
 class S3ObjectStore:
@@ -143,13 +460,22 @@ class S3ObjectStore:
 
     scheme = "s3"
     buffer_shards = False
+    # the endpoint takes x-amz-checksum-sha256 on parts and reports a composite
+    # checksum (HEAD, ChecksumMode=ENABLED); OSS does not
+    part_checksums = True
 
-    def __init__(self, uri: str, *, client: Any, transfer: TransferSettings | None = None) -> None:
+    def __init__(self, uri: str, *, client: Any, transfer: TransferSettings | None = None,
+                 client_factory: Callable[[], Any] | None = None) -> None:
+        """``client_factory``: a picklable callable that builds a client like ``client``
+        in another process (:meth:`read_files`); None keeps every read in this process."""
         self.bucket, self.prefix = parse_s3_uri(uri, self.scheme)
         self.uri = f"{self.scheme}://{self.bucket}" + (f"/{self.prefix}" if self.prefix else "")
         self.client = client
         self.transfer = transfer or TransferSettings()
+        self.client_factory = client_factory
         self.conditional_writes = True
+        # set when the endpoint answered a part checksum with NotImplemented
+        self.part_checksums_refused = False
 
     def _full(self, name: str) -> str:
         return f"{self.prefix}/{name}" if self.prefix else name
@@ -207,34 +533,190 @@ class S3ObjectStore:
         head = self._head(key)
         return None if head is None else int(head["ContentLength"])
 
-    def write_file(self, key: str, source: str | os.PathLike[str]) -> None:
+    def _checksums(self) -> bool:
+        return bool(self.part_checksums and self.transfer.part_checksum and not self.part_checksums_refused)
+
+    def checksum(self, key: str) -> str | None:
+        """The SHA-256 checksum the store keeps for object ``key`` (base64; a
+        multipart object's is composite, ``<b64>-<parts>``), None when the object is
+        missing or has none (uploaded without checksums, an endpoint without them)."""
+        if not self._checksums():
+            return None
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=self._key(key), ChecksumMode="ENABLED")
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            if self._code(error) in _MISSING:
+                return None
+            raise
+        value = head.get("ChecksumSHA256")
+        return str(value) if value else None
+
+    def write_file(self, key: str, source: str | os.PathLike[str]) -> str | None:
         """Upload a file; one larger than a part goes as a multipart upload whose
         parts are read from the file as they are sent (never the whole file in
-        memory). A failed upload is aborted, so no part is left billed."""
+        memory). Returns the object's SHA-256 checksum (:meth:`checksum`), None
+        without checksums.
+
+        Integrity: each part carries its SHA-256 (the store refuses a part whose body
+        does not match), and the composite checksum the store reports afterwards must
+        equal the one of the parts sent (:func:`composite_sha256`).
+
+        Resume: the UploadId and every acknowledged part are journaled next to the
+        source (:class:`_UploadJournal`). A failed try continues from the parts
+        ``list_parts`` and the journal agree on (same ETag, same checksum), up to
+        ``upload_attempts`` tries; after the last the upload and its journal are kept,
+        so a later call (the next push, a restarted process) continues it. A journal
+        of another version of the file aborts its upload and starts again.
+
+        An endpoint that answers a checksum with ``NotImplemented`` (Cloudflare R2
+        on UploadPart) turns checksums off for this store, with one warning per
+        process, and the file is uploaded again without them."""
+        try:
+            return self._write_file(key, source)
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            if not self._checksums() or self._code(error) != "NotImplemented":
+                raise
+            self.part_checksums_refused = True
+            _warn_part_checksums_off(self.uri, error)
+            return self._write_file(key, source)
+
+    def _write_file(self, key: str, source: str | os.PathLike[str]) -> str | None:
+        import hashlib
+
+        checks = self._checksums()
         size = os.path.getsize(source)
         part = self.transfer.part_for(size)
         full = self._key(key)
         if size <= part:
             with open(source, "rb") as fh:
-                self.client.put_object(Bucket=self.bucket, Key=full, Body=fh.read())
-            return
-        upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=full)["UploadId"]
-        try:
-            with open(source, "rb") as fh:
-                def send(number: int) -> dict[str, Any]:
-                    offset = (number - 1) * part
-                    body = os.pread(fh.fileno(), min(part, size - offset), offset)
-                    done = self.client.upload_part(Bucket=self.bucket, Key=full, UploadId=upload_id,
-                                                   PartNumber=number, Body=body)
-                    return {"PartNumber": number, "ETag": done["ETag"]}
+                body = fh.read()
+            extra = {"ChecksumSHA256": _b64(hashlib.sha256(body).digest())} if checks else {}
+            self.client.put_object(Bucket=self.bucket, Key=full, Body=body, **extra)
+            return extra.get("ChecksumSHA256")
+        count = -(-size // part)
+        st = os.stat(source)
+        journal = _UploadJournal(source, {"bucket": self.bucket, "key": full, "size": int(size),
+                                          "mtime_ns": int(st.st_mtime_ns), "part_bytes": int(part),
+                                          "checksum": checks})
+        self._open_upload(journal, full, part, size, checks)
+        for attempt in range(1, self.transfer.upload_attempts + 1):
+            try:
+                self._send_parts(journal, full, source, part, size, count, checks)
+                parts = [{"PartNumber": n, "ETag": journal.parts[n]["ETag"],
+                          **({"ChecksumSHA256": journal.parts[n]["sha256"]} if checks else {})}
+                         for n in range(1, count + 1)]
+                self.client.complete_multipart_upload(Bucket=self.bucket, Key=full, UploadId=journal.upload_id,
+                                                      MultipartUpload={"Parts": parts})
+                break
+            except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+                if checks and self._code(error) == "NotImplemented":
+                    try:  # the endpoint takes no part checksums: write_file starts again without
+                        self.client.abort_multipart_upload(Bucket=self.bucket, Key=full,
+                                                           UploadId=journal.upload_id)
+                    except Exception:  # noqa: BLE001 - already gone
+                        pass
+                    journal.remove()
+                    raise
+                if attempt == self.transfer.upload_attempts:
+                    raise  # the upload and its journal stay: the next call continues them
+                listed = self._listed_parts(full, journal.upload_id, part, size)
+                if listed is None:  # the upload is gone (completed elsewhere, expired, aborted)
+                    journal.upload_id, journal.parts = None, {}
+                    self._open_upload(journal, full, part, size, checks, fresh=True)
+                else:
+                    journal.parts = self._agreed(journal.parts, listed, checks)
+                    journal.save()
+        journal.remove()
+        if not checks:
+            return None
+        expected = composite_sha256([journal.parts[n]["sha256"] for n in range(1, count + 1)])
+        reported = self.checksum(key)
+        if reported is not None and reported != expected:
+            raise ObjectStoreError(f"{key}: the store reports checksum {reported}, the parts sent make {expected}")
+        return expected
 
-                with ThreadPoolExecutor(self.transfer.concurrency) as pool:
-                    parts = list(pool.map(send, range(1, -(-size // part) + 1)))
-            self.client.complete_multipart_upload(Bucket=self.bucket, Key=full, UploadId=upload_id,
-                                                  MultipartUpload={"Parts": parts})
-        except BaseException:
-            self.client.abort_multipart_upload(Bucket=self.bucket, Key=full, UploadId=upload_id)
-            raise
+    def _open_upload(self, journal: _UploadJournal, full: str, part: int, size: int, checks: bool, *,
+                     fresh: bool = False) -> None:
+        """Continue the journaled upload of this file version, or create one."""
+        state = None if fresh else journal.load()
+        if state is not None and state.get("upload_id") and "stale_upload_id" not in state:
+            listed = self._listed_parts(full, str(state["upload_id"]), part, size)
+            if listed is not None:
+                journal.upload_id = str(state["upload_id"])
+                saved = {int(n): v for n, v in dict(state.get("parts") or {}).items()}
+                journal.parts = self._agreed(saved, listed, checks)
+                journal.save()
+                return
+        stale = (state or {}).get("stale_upload_id")
+        if stale:
+            try:  # another version of the file: its parts are never completed
+                self.client.abort_multipart_upload(Bucket=self.bucket, Key=full, UploadId=str(stale))
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+        extra = {"ChecksumAlgorithm": "SHA256"} if checks else {}
+        journal.upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=full, **extra)["UploadId"]
+        journal.parts = {}
+        journal.save()
+
+    def _send_parts(self, journal: _UploadJournal, full: str, source: str | os.PathLike[str], part: int,
+                    size: int, count: int, checks: bool) -> None:
+        import hashlib
+
+        missing = [n for n in range(1, count + 1) if n not in journal.parts]
+        if not missing:
+            return
+        with open(source, "rb") as fh:
+            def send(number: int) -> None:
+                offset = (number - 1) * part
+                body = os.pread(fh.fileno(), min(part, size - offset), offset)
+                digest = _b64(hashlib.sha256(body).digest()) if checks else None
+                extra = {"ChecksumSHA256": digest} if checks else {}
+                done = self.client.upload_part(Bucket=self.bucket, Key=full, UploadId=journal.upload_id,
+                                               PartNumber=number, Body=body, **extra)
+                journal.record(number, {"ETag": done["ETag"], "sha256": digest, "size": len(body)})
+
+            with ThreadPoolExecutor(min(self.transfer.concurrency, len(missing))) as pool:
+                for future in [pool.submit(send, n) for n in missing]:
+                    future.result()
+
+    def _listed_parts(self, full: str, upload_id: str, part: int, size: int) -> dict[int, dict[str, Any]] | None:
+        """The parts the store holds for ``upload_id`` (number -> ETag, size,
+        checksum), None when the upload does not exist any more."""
+        out: dict[int, dict[str, Any]] = {}
+        marker = 0
+        while True:
+            try:
+                page = self.client.list_parts(Bucket=self.bucket, Key=full, UploadId=upload_id,
+                                              PartNumberMarker=marker)
+            except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+                if self._code(error) in {"NoSuchUpload", *_MISSING}:
+                    return None
+                raise
+            for p in page.get("Parts") or ():
+                out[int(p["PartNumber"])] = {"ETag": p.get("ETag"), "size": p.get("Size"),
+                                             "sha256": p.get("ChecksumSHA256")}
+            if not page.get("IsTruncated"):
+                return out
+            marker = int(page["NextPartNumberMarker"])
+
+    @staticmethod
+    def _agreed(journaled: Mapping[int, Mapping[str, Any]], listed: Mapping[int, Mapping[str, Any]],
+                checks: bool) -> dict[int, dict[str, Any]]:
+        """The journaled parts the store holds as journaled: same ETag, same size,
+        and (with checksums) the same SHA-256 when the store lists one. A part the
+        store holds but the journal never recorded is sent again."""
+        out = {}
+        for n, mine in journaled.items():
+            theirs = listed.get(int(n))
+            if theirs is None or theirs.get("ETag") != mine.get("ETag"):
+                continue
+            if theirs.get("size") is not None and mine.get("size") is not None \
+                    and int(theirs["size"]) != int(mine["size"]):
+                continue
+            if checks and (not mine.get("sha256") or (theirs.get("sha256") and theirs["sha256"] != mine["sha256"])):
+                continue
+            out[int(n)] = dict(mine)
+        return out
 
     def read_file(self, key: str, target: str | os.PathLike[str]) -> bool:
         """Download object ``key`` to ``target``; a large one by parallel ranges,
@@ -260,8 +742,18 @@ class S3ObjectStore:
 
             def fetch(offset: int) -> None:
                 end = min(offset + part, size) - 1
-                body = self.client.get_object(Bucket=self.bucket, Key=full, Range=f"bytes={offset}-{end}",
-                                              **pin)["Body"].read()
+                for attempt in range(RANGE_READ_ATTEMPTS):
+                    try:
+                        body = self.client.get_object(Bucket=self.bucket, Key=full, Range=f"bytes={offset}-{end}",
+                                                      **pin)["Body"].read()
+                    except RANGE_READ_RETRYABLE:
+                        # botocore retries the request, not the streamed body: a stalled
+                        # body read of one part would otherwise fail the whole download
+                        if attempt + 1 == RANGE_READ_ATTEMPTS:
+                            raise
+                        time.sleep(min(30.0, 2.0 ** attempt))
+                        continue
+                    break
                 if len(body) != end - offset + 1:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
                 os.pwrite(fh.fileno(), body, offset)
@@ -269,6 +761,42 @@ class S3ObjectStore:
             with ThreadPoolExecutor(self.transfer.concurrency) as pool:
                 list(pool.map(fetch, range(0, size, part)))
         return True
+
+    def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
+        """Download each ``(key, target)`` like :meth:`read_file`; returns the keys
+        that are missing (nothing written for them). With a ``client_factory`` and
+        ``transfer.download_processes`` > 1 the files are split over that many
+        child interpreters, each moving ``ceil(file_concurrency / processes)`` files at
+        once; otherwise ``file_concurrency`` threads of this process move them. The
+        children are plain ``python -c`` subprocesses fed by stdin, not
+        ``multiprocessing``: spawn re-imports the caller's ``__main__`` (an unguarded
+        script runs again) and fork copies a process that may hold threads or a GPU
+        runtime."""
+        items = [(key, str(target)) for key, target in items]
+        procs = min(int(self.transfer.download_processes), len(items))
+        if self.client_factory is None or procs <= 1:
+            return _read_files_here(self, items, self.transfer.file_concurrency)
+        threads = max(1, -(-int(self.transfer.file_concurrency) // procs))
+        groups = [items[i::procs] for i in range(procs)]
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        children = []
+        for group in groups:
+            child = subprocess.Popen([sys.executable, "-c", READ_FILES_CHILD], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, env=env)
+            children.append(child)
+            child.stdin.write(pickle.dumps((self.uri, self.client_factory, asdict(self.transfer), threads, group)))
+            child.stdin.close()
+        missing, failed = [], []
+        for child in children:
+            out = child.stdout.read()
+            if child.wait() != 0:
+                failed.append(child.returncode)
+                continue
+            missing += pickle.loads(out)
+        if failed:
+            raise ObjectStoreError(f"{self.uri}: {len(failed)} of {len(children)} download processes "
+                                   f"failed (exit {failed}); their stderr is above")
+        return missing
 
     def list(self, prefix: str, *, start_after: str = "") -> list[str]:
         strip = len(self.prefix) + 1 if self.prefix else 0
@@ -280,6 +808,27 @@ class S3ObjectStore:
             # a key ending in "/" is a directory marker a bucket mount (goofys) wrote: not an object
             keys += [item["Key"][strip:] for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
         return keys
+
+    def list_meta(self, prefix: str) -> tuple[list[tuple[str, float]], float]:
+        """``([(key, LastModified epoch s)], server time)`` under ``prefix``: the
+        object times and the clock they compare to both come from the server
+        (the ``Date`` header of the listing), never from this host's clock."""
+        from email.utils import parsedate_to_datetime
+
+        strip = len(self.prefix) + 1 if self.prefix else 0
+        out: list[tuple[str, float]] = []
+        now: float | None = None
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket,
+                                                                          Prefix=self._full(prefix)):
+            date = (page.get("ResponseMetadata") or {}).get("HTTPHeaders", {}).get("date")
+            if date:
+                stamp = parsedate_to_datetime(date).timestamp()
+                now = stamp if now is None else max(now, stamp)
+            out += [(item["Key"][strip:], item["LastModified"].timestamp())
+                    for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
+        if now is None:  # no Date header: the newest object time is a lower bound of the server clock
+            now = max((t for _, t in out), default=0.0)
+        return out, now
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=self._key(key))
@@ -308,22 +857,74 @@ class S3Store(BucketMountStore):
     def objects(self) -> S3ObjectStore:  # type: ignore[override]
         if self._objects is None:
             client = self._client or _client(self._environ, require_credentials=True)
+            # another process builds its own client from the same settings (read_files);
+            # an injected client (tests) has no such factory
+            factory = None if self._client is not None else functools.partial(
+                _client, dict(self._environ), require_credentials=True)
             self._objects = S3ObjectStore(self.uri, client=client,
-                                          transfer=TransferSettings.from_env(self._environ))
+                                          transfer=TransferSettings.from_env(self._environ),
+                                          client_factory=factory)
         return self._objects
 
     def _tree(self) -> TreeMirror:
         if self._mirror is None:
             self._mirror = TreeMirror(self.root, self.objects, subtrees=STAGED_SUBTREES,
-                                      pointers=POINTER_FILES, records=RECORD_FILES)
+                                      pointers=POINTER_FILES, records=RECORD_FILES,
+                                      independent=INDEPENDENT_DIRS,
+                                      file_concurrency=self.objects.transfer.file_concurrency)
         return self._mirror
 
     @property
     def put_renames(self) -> bool:  # type: ignore[override]
         return self.staged  # a stage directory is local disk; the bucket mount is not
 
-    def commit(self) -> float:
-        return self._tree().push() if self.staged else super().commit()
+    @property
+    def put_links(self) -> bool:  # type: ignore[override]
+        return self.staged  # a 207 GB release export is linked into the stage, not copied
+
+    def commit(self, paths: Sequence[str] | None = None) -> float:
+        return self._tree().push(paths) if self.staged else super().commit(paths)
+
+    @property
+    def cut_commits_beside_buffer_reads(self) -> bool:  # type: ignore[override]
+        return self.staged  # the buffer goes by the object API; a push takes the cut's paths only
+
+    def push_local_file(self, relative: str) -> int | None:
+        """Upload one file of the stage now (a trainer rank's cut shard, on whichever
+        node wrote it: a multi-node island has one stage per node); returns the size
+        the object store reports, None when this store has no stage."""
+        if not self.staged:
+            return None
+        return self._tree().push_file(relative)
+
+    def local_file_checksum(self, relative: str) -> str | None:
+        """The checksum the object store keeps for a file :meth:`push_local_file`
+        uploaded (``S3ObjectStore.checksum``), None without one."""
+        if not self.staged:
+            return None
+        return self._tree().object_checksum(relative)
+
+    def evict_local_file(self, relative: str) -> int:
+        """Drop the stage copy of a file :meth:`push_local_file` uploaded (a cut shard:
+        a K3.1 cut is ~1.35 TB per node); the bucket keeps it. Returns the bytes freed."""
+        return self._tree().evict_file(relative) if self.staged else 0
+
+    def delete_remote_tree(self, relative: str) -> list[str]:
+        """Delete every object under ``relative``, including what other nodes uploaded."""
+        if not self.staged:
+            return []
+        return self._tree().delete_tree(relative)
+
+    def evict_local(self, relative: str) -> None:
+        """Drop the stage copy of a pushed directory (a 207 GB Kimi-K3.1 release
+        kept per release filled the trainer's disk); the bucket keeps it."""
+        if self.staged:
+            self._tree().evict_tree(relative)
+
+    def remove_tree(self, relative: str) -> None:
+        if self.staged:  # an evicted directory has no local files left to prune
+            self.delete_remote_tree(relative)
+        super().remove_tree(relative)
 
     def reload(self) -> None:
         if self.staged:
@@ -348,17 +949,104 @@ def head_objects(uri: str, *, environ: Mapping[str, str] | None = None, client: 
                          transfer=TransferSettings.from_env(env))
 
 
-def island_envs(uri: str, environ: Mapping[str, str] | None = None, *, stage: bool = False) -> dict[str, str]:
+def island_envs(uri: str, environ: Mapping[str, str] | None = None, *, stage: bool = False,
+                credentials: bool = True) -> dict[str, str]:
     """The environment of an island that uses the store's object API: the store
     hook, the URI, the local stage directory when ``stage`` (one-node islands),
     and the store settings and credentials of the launcher's environment. Raises
-    ValueError without store credentials."""
-    env = os.environ if environ is None else environ
+    ValueError without store credentials. ``credentials=False``: the island gets
+    its credential from a Modal Secret with the AWS names (:data:`CREDENTIALS_ENV`
+    tells it so); none is required here or copied."""
+    env = dict(os.environ if environ is None else environ)
     parse_s3_uri(uri)
-    if not has_store_credentials(env):
+    if credentials and not (env.get(KEY_ID_ENV) and env.get(SECRET_ENV)) and env.get(PROFILE_ENV):
+        env.update(profile_credentials(env))  # the profile the launch names: its key goes to the island
+    if credentials and not (env.get(KEY_ID_ENV) and env.get(SECRET_ENV)):
         raise ValueError(f"an island that uses the s3 store {uri} needs store credentials: set "
-                         f"{KEY_ID_ENV} and {SECRET_ENV} (a key limited to the store's bucket) on the "
-                         "launcher; the island never uses the launcher's cloud credentials")
+                         f"{KEY_ID_ENV} and {SECRET_ENV} (a key limited to the store's bucket), or "
+                         f"{PROFILE_ENV} to an AWS profile holding one, on the launcher; the island "
+                         "never uses the launcher's cloud credentials")
     out = {STORE_IMPL_ENV: STORE_IMPL, URI_ENV: uri, **({STAGE_ENV: DEFAULT_STAGE} if stage else {})}
-    out.update({name: env[name] for name in (*SETTING_ENVS, *CREDENTIAL_ENVS) if env.get(name)})
+    out.update({name: env[name] for name in SETTING_ENVS if env.get(name)})
+    # an endpoint / region found in the profile: the island has no profile to read them from
+    endpoint, region = store_endpoint(env), store_region(env)
+    if endpoint and ENDPOINT_ENV not in out:
+        out[ENDPOINT_ENV] = endpoint
+    if region and REGION_ENV not in out:
+        out[REGION_ENV] = region
+    if credentials:
+        out.update({name: env[name] for name in CREDENTIAL_ENVS if env.get(name)})
+    else:
+        out[CREDENTIALS_ENV] = CREDENTIALS_AWS_ENV
     return out
+
+
+def profile_credentials(environ: Mapping[str, str]) -> dict[str, str]:
+    """:data:`KEY_ID_ENV` / :data:`SECRET_ENV` (/ :data:`TOKEN_ENV`) from the store's
+    AWS profile (:data:`PROFILE_ENV`); ``{}`` when it has none."""
+    profile = environ.get(PROFILE_ENV)
+    if not profile or profile_config(environ).get("_missing"):
+        return {}
+    import boto3
+
+    creds = boto3.session.Session(profile_name=profile).get_credentials()
+    if creds is None:
+        return {}
+    frozen = creds.get_frozen_credentials()
+    out = {KEY_ID_ENV: frozen.access_key, SECRET_ENV: frozen.secret_key}
+    if frozen.token:
+        out[TOKEN_ENV] = frozen.token
+    return out
+
+
+# ------------------------------------------------------------------ CLI helpers
+def add_store_client_arguments(parser: Any) -> None:
+    """``--endpoint-url`` and ``--profile`` of a CLI that opens an ``s3://`` store."""
+    parser.add_argument("--endpoint-url", default=None, metavar="URL",
+                        help=f"S3-compatible endpoint (R2, MinIO); default: {ENDPOINT_ENV}, AWS_ENDPOINT_URL, "
+                             "the profile's endpoint_url, else AWS S3")
+    parser.add_argument("--profile", default=None, metavar="NAME",
+                        help=f"AWS profile with the store's key, endpoint_url and region "
+                             f"(default: {PROFILE_ENV}, AWS_PROFILE)")
+
+
+def apply_store_client_arguments(args: Any, environ: Any = None) -> None:
+    """Put ``--endpoint-url`` / ``--profile`` into ``environ`` (default: the process
+    environment), where every store client of this process reads them."""
+    env = os.environ if environ is None else environ
+    if getattr(args, "endpoint_url", None):
+        env[ENDPOINT_ENV] = str(args.endpoint_url)
+    if getattr(args, "profile", None):
+        env[PROFILE_ENV] = str(args.profile)
+
+
+_AUTH_CODES = frozenset({"InvalidAccessKeyId", "SignatureDoesNotMatch", "AccessDenied", "Unauthorized",
+                         "InvalidToken", "ExpiredToken", "403", "401"})
+
+
+def describe_store_error(error: BaseException, uri: str = "", environ: Mapping[str, str] | None = None) -> str | None:
+    """A message naming what to set for a store error of credentials or endpoint;
+    None for any other error."""
+    env = os.environ if environ is None else environ
+    name = type(error).__name__
+    code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+    endpoint = store_endpoint(env)
+    where = f"endpoint {endpoint}" if endpoint else "AWS S3 (no endpoint set)"
+    hint_endpoint = (f"set {ENDPOINT_ENV} or AWS_ENDPOINT_URL (or --endpoint-url, or endpoint_url in the "
+                     f"AWS profile) to the store's endpoint, e.g. https://<account>.r2.cloudflarestorage.com")
+    target = f"s3 store {uri}" if uri else "s3 store"
+    if name in ("NoCredentialsError", "PartialCredentialsError"):
+        return f"{target}: {missing_credentials_message()}"
+    if name == "ProfileNotFound":
+        return f"{target}: AWS profile {store_profile(env)!r} not found; set {PROFILE_ENV} (or --profile) to a configured profile"
+    if name in ("EndpointConnectionError", "ConnectTimeoutError", "InvalidEndpointConfigurationError") \
+            or isinstance(error, ValueError) and "endpoint" in str(error).lower():
+        return f"{target}: cannot reach {where} ({error}); {hint_endpoint}"
+    if code in _AUTH_CODES:
+        extra = "" if endpoint else f"; a key of an S3-compatible store (R2) is refused by AWS: {hint_endpoint}"
+        return (f"{target}: {where} refused the credentials ({code}). Check {KEY_ID_ENV} / {SECRET_ENV} "
+                f"or the profile in {PROFILE_ENV} / AWS_PROFILE{extra}")
+    if code == "AuthorizationHeaderMalformed" or (code in ("InvalidRegionName", "InvalidRequest")
+                                                  and endpoint and _is_r2(endpoint)):
+        return f"{target}: {where} refused the region ({code}); set {REGION_ENV}=auto for Cloudflare R2"
+    return None

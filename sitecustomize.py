@@ -24,6 +24,13 @@ if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
     install()
 
 
+if os.environ.get("YETO_SGLANG_MXFP4_INPLACE") == "1":
+    # In-place reload of MXFP4 routed experts on SGLang's SM100 trtllm-gen path
+    # (every SGLang process, including the spawned schedulers).
+    from yeto.rl.adapters.sampler_engines.sglang_mxfp4_reload import install as _install_mxfp4_inplace
+
+    _install_mxfp4_inplace()
+
 def _install_tms_post_pause_hold() -> None:
     """Hold a Miles trainer actor after TMS pause for crash attribution.
 

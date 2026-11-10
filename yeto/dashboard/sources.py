@@ -95,11 +95,28 @@ def _sft_role(path: Path) -> str | None:
     return role(path)
 
 
+_CLUSTER_TAPE_RE = re.compile(r"-l(\d+)-[A-Za-z0-9]+\.jsonl$")
+
+
+def cluster_tape_island(path: Path) -> str | None:
+    """The island of a launcher per-cluster event tape
+    (``~/.yeto/runs/<run>/events/<prefix>-l<N>-<cloud>.jsonl``): N. The records'
+    ``island_id`` is the island's *learner id*, which is not unique when a launch
+    holds islands that each run as learner 0 of 1 (the sampler islands of a synced
+    group or a pair), so this file's island names them."""
+    if path.parent.name != "events":
+        return None
+    m = _CLUSTER_TAPE_RE.search(path.name)
+    return m.group(1) if m else None
+
+
 class TapeSource:
     def __init__(self, path: str | os.PathLike, island: str | None = None):
         self.path = Path(path)
         self.name = str(self.path)
-        self.island = island if island is not None else (
+        cluster = cluster_tape_island(self.path) if island is None else None
+        self.island_fixed = cluster is not None
+        self.island = island if island is not None else cluster if cluster is not None else (
             island_hint(self.path) if "journal" in self.path.name
             else host_island_hint(self.path) if "hostmem" in self.path.name else None)
         self.node = node_hint(self.path)
@@ -138,7 +155,8 @@ class TapeSource:
     def pump(self, reducer) -> int:
         n = 0
         for off, rec in self.read_new():
-            if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node):
+            if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node,
+                            island_fixed=self.island_fixed):
                 n += 1
         return n
 
@@ -229,6 +247,7 @@ def node_hint(path: Path) -> str | None:
 # mtime is when the stop command RETURNED -- an upper bound on the issue time, so an
 # island failure in the few seconds before it is conservatively NOT counted as ours.
 STOP_FILE = "STOP_ISSUED_utc.txt"
+TEARDOWN_FILE = "teardown.json"
 LEGACY_STOP_MARKERS = (("GATE*_STOPPED", "gate"), ("EARLY_STOPPED_TIME", "early"), ("WATCHDOG_FIRED", "watchdog"))
 
 
@@ -254,7 +273,11 @@ def stop_records_in(d: Path) -> list[dict]:
                 out.append({"event": "operator_stop", "time_unix": t,
                             "cause": parts[1] if len(parts) > 1 else "unknown",
                             "marker": STOP_FILE, "path": str(f)})
-    if out:
+    td = d / TEARDOWN_FILE  # the launcher tore the run down (its last act): every island is stopped
+    if td.is_file():
+        out.append({"event": "operator_stop", "time_unix": td.stat().st_mtime, "cause": "teardown",
+                    "marker": TEARDOWN_FILE + " (mtime)", "path": str(td)})
+    if any(r["marker"] == STOP_FILE for r in out):
         return out
     for pattern, cause in LEGACY_STOP_MARKERS:
         for p in sorted(d.glob(pattern)):

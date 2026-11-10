@@ -17,13 +17,17 @@ BF16 Megatron training and FP8 SGLang rollout make the same routing decision.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from yeto.rl.adapters.miles.models.partial_experts.attest import (
+    require_sha256 as _sha256,
+    sha256_file,
+)
 
 
 ORIGINAL_EXPERTS = 256
@@ -44,7 +48,6 @@ SPLIT_TOKEN_MULTIPLIER = 1_103_515_245
 SPLIT_LAYER_MULTIPLIER = 12_345
 SPLIT_SOURCE_MULTIPLIER = 2_654_435_761
 
-_HEX = frozenset("0123456789abcdef")
 _EXPERT_IN_HF_NAME = re.compile(
     r"(?P<prefix>\.mlp\.experts\.)(?P<expert>\d+)(?=\.)"
 )
@@ -108,27 +111,10 @@ _LOGICAL_TO_TRAINING_IDS = tuple(
 )
 
 
-def sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
         return value.get(name, default)
     return getattr(value, name, default)
-
-
-def _sha256(value: Any, name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{name} must be a SHA256 string")
-    normalized = value.lower()
-    if len(normalized) != 64 or any(character not in _HEX for character in normalized):
-        raise ValueError(f"{name} must be a lowercase SHA256 string")
-    return normalized
 
 
 def _sources(value: Any) -> tuple[tuple[int, ...], ...]:

@@ -95,6 +95,8 @@ from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from .buffer_payload import (ENGINE_META, ROLLOUT_ROUTED_EXPERTS, ROLLOUT_TOP_LOGPROBS, ROLLOUT_TOP_LOGPROBS_IDS,
+                             TOP_LOGPROBS_DTYPE, TOP_LOGPROBS_IDS_DTYPE, routed_experts_uint16)
 from .engine_sampler import ROUND_EVENT, EngineRound, PromptItem, dispense_position
 from .policy_versions import engine_weight_version
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
@@ -112,6 +114,7 @@ LOST_DRAIN = "drain_timeout"  # cancelled when a drain reached its timeout
 WEIGHT_SWITCHES = ("auto", "drain", "live")
 GROUP_EVENT = "rl_agentic_group"
 RETRY_EVENT = "rl_agentic_trial_retry"
+LOST_EVENT = "rl_agentic_trial_lost"  # one token_alignment loss: error, call, token window, trial_dir
 DEFAULT_INFRA_RETRIES = 2  # per trial slot (spec agentic.infra_retries)
 # ABORTED reasons that are never an infrastructure failure before the policy ran: the outer
 # wall-clock cap (a timeout; retrying it would favour short solutions), a closing gate, and the
@@ -145,7 +148,8 @@ def session_id(*parts: Any) -> str:
 
 
 def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance: Mapping[str, str],
-                   group_index: int, index: int, versions: tuple[int, int] | None = None) -> dict[str, Any]:
+                   group_index: int, index: int, versions: tuple[int, int] | None = None,
+                   engine_meta: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One kept trial as a buffer sample (module doc). ``versions``: the oldest and
     newest weight version of its turns (``live``): ``weight_version`` is the
     oldest and ``final_weight_version`` (as :func:`~.engine_sampler.sample_record`'s)
@@ -157,7 +161,7 @@ def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance:
     # A last turn the engine cut at its length limit ends the trajectory as
     # surely as a segment over max_response_len: both are truncated.
     truncated = seg.truncated or last == FINISH_LENGTH
-    return {
+    record = {
         "group_index": group_index, "index": index, "prompt": item.prompt,
         "response": "", "label": item.label,
         "tokens": list(seg.prompt_ids) + response, "response_length": len(response),
@@ -177,6 +181,19 @@ def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance:
                      **({} if versions is None else
                         {"final_weight_version": engine_weight_version(int(versions[1]))})},
     }
+    # the rollout arrays under the single-turn sample's names and dtypes (sample_record)
+    routed, top_ids = getattr(seg, "routed_experts", None), getattr(seg, "response_top_ids", None)
+    if routed is not None:
+        record[ROLLOUT_ROUTED_EXPERTS] = routed_experts_uint16(routed,
+                                                               where=f"prompt {item.prompt_id}")
+    if top_ids is not None:
+        import numpy
+
+        record[ROLLOUT_TOP_LOGPROBS_IDS] = numpy.asarray(top_ids).astype(TOP_LOGPROBS_IDS_DTYPE)
+        record[ROLLOUT_TOP_LOGPROBS] = numpy.asarray(seg.response_top_logprobs).astype(TOP_LOGPROBS_DTYPE)
+    if engine_meta is not None:
+        record["metadata"][ENGINE_META] = dict(engine_meta)
+    return record
 
 
 def infra_failure(result: Any) -> str | None:
@@ -646,13 +663,19 @@ class AgenticRound(EngineRound):
         n = len(group.sessions)
         lost: Counter[str] = Counter()
         kept: list[tuple[Any, int, int]] = []  # (finished, behavior version, newest version)
+        alignment_reports = rebased = 0  # rl_agentic_trial_lost events / kept trials whose stream restarted
         for j, finished in enumerate(group.results):
             if isinstance(finished, _Lost):
                 lost[finished.reason] += 1
                 continue
             if finished.segments is None or finished.trajectory.outcome is Outcome.ABORTED:
                 lost[str(finished.trajectory.reason).split(":", 1)[0] or "aborted"] += 1
+                if getattr(finished, "loss", None) is not None:  # token_alignment: what broke, for the tape
+                    alignment_reports += 1
+                    self.emit(LOST_EVENT, rollout_id=group.rollout_id, prompt_id=group.item.prompt_id,
+                              trial=j, reason=str(finished.trajectory.reason), **finished.loss)
                 continue
+            rebased += int(getattr(finished.segments, "rebased_turns", 0) > 0)
             turns = [int(t.policy_version) for t in finished.turns if t.policy_version is not None]
             start = group.start_versions[j]
             if self.live:  # the oldest version of any turn: the trainer's age gate and TIS see it
@@ -684,6 +707,8 @@ class AgenticRound(EngineRound):
             reason = "reclaimed"
         elif self.write_fenced():  # a newer incarnation holds the lease
             reason = "fenced"
+        elif group.spot is not None and not self._still_holds(group.spot):  # the dispenser gave it out again
+            reason = "dispense_lost"
         if reason is not None and reason != "below_min_samples":
             self.dropped_groups += 1
             tally.dropped += 1
@@ -695,7 +720,8 @@ class AgenticRound(EngineRound):
             for j, (finished, version, top) in enumerate(kept):
                 sample = agentic_sample(group.item, finished, version=version, provenance=record,
                                         group_index=group.position, index=group.position * n + j,
-                                        versions=(version, top) if self.live else None)
+                                        versions=(version, top) if self.live else None,
+                                        engine_meta=self.engine_meta)
                 tally.finish[sample["metadata"]["finish_reason"]] += 1
                 tally.tokens += sample["response_length"]
                 tally.rewards.append(sample["reward"])
@@ -707,8 +733,16 @@ class AgenticRound(EngineRound):
                 tally.refilled += 1
             tally.samples += len(samples)
         written = reason is None and group.spot is not None
+        # below_min_samples: the trials were lost to infrastructure (ABORTED, version, drain), not
+        # scored wrong (a 0 reward is kept): the task goes out again, counted toward the redo limit
+        requeue = [group.spot] if reason == "below_min_samples" and group.spot is not None else []
+        outcome = {} if group.spot is None else {group.spot: {
+            "reason": reason, "kept": len(kept), "trials": n, "lost": dict(sorted(lost.items())),
+            "retry_reasons": list(group.retry_reasons),
+            "token_alignment_reports": alignment_reports, "stream_rebased": rebased}}
         self._written(rid, [group.spot] if written else [],
-                      keep=[g.spot for g in self._unsettled if g.spot is not None])
+                      keep=[g.spot for g in self._unsettled if g.spot is not None],
+                      requeue=requeue, outcome=outcome)
         served = self.engine.served_version()
         self.emit(GROUP_EVENT, rollout_id=rid, prompt_id=group.item.prompt_id, written=reason is None,
                   dropped_reason=reason, trials=n, kept=len(kept), lost=dict(sorted(lost.items())),
@@ -717,7 +751,14 @@ class AgenticRound(EngineRound):
                   group_s=round(self.clock() - (group.started_at or self.clock()), 3),
                   trial_s=list(group.trial_s), in_flight_utilization=group.utilization,
                   drain_wait_s=group.drain_s, weight_switch=self.weight_switch,
-                  infra_retries=list(group.retries), retry_reasons=list(group.retry_reasons))
+                  infra_retries=list(group.retries), retry_reasons=list(group.retry_reasons),
+                  retried_trials=len(group.retry_reasons), lost_trials=sum(lost.values()))
+
+    def _still_holds(self, position: int) -> bool:
+        """The prompts' dispenser still gives this island the position (a store
+        ledger: no later attempt was claimed); True for a source without the check."""
+        check = getattr(self.prompts, "still_holds", None)
+        return True if not callable(check) else bool(check(position))
 
     def _outcomes(self) -> dict[str, int]:
         """The admission counters: totals since the last round event, in flight now."""
@@ -745,6 +786,8 @@ class AgenticRound(EngineRound):
                    if span > 0 else None,
                    "drain_wait_s": round(self._drain_now() - drain, 3),
                    "infra_retries": dict(sorted(tally.retried.items())), "groups_refilled": tally.refilled,
+                   # trials run again after an infra failure / trials missing from their group
+                   "retried_trials": sum(tally.retried.values()), "lost_trials": n_lost,
                    "infra_retries_total": dict(sorted(self.retries_total.items())),
                    "infra_retries_exhausted_total": self.retries_exhausted}
         self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=self.engine.served_version(),
@@ -804,6 +847,8 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
 
     * ``template`` (a :mod:`yeto.rl.harness.chat_templates` name), ``tokenizer``
       (default ``base_dir``), ``model`` (the model name the agent sends);
+      ``template_kwargs`` (optional): extra template variables over the
+      template's own;
     * ``turn_max_tokens``: the signed ``max_tokens`` of each model call;
     * ``max_response_len`` / ``max_prompt_len``: the trainer's row widths (a
       longer stream is cut / ABORTED);
@@ -838,7 +883,12 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         signed = {"max_tokens": int(section["turn_max_tokens"]),
                   "temperature": float(sampling.get("temperature", 1.0)), "top_p": float(sampling.get("top_p", 1.0))}
         tokenizer = section.get("tokenizer") or spec.get("base_dir")
-        template = ChatTemplate.load(str(section["template"]), tokenizer_path=tokenizer)
+        template = ChatTemplate.load(str(section["template"]), tokenizer_path=tokenizer,
+                                     trust_remote_code=bool(section.get("trust_remote_code", False)))
+        if section.get("template_kwargs"):  # e.g. Kimi-K3.1's {"thinking_effort": "low"}
+            spec_ = template.spec
+            template = ChatTemplate(dataclasses.replace(spec_, template_kwargs={
+                **spec_.template_kwargs, **dict(section["template_kwargs"])}), template.tokenizer)
         model = str(section.get("model", "model"))
         max_in_flight = int(section["max_in_flight"])
         max_response_len = int(section["max_response_len"])
@@ -857,7 +907,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     recorder = ProxyTokenRecorder(proxy, host=str(proxy_cfg.get("host", "127.0.0.1")),
                                   port=int(proxy_cfg.get("port", 0)), public_base=public_base,
                                   path_secret=Path(secret_file).read_text().strip() if secret_file else None)
-    settings = HarborSettings.from_env()
+    settings = dataclasses.replace(HarborSettings.from_env(), turn_max_tokens=signed["max_tokens"])
     harness = HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
     defaults = {"model_name": model, **dict(section.get("task_defaults") or {})}
     provider = str(environ.get("HARBOR_ENV_TYPE", "") or "").strip().lower()
@@ -870,6 +920,15 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         raise HarnessConfigError("spec agentic.weight_switch live needs an engine with live_update")
     if defaults.get("provider") == "boat":
         check_in_flight_cap(max_in_flight)
+    if defaults.get("provider"):
+        # A trial waiting for a sandbox slot would spend its wall-clock budget waiting:
+        # the cap (HARBOR_MAX_SANDBOXES, required for remote-docker) must cover max_in_flight.
+        from yeto.rl.harness.harbor.capacity import process_limits
+
+        slots = process_limits().slots(str(defaults["provider"]))
+        if slots is not None and slots.limit < max_in_flight:
+            raise HarnessConfigError(f"agentic.max_in_flight {max_in_flight} exceeds the {defaults['provider']} "
+                                     f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
     loop = LoopThread(workers=max_in_flight + 8)
 
     def make(engine_: Any, writer: Any, **kwargs: Any) -> AgenticRound:

@@ -263,6 +263,10 @@ def compact_supported(*, args: Any, parallel_state: Any, call: Mapping[str, Any]
         return "context parallel > 1"
     if call.get("indices_are_token_positions"):
         return "token-position indices"
+    if call.get("kept_in_train_dump") and getattr(args, "save_debug_train_data", None) is not None:
+        # upstream keeps the replay tensors in rollout_data for the train dump;
+        # the compact fill may delete them (shadow check), so the legacy fill runs
+        return "replay data kept for the train dump"
     if sequential is None or call.get("register_replay_list_func") is not sequential:
         return "stream registration is not register_replay_list_sequential"
     return None
@@ -334,10 +338,16 @@ def compact_fill_replay_data(*, args: Any, models: Any, data_iterator: Sequence[
                              num_microbatches: Sequence[int], rollout_data: dict, data_key: str,
                              replay_list: list, register_replay_list_func: Any,
                              if_sp_region: bool = True, indices_are_token_positions: bool = False,
+                             sequence_first: bool = False, kept_in_train_dump: bool = False,
                              parallel_state: Any, pin: bool | None = None,
                              stats: dict[str, Any] | None = None) -> None:
     """Miles ``fill_replay_data`` for THD, context parallel 1, sequential
     stream registration and routing indices (:func:`compact_supported`).
+
+    ``sequence_first`` (upstream: Megatron MoE's ``[S, B]`` order) only affects
+    the bshd branch, which compact does not cover (``qkv_format == "thd"`` is
+    asserted); ``kept_in_train_dump`` is refused by :func:`compact_supported`
+    when a train dump is on. Both are accepted so the upstream call shape binds.
 
     Same micro-batch order, padding (-1) and sequence-parallel window as the
     legacy fill; each replay stream records a contiguous view of one buffer per
@@ -572,7 +582,7 @@ def _measured(fill: Callable[..., Any], call: dict[str, Any], *, mode: str, reas
 def _miles_targets() -> tuple[Any, Callable[..., Any] | None, Callable[[], Any]]:
     from miles.backends.megatron_utils import actor as actor_module
     from miles.backends.training_utils.parallel import get_parallel_state
-    from miles.backends.training_utils.replay_data import register_replay_list_sequential
+    from miles.backends.training_utils.replay.data import register_replay_list_sequential
 
     return actor_module, register_replay_list_sequential, get_parallel_state
 

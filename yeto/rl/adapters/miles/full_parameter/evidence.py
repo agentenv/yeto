@@ -15,6 +15,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from yeto.rl.adapters.miles.ext_args import ext_attr
+from yeto.rl.adapters.miles.proc_state import proc_state
+
 if TYPE_CHECKING:
     from yeto.rl.engine.policy_versions import PublishedPolicies
     from yeto.rl.trajectory_evidence import BehaviorPolicyOf
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
 def evidence_enabled(args: Any) -> bool:
     """Whether this island binds rounds to trajectory evidence (full-parameter)."""
 
-    return getattr(args, "yeto_rl_trajectory_evidence_dir", None) is not None
+    return ext_attr(args, "rl_trajectory_evidence_dir", None) is not None
 
 
 def persist_published_round_evidence(
@@ -65,10 +68,10 @@ def persist_published_round_evidence(
 
     if not policy_token:
         raise RuntimeError("trajectory evidence needs the published policy token")
-    evidence_kind = getattr(args, "yeto_rl_trajectory_evidence_kind", None)
+    evidence_kind = ext_attr(args, "rl_trajectory_evidence_kind", None)
     if evidence_kind not in EVIDENCE_KINDS:
         raise RuntimeError("trajectory evidence kind is not bound by the launch context")
-    schema_version = getattr(args, "yeto_rl_trajectory_evidence_schema_version", None)
+    schema_version = ext_attr(args, "rl_trajectory_evidence_schema_version", None)
     if schema_version not in LAUNCH_CONTEXT_SCHEMA_VERSIONS:
         raise RuntimeError("trajectory evidence schema is not bound by the launch context")
     token_round, policy_hash = parse_policy_snapshot_token(policy_token)
@@ -78,7 +81,7 @@ def persist_published_round_evidence(
         raise RuntimeError(f"round {rollout_id} is older than its policy token {policy_token}")
     from ..buffer_rollout import EXTERNAL_CUT_ROUND_ATTR
 
-    external = getattr(args, EXTERNAL_CUT_ROUND_ATTR, None)
+    external = proc_state(args, EXTERNAL_CUT_ROUND_ATTR)
     if external is not None:
         # Relay trainer: every trajectory names its external merged cut
         # (schema 5); the age bound is the merged version the round's take gated on.
@@ -90,25 +93,25 @@ def persist_published_round_evidence(
             groups,
             rollout_id=rollout_id,
             behavior_policy_hash=policy_hash,
-            reward_contract_hash=getattr(args, "yeto_rl_reward_sha256", None),
+            reward_contract_hash=ext_attr(args, "rl_reward_sha256", None),
             evidence_kind=evidence_kind,
             behavior_cut_of=behavior_cut_of,
             merged_version=int(external["merged_version"]),
-            max_policy_age=int(getattr(args, "yeto_rl_max_policy_age", 0) or 0),
+            max_policy_age=int(ext_attr(args, "rl_max_policy_age", 0) or 0),
         )
-        write_trajectory_batch_evidence(args.yeto_rl_trajectory_evidence_dir, evidence)
+        write_trajectory_batch_evidence(ext_attr(args, "rl_trajectory_evidence_dir"), evidence)
         return
     evidence = build_trajectory_batch_evidence(
         groups,
         rollout_id=rollout_id,
         behavior_policy_hash=policy_hash,
-        reward_contract_hash=getattr(args, "yeto_rl_reward_sha256", None),
+        reward_contract_hash=ext_attr(args, "rl_reward_sha256", None),
         evidence_kind=evidence_kind,
         behavior_policy_of=_oldest_published_policy(published),
         # the configured limit (the driver's age check applies any fallback)
-        max_policy_age=int(getattr(args, "yeto_rl_max_policy_age", 0) or 0),
+        max_policy_age=int(ext_attr(args, "rl_max_policy_age", 0) or 0),
     )
-    write_trajectory_batch_evidence(args.yeto_rl_trajectory_evidence_dir, evidence)
+    write_trajectory_batch_evidence(ext_attr(args, "rl_trajectory_evidence_dir"), evidence)
 
 
 def _oldest_published_policy(published: PublishedPolicies) -> BehaviorPolicyOf:

@@ -104,10 +104,28 @@ def is_rank(coord: Mapping[str, int], rank: int | None) -> bool:
     return rank is not None and int(coord.get("global_rank", -1)) == rank
 
 
+ROLLOUT_CHECKPOINT_DIRNAME = "rollout"  # upstream compute_rollout_checkpoint_dir: <load>/rollout/<id>/
+DATA_SOURCE_DIRNAME = "data_source"  # upstream rollout_executor._DATA_SOURCE_DIRNAME
+EXECUTOR_DIRNAME = "executor"  # upstream rollout_executor._EXECUTOR_DIRNAME
+STATE_FILENAME = "state.pt"  # upstream simple_checkpointer._STATE_FILENAME
+
+
+def rollout_checkpoint_dir(load: str, rollout_id: int) -> str:
+    """Upstream ``compute_rollout_checkpoint_dir(load, rollout_id=)``."""
+    return os.path.join(load, ROLLOUT_CHECKPOINT_DIRNAME, str(int(rollout_id)))
+
+
 def write_shifted_dataset_state(args: Any, cursor: Mapping[str, int], groups: int) -> str:
     """Put a dataset state with ``sample_offset + groups`` where Miles'
-    ``RolloutDataSource.load(start_rollout_id - 1)`` reads it (its ``args.load``,
-    i.e. ``--ref-load`` in bridge mode). Returns the path written.
+    ``rollout_executor.load(start_rollout_id - 1, load=args.load)`` reads it
+    (``args.load``, i.e. ``--ref-load`` in bridge mode). Returns the directory written.
+
+    Upstream layout (one directory per rollout): ``<load>/rollout/<id>/data_source/state.pt``
+    holds the ``RolloutDataSource`` state and ``<load>/rollout/<id>/executor/state.pt`` the
+    executor's untrained outputs (an empty dict: nothing to replay); ``load`` asserts the
+    rollout directory exists and reads both. Upstream loads only when
+    ``start_rollout_id > 0``, so a shift for a run that has not trained a step yet
+    (``rollout_id`` -1) would never be read and is refused.
     """
     import torch
 
@@ -116,9 +134,13 @@ def write_shifted_dataset_state(args: Any, cursor: Mapping[str, int], groups: in
         raise InjectionConfigError(f"{CURSOR_SHIFT_ENV}: args.load is unset, nothing would read the file")
     start = getattr(args, "start_rollout_id", None)
     rollout_id = (int(start) if start is not None else 0) - 1
-    path = os.path.join(load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
-    if os.path.exists(path):
-        raise InjectionConfigError(f"{path} already exists; refusing to overwrite it")
+    if rollout_id < 0:
+        raise InjectionConfigError(
+            f"{CURSOR_SHIFT_ENV}: start_rollout_id is {start}; Miles loads the rollout state only "
+            "for a trained step (start_rollout_id > 0), the shift would never be read")
+    directory = rollout_checkpoint_dir(load, rollout_id)
+    if os.path.exists(directory):
+        raise InjectionConfigError(f"{directory} already exists; refusing to overwrite it")
     state = {
         "sample_offset": int(cursor["sample_offset"]) + groups,
         "epoch_id": int(cursor["epoch_id"]),
@@ -126,6 +148,7 @@ def write_shifted_dataset_state(args: Any, cursor: Mapping[str, int], groups: in
         "sample_index": int(cursor["sample_index"]),
         "metadata": {},
     }
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(state, path)
-    return path
+    for sub, payload in ((DATA_SOURCE_DIRNAME, state), (EXECUTOR_DIRNAME, {})):
+        os.makedirs(os.path.join(directory, sub), exist_ok=True)
+        torch.save(payload, os.path.join(directory, sub, STATE_FILENAME))
+    return directory

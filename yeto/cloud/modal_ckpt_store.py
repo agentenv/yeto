@@ -203,8 +203,9 @@ class ModalVolumeStore(CheckpointStore):
 
         return modal.Volume.from_name(self.volume_name)
 
-    def commit(self) -> float:
-        """Explicit commit; a failing commit raises (the sync then reports store_synced
+    def commit(self, paths: Any = None) -> float:
+        """Explicit commit (``paths`` is accepted and ignored: a Volume commit makes
+        every write of the container durable); a failing commit raises (the sync then reports store_synced
         False). In the island container the learner's Python cannot import the Modal
         client, so the commit runs in the Modal runner's interpreter
         (``YETO_MODAL_PYTHON`` / ``YETO_MODAL_SYSPATH``, exported by modal_runner)."""

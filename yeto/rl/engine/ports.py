@@ -109,6 +109,19 @@ class RolloutBatchHandle:
     # The task-dispenser positions of those groups (row runs,
     # ``data_split.row_runs``); None when no stale group had one.
     buffer_stale_positions: list[list[int]] | None = None
+    # xhw guard (yeto.rl.engine.xhw_guard): the round's tokens and rollout-side
+    # statistics per source, and the groups a quarantine passed over / a downweight
+    # scaled; None = not reported (no buffer reader).
+    buffer_source_tokens: dict[str, int] | None = None
+    buffer_source_stats: dict[str, dict[str, float]] | None = None
+    buffer_xhw_quarantined: int | None = None
+    buffer_xhw_downweighted: int | None = None
+    # BatchReader group_size: short groups trained, groups too small to train, whole
+    # groups carried to the next round, loss-free padding samples; None = not reported
+    buffer_incomplete_groups: int | None = None
+    buffer_dropped_small_groups: int | None = None
+    buffer_carried_over_groups: int | None = None
+    buffer_padded_samples: int | None = None
     # Summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None

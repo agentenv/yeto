@@ -4,8 +4,10 @@ verl's ``HarborAgentLoop`` asks a token recorder for one OpenAI base URL per
 sample and, after the trial, for the sample's model calls.
 :class:`ProxyTokenRecorder` is that recorder in front of a sampler engine: it
 serves a :class:`~.proxy.RecordsProxy` over HTTP in the worker process (the
-sandboxed agent calls ``<base>/t/<session>/v1``) and turns the proxy's records
-into :class:`~yeto.rl.agentic.TokenTurn` values.
+sandboxed agent calls ``<base>/t/<session>/<token>/v1``, the token random per
+session) and turns the proxy's records into :class:`~yeto.rl.agentic.TokenTurn`
+values.  Only the model routes are served: records and close are in-process
+calls, so no sandbox can read, close or write another session (proxy doc).
 
 One recorder per process, not per sample: verl builds a new agent loop for
 every sample, so ``HarborAgentLoop`` keeps the recorder per event loop
@@ -93,7 +95,10 @@ def turns_from_records(records: Mapping[str, Any]) -> list[TokenTurn]:
                                        policy_version=turn.get("policy_version"),
                                        provenance=turn.get("provenance"),
                                        finish_reason=turn.get("finish_reason"),
-                                       policy_error=turn.get("parse_error")))
+                                       policy_error=turn.get("parse_error"),
+                                       completion_top_ids=turn.get("top_ids"),
+                                       completion_top_logprobs=turn.get("top_logprobs"),
+                                       routed_experts=turn.get("routed_experts")))
                 cursor, pending_stop = end, len(turn.get("stop_added") or ())
             if cursor + pending_stop != len(ids):
                 raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
@@ -130,7 +135,7 @@ class ProxyTokenRecorder:
             if self._base_url is None:
                 from aiohttp import web
 
-                app = self.proxy.app()
+                app = self.proxy.app()  # model routes only: records/close stay in process
                 if self._prefix:
                     outer = web.Application()
                     outer.add_subapp(f"{self._prefix}/", app)
@@ -159,8 +164,9 @@ class ProxyTokenRecorder:
         if trajectory_id in self._open:
             raise HarnessConfigError(f"recorder session {trajectory_id!r} is already open")
         base = await self._base()
+        self.proxy.open(trajectory_id)  # issues the session's own token
         self._open.add(trajectory_id)
-        return f"{base}/t/{trajectory_id}/v1"
+        return f"{base}{self.proxy.path(trajectory_id)}/v1"
 
     async def close(self, trajectory_id: str) -> Sequence[TokenTurn]:
         if trajectory_id not in self._open:
@@ -175,6 +181,10 @@ class ProxyTokenRecorder:
         if invalid:
             raise TokenAlignmentError(f"records proxy invalidated the trajectory: {invalid}")
         return turns_from_records(records)
+
+    def decode(self, ids: Sequence[int]) -> str:
+        """Text of ``ids`` under the proxy's chat template (loss reports)."""
+        return self.proxy.backend.template.decode(list(ids))
 
     async def aclose(self) -> None:
         """Stop the HTTP server (tests; a worker process keeps it for its life)."""

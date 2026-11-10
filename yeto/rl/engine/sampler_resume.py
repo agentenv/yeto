@@ -367,3 +367,77 @@ class ReclaimWatcher:
                     print(f"[sampler-island] reclaim handler failed: {error!r}", flush=True)
                 return
             self._stop.wait(self.poll_s)
+
+
+# ---------------------------------------------------------------------------- handoff
+# A replacement sampler with its own shard (the NC lease pool: a new node, a new
+# shard) continues the prompts of the sampler it replaces (``continues_shard``):
+# it asks that sampler to stop (``handoffs/<predecessor>.json``), waits for its
+# LEAVE record, and starts at the round after the predecessor's newest written
+# round. Prompts are drawn by rollout id within the data slot, so the rounds
+# continue the predecessor's rows with no repeat. The predecessor's shard keeps
+# its groups; the trainer reads them as before.
+HANDOFF_DIR = "sample-buffer/handoffs"
+HANDOFF_EVENT = "rl_sampler_handoff"
+DEFAULT_HANDOFF_WAIT_S = 900.0
+
+
+def _objects(store: Any) -> Any:
+    return getattr(store, "objects", None)
+
+
+def _read_record(store: Any, key: str) -> dict[str, Any] | None:
+    objects = _objects(store)
+    if objects is not None:
+        raw = objects.read(key)
+    else:
+        path = Path(store.root) / key
+        raw = path.read_bytes() if path.is_file() else None
+    return None if raw is None else json.loads(raw)
+
+
+def _list_records(store: Any, prefix: str) -> list[str]:
+    objects = _objects(store)
+    if objects is not None:
+        return [k for k in objects.list(prefix.rstrip("/") + "/") if k.endswith(".json")]
+    root = Path(store.root) / prefix
+    return sorted(f"{prefix}/{p.name}" for p in root.glob("*.json")) if root.is_dir() else []
+
+
+def request_handoff(store: Any, predecessor: str, successor: str, clock: Callable[[], float] = time.time) -> None:
+    _put_record(store, f"{HANDOFF_DIR}/{predecessor}.json",
+                {"predecessor": predecessor, "successor": successor, "requested_at": clock()})
+
+
+def handoff_requested(store: Any, sampler: str) -> bool:
+    """Whether a successor asked ``sampler`` to stop (its loop starts no new round)."""
+    return _read_record(store, f"{HANDOFF_DIR}/{sampler}.json") is not None
+
+
+def sampler_left(store: Any, sampler: str) -> bool:
+    """Whether every incarnation record of ``sampler`` has its LEAVE (True: none is running)."""
+    records = [_read_record(store, key) for key in _list_records(store, f"{MEMBERS_DIR}/{sampler}")]
+    records = [r for r in records if r is not None]
+    return bool(records) and all(r.get("left_at") is not None for r in records)
+
+
+def handoff_start(store: Any, predecessor: str, successor: str,
+                  predecessor_entries: Callable[[], Iterable[Any]], *,
+                  wait_s: float = DEFAULT_HANDOFF_WAIT_S, poll_s: float = 5.0,
+                  clock: Callable[[], float] = time.monotonic,
+                  sleep: Callable[[float], None] = time.sleep) -> tuple[int, dict[str, Any]]:
+    """The first round of ``successor`` (and the handoff detail). A predecessor that
+    left: its next round. One still running after ``wait_s`` (or that never wrote a
+    member record, e.g. killed hard): one round further, so its round in flight
+    cannot repeat prompts (a round's rows are skipped instead)."""
+    request_handoff(store, predecessor, successor)
+    deadline = clock() + float(wait_s)
+    left = sampler_left(store, predecessor)
+    while not left and clock() < deadline:
+        sleep(poll_s)
+        left = sampler_left(store, predecessor)
+    point = resume_point(predecessor_entries(), predecessor)
+    start = point.next_rollout_id if left or not point.written_rounds else point.next_rollout_id + 1
+    return start, {"predecessor": predecessor, "predecessor_left": left,
+                   "predecessor_next_rollout_id": point.next_rollout_id,
+                   "predecessor_groups": point.groups, "start_rollout_id": start}

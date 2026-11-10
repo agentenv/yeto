@@ -14,6 +14,7 @@ integration tests exercise against the real binary.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import threading
 from collections.abc import Mapping
@@ -197,6 +198,12 @@ class FakeEngine:
 class FakeRolloutPool:
     def __init__(self, engine: FakeEngine) -> None:
         self.engine = engine
+
+    def discard_groups(self, batch: RolloutBatchHandle, group_ids: Any) -> RolloutBatchHandle:
+        """The fake trains ``batch.groups``: dropping a group drops its data."""
+        drop = set(group_ids)
+        self.engine.calls.append(("discard_groups", batch.rollout_id, tuple(sorted(drop))))
+        return dataclasses.replace(batch, groups=tuple(g for g in batch.groups if g.group_id not in drop))
 
     def generate(
         self, rollout_id: int, *, expected_policy_version: str | None = None

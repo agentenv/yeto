@@ -59,7 +59,7 @@ def write_full_checkpoint(actor: Any, *, path: str, rollout_id: int) -> dict[str
         return {"path": str(path), "writers": "rank0"}
     import torch
     from miles.backends.megatron_utils.hf_export import _get_hf_bridge
-    from miles.backends.training_utils.checkpoint_io import write_checkpoint_dir
+    from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
     from miles.utils.distributed_utils import get_gloo_group
     from miles.utils.hf_utils.config import HF_EXPORT_COMPLETE_MARKER
     from miles.utils.megatron_bridge_utils import patch_megatron_model
@@ -82,14 +82,44 @@ def write_full_checkpoint(actor: Any, *, path: str, rollout_id: int) -> dict[str
 
 
 def write_lora_adapter(actor: Any, *, path: str) -> dict[str, Any]:
-    """Write the actor's current LoRA adapter into ``path`` (collective)."""
-    publisher = getattr(actor, "snapshot_publisher", None)
-    if publisher is None:
-        raise RuntimeError("LoRA release export needs the actor's snapshot publisher "
-                           "(Miles builds it when --save-hf is set)")
+    """Write the actor's current LoRA adapter into ``path`` (collective).
+
+    Upstream's ``SnapshotPublisher`` writes models only; adapters go through
+    the adapter library, exactly as ``hf_export.save_hf_model`` writes the
+    ``adapter/`` directory next to an HF export: the sampler layout when the
+    slots ask for it (``bf16_adapter_key_style == "sampler"``) or the
+    parametrization has no plain PEFT form (fused modules with their own A,
+    stacked experts), the PEFT layout otherwise. Rank 0 writes, every rank
+    takes part in the gather; ``write_checkpoint_dir`` adds the completion
+    marker the sampler's loader looks for."""
+    slots = getattr(actor, "adapter_slots", None)
+    if slots is None:
+        raise RuntimeError("LoRA release export needs the actor's adapter slots "
+                           "(Miles builds them for a LoRA actor)")
+    args = actor.args
+    from miles.backends.megatron_utils.lora.checkpoint import single_lora_parametrization
+    from miles.backends.training_utils.checkpoint.adapter.adapter_dir import (
+        write_peft_export,
+        write_sampler_export,
+    )
+    from miles.backends.training_utils.checkpoint.adapter.adapter_exports import has_plain_peft_form
+    from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
+    from miles.utils.hf_utils.config import HF_EXPORT_COMPLETE_MARKER
+
+    parametrization = single_lora_parametrization(slots, args)
+    write_export = (
+        write_sampler_export
+        if getattr(slots, "bf16_adapter_key_style", "peft") == "sampler"
+        or not has_plain_peft_form(parametrization, slots.targets)
+        else write_peft_export
+    )
+
+    def write(directory: Path) -> None:
+        write_export(directory, slots, 0, parametrization, slots.targets, lora_dropout=args.lora_dropout)
+
     with _awake_process_groups(actor):
-        publisher.write_adapter(None, Path(path))
-    return {"path": str(path)}
+        write_checkpoint_dir(Path(path), write, completion_marker=HF_EXPORT_COMPLETE_MARKER)
+    return {"path": str(path), "layout": "sampler" if write_export is write_sampler_export else "peft"}
 
 
 @contextmanager

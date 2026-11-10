@@ -22,11 +22,15 @@ releases live there). They are either separate single-island launches
 or one launch of one trainer and several sampler islands (each sampler
 writes its own shard of the buffer, :func:`buffer_shards`): there is no syncer, and each island runs as its own one-learner, no-sync island
 (learner id 0 of 1) whose role comes from its island args (:func:`island_args`).
-Synced trainers (:mod:`.merged_release`): a launch of N >= 2 islands
-with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
+Synced trainers (:mod:`.merged_release`): a launch of N islands with
+``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
 ``--rl-single-island-no-sync``): every island is a trainer, learner m of N, and
 reads lane m of the buffer; the island with learner id 0 releases the merged
-policy. The store reaches the island as ``--rl-sample-store`` (buffer and
+policy. LoRA synced trainers need N >= 2 (they merge LoRA deltas); full-parameter
+synced trainers (``--tuning full`` with the full-parameter preset, the K3.1
+recipe: :func:`synced_full_parameter_trainer`) merge full-parameter
+pseudo-gradients and run with N >= 1 (N = 1: learners 1 / quorum 1, the merge
+is the identity). The store reaches the island as ``--rl-sample-store`` (buffer and
 releases only: multi-island round cuts do not exist), the trainer count as
 ``--rl-sample-lanes``. The samplers are separate no-sync launches over the
 same store, or islands of the same launch, a *synced group*
@@ -65,6 +69,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from .data_split import DataSlot  # noqa: F401 - re-exported (callers import it from here)
@@ -100,6 +105,10 @@ class SampleBufferConfig:
     it in the background (``--rl-release-inline``; ``sampler_island`` module doc);
     ``release_delta_full_every``: trainer, upload staged full releases as bf16
     deltas, every N-th one full (``--rl-release-delta-full-every``; 0: off);
+    ``release_every`` / ``release_skip_busy``: trainer, release every N-th
+    version / skip a release while the previous upload is in flight
+    (``--rl-release-every``, ``--rl-release-skip-busy``; ``sampler_island``
+    ``ReleasingPublisher``);
     ``until_trainers_end``: sampler, generate until this many trainers that read
     the store have ended, with no fixed round count (module doc; 0: the
     island's own rounds)."""
@@ -113,6 +122,8 @@ class SampleBufferConfig:
     release_legacy: bool = False
     release_inline: bool = False
     release_delta_full_every: int = 0
+    release_every: int = 1
+    release_skip_busy: bool = False
     until_trainers_end: int = 0
 
 
@@ -145,14 +156,25 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
     """Launch checks of synced trainers (module doc), before the per-role checks."""
     if not is_synced_trainer(args):
         return
-    if int(num_islands) < 2:
+    full = synced_full_parameter_trainer(args)
+    if int(num_islands) < 2 and not full:
         raise ValueError("--rl-sample-role trainer without --rl-single-island-no-sync is a synced "
-                         f"multi-island launch: it needs at least two islands (got {num_islands})")
+                         f"multi-island launch: it needs at least two islands (got {num_islands}); "
+                         "one learner behind the syncer runs only the full-parameter preset "
+                         f"(--tuning full --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET})")
     if is_convertible_pool(args):
         raise ValueError("synced trainers do not combine with convertible nodes")
-    if getattr(args, "tuning", "lora") != "lora":
+    tuning = getattr(args, "tuning", "lora")
+    if tuning not in ("lora", "full"):
         raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
-                         "they need --tuning lora")
+                         "they need --tuning lora or --tuning full")
+    if tuning == "full" and not full and getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
+        # --tuning full on a synced trainer: the full-parameter preset (the syncer merges the
+        # islands' pseudo-gradients) or the K3.1 form (whole-checkpoint releases; no LoRA delta
+        # to merge); the generic path keeps the LoRA merge and its golden argv
+        raise ValueError("synced trainers with --tuning full need --rl-model-recipe kimi_k31 "
+                         f"(whole-checkpoint releases) or --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} "
+                         "(full-parameter pseudo-gradients); other recipes need --tuning lora")
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
             getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
         # The strict sweep publishes in lockstep (policy age 0); a synced trainer
@@ -429,6 +451,8 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     if out.rl_sample_role != TRAINER:
         out.rl_release_inline = False
         out.rl_release_delta_full_every = 0
+        out.rl_release_every = 1
+        out.rl_release_skip_busy = False
     return out
 
 
@@ -459,6 +483,8 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
         out.rl_sampler_min_round_seconds = None
         return out
     out.rl_release_delta_full_every = 0
+    out.rl_release_every = 1
+    out.rl_release_skip_busy = False
     out.rl_sampler_until_trainers_end = sampler_stop_trainers(args, num_islands).get(island, 0)
     if out.rl_sample_substore is not None:
         out.rl_checkpoint_store = substore_uri(args.rl_checkpoint_store, out.rl_sample_substore)
@@ -478,10 +504,66 @@ def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: d
     out.rl_sample_wait_s = None
     out.total_steps = out.rl_synced_trainers * int(args.total_steps) // len(samplers)
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET:
+        out.rl_sampler_max_backlog_rounds = full_parameter_sampler_backlog_rounds(
+            args, island, num_islands)
         _as_full_parameter_sampler(out)
     if getattr(args, "rl_total_fragment_steps", None) is not None:
         out.rl_total_fragment_steps = out.total_steps * int(getattr(out, "fragments", 1) or 1)
     return out
+
+
+def min_full_parameter_backlog_rounds(args: Any, island: int, num_islands: int) -> int:
+    """The smallest backlog cap (sampler rounds) of a full-parameter synced group's
+    sampler that cannot stall the group.
+
+    The sampler counts its backlog from the read position of the newest release,
+    and the publisher releases only when the merged version advances: every fragment
+    merged once more, i.e. ``--fragments`` x ``--local-rl-rounds-per-sync`` local
+    rounds of every trainer, plus the
+    ``--pipeline`` fragments in flight. Until then the trainers it feeds (all K, or
+    its own trainer with ``--rl-sampler-follow trainer``) consume
+    ``trainers x (fragments + pipeline)`` rounds of groups, shared by the samplers of
+    the same store. A lower cap stops the sampler before the next release exists and
+    the trainers then wait for groups forever."""
+    bindings = sampler_bindings(args, num_islands)
+    samplers = sampler_islands(args, num_islands)
+    if bindings:
+        trainers_fed = 1
+        sharing = sum(1 for t in bindings.values() if t == bindings[island])
+    else:
+        trainers_fed = len(synced_group_learners(args, num_islands))
+        sharing = len(samplers)
+    return stall_free_backlog_rounds(
+        trainers_fed=trainers_fed, sharing=sharing,
+        fragments=int(getattr(args, "fragments", 1) or 1),
+        local_rounds=int(getattr(args, "local_rl_rounds_per_sync", 1) or 1),
+        pipeline=int(getattr(args, "pipeline", 0) or 0))
+
+
+def stall_free_backlog_rounds(*, trainers_fed: int, sharing: int, fragments: int = 1,
+                              local_rounds: int = 1, pipeline: int = 0) -> int:
+    """The pure part of :func:`min_full_parameter_backlog_rounds`: ``trainers_fed`` x
+    (``fragments`` x ``local_rounds`` + ``pipeline``) rounds until the next merged
+    release, shared by ``sharing`` samplers of the store (rounded up)."""
+    rounds = trainers_fed * (fragments * local_rounds + pipeline)
+    return -(-rounds // max(1, sharing))
+
+
+def full_parameter_sampler_backlog_rounds(args: Any, island: int, num_islands: int) -> int:
+    """``--rl-sampler-max-backlog-rounds`` of a full-parameter synced group's sampler:
+    the stall-free minimum (:func:`min_full_parameter_backlog_rounds`) plus the
+    default margin, or the operator's value, refused when it is below the minimum."""
+    need = min_full_parameter_backlog_rounds(args, island, num_islands)
+    explicit = getattr(args, "rl_sampler_max_backlog_rounds", None)
+    if explicit is None:
+        return need + DEFAULT_MAX_BACKLOG_ROUNDS
+    if int(explicit) < need:
+        raise ValueError(
+            f"--rl-sampler-max-backlog-rounds {explicit} stalls a full-parameter synced group: "
+            f"sampler island {island} must hold at least {need} rounds of groups until the "
+            "next merged release (trainers x (fragments x local rounds + pipeline) / samplers "
+            "per store)")
+    return int(explicit)
 
 
 def _as_full_parameter_sampler(out: Any) -> None:
@@ -510,6 +592,18 @@ def island_learner(args: Any, island: int, num_learners: int,
     if learners:
         return (learners[island], len(learners)) if island in learners else (0, 1)
     return island, num_learners
+
+
+def synced_full_parameter_trainer(args: Any) -> bool:
+    """A synced trainer island (:func:`is_synced_trainer`) training every
+    parameter: ``--tuning full`` with the full-parameter preset. Its pseudo-gradient
+    is merged by the syncer across the K learner islands (K >= 1: one learner is
+    learners=1/quorum=1 and the merge is the identity); the samplers run as
+    full-parameter samplers (:func:`_as_full_parameter_sampler`). The K3.1
+    recipe (partial experts, ``--tuning full``) takes this form."""
+    return (is_synced_trainer(args)
+            and getattr(args, "tuning", "lora") == "full"
+            and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
 def buffer_full_parameter(args: Any) -> bool:
@@ -561,7 +655,8 @@ def check_pair(args: Any, num_islands: int) -> None:
 def check_pool(args: Any, num_islands: int) -> None:
     """Launch checks of a convertible pool: at least two islands, every island
     declared convertible, no other role switch, ``--rl-single-island-no-sync``,
-    LoRA on colocated islands (the trainer and the engines share the GPUs); then
+    LoRA or full parameters on colocated islands (the trainer and the engines share
+    the GPUs; a full-parameter node releases whole checkpoints, the K3.1 form); then
     every island's own role checks."""
     islands = convertible_islands(args)
     if num_islands < 2 or islands != list(range(num_islands)):
@@ -576,10 +671,10 @@ def check_pool(args: Any, num_islands: int) -> None:
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("a convertible pool needs --rl-single-island-no-sync: there is no "
                          "syncer; the islands share the --rl-checkpoint-store")
-    if getattr(args, "tuning", "lora") != "lora" or \
+    if getattr(args, "tuning", "lora") not in ("lora", "full") or \
             (getattr(args, "rl_placement", None) or "colocated") != "colocated":
         raise ValueError("a convertible node trains and generates on the same GPUs: it needs "
-                         "--tuning lora and colocated placement")
+                         "--tuning lora or --tuning full and colocated placement")
     for m in range(num_islands):
         check_launch(island_args(args, m, num_islands))
 
@@ -602,6 +697,8 @@ def check_launch(args: Any) -> None:
             raise ValueError("--rl-release-inline needs --rl-sample-role trainer")
         if int(getattr(args, "rl_release_delta_full_every", 0) or 0):
             raise ValueError("--rl-release-delta-full-every needs --rl-sample-role trainer")
+        if _release_every(args) != 1 or getattr(args, "rl_release_skip_busy", False):
+            raise ValueError("--rl-release-every / --rl-release-skip-busy need --rl-sample-role trainer")
         return
     if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
@@ -638,11 +735,59 @@ def check_launch(args: Any) -> None:
         raise ValueError("--rl-release-reload-latest needs --rl-sample-role trainer "
                          "(or a convertible pool): only a trainer writes policy releases")
     _check_release_delta(args, role)
+    _check_release_cadence(args, role)
     wait_s = getattr(args, "rl_sample_wait_s", None)
     if wait_s is not None and (role not in (TRAINER, CONVERTIBLE) or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
     if role == CONVERTIBLE and not getattr(args, "rl_convertible_node", None):
         raise ValueError("--rl-sample-role convertible needs --rl-convertible-node NAME")
+
+
+RELEASE_SKIP_BUSY_MIN_AGE = 3
+
+
+def _release_every(args: Any) -> int:
+    return int(getattr(args, "rl_release_every", 1) or 1)
+
+
+def _check_release_cadence(args: Any, role: str) -> None:
+    """``--rl-release-every N`` / ``--rl-release-skip-busy``: a trainer whose samplers
+    may sample on an older release than every version.
+
+    Policy age stays counted in trainer versions (the buffer gate, the algorithm
+    spec and resumed_base are unchanged): a release every N versions lets a
+    sampler's newest weights trail the trainer by up to N - 1 more versions, so
+    the launch needs --rl-max-policy-age >= N, else every sample of the
+    in-between steps would be dropped as stale. Skipping busy releases has no
+    fixed bound (an upload may span several steps). A sample's lag is about
+    ceil(upload_s / step_s) + ceil(download_s / step_s) + backlog_groups / groups_per_step
+    versions (Kimi-K3.1, 207 GB releases: a 12-20 min upload over ~200 s steps alone
+    is 4-6), so pick the age from that sum and watch rl_buffer_stale_skipped; the
+    launch only refuses an age below the floor of 3 (one release in flight, one
+    being downloaded, one served). Samples older than the age are dropped as
+    stale and counted."""
+    every, busy = _release_every(args), bool(getattr(args, "rl_release_skip_busy", False))
+    if every == 1 and not busy:
+        return
+    age = int(getattr(args, "rl_max_policy_age", 0) or 0)
+    problems = []
+    if every < 1:
+        problems.append("--rl-release-every >= 1")
+    if role != TRAINER:
+        problems.append("--rl-sample-role trainer")
+    if (getattr(args, "rl_backend", None) or "miles") != "miles":
+        problems.append("--rl-backend miles (the verl buffer trainer releases every version)")
+    if every > 1 and age < every:
+        problems.append(f"--rl-max-policy-age >= {every} (a sampler may trail by up to "
+                        f"{every} versions; got {age})")
+    if busy:
+        if getattr(args, "rl_release_inline", False):
+            problems.append("staged releases for --rl-release-skip-busy (no --rl-release-inline)")
+        if age < RELEASE_SKIP_BUSY_MIN_AGE:
+            problems.append(f"--rl-max-policy-age >= {RELEASE_SKIP_BUSY_MIN_AGE} for "
+                            f"--rl-release-skip-busy (got {age})")
+    if problems:
+        raise ValueError("--rl-release-every / --rl-release-skip-busy need " + "; ".join(problems))
 
 
 def _check_release_delta(args: Any, role: str) -> None:
@@ -691,6 +836,12 @@ def convertible_min_backlog_rounds(args: Any) -> int:
     return int(getattr(args, "rl_max_policy_age", 0) or 0) + 1
 
 
+def sampler_backlog_rounds(explicit: int | None = None) -> int:
+    """The backlog cap (rounds) of a plain sampler (no full-parameter synced group):
+    the operator's value, else :data:`DEFAULT_MAX_BACKLOG_ROUNDS`."""
+    return _max_backlog_rounds(SimpleNamespace(rl_sampler_max_backlog_rounds=explicit), SAMPLER)
+
+
 def _max_backlog_rounds(args: Any, role: str) -> int | None:
     rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
     if role == SAMPLER:
@@ -725,6 +876,8 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
         release_inline=role == TRAINER and bool(getattr(args, "rl_release_inline", False)),
         release_delta_full_every=(int(getattr(args, "rl_release_delta_full_every", 0) or 0)
                                   if role == TRAINER else 0),
+        release_every=_release_every(args) if role == TRAINER else 1,
+        release_skip_busy=role == TRAINER and bool(getattr(args, "rl_release_skip_busy", False)),
         until_trainers_end=(int(getattr(args, "rl_sampler_until_trainers_end", 0) or 0)
                             if role == SAMPLER else 0))
 
@@ -764,6 +917,10 @@ def island_flags(args: Any) -> str:
         flags += " --rl-release-inline"
     if role == TRAINER and int(getattr(args, "rl_release_delta_full_every", 0) or 0):
         flags += f" --rl-release-delta-full-every {int(args.rl_release_delta_full_every)}"
+    if role == TRAINER and _release_every(args) != 1:
+        flags += f" --rl-release-every {_release_every(args)}"
+    if role == TRAINER and getattr(args, "rl_release_skip_busy", False):
+        flags += " --rl-release-skip-busy"
     if getattr(args, "rl_sampler_node", None):
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):

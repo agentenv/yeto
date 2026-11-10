@@ -104,7 +104,7 @@ import re
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -115,7 +115,7 @@ from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_
 
 from .object_store import ObjectStore, download_file, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
-from .resume import CheckpointStore, _write_json_atomic
+from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
 SCHEMA = "yeto.rl.policy-release/v1"
 # Releases re-quantized from the BF16 ones (yeto.rl.quant.release) live in
@@ -129,6 +129,15 @@ LORA = "lora"
 WEIGHT_FORMATS = (FULL, LORA)
 _DIGEST_CHUNK = 1 << 20
 DEFAULT_CACHE_DIR = "~/.cache/yeto/policy-releases"
+# the yeto cache root that replaces ``~/.cache/yeto`` in the default (e.g. a process
+# whose HOME points elsewhere shares the node's cache); unset: the default as is
+CACHE_DIR_ENV = "YETO_CACHE_DIR"
+
+
+def default_cache_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """:data:`DEFAULT_CACHE_DIR`, or ``$YETO_CACHE_DIR/policy-releases`` when that is set."""
+    root = (os.environ if environ is None else environ).get(CACHE_DIR_ENV, "").strip()
+    return Path(root).expanduser() / "policy-releases" if root else Path(DEFAULT_CACHE_DIR).expanduser()
 # a delta larger than this share of the full release is not worth it: release in full
 MAX_DELTA_RATIO = 0.5
 # a sampler stops after this many releases in a row fail their digest checks
@@ -168,6 +177,11 @@ class PolicyRelease:
     # sha256 of each weight file of a full release (``file_digests``: the full
     # releases of a delta chain); None: not digested file by file
     file_sha256: dict[str, str] | None = None
+    # What the trainer declares about the weights beyond their bytes, e.g. the
+    # partial-experts selection a Kimi-K3.1 release was trained with
+    # (``{"expert_selection_sha256": ..., "partial_experts": {...}}``, INTERFACES 2.3);
+    # a sampler bound to a selection refuses a release of another one. None: nothing declared.
+    manifest: dict[str, Any] | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -404,9 +418,19 @@ class DeltaChain:
         return True
 
 
+def store_cache_key(store: Any) -> str:
+    """The sub-directory of :data:`DEFAULT_CACHE_DIR` a store's downloads live in:
+    a short digest of the store's identity (its URI for an object store, else its
+    resolved root). Release names (``r<seq>-v<version>``) repeat from run to run, so a
+    node that serves several runs must never reuse another run's download."""
+    identity = getattr(store, "uri", None) or str(Path(getattr(store, "root", ".")).expanduser().resolve())
+    return hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:16]
+
+
 class PolicyReleaseStore:
     """Writes (trainer) and reads (sampler) the releases in one store.
-    ``cache_dir``: where a store with an object API downloads a release to.
+    ``cache_dir``: where a store with an object API downloads a release to; the
+    default is :func:`default_cache_dir` (``$YETO_CACHE_DIR``) keyed by the store (:func:`store_cache_key`).
     ``release_dir``: the release directory in the store
     (:func:`~yeto.rl.quant.schemes.release_dir_for` of the scheme)."""
 
@@ -437,7 +461,12 @@ class PolicyReleaseStore:
         # seconds per phase of the last release() that wrote a release (module doc)
         self.last_timings: dict[str, float] = {}
         self.last_visible_at: float | None = None  # wall time LATEST named the last staged release
+        # the release the engines serve (``mark_served``): a download never drops it,
+        # its files are what a restart or a whole reload reads
+        self.serving: str | None = None
         self.cache_dir = Path(cache_dir).expanduser()
+        if str(cache_dir) == DEFAULT_CACHE_DIR:  # the shared default: one sub-directory per store
+            self.cache_dir = default_cache_dir() / store_cache_key(store)
         if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
             self.cache_dir /= self.release_dir
 
@@ -486,7 +515,7 @@ class PolicyReleaseStore:
     def _download(self, objects: ObjectStore, release: PolicyRelease, *,
                   prune_cache: bool = True) -> Path:
         """Download every object of the release into ``cache_dir/<path>`` (once:
-        a complete download is renamed into place) and drop older downloads
+        a complete download is renamed into place) after dropping older downloads
         (unless ``prune_cache`` is false: a delta chain needs its bases).
         The recorded files are checked against the object sizes first."""
         target = self.cache_dir / release.path
@@ -501,24 +530,70 @@ class PolicyReleaseStore:
                          for name in release.files}
                 if (error := _incomplete(release, sizes)) is not None:
                     raise error
+            if prune_cache:  # free older downloads first (two 207 GB Kimi-K3.1 releases
+                self._prune_cache(keep=())  # fill a sampler's disk); never the served one
             staging = self.cache_dir / f".{release.path}.partial"
             shutil.rmtree(staging, ignore_errors=True)
-            for key in keys:
+            def fetch(key: str) -> None:
                 path = staging / key[len(prefix):]
                 path.parent.mkdir(parents=True, exist_ok=True)
                 if not download_file(objects, key, path):
                     raise ReleaseIncomplete(f"release object {key} disappeared during the download")
+
+            # several files at once: one file tops out near 100 MB/s on R2
+            # (TransferSettings), a 207 GB Kimi-K3.1 release took 28 minutes file by file;
+            # an object API with read_files (s3_store) also spreads them over processes
+            transfer = getattr(objects, "transfer", None)
+            workers = max(1, min(int(getattr(transfer, "file_concurrency", 1) or 1), len(keys)))
+            read_files = getattr(objects, "read_files", None)
+            if read_files is not None:
+                items = []
+                for key in keys:
+                    path = staging / key[len(prefix):]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    items.append((key, path))
+                missing = read_files(items)
+                if missing:
+                    raise ReleaseIncomplete(f"release object {missing[0]} disappeared during the download")
+            elif workers == 1:
+                for key in keys:
+                    fetch(key)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(workers, thread_name_prefix="yeto-release-get") as pool:
+                    for future in [pool.submit(fetch, key) for key in keys]:
+                        future.result()
             check_complete(release, staging)
             staging.replace(target)
         if prune_cache:
             self._prune_cache(keep=(release.path,))
         return target
 
+    def mark_served(self, release: PolicyRelease) -> None:
+        """The engines serve ``release`` now (a load succeeded): drop the other
+        downloads and the overlays of releases no longer served."""
+        self.serving = release.path
+        if self.store.objects is None or not self.cache_dir.is_dir():
+            return
+        self._prune_cache(keep=(release.path,))
+        for old in self.cache_dir.iterdir():
+            if (old.is_dir() and old.name.endswith(".overlay")
+                    and old.name[:-len(".overlay")] != release.path):
+                shutil.rmtree(old, ignore_errors=True)
+
     def _prune_cache(self, keep: tuple[str, ...]) -> None:
+        """Drop the cached downloads except ``keep`` and the served release
+        (``serving``): until a new release is loaded, a restart or a whole reload
+        of the engines reads the served one's files."""
+        keep = (*keep, self.serving) if self.serving else keep
         for old in self.cache_dir.iterdir() if self.cache_dir.is_dir() else ():
             # The cache of another release directory (e.g. W4A8_RELEASE_DIR under the
             # default one) belongs to another store: never drop it here.
-            if old.is_dir() and old.name not in keep and not old.name.startswith(RELEASE_DIR):
+            # An overlay (``release_overlay``: symlinks and an index) stays: the engine
+            # compares the next release with the overlay it serves.
+            if (old.is_dir() and old.name not in keep and not old.name.startswith(RELEASE_DIR)
+                    and not old.name.endswith(".overlay")):
                 shutil.rmtree(old, ignore_errors=True)
 
     def latest(self) -> PolicyRelease | None:
@@ -562,9 +637,11 @@ class PolicyReleaseStore:
                 engine_checksum: str | None = None,
                 buffer_shards: dict[str, int] | None = None,
                 derived_from: dict[str, Any] | None = None,
-                origin: dict[str, Any] | None = None) -> PolicyRelease | None:
+                origin: dict[str, Any] | None = None,
+                manifest: dict[str, Any] | None = None) -> PolicyRelease | None:
         """Write the weights with ``write(directory)``, then the record (it lists the
-        weight files and their sizes), then LATEST.
+        weight files and their sizes), then LATEST. ``manifest``: the record's
+        ``manifest`` (class doc).
 
         Returns None (writes nothing) when the latest release is this version and hash."""
         version = int(version)
@@ -585,7 +662,7 @@ class PolicyReleaseStore:
                                          buffer_selected=buffer_selected,
                                          engine_checksum=engine_checksum,
                                          buffer_shards=buffer_shards, derived_from=derived_from,
-                                         origin=origin)
+                                         origin=origin, manifest=manifest)
         finally:
             guard.release()
         self._written = record
@@ -597,7 +674,8 @@ class PolicyReleaseStore:
                        weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None,
                        delta_base: DeltaBase | None = None,
-                       digest_full: bool = False) -> PolicyRelease | None:
+                       digest_full: bool = False,
+                       manifest: dict[str, Any] | None = None) -> PolicyRelease | None:
         """Publish the weights already written into the local directory ``staged``
         (module doc, staged releases): the weight files go into the store first;
         then the record, in the release directory and as LATEST, in one put.
@@ -643,6 +721,7 @@ class PolicyReleaseStore:
                 digests = file_digests(staged, files) if digest_full and weights == FULL and delta is None else None
             with timer.phase("upload_s"):
                 self.store.put_directory(upload, f"{self.release_dir}/{name}")
+                self.store.evict_local(f"{self.release_dir}/{name}")
         finally:
             if upload != staged:
                 shutil.rmtree(upload, ignore_errors=True)
@@ -654,7 +733,7 @@ class PolicyReleaseStore:
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
                                origin=None if origin is None else dict(origin), delta=delta,
-                               file_sha256=digests)
+                               file_sha256=digests, manifest=None if manifest is None else dict(manifest))
         text = json.dumps(asdict(record), sort_keys=True).encode("utf-8")
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
@@ -765,7 +844,8 @@ class PolicyReleaseStore:
                        policy_hash: str, write: Callable[[Path], None], *, weights: str,
                        buffer_selected: int | None, engine_checksum: str | None,
                        buffer_shards: dict[str, int] | None, derived_from: dict[str, Any] | None,
-                       origin: dict[str, Any] | None) -> PolicyRelease:
+                       origin: dict[str, Any] | None,
+                       manifest: dict[str, Any] | None = None) -> PolicyRelease:
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
@@ -784,19 +864,21 @@ class PolicyReleaseStore:
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
                                derived_from=None if derived_from is None else dict(derived_from),
-                               origin=None if origin is None else dict(origin))
+                               origin=None if origin is None else dict(origin),
+                               manifest=None if manifest is None else dict(manifest))
         if self.cached_latest:  # one commit (module doc)
             with timer.phase("commit_s"):
                 _write_json_atomic(directory / RECORD, asdict(record))
                 _write_json_atomic(self.root / LATEST, asdict(record))
-                self.store.commit()
+                commit_paths(self.store, [f"{self.release_dir}/{name}", f"{self.release_dir}/{LATEST}"])
         else:
             with timer.phase("commit_weights_s"):
                 _write_json_atomic(directory / RECORD, asdict(record))
-                self.store.commit()  # the weights and the record are durable before LATEST names them
+                # the weights and the record are durable before LATEST names them
+                commit_paths(self.store, [f"{self.release_dir}/{name}"])
             with timer.phase("commit_latest_s"):
                 _write_json_atomic(self.root / LATEST, asdict(record))
-                self.store.commit()
+                commit_paths(self.store, [f"{self.release_dir}/{LATEST}"])
         with timer.phase("prune_s"):
             self._prune()
         return record
@@ -810,7 +892,7 @@ class PolicyReleaseStore:
         for name in removed:
             shutil.rmtree(self.root / name, ignore_errors=True)
         if removed:
-            self.store.commit()
+            commit_paths(self.store, [f"{self.release_dir}/{name}" for name in removed])
         return removed
 
 
@@ -893,6 +975,44 @@ class FollowerCounters:
         return asdict(self)
 
 
+DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
+DOWNLOAD_WAIT_S = 5.0  # refresh waits this long for a download it starts before going on
+
+
+def _download_failed(release: PolicyRelease, error: BaseException, served: int) -> ReleaseNotLoaded:
+    return ReleaseNotLoaded(
+        f"r{release.seq}-v{release.version}: download failed ({type(error).__name__}: {error}); "
+        f"the engines keep v{served} and the download is tried again",
+        reason="download_failed",
+        fields={"release_version": release.version, "error": f"{type(error).__name__}: {str(error)[:200]}"})
+
+
+class _Fetch:
+    """One background download of a release (``PolicyFollower(background_download=True)``)."""
+
+    def __init__(self, release: PolicyRelease) -> None:
+        self.release = release
+        self.done = threading.Event()
+        self.directory: Path | None = None
+        self.error: BaseException | None = None
+        self.seconds = 0.0
+        self.reported = False
+        self.retry_at: float | None = None
+
+    def start(self, releases: "PolicyReleaseStore", *, from_store: bool, timer: Callable[[], float]) -> None:
+        def run() -> None:
+            began = timer()
+            try:
+                self.directory = releases.resolve(self.release, from_store=from_store)
+            except BaseException as error:  # noqa: BLE001 - reported by PolicyFollower.refresh
+                self.error = error
+            finally:
+                self.seconds = round(timer() - began, 3)
+                self.done.set()
+
+        threading.Thread(target=run, name=f"release-download-r{self.release.seq}", daemon=True).start()
+
+
 class PolicyFollower:
     """Sampler side: load each new release into the engines.
 
@@ -930,6 +1050,16 @@ class PolicyFollower:
     The ``max_rebuild_failures``-th failure in a row raises the error (the
     island stops).
 
+    Background download (``background_download``): :meth:`refresh` starts a
+    thread that fetches the newest release and returns None until its files are
+    on disk, so the engines go on generating on the served weights (also during
+    a round: the download is not an engine load). One download runs at a time;
+    a newer release is fetched when it ends. A failed download (any error but
+    :class:`ReleaseIncomplete`) raises :class:`ReleaseNotLoaded` (reason
+    ``download_failed``) once and is tried again ``download_retry_s`` later.
+    Without it, a failed download raises the same :class:`ReleaseNotLoaded`
+    on the refresh that tried it.
+
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
     release (``last_seen``) in ``LATEST``."""
@@ -939,7 +1069,9 @@ class PolicyFollower:
                  scheme: str | None = None, live_update: bool = False,
                  timer: Callable[[], float] = time.perf_counter,
                  wall: Callable[[], float] = time.time,
-                 max_rebuild_failures: int = MAX_REBUILD_FAILURES) -> None:
+                 max_rebuild_failures: int = MAX_REBUILD_FAILURES,
+                 background_download: bool = False,
+                 download_retry_s: float = DOWNLOAD_RETRY_S) -> None:
         if int(max_rebuild_failures) < 1:
             raise ValueError("max_rebuild_failures must be >= 1")
         self.max_rebuild_failures = int(max_rebuild_failures)
@@ -959,6 +1091,11 @@ class PolicyFollower:
         self.wall = wall
         self.seen_at: float | None = None
         self.last_timings: dict[str, float] = {}
+        # Background download (class doc): the files of the newest release are fetched
+        # by a thread while the engines keep generating on the served weights.
+        self.background_download = bool(background_download)
+        self.download_retry_s = float(download_retry_s)
+        self._fetch: _Fetch | None = None
 
     @contextmanager
     def generating(self) -> Iterator[None]:
@@ -1003,19 +1140,31 @@ class PolicyFollower:
         self.last_seen = latest
         if self.release is not None and latest.seq <= self.release.seq:
             return None
+        if self.scheme is not None:
+            check_release_scheme(latest, self.scheme)
+        fetched = None
+        if self.background_download:
+            fetched = self._fetched(latest)
+            if fetched is None:  # still downloading, or waiting to retry: keep generating
+                return None
         if (self._in_flight or self.hold()) and not self.live_update:
             self.counters.deferred_in_flight += 1
             return None
-        if self.scheme is not None:
-            check_release_scheme(latest, self.scheme)
-        try:
-            with timer.phase("resolve_s"):
-                directory = self.releases.resolve(latest, from_store=self.rebuild_failures > 0)
-        except ReleaseIncomplete as error:
-            self.incomplete = str(error)
-            return None
-        except ReleaseDeltaError as error:
-            self._rebuild_failed(latest, error)
+        if fetched is not None:
+            directory = fetched.directory
+            self._fetch = None
+            timer.add("resolve_s", fetched.seconds)
+        else:
+            try:
+                with timer.phase("resolve_s"):
+                    directory = self.releases.resolve(latest, from_store=self.rebuild_failures > 0)
+            except ReleaseIncomplete as error:
+                self.incomplete = str(error)
+                return None
+            except ReleaseDeltaError as error:
+                self._rebuild_failed(latest, error)
+            except Exception as error:  # noqa: BLE001 - a failed transfer: keep the served weights
+                raise _download_failed(latest, error, self.version) from error
         self.incomplete = None
         if not getattr(self._load, "verifies_files", False):
             try:
@@ -1026,6 +1175,9 @@ class PolicyFollower:
         self.rebuild_failures = 0
         with timer.phase("load_s"):
             self._load(latest, directory)
+        mark = getattr(self.releases, "mark_served", None)
+        if callable(mark):  # loaded: the older downloads may go now
+            mark(latest)
         previous = self.release
         self.counters.loaded += 1
         if previous is not None:
@@ -1036,6 +1188,40 @@ class PolicyFollower:
         self.release = latest
         self.last_timings = timer.as_dict()
         return latest
+
+    def _fetched(self, latest: PolicyRelease) -> "_Fetch | None":
+        """The finished background download of ``latest``, else None after starting
+        or polling it. A failed download raises :class:`ReleaseNotLoaded` once
+        (reason ``download_failed``) and is tried again ``download_retry_s`` later;
+        the engines keep the release they serve meanwhile."""
+        fetch = self._fetch
+        if fetch is not None and fetch.release.seq != latest.seq and not fetch.done.is_set():
+            self.incomplete = f"downloading r{fetch.release.seq}-v{fetch.release.version}"
+            return None  # one download at a time: the newer release follows this one
+        if fetch is None or fetch.release.seq != latest.seq:
+            self._fetch = fetch = _Fetch(latest)
+            fetch.start(self.releases, from_store=self.rebuild_failures > 0, timer=self.timer)
+            fetch.done.wait(DOWNLOAD_WAIT_S)  # a small release is there at once
+        if not fetch.done.is_set():
+            self.incomplete = f"downloading r{latest.seq}-v{latest.version}"
+            return None
+        if fetch.error is None:
+            return fetch
+        error = fetch.error
+        if isinstance(error, ReleaseIncomplete):  # not visible yet: read it again next time
+            self._fetch = None
+            self.incomplete = str(error)
+            return None
+        if not fetch.reported:
+            fetch.reported = True
+            fetch.retry_at = self.timer() + self.download_retry_s
+            if isinstance(error, ReleaseDeltaError):
+                self._fetch = None
+                self._rebuild_failed(latest, error)
+            raise _download_failed(latest, error, self.version) from error
+        if self.timer() >= (fetch.retry_at or 0.0):
+            self._fetch = None  # the next refresh starts a new download
+        return None
 
     def _rebuild_failed(self, release: PolicyRelease, error: ReleaseDeltaError) -> None:
         """Count a failed rebuild of ``release`` and raise (class doc)."""

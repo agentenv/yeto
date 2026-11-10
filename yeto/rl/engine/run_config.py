@@ -46,6 +46,10 @@ RECIPE_GLM5_NEXT = "glm5_next"
 # bridge). The recipe is driven by the provider's layer pattern and router
 # fields, not by one checkpoint (adapters/miles/models/nemotron_h.py).
 RECIPE_NEMOTRON_H = "nemotron_h"
+# Kimi-K3.1-Pro (kimi_k31): KDA + DSA MLA + 896-expert latent MoE through the
+# Miles plugin spec; 128 experts per MoE layer trained in place from an
+# expert_selection.json (adapters/miles/models/kimi_k31), raw bridge mode.
+RECIPE_KIMI_K31 = "kimi_k31"
 TRANSFORMER_IMPLS = ("transformer_engine", "local")
 GATED_DELTA_NET = "gated_delta_net"
 
@@ -152,6 +156,12 @@ class ModelRecipe:
     # Recipe-owned Miles model flags read from the provider (nemotron_h router,
     # latent MoE); empty for the other recipes.
     model_flags: tuple[str, ...] = ()
+    # kimi_k31: the expert_selection.json the trainer runs with (--rl-expert-selection);
+    # None for every other recipe.
+    expert_selection: str | None = None
+    # kimi_k31: routed-expert fake QAT format (--rl-routed-expert-qat, Miles
+    # --routed-expert-qat); None (off) for every other recipe.
+    routed_expert_qat: str | None = None
 
 
 @dataclass(frozen=True)
@@ -523,6 +533,11 @@ class RLRunConfig:
     # fails the publish (abort -> REBUILD_OLD) instead of stalling the run.
     # None = flag not emitted (fork default: torch's process-group timeout).
     update_weight_group_timeout_s: float | None = None
+    # Miles k31/b3-b7 (B7): the Megatron training step without host-GPU syncs
+    # (DebugConfig.host_sync_free, default on). False emits --no-host-sync-free
+    # (the fork's MILES_HOST_SYNC_FREE=0 escape hatch, now a launch flag); True
+    # emits nothing, so the default argv does not move.
+    host_sync_free: bool = True
     # Per-(profile_hash, source, target) cost
     # table read by ``elastic.ElasticHook`` (None = no costs -> recommend/auto hold),
     # and the load-window length for ``timeline.load_windows`` (None = no hook).
@@ -797,12 +812,20 @@ def resolve_rl_run_config(
         raise ValueError("EP>1 requires a MoE model")
     rules.check_expert_parallel(actor_gpus, expert_parallel)
     fn_variant = qwen3_8_next_variant(args, provider)
-    # the native Flash-Next plugin shards routed-expert LoRA by EP itself
-    if fn_variant is None and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
+    recipe = getattr(args, "rl_model_recipe", RECIPE_GENERIC)
+    # the native Flash-Next plugin and the Kimi-K3.1 plugin (shared-outer expert LoRA)
+    # shard routed-expert LoRA by EP themselves
+    if (fn_variant is None and recipe != RECIPE_KIMI_K31 and is_moe and expert_parallel > 1
+            and args.lora_targets == "all-linear"):
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
-    recipe = getattr(args, "rl_model_recipe", RECIPE_GENERIC)
+    expert_selection = getattr(args, "rl_expert_selection", None) or None
+    if expert_selection is not None and recipe != RECIPE_KIMI_K31:
+        raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31")
+    routed_expert_qat = getattr(args, "rl_routed_expert_qat", None) or None
+    if routed_expert_qat is not None and recipe != RECIPE_KIMI_K31:
+        raise ValueError("--rl-routed-expert-qat belongs to --rl-model-recipe kimi_k31")
     if args.lora_targets == "attention-routed-experts" and (
         not is_moe or recipe != RECIPE_DEEPSEEK_V4_FLASH
     ):
@@ -857,6 +880,18 @@ def resolve_rl_run_config(
             # rectangle and the engines are laid out over the island.
             visible_gpus_per_node = (args.actor_num_gpus_per_node + rollout_gpus
                                      if island_gpus_per_node is None else int(island_gpus_per_node))
+    elif (sample_roles.sample_role(args) == sample_roles.TRAINER and actor_gpus > 1
+          and getattr(args, "rollout_num_gpus", None) in (None, 0)):
+        # A multi-GPU LoRA buffer trainer (samples from the store, engines elsewhere):
+        # a trainer-only fixed partition (Miles --debug-train-only), as the full branch
+        # does. No engine shares its GPUs, so it is never offloaded and exports the adapter
+        # from the resident process. One trainer GPU keeps the colocated form (GPU-verified,
+        # T-LSMP i); this case used to be refused there ("one trainer GPU only").
+        if int(getattr(args, "rl_standby_gpus", 0) or 0):
+            raise ValueError("--rl-standby-gpus needs --rl-placement fixed-partition")
+        dedicated_rollout_gpus = 0
+        standby_gpus = 0
+        visible_gpus_per_node = args.actor_num_gpus_per_node
     elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
         # A LoRA fixed partition (ports engine only; the
         # legacy CLI never sets rl_placement, so its layout is unchanged).
@@ -931,6 +966,19 @@ def resolve_rl_run_config(
             )
         # Megatron picks the backend (Miles run_glm5_3_flash.py passes none)
         recipe_name, attention_backend = RECIPE_GLM5_NEXT, "auto"
+    elif recipe == RECIPE_KIMI_K31:
+        from . import kimi_k31_lora
+
+        # full: the selected experts train in place; lora: an adapter over the frozen base
+        kimi_k31_lora.check_tuning(parameter_mode, expert_selection=expert_selection,
+                                   routed_expert_qat=routed_expert_qat,
+                                   lora_targets=getattr(args, "lora_targets", None))
+        if parameter_mode == "full" and expert_selection is None:
+            raise ValueError("the kimi_k31 recipe needs --rl-expert-selection PATH (expert_selection.json)")
+        if not is_moe or not multi_latent_attention:
+            raise ValueError("the kimi_k31 recipe needs the Kimi-K3.1 MoE/MLA provider view")
+        # Megatron picks the backend (Miles scripts/run_kimi_k3.py passes none)
+        recipe_name, attention_backend = RECIPE_KIMI_K31, "auto"
     elif fn_variant is not None:
         if parameter_mode != "lora":
             raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")
@@ -1093,6 +1141,8 @@ def resolve_rl_run_config(
             gdn=gdn,
             transformer_impl=transformer_impl,
             model_flags=_recipe_model_flags(recipe_name, provider),
+            expert_selection=expert_selection,
+            routed_expert_qat=routed_expert_qat,
         ),
         geometry=geometry,
         parallel=ParallelLayout(
@@ -1225,6 +1275,7 @@ def resolve_rl_run_config(
         update_weight_group_timeout_s=(
             ELASTIC_UPDATE_WEIGHT_GROUP_TIMEOUT_S if getattr(args, "rl_elastic", False) else None
         ),
+        host_sync_free=bool(getattr(args, "rl_host_sync_free", True)),
         trainer_dp_edges=bool(getattr(args, "rl_elastic", False)
                               and getattr(args, "rl_elastic_trainer_edges", False)),
         edge_costs_path=getattr(args, "rl_edge_costs_path", None) or None,

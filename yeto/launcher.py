@@ -146,19 +146,33 @@ from .launch.teardown import (  # noqa: F401
     terminate_and_verify,
 )
 from .launch.verda import VERDA_ISLANDS, _verda_copy_override, remote_sky_api_server  # noqa: F401
-from .launch.manifest import _island_tasks_manifest, _miles_overlay_manifest  # noqa: F401
+from .launch.manifest import _island_tasks_manifest  # noqa: F401
 
 
 # Rough per-GPU training capacity sanity check (bf16 LoRA, GB).
-GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48, "RTX-PRO-6000": 96, "RTX-6000-Ada": 48}
+GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "B300": 288, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48, "RTX-PRO-6000": 96, "RTX-6000-Ada": 48}
+
+
+def _follower_islands(args, specs, learner_names) -> list[str]:
+    """Cluster names of a synced group's sampler islands that run until their
+    trainers end (the fleet controller ends them once the trainers are done)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return []
+    from .rl.engine import sample_roles
+
+    if not sample_roles.is_synced_group(args):
+        return []
+    stops = sample_roles.sampler_stop_trainers(args, len(specs))
+    return [learner_names[m] for m, n in sorted(stops.items()) if n and m < len(learner_names)]
 
 
 def _island_overrides(args, specs) -> dict:
     """launch-preflight-guards 3.2: validated per-island overrides ({} normally)."""
     from .island_overrides import overrides_of
-    from .launch_preflight import check_policy_age_spec
+    from .launch_preflight import check_compat_groups, check_policy_age_spec
 
     check_policy_age_spec(args)  # dry-run reaches here without pre_cloud_checks
+    check_compat_groups(args, specs)
     return overrides_of(args, len(specs))
 
 
@@ -241,6 +255,14 @@ def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
             )
 
 
+def _relaunch_of_same_run(args) -> bool:
+    """True when this cluster prefix already has a run manifest (an earlier launch of the
+    same run: a resume or a restart), so its old event tapes belong to this run."""
+    from .launch.code_pack import _previous_manifest
+
+    return _previous_manifest(args.cluster_prefix) is not None
+
+
 def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     """Provision and supervise the fleet; returns the run's exit code.
 
@@ -261,6 +283,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     ids of each Verda island once it is up (the CLI saves them in the run
     record; recovery and teardown are checked against them).
     """
+    relaunch = _relaunch_of_same_run(args)  # before this launch writes its own manifest
     import sky
 
     if getattr(args, "rl_single_island_no_sync", False) and (
@@ -314,6 +337,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     if echo_names:
         # Refuse to mix runs in one tape, before anything is provisioned.
         existing = sorted(str(p) for p in events_dir.glob("*.jsonl*")) if events_dir.exists() else []
+        if existing and relaunch:
+            # a relaunch of this run (resume, or a restart after a failed start): the
+            # earlier attempt's tapes move aside, so the new incarnation's tape is clean
+            prev = events_dir / "previous" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            prev.mkdir(parents=True, exist_ok=True)
+            for old in existing:
+                Path(old).rename(prev / Path(old).name)
+            print(f"[launcher] relaunch of run {args.cluster_prefix!r}: {len(existing)} earlier event "
+                  f"tape(s) moved to {prev}", flush=True)
+            existing = []
         if existing:
             raise ValueError(
                 f"event tapes already exist for run {args.cluster_prefix!r}: {existing}; "
@@ -343,6 +376,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     controller = None
     teardown_unverified = False
     run_started_unix = time.time()  # Modal rows created after this are this run's app
+    # Every billed resource of this run goes into its crash-safe ledger; the cost guard
+    # (budget breaker, idle shutdown, NC lease expiry) runs until the teardown below.
+    cost_ledger, cost_guard = _start_cost_guard(args, events_dir)
     verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
     # Read by the finally block (Modal stop / tape pull) even on an early failure.
@@ -367,6 +403,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 )
             print(f"[launcher] launching syncer cluster {syncer_cluster} in {args.syncer_region}")
             syncer_task = make_syncer_task(args, num_learners)
+            cost_ledger.created("sky_cluster", syncer_cluster, syncer_cluster, role="syncer")
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
             syncer_job, syncer_handle = sky.stream_and_get(rid)
             clusters.append(syncer_cluster)
@@ -538,6 +575,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             from .modal_runner import ModalIslandOps, ModalOps, modal_app_name
 
             modal_ops = ModalOps(modal_app_name(prefix))
+            modal_ops.ledger = cost_ledger
             for cfg in [*modal_cfgs.values(), *([] if held_cfg is None else [held_cfg])]:
                 modal_ops.define(cfg)
             print(f"[launcher] deploying Modal app {modal_ops.app_name} "
@@ -556,6 +594,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         for name in list(rids) + list(modal_cfgs):
             if name not in errors:
                 clusters.append(name)
+        for name in rids:  # sky clusters (a failed launch may still have left one up)
+            cost_ledger.created("sky_cluster", name, name)
         for split in splits.values():  # both clusters may exist even after an error
             for name in (split.name, split.engine_name):
                 if name not in clusters:
@@ -732,6 +772,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             ),
             wan_probe_relaunches=wan_probe_relaunches(args),
             island_relaunch_envs=peer_recovery_relaunch_envs(args),
+            followers=_follower_islands(args, specs, learner_names),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -914,6 +955,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # fails closed on an incomplete island tape.
         return NO_SYNC_INCOMPLETE_EXIT if no_sync_incomplete else 0
     finally:
+        if cost_guard is not None:
+            cost_guard.stop()  # the teardown below releases everything; no forced stop mid-way
         if verda is not None and verda.get("pth_written"):
             from .sky_patches import remove_local_pth
 
@@ -949,6 +992,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if not teardown_island(sky, name, head=head_mode, collect=None,
                                        num_nodes=nodes_by_cluster.get(name, 1)):
                     unverified.append(name)
+                else:
+                    cost_ledger.released("sky_cluster", name, name)
             # Sky islands without an echoed tape
             # (their tapes are in the pre-teardown diagnostics, also for islands
             # the controller tore down earlier) still give the manifest T_s.
@@ -1010,6 +1055,43 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         if teardown_unverified and sys.exc_info()[0] is None:
             # the run's own outcome is secondary to a possibly still-running app
             return TEARDOWN_UNVERIFIED_EXIT  # noqa: B012
+
+
+def _start_cost_guard(args, events_dir):
+    """(ledger, guard or None) of this run. The ledger always exists (cleanup needs
+    it); the guard is off with --no-cost-guard or --dry-run, and never fails the launch."""
+    from . import runs
+    from .cost import ledger as cost_ledger_mod
+    from .cost.guard import CostGuard, TapeTail, guard_config_from_args, guard_enabled
+
+    name = args.cluster_prefix
+    if cost_ledger_mod.current() is None and not guard_enabled(args) \
+            and getattr(args, "no_cost_guard", None) is None:
+        # a programmatic launch without the CLI's cost flags (tests): no ledger file
+        return cost_ledger_mod.NullLedger(), None
+    ledger = cost_ledger_mod.current() or cost_ledger_mod.ResourceLedger.for_run(name)
+    if not guard_enabled(args) or getattr(args, "dry_run", False):
+        return ledger, None
+    try:
+        from .cost.billing import ModalBilling, Rates
+        from .cost.report import default_tape_globs
+
+        globs = default_tape_globs(name) + list(getattr(args, "cost_tapes", None) or [])
+        if events_dir is not None:
+            globs.append(str(Path(events_dir) / "*.jsonl"))
+        cfg = guard_config_from_args(args)
+        guard = CostGuard(name, cfg, ledger=ledger, tapes=TapeTail(globs),
+                          rates=Rates.from_env(getattr(args, "cost_prices", None)),
+                          billing=ModalBilling(refresh_s=max(cfg.poll_s, 300.0)),
+                          log=lambda m: print(m, flush=True))
+        print(f"[launcher] cost guard on: budget {cfg.budget_usd} USD (warn {cfg.warn_usd}), idle "
+              f"warn {cfg.idle.idle_after_s / 60:.0f} min + stop {cfg.idle.stop_after_s / 60:.0f} min, "
+              f"load grace {cfg.idle.load_grace_s / 60:.0f} min; ledger {ledger.path}", flush=True)
+        runs.update_run(name, resource_ledger=str(ledger.path))
+        return ledger, guard.start()
+    except Exception as e:  # noqa: BLE001
+        print(f"[launcher] WARNING: cost guard not started: {e}", file=sys.stderr, flush=True)
+        return ledger, None
 
 
 NO_SYNC_EVENT_DRAIN_S = 120.0
@@ -1139,6 +1221,9 @@ def dry_run_plan(args) -> dict:
         # which rows of --data each training island reads
         **({"data_split": {**split_plan.record(), "warning": split_plan.warning()}}
            if split_plan is not None else {}),
+        # Kimi-K3.1 full form: the checked selection and a rough per-GPU memory budget
+        **({"kimi_k31_full": args._kimi_k31_full}
+           if getattr(args, "_kimi_k31_full", None) else {}),
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),

@@ -7,17 +7,8 @@ import sys
 import time
 from pathlib import Path
 
-from .rl_backend import _miles_overlay
 from .topology import rl_island_placement_records
 from .island_tasks import data_split_plan, island_task_plan
-
-
-def _miles_overlay_manifest(args) -> dict:
-    """``miles_overlay`` for the run manifest; absent (old manifests unchanged) when off."""
-
-    overlay = _miles_overlay()
-    record = overlay.overlay_record(overlay.resolve_overlay(args))
-    return {"miles_overlay": record} if record else {}
 
 
 def _island_tasks_manifest(args) -> dict:
@@ -66,15 +57,17 @@ def _write_run_manifest(args) -> dict | None:
     from .. import rl as _rl
     from .. import runs
 
+    from ..rl.adapters.miles.pins import image_miles_commit
+
     manifest = {
         "rl_engine": "ports",
         "rl_image": getattr(args, "rl_image", None),
-        "miles_commit": _rl.MILES_NEXT_COMMIT,
+        # the commit the island checks out: the image's own when it ships another (0f6ebd51)
+        "miles_commit": image_miles_commit(getattr(args, "rl_image", None)) or _rl.MILES_NEXT_COMMIT,
         "sglang_commit": _rl.SGLANG_NEXT_COMMIT,
         "source_sha256": getattr(args, "source_sha256", None),
         **_code_identity_manifest(args),
         "cluster_prefix": args.cluster_prefix,
-        **_miles_overlay_manifest(args),
         **_island_tasks_manifest(args),
         **_data_split_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
@@ -87,9 +80,6 @@ def _write_run_manifest(args) -> dict | None:
     }
     print(f"[launcher] RL image {manifest['rl_image']}, "
           f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
-    if manifest.get("miles_overlay"):
-        print(f"[launcher] Miles code = {manifest['miles_overlay']['summary']} "
-              "(image manifest does NOT match the running Miles code)", flush=True)
     try:
         path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)

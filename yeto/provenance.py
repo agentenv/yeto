@@ -67,6 +67,71 @@ def canonical_json_sha256(path: str | Path) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _top_level_spec(name: str, base_dir: str | Path | None):
+    """Find a top-level module without executing any package initializer.
+
+    ``sys.path`` first, then ``base_dir`` (the repository root, so
+    ``examples.x`` resolves from any cwd), then the remaining meta-path
+    finders: an editable install (``pip install -e``) registers its own
+    finder instead of a ``sys.path`` entry. Locating a top-level name never
+    runs code, so asking those finders is still side-effect free.
+    """
+    import sys
+    from importlib.machinery import PathFinder
+
+    found = PathFinder.find_spec(name, None)
+    if found is None and base_dir is not None:
+        found = PathFinder.find_spec(name, [str(base_dir)])
+    if found is None:
+        for finder in sys.meta_path:
+            if finder is PathFinder:
+                continue
+            find = getattr(finder, "find_spec", None)
+            if find is None:
+                continue
+            try:
+                found = find(name, None)
+            except Exception:  # a foreign finder must not break attestation
+                found = None
+            if found is not None:
+                break
+    return found
+
+
+def python_module_spec_form(spec: str, *, base_dir: str | Path) -> str:
+    """Rewrite a ``file.py:function`` spec inside ``base_dir`` to ``package.module:function``.
+
+    Workers import the callable by module name, so a file path is accepted
+    only when it lies under ``base_dir`` (the synced repository); the file is
+    then named relative to it (``examples/math_reward.py:f`` ->
+    ``examples.math_reward:f``). Module specs pass through unchanged.
+    """
+    target, separator, function = spec.partition(":")
+    if not separator or not (target.endswith(".py") or os.path.sep in target or "/" in target):
+        return spec
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        path = Path(base_dir) / path
+    path = path.resolve()
+    root = Path(base_dir).resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        raise ProvenanceError(
+            f"{target!r} is outside the repository {root}; copy it under the repository "
+            "or install it as a package and pass package.module:function"
+        ) from None
+    if path.suffix != ".py" or not path.is_file():
+        raise ProvenanceError(f"{target!r} is not a .py file")
+    parts = relative.with_suffix("").parts
+    if not all(part.isidentifier() for part in parts):
+        raise ProvenanceError(
+            f"{target!r} cannot be imported as a module (every path component must be "
+            "a Python identifier); pass package.module:function"
+        )
+    return f"{'.'.join(parts)}{separator}{function}"
+
+
 def python_spec_path(spec: str, *, base_dir: str | Path | None = None) -> Path:
     """Locate the source selected by a ``module-or-file:factory`` spec."""
     target, separator, _factory = spec.partition(":")
@@ -92,7 +157,10 @@ def python_spec_path(spec: str, *, base_dir: str | Path | None = None) -> Path:
         module_name = ""
         for index, part in enumerate(parts):
             module_name = f"{module_name}.{part}" if module_name else part
-            module_spec = PathFinder.find_spec(module_name, search_path)
+            if index == 0:
+                module_spec = _top_level_spec(part, base_dir)
+            else:
+                module_spec = PathFinder.find_spec(module_name, search_path)
             if module_spec is None:
                 break
             if index < len(parts) - 1:
@@ -354,6 +422,10 @@ def resolve_hub_revision(
     requested = requested_revision or "main"
     if is_immutable_commit(requested):
         return requested, requested.lower()
+    if repo_type == "dataset":
+        from .data import split_hub_config
+
+        repo_id = split_hub_config(repo_id)[0]  # "repo:config" pins the repo
     if repo_type not in {"model", "dataset"}:
         raise ValueError(f"unsupported Hub repo type {repo_type!r}")
     if api is None:
@@ -373,7 +445,9 @@ def resolve_hub_revision(
     except Exception as exc:
         raise ProvenanceError(
             f"could not resolve {repo_type} {repo_id!r} revision {requested!r} "
-            "to an immutable Hugging Face commit"
+            f"to an immutable Hugging Face commit ({type(exc).__name__}); check access "
+            "(HF_TOKEN for gated or private repos) or pass the 40-character commit "
+            f"directly with --{'model' if repo_type == 'model' else 'data'}-revision <sha>"
         ) from exc
     commit = getattr(info, "sha", None)
     if not is_immutable_commit(commit):

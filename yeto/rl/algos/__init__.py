@@ -22,4 +22,5 @@ EXTENSION_MODULES: tuple[str, ...] = (
     "yeto.rl.algos.loss_variants",  # rl-algo-loss-variants
     "yeto.rl.algos.critic",  # rl-algo-critic-family
     "yeto.rl.algos.sao",  # rl-algo-critic-family 8.3
+    "yeto.rl.algos.score_centering",  # Kimi-K3.1: upstream --loss-type score_centering
 )

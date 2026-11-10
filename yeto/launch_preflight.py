@@ -465,6 +465,42 @@ def dry_run_memory(args, specs) -> list[dict] | None:
     return island_memory_estimates(args, specs, margin=margin)
 
 
+def check_compat_groups(args, specs) -> None:
+    """Islands that merge through the syncer must declare one compat group.
+
+    The group is part of every island's session contract
+    (``BackendIdentity.compat_group``), so a synced launch whose trainer islands
+    sit on different cards (an H100 and an L40S island) has the syncer refuse
+    the second island's HELLO only after both containers booted. Refuse that
+    before any cloud resource unless ``--rl-compat-group`` declares one group
+    for every island (an operator decision: numeric tolerance not calibrated).
+    Sampler islands of a synced group and no-sync / store-coupled launches have
+    no syncer session and are not checked."""
+    if getattr(args, "training_mode", "sft") != "rl" or getattr(args, "rl_compat_group", None):
+        return
+    if getattr(args, "rl_single_island_no_sync", False):
+        return
+    from .hw.catalog import UnknownCardType, compat_group
+    from .rl.engine import sample_roles
+
+    n = len(specs)
+    if sample_roles.is_store_coupled(args) or sample_roles.is_convertible_pool(args):
+        return
+    members = sorted(sample_roles.synced_group_learners(args, n)) or list(range(n))
+    groups: dict[str, list[int]] = {}
+    for m in members:
+        try:
+            groups.setdefault(compat_group(specs[m].gpu), []).append(m)
+        except (UnknownCardType, ValueError):
+            return  # an unknown card fails in the island task with its own message
+    if len(groups) > 1:
+        listed = ", ".join(f"{g}: islands {v}" for g, v in sorted(groups.items()))
+        raise PreflightError(
+            f"synced islands on different cards ({listed}) would be refused by the syncer "
+            "(the compat group is part of the session contract); put them on one card type "
+            "or pass --rl-compat-group <vendor>-<card> to declare one group for all")
+
+
 def check_policy_age_spec(args) -> None:
     """``--rl-max-policy-age N`` (global or a per-island override) needs an
     algorithm spec with ``execution.max_policy_staleness >= N`` -- the same rule
@@ -489,4 +525,31 @@ def check_policy_age_spec(args) -> None:
         raise PreflightError(
             f"--rl-max-policy-age {age} needs an algorithm spec with "
             f"execution.max_policy_staleness >= {age} (and a TIS correction); the run's spec "
-            f"tolerates {tolerated} (--rl-algorithm-spec)")
+            f"tolerates {tolerated} (--rl-algorithm-spec). Start from a shipped spec, e.g. "
+            "examples/k31/algorithm-spec.async-age2-tis.json (max_policy_staleness 2, TIS), "
+            "or lower --rl-max-policy-age")
+
+
+# ---------------------------------------------------------------------------
+# Modal SDK (a --gpu modal:* launch drives Modal through this interpreter)
+
+MODAL_PROXY_ENVS = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+MODAL_PROXY_INSTALL = "pip install 'modal[api-proxy-support]==1.6.3'"
+
+
+def modal_sdk_problem(environ=None, find_spec=None) -> str | None:
+    """Why this Python cannot drive Modal (None: it can). The SDK must import; with
+    ``HTTPS_PROXY`` / ``ALL_PROXY`` set, Modal talks through the proxy and needs
+    ``aiohttp_socks`` too (the ``api-proxy-support`` extra), else the first call fails."""
+    import importlib.util  # noqa: PLC0415
+
+    env = os.environ if environ is None else environ
+    find = find_spec or importlib.util.find_spec
+    if find("modal") is None:
+        return (f"the Modal SDK is not importable by {sys.executable}: pip install 'yeto[modal]' "
+                "(or pip install modal)")
+    proxy = next((name for name in MODAL_PROXY_ENVS if env.get(name)), None)
+    if proxy is not None and find("aiohttp_socks") is None:
+        return (f"{proxy} is set, so Modal goes through the proxy and needs aiohttp_socks, which "
+                f"{sys.executable} cannot import: {MODAL_PROXY_INSTALL}")
+    return None

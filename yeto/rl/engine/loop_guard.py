@@ -19,7 +19,7 @@ a streaming cut inside the adapter would, and is not built.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .sampler_engine import FINISH_LOOP_ABORT, Completion
 
@@ -49,6 +49,4 @@ class LoopGuard:
             return completion
         # The text of the kept tokens is not known without the tokenizer; the
         # sample keeps the full engine text; finish_reason marks the cut (training reads tokens).
-        return Completion(token_ids=completion.token_ids[:keep], logprobs=completion.logprobs[:keep],
-                          text=completion.text, finish_reason=FINISH_LOOP_ABORT,
-                          prompt_token_ids=completion.prompt_token_ids)
+        return replace(completion.cut(keep), finish_reason=FINISH_LOOP_ABORT)

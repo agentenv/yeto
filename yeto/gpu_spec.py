@@ -34,7 +34,12 @@ _GPU_CANONICAL = {
     "h100": "H100",
     "h200": "H200",
     "b200": "B200",
+    "b300": "B300",
     "v100": "V100",
+    # AMD Instinct (ROCm): the sampler nodes of the Kimi K3.1 line (MI355X, 288 GiB)
+    "mi300x": "MI300X",
+    "mi325x": "MI325X",
+    "mi355x": "MI355X",
     "t4": "T4",
     # Ascend NPU (910B4 is the model the user bought, 2026-10-10). The
     # launcher spells it like any other card: ``ssh:1x8x910b4``.
@@ -57,15 +62,17 @@ _CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu", "910B2": "npu",
                      "910B3": "npu", "910C": "npu"}
 
 # Device family per canonical card name: the launcher dimension that selects
-# the card tool (nvidia-smi / npu-smi / ppu-smi) and the collective-
-# communication variables. It is not the torch device type: a PPU card has
-# family ``ppu`` and device type ``cuda``.
-DEVICE_FAMILIES = ("cuda", "npu", "ppu")
+# the card tool (nvidia-smi / npu-smi / ppu-smi / amd-smi, rocm-smi) and the
+# collective-communication variables. It is not the torch device type: a PPU
+# card has family ``ppu`` and device type ``cuda``; so does an AMD card (torch
+# on ROCm reports ``cuda``), with family ``rocm``.
+DEVICE_FAMILIES = ("cuda", "npu", "ppu", "rocm")
 # Environment variable the island launcher sets to the node's device family;
 # yeto.accel.device_family reads it (torch cannot tell a PPU from a GPU).
 DEVICE_FAMILY_ENV = "YETO_DEVICE_FAMILY"
 _CARD_DEVICE_FAMILY = {**{card: "npu" for card in _CARD_DEVICE_TYPE},
-                       "810E": "ppu", "M890": "ppu"}
+                       "810E": "ppu", "M890": "ppu",
+                       "MI300X": "rocm", "MI325X": "rocm", "MI355X": "rocm"}
 
 
 class UnknownCard(ValueError):
@@ -96,7 +103,7 @@ def device_type_of(card: str) -> str:
 
 
 def device_family_of(card: str) -> str:
-    """``"cuda"``, ``"npu"`` or ``"ppu"`` of a card name; unknown card -> error."""
+    """``"cuda"``, ``"npu"``, ``"ppu"`` or ``"rocm"`` of a card name; unknown card -> error."""
     name = canonical_card(card)
     return _CARD_DEVICE_FAMILY.get(name, "cuda")
 

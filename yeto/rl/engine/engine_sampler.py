@@ -34,13 +34,23 @@ calls ``island.run()``. The process entry (``python -m yeto.rl.engine.engine_sam
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .buffer_payload import GroupWriter
+from .buffer_payload import (
+    ENGINE_META,
+    ROLLOUT_ROUTED_EXPERTS,
+    ROLLOUT_TOP_LOGPROBS,
+    ROLLOUT_TOP_LOGPROBS_IDS,
+    TOP_LOGPROBS_DTYPE,
+    TOP_LOGPROBS_IDS_DTYPE,
+    GroupWriter,
+    routed_experts_uint16,
+)
 from .loop_guard import LoopGuard
 from .policy_release import PolicyFollower, PolicyReleaseStore, ReleaseNotLoaded
 from .policy_versions import engine_weight_version
@@ -53,7 +63,10 @@ from .sampler_engine import (
     SamplerEngineError,
     SamplingParams,
     completion_version,
+    returns_routed_experts,
+    top_logprobs_num,
     updates_during_generation,
+    version_fields,
 )
 from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
@@ -76,6 +89,19 @@ class PromptItem:
 Reward = Callable[[PromptItem, Completion], float]
 
 
+def _accepted_kwargs(fn: Callable[..., Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """The keyword arguments of ``kwargs`` that ``fn`` accepts (all with ``**kwargs``)."""
+    import inspect  # noqa: PLC0415
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 def dispense_position(item: PromptItem) -> int | None:
     """The task-dispenser position of a prompt's row, None without one."""
     spot = item.metadata.get(DISPENSE_POSITION_KEY)
@@ -83,13 +109,20 @@ def dispense_position(item: PromptItem) -> int | None:
 
 
 def sample_record(item: PromptItem, completion: Completion, *, reward: float, version: int,
-                  provenance: Mapping[str, str], group_index: int, index: int) -> dict[str, Any]:
+                  provenance: Mapping[str, str], group_index: int, index: int,
+                  engine_meta: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One sample in the buffer payload (the ``Sample.to_dict()`` keys the
     trainer readers use; ``tokens`` is prompt + response when the engine gave
-    the prompt tokens, else the response only and ``prompt_tokens_known`` False)."""
+    the prompt tokens, else the response only and ``prompt_tokens_known`` False).
+    The rollout arrays of the completion (R3 routed experts as ``uint16``, the
+    top-K log-probs as ``int32`` / ``float32``) are written under the
+    :mod:`.buffer_payload` field names when the engine returned them;
+    ``engine_meta`` (``version_fields`` ...) goes to ``metadata.engine``."""
+    import numpy
+
     response = list(completion.token_ids)
     prompt_ids = list(completion.prompt_token_ids)
-    return {
+    record = {
         "group_index": group_index, "index": index, "prompt": item.prompt,
         "response": completion.text, "label": item.label,
         "tokens": prompt_ids + response, "response_length": len(response),
@@ -100,8 +133,59 @@ def sample_record(item: PromptItem, completion: Completion, *, reward: float, ve
                      "finish_reason": completion.finish_reason,
                      "prompt_tokens_known": bool(prompt_ids), "provenance": dict(provenance),
                      **({} if completion.final_weight_version is None else
-                        {"final_weight_version": engine_weight_version(int(completion.final_weight_version))})},
+                        {"final_weight_version": engine_weight_version(int(completion.final_weight_version))}),
+                     **({} if engine_meta is None else {ENGINE_META: dict(engine_meta)})},
     }
+    if completion.routed_experts is not None:
+        record[ROLLOUT_ROUTED_EXPERTS] = routed_experts_uint16(completion.routed_experts,
+                                                               where=f"prompt {item.prompt_id}")
+    if completion.top_logprobs is not None:
+        record[ROLLOUT_TOP_LOGPROBS_IDS] = numpy.asarray(completion.top_logprobs_ids).astype(TOP_LOGPROBS_IDS_DTYPE)
+        record[ROLLOUT_TOP_LOGPROBS] = numpy.asarray(completion.top_logprobs).astype(TOP_LOGPROBS_DTYPE)
+    return record
+
+
+def _quantile(xs: Sequence[float], q: float) -> float | None:
+    xs = sorted(xs)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * q
+    lo, hi = int(k), min(int(k) + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def round_summary(scored: Sequence[tuple[Any, Sequence[Mapping[str, Any]]]]) -> dict[str, Any]:
+    """Reward / response-length / truncation summary of one round's scored groups
+    for ``rl_sampler_engine_round`` (the dashboard's sampler table). ``truncated``
+    counts samples whose status is ``truncated``; ``zero_variance_seen`` the groups
+    whose samples all scored the same (whether or not they are dropped)."""
+    rewards = [float(x.get("reward", 0.0)) for _, group in scored for x in group]
+    lengths = [float(x.get("response_length", 0)) for _, group in scored for x in group]
+    if not rewards:
+        return {}
+    mean = sum(rewards) / len(rewards)
+    return {
+        "reward_mean": mean,
+        "reward_std": math.sqrt(sum((r - mean) ** 2 for r in rewards) / len(rewards)),
+        "reward_p10": _quantile(rewards, 0.1), "reward_p50": _quantile(rewards, 0.5),
+        "reward_p90": _quantile(rewards, 0.9),
+        "resp_len_mean": sum(lengths) / len(lengths), "resp_len_p95": _quantile(lengths, 0.95),
+        "truncated": sum(x.get("status") == "truncated" for _, group in scored for x in group),
+        "zero_variance_seen": sum(zero_variance(group) for _, group in scored),
+    }
+
+
+def zero_variance(samples: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every sample of a group scored the same reward (no GRPO advantage)."""
+    rewards = {float(sample.get("reward", 0.0)) for sample in samples}
+    return len(rewards) <= 1
+
+
+def engine_meta(engine: SamplerEngine, sampling: SamplingParams) -> dict[str, Any]:
+    """``metadata.engine`` of every sample of a round (:mod:`.buffer_payload`)."""
+    return {"version_fields": version_fields(engine, sampling),
+            "routed_experts": returns_routed_experts(engine),
+            "top_logprobs_num": top_logprobs_num(engine)}
 
 
 _completion_version = completion_version  # moved to sampler_engine (the records proxy uses it)
@@ -139,10 +223,14 @@ class EngineRound:
         self.data_cursor = data_cursor
         self.reclaimed = reclaimed
         self.unchecked_in_flight = unchecked_in_flight
+        self.engine_meta = engine_meta(engine, self.sampling)
         self.dropped_groups = 0  # groups not written because the island is leaving
         # Read right before every group write; True = another incarnation
         # holds the island's lease (incarnation_lease), so nothing more is written
         self.write_fenced: Callable[[], bool] = lambda: False
+        # spec drop_zero_variance_groups: a group whose samples all score the same
+        # reward carries no GRPO advantage; it is scored, counted and not written
+        self.drop_zero_variance = False
 
     def _round_record(self, rollout_id: int, last: bool, position: int | None = None,
                       cursor: Mapping[str, int] | None = None) -> dict[str, Any] | None:
@@ -155,12 +243,20 @@ class EngineRound:
         return SamplerRound(self.writer.sampler_id, self.incarnation, rollout_id,
                             data_cursor=cursor, last=last, dispense_position=position).record()
 
-    def _written(self, rollout_id: int, positions: list[int], keep: Sequence[int] = ()) -> None:
+    def _written(self, rollout_id: int, positions: list[int], keep: Sequence[int] = (),
+                 requeue: Sequence[int] = (), outcome: Mapping[int, Mapping[str, Any]] | None = None) -> None:
         """Prompts from the task dispenser learn which groups are in the buffer.
-        ``keep``: positions still generating (a streaming round), not released."""
+        ``keep``: positions still generating (a streaming round), not released;
+        ``requeue``: groups lost to infrastructure (given out again, counted
+        toward the redo limit); ``outcome``: per-position detail for the log."""
         written = getattr(self.prompts, "written", None)
         if callable(written):
-            extra = {"keep": sorted(keep)} if keep else {}
+            extra: dict[str, Any] = {"keep": sorted(keep)} if keep else {}
+            if requeue:
+                extra["requeue"] = sorted(requeue)
+            if outcome:
+                extra["outcome"] = dict(outcome)
+            extra = _accepted_kwargs(written, extra)  # an older written() takes neither requeue nor outcome
             result = dict(written(rollout_id, positions, unwritten="release", **extra) or {})
             result.pop("rollout_id", None)
             self.emit("rl_dispense_written", rollout_id=rollout_id, **result)
@@ -204,9 +300,17 @@ class EngineRound:
                     item, completion, reward=self.reward(item, completion),
                     version=_completion_version(completion, version, live=live),
                     provenance=record, group_index=position,
-                    index=position * self.sampling.n + j))
+                    index=position * self.sampling.n + j, engine_meta=self.engine_meta))
             scored.append((item, samples))
-        self._write_scored(rollout_id, version, scored, finish=finish, tokens=tokens, record=record)
+        # dashboard: the round's reward / length / truncation summary over every
+        # scored group (observation only; what is written is unchanged)
+        extra: dict[str, Any] = round_summary(scored)
+        if self.drop_zero_variance:
+            kept = [(item, samples) for item, samples in scored if not zero_variance(samples)]
+            extra["zero_variance_groups"] = len(scored) - len(kept)
+            scored = kept
+        self._write_scored(rollout_id, version, scored, finish=finish, tokens=tokens, record=record,
+                           extra=extra)
 
     def _write_group(self, rollout_id: int, item: PromptItem, group: Sequence[Mapping[str, Any]], *,
                      record: Mapping[str, str], last: bool,
@@ -234,6 +338,11 @@ class EngineRound:
             if self.reclaimed() or self.write_fenced():  # leaving: the replacement owns the shard
                 self.dropped_groups += len(scored) - position
                 break
+            held = getattr(self.prompts, "still_holds", None)
+            spot = dispense_position(item)
+            if spot is not None and callable(held) and not held(spot):  # a store ledger gave it out again
+                self.dropped_groups += 1
+                continue
             spot = self._write_group(rollout_id, item, group, record=record, last=position == len(scored) - 1)
             written += 1
             if spot is not None:
@@ -262,6 +371,14 @@ class EngineSamplerConfig:
     live_poll_s: float | None = None  # store poll during a round (engines that update live); None: poll_s
     loop_guard: LoopGuard | None = None
     max_consecutive_load_failures: int = 3
+    # the partial-experts selection the run trains (Kimi-K3.1): releases of another
+    # selection are refused (sampler_checks.PortReleaseLoader); None: no check
+    expert_selection_sha256: str | None = None
+    # the trainable expert sets only (manifest.partial_experts.trainable_sha256): any EP layout of
+    # the same experts is accepted; when set it replaces expert_selection_sha256's check
+    expert_trainable_sha256: str | None = None
+    # skip groups whose samples all score the same reward (DAPO dynamic sampling)
+    drop_zero_variance_groups: bool = False
 
 
 @dataclass
@@ -278,6 +395,14 @@ class EngineSamplerIsland:
         if start is None:
             start = 0 if self.resume is None else self.resume.next_rollout_id
         return self.loop.run(start)
+
+
+def started_on_release(releases: PolicyReleaseStore, base_version: int):
+    """The newest release when the engine started on it (a sampler after a trainer phase,
+    ``role_switch.sampler_spec_on_release``), so the follower serves it and never loads it
+    again; None otherwise (the base weights, or a newer release the follower loads)."""
+    latest = releases.latest() if int(base_version) > 0 else None
+    return latest if latest is not None and int(latest.version) == int(base_version) else None
 
 
 def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
@@ -302,25 +427,33 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     trials run (``holds_weights``) and reads pending releases (``release_pending``)."""
     sampling = config.sampling.check()
     check_sampling_fits(sampling, engine, max_prompt_tokens=config.max_prompt_tokens)
-    provenance = Provenance.of(engine.identity, sampler_id=config.sampler_id, sampling=sampling)
+    provenance = Provenance.of(engine.identity, sampler_id=config.sampler_id, sampling=sampling,
+                               routed_experts=returns_routed_experts(engine))
     emit(START_EVENT, sampler_id=config.sampler_id, num_rollouts=int(config.num_rollouts),
          max_backlog_groups=int(config.max_backlog_groups), sampling=sampling.to_dict(),
          sampling_digest=sampling.digest(), allow_penalties=sampling.allow_penalties,
          max_prompt_tokens=int(config.max_prompt_tokens), provenance=provenance.to_record(),
          loop_guard=None if config.loop_guard is None else vars(config.loop_guard).copy())
     loader = PortReleaseLoader(engine, checks or PostLoadChecks(), emit,
-                               max_consecutive_failures=config.max_consecutive_load_failures)
+                               max_consecutive_failures=config.max_consecutive_load_failures,
+                               expected_selection_sha256=config.expert_selection_sha256,
+                               expected_trainable_sha256=config.expert_trainable_sha256)
     try:
         loader.start(config.base_dir, int(config.base_version))
     except ReleaseNotLoaded as error:  # no served version to fall back to
         raise SamplerLoadFatal(f"the engine failed its start checks: {error}") from error
+    # background download: a 207 GB Kimi-K3.1 release took longer to fetch than a
+    # trainer step, and the engines idled through it
     follower = PolicyFollower(releases, loader, version=int(config.base_version),
-                              live_update=updates_during_generation(engine))
+                              live_update=updates_during_generation(engine), background_download=True)
+    follower.release = started_on_release(releases, int(config.base_version))
     engine_round = (make_round or EngineRound)(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
                                loop_guard=config.loop_guard, incarnation=incarnation,
                                resume=resume, data_cursor=data_cursor,
                                reclaimed=should_stop if reclaimed is None else reclaimed)
+    if config.drop_zero_variance_groups:
+        engine_round.drop_zero_variance = True
     if getattr(engine_round, "streams", False):  # a streaming agentic round
         follower.live_update = engine_round.live
         follower.hold = engine_round.holds_weights

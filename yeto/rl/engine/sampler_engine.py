@@ -5,7 +5,7 @@ The sampler island's loop, buffer writer, reward call and release follower are
 engine-neutral. Everything that depends on the engine (process start, HTTP API,
 weight reload, vendor patches and environment) lives in an adapter that
 implements :class:`SamplerEngine`. Adapters: ``sglang-server`` (PPU, stage 1)
-and ``vllm-server`` (vllm-ascend on 910B, stage 2), in
+and ``vllm-server`` (vllm-ascend on 910B, stage 2; upstream vLLM on CUDA / ROCm), in
 :mod:`yeto.rl.adapters.sampler_engines`. Tests use
 :class:`yeto.rl.adapters.sampler_engines.fake.FakeEngine`.
 
@@ -137,6 +137,14 @@ class Completion:
     prompt_token_ids: tuple[int, ...] = ()
     weight_version: int | None = None
     final_weight_version: int | None = None
+    # R3: the experts the engine routed each token to, ``uint16[T, L_moe, top_k]``
+    # over prompt + response - 1 positions (the Miles convention; None: the
+    # engine does not return them). Original expert ids, not local slots.
+    routed_experts: Any = field(default=None, compare=False, repr=False)
+    # score_centering: the top-K candidate ids and their log-probs at every
+    # response position, ``int32[T_resp, K]`` and ``float32[T_resp, K]``.
+    top_logprobs_ids: Any = field(default=None, compare=False, repr=False)
+    top_logprobs: Any = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if len(self.token_ids) != len(self.logprobs):
@@ -145,6 +153,34 @@ class Completion:
         if self.finish_reason not in FINISH_REASONS:
             raise SamplerEngineError(f"unknown finish_reason {self.finish_reason!r} "
                                      f"(known: {FINISH_REASONS})")
+        if (self.top_logprobs_ids is None) != (self.top_logprobs is None):
+            raise SamplerEngineError("top_logprobs_ids and top_logprobs come together")
+        if self.top_logprobs is not None:
+            ids, vals = self.top_logprobs_ids, self.top_logprobs
+            if tuple(ids.shape) != tuple(vals.shape) or ids.ndim != 2 or ids.shape[0] != len(self.token_ids):
+                raise SamplerEngineError(f"top log-probs of shape {tuple(vals.shape)} (ids {tuple(ids.shape)}) "
+                                         f"for {len(self.token_ids)} response tokens; expected [T_resp, K]")
+        if self.routed_experts is not None and self.routed_experts.ndim != 3:
+            raise SamplerEngineError(f"routed_experts has {self.routed_experts.ndim} dims, expected "
+                                     "[T, L_moe, top_k]")
+
+    def cut(self, keep: int) -> "Completion":
+        """The completion's first ``keep`` response tokens, with every per-token
+        array cut the same way (the loop guard). The routed experts cover the
+        prompt too: ``len(prompt) + keep - 1`` rows stay when the prompt length is
+        known, else the array is dropped (its row for the prompt is unknown)."""
+        keep = int(keep)
+        experts = self.routed_experts
+        if experts is not None:
+            rows = len(self.prompt_token_ids) + keep - 1 if self.prompt_token_ids else None
+            experts = None if rows is None else experts[:max(rows, 0)]
+        return Completion(
+            token_ids=self.token_ids[:keep], logprobs=self.logprobs[:keep], text=self.text,
+            finish_reason=self.finish_reason, prompt_token_ids=self.prompt_token_ids,
+            weight_version=self.weight_version, final_weight_version=self.final_weight_version,
+            routed_experts=experts,
+            top_logprobs_ids=None if self.top_logprobs_ids is None else self.top_logprobs_ids[:keep],
+            top_logprobs=None if self.top_logprobs is None else self.top_logprobs[:keep])
 
 
 @dataclass(frozen=True)
@@ -234,6 +270,35 @@ def updates_during_generation(engine: Any) -> bool:
     return getattr(engine, "updates_during_generation", False) is True
 
 
+def returns_routed_experts(engine: Any) -> bool:
+    """Optional capability: the engine returns the experts it routed each token
+    to (R3; attribute ``returns_routed_experts``, default False). Declared by
+    ``sglang-server`` and upstream ``vllm-server`` (platform cuda / rocm) with
+    ``return_routed_experts``; vllm-ascend, R3 off and the fake engine do not, and
+    their samples carry ``provenance.routed_experts`` ``"false"`` so a trainer that
+    needs R3 refuses them early."""
+    return getattr(engine, "returns_routed_experts", False) is True
+
+
+def top_logprobs_num(engine: Any) -> int:
+    """Optional capability: the top-K candidates per response token the engine
+    returns (attribute ``top_logprobs_num``, default 0 = none)."""
+    try:
+        return max(0, int(getattr(engine, "top_logprobs_num", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def version_fields(engine: Any, sampling: SamplingParams) -> dict[str, Any]:
+    """``engine.version_fields`` of every sample (score_centering checks them
+    against the trainer's ``--rollout-temperature/top-p/top-k`` and fp32 head):
+    the engine's ``fp32_lm_head`` attribute (default False) and the run's
+    sampling parameters."""
+    return {"fp32_lm_head": getattr(engine, "fp32_lm_head", False) is True,
+            "temperature": float(sampling.temperature), "top_p": float(sampling.top_p),
+            "top_k": int(sampling.top_k)}
+
+
 def completion_version(completion: Completion, served: int, *, live: bool) -> int:
     """The behavior version of one completion: the round's served version, or the
     completion's own on an engine that updates during a generation (it must give
@@ -286,6 +351,8 @@ class Provenance:
     topology: str = UNKNOWN
     sampler_id: str = UNKNOWN
     sampling_digest: str = UNKNOWN
+    # "true" / "false": whether the samples carry R3 routed experts (:func:`returns_routed_experts`)
+    routed_experts: str = UNKNOWN
 
     # The per-source metrics group by these fields (A-INF 4.1).
     KEY_FIELDS = ("device_family", "card_model", "engine", "engine_version", "precision",
@@ -295,13 +362,19 @@ class Provenance:
     def unknown(cls) -> "Provenance":
         return cls(*([UNKNOWN] * 6))
 
+    def returns_routed_experts(self) -> bool | None:
+        """True / False when the source said whether it returns R3 routed experts, else None."""
+        return {"true": True, "false": False}.get(self.routed_experts)
+
     @classmethod
-    def of(cls, identity: EngineIdentity, *, sampler_id: str, sampling: SamplingParams) -> "Provenance":
+    def of(cls, identity: EngineIdentity, *, sampler_id: str, sampling: SamplingParams,
+           routed_experts: bool | None = None) -> "Provenance":
         return cls(device_family=identity.device_family, card_model=identity.card_model,
                    engine=identity.engine, engine_version=identity.engine_version,
                    precision=identity.precision, quant_scheme=identity.quant_scheme,
                    topology=identity.topology, sampler_id=str(sampler_id),
-                   sampling_digest=sampling.digest())
+                   sampling_digest=sampling.digest(),
+                   routed_experts=UNKNOWN if routed_experts is None else str(bool(routed_experts)).lower())
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any] | None) -> "Provenance":

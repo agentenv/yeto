@@ -51,6 +51,8 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+from yeto.rl.adapters.miles.ext_args import ext_attr
+
 MODULE = "yeto.rl.adapters.miles.remote_code_prewarm"
 RESULT_PREFIX = "YETO_REMOTE_CODE_PREWARM "
 LOCK_NAME = ".yeto-remote-code-prewarm.lock"
@@ -372,7 +374,7 @@ def prewarm_remote_code(miles_args: Any, *, ray_module: Any = None, affinity: An
     """
     out = sys.stderr if out is None else out
     started = clock()
-    if not getattr(miles_args, "yeto_rl_trust_remote_code", False):
+    if not ext_attr(miles_args, "rl_trust_remote_code", False):
         return None
     try:
         paths = engine_model_paths(miles_args)

@@ -40,6 +40,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from yeto.rl.engine.proc_state import pop_proc_state, proc_state, set_proc_state
+
 from .reward_pipeline import (
     RewardPipelineError,
     expected_algorithm_sha256,
@@ -94,7 +96,7 @@ def apply_sample_filters(args: Any, data: Sequence[Sequence[Any]]) -> dict[str, 
     if not config or not config.get("overlong_filter"):
         return None
     counts = {OVERLONG_FILTER: overlong_filter(data)}
-    setattr(args, FILTER_COUNTS_ATTR, counts)
+    set_proc_state(args, FILTER_COUNTS_ATTR, counts)
     return counts
 
 
@@ -105,12 +107,11 @@ def group_filtered_samples(group: Sequence[Any]) -> int:
 def metadata_fields(args: Any, trained_groups: Sequence[Sequence[Any]] = ()) -> dict[str, Any]:
     """Extra rollout-metadata fields (empty when no filter ran)."""
 
-    counts = getattr(args, FILTER_COUNTS_ATTR, None)
+    counts = proc_state(args, FILTER_COUNTS_ATTR)
     if not counts:
         return {}
     return {"filtered_samples": dict(counts)}
 
 
 def reset(args: Any) -> None:
-    if hasattr(args, FILTER_COUNTS_ATTR):
-        setattr(args, FILTER_COUNTS_ATTR, None)
+    pop_proc_state(args, FILTER_COUNTS_ATTR)

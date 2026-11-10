@@ -175,7 +175,7 @@ class MirrorStore(CheckpointStore):
             tmp.write_bytes(data)
             tmp.replace(path)
 
-    def commit(self) -> float:
+    def commit(self, paths: Any = None) -> float:
         raise RuntimeError("the head's mirror of the store is read-only")
 
 
@@ -516,16 +516,24 @@ def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                   files: StoreFiles | None = None, islands: Any = None) -> CloudTrainerBinding:
     """The :class:`CloudTrainerBinding` of a Modal trainer
     island (``files`` / ``islands`` replace the SDK in tests)."""
-    from .storage import MODAL_CHECKPOINT_STORE_MOUNT, modal_checkpoint_store
+    from .storage import (
+        MODAL_CHECKPOINT_STORE_MOUNT, is_object_store_uri, modal_checkpoint_store, store_client_environ,
+    )
 
+    object_store = is_object_store_uri(getattr(args, "rl_checkpoint_store", None) or "")
     if files is None:
-        volume, mount = modal_checkpoint_store(args)
-        files = ModalVolumeFiles(volume, mount[len(MODAL_CHECKPOINT_STORE_MOUNT):])
+        if object_store:  # s3://: the head reads the store by object key, like a sky island
+            files = head_store_objects(str(args.rl_checkpoint_store), store_client_environ(args))
+        else:
+            volume, mount = modal_checkpoint_store(args)
+            files = ModalVolumeFiles(volume, mount[len(MODAL_CHECKPOINT_STORE_MOUNT):])
     if islands is None:
         islands = ModalTrainerIslands(island.modal_ops, island.modal_cfg, name=island.name,
                                       jobs_path=Path(journal_dir) / JOBS_FILE,
                                       poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
                                       events_dir=island.events_dir)
+    if object_store:
+        return object_store_binding(args, files, islands, journal_dir=journal_dir)
     return _binding(args, files, islands, journal_dir=journal_dir)
 
 
@@ -569,7 +577,7 @@ def head_store_objects(uri: str, environ: Mapping[str, str] | None = None) -> Ob
         return oss_store.head_objects(uri)
     from yeto.cloud.s3_store import head_objects
 
-    return head_objects(uri)
+    return head_objects(uri, environ=environ)
 
 
 def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,

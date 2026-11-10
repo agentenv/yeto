@@ -156,3 +156,26 @@ records proxy on Modal (tunnel plus a secret path prefix) for Codex trials. On
 both the Miles path (agent function + reward hook, proxy in place of the
 session server) and the verl path (`HarborAgentLoop.run`, HTTP recorder over
 the proxy), every recorded turn re-tokenizes to the same ids as the stream.
+
+## pi + records proxy
+
+`agent: pi` runs the pi coding agent (badlogic/pi-mono, npm
+`@earendil-works/pi-coding-agent`, `PI_VERSION` in `pins.py`) through
+`pi_agent.YetoPi`, a subclass of Harbor's built-in `pi` agent. Harbor's agent
+installs the deprecated `@mariozechner/pi-coding-agent` and sets no base URL;
+`YetoPi` installs the current package and writes pi's `models.json` /
+`settings.json` (`pi_config.py`) before Harbor's own `pi --print --mode json`
+command runs:
+
+- provider `yeto`, `api = "openai-completions"` (the proxy's
+  `/chat/completions` entry), `baseUrl` = `$OPENAI_BASE_URL`; the model name is
+  `yeto/<model>`, so Harbor copies no host API key into the sandbox;
+- `maxTokens` = the proxy's signed per-turn `max_tokens`
+  (`HarborSettings.turn_max_tokens`, set by the agentic round): pi sends
+  `max_tokens` on every call and the gateway refuses any other value;
+  `contextWindow` is unbounded so pi never lowers it;
+- no compaction, no project trust, 1800 s HTTP idle timeout, offline
+  (`PI_OFFLINE`, no version check, no telemetry).
+
+pi's tools are `read`, `bash`, `edit`, `write` as OpenAI function tools; the
+Qwen3 templates render them as `<tool_call>` JSON.

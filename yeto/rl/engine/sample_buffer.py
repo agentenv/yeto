@@ -86,6 +86,18 @@ _POS_DIGITS = 12
 # create-if-absent races lost in a row before an append gives up (another writer
 # takes every position first: that is a fault, not contention)
 _MAX_CREATE_RACES = 1000
+# concurrent record reads of one ObjectIndex.read_new (an object store GET each)
+_READ_WORKERS = 16
+
+
+def _read_all(objects: ObjectStore, keys: list[str]) -> list[bytes | None]:
+    """``objects.read`` of every key, in key order (concurrent for more than one)."""
+    if len(keys) <= 1:
+        return [objects.read(k) for k in keys]
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=min(_READ_WORKERS, len(keys))) as pool:
+        return list(pool.map(objects.read, keys))
 
 
 class SampleBufferError(RuntimeError):
@@ -272,12 +284,15 @@ class ObjectIndex:
     def read_new(self) -> list[dict[str, Any]]:
         """The records after the last one read, in order. Stops before a missing
         position (no writer leaves one: a position is created only after the one
-        before it)."""
-        out = []
-        for key in self.objects.list(self.prefix, start_after=self._last_key):
-            if key != self.key(self._next):
+        before it). One LIST; the records it names are fetched concurrently
+        (``_READ_WORKERS``), then taken in position order up to the first gap."""
+        keys = []
+        for i, key in enumerate(self.objects.list(self.prefix, start_after=self._last_key)):
+            if key != self.key(self._next + i):
                 break
-            raw = self.objects.read(key)
+            keys.append(key)
+        out = []
+        for key, raw in zip(keys, _read_all(self.objects, keys)):
             if raw is None:
                 break
             try:
@@ -296,6 +311,40 @@ class ObjectIndex:
             data = (json.dumps(record, sort_keys=True) + "\n").encode()
             if self.objects.create(self.key(record["pos"]), data):
                 absorb(self.read_new())
+                return
+        raise SampleBufferError(f"{self.prefix}: lost {_MAX_CREATE_RACES} appends in a row to other writers")
+
+    def append_batch(self, absorb: Callable[[list[dict[str, Any]]], None],
+                     make: Callable[[int], list[dict[str, Any]]]) -> None:
+        """Append a batch: one ``read_new`` (one LIST), then the records' create-if-absent
+        writes in position order, without a LIST or a read-back between them.
+        ``make(done)``: the records not created yet (``done`` of the batch are), with
+        their positions from the index length. Each created record is the next
+        position, so no reader sees a gap; a lost create (another writer took that
+        position) stops the run, the other writer's records are read and the rest is
+        made again at the new positions - the same outcome as one ``append`` per
+        record, with one LIST per batch instead of two per record."""
+        done = 0
+        for _ in range(_MAX_CREATE_RACES):
+            absorb(self.read_new())
+            records = make(done)
+            if not records:
+                return
+            created = []
+            for record in records:
+                if int(record["pos"]) != self._next + len(created):
+                    raise SampleBufferError(f"{self.prefix}: batch record at {record['pos']}, "
+                                            f"expected {self._next + len(created)}")
+                data = (json.dumps(record, sort_keys=True) + "\n").encode()
+                if not self.objects.create(self.key(record["pos"]), data):
+                    break
+                created.append(record)
+            if created:  # ours, at the next positions: absorbed as written, not read back
+                self._next += len(created)
+                self._last_key = self.key(self._next - 1)
+                absorb(created)
+                done += len(created)
+            if len(created) == len(records):
                 return
         raise SampleBufferError(f"{self.prefix}: lost {_MAX_CREATE_RACES} appends in a row to other writers")
 
@@ -456,6 +505,7 @@ class FileSampleBuffer:
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
+        self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
         self.batch_size = int(batch_size)
         self.arrival_window_s = float(arrival_window_s)
         self.clock = clock
@@ -536,8 +586,13 @@ class FileSampleBuffer:
             if isinstance(self.index, JsonlIndex):
                 self.index.append_many(self._absorb, make)
                 return
-            for record in records:  # an object store: one create-if-absent per record
-                self._write_record(lambda pos, record=record: {**record, "pos": pos})
+            def rest(done: int) -> list[dict]:  # an object store: create-if-absent per record
+                if self._ended:
+                    raise SampleBufferError("append after the data end")
+                start = len(self._entries)
+                return [{**record, "pos": start + i} for i, record in enumerate(records[done:])]
+
+            self.index.append_batch(self._absorb, rest)
 
     def _absorb(self, records: list[dict[str, Any]]) -> None:
         for record in records:
@@ -562,6 +617,15 @@ class FileSampleBuffer:
     def _merge_shards(self) -> None:
         new: list[list[dict[str, Any]]] = []  # per shard, in shard order
         for shard in self.index.shard_names():
+            if self._expected_shards is not None and shard not in self._expected_shards:
+                # a shard this trainer was not launched with (another run's or a stray
+                # sampler's under the same prefix): never train on it
+                if shard not in self._foreign_shards:
+                    self._foreign_shards.add(shard)
+                    print(f"[sample-buffer] WARNING: shard {shard!r} has groups but is not one of the "
+                          f"expected shards {sorted(self._expected_shards)} (--rl-buffer-shards): its "
+                          f"groups are NOT trained on; a sampler under that name is wasted", flush=True)
+                continue
             reader = self._shard_readers.get(shard)
             if reader is None:  # first seen here: skip what an earlier merger merged
                 done = sum(1 for s in self._shard_of if s == shard)
@@ -587,6 +651,11 @@ class FileSampleBuffer:
             merged.append({"schema": SCHEMA, "end": True})
         if merged:
             self._write_records(merged)
+
+    def shard_at(self, position: int) -> str | None:
+        """The sampler shard of merged position ``position`` (None: no merged shards)."""
+        with self._lock:
+            return self._shard_of[int(position)] if 0 <= int(position) < len(self._shard_of) else None
 
     def shard_positions(self, cursor: int) -> dict[str, int]:
         """{shard: records of that shard below merged position ``cursor``}: the

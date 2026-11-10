@@ -82,6 +82,22 @@ def render_conversation(tokenizer, messages: list[dict], tools: list | None) -> 
     return _render_fallback(messages, tools)
 
 
+def split_hub_config(name: str) -> tuple[str, str | None]:
+    """``"repo/id:config"`` -> ``("repo/id", "config")``; a plain id has no config.
+
+    Hub ids never contain ``:``, so the suffix selects the dataset config of a
+    multi-config dataset (``openai/gsm8k:main``); without it a pinned
+    revision of such a dataset cannot be loaded ("Config name is missing").
+    Local paths and cloud URIs are not split (callers check them first).
+    """
+    if "://" in name or ":" not in name:
+        return name, None
+    repo, _, config = name.rpartition(":")
+    if not repo or not config or "/" in config:
+        return name, None
+    return repo, config
+
+
 def prompt_split(source, revision: str | None) -> str:
     """`train`, or a Hub dataset's only split when it has no `train`
     (e.g. HuggingFaceH4/MATH-500 ships just `test`)."""
@@ -92,7 +108,9 @@ def prompt_split(source, revision: str | None) -> str:
     try:
         from datasets import get_dataset_split_names
 
-        names = list(get_dataset_split_names(source, revision=revision))
+        repo, config = split_hub_config(source)
+        names = list(get_dataset_split_names(repo, revision=revision) if config is None
+                     else get_dataset_split_names(repo, config, revision=revision))
     except Exception:  # noqa: BLE001 - load_rows reports the real error
         return "train"
     if "train" not in names and len(names) == 1:
@@ -135,8 +153,11 @@ def load_rows(dataset_name, split: str = "train", revision: str | None = None):
                 f"remote dataset revision {revision!r} is not an immutable commit"
             )
         kwargs["revision"] = revision
+    repo, config = split_hub_config(dataset_name)
+    if config is not None:
+        kwargs["name"] = config
     try:
-        return load_dataset(dataset_name, **kwargs)
+        return load_dataset(repo, **kwargs)
     except Exception as exc:
         if revision is not None:
             # refs/convert/parquet is a separately moving Hub ref.  Falling

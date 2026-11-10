@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 # Sampling settings pinned per eval version (any change = another ruler).
 SAMPLING_ATTRS = ("rollout_temperature", "rollout_top_p", "rollout_top_k", "rollout_max_response_len",
-                  "rollout_max_context_len")
+                  "max_seq_len")  # upstream #4699: --rollout-max-context-len became --max-seq-len
 SAMPLING_ENVS = ("YETO_CODEX_REASONING_EFFORT", "YETO_CODEX_MAX_TURNS")
 
 

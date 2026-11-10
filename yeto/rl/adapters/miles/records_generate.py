@@ -66,7 +66,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
-from yeto.rl.harness.harbor.trial import CUSTOM_PROVIDERS
+from yeto.rl.harness.harbor.trial import provider_import_path, registered_providers
 
 from .harbor_agent import gate, task_from_metadata
 
@@ -171,13 +171,15 @@ def records_proxy_from_env() -> Any:
         SAMPLING_ENV,
         TEMPLATE_ENV,
         TOKENIZER_ENV,
+        TRUST_REMOTE_CODE_ENV,
     )
     from yeto.rl.harness.chat_templates import ChatTemplate
     from yeto.rl.harness.gateway.proxy import RecordsProxy
 
     try:
         url = os.environ[ROUTER_URL_ENV]
-        template = ChatTemplate.load(os.environ[TEMPLATE_ENV], tokenizer_path=os.environ[TOKENIZER_ENV])
+        template = ChatTemplate.load(os.environ[TEMPLATE_ENV], tokenizer_path=os.environ[TOKENIZER_ENV],
+                                     trust_remote_code=os.environ.get(TRUST_REMOTE_CODE_ENV) == "1")
         signed = json.loads(os.environ[SAMPLING_ENV])
         engine = SGLangRouterEngine(url, max_model_len=int(os.environ[MAX_MODEL_LEN_ENV]), identity=EngineIdentity(
             engine="miles-sglang-router", engine_version=UNKNOWN, device_family="cuda",
@@ -202,9 +204,9 @@ _recorders: LoopLocal[Any] = LoopLocal(_recorder_from_env)
 
 
 def _harness(task: Any) -> HarborHarness:
-    if task.provider not in CUSTOM_PROVIDERS:
+    if provider_import_path(task.provider) is None:
         raise HarnessConfigError(f"records_generate runs yeto's TrialConfig builder; provider {task.provider!r} "
-                                 f"is not one of {sorted(CUSTOM_PROVIDERS)} (use Miles' example path)")
+                                 f"is not one of {sorted(registered_providers())} (use Miles' example path)")
     settings = HarborSettings.from_env()
     return HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
 

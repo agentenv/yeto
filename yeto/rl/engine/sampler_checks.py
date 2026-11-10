@@ -56,7 +56,8 @@ from typing import Any
 
 from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
 
-from .policy_release import PolicyRelease, ReleaseNotLoaded
+from .policy_release import LORA, PolicyRelease, ReleaseNotLoaded
+from .release_overlay import is_partial_release, overlay_release
 from .sampler_engine import SamplerEngine, SamplerEngineError, SamplingParams
 
 # Routed-expert matrices of GLM5.3-Flash as the GLM inference report counts them.
@@ -68,6 +69,10 @@ INDEX_FILE = "model.safetensors.index.json"
 BF16 = "bf16"
 
 LOAD_CHECK_FAILED_EVENT = "sampler_load_check_failed"
+EXPERT_SELECTION_SHA256 = "expert_selection_sha256"  # release manifest key (INTERFACES 2.3)
+# manifest["partial_experts"]["trainable_sha256"]: the trainable expert sets alone, independent of
+# the trainer's EP slot order (release tensors are named by original expert id)
+TRAINABLE_SHA256 = "trainable_sha256"
 LOAD_CHECKED_EVENT = "rl_sampler_load_checked"
 
 
@@ -104,6 +109,25 @@ def release_scheme(release: PolicyRelease | None) -> str:
     return str((derived or {}).get("scheme") or BF16)
 
 
+def overlaid_release_scheme(release: PolicyRelease, directory: Path, base_dir: Any, served: str) -> str:
+    """The scheme a release is served in. A partial-experts release (the Kimi-K3.1
+    recipe: ``manifest.partial_experts``, no ``derived_from``) carries the trained
+    experts in the base checkpoint's own tensor format and is laid over that base
+    (:func:`.release_overlay.overlay_release`), so it is served in the base's
+    scheme when its ``quantization_config`` is the base's; every other release
+    keeps :func:`release_scheme` (trained weights: bf16)."""
+    if release.weights == LORA and release.derived_from is None and base_dir is not None:
+        # an adapter merged into the engine's base (lora_release_merge): only BF16 modules
+        # change, every quantized tensor stays the base's, so the base's scheme is served
+        return served
+    if release.derived_from is not None or not is_partial_release(release.manifest) or base_dir is None:
+        return release_scheme(release)
+    released, based = checkpoint_quant_format(Path(directory)), checkpoint_quant_format(Path(base_dir))
+    if released[0] is not None and released == based:
+        return served
+    return release_scheme(release)
+
+
 def count_release_experts(directory: Path, pattern: str = EXPERT_WEIGHT_PATTERN) -> int | None:
     """Routed-expert weight tensors named in the release's safetensors index
     (None: the release has no index file)."""
@@ -124,6 +148,21 @@ def release_quant_format(directory: Path) -> tuple[str | None, str | None]:
     quant = json.loads(config.read_text(encoding="utf-8")).get("quantization_config") or {}
     method = quant.get("quant_method")
     fmt = quant.get("format")
+    return (None if method is None else str(method)), (None if fmt is None else str(fmt))
+
+
+def checkpoint_quant_format(directory: Path) -> tuple[str | None, str | None]:
+    """:func:`release_quant_format`, also reading ``text_config.quantization_config``
+    (a multimodal checkpoint such as Kimi-K3.1 nests the language model's config)."""
+    top = release_quant_format(directory)
+    if top[0] is not None:
+        return top
+    config = Path(directory) / "config.json"
+    if not config.is_file():
+        return top
+    text = json.loads(config.read_text(encoding="utf-8")).get("text_config")
+    quant = (text.get("quantization_config") if isinstance(text, dict) else None) or {}
+    method, fmt = quant.get("quant_method"), quant.get("format")
     return (None if method is None else str(method)), (None if fmt is None else str(fmt))
 
 
@@ -263,10 +302,23 @@ class PortReleaseLoader:
 
     def __init__(self, engine: SamplerEngine, checks: PostLoadChecks, emit: Callable[..., None], *,
                  max_consecutive_failures: int = 3,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 expected_selection_sha256: str | None = None,
+                 expected_trainable_sha256: str | None = None) -> None:
+        """``expected_selection_sha256``: the partial-experts selection this sampler
+        is bound to (a Kimi-K3.1 run); a release whose record's ``manifest`` names
+        no selection or another one is refused before the engine is touched.
+        ``expected_trainable_sha256``: bind to the trainable expert sets instead
+        (``manifest.partial_experts.trainable_sha256``), so a trainer that runs the same
+        experts under another EP layout (another slot order, another ``sha256``) is
+        accepted; when set it replaces the whole-selection comparison."""
         if int(max_consecutive_failures) < 1:
             raise ValueError("max_consecutive_failures must be >= 1")
         self.engine = engine
+        self.expected_selection_sha256 = (None if expected_selection_sha256 is None
+                                          else str(expected_selection_sha256).lower())
+        self.expected_trainable_sha256 = (None if expected_trainable_sha256 is None
+                                          else str(expected_trainable_sha256).lower())
         self.checks = checks
         self.emit = emit
         self.max_consecutive_failures = int(max_consecutive_failures)
@@ -291,13 +343,55 @@ class PortReleaseLoader:
         self._serve(release, directory, int(version), first=True)
 
     def __call__(self, release: PolicyRelease, directory: Path) -> None:
-        scheme = release_scheme(release)
+        directory = Path(directory)
+        base = getattr(getattr(self.engine, "config", None), "base_dir", None)
+        scheme = overlaid_release_scheme(release, directory, base, self.scheme)
         if scheme != self.scheme:
             raise ReleaseNotLoaded(
                 f"release r{release.seq}-v{release.version} has scheme {scheme}; this engine "
                 f"serves {self.scheme}; keeping v{self.engine.served_version()}",
                 reason="scheme_mismatch")
-        self._serve(release, Path(directory), int(release.version), first=False)
+        if self.expected_trainable_sha256 is not None:
+            declared = ((release.manifest or {}).get("partial_experts") or {}).get(TRAINABLE_SHA256)
+            if declared is None or str(declared).lower() != self.expected_trainable_sha256:
+                self._refuse(int(release.version), "expert_selection",
+                             {"release_trainable": None if declared is None else str(declared),
+                              "expected_trainable": self.expected_trainable_sha256})
+        elif self.expected_selection_sha256 is not None:
+            declared = (release.manifest or {}).get(EXPERT_SELECTION_SHA256)
+            if declared is None or str(declared).lower() != self.expected_selection_sha256:
+                self._refuse(int(release.version), "expert_selection",
+                             {"release": None if declared is None else str(declared),
+                              "expected": self.expected_selection_sha256})
+        if release.weights == LORA:
+            directory = self._merged_lora(release, directory, base)
+        elif is_partial_release(release.manifest) and base is not None:
+            # a release of the trained experts only: lay it over the engine's base checkpoint,
+            # as the role switch does for the release a sampler starts on (GPU-A it11b: the
+            # follower started SGLang on the bare partial release, which lacks every other weight)
+            directory = overlay_release(base, directory, directory.with_name(directory.name + ".overlay"))
+        self._serve(release, directory, int(release.version), first=False)
+
+    def _merged_lora(self, release: PolicyRelease, directory: Path, base: Any) -> Path:
+        """A LoRA release on an engine that serves full checkpoints only: merge the
+        adapter into the engine's base (:mod:`.lora_release_merge`). Refused before
+        the engine is touched when there is no base or the adapter cannot be merged
+        without re-quantizing (routed-expert LoRA over MXFP4 experts)."""
+        from .lora_release_merge import LoraMergeError, merge_lora_release
+
+        version = int(release.version)
+        if base is None:
+            self._refuse(version, "lora_merge", "a LoRA release needs the engine's base_dir to merge into")
+        declared = (release.manifest or {}).get("lora") or {}
+        if declared.get("routed_experts"):
+            self._refuse(version, "lora_merge", "the adapter targets the routed experts, which only a LoRA "
+                         "bypass engine serves (merging re-quantizes the MXFP4 experts); train with "
+                         "--lora-targets attention for this sampler")
+        try:
+            return merge_lora_release(base, directory, directory.with_name(directory.name + ".merged"))
+        except (LoraMergeError, OSError) as error:
+            self._refuse(version, "lora_merge", str(error))
+        raise AssertionError("unreachable")
 
     def _fail(self, version: int, step: str, detail: Any) -> None:
         """A load or check failed: the engine holds unchecked weights, so it stops serving."""
@@ -372,7 +466,15 @@ class PortReleaseLoader:
         """Extra fields of ``rl_sampler_policy_loaded`` (``SamplerLoop.loaded_fields``)."""
         if self.last_load is None:
             return {}
-        return {k: self.last_load[k] for k in ("reload_mode", "pause_s", "scheme")}
+        fields = {k: self.last_load[k] for k in ("reload_mode", "pause_s", "scheme")}
+        # how the weights moved (a fast path, or why it fell back to a whole reload)
+        fields.update({k: v for k, v in self.last_load.items() if k in LOAD_PATH_FIELDS})
+        return fields
+
+
+LOAD_PATH_FIELDS = ("expert_update", "expert_update_fallback", "expert_update_fallback_detail",
+                    "expert_update_repair", "update_s", "files", "sparse", "sparse_fallback",
+                    "sparse_fallback_detail", "sparse_repair")
 
 
 def check_sampling_fits(sampling: SamplingParams, engine: SamplerEngine, *,

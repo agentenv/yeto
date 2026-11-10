@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from yeto.rl.adapters.miles.ext_args import ext_attr
 from yeto.rl.megatron_masters import MegatronMasterError
 
 CANONICAL_PREFIX = "base_model.model."
@@ -472,6 +473,22 @@ def _wait_deferred_digest(actor: Any) -> None:
 FULL_SHARD_PREFIX = b"yeto-rl-full-parameter-shard-v1\0"
 
 
+MODEL_COMPANION_MODULE_NAME = "model_companion"  # ModelCompanionInstallationUtils.install's add_module name
+
+
+def is_companion_parameter(name: str) -> bool:
+    """Mirror of upstream ``ModelCompanionInstallationUtils.is_companion_parameter``
+    (``"model_companion" in name.split(".")``), usable where Miles is not importable."""
+    return MODEL_COMPANION_MODULE_NAME in name.split(".")
+
+
+def model_companions(model: Sequence[Any]) -> list[Any]:
+    """Upstream's ``ModelCompanion`` submodules of the model chunks."""
+    from miles.backends.training_utils.model_companion import _get_companions_of_model
+
+    return list(_get_companions_of_model(model))
+
+
 def export_full_digest(actor: Any, *, policy_version: int) -> dict[str, Any]:
     """Plugin of a no-sync full-parameter island: hash this rank's model shard.
 
@@ -495,6 +512,11 @@ def export_full_digest(actor: Any, *, policy_version: int) -> dict[str, Any]:
         named: dict[str, Any] = {}
         for index, chunk in enumerate(actor.model):
             for name, param in chunk.named_parameters():
+                # upstream's ModelCompanion (sample_consumptions, weight_version) is
+                # a submodule: its parameters change every step and differ between
+                # islands, so the same weights would hash differently
+                if is_companion_parameter(name):
+                    continue
                 named[f"{index}.{name}"] = param
         for name in sorted(named):
             value = named[name].detach()
@@ -527,7 +549,33 @@ def is_native_flash_next(actor: Any) -> bool:
     (``yeto_rl_native_lora_export``) and this module dispatches on that.
     """
 
-    return getattr(getattr(actor, "args", None), "yeto_rl_native_lora_export", None) == "qwen3_8_next"
+    return ext_attr(getattr(actor, "args", None), "rl_native_lora_export", None) == "qwen3_8_next"
+
+
+def is_native_slots(actor: Any) -> bool:
+    """Kimi-K3.1 LoRA trains in Miles' raw bridge mode: its adapter is read and written
+    through Miles' adapter slots (:mod:`.native_slots_state`), not Bridge conversion
+    tasks. The learner marks the run (``yeto_rl_native_lora_export = "kimi_k31"``)."""
+
+    return ext_attr(getattr(actor, "args", None), "rl_native_lora_export", None) == "kimi_k31"
+
+
+def _export_native_slots(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
+    from yeto.rl.engine.policy_digest import NonFiniteTensor, stage_f32_on_host
+
+    from . import native_slots_state
+
+    try:
+        tensors = native_slots_state.export_tensors(actor, is_main=_is_main_rank(actor))
+    except native_slots_state.NativeSlotsError as error:
+        raise StatePluginError(str(error)) from None
+    if tensors is None:
+        return None
+    try:
+        out = stage_f32_on_host(tensors, staging)
+    except NonFiniteTensor as error:
+        raise StatePluginError(str(error)) from None
+    return {"policy_version": int(policy_version), "tensors": out}
 
 
 def _flash_next_exporter() -> Callable[[Any], Iterable[Any]]:
@@ -715,6 +763,8 @@ def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> di
 
     if is_native_flash_next(actor):
         return _export_flash_next(actor, policy_version=policy_version)
+    if is_native_slots(actor):
+        return _export_native_slots(actor, policy_version=policy_version, staging=staging)
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     tensors: dict[str, Any] = {}
@@ -891,6 +941,9 @@ def _apply_state(
         # The no-sync Flash-Next island never applies a state; its export is a
         # lossy (bf16, tied q/k/v A, padded) fingerprint, not an apply contract.
         raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
+    if is_native_slots(actor):
+        return _apply_native_slots(actor, tensors=tensors, policy_version=policy_version,
+                                   local_step=local_step, optimizer=optimizer)
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     policy = _packed_policy_for(actor, bindings)
@@ -943,6 +996,36 @@ def _apply_state(
     }
 
 
+def _apply_native_slots(actor: Any, *, tensors: Mapping[str, Any], policy_version: int,
+                        local_step: int, optimizer: str) -> dict[str, Any]:
+    """:func:`_apply_state` over Miles' adapter slots (Kimi-K3.1 LoRA, :mod:`.native_slots_state`)."""
+    import torch
+
+    from . import native_slots_state
+
+    with torch.no_grad():
+        for name, value in tensors.items():
+            if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
+                raise StatePluginError(f"{name!r} is not finite FP32")
+        scheduler_samples = align_scheduler(actor, local_step)
+        try:
+            native_slots_state.apply_tensors(actor, tensors)
+        except native_slots_state.NativeSlotsError as error:
+            raise StatePluginError(str(error)) from None
+    _barrier()
+    if optimizer == "reset":
+        reset_optimizer_moments(actor.optimizer)
+    refresh_actor_backup(actor)
+    params = list(actor.adapter_slots.slot_parameters(0))
+    assert_grad_flow_intact(actor.model, params)
+    return {
+        "policy_version": int(policy_version),
+        "tensors": len(tensors),
+        "optimizer": optimizer,
+        "scheduler_samples": scheduler_samples,
+    }
+
+
 # Megatron's per-step grad norms, recorded in this rank's process. Upstream
 # ``train`` does not return them, and once the step is done the optimizer's
 # ``get_grad_norm`` recomputes over already-consumed buffers (observed 0.0 on
@@ -984,7 +1067,7 @@ def install_grad_norm_recorder() -> bool:
         _EV_STATS.clear()
         _POLICY_STATS.clear()
         try:
-            if getattr(args[0] if args else kwargs.get("args"), "yeto_rl_profile_trainer", False):
+            if ext_attr(args[0] if args else kwargs.get("args"), "rl_profile_trainer", False):
                 from .train_profile import profiled  # observation (--rl-profile-trainer)
 
                 result = profiled(original, *args, **kwargs)
@@ -1005,6 +1088,15 @@ def install_grad_norm_recorder() -> bool:
     # Opt-in until verified on GPU (hot path: per-micro-batch tensor reductions).
     if os.environ.get("YETO_POLICY_METRICS") == "1":
         install_policy_metrics_recorder()
+    # yeto/dual_clipfrac (k31 pins; ports-v1's fork reports dual_clipfrac itself):
+    # a pass-through unless the run sets eps_clip_c.
+    if _pin_lacks_fork_dual_clipfrac():
+        try:
+            install_dual_clipfrac_recorder()
+        except ImportError as exc:  # an observation metric never stops the trainer; said loudly
+            import sys
+
+            print(f"[yeto] {DUAL_CLIPFRAC_KEY} is not reported: {exc!r}", file=sys.stderr, flush=True)
     return True
 
 
@@ -1105,6 +1197,26 @@ def step_policy_stats(stats: dict[str, float] | None = None) -> dict[str, float]
     return out
 
 
+LOSS_HUB_LOSSES = "miles.backends.training_utils.loss.hub.losses"
+
+
+def miles_module_or_absent(name: str) -> Any | None:
+    """Import an upstream Miles module; None only when Miles itself is not
+    installed (the CPU venv). With Miles present a missing module means the
+    upstream path moved, which must fail loudly instead of switching a
+    recorder off (the loss_hub -> loss/hub move went unnoticed this way)."""
+    import importlib
+    import sys
+    from importlib.util import find_spec
+
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        if "miles" in sys.modules or find_spec("miles") is not None:
+            raise
+        return None
+
+
 def install_policy_metrics_recorder() -> bool:
     """Wrap Miles ``policy_loss_function`` (advantage stats) and the
     ``compute_policy_loss`` it calls (ratio vs clip counts); idempotent."""
@@ -1112,9 +1224,8 @@ def install_policy_metrics_recorder() -> bool:
     global _POLICY_METRICS_INSTALLED
     if _POLICY_METRICS_INSTALLED:
         return True
-    try:
-        from miles.backends.training_utils.loss_hub import losses
-    except ImportError:
+    losses = miles_module_or_absent(LOSS_HUB_LOSSES)
+    if losses is None:
         return False
     original_fn = getattr(losses, "policy_loss_function", None)
     original_cpl = getattr(losses, "compute_policy_loss", None)
@@ -1140,6 +1251,145 @@ def install_policy_metrics_recorder() -> bool:
 
         losses.compute_policy_loss = compute_policy_loss
     _POLICY_METRICS_INSTALLED = True
+    return True
+
+
+# --------------------------------------------------------------------------
+# yeto/dual_clipfrac: the fork's dual_clipfrac metric (ports-v1 2be012421), not
+# ported to Miles k31/b8 and reproduced here from the two module-global names the
+# k31 loss/hub policy_loss_function calls at call time:
+#
+# * ``losses.policy_loss_function`` (wrapped) opens a per-call tap in a
+#   contextvar carrying its ``sum_of_sample_mean``;
+# * ``losses.response_layout`` (wrapped, only while a tap is open) hands the loss
+#   a view of its layout that records the reducer the loss rebuilds with the
+#   TIS / RS masks (``layout.reducer(modified_response_masks)``), which is the
+#   reducer the fork reduced dual_clipfrac with;
+# * ``losses.compute_policy_loss`` (wrapped) computes the fork's per-token
+#   indicator from its inputs (ppo_kl, clean_advantages, eps_clip, eps_clip_high,
+#   eps_clip_c), with the fork's eager ops (``compute_dual_clipfrac``);
+#
+# and, after the loss returns, ``metrics["yeto/dual_clipfrac"]`` = that reducer
+# of the indicator, detached. Reported only when dual-clip is on (``eps_clip_c``
+# set) and the default variant runs (the fork reported it only there); the loss,
+# its gradient and every other metric are untouched.
+# --------------------------------------------------------------------------
+DUAL_CLIPFRAC_KEY = "yeto/dual_clipfrac"
+LOSS_HUB_MATH_UTILS = "miles.backends.training_utils.loss.hub.math_utils"
+_DUAL_CLIPFRAC_INSTALLED = False
+
+
+class _DualClipTap:
+    """One ``policy_loss_function`` call with dual-clip on."""
+
+    __slots__ = ("reducer", "indicator")
+
+    def __init__(self, reducer: Any) -> None:
+        self.reducer = reducer  # the reducer the loss reduces its metrics with last
+        self.indicator: Any = None
+
+
+class _ReducerRecordingLayout:
+    """The loss's response layout, recording the reducers it builds."""
+
+    __slots__ = ("_layout", "_tap")
+
+    def __init__(self, layout: Any, tap: _DualClipTap) -> None:
+        self._layout = layout
+        self._tap = tap
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._layout, name)
+
+    def reducer(self, loss_masks: Any) -> Any:
+        built = self._layout.reducer(loss_masks)
+        self._tap.reducer = built
+        return built
+
+
+def dual_clip_indicator(safe_exp_neg_ppo_kl: Callable[[Any], Any], ppo_kl: Any, advantages: Any,
+                        eps_clip: float, eps_clip_high: float, eps_clip_c: float) -> Any:
+    """The fork's ``compute_dual_clipfrac`` (2be012421): per token, 1.0 where the
+    dual-clip bound ``-c * A`` is the active term of the PPO loss (``A < 0``)."""
+    import torch
+
+    with torch.no_grad():
+        ratio = safe_exp_neg_ppo_kl(ppo_kl)
+        pg_losses1 = -ratio * advantages
+        pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
+        clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses3 = -eps_clip_c * advantages
+        return ((advantages < 0) & (pg_losses3 < clip_pg_losses1)).float()
+
+
+def _pin_lacks_fork_dual_clipfrac() -> bool:
+    """The k31 lineage reports no dual_clipfrac of its own (B8 dropped it)."""
+    from .pins import current_miles_commit, lineage_of
+
+    lineage = lineage_of(current_miles_commit())
+    return lineage is not None and lineage.name == "k31"
+
+
+def install_dual_clipfrac_recorder() -> bool:
+    """Wrap Miles ``policy_loss_function`` / ``response_layout`` /
+    ``compute_policy_loss`` so the policy loss reports ``yeto/dual_clipfrac``
+    (see above); idempotent. False when Miles (or the fork's ratio helper) is
+    absent."""
+
+    global _DUAL_CLIPFRAC_INSTALLED
+    if _DUAL_CLIPFRAC_INSTALLED:
+        return True
+    losses = miles_module_or_absent(LOSS_HUB_LOSSES)
+    if losses is None:
+        return False
+    math_utils = miles_module_or_absent(LOSS_HUB_MATH_UTILS)
+    safe_exp = getattr(math_utils, "_safe_exp_neg_ppo_kl", None) if math_utils is not None else None
+    original_fn = getattr(losses, "policy_loss_function", None)
+    original_cpl = getattr(losses, "compute_policy_loss", None)
+    if original_fn is None or original_cpl is None or safe_exp is None:
+        return False
+    import contextvars
+
+    tap_var: contextvars.ContextVar[_DualClipTap | None] = contextvars.ContextVar(
+        "yeto_dual_clip_tap", default=None)
+
+    def policy_loss_function(args, batch, logits, sum_of_sample_mean):
+        if getattr(args, "eps_clip_c", None) is None:
+            return original_fn(args, batch, logits, sum_of_sample_mean)
+        tap = _DualClipTap(sum_of_sample_mean)
+        token = tap_var.set(tap)
+        try:
+            loss, metrics = original_fn(args, batch, logits, sum_of_sample_mean)
+        finally:
+            tap_var.reset(token)
+        if tap.indicator is not None and isinstance(metrics, dict):
+            metrics[DUAL_CLIPFRAC_KEY] = tap.reducer(tap.indicator).clone().detach()
+        return loss, metrics
+
+    def compute_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, *rest, **kw):
+        result = original_cpl(ppo_kl, advantages, eps_clip, eps_clip_high, *rest, **kw)
+        tap = tap_var.get()
+        eps_clip_c = rest[0] if rest else kw.get("eps_clip_c")
+        if tap is not None and eps_clip_c is not None:
+            tap.indicator = dual_clip_indicator(safe_exp, ppo_kl, advantages, eps_clip, eps_clip_high,
+                                                eps_clip_c)
+        return result
+
+    losses.policy_loss_function = policy_loss_function
+    losses.compute_policy_loss = compute_policy_loss
+    original_layout = getattr(losses, "response_layout", None)
+    if original_layout is not None:
+        def response_layout(*args, **kwargs):
+            layout = original_layout(*args, **kwargs)
+            tap = tap_var.get()
+            if tap is None:
+                return layout
+            # the reducer of the loss's metrics until TIS / RS rebuilds it
+            tap.reducer = layout.sum_of_sample_mean
+            return _ReducerRecordingLayout(layout, tap)
+
+        losses.response_layout = response_layout
+    _DUAL_CLIPFRAC_INSTALLED = True
     return True
 
 
@@ -1229,9 +1479,8 @@ def install_value_metrics_recorder() -> bool:
     global _VALUE_METRICS_INSTALLED
     if _VALUE_METRICS_INSTALLED:
         return True
-    try:
-        from miles.backends.training_utils.loss_hub import losses
-    except ImportError:
+    losses = miles_module_or_absent(LOSS_HUB_LOSSES)
+    if losses is None:
         return False
     original = getattr(losses, "value_loss_function", None)
     if original is None:
@@ -1628,21 +1877,31 @@ _GRAD_BINDINGS: dict[int, Any] = {}
 def align_weight_version(actor: Any, *, next_version: int) -> None:
     """Plugin: make Miles' next ``update_weights`` stamp ``next_version``.
 
-    Miles increments ``weight_updater.weight_version`` once per update, writes
-    it to the inference engines and gives it to the rollout executor as the
-    current version (the fully_async staleness filter subtracts from it). Set
-    to ``next_version - 1`` here, the update stamps the yeto policy version.
+    Upstream (#3423) takes the version it writes to the inference engines and
+    gives the rollout executor from the model companions' ``weight_version``
+    parameter: ``train_one_step`` bumps it once per optimizer step and
+    ``update_weights`` reads it (``_get_actor_weight_version``). The update
+    itself no longer increments anything, so the companions are set to
+    ``next_version`` itself (the fully_async staleness filter subtracts the
+    engine-reported yeto version from the executor's, so both must be yeto's).
+    A colocated or asleep actor publishes from its CPU backup
+    (``weights_backuper.get("actor")``), whose companion entries are refreshed
+    too. yeto's versions are monotonic, as the executor's ``set_weight_version``
+    requires.
     """
 
-    updater = getattr(actor, "weight_updater", None)
-    if updater is None:
+    from .full_parameter.rank_state import set_model_weight_version
+
+    companions = model_companions(actor.model) if getattr(actor, "model", None) is not None else []
+    if not companions:
         if getattr(getattr(actor, "args", None), "debug_train_only", False):
-            # trainer-only island (Miles --debug-train-only): no engine and no weight
-            # updater; update_weights returns early and the policy release carries
-            # the version (Modal run-11 failed here)
+            # trainer-only island (Miles --debug-train-only): no engine; update_weights
+            # returns early and the policy release carries the version (Modal run-11)
             return
-        raise RuntimeError("the trainer has no weight_updater to carry the policy version")
-    updater.weight_version = int(next_version) - 1
+        raise RuntimeError("the trainer model has no companion to carry the policy version")
+    # k31/b2 Miles: full_parameter_state.set_model_weight_version (companions and
+    # their CPU backup); older pins: the companions are filled by hand.
+    set_model_weight_version(actor, int(next_version))
 
 
 def grad_norm(actor: Any) -> float:

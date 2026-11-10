@@ -245,8 +245,10 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
     until the head ends the run. Returns the number of trainer incarnations run.
 
     In rollout the node loads the newest policy release of the store before each
-    round (the LoRA adapter the trainer of any node released, through
-    :class:`.sampler_island.EngineReleaseLoader`, the sampler island's path), and
+    round (what the trainer of any node released, through
+    :class:`.sampler_island.EngineReleaseLoader`, the sampler island's path: the
+    LoRA adapter in LoRA mode, the whole checkpoint of a full-parameter node such as
+    the K3.1 recipe -- ``lora_mode(miles_args)`` selects the release scheme), and
     holds a round back while the pool backlog is at its cap
     (:class:`~yeto.rl.engine.convertible_remote.PoolBacklogGate`)."""
     import os

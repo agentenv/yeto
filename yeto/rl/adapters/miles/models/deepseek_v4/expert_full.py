@@ -15,9 +15,15 @@ from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     contract_from_config,
     training_to_logical_expert_id,
 )
+from yeto.rl.adapters.miles.models.partial_experts.freeze import (
+    ExpertParamDecision,
+    apply_expert_freeze,
+)
 
 
 EXPERT_PARAMETER_COUNT = NUM_LAYERS * 3 * 4096 * 2048
+# Mark of a trainable clone-expert parameter (optimizer ParamKey group).
+TRAINABLE_PARAM_ATTR = "_yeto_expert_full"
 
 _INDIVIDUAL_EXPERT = re.compile(
     r"(?:^|\.)decoder\.layers\.(?P<layer>\d+)\.mlp\.experts\."
@@ -104,10 +110,6 @@ def expert_full_specs(
     return result
 
 
-def _model_chunks(models: Any) -> tuple[Any, ...]:
-    return tuple(models) if isinstance(models, (list, tuple)) else (models,)
-
-
 def _parallel_coordinates(
     *,
     expert_parallel_rank: int | None,
@@ -160,40 +162,55 @@ def configure_clone_expert_full(
         for expert in local_ids
         if ORIGINAL_EXPERTS <= expert < selected_end
     )
+    def classify(name: str, parameter: Any) -> ExpertParamDecision | None:
+        match = _INDIVIDUAL_EXPERT.search(name)
+        if match is None:
+            return None
+        local_expert = int(match.group("local_expert"))
+        if not 0 <= local_expert < local_count or parameter.ndim != 2:
+            raise RuntimeError(
+                f"{name} is not one of {local_count} individual expert weights"
+            )
+        parameter_ids = (local_ids[local_expert],)
+        parameter_trainable_ids = tuple(
+            expert for expert in parameter_ids if expert in trainable_ids
+        )
+        marks: dict[str, Any] = {
+            "_yeto_expert_layer": int(match.group("layer")),
+            "_yeto_expert_branch": match.group("branch"),
+        }
+        if parameter_trainable_ids:
+            marks["_yeto_expert_id"] = parameter_trainable_ids[0]
+        return ExpertParamDecision(bool(parameter_trainable_ids), marks)
+
+    try:
+        frozen = apply_expert_freeze(
+            models,
+            classify,
+            configured_attr="_yeto_expert_full_configured",
+            trainable_attr=TRAINABLE_PARAM_ATTR,
+        )
+    except RuntimeError as exc:
+        if str(exc).startswith("expert parameter was configured twice: "):
+            name = str(exc).split(": ", 1)[1]
+            raise RuntimeError(f"expert-full parameter was configured twice: {name}") from None
+        raise
     records = []
-    for chunk in _model_chunks(models):
-        for name, parameter in chunk.named_parameters():
-            match = _INDIVIDUAL_EXPERT.search(name)
-            if match is None:
-                continue
-            local_expert = int(match.group("local_expert"))
-            if not 0 <= local_expert < local_count or parameter.ndim != 2:
-                raise RuntimeError(
-                    f"{name} is not one of {local_count} individual expert weights"
-                )
-            parameter_ids = (local_ids[local_expert],)
-            parameter_trainable_ids = tuple(
-                expert for expert in parameter_ids if expert in trainable_ids
+    for item in frozen:
+        match = _INDIVIDUAL_EXPERT.search(item.parameter_name)
+        assert match is not None
+        local_expert = int(match.group("local_expert"))
+        parameter_ids = (local_ids[local_expert],)
+        records.append(
+            ExpertFullRecord(
+                item.parameter_name,
+                int(match.group("layer")),
+                match.group("branch"),
+                rank,
+                parameter_ids,
+                tuple(expert for expert in parameter_ids if expert in trainable_ids),
             )
-            if getattr(parameter, "_yeto_expert_full_configured", False):
-                raise RuntimeError(f"expert-full parameter was configured twice: {name}")
-            parameter._yeto_expert_full_configured = True
-            parameter._yeto_expert_layer = int(match.group("layer"))
-            parameter._yeto_expert_branch = match.group("branch")
-            parameter.requires_grad_(bool(parameter_trainable_ids))
-            if parameter_trainable_ids:
-                parameter._yeto_expert_full = True
-                parameter._yeto_expert_id = parameter_trainable_ids[0]
-            records.append(
-                ExpertFullRecord(
-                    name,
-                    int(match.group("layer")),
-                    match.group("branch"),
-                    rank,
-                    parameter_ids,
-                    parameter_trainable_ids,
-                )
-            )
+        )
 
     local_layers = {record.layer for record in records}
     if not local_layers:

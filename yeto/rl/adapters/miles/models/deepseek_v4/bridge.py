@@ -363,7 +363,9 @@ def _layer_spec(config, vp_stage=None, *, clone_sources=None):
     # it is not the V4 indexer implementation itself.  The pinned Miles image
     # accepts only ``torch`` or ``flashinfer`` here, and defaults to ``torch``.
     spec = get_dsv4_spec(
-        SimpleNamespace(miles_dsa_topk_backend="torch"),
+        # get_dsv4_spec reads args.dsv4_impl first (every Miles version); "miles" is the
+        # plugin's own implementation, the one the pinned image runs
+        SimpleNamespace(dsv4_impl="miles", miles_dsa_topk_backend="torch"),
         config,
         vp_stage,
     )
@@ -430,7 +432,7 @@ def ensure_deepseek_v4_bridge() -> type:
     # Importing this package registers Miles' legacy V4 bridge, whose config
     # owns the pinned MCore extension fields used by the image.
     import miles_plugins.mbridge  # noqa: F401
-    from miles_plugins.mbridge.deepseekv4 import DeepseekV4Bridge as LegacyV4
+    from miles_plugins.mbridge import DeepseekV4Bridge as LegacyV4
 
     class _AliasedAutoMapping(AutoMapping):
         def __init__(

@@ -378,6 +378,18 @@ _ALGORITHM = (
         ),
     ),
     cli_flag(
+        "--rl-sampler-engine",
+        choices=("sglang", "vllm"),
+        default=None,
+        help=(
+            "--rl-sample-role trainer: the engine of the separate samplers that load "
+            "this run's releases. Kimi-K3.1 LoRA checks the adapter targets against it: "
+            "vllm (A-card, MXFP4 experts) takes --lora-targets attention only; "
+            "all-linear (routed experts) needs sglang. Default: not declared "
+            "(all-linear is refused)"
+        ),
+    ),
+    cli_flag(
         "--rl-allow-local-data",
         action="store_true",
         help=(
@@ -712,6 +724,10 @@ _RESUME = (
              help="with --rl-code-pack git-patch or release on an existing run: switch the run "
              "to a pack of the current local tree (or to the release --rl-image); refused unless the algorithm semantic hash is "
              "unchanged; the manifest records the old -> new pack and REASON"),
+    cli_flag("--rl-code-pack-keep", action="store_true", default=False,
+             help="with --rl-code-pack git-patch on an existing run whose pinned pack differs "
+             "from the local tree: resume on the pinned pack anyway (without it the launch is "
+             "refused, so a relaunch after a code change never runs the old code by accident)"),
     # rl-resume-from-checkpoint
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
@@ -789,6 +805,16 @@ _RESUME = (
                 "N-th release (and a delta above half the full size) goes in full. The samplers "
                 "rebuild the weights on local disk and check every file's sha256. 0 (default): "
                 "every release in full"),
+    shared_flag("--rl-release-every", type=int, default=1, metavar="N",
+                help="--rl-sample-role trainer: release every N-th policy version only (the "
+                "trainer's own engines still take every one; the last version of the run is "
+                "always released). Needs --rl-max-policy-age >= N. Default 1: every version"),
+    shared_flag("--rl-release-skip-busy", action="store_true", default=False,
+                help="--rl-sample-role trainer with staged releases: skip the release of a "
+                "version while the previous upload is in flight instead of waiting for it "
+                "(latest wins; rl_policy_release_skipped reason=upload_in_flight). Needs "
+                "--rl-max-policy-age >= 3; size it as ceil(upload_s / step_s) + "
+                "ceil(download_s / step_s) + backlog_groups / groups_per_step"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),

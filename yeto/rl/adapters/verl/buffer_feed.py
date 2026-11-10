@@ -267,28 +267,12 @@ def print_feed_event(event: str, **fields: Any) -> None:
                          "event": str(event), **fields}), flush=True)
 
 
-INCARNATION_FENCE_ENV = "YETO_BUFFER_INCARNATION_FENCE"  # "0": no stale-incarnation gate
-LEASE_ROOT_ENV = "YETO_INCARNATION_LEASE_ROOT"  # the store holding the sampler leases (default: the buffer's)
-
-
-def default_incarnation_gate(buffer: Any, environ: Mapping[str, str] | None = None) -> Any:
-    """The feed's stale-incarnation gate over the buffer's store (or
-    :data:`LEASE_ROOT_ENV`); None when off (:data:`INCARNATION_FENCE_ENV` ``0``) or
-    the buffer has no store / entries (test doubles)."""
-    from yeto.rl.engine.incarnation_lease import IncarnationGate
-
-    env = os.environ if environ is None else environ
-    if str(env.get(INCARNATION_FENCE_ENV, "1")).strip() == "0":
-        return None
-    entries = getattr(buffer, "entries", None)
-    store = getattr(buffer, "store", None)
-    if env.get(LEASE_ROOT_ENV):
-        from yeto.rl.engine.resume import store_for
-
-        store = store_for(str(env[LEASE_ROOT_ENV]), environ=env)
-    if store is None or not callable(entries):
-        return None
-    return IncarnationGate(store, entries)
+# the stale-incarnation gate is shared with the Miles reader (buffer_rollout.BatchReader)
+from yeto.rl.engine.incarnation_lease import (  # noqa: E402
+    INCARNATION_FENCE_ENV,
+    LEASE_ROOT_ENV,
+    default_incarnation_gate,
+)
 
 
 class BufferFeed:

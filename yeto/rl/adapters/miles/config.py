@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -33,7 +34,6 @@ from typing import Any
 from yeto.rl.adapters.miles.pins import (
     MILES_DISTOPT_FULL_PARAMETER_COMMIT,
     MILES_NEXT_COMMIT,
-    miles_fork_lineage_from,
 )
 from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
@@ -154,6 +154,19 @@ _FT_NAMESPACE_OFF = (
 
 class MilesConfigError(ValueError):
     """The ports path cannot express this configuration; startup is refused."""
+
+
+def _require_elastic_pin(k31_feature: str, what: str) -> None:
+    """Refuse ``what`` on a pin without the elastic verbs it needs: the k31
+    lineage from k31/b4 on (``k31_feature``), or the ports-v1 fork (M1-M6 since
+    0af62f4d)."""
+    from yeto.rl.adapters.miles import pins
+
+    if pins.pin_has(k31_feature, MILES_NEXT_COMMIT) or pins.pin_has("elastic_m1_m6", MILES_NEXT_COMMIT):
+        return
+    raise MilesConfigError(
+        f"{what} needs Miles k31/b4 {pins.MILES_K31_B4_COMMIT[:9]} or later ({k31_feature}); "
+        f"the pinned image ships {MILES_NEXT_COMMIT[:9]}")
 
 
 class UnmappedConfigError(MilesConfigError):
@@ -297,6 +310,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "model_recipe.gdn.qkv_format": _ok,
     "model_recipe.transformer_impl": _ok,
     "model_recipe.model_flags": _ok,
+    "model_recipe.expert_selection": _ok,  # kimi_k31: --partial-experts-selection
+    "model_recipe.routed_expert_qat": _ok,  # kimi_k31: --routed-expert-qat
     **{f"geometry.{name}": _ok for name in _GEOMETRY_FIELDS},
     **{
         f"geometry.moe.{name}": _ok
@@ -417,7 +432,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.custom_agent_function_path": _requires_agentic_generate(
         "--custom-agent-function-path"
     ),
-    "agent.agent_max_seq_len": _requires_agentic_generate("--max-seq-len"),
+    "agent.agent_max_seq_len": _ok,  # upstream #4699: a core RolloutConfig field, every generate reads it
     "agent.dynamic_sampling_filter_path": _ok,  # reconciled with AlgorithmSpec
     "agent.use_rollout_routing_replay": _ok,
     "agent.use_session_server": _ok,
@@ -436,6 +451,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "trainer_dp_edges": _ok,
     "use_miles_router": _ok,
     "update_weight_group_timeout_s": _ok,
+    "host_sync_free": _ok,  # k31/b3-b7: --no-host-sync-free when off (pin gate below)
     # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
     "edge_costs_path": _ok,
     "elastic_window_s": _ok,
@@ -453,7 +469,8 @@ LEAF_POLICY: dict[str, _Check] = {
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
                     "fused_stage", "release_legacy", "release_inline",
-                    "release_delta_full_every", "until_trainers_end")},
+                    "release_delta_full_every", "release_every", "release_skip_busy",
+                    "until_trainers_end")},
 }
 
 
@@ -559,6 +576,88 @@ def _flags(tokens: Sequence[str]) -> Iterator[str]:
         flag = token.split("=", 1)[0]
         if flag.startswith("--"):
             yield flag
+
+
+PIPELINE_SPLIT_FLAGS = ("--decoder-first-pipeline-num-layers", "--decoder-last-pipeline-num-layers")
+
+
+def _argv_int(tokens: Sequence[str], flag: str) -> int | None:
+    """The last value of ``flag`` in ``tokens`` (``--flag N`` or ``--flag=N``), None if absent."""
+    found = None
+    for i, token in enumerate(tokens):
+        name, eq, value = token.partition("=")
+        if name != flag:
+            continue
+        raw = value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+        try:
+            found = int(raw)
+        except ValueError as exc:
+            raise MilesConfigError(f"{flag} needs an integer layer count, got {raw!r}") from exc
+    return found
+
+
+def suggest_pipeline_splits(num_layers: int, pipeline_parallel: int, limit: int = 3) -> list[str]:
+    """Up to ``limit`` (first, last) stage sizes for which the middle ``PP-2`` stages hold
+    equally many layers, closest to an even split first."""
+    pp = pipeline_parallel
+    if pp < 2:
+        return []
+    if pp == 2:
+        half = num_layers // 2
+        return [f"first {num_layers - half} / last {half}"] if half >= 1 else []
+    out: list[str] = []
+    base = num_layers // pp
+    for middle in sorted(range(1, num_layers // (pp - 2) + 1), key=lambda k: (abs(k - base), -k)):
+        rest = num_layers - middle * (pp - 2)
+        if rest < 2:
+            continue
+        first, last = (rest + 1) // 2, rest // 2
+        out.append(f"first {first} / last {last} ({pp - 2} middle stages x {middle})")
+        if len(out) == limit:
+            break
+    return out
+
+
+def check_pipeline_split(num_layers: int, pipeline_parallel: int,
+                         uneven: tuple[int, int] | None, extra_argv: Sequence[str] = ()) -> None:
+    """Refuse a pipeline split Megatron cannot build, before any GPU starts.
+
+    The effective split is the run config's ``uneven_pipeline_layers`` or the
+    ``--decoder-first/last-pipeline-num-layers`` of the extra argv (both set to different
+    values is a conflict). Without either, PP>1 needs ``num_layers % PP == 0``. With
+    them, the layers left after the given first / last stage must split evenly over the
+    remaining stages, at least one layer each (Megatron's uneven-PP rule)."""
+    pp = int(pipeline_parallel)
+    given = {flag: _argv_int(extra_argv, flag) for flag in PIPELINE_SPLIT_FLAGS}
+    first, last = given[PIPELINE_SPLIT_FLAGS[0]], given[PIPELINE_SPLIT_FLAGS[1]]
+    if uneven is not None:
+        if (first is not None and first != uneven[0]) or (last is not None and last != uneven[1]):
+            raise MilesConfigError(
+                f"pipeline split conflict: the run config splits first {uneven[0]} / last {uneven[1]}, "
+                f"the extra argv passes first {first} / last {last}")
+        first, last = uneven
+    if first is None and last is None:
+        if pp > 1 and num_layers % pp:
+            raise MilesConfigError(
+                f"{num_layers} layers do not split evenly over pipeline parallel {pp}: pass an uneven "
+                f"split ({' or '.join(PIPELINE_SPLIT_FLAGS)}), e.g. "
+                + "; ".join(suggest_pipeline_splits(num_layers, pp)))
+        return
+    if pp < 2:
+        raise MilesConfigError(f"{' / '.join(PIPELINE_SPLIT_FLAGS)} need pipeline parallel > 1 (got {pp})")
+    fixed = [n for n in (first, last) if n is not None]
+    if any(n < 1 for n in fixed):
+        raise MilesConfigError(f"pipeline stage layer counts must be >= 1 (first {first} / last {last})")
+    rest_layers = num_layers - sum(fixed)
+    rest_stages = pp - len(fixed)
+    ok = (rest_layers == 0) if rest_stages == 0 else (rest_layers >= rest_stages and rest_layers % rest_stages == 0)
+    if not ok:
+        what = (f"first {first} + last {last}" if len(fixed) == 2
+                else f"{'first' if first is not None else 'last'} {fixed[0]}")
+        raise MilesConfigError(
+            f"pipeline split does not add up: {num_layers} layers, PP {pp}, {what} leaves {rest_layers} "
+            f"layers for {rest_stages} stage(s) (needs an equal share of >= 1 each); e.g. "
+            + "; ".join(suggest_pipeline_splits(num_layers, pp)))
 
 
 def reject_fault_tolerance_flags(tokens: Sequence[str]) -> None:
@@ -673,6 +772,21 @@ def _lora_argv(trainable: Any, *, colocated: bool) -> list[str]:
     ]
 
 
+
+def _leading_dense_layers(moe: Any) -> int:
+    """``first_k_dense_replace`` of a MoE geometry: the leading zeros of its layer
+    mask (an integer frequency means every layer is MoE)."""
+    freq = None if moe is None else moe.layer_freq
+    if not isinstance(freq, (list, tuple)):
+        return 0
+    dense = 0
+    for value in freq:
+        if int(value):
+            break
+        dense += 1
+    return dense
+
+
 def translate_run_config(
     config: Any,
     algorithm: AlgorithmSpec,
@@ -713,6 +827,8 @@ def translate_run_config(
         raise TypeError("algorithm must be an AlgorithmSpec")
     check_config_mapped(config)
     algorithm, extra_argv, absorbed = check_extra_argv(extra_argv, algorithm)
+    check_pipeline_split(config.geometry.num_layers, config.parallel.pipeline_parallel,
+                         config.parallel.uneven_pipeline_layers, extra_argv)
     problems = algorithm.rejections()
     if problems:
         raise MilesConfigError("algorithm spec rejected: " + "; ".join(problems))
@@ -759,6 +875,7 @@ def translate_run_config(
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
+        RECIPE_KIMI_K31,
         RECIPE_NEMOTRON_H,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
@@ -766,6 +883,8 @@ def translate_run_config(
     from .lr_schedule import lr_schedule_argv
     from .models import glm5_next, nemotron_h
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
+    from .models.kimi_k31 import ports_recipe as kimi_k31_recipe
+    from .models.kimi_k31 import release as kimi_k31_release
 
     geometry = config.geometry
     parallel = config.parallel
@@ -781,9 +900,14 @@ def translate_run_config(
 
     if sample_buffer is not None and sample_buffer.role == CONVERTIBLE:
         # Trainer and engines share the GPUs; the converted node loads its own
-        # trained weights into its engines (no release through the store)
-        if trainable.parameter_mode != "lora" or request.kind != "colocated":
-            raise MilesConfigError("--rl-sample-role convertible needs LoRA on a colocated island")
+        # trained weights into its engines (no release through the store). LoRA
+        # (the GPU-verified form) or full parameters: the handoff path is Miles'
+        # colocated update_weights, which is the upstream default for every
+        # parameter; the K3.1 recipe (partial experts, MXFP4 releases) is
+        # full-parameter only, so the node trains and releases whole checkpoints.
+        if trainable.parameter_mode not in ("lora", "full") or request.kind != "colocated":
+            raise MilesConfigError("--rl-sample-role convertible needs LoRA or full parameters "
+                                   "(--tuning lora|full) on a colocated island")
     elif (sample_buffer is not None and sample_buffer.role == "trainer"
             and trainable.parameter_mode == "lora" and request.kind == "colocated"
             and request.trainer_gpus != 1):
@@ -817,7 +941,9 @@ def translate_run_config(
             # supports LoRA; p2p/disk-delta assert no LoRA.
             placement_values += ["--update-weight-transfer-mode", "broadcast"]
         if request.placement_map_arg is not None:
-            # fork-M1 (--yeto-placement-map): explicit role -> bundle map.
+            # fork-M1 (--yeto-placement-map): explicit role -> bundle map
+            # (ClusterConfig.yeto_placement_map on k31/b4+).
+            _require_elastic_pin("placement_map", "an explicit bundle map (--yeto-placement-map)")
             placement_values += [
                 "--yeto-placement-map",
                 json.dumps(request.placement_map_arg, sort_keys=True, separators=(",", ":")),
@@ -838,6 +964,11 @@ def translate_run_config(
         ]
     elif recipe.name == RECIPE_GLM5_NEXT:
         model_name = glm5_next.MODEL_NAME  # the model flags replace the geometry below
+    elif recipe.name == RECIPE_KIMI_K31:
+        # the plugin spec replaces the geometry below; a Kimi-K3 checkpoint (no DSA
+        # indexer, e.g. the 4-layer smoke model) takes the K3 bridge and spec
+        kimi_hf_model_type = _kimi_hf_model_type(config.hf_checkpoint)
+        model_name = kimi_k31_recipe.model_name_for(kimi_hf_model_type)
     elif recipe.name == RECIPE_DEEPSEEK_V4_FLASH:
         model_name = deepseek_v4.MODEL_NAME
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
@@ -854,8 +985,10 @@ def translate_run_config(
         "--hf-checkpoint", config.hf_checkpoint,
         "--ref-load", config.ref_load,
         # glm5_next: Megatron-Bridge has no glm5_next bridge; Miles loads the torch_dist
-        # checkpoint and exports through its own converters (raw)
-        "--megatron-to-hf-mode", "raw" if recipe.name == RECIPE_GLM5_NEXT else "bridge",
+        # checkpoint and exports through its own converters (raw). kimi_k31: the
+        # partial-experts trainer loads the MXFP4 checkpoint through the Miles mbridge
+        # plugin and publishes through the Direct iterator (raw).
+        "--megatron-to-hf-mode", kimi_k31_release.megatron_to_hf_mode(recipe.name),
         "--model-name", model_name,
         *model_recipe_values,
         "--num-layers", str(geometry.num_layers),
@@ -906,7 +1039,10 @@ def translate_run_config(
         # DP-change certification refuses --balance-data (reshard.reshard_problems):
         # dropped only when trainer DP-change edges are enabled.
         *(() if getattr(config, "trainer_dp_edges", False) else ("--balance-data",)),
-        "--rollout-max-context-len", str(batch.seq_len),
+        # upstream #4699: --rollout-max-context-len became the core RolloutConfig
+        # field --max-seq-len (the agentic generate reads the same field), emitted once
+        "--max-seq-len", str(int(agent.agent_max_seq_len) if agent.agent_max_seq_len is not None
+                             else batch.seq_len),
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         # metadata is extracted inside the rollout process
         "--rollout-sample-filter-path", TRAINED_GROUPS_HOOK_PATH,
@@ -953,17 +1089,28 @@ def translate_run_config(
 
         from .policy_age import SUPPORT, policy_age_argv
 
-        SUPPORT.check(max_policy_age)
+        SUPPORT.check(max_policy_age, buffer_trainer=sample_buffer is not None
+                      and sample_buffer.role == "trainer")
         tolerated = algorithm_max_policy_staleness(algorithm)
         if tolerated < max_policy_age:
             raise MilesConfigError(
                 f"--rl-max-policy-age {max_policy_age} needs an algorithm spec with "
-                f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
+                f"execution.max_policy_staleness >= {max_policy_age} (and a cross-version correction: "
+                "correction.method tis, or score_centering_is tis / mis); "
                 f"the run's spec tolerates {tolerated}")
         if not rollout_ahead:
-            values.extend(policy_age_argv(
-                max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
-                overlap=rollout_overlap))
+            agentic = bool(getattr(config.agent, "custom_agent_function_path", None))
+            if agentic and not rollout_overlap:
+                # B5 (k31/b3-b7, ports-v1 ddce20992): --agentic-suspend-between-turns /
+                # --agentic-suspend-max-rounds (RolloutConfig); older pins reject the flags.
+                from yeto.rl.adapters.miles import pins
+
+                if not pins.pin_has("agentic_suspend", MILES_NEXT_COMMIT):
+                    raise MilesConfigError(
+                        f"--rl-max-policy-age {max_policy_age} on an agentic task needs Miles with "
+                        f"--agentic-suspend-between-turns (k31/b3-b7 {pins.MILES_K31_B3B7_COMMIT[:9]} or "
+                        f"later); the pinned image ships {MILES_NEXT_COMMIT[:9]}")
+            values.extend(policy_age_argv(max_policy_age, agentic=agentic, overlap=rollout_overlap))
     if async_buffer_rounds is None and rollout_overlap:
         async_buffer_rounds = max_policy_age  # default: buffer depth = A_hard
     if async_buffer_rounds is not None:
@@ -1002,7 +1149,7 @@ def translate_run_config(
             ("--eval-top-p", evaluation.top_p),
             ("--eval-max-prompt-len", evaluation.max_prompt_len),
             ("--eval-max-response-len", evaluation.max_response_len),
-            ("--eval-max-context-len", evaluation.max_context_len),
+            # --eval-max-context-len is gone upstream (#4699); eval context = --max-seq-len
         ):
             if value is not None:
                 values.extend((flag, str(value)))
@@ -1033,12 +1180,30 @@ def translate_run_config(
         values.append("--sequence-parallel")
     values.extend(("--distributed-timeout-minutes", str(config.distributed_timeout_minutes)))
     if getattr(config, "use_miles_router", False):
-        # --rl-elastic: fork cordon/drain/admit_cordoned need the Miles router
-        values.append("--use-miles-router")
+        # --rl-elastic: cordon/drain/admit_cordoned need the Miles router (and its
+        # cordon endpoints: k31/b4 router_cordon, ports-v1 M3)
+        _require_elastic_pin("router_cordon", "--rl-elastic (cordon / drain / admit on the Miles router)")
+        values.extend(("--router", "miles"))  # upstream #4322: --use-miles-router is this alias
     timeout_s = getattr(config, "update_weight_group_timeout_s", None)
     if timeout_s is not None:
-        # A27: bounded weight-update group rendezvous (fork image-m3a27+).
-        values.extend(("--update-weight-group-timeout-s", f"{float(timeout_s):g}"))
+        # A27: bounded weight-update group rendezvous. The upstream flag names
+        # the per-engine request timeout; the k31/b3-b7 B3 batch (feature
+        # engine_failure_isolation) bounds each engine's join by it and raises an
+        # ExternalFailureError instead of losing the trainer (ports-v1: fork image-m3a27+
+        # --update-weight-group-timeout-s, renamed here).
+        values.extend(("--update-weight-engine-request-timeout", f"{float(timeout_s):g}"))
+    if not getattr(config, "host_sync_free", True):
+        # B7: the fork's MILES_HOST_SYNC_FREE=0 escape hatch is the typed
+        # --no-host-sync-free (DebugConfig.host_sync_free); the environment
+        # variable is not read any more. The default (on) emits nothing.
+        from yeto.rl.adapters.miles import pins
+
+        if not pins.pin_has("host_sync_free_flag", MILES_NEXT_COMMIT):
+            raise MilesConfigError(
+                "--no-host-sync-free needs Miles k31/b3-b7 "
+                f"{pins.MILES_K31_B3B7_COMMIT[:9]} or later (DebugConfig.host_sync_free); "
+                f"the pinned image ships {MILES_NEXT_COMMIT[:9]}")
+        values.append("--no-host-sync-free")
     if config.train_memory.max_tokens_per_gpu is not None and recipe.gdn.gated_delta_net:
         # Miles miles_validate_args: dynamic batch size is not supported for bshd
         raise MilesConfigError(
@@ -1086,8 +1251,6 @@ def translate_run_config(
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
         values.extend(harbor_rollout_argv(agent.custom_agent_function_path, sample_buffer=sample_buffer))
-    if agent.agent_max_seq_len is not None:
-        values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
         values.append("--use-session-server")
         if agent.session_server_ip:
@@ -1176,8 +1339,34 @@ def translate_run_config(
         shape["num_layers"] = geometry.num_layers
         values = glm5_next.apply_recipe(values, glm5_next.model_argv(
             **shape, transformer_impl=recipe.transformer_impl))
+    if recipe.name == RECIPE_KIMI_K31:
+        # the plugin spec replaces the Bridge-geometry model flags (INTERFACES 2.5 / Y3
+        # ports_recipe): raw bridge mode, frozen router bias, the selection file, routing
+        # replay; the layer count follows the checkpoint (Kimi-K3-4layer smoke model)
+        lora = trainable.parameter_mode == "lora"
+        if not lora and not getattr(recipe, "expert_selection", None):
+            raise MilesConfigError("the kimi_k31 recipe needs --rl-expert-selection PATH")
+        if lora:
+            values = _kimi_k31_lora_values(values, trainable, recipe)
+        try:
+            values = kimi_k31_recipe.apply_recipe(values, kimi_k31_recipe.recipe_argv(
+                selection_path=None if lora else recipe.expert_selection, ep_size=parallel.expert_parallel,
+                context_parallel_size=int(getattr(parallel, "context_parallel", 1) or 1),
+                seq_length=batch.seq_len, extra_argv=extra_argv,
+                num_layers=geometry.num_layers,
+                first_k_dense_replace=_leading_dense_layers(geometry.moe),
+                routed_expert_qat=getattr(recipe, "routed_expert_qat", None),
+                hf_model_type=kimi_hf_model_type,
+                num_experts=getattr(geometry.moe, "num_experts", None)))
+        except kimi_k31_recipe.KimiK31RecipeError as error:
+            raise MilesConfigError(f"kimi_k31 recipe: {error}") from None
+        values = _full_recompute_for_mxfp4_experts(values)
     values.extend(extra_argv)
-    values.extend(train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, "")))
+    train_extra = train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, ""))
+    if any(flag in train_extra for flag in PIPELINE_SPLIT_FLAGS):
+        check_pipeline_split(geometry.num_layers, parallel.pipeline_parallel,
+                             parallel.uneven_pipeline_layers, (*extra_argv, *train_extra))
+    values.extend(train_extra)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
@@ -1270,7 +1459,21 @@ TRAIN_EXTRA_FLAGS = frozenset({
     # of N tokens instead of one fp32 full-vocabulary block (a full block ran out of
     # memory there on a long agentic sample: 11.94 GiB for one block)
     "--log-probs-chunk-size",
+    # torch profiler of the Miles train loop (Megatron --use-pytorch-profiler and its
+    # step window, Miles --profile-target); the trace goes to --tensorboard-dir
+    "--use-pytorch-profiler", "--profile-step-start", "--profile-step-end", "--profile-ranks",
+    "--profile-target", "--tensorboard-dir",
+    # YETO_RL_NAN_SKIP: Megatron's DDP check raises on a NaN grad; off, Miles skips that optimizer step
+    "--no-check-for-nan-in-loss-and-grad",
+    # kimi_k31 first_stage_grad (PP stage 0 expert grads under full recompute on
+    # images before Miles k31/stage0-grad); chains another hook via its env var
+    "--custom-megatron-before-train-step-hook-path",
+    # an uneven pipeline split of a layer count PP divides (balance stage memory);
+    # the caller checks the split with check_pipeline_split
+    *PIPELINE_SPLIT_FLAGS,
 })
+# Recipes that take TRAIN_EXTRA_ENV.
+TRAIN_EXTRA_RECIPES = ("nemotron_h", "kimi_k31")
 
 
 def _nemotron_h_train_flags(recipe_module: Any, config: Any) -> tuple[str, ...]:
@@ -1295,20 +1498,64 @@ def _nemotron_h_train_flags(recipe_module: Any, config: Any) -> tuple[str, ...]:
 
 
 def train_extra_argv(recipe_name: str, raw: str) -> tuple[str, ...]:
-    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV`` (space- or comma-separated); empty unless set. Nemotron-H only."""
+    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV`` (space- or comma-separated); empty unless set.
+    Only the :data:`TRAIN_EXTRA_RECIPES` recipes take it."""
     import shlex
-
-    from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H
 
     tokens = shlex.split((raw or "").replace(",", " "))  # commas: one shell word
     if not tokens:
         return ()
-    if recipe_name != RECIPE_NEMOTRON_H:
-        raise MilesConfigError(f"{TRAIN_EXTRA_ENV} is only for the {RECIPE_NEMOTRON_H} recipe")
+    if recipe_name not in TRAIN_EXTRA_RECIPES:
+        raise MilesConfigError(f"{TRAIN_EXTRA_ENV} is only for the {', '.join(TRAIN_EXTRA_RECIPES)} recipes")
     bad = [t for t in tokens if t.startswith("--") and t not in TRAIN_EXTRA_FLAGS]
     if bad or not tokens[0].startswith("--"):
         raise MilesConfigError(f"{TRAIN_EXTRA_ENV}: flags not allowed: {bad or tokens[:1]}")
     return tuple(tokens)
+
+
+def _kimi_k31_lora_values(values: list[str], trainable: Any, recipe: Any) -> list[str]:
+    """kimi_k31 ``--tuning lora`` (``yeto.rl.engine.kimi_k31_lora``): the generic LoRA
+    flags plus the recipe's. Routed-expert targets add ``--experts-shared-outer-loras``
+    (the upstream recipe's expert layout). ``--lora-base-cpu-backup`` is dropped: Miles'
+    16xB300 recipe has no host room for SGLang's base copy next to the trainer's offloaded
+    weights and re-sends the base at every colocated sync instead."""
+    from yeto.rl.engine import kimi_k31_lora
+
+    try:
+        kimi_k31_lora.check_tuning("lora", expert_selection=getattr(recipe, "expert_selection", None),
+                                   routed_expert_qat=getattr(recipe, "routed_expert_qat", None),
+                                   lora_targets=trainable.lora_targets)
+    except kimi_k31_lora.KimiK31LoraError as error:
+        raise MilesConfigError(f"kimi_k31 recipe: {error}") from None
+    values = [v for v in values if v != "--lora-base-cpu-backup"]
+    return [*values, *kimi_k31_lora.extra_lora_argv(trainable.lora_targets)]
+
+
+FULL_RECOMPUTE_ARGV = ("--recompute-granularity", "full", "--recompute-method", "uniform",
+                       "--recompute-num-layers", "1")
+
+
+def _full_recompute_for_mxfp4_experts(values: list[str]) -> list[str]:
+    """kimi_k31: the frozen routed experts stay MXFP4 and every GEMM dequantizes a
+    whole layer of them to BF16 (Miles ``mxfp4_experts``). Without full recompute
+    autograd keeps each layer's dequantized weights for the backward, about 7 GB per
+    MoE layer per GPU at EP8, which no pipeline stage of the full model fits; full
+    recompute frees them after each layer's backward. The recipe turns it on when the
+    launch did not (as --rl-activation-recompute would) and refuses any other
+    recompute granularity."""
+    granularity = None
+    for flag, value in zip(values, values[1:]):
+        if flag == "--recompute-granularity":
+            granularity = value
+    if granularity is None:
+        logging.getLogger(__name__).warning("kimi_k31: turning on full uniform activation recompute (the frozen MXFP4 "
+                       "experts' dequantized weights would otherwise stay alive until the backward)")
+        return [*values, *FULL_RECOMPUTE_ARGV]
+    if granularity != "full":
+        raise MilesConfigError(
+            f"kimi_k31 recipe: --recompute-granularity {granularity} keeps the frozen MXFP4 experts' "
+            "dequantized weights for the backward; use full recompute (--rl-activation-recompute)")
+    return values
 
 
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
@@ -1318,8 +1565,7 @@ def train_memory_argv(memory: Any) -> tuple[str, ...]:
 
     values: list[str] = []
     if memory.activation_recompute:
-        values.extend(("--recompute-granularity", "full", "--recompute-method", "uniform",
-                       "--recompute-num-layers", "1"))
+        values.extend(FULL_RECOMPUTE_ARGV)
     if memory.max_tokens_per_gpu is not None:
         values.extend(("--use-dynamic-batch-size",
                        "--max-tokens-per-gpu", str(memory.max_tokens_per_gpu)))
@@ -1389,7 +1635,8 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
       the hybrid optimizer's whole FP32 copy (host-pinned when offloaded);
       Miles reads it and, on a cut apply, writes both that copy and the BF16
       model view (``full_parameter_state._propagate_master_writes``). Needs
-      a Miles image at or after :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT`;
+      a Miles pin with the pins feature ``distopt_full_parameter`` (ports-v1
+      :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT` on, k31 from B2 on);
       DP=1 only (at DP>1 a distributed-optimizer master is a partial range).
 
     A no-sync trainer island (samples from the store) has no such reader:
@@ -1443,10 +1690,11 @@ def _dp_optimizer_attrs(choice: str, data_parallel: int) -> dict[str, Any]:
 
 
 def _miles_reads_distributed_optimizer_masters() -> bool:
+    """The pinned Miles carries the pins feature ``distopt_full_parameter``
+    (ports-v1 56190a5a8 on, k31 from B2 on)."""
     from yeto.rl.adapters.miles import pins
 
-    return (MILES_DISTOPT_FULL_PARAMETER_COMMIT in pins.MILES_FORK_LINEAGE
-            and MILES_NEXT_COMMIT in miles_fork_lineage_from(MILES_DISTOPT_FULL_PARAMETER_COMMIT))
+    return pins.pin_has("distopt_full_parameter", MILES_NEXT_COMMIT)
 
 
 def _resolve_tito_parsers(model: str) -> tuple[str | None, str | None]:
@@ -1461,9 +1709,79 @@ def _resolve_tito_parsers(model: str) -> tuple[str | None, str | None]:
 
 
 def apply_runtime_attrs(args: Any, launch: MilesLaunchArgs) -> Any:
+    """Legacy carrier: every runtime attribute as one attribute on a mutable namespace."""
     for name, value in launch.runtime_attrs.items():
         setattr(args, name, value)
     return args
+
+
+def split_runtime_attrs(launch: MilesLaunchArgs) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(miles_part, yeto_part)`` of ``launch.runtime_attrs``.
+
+    The Miles part is set on the raw namespace in ``preprocess_args`` (before
+    Miles validates ownership): Megatron fields such as
+    ``use_distributed_optimizer`` and the MIS hook's own fields (``tis_*``,
+    ``rs_*``, ``use_rs``; collected by Miles into the hook config, see
+    :func:`mis_hook_config_class`). The yeto part goes to the ``IslandArgs``
+    context after parsing. The table itself (and so the golden files) does
+    not change.
+    """
+    from yeto.rl.adapters.miles.island_args import is_yeto_name
+
+    miles_part = {k: v for k, v in launch.runtime_attrs.items() if not is_yeto_name(k)}
+    yeto_part = {k: v for k, v in launch.runtime_attrs.items() if is_yeto_name(k)}
+    return miles_part, yeto_part
+
+
+def _preprocess_runtime_attrs(args: Any, launch: MilesLaunchArgs) -> Any:
+    for name, value in split_runtime_attrs(launch)[0].items():
+        setattr(args, name, value)
+    return args
+
+
+# yeto's MIS attributes (``mismatch_correction.mis_config`` keys): on the new Miles
+# argument system a hook declares its own fields through ``config_class``.
+MIS_HOOK_FIELDS: tuple[str, ...] = (
+    "rs_level", "rs_lower_bound", "rs_upper_bound", "rs_veto_threshold",
+    "tis_batch_normalize", "tis_level", "tis_lower_bound", "tis_mode", "tis_upper_bound", "use_rs",
+)
+
+
+def attach_mis_hook_config() -> None:
+    """Declare the vendored MIS hook's fields to Miles (``config_class``) before ``parse_args``.
+
+    The hook lives in the engine-neutral core, which may not import Miles, so
+    the adapter attaches the class from here; without the Miles schema (the
+    pinned fork) the attributes stay on the namespace and nothing is attached.
+    """
+    config_class = mis_hook_config_class()
+    if config_class is None:
+        return
+    try:
+        from yeto.rl.algos.vendor import miles_mis
+    except ImportError:  # no torch on this host: the hook cannot be used here anyway
+        return
+    miles_mis.compute_mis_weights_with_cp.config_class = config_class  # type: ignore[attr-defined]
+
+
+def mis_hook_config_class() -> type | None:
+    """The ``config_class`` of the vendored MIS hook, or ``None`` on a Miles without the schema.
+
+    Fields carry no ``Arg`` (no CLI flag): preprocess sets them on the namespace,
+    ``resolve_custom_function_configs`` moves them into the hook config and the
+    hook's view exposes them under the same names, so the vendored code reads
+    ``args.tis_mode`` unchanged.
+    """
+    try:
+        from miles.utils.args.schema import BaseConfig
+    except ImportError:
+        return None
+    namespace: dict[str, Any] = {"__annotations__": {}, "__module__": __name__,
+                                 "__doc__": "yeto MIS (mixed importance sampling) hook configuration."}
+    for name in MIS_HOOK_FIELDS:
+        namespace["__annotations__"][name] = Any
+        namespace[name] = None
+    return type("YetoMisConfig", (BaseConfig,), namespace)
 
 
 def validate_parsed_args(
@@ -1508,12 +1826,41 @@ def validate_parsed_args(
     check_placement_not_rewritten(launch.placement, args)
 
 
+def _kimi_hf_model_type(hf_checkpoint: Any) -> str:
+    """``model_type`` of the checkpoint's config.json (``kimi_k31`` when unreadable:
+    the K3.1 spec is the recipe's default)."""
+    from yeto.rl.adapters.miles.models.kimi_k31 import ports_recipe as kimi_k31_recipe
+
+    try:
+        config = json.loads((Path(str(hf_checkpoint)) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return kimi_k31_recipe.MODEL_NAME
+    return str(config.get("model_type") or kimi_k31_recipe.MODEL_NAME)
+
+
 def _upstream_num_cells(args: Any) -> int:
+    from yeto.rl.adapters.miles.island_args import miles_config
+
     try:
         from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_num_cells
     except ImportError:
         return 1 if not getattr(args, "indep_dp", False) else -1
-    return compute_trainer_num_cells(args, role=ACTOR_ROLE)
+    return _call_num_cells(compute_trainer_num_cells, miles_config(args), ACTOR_ROLE)
+
+
+def _call_num_cells(compute_trainer_num_cells, config: Any, role: Any) -> int:
+    """Both pin generations of ``compute_trainer_num_cells``: the ports-v1 fork
+    takes ``(config, *, role)``; upstream main (the k31 lineage,
+    ``miles.utils.megatron_args_utils``) takes ``(args, *, total_gpus)`` with the
+    trainer's GPU count from ``compute_trainer_total_gpus(config, role=)``."""
+    import inspect
+
+    params = inspect.signature(compute_trainer_num_cells).parameters
+    if "total_gpus" in params:
+        from miles.utils.args.trainer_utils import compute_trainer_total_gpus
+
+        return compute_trainer_num_cells(config, total_gpus=compute_trainer_total_gpus(config, role=role))
+    return compute_trainer_num_cells(config, role=role)
 
 
 TEST_DEBUG_ROLLOUT_ENV = "YETO_TEST_MILES_LOAD_DEBUG_ROLLOUT_DATA"
@@ -1540,15 +1887,28 @@ def _apply_test_debug_rollout(args: Any) -> Any:
 
 
 def parse_miles_args(launch: MilesLaunchArgs) -> Any:
-    """Run upstream ``parse_args`` on the translated argv, then validate it."""
+    """Run upstream ``parse_args`` on the translated argv, then validate it.
+
+    Returns the driver's :class:`~yeto.rl.adapters.miles.island_args.IslandArgs`
+    over the parsed Miles configuration: Miles' names read through, yeto's
+    runtime attributes sit in its context (and, on a mutable namespace, also
+    on the namespace itself).
+    """
+    from yeto.rl.adapters.miles.island_args import IslandArgs
 
     previous = sys.argv
     try:
         sys.argv = list(launch.argv)
         from miles.utils.arguments import parse_args
 
-        args = parse_args(preprocess_args=lambda ns: _apply_test_debug_rollout(apply_runtime_attrs(ns, launch)))
+        attach_mis_hook_config()
+        args = parse_args(
+            preprocess_args=lambda ns: _apply_test_debug_rollout(_preprocess_runtime_attrs(ns, launch))
+        )
     finally:
         sys.argv = previous
-    validate_parsed_args(args, launch)
-    return args
+    island = IslandArgs(args)
+    for name, value in split_runtime_attrs(launch)[1].items():
+        setattr(island, name, value)
+    validate_parsed_args(island, launch)
+    return island

@@ -86,6 +86,13 @@ def object_size(objects: ObjectStore, key: str) -> int | None:
     return None if data is None else len(data)
 
 
+def object_checksum(objects: ObjectStore, key: str) -> str | None:
+    """The SHA-256 checksum the store keeps for object ``key`` (``S3ObjectStore.checksum``:
+    base64, ``-<parts>`` for a multipart object), None when the store keeps none."""
+    checksum = getattr(objects, "checksum", None)
+    return None if checksum is None else checksum(key)
+
+
 def check_key(key: str) -> str:
     parts = key.split("/")
     if not key or key.startswith("/") or any(p in ("", ".", "..") for p in parts):
@@ -165,6 +172,12 @@ class DirectoryObjectStore:
 
 
 PUSHED_STATE = ".yeto-pushed.json"  # in the mirror root: what the object store holds of it
+TREE_LOCK = "tree"  # the lock of every subtree that is not independent (see TreeMirror)
+DEFAULT_FILE_CONCURRENCY = 8  # files of one upload tier moved at once by a push
+
+
+def _under(rel: str, paths: tuple[str, ...]) -> bool:
+    return any(rel == p or rel.startswith(p + "/") for p in paths)
 
 
 class TreeMirror:
@@ -177,42 +190,71 @@ class TreeMirror:
     place on the object store.
 
     * ``push`` uploads every file under ``root`` that is new or changed since the
-      last push (size and mtime): first the data files, then the record files
-      (``records``, by file name: a record lists the data files next to it), then
-      the pointer files (``pointers``, by file name), so a reader that follows a
-      pointer finds what it names; then it deletes the objects of files removed here (a prune). It
+      last push (size and mtime), in three tiers: first the data files, then the
+      record files (``records``, by file name: a record lists the data files next
+      to it), then the pointer files (``pointers``, by file name), so a reader that
+      follows a pointer finds what it names. The files of one tier move
+      ``file_concurrency`` at a time; a tier starts when the previous one is
+      complete. Then it deletes the objects of files removed here (a prune). It
       returns the seconds it took.
+    * ``push(paths)`` does the same for the files under ``paths`` only (relative
+      files or directories). ``independent`` names top-level directories (by
+      prefix, e.g. ``policy-releases`` also covers ``policy-releases-w4a8``) whose
+      writer commits them with their own paths: a push without ``paths`` leaves
+      them alone, so a policy release never waits for a round cut of the same
+      store, nor uploads it (GPU-A it10: the record and ``LATEST.json`` of a
+      6 GB release waited 40 minutes behind a 178 GB cut).
     * ``pull`` downloads the keys under ``subtrees`` that are missing here, and
       every pointer file again (pointers are the only rewritten objects).
 
-    What was pushed or pulled is kept in :data:`PUSHED_STATE` under ``root`` (under
-    ``flock``), so several processes of one host share one mirror without
-    uploading each other's files again. Every writer of the subtrees must be on
-    this host (one-node islands: a rank on another node writes to its own disk).
-    Files move with :func:`upload_file` / :func:`download_file`, so a large file
-    is never held in memory when the backend streams it."""
+    Locks (``flock``, so several processes of one host share one mirror): each
+    independent directory has its own lock and the rest of the tree one more
+    (:data:`TREE_LOCK`), held while that part is pushed, so one part is never pushed
+    twice at once while the other parts move freely. What was pushed or pulled is
+    kept in :data:`PUSHED_STATE` under ``root``, read and rewritten under a lock of
+    its own that is held only for that read-modify-write, never during a transfer.
+    Every writer of the subtrees must be on this host, unless it uploads its files
+    itself and records them with :meth:`record_pushed` (a rank on another node of a
+    multi-node island, ``cut_plugin``). Files move with :func:`upload_file` /
+    :func:`download_file`, so a large file is never held in memory when the backend
+    streams it."""
 
     def __init__(self, root: str | os.PathLike[str], objects: ObjectStore, *,
                  subtrees: tuple[str, ...], pointers: frozenset[str],
-                 records: frozenset[str] = frozenset()) -> None:
+                 records: frozenset[str] = frozenset(), independent: tuple[str, ...] = (),
+                 file_concurrency: int = DEFAULT_FILE_CONCURRENCY) -> None:
+        import threading
+
+        if int(file_concurrency) < 1:
+            raise ValueError("file concurrency must be >= 1")
         self.root = Path(root).expanduser()
         self.objects = objects
         self.subtrees = tuple(subtrees)
         self.pointers = frozenset(pointers)
         self.records = frozenset(records)
+        self.independent = tuple(d.strip("/") for d in independent)
+        self.file_concurrency = int(file_concurrency)
+        self._state_mutex = threading.Lock()  # threads of this process; flock covers the others
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _upload_rank(self, rel: str) -> int:
         name = rel.rsplit("/", 1)[-1]
         return 2 if name in self.pointers else 1 if name in self.records else 0
 
-    def _locked(self):
+    def _is_independent(self, rel: str) -> bool:
+        top = rel.split("/", 1)[0]
+        return any(top.startswith(d) for d in self.independent)
+
+    def _lock_key(self, rel: str) -> str:
+        return rel.split("/", 1)[0] if self._is_independent(rel) else TREE_LOCK
+
+    def _flock(self, name: str):
         import contextlib
         import fcntl
 
         @contextlib.contextmanager
         def held():
-            with open(self.root / (PUSHED_STATE + ".lock"), "a+b") as fh:
+            with open(self.root / name, "a+b") as fh:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
                     yield
@@ -220,6 +262,25 @@ class TreeMirror:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
         return held()
+
+    def _locked(self):
+        """The state lock: only around a read-modify-write of :data:`PUSHED_STATE`."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            with self._state_mutex, self._flock(PUSHED_STATE + ".lock"):
+                yield
+
+        return held()
+
+    def _part_locks(self, keys: list[str]):
+        import contextlib
+
+        stack = contextlib.ExitStack()
+        for key in sorted(set(keys)):  # one order everywhere: no two pushes wait on each other
+            stack.enter_context(self._flock(f"{PUSHED_STATE}.{key}.lock"))
+        return stack
 
     def _state(self) -> dict[str, list[int]]:
         import json
@@ -234,38 +295,134 @@ class TreeMirror:
         tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.root / PUSHED_STATE)
 
-    def _local_files(self) -> dict[str, list[int]]:
+    def _update_state(self, done: dict[str, list[int]] | None = None, removed: list[str] = ()) -> None:
+        with self._locked():
+            state = self._state()
+            state.update(done or {})
+            for rel in removed:
+                state.pop(rel, None)
+            self._save_state(state)
+
+    def record_pushed(self, rel: str) -> None:
+        """Mark the local file ``rel`` as already in the object store (its writer
+        uploaded it itself), so no push of this host uploads it again."""
+        st = (self.root / rel).stat()
+        self._update_state({rel: [st.st_size, st.st_mtime_ns]})
+
+    def push_file(self, rel: str) -> int:
+        """Upload the local file ``rel`` now (its writer, e.g. a trainer rank on any
+        node, moves its own file instead of waiting for the driver's push), mark it
+        pushed and return the size the object store reports for it (a HEAD), so the
+        caller can hand a checked size to whoever commits the pointer. A large file
+        moves as a resumable multipart upload with a SHA-256 per part (``write_file``):
+        a call after a failed one continues it. :meth:`object_checksum` then gives the
+        checksum the store keeps (one more HEAD)."""
+        rel = check_key(rel)
+        upload_file(self.objects, rel, self.root / rel)
+        self.record_pushed(rel)
+        size = object_size(self.objects, rel)
+        if size is None:
+            raise ObjectStoreError(f"{rel} is not in the object store after its upload")
+        return int(size)
+
+    def object_checksum(self, rel: str) -> str | None:
+        return object_checksum(self.objects, check_key(rel))
+
+    def evict_file(self, rel: str) -> int:
+        """Delete the local copy of the pushed file ``rel`` and forget it in the pushed
+        state, leaving its object in the store (a later push must not take the missing
+        file for a prune). Returns the bytes freed."""
+        rel = check_key(rel)
+        path = self.root / rel
+        with self._part_locks([self._lock_key(rel)]):
+            freed = path.stat().st_size if path.is_file() else 0
+            path.unlink(missing_ok=True)
+            self._update_state(removed=[rel])
+        return freed
+
+    def delete_tree(self, rel: str) -> list[str]:
+        """Delete every object under the directory ``rel`` (also those other hosts
+        uploaded: the shards of a multi-node cut) and forget them in the pushed state."""
+        rel = check_key(rel.strip("/"))
+        keys = list(self.objects.list(rel + "/"))
+        for key in keys:
+            self.objects.delete(key)
+        with self._locked():
+            state = self._state()
+            for key in [k for k in state if _under(k, (rel,))]:
+                del state[key]
+            self._save_state(state)
+        return keys
+
+    def evict_tree(self, rel: str) -> int:
+        """Delete the local files under the directory ``rel`` and forget them in the
+        pushed state, leaving their objects in the store: no later push takes the
+        missing files for a prune. Returns the bytes freed."""
+        rel = check_key(rel.strip("/"))
+        freed = 0
+        with self._part_locks([self._lock_key(rel)]):
+            path = self.root / rel
+            if path.is_dir():
+                freed = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+                shutil.rmtree(path, ignore_errors=True)
+            self._update_state(removed=[k for k in self._state() if _under(k, (rel,))])
+        return freed
+
+    def _local_files(self, paths: tuple[str, ...] | None = None) -> dict[str, list[int]]:
+        if paths is None:
+            candidates = self.root.rglob("*")
+        else:
+            candidates = []
+            for p in paths:
+                path = self.root / p
+                candidates += [path] if path.is_file() else list(path.rglob("*")) if path.is_dir() else []
         out = {}
-        for path in self.root.rglob("*"):
+        for path in candidates:
             rel = path.relative_to(self.root).as_posix()
             if (path.is_file() and not path.name.endswith(TMP_SUFFIX)
-                    and not rel.startswith(PUSHED_STATE)):
+                    and not rel.startswith(PUSHED_STATE)
+                    and (paths is not None or not self._is_independent(rel))):
                 st = path.stat()
                 out[rel] = [st.st_size, st.st_mtime_ns]
         return out
 
-    def push(self) -> float:
+    def push(self, paths: "list[str] | tuple[str, ...] | None" = None) -> float:
         import time
+        from concurrent.futures import ThreadPoolExecutor
 
         started = time.monotonic()
-        with self._locked():
-            state = self._state()
-            local = self._local_files()
+        scope = None if paths is None else tuple(sorted({check_key(str(p).strip("/")) for p in paths}))
+        keys = [TREE_LOCK] if scope is None else [self._lock_key(p) for p in scope]
+        with self._part_locks(keys):
+            with self._locked():
+                state = self._state()
+            local = self._local_files(scope)
             changed = [rel for rel, stamp in local.items() if state.get(rel) != stamp]
-            changed.sort(key=lambda rel: (self._upload_rank(rel), rel))
-            for rel in changed:
+
+            def upload(rel: str) -> None:
                 upload_file(self.objects, rel, self.root / rel)
-                state[rel] = local[rel]
-                self._save_state(state)
-            for rel in sorted(set(state) - set(local)):
+                self._update_state({rel: local[rel]})
+
+            for tier in (0, 1, 2):
+                files = sorted(rel for rel in changed if self._upload_rank(rel) == tier)
+                if not files:
+                    continue
+                with ThreadPoolExecutor(min(self.file_concurrency, len(files))) as pool:
+                    for future in [pool.submit(upload, rel) for rel in files]:
+                        future.result()  # the first error stops before the next tier
+            if scope is None:
+                gone = [rel for rel in state if rel not in local and not self._is_independent(rel)]
+            else:
+                gone = [rel for rel in state if rel not in local and _under(rel, scope)]
+            for rel in sorted(gone):
                 self.objects.delete(rel)
-                del state[rel]
-            self._save_state(state)
+            if gone:
+                self._update_state(removed=gone)
         return time.monotonic() - started
 
     def pull(self) -> None:
-        with self._locked():
-            state = self._state()
+        with self._part_locks([TREE_LOCK]):
+            done: dict[str, list[int]] = {}
             for subtree in self.subtrees:
                 for key in self.objects.list(subtree):
                     path = self.root / key
@@ -279,5 +436,5 @@ class TreeMirror:
                         continue
                     os.replace(tmp, path)
                     st = path.stat()
-                    state[key] = [st.st_size, st.st_mtime_ns]
-            self._save_state(state)
+                    done[key] = [st.st_size, st.st_mtime_ns]
+            self._update_state(done)

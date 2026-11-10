@@ -71,7 +71,8 @@ from yeto.rl.harness.gateway.gate_relay import GateRelay
 from yeto.rl.harness.gateway.relay_env import (  # noqa: F401 - re-exported names
     RELAY_HOST_ENV, RELAY_PORT_ENV, RELAY_PUBLIC_BASE_ENV, RELAY_PUBLIC_HOST_ENV, RELAY_SECRET_FILE_ENV)
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
-from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
+from yeto.rl.harness.harbor.trial import (CODEX_KWARGS, TrialConfigBuilder, provider_import_path,
+                                         setup_retries_from_env)
 from yeto.rl.harness.harbor.codex_provider import use_yeto_codex
 
 logger = logging.getLogger(__name__)
@@ -307,8 +308,8 @@ def example_config_builder(example: Any, metadata: dict[str, Any], request_kwarg
 
 def trial_config_builder(task: AgentTask, example: Any, metadata: dict[str, Any],
                          request_kwargs: dict[str, Any]) -> TrialConfigBuilder:
-    """The example's builder for Harbor's providers; yeto's for :data:`CUSTOM_PROVIDERS`."""
-    if task.provider in CUSTOM_PROVIDERS:
+    """The example's builder for Harbor's providers; yeto's for registered ones (``trial.provider_import_path``)."""
+    if provider_import_path(task.provider) is not None:
         return partial(build_trial_config, settings=HarborSettings.from_env())
     return example_config_builder(example, metadata, request_kwargs)
 

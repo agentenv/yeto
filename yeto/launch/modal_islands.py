@@ -20,7 +20,7 @@ from .credentials import SECRET_ENV_NAMES, _secret_value, registry_login_for
 from .storage import (
     MODAL_CHECKPOINT_STORE_MOUNT, MODEL_STORE_MOUNT, _rl_checkpoint_mount,
     _rl_checkpoint_storage_name, droppable_rejoins_in_new_container, modal_checkpoint_store,
-    resumes_in_new_container,
+    modal_store_secret_name, resumes_in_new_container,
 )
 from .harness_env import (
     harbor_callback_base_env,
@@ -52,6 +52,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     island config: same run script, same envs (syncer address swapped for
     the Modal-reachable one), image/volume per training mode."""
     from ..modal_runner import (
+        MODAL_ISLAND_DEFAULT_ENVS,
         ModalIslandConfig,
         image_ref_from_rl_image,
         modal_app_name,
@@ -74,6 +75,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and verl_needs_nccl_shm_off(args, spec):
         envs.setdefault("NCCL_SHM_DISABLE", "1")  # --modal-env below still overrides it
+    for key, value in MODAL_ISLAND_DEFAULT_ENVS.items():
+        envs.setdefault(key, value)  # --modal-env below still overrides it
     for item in getattr(args, "modal_env", None) or []:
         key, sep, value = str(item).partition("=")
         if not sep or not key:
@@ -150,13 +153,14 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         harbor_port_env=port_env,
         harbor_base_env=base_env,
         harbor_secret_env=secret_env,
-        named_secrets=((modal_sandbox_secret_name(args, spec),)
-                       if getattr(args, "modal_sandbox_secret", None) else ()),
+        named_secrets=tuple(name for name in (modal_sandbox_secret_name(args, spec),
+                                              modal_store_secret_name(args, spec))
+                            if name),
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
         cpu_override=getattr(args, "modal_cpu", None),
         memory_gib_override=getattr(args, "modal_memory_gib", None),
-        ephemeral_disk_gib=modal_ephemeral_disk_gib(args) if rl else getattr(
+        ephemeral_disk_gib=modal_ephemeral_disk_gib(args, num_nodes=spec.num_nodes) if rl else getattr(
             args, "modal_ephemeral_disk_gib", None),
         tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
                      if getattr(args, "modal_tape_volume", None) else None),
@@ -188,15 +192,56 @@ MODAL_EPHEMERAL_DISK_MIN_GIB = 512
 MODAL_EPHEMERAL_DISK_MAX_GIB = 3072
 
 
-def modal_ephemeral_disk_gib(args) -> int | None:
-    """Container disk of a Modal RL island: ``--modal-ephemeral-disk-gib``, or
-    for full-parameter sync a size scaled to the model; None keeps Modal's
-    default (other modes, or a model whose size is unknown)."""
+# a round cut on a staged s3:// store passes through each node's disk (its shards, then the
+# upload); safety factor on the estimate, plus one release export staged on the driver node
+CUT_DISK_SAFETY = 0.3
+RELEASE_STAGE_GIB = 200
+
+
+def cuts_requested(args) -> bool:
+    return any(getattr(args, name, None) is not None
+               for name in ("rl_cut_every", "rl_cut_auto_mtbf_s", "rl_cut_max_interval_s"))
+
+
+def cut_bytes_per_node(args, num_nodes: int) -> float | None:
+    """Estimated bytes of one round cut on one node: the trainable parameters with their
+    optimizer state (bf16 weight + fp32 master/m/v, 14 bytes each), split over the nodes.
+    Known for the Kimi-K3.1 partial-experts form (``--rl-expert-selection``); None otherwise."""
+    if not getattr(args, "rl_expert_selection", None):
+        return None
+    from ..rl.adapters.miles.models.kimi_k31 import model as k31
+    from .k31_checks import NON_EXPERT_PER_LAYER, check_expert_selection
+
+    sel = check_expert_selection(args) or {}
+    layers = int(sel.get("moe_layers") or k31.NUM_MOE_LAYERS)
+    params = layers * (int(sel.get("num_trainable") or 0) * k31.EXPERT_PARAMETERS + NON_EXPERT_PER_LAYER)
+    return params * 14 / max(1, int(num_nodes))
+
+
+def modal_ephemeral_disk_gib(args, num_nodes: int = 1) -> int | None:
+    """Container disk of a Modal RL island: ``--modal-ephemeral-disk-gib``; with round cuts
+    the estimated cut per node x (1 + CUT_DISK_SAFETY) plus a release stage (a launch whose
+    estimate passes Modal's limit is refused); for full-parameter sync a size scaled to the
+    model; None keeps Modal's default (other modes, or a model whose size is unknown)."""
     explicit = getattr(args, "modal_ephemeral_disk_gib", None)
     if explicit is not None:
         if int(explicit) < 1:
             raise ValueError("--modal-ephemeral-disk-gib must be >= 1")
+        if int(explicit) > MODAL_EPHEMERAL_DISK_MAX_GIB:
+            raise ValueError(f"--modal-ephemeral-disk-gib {explicit} > Modal's limit "
+                             f"{MODAL_EPHEMERAL_DISK_MAX_GIB} GiB")
         return int(explicit)
+    if cuts_requested(args):
+        per_node = cut_bytes_per_node(args, num_nodes)
+        if per_node is not None:
+            need = math.ceil(per_node * (1 + CUT_DISK_SAFETY) / (1 << 30)) + RELEASE_STAGE_GIB \
+                + MODAL_EPHEMERAL_DISK_MARGIN_GIB
+            if need > MODAL_EPHEMERAL_DISK_MAX_GIB:
+                raise ValueError(
+                    f"a round cut needs ~{need} GiB of disk per Modal node ({per_node / 1e12:.2f} TB of shards "
+                    f"on each of {num_nodes} node(s), +{CUT_DISK_SAFETY:.0%}, a release stage), more than "
+                    f"Modal's {MODAL_EPHEMERAL_DISK_MAX_GIB} GiB: use more nodes, or no cuts")
+            return max(need, MODAL_EPHEMERAL_DISK_MIN_GIB)
     if not rl_dense_sweep(args):
         return None
     from ..shape.memory import model_weights_gb
@@ -354,7 +399,7 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     if not confirmed:
         print(f"[launcher] WARN: Modal app {modal_ops.app_name} not confirmed stopped after "
               f"{len(checks)} check(s) (every row with this name must be stopped with 0 "
-              f"tasks; last: {checks[-1]}); stop it by hand: modal app stop "
+              f"tasks; last: {checks[-1]}); stop it by hand: modal app stop --yes "
               f"{modal_ops.app_name} (exit {TEARDOWN_UNVERIFIED_EXIT})", file=sys.stderr)
     return confirmed
 

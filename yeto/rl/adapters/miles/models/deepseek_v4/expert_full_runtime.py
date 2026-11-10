@@ -1,18 +1,20 @@
 """Runtime helpers for attention LoRA plus clone-expert full tuning on ports Miles.
 
-:mod:`.ports_runtime` installs these through ports Miles module hooks.
+:mod:`.ports_runtime` installs these through ports Miles module hooks. The
+model-independent pieces (import hooks, optimizer-master validation, export
+task filtering) come from :mod:`..partial_experts`; this module keeps the
+DeepSeek V4 clone geometry and its environment-driven settings.
 """
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
 import os
 import re
-import sys
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
+
+from yeto.rl.adapters.miles.ext_args import ext_attr
 
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_EXPERT_RANK,
@@ -22,6 +24,41 @@ from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     TRAINING_EXPERTS_PER_RANK,
     logical_to_training_expert_id,
 )
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import TRAINABLE_PARAM_ATTR
+from yeto.rl.adapters.miles.models.partial_experts import export as _export
+from yeto.rl.adapters.miles.models.partial_experts import optimizer as _optimizer
+from yeto.rl.adapters.miles.models.partial_experts.config import (
+    CLONE_PREFIX,
+    PartialExpertModelConfig,
+    register_model,
+)
+from yeto.rl.adapters.miles.models.partial_experts.hooks import (  # noqa: F401  (re-exported)
+    _FINDERS,
+    _Finder,
+    _Loader,
+    install_or_defer,
+)
+
+LABEL = "expert-full"
+
+# The DeepSeek V4 Flash contract: a prefix of the 32 clones per layer trains;
+# Adam keeps replicated FP32 masters (streamed by the full-parameter
+# transport), so the distributed optimizer stays refused.
+MODEL_CONFIG = register_model(PartialExpertModelConfig(
+    model_type="deepseek_v4",
+    num_routed_experts=ORIGINAL_EXPERTS,
+    num_moe_layers=NUM_LAYERS,
+    trainable_strategy=CLONE_PREFIX,
+    ep_size_default=8,
+    allow_distributed_optimizer=False,
+    requires_complete_master=True,
+    trainable_param_attr=TRAINABLE_PARAM_ATTR,
+    needs_engine_patch=True,
+    num_trainable_per_layer=None,
+    trainable_param_fragment=".mlp.experts.",
+    routed_experts_dtype="uint16",
+    notes=("clone experts 256..287 per layer; count from YETO_DSV4_EXPERT_FULL_COUNT",),
+))
 
 _EXPERT_WEIGHT = re.compile(
     r"^(?:base_model\.model\.)?model\.layers\.(?P<layer>\d+)\.mlp\."
@@ -54,17 +91,7 @@ def selected_expert_hf_name(name: str, *, expert_count: int) -> bool:
     )
 
 
-def _mapping_hf_names(task: Any) -> tuple[str, ...]:
-    if task is None:
-        return ()
-    value = getattr(getattr(task, "mapping", None), "hf_param", None)
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, Mapping) and all(
-        isinstance(item, str) for item in value.values()
-    ):
-        return tuple(value.values())
-    return ()
+_mapping_hf_names = _export.mapping_hf_names
 
 
 def filter_collective_expert_tasks(tasks, *, expert_count: int) -> list[Any]:
@@ -74,19 +101,15 @@ def filter_collective_expert_tasks(tasks, *, expert_count: int) -> list[Any]:
         logical_to_training_expert_id(expert) % TRAINING_EXPERTS_PER_RANK
         for expert in range(ORIGINAL_EXPERTS, ORIGINAL_EXPERTS + expert_count)
     }
-    selected = []
-    for task in tasks:
-        matches = tuple(
-            _EXPERT_WEIGHT.fullmatch(name) for name in _mapping_hf_names(task)
-        )
-        if matches and all(
+
+    def accept(name: str) -> bool:
+        match = _EXPERT_WEIGHT.fullmatch(name)
+        return (
             match is not None
-            and int(match.group("expert")) % TRAINING_EXPERTS_PER_RANK
-            in selected_offsets
-            for match in matches
-        ):
-            selected.append(task)
-    return selected
+            and int(match.group("expert")) % TRAINING_EXPERTS_PER_RANK in selected_offsets
+        )
+
+    return _export.filter_tasks(tasks, accept)
 
 
 def _expert_lr() -> float:
@@ -105,93 +128,29 @@ def wrap_expert_full_optimizer(original):
     Miles calls Megatron's factory with keyword arguments from its model module.
     """
 
-    def get_megatron_optimizer(
-        *,
-        config,
-        model_chunks,
-        config_overrides=None,
-        use_gloo_process_groups=True,
-        **kwargs,
-    ):
-        from megatron.core.optimizer import get_standard_config_overrides
-        from megatron.core.optimizer.optimizer_config import ParamKey
-
-        if config.use_distributed_optimizer:
-            raise RuntimeError(
-                "expert-full RL requires replicated FP32 optimizer masters"
-            )
-        overrides = (
-            get_standard_config_overrides(config)
-            if config_overrides is None
-            else dict(config_overrides)
-        )
-        overrides[ParamKey(attr="_yeto_expert_full")] = {
-            "max_lr": _expert_lr(),
-            "min_lr": _expert_lr(),
-        }
-        optimizer = original(
-            config=config,
-            model_chunks=model_chunks,
-            config_overrides=overrides,
-            use_gloo_process_groups=use_gloo_process_groups,
-            **kwargs,
-        )
-        _validate_complete_optimizer_masters(model_chunks, optimizer)
-        return optimizer
-
-    return get_megatron_optimizer
-
-
-def _model_chunks(models: Any) -> tuple[Any, ...]:
-    return tuple(models) if isinstance(models, (list, tuple)) else (models,)
+    return _optimizer.wrap_megatron_optimizer(
+        original,
+        label=LABEL,
+        allow_distributed_optimizer=MODEL_CONFIG.allow_distributed_optimizer,
+        param_attr=MODEL_CONFIG.trainable_param_attr,
+        lr=_expert_lr,
+        # late-bound: tests replace this module's validator
+        validate=lambda chunks, optimizer: _validate_complete_optimizer_masters(chunks, optimizer),
+    )
 
 
 def _validate_complete_optimizer_masters(model_chunks, optimizer) -> None:
     """Require every trainable model parameter's replicated optimizer master."""
 
-    import torch
-
-    optimizer_parameters = set()
-    for child in _optimizer_children(optimizer):
-        inner = getattr(child, "optimizer", None)
-        param_groups = getattr(inner, "param_groups", None)
-        if param_groups is None:
-            param_groups = getattr(child, "param_groups", None)
-        if param_groups is None:
-            if getattr(child, "is_stub_optimizer", False):
-                continue
-            raise RuntimeError("expert-full Adam child has no parameter groups")
-        for group in param_groups:
-            if not isinstance(group, Mapping) or "params" not in group:
-                raise RuntimeError("expert-full Adam parameter group is invalid")
-            optimizer_parameters.update(id(parameter) for parameter in group["params"])
-
-    trainable = []
-    seen = set()
-    for chunk in _model_chunks(model_chunks):
-        for parameter in chunk.parameters():
-            if parameter.requires_grad and id(parameter) not in seen:
-                trainable.append(parameter)
-                seen.add(id(parameter))
-    if not trainable:
-        raise RuntimeError("expert-full optimizer has no trainable parameters")
-    for parameter in trainable:
-        main = getattr(parameter, "main_param", None)
-        if (
-            getattr(parameter, "main_param_sharded", False)
-            or main is None
-            or main.dtype != torch.float32
-            or main.numel() != parameter.numel()
-            or id(main) not in optimizer_parameters
-        ):
-            raise RuntimeError(
-                "expert-full trainable parameter lacks a complete, "
-                "optimizer-owned FP32 master"
-            )
+    _optimizer.validate_optimizer_masters(
+        model_chunks,
+        optimizer,
+        require_complete=MODEL_CONFIG.requires_complete_master,
+        label=LABEL,
+    )
 
 
-def _optimizer_children(optimizer) -> list[Any]:
-    return list(getattr(optimizer, "chained_optimizers", (optimizer,)))
+_optimizer_children = _optimizer.optimizer_children
 
 
 def weight_iterator_task_bridge(iterator):
@@ -209,7 +168,7 @@ def weight_iterator_task_bridge(iterator):
 
     cached = AutoBridge.from_hf_pretrained(
         source,
-        trust_remote_code=bool(iterator.args.yeto_rl_trust_remote_code),
+        trust_remote_code=bool(ext_attr(iterator.args, "rl_trust_remote_code")),
     )
     iterator._yeto_expert_full_task_bridge = cached
     return cached
@@ -260,56 +219,22 @@ def export_selected_expert_weights(
             for _ in named_weights:
                 pass
             return
-        selected = (
-            item for item in named_weights
-            if selected_expert_hf_name(item[0], expert_count=expert_count)
+        selected = _export.select_named_weights(
+            named_weights, lambda name: selected_expert_hf_name(name, expert_count=expert_count)
         )
         for item in iterator._postprocess_and_quantize(selected, "base"):
             if not module.is_lora_weight_name(item[0]):
                 yield item
 
 
-class _Loader(importlib.abc.Loader):
-    def __init__(self, wrapped, installer) -> None:
-        self.wrapped = wrapped
-        self.installer = installer
-
-    def create_module(self, spec):
-        create = getattr(self.wrapped, "create_module", None)
-        return None if create is None else create(spec)
-
-    def exec_module(self, module) -> None:
-        self.wrapped.exec_module(module)
-        self.installer(module)
-
-
-class _Finder(importlib.abc.MetaPathFinder):
-    def __init__(self, fullname: str, installer) -> None:
-        self.fullname = fullname
-        self.installer = installer
-
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname != self.fullname:
-            return None
-        try:
-            sys.meta_path.remove(self)
-            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        finally:
-            sys.meta_path.insert(0, self)
-        if spec is None or spec.loader is None:
-            return spec
-        spec.loader = _Loader(spec.loader, self.installer)
-        return spec
-
-
-_FINDERS: list[_Finder] = []
-
-
-def install_or_defer(fullname: str, installer) -> None:
-    loaded = sys.modules.get(fullname)
-    if loaded is not None:
-        installer(loaded)
-        return
-    finder = _Finder(fullname, installer)
-    _FINDERS.append(finder)
-    sys.meta_path.insert(0, finder)
+__all__ = [
+    "MODEL_CONFIG",
+    "configured_expert_count",
+    "expected_expert_task_count",
+    "export_selected_expert_weights",
+    "filter_collective_expert_tasks",
+    "install_or_defer",
+    "selected_expert_hf_name",
+    "weight_iterator_task_bridge",
+    "wrap_expert_full_optimizer",
+]

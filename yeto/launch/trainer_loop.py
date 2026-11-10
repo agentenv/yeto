@@ -95,8 +95,8 @@ def add_arguments(group) -> None:
         "--rl-trainer-island", type=int, default=None, metavar="M",
         help="with --rl-trainer-scheduler: the island (index into --gpu) the scheduler starts "
         "and stops; the fleet does not start it. Every island must reach the "
-        "--rl-checkpoint-store: modal-volume:// on Modal islands, s3:// or oss:// on sky "
-        "islands (not Verda)")
+        "--rl-checkpoint-store: modal-volume:// or s3:// on Modal islands, s3:// or oss:// on "
+        "sky islands (not Verda)")
     group.add_argument(
         "--rl-ssh-trainer-workdir", default=None, metavar="PATH",
         help="with an ssh: trainer island: the yeto checkout on the inventory's trainer nodes "

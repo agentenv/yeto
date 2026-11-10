@@ -52,7 +52,7 @@ _STAGE_W_VALUE_FLAGS = (
     "--save", "--save-interval", "--lr-decay-style", "--rollout-sample-filter-path",
     "--rollout-all-samples-process-path", "--buffer-filter-path", "--eval-interval",
     "--n-samples-per-eval-prompt", "--eval-max-response-len", "--eval-top-p",
-    "--eval-temperature", "--eval-max-context-len", "--eval-max-prompt-len",
+    "--eval-temperature", "--eval-max-prompt-len",
 )
 _STAGE_W_MULTI_VALUE_FLAGS = ("--eval-prompt-data",)  # name + path
 _STAGE_W_SWITCHES = ("--skip-eval-before-train",)

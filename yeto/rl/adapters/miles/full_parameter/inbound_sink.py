@@ -57,6 +57,24 @@ def _chunk_put(ray_module):
     return lambda value: put_full_parameter_chunk(ray_module, value)
 
 
+FRAGMENT_RECEIVED_TAG = "[yeto-fragment-received]"
+
+
+def log_received_fragment(fragment_id: int, version: int, payload_hash: str, wire_hash: str) -> str:
+    """One line per authoritative (merged) fragment version this island stored:
+    its content hash (the Miles fragment payload hash of the received FP32
+    values) and the wire hash. Two islands that received the same merged
+    fragment version log the same ``payload`` (the SC2 per-fragment check)."""
+    import json
+    import sys
+
+    line = FRAGMENT_RECEIVED_TAG + " " + json.dumps(
+        {"fragment": int(fragment_id), "version": int(version),
+         "payload": str(payload_hash), "wire": str(wire_hash)}, sort_keys=True)
+    print(line, file=sys.stderr, flush=True)
+    return line
+
+
 class MilesRayInboundChunkSink:
     """Stream exact wire bytes into the production Miles typed Ray layout."""
 
@@ -343,6 +361,8 @@ class MilesRayInboundChunkSink:
                 return StreamedInboundPayload(raced, digest)
             stored = self.sink.with_verification(stored)
             self.sink._stored[key] = stored
+        log_received_fragment(transaction.fragment_id, transaction.version,
+                              fragment_descriptor.payload_hash, digest_hex)
 
         discarded = False
 

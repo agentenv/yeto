@@ -39,6 +39,11 @@ CARD_VENDOR: Mapping[str, str] = {
     # Alibaba T-Head PPU (rl-ssh-node-pool). torch reports device type
     # "cuda" on these cards, so the vendor comes from the card name only.
     "810E": "thead", "M890": "thead",
+    # NVIDIA Blackwell Ultra (Modal / National Compute B300 nodes).
+    "B300": "nvidia",
+    # AMD Instinct (ROCm; the Kimi K3.1 sampler nodes). torch reports device
+    # type "cuda" on ROCm too, so the vendor comes from the card name only.
+    "MI300X": "amd", "MI325X": "amd", "MI355X": "amd",
 }
 
 # Nominal HBM sizes (GiB) a card ships with. Read from our machines: 910B4
@@ -50,6 +55,7 @@ CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
     "910B": (32, 64), "910B4": (32, 64), "910B2": (64,), "910B3": (64,), "910C": (128,),
     "810E": (), "M890": (144,),
     "H100": (80,), "H200": (141,), "A100": (40, 80), "A100-80GB": (80,), "B200": (180,),
+    "B300": (288,), "MI300X": (192,), "MI325X": (256,), "MI355X": (288,),
 }
 
 # torch device type -> device family in the backend identity. A PPU is absent
@@ -59,7 +65,7 @@ DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "asc
 
 # Launcher device family (yeto.gpu_spec.DEVICE_FAMILIES) -> vendor.
 VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend",
-                                              "ppu": "thead"}
+                                              "ppu": "thead", "rocm": "amd"}
 DEVICE_FAMILY_BY_VENDOR: Mapping[str, str] = {v: k for k, v in VENDOR_BY_DEVICE_FAMILY.items()}
 
 

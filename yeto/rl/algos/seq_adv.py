@@ -46,6 +46,7 @@ from yeto.rl.engine.algorithm import (
 )
 
 from . import reward_pipeline as rp
+from yeto.rl.engine.ext_attrs import ext_attr
 
 MODULE = "yeto.rl.algos.seq_adv"
 SEQ_ADV_ATTR = "yeto_rl_seq_adv"
@@ -278,7 +279,7 @@ def runtime_attrs(spec) -> dict[str, Any]:
 
 
 def read_seq_adv_config(args: Any) -> dict[str, Any]:
-    payload = getattr(args, SEQ_ADV_ATTR, None)
+    payload = ext_attr(args, SEQ_ADV_ATTR, None)
     if payload is None:
         raise AdvantageTransformError(
             f"args.{SEQ_ADV_ATTR} is missing: GDPO runs only with the configuration the ports "

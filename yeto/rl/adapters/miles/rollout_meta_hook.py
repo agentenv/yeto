@@ -41,6 +41,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.adapters.miles.ext_args import ext_attr
+from yeto.rl.adapters.miles.proc_state import pop_proc_state, proc_state, set_proc_state, take_runtime_stats
+
 META_SINK_ENV = "YETO_ROLLOUT_META_SINK"
 DEFAULT_SINK_ACTOR = "yeto_rollout_meta"
 # Per-step seconds of the last metadata hook run (printed by record_trained_groups)
@@ -73,7 +76,18 @@ ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
 LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # buffer_stale_groups: groups the sample-buffer reader passed over this round
 # because they were older than max_policy_age (consumed, not trained)
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
+# buffer_xhw_quarantined / buffer_xhw_downweighted: groups the xhw guard passed over /
+# scaled this round (yeto.rl.engine.xhw_guard)
+# buffer_incomplete_groups / buffer_dropped_small_groups / buffer_carried_over_groups /
+# buffer_padded_samples: short groups trained, groups too small to train, whole groups
+# held for the next round, loss-free padding samples (BatchReader group_size)
+BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
+                    "buffer_carried_over_groups", "buffer_padded_samples")
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
+                                 "buffer_xhw_quarantined", "buffer_xhw_downweighted", *BUFFER_FILL_KEYS})
+# buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
+# per-source composition and rollout-side statistics of the round (xhw guard)
+ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
 ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
@@ -112,10 +126,14 @@ def record_round_metadata(
     """Rollout side: report this rollout's per-round counters (call once per rollout)."""
 
     del args
-    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS)
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS - ROUND_METADATA_DICT_KEYS)
     if unknown:
         raise RuntimeError(f"unknown per-round metadata keys {unknown}")
     for key, value in counts.items():
+        if key in ROUND_METADATA_DICT_KEYS:
+            if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
+                raise RuntimeError(f"per-round metadata {key} must be a mapping with str keys")
+            continue
         if key in ROUND_METADATA_LIST_KEYS:
             if not isinstance(value, list) or any(
                     not isinstance(run, list) or any(isinstance(v, bool) or not isinstance(v, int)
@@ -190,8 +208,8 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     # loss_mask 1 -> 0 before Miles converts the samples to train data.
     from yeto.rl.harness.placeholder_logprob_mask import apply_to_groups as mask_placeholder_logprobs
 
-    setattr(args, _PLACEHOLDER_ATTR,
-            mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
+    set_proc_state(args, _PLACEHOLDER_ATTR,
+                   mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
     marks.append(("placeholder_mask", time.monotonic()))
     # CompactionRL: the masks above may drop optimised tokens; the per-segment
     # counts (tokens_after, gae_length) must follow the final masks.
@@ -199,7 +217,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
-    setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
+    set_proc_state(args, _TRAINED_ATTR, {_group_key(group) for group in data})
     # The dispenser learns which of its rows entered this training batch
     from .task_dispense import on_trained as dispense_on_trained
 
@@ -302,7 +320,12 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         numbered = {v: engine_version_number(v) for v in versions}
         if None not in numbered.values():
             token = min(versions, key=lambda v: numbered[v])
-            carry = _carry.group_versions_record(group)
+            # a group with no per-token versions (a sample-buffer group from an engine
+            # sampler: one generating version per sample) names that version itself,
+            # so the trainer's token check defers to the driver's age window like
+            # for a carried-over group
+            carry = _carry.group_versions_record(group) or {
+                "policy_versions": sorted({int(numbered[v]) for v in versions})}
     rewards = [_reward(args, s) for s in samples]
     finite = [r for r in rewards if math.isfinite(r)]
     return {
@@ -406,10 +429,20 @@ def batch_summary_by_bucket(args: Any, samples: Sequence[Any]) -> dict[str, dict
 BATCH_SUMMARY_ENV = "YETO_RL_BATCH_SUMMARY"
 
 
+# Set by the sample-buffer reader (buffer_rollout_miles): its trained batch has no
+# rollout-side summary otherwise, and the dashboard's per-round reward distribution,
+# response length and truncation read it. Observation only.
+BUFFER_READER_ATTR = "_yeto_buffer_reader_round"
+
+
+def buffer_summary_enabled(args: Any) -> bool:
+    return batch_summary_enabled(args) or bool(proc_state(args, BUFFER_READER_ATTR))
+
+
 def batch_summary_enabled(args: Any) -> bool:
     """Opt-in (``--rl-observe-timeline`` sets ``args.yeto_rl_observe_timeline``,
     or ``YETO_RL_BATCH_SUMMARY=1``): the default metadata key set is unchanged."""
-    return bool(getattr(args, "yeto_rl_observe_timeline", False)) or os.environ.get(
+    return bool(ext_attr(args, "rl_observe_timeline", False)) or os.environ.get(
         BATCH_SUMMARY_ENV) == "1"
 
 
@@ -417,7 +450,7 @@ def build_metadata(
     args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None, *,
     defer_estimate: bool = False,
 ) -> dict[str, Any]:
-    trained = getattr(args, _TRAINED_ATTR, None)
+    trained = proc_state(args, _TRAINED_ATTR)
     if trained is None:
         raise RuntimeError(
             "rollout metadata hook ran without record_trained_groups; "
@@ -467,7 +500,7 @@ def build_metadata(
         ),
         **extra,
     }
-    placeholder = int(getattr(args, _PLACEHOLDER_ATTR, 0) or 0)
+    placeholder = int(proc_state(args, _PLACEHOLDER_ATTR) or 0)
     if placeholder:  # absent when 0 (old key set kept)
         from yeto.rl.harness.placeholder_logprob_mask import COUNT_KEY as _PLACEHOLDER_KEY
 
@@ -486,7 +519,7 @@ def build_metadata(
         # over every generated sample (Miles Sample.non_generation_time).
         # Absent when no sample reported any: the default key set is unchanged.
         payload["tool_wait_seconds"] = tool_wait
-    if trained_samples and batch_summary_enabled(args):
+    if trained_samples and buffer_summary_enabled(args):
         payload["batch_summary"] = batch_summary(args, trained_samples)
         if any(_bucket_of(s) != "unknown" for s in trained_samples):
             # 4.1: only when rows carry a difficulty (old key set kept otherwise)
@@ -594,7 +627,7 @@ MISMATCH_TEXT_MAX_ENV = "YETO_RL_MISMATCH_TEXT_MAX"
 
 
 def _limit_from(args: Any, attr: str, env: str, default: int) -> int:
-    value = getattr(args, attr, None)
+    value = ext_attr(args, attr, None)
     if value is None:
         value = os.environ.get(env)
     try:
@@ -1088,10 +1121,10 @@ def submitted_groups(args: Any, data_source: Any) -> int | None:
     offset = getattr(source, "sample_offset", None)
     index = getattr(source, "sample_group_index", None)
     index = index if isinstance(index, int) and not isinstance(index, bool) else None
-    previous_index = getattr(args, _GROUP_INDEX_ATTR, None)
-    previous = getattr(args, _OFFSET_ATTR, None)
-    setattr(args, _GROUP_INDEX_ATTR, index)
-    setattr(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
+    previous_index = proc_state(args, _GROUP_INDEX_ATTR)
+    previous = proc_state(args, _OFFSET_ATTR)
+    set_proc_state(args, _GROUP_INDEX_ATTR, index)
+    set_proc_state(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
     if getattr(source, "buffer", None):
         return None
     if index is not None:
@@ -1142,7 +1175,7 @@ def elastic_metadata_enabled(args: Any) -> bool:
     """
     import os
 
-    return bool(getattr(args, "yeto_rl_elastic_metadata", False)) or os.environ.get(
+    return bool(ext_attr(args, "rl_elastic_metadata", False)) or os.environ.get(
         ELASTIC_METADATA_ENV) == "1"
 
 
@@ -1204,18 +1237,15 @@ def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
         # older images -> the offset-derived count above (tokens unknown).
         from yeto.rl.engine.rollout_cutoff import discard_stats_fields
 
-        payload.update(discard_stats_fields(getattr(args, "rollout_abort_discard_stats", None)))
-        if hasattr(args, "rollout_abort_discard_stats"):
-            args.rollout_abort_discard_stats = None
-        # rl-algo-supplement 2.6: the fork's over-sampling tally (absent on
-        # older images -> no field, unknown)
+        payload.update(discard_stats_fields(take_runtime_stats(args, "abort_discard")))
+        # rl-algo-supplement 2.6: the over-sampling tally (MetricGatherer; the
+        # same numbers are Miles' rollout/over_sampling/* metrics). Absent on
+        # older images -> no field, unknown
         from yeto.rl.engine.ports import over_sampling_fields
 
-        over_sampling = over_sampling_fields(getattr(args, "rollout_over_sampling_stats", None))
+        over_sampling = over_sampling_fields(take_runtime_stats(args, "over_sampling"))
         if over_sampling is not None:
             payload["over_sampling"] = over_sampling
-        if hasattr(args, "rollout_over_sampling_stats"):
-            args.rollout_over_sampling_stats = None
         _timed("put", put_to_sink, payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on
@@ -1225,5 +1255,4 @@ def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
 
         _reset_sample_filters(args)
         for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR, _PLACEHOLDER_ATTR):
-            if hasattr(args, attr):
-                setattr(args, attr, None)
+            pop_proc_state(args, attr)

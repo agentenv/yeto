@@ -58,8 +58,10 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
+from .merged_release import fastest_lane_read
 from .policy_release import PolicyFollower, ReleaseNotLoaded
 from .sample_buffer import buffer_dir, read_read_position
+from .task_dispense import DispenseEnded, DispenseFencedEnd
 
 DEFAULT_POLL_S = 5.0
 
@@ -97,6 +99,9 @@ def heartbeat_read(beat: Mapping[str, Any], seen: Any, shard: str | None, read: 
     return read
 
 
+WAIT_HEARTBEAT_S = 60.0
+
+
 class SamplerLoop:
     def __init__(self, *, follower: PolicyFollower, buffer: Any,
                  generate: Callable[[int], None], num_rollouts: int | None,
@@ -128,6 +133,11 @@ class SamplerLoop:
         self._not_loaded: tuple[Any, ...] | None = None  # (seq, reason, fields) last reported
         self.live_poll_s = self.poll_s if live_poll_s is None else float(live_poll_s)
         self.unchecked_in_flight = False  # this round generated on weights that failed a check
+        # while it waits (no trainer reading: backlog at the cap, or no release yet) the
+        # sampler writes rl_sampler_waiting every heartbeat_s: its event tape keeps moving,
+        # so the NC pool's stall check (elastic stall_s) never takes a paused sampler for a
+        # crashed one and restarts or replaces it while the trainer is away
+        self.heartbeat_s = WAIT_HEARTBEAT_S
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -153,6 +163,11 @@ class SamplerLoop:
         beat = None if root is None else read_read_position(root)
         if beat is not None:
             read = heartbeat_read(beat, seen, shard, read)
+        # synced trainers' lanes: count from the furthest one, so a stopped trainer's
+        # unread lane cannot hold the cap (merged_release.fastest_lane_read)
+        lanes = fastest_lane_read(self.buffer, shard)
+        if lanes is not None:
+            read = max(read, lanes)
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self, *, in_flight: bool = False) -> None:
@@ -209,6 +224,15 @@ class SamplerLoop:
         """True when the round may start; False when asked to stop while waiting."""
         waiting_since = None
         waiting_policy_since = None
+        beat = [time.monotonic()]
+
+        def heartbeat(reason: str, since: float, **fields: Any) -> None:
+            now = time.monotonic()
+            if now - beat[0] >= self.heartbeat_s:
+                beat[0] = now
+                self.emit("rl_sampler_waiting", rollout_id=rollout_id, reason=reason,
+                          waited_s=round(now - since, 1), policy_version=self.follower.version, **fields)
+
         while True:
             self._load_newest()
             behind = getattr(self.follower.releases, "behind", None)  # spot samplers
@@ -218,6 +242,7 @@ class SamplerLoop:
                 if waiting_policy_since is None:
                     waiting_policy_since = time.monotonic()
                     self.emit("rl_sampler_waiting_policy", rollout_id=rollout_id)
+                heartbeat("policy", waiting_policy_since)
                 if self.should_stop():
                     return False
                 self.sleep(self.poll_s)
@@ -239,6 +264,7 @@ class SamplerLoop:
                 self.emit("rl_sampler_backlog_full", rollout_id=rollout_id, backlog_groups=backlog,
                           max_backlog_groups=self.max_backlog_groups,
                           policy_version=self.follower.version)
+            heartbeat("backlog_full", waiting_since, backlog_groups=backlog)
             if self.should_stop():
                 return False
             self.sleep(self.poll_s)
@@ -265,8 +291,16 @@ class SamplerLoop:
             before = len(self.buffer)
             started = self.clock()
             version, lag = self.follower.version, self.follower.version_lag()
-            with self.follower.generating(), self._live_refresh():
-                self.generate(rollout_id)
+            try:
+                with self.follower.generating(), self._live_refresh():
+                    self.generate(rollout_id)
+            except DispenseEnded as error:
+                if isinstance(error, DispenseFencedEnd):  # fenced: the data did not end
+                    raise
+                # the task dispenser settled every task: a normal end, not a failure
+                print(f"[engine-sampler] data ended: {error}", flush=True)
+                self.emit("rl_sampler_data_ended", rollout_id=rollout_id, rounds=done, detail=str(error)[:200])
+                break
             self.buffer.refresh()
             generate_s = self.clock() - started
             self.emit("rl_sampler_round", rollout_id=rollout_id, policy_version=version,

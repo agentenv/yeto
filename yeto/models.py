@@ -53,6 +53,7 @@ MODEL_ALIASES = {
     "kimi-k25": "moonshotai/Kimi-K2.5",
     "kimi-k26": "moonshotai/Kimi-K2.6",
     "kimi-k3": "moonshotai/Kimi-K3",  # size via Hub metadata
+    "kimi-k31-pro": "moonshotai/Kimi-K3.1-Pro",  # 2.78T MoE, MXFP4; size via Hub metadata
     # DeepSeek
     "deepseek31": "deepseek-ai/DeepSeek-V3.1",
     "deepseek-r1": "deepseek-ai/DeepSeek-R1",

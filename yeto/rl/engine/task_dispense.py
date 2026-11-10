@@ -136,6 +136,10 @@ class DispenseEnded(RuntimeError):
     """Every pass was given out and reported (``--rl-data-passes``): the data ended."""
 
 
+class DispenseFencedEnd(DispenseEnded):
+    """This incarnation was fenced: it takes no more tasks (the data did not end)."""
+
+
 # ---------------------------------------------------------------- wire codec
 
 
@@ -1094,7 +1098,8 @@ class DispensedRows:
 
     def written(self, rollout_id: int, positions: Iterable[int], *,
                 timeout_s: float = COMMIT_ACK_TIMEOUT_S, unwritten: str = "drop",
-                keep: Iterable[int] = ()) -> dict[str, Any]:
+                keep: Iterable[int] = (), requeue: Iterable[int] = (),
+                outcome: Mapping[int, Any] | None = None) -> dict[str, Any]:
         """Sampler island: the groups of ``positions`` are in the sample
         buffer, so their rows are done: report them trained (the sampler's
         "trained" is "written for the trainers") and wait (``timeout_s``) for
@@ -1102,12 +1107,18 @@ class DispensedRows:
         taken becomes a drop candidate (dropped at the next draw unless Miles put
         its group back into its buffer, as for a training island). ``keep``:
         taken positions whose groups are still generating (a streaming
-        sampler): neither released nor drop candidates."""
+        sampler): neither released nor drop candidates. ``requeue``: groups
+        lost to infrastructure, reported REQUEUE (given out again at most
+        ``--dispense-max-redo`` times). ``outcome``: log detail (unused here)."""
+        del outcome
         with self._lock:
             done = {int(p) for p in positions} & self.tasks.taken()
+            again = ({int(p) for p in requeue} & self.tasks.taken()) - done
             self._pending = {r: kept - done for r, kept in self._pending.items()
                              if r > int(rollout_id) and kept - done}
             self.tasks.report(trained=sorted(done))
+            if again:
+                self.tasks.report(requeue=sorted(again))
             rest = self.tasks.taken() - done - self.pending_positions() - {int(p) for p in keep}
             released = 0
             if unwritten == "release":  # never in the buffer: give them out again now
@@ -1115,8 +1126,9 @@ class DispensedRows:
                 self.tasks.report(release=sorted(rest))
                 released, rest = len(rest), set()
             self._candidates = rest
-        acked = self.tasks.flush(timeout_s) if done or released else True
+        acked = self.tasks.flush(timeout_s) if done or released or again else True
         return {"rollout_id": int(rollout_id), "trained": len(done), "released": released,
+                "requeued": len(again),
                 "acked": bool(acked)}
 
     def close(self) -> dict[str, Any]:
@@ -1139,11 +1151,16 @@ class DispensedPrompts(DispensedRows):
     positions per round, maps them to rows of its prompt file and reports a
     position trained once its group is in the sample buffer (``EngineRound``
     calls :meth:`written`); the rows of a round it did not write go back at
-    once (released)."""
+    once (released).
+
+    ``task_key``: the row field holding the agent task mapping (prompt format
+    ``agentic``); it goes into the item metadata as ``agent_task``, as
+    ``JsonlPrompts`` does. A row without one is reported dropped, as a row
+    without ``input_key`` is."""
 
     def __init__(self, path: str | os.PathLike[str], tasks: TaskSource, positions: PositionMap, *,
                  input_key: str, label_key: str | None, groups_per_round: int,
-                 render: Callable[[Any], str] = str) -> None:
+                 render: Callable[[Any], str] = str, task_key: str | None = None) -> None:
         import json
 
         super().__init__(tasks, positions)
@@ -1154,13 +1171,14 @@ class DispensedPrompts(DispensedRows):
         self.input_key, self.label_key = input_key, label_key
         self.groups_per_round = int(groups_per_round)
         self.render = render
+        self.task_key = task_key
         self.drawn = 0
 
     @classmethod
     def open(cls, path: str | os.PathLike[str], config: Mapping[str, Any], *, input_key: str,
              label_key: str | None, groups_per_round: int, render: Callable[[Any], str] = str,
              key: bytes | None = None, connect: Callable[[int], DispenseConnection] | None = None,
-             environ: Any = None) -> "DispensedPrompts":
+             environ: Any = None, task_key: str | None = None) -> "DispensedPrompts":
         """Open the island's connection (``config``: ``address``, ``learner_id``,
         ``seed``, ``prefetch_blocks``, and ``mix`` / ``by_label`` / ``labels`` for
         the streams) and start taking rows."""
@@ -1168,7 +1186,7 @@ class DispensedPrompts(DispensedRows):
                                             connect=connect, incarnation=member_incarnations(environ))
         try:
             return cls(path, tasks, positions, input_key=input_key, label_key=label_key,
-                       groups_per_round=groups_per_round, render=render)
+                       groups_per_round=groups_per_round, render=render, task_key=task_key)
         except BaseException:
             tasks.close(release=True)
             raise
@@ -1190,12 +1208,16 @@ class DispensedPrompts(DispensedRows):
             for position in self.take_rows(self.groups_per_round - len(items)):
                 index = self.positions.row(position)
                 row = self.rows[index]
-                if self.input_key not in row:
+                task = row.get(self.task_key) if self.task_key is not None else None
+                if self.input_key not in row or (self.task_key is not None and not isinstance(task, Mapping)):
                     self.tasks.report(dropped=[position])
                     continue
+                metadata: dict[str, Any] = {"row": index, DISPENSE_POSITION_KEY: int(position)}
+                if task is not None:
+                    metadata["agent_task"] = dict(task)
                 items.append(PromptItem(prompt_id=f"row{index}", prompt=self.render(row[self.input_key]),
                                         label=row.get(self.label_key) if self.label_key else None,
-                                        metadata={"row": index, DISPENSE_POSITION_KEY: int(position)}))
+                                        metadata=metadata))
                 self.drawn += 1
         return items
 

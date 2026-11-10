@@ -44,8 +44,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from yeto.cloud.s3_store import (PART_CONCURRENCY_ENV, PART_MB_ENV, POINTER_FILES, RECORD_FILES,
-                                 STAGED_SUBTREES, S3ObjectStore, TransferSettings, parse_s3_uri)
+from yeto.cloud.s3_store import (FILE_CONCURRENCY_ENV, INDEPENDENT_DIRS, PART_CONCURRENCY_ENV, PART_MB_ENV,
+                                 POINTER_FILES, RECORD_FILES, STAGED_SUBTREES, S3ObjectStore,
+                                 TransferSettings, parse_s3_uri)
 from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror
 from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore
 
@@ -62,7 +63,8 @@ STAGE_ENV = "YETO_RL_STORE_OSS_STAGE"
 DEFAULT_STAGE = "~/.cache/yeto/oss-store-stage"
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
-SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, CREDENTIALS_FILE_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV)
+SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, CREDENTIALS_FILE_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV,
+                FILE_CONCURRENCY_ENV)
 FORBID_OVERWRITE_HEADER = "x-oss-forbid-overwrite"
 
 
@@ -83,6 +85,7 @@ class OssObjectStore(S3ObjectStore):
 
     scheme = SCHEME
     buffer_shards = True
+    part_checksums = False  # OSS's S3 API takes no x-amz-checksum-sha256 (its CRC64 is not composite)
 
     def create(self, key: str, data: bytes) -> bool:
         if not self.conditional_writes:
@@ -196,11 +199,32 @@ class OssStore(CheckpointStore):
     def _tree(self) -> TreeMirror:
         if self._mirror is None:
             self._mirror = TreeMirror(self.root, self.objects, subtrees=STAGED_SUBTREES,
-                                      pointers=POINTER_FILES, records=RECORD_FILES)
+                                      pointers=POINTER_FILES, records=RECORD_FILES,
+                                      independent=INDEPENDENT_DIRS,
+                                      file_concurrency=self.objects.transfer.file_concurrency)
         return self._mirror
 
-    def commit(self) -> float:
-        return self._tree().push()
+    def commit(self, paths: Any = None) -> float:
+        return self._tree().push(paths)
+
+    @property
+    def cut_commits_beside_buffer_reads(self) -> bool:  # type: ignore[override]
+        return True  # always staged: the buffer goes by the object API
+
+    def push_local_file(self, relative: str) -> int | None:
+        """Upload one file of the stage now (a trainer rank's cut shard, on whichever
+        node wrote it: a multi-node island has one stage per node); returns the size
+        the object store reports, None when this store has no stage."""
+        return self._tree().push_file(relative)
+
+    def local_file_checksum(self, relative: str) -> str | None:
+        """The checksum the object store keeps for a file :meth:`push_local_file`
+        uploaded (``S3ObjectStore.checksum``), None without one."""
+        return self._tree().object_checksum(relative)
+
+    def delete_remote_tree(self, relative: str) -> list[str]:
+        """Delete every object under ``relative``, including what other nodes uploaded."""
+        return self._tree().delete_tree(relative)
 
     def reload(self) -> None:
         self._tree().pull()

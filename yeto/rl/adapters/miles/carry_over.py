@@ -47,6 +47,8 @@ from yeto.rl.engine.offpolicy_correction import (
     GATE_UNKNOWN_VERSION_DROPPED,
     TRUNCATED_BY_TURN,
 )
+from yeto.rl.adapters.miles.ext_args import ext_attr
+from yeto.rl.adapters.miles.proc_state import pop_proc_state, proc_state, set_proc_state, take_runtime_stats
 from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.version_segments import (
     ProvenanceError,
@@ -78,8 +80,8 @@ def max_policy_age(args: Any) -> int:
     Rollout ahead (``yeto_rl_rollout_ahead``): 0. Each batch comes from one
     publication and nothing is carried over; the lag of a whole batch is the
     driver's (the configured limit still bounds the trajectory evidence)."""
-    limit = int(getattr(args, "yeto_rl_max_policy_age", 0) or 0)
-    if limit == 0 or getattr(args, "yeto_rl_rollout_ahead", 0):
+    limit = int(ext_attr(args, "rl_max_policy_age", 0) or 0)
+    if limit == 0 or ext_attr(args, "rl_rollout_ahead", 0):
         return 0
     from .rollout_meta_hook import max_policy_age_override
 
@@ -142,11 +144,11 @@ def _trajectories(group: Sequence[Any]) -> int:
 
 
 def _stats_for(args: Any, current_version: int) -> dict[str, Any]:
-    stats = getattr(args, CARRY_STATS_ATTR, None)
+    stats = proc_state(args, CARRY_STATS_ATTR)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
         stats = {"version": current_version, **{k: 0 for k in CARRY_FIELDS},
                  DROPPED_LENGTHS: {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []}}
-        setattr(args, CARRY_STATS_ATTR, stats)
+        set_proc_state(args, CARRY_STATS_ATTR, stats)
     return stats
 
 
@@ -190,9 +192,7 @@ def take_carry_round(args: Any, current_version: int | None
                      ) -> tuple[dict[str, int], dict[str, list[int]]]:
     """This round's carry-over counts and the response lengths of the
     trajectories discarded per ``offpolicy_gate`` reason; consumed."""
-    stats = getattr(args, CARRY_STATS_ATTR, None)
-    if hasattr(args, CARRY_STATS_ATTR):
-        setattr(args, CARRY_STATS_ATTR, None)
+    stats = pop_proc_state(args, CARRY_STATS_ATTR)
     if not isinstance(stats, dict) or stats.get("version") != current_version:
         return ({k: 0 for k in CARRY_FIELDS},
                 {GATE_GROUP_DROPPED: [], GATE_UNKNOWN_VERSION_DROPPED: []})
@@ -463,8 +463,10 @@ def trained_token_versions(sample: Any, current_version: int) -> list[int | None
 
 # --------------------------------------------- agentic suspension (5.1/5.3)
 
-SUSPEND_STATS_ATTR = "rollout_suspend_stats"  # Miles fork, set at the cut-off
-RESUME_STATS_ATTR = "rollout_resume_stats"  # Miles fork, set at rollout start
+# rollout_runtime_stats kinds Miles publishes at the cut-off / at rollout start
+# (ports-v1 fork: args.rollout_suspend_stats / args.rollout_resume_stats)
+SUSPEND_STATS_KIND = "suspend"
+RESUME_STATS_KIND = "resume"
 SUSPEND_EXPIRED_PREFIX = "CodexSuspendExpired"
 POLICY_AGE_EXCEEDED_PREFIX = "policy_age_exceeded"
 # Sample metadata key of an infrastructure failure reason (set by the agent function).
@@ -500,13 +502,10 @@ def suspend_fields(args: Any, all_samples: Sequence[Sequence[Any]]) -> dict[str,
     their suspension outlived the survival limit, trajectories outside the
     version window, trajectories that were suspended at least once, and the
     seconds their environments stayed alive while parked (survival cost)."""
-    suspend = getattr(args, SUSPEND_STATS_ATTR, None)
-    resume = getattr(args, RESUME_STATS_ATTR, None)
+    suspend = take_runtime_stats(args, SUSPEND_STATS_KIND)
+    resume = take_runtime_stats(args, RESUME_STATS_KIND)
     if suspend is None and resume is None:
         return {}
-    for attr in (SUSPEND_STATS_ATTR, RESUME_STATS_ATTR):
-        if hasattr(args, attr):
-            setattr(args, attr, None)
     out: dict[str, Any] = {}
     for prefix, stats in (("", suspend), ("", resume)):
         if isinstance(stats, dict):

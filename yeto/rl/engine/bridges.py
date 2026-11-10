@@ -67,6 +67,17 @@ def _lora(state: TrainableState) -> CanonicalLoraState:
     return state.to_lora()
 
 
+def learned_layout(config: Any, initial: CanonicalLoraState) -> Any:
+    """``config`` with the layout of the island's first export when it predicts none
+    (``layout_hash`` None and no ``expected_specs``: a native LoRA export whose layout
+    the CPU cannot derive, Kimi-K3.1). Every island learns it the same way; the
+    syncer's session contract (built from the layout) refuses islands whose layouts
+    differ. A config that predicts a layout is returned unchanged."""
+    if getattr(config, "layout_hash", None) is not None or tuple(getattr(config, "expected_specs", ()) or ()):
+        return config
+    return replace(config, expected_specs=tuple(initial.specs), layout_hash=initial.layout_hash)
+
+
 def _at_version(state: CanonicalLoraState, version: int) -> CanonicalLoraState:
     return canonical_state(
         version,
@@ -395,6 +406,7 @@ class StrictAvgSync(RoundCutHooks):
 
     def start(self, driver: IslandDriver) -> SyncStart:
         initial = _lora(driver.export_local())
+        self.config = learned_layout(self.config, initial)
         self.bridge = StrictRlBridge(_PortsStrictRuntime(initial, self.progress), self.config)
         if self.client_factory is not None:
             self.bridge.client.close()
@@ -513,6 +525,15 @@ def _pool_local_round_fields(stats: LocalRoundStats, base_version: int, payload_
     }
 
 
+def _combined_delta_norm(submissions) -> float | None:
+    """sqrt of the summed squared submission norms; None when nothing was submitted or
+    any submission is unmeasured (an empty round has no measured delta, not a 0.0 one)."""
+    norms = [s.delta_l2_norm for s in submissions]
+    if not norms or any(n is None for n in norms):
+        return None
+    return math.sqrt(sum(n * n for n in norms))
+
+
 def _flat(state: CanonicalLoraState, specs) -> torch.Tensor:
     """The LoRA vector as one flat f32 tensor in ``specs`` order."""
     parts = [state.tensors[spec.name].detach().to(torch.float32).reshape(-1) for spec in specs]
@@ -623,6 +644,7 @@ class PoolAvgSync(RoundCutHooks):
 
     def start(self, driver: IslandDriver) -> SyncStart:
         self.template = _lora(driver.export_local())
+        self.config = learned_layout(self.config, self.template)
         # The syncer layout orders tensors by spec (core.build_avg_layout).
         self.specs = tuple(sorted(self.config.expected_specs or ())) or tuple(sorted(self.template.specs))
         self._driver = driver
@@ -1274,9 +1296,7 @@ class DecoupledSync(RoundCutHooks):
             )
             stats = replace(
                 stats,
-                delta_l2_norm=math.sqrt(
-                    sum(s.delta_l2_norm**2 for s in consolidation.submissions)
-                ),
+                delta_l2_norm=_combined_delta_norm(consolidation.submissions),
             )
             self._record_local_round(
                 stats,
@@ -1302,7 +1322,7 @@ class DecoupledSync(RoundCutHooks):
         )
         stats = replace(
             stats,
-            delta_l2_norm=math.sqrt(sum(s.delta_l2_norm**2 for s in submissions)),
+            delta_l2_norm=_combined_delta_norm(submissions),
         )
         self._record_local_round(
             stats, rollout_id=rollout_id, batch=batch, submissions=submissions
