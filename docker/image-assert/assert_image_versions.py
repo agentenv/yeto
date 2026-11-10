@@ -130,13 +130,34 @@ def check_cann(cann: dict | None, report: Report) -> None:
         report.add("cann", have.startswith(cann["version"]), f"{have} from {source} (lock {cann['version']})")
 
 
+def _nvidia_smi_driver() -> tuple[str | None, str | None]:
+    """The host driver as nvidia-smi reports it: sandboxed runtimes (Modal's gVisor)
+    mount the driver libraries but no /proc/driver/nvidia/version."""
+    import shutil
+    import subprocess
+
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return None, None
+    try:
+        out = subprocess.run([smi, "--query-gpu=driver_version", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    first = out.strip().splitlines()[0].strip() if out.strip() else ""
+    return (first, "nvidia-smi") if re.fullmatch(r"[0-9][0-9.]*", first) else (None, None)
+
+
 def check_driver(driver: dict | None, report: Report) -> None:
     if not driver:
         return
     have, source = _read_version([driver["version_file"]])
+    if have is None:
+        have, source = _nvidia_smi_driver()
     want = driver.get("min")
     if have is None:
-        report.add("driver", False, f"no version in {driver['version_file']} (is the host driver mounted?)")
+        report.add("driver", False, f"no version in {driver['version_file']} and no nvidia-smi answer "
+                                    "(is the host driver mounted?)")
     elif want is None:
         report.add("driver", True, f"{have} from {source} (recorded; no minimum in the lock)")
     else:
