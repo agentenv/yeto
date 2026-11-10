@@ -569,3 +569,95 @@ def test_live_loses_a_trial_without_any_known_version(tmp_path):
         rnd.close()
     (group,) = [f for n, f in events if n == GROUP_EVENT]
     assert group["lost"] == {LOST_VERSION: N} and not group["written"]
+
+
+class _AlwaysInFlight:
+    """A streaming round that always holds a group whose trials have not ended
+    (agentic trials of 20+ min: the sampler never sees a gap between groups)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def holds_weights(self) -> bool:
+        self.calls += 1
+        return True
+
+
+def test_a_release_deferred_past_the_bound_is_loaded_with_forced_and_deferred_s(tmp_path):
+    from yeto.rl.engine.sampler_loop import SamplerLoop
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    loaded = []
+    now = {"t": 0.0}
+    follower = PolicyFollower(releases, lambda release, directory: loaded.append(release.version),
+                              timer=lambda: now["t"], max_defer_s=600.0)
+    follower.hold = _AlwaysInFlight().holds_weights
+    events = []
+    loop = SamplerLoop(follower=follower, buffer=None, generate=lambda rid: None, num_rollouts=1,
+                       max_backlog_groups=1, emit=lambda n, **f: events.append((n, f)), sleep=lambda s: None)
+    releases.release(1, "h1", lambda d: (d / "model.safetensors").write_text("w"))
+    for t in (0.0, 300.0, 599.9):  # still within the bound: deferred
+        now["t"] = t
+        loop._load_newest()
+    assert not loaded and follower.counters.deferred_in_flight == 3 and follower.counters.forced_loads == 0
+    assert not [f for n, f in events if n == "rl_sampler_policy_loaded"]
+    now["t"] = 600.0
+    loop._load_newest()
+    assert loaded == [1] and follower.version == 1 and follower.counters.forced_loads == 1
+    (event,) = [f for n, f in events if n == "rl_sampler_policy_loaded"]
+    assert event["forced"] is True and event["deferred_s"] == 600.0 and event["policy_version"] == 1
+    # the next release starts a new deferral clock
+    releases.release(2, "h2", lambda d: (d / "model.safetensors").write_text("w"))
+    now["t"] = 700.0
+    loop._load_newest()
+    assert loaded == [1] and follower.counters.deferred_in_flight == 4
+    now["t"] = 1300.0
+    loop._load_newest()
+    assert loaded == [1, 2] and follower.counters.forced_loads == 2
+    assert [f["deferred_s"] for n, f in events if n == "rl_sampler_policy_loaded"] == [600.0, 600.0]
+
+
+def test_the_deferral_bound_never_forces_a_load_into_a_marked_round_or_when_unset(tmp_path):
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    loaded = []
+    now = {"t": 0.0}
+    follower = PolicyFollower(releases, lambda release, directory: loaded.append(release.version),
+                              timer=lambda: now["t"], max_defer_s=10.0)
+    releases.release(1, "h1", lambda d: (d / "model.safetensors").write_text("w"))
+    with follower.generating():  # a round that cannot take weights mid-generation
+        assert follower.refresh() is None
+        now["t"] = 1e6
+        assert follower.refresh() is None and not loaded
+    unbounded = PolicyFollower(releases, lambda release, directory: loaded.append(release.version),
+                               timer=lambda: now["t"])
+    unbounded.hold = lambda: True
+    for t in (0.0, 1e9):
+        now["t"] = t
+        assert unbounded.refresh() is None
+    assert not loaded and unbounded.counters.forced_loads == 0
+    with pytest.raises(ValueError):
+        PolicyFollower(releases, lambda r, d: None, max_defer_s=0)
+
+
+def test_an_unforced_load_carries_no_forced_field(tmp_path):
+    from yeto.rl.engine.sampler_loop import SamplerLoop
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    follower = PolicyFollower(releases, lambda release, directory: None, max_defer_s=600.0)
+    events = []
+    loop = SamplerLoop(follower=follower, buffer=None, generate=lambda rid: None, num_rollouts=1,
+                       max_backlog_groups=1, emit=lambda n, **f: events.append((n, f)), sleep=lambda s: None)
+    releases.release(1, "h1", lambda d: (d / "model.safetensors").write_text("w"))
+    loop._load_newest()
+    (event,) = [f for n, f in events if n == "rl_sampler_policy_loaded"]
+    assert "forced" not in event and "deferred_s" not in event and not follower.last_forced
+
+
+def test_spec_reload_max_defer_s_defaults_to_600_and_null_disables():
+    from yeto.rl.engine.engine_sampler_entry import island_config
+
+    base = {"sampler_id": "s", "num_rollouts": 1, "max_backlog_groups": 1, "sampling": {"n": 2, "max_tokens": 8},
+            "max_prompt_tokens": 16}
+    assert island_config(base).reload_max_defer_s == 600.0
+    assert island_config({**base, "reload_max_defer_s": 120}).reload_max_defer_s == 120.0
+    assert island_config({**base, "reload_max_defer_s": None}).reload_max_defer_s is None
