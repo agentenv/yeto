@@ -29,6 +29,8 @@ repeated here:
 6. [Dashboard](#6-dashboard)
 7. [Breakers and cost protection](#7-breakers-and-cost-protection)
 8. [Troubleshooting FAQ](#8-troubleshooting-faq)
+9. [Trainer image (Miles)](#9-trainer-image-miles)
+10. [Full-parameter parallel layout (64 and 128 experts)](#10-full-parameter-parallel-layout-64-and-128-experts)
 
 ---
 
@@ -121,6 +123,7 @@ replacement ready, provide at least `N + 1` accounts.
 - **Trainer image** on Modal: selected by the trainer flags (see
   `examples/k31/launch-trainer-modal-b300.sh` and [MILES_RL.md](MILES_RL.md)).
   The run's code is shipped as a code pack (`--rl-code-pack`, default `auto`).
+  Building and pinning the image: [section 9](#9-trainer-image-miles).
 
 ### Model weights
 
@@ -132,7 +135,8 @@ replacement ready, provide at least `N + 1` accounts.
   `max_mb_s`, `timeout_s`); the spec's `engine.server.base_dir` points at the
   local copy.
 - **Expert selection**: the trainer's `--rl-expert-selection <file>` and the
-  spec's `expert_selection_sha256` must describe the same file.
+  spec's `expert_selection_sha256` must describe the same file. Format and
+  generation: [section 10.3](#103-expert-selection-file).
 
 ### Sandbox host
 
@@ -634,9 +638,224 @@ Read `down.log`. Usually a node release is still in progress. Run
 `python -m yeto.launch.nc pool-status --config <pool.json>` and, if nodes are
 listed, `pool-stop` again.
 
+## 9. Trainer image (Miles)
+
+The trainer runs from a container image that carries Miles, SGLang,
+Megatron-LM and their dependencies at fixed commits. Every default image is
+pinned by digest.
+
+### 9.1 Default images and `--rl-image`
+
+The defaults are defined in `yeto/rl/adapters/miles/pins.py`:
+
+| Constant | Used for |
+|---|---|
+| `MILES_K31_FULL_IMAGE` | Default `--rl-image` for `--rl-model-recipe kimi_k31 --tuning full` (the full-parameter, partial-experts trainer) |
+| `MILES_K31_IMAGE` (= `MILES_NEXT_IMAGE`) | Default for every other recipe and the LoRA form |
+
+Both resolve to `docker:<registry>/yeto-miles-k31@sha256:<digest>`. Only the
+registry prefix is configurable:
+
+- `YETO_IMAGE_REGISTRY=<registry>/<org>` (in the run config `env`) points the
+  defaults at a mirror that carries the same digests. Because the reference is
+  a digest, a mirror cannot serve different bytes under the same pin.
+- `--rl-image docker:<registry>/<repo>@sha256:<digest>` overrides the image for
+  one run. Recommended practice: always reference by digest, not by tag.
+- `--rl-image-private` pulls with a registry login
+  (`SKYPILOT_DOCKER_USERNAME` / `SKYPILOT_DOCKER_PASSWORD`; see
+  [CLOUDS.md](CLOUDS.md)).
+
+When the image's Miles commit differs from the default pin, the island
+checks its checkout against the commit recorded for that digest
+(`IMAGE_MILES_COMMITS` in `pins.py`).
+
+### 9.2 Building the Miles K3.1 image
+
+Source: `docker/miles-k31/` in this repository.
+
+- `docker/miles-k31/versions.lock.json` pins the upstream base image by index
+  and manifest digest. It also pins the base's build arguments (the Miles,
+  SGLang and Megatron-LM commits, CUDA, NCCL, FlashInfer) and the expected
+  package versions.
+- `docker/miles-k31/build.sh` builds without a Docker daemon. It uses `crane`
+  to append one overlay layer to the pinned base. The layer holds the Miles
+  fork checkout, the SGLang fork checkout, the `peft` and `pyrage` wheels, the
+  Megatron patches, `/opt/yeto/image-manifest.json` and the image-assert lock
+  under `/opt/yeto/image`.
+
+```
+MILES_SRC=<miles-fork-clone> SGLANG_SRC=<sglang-fork-clone> \
+MILES_BRANCH=<branch-or-commit> SGLANG_BRANCH=<branch-or-commit> \
+DEST_REPO=<registry>/<org>/yeto-miles-k31 \
+  docker/miles-k31/build.sh --push
+```
+
+Before it builds anything, the script compares the base image's recorded build
+arguments with the lock and stops on any mismatch. It resolves the fork
+branches to commits and tags the image `k31-<miles7>-<sglang7>` (plus
+`TAG_SUFFIX` when set). After a push it prints the digest and writes
+`build-record.json`. Use that digest in `--rl-image`.
+
+**How versions are fixed.** The Miles commit inside the image is the commit
+`MILES_BRANCH` resolved to at build time. It is recorded in
+`/opt/yeto/image-manifest.json`, in the `ai.yeto.miles.commit` image label and
+in the image-assert `commits.json`. The pinned digest therefore fixes Miles,
+SGLang, Megatron-LM, Megatron-Bridge and torch_memory_saver together.
+
+### 9.3 Code packs: `git-patch` and `release`
+
+The trainer image fixes the frameworks. The yeto code that runs on the island
+is pinned separately as the run's **code pack** (`--rl-code-pack`):
+
+| Mode | What runs on the island | Pinned by |
+|---|---|---|
+| `git-patch` (the `auto` default with a bucket or `modal-volume://` checkpoint store) | Your local git tree (commit plus a patch of uncommitted and untracked files), packed once at the first start and stored in the checkpoint store | The pack digest in the run manifest |
+| `release` | `/opt/yeto/src` inside a yeto release image; no local tree is shipped | The release image digest |
+| `off` | The local tree at each launch, unpinned | Nothing |
+
+A release image is built with `scripts/build_yeto_release_image.sh [--push]`
+(`DEST_REPO=<registry>/<org>/yeto-release`). It adds one layer with
+`git archive` of one clean commit to the image pinned as `MILES_NEXT_IMAGE`,
+and it refuses a dirty work tree. Launch it with
+`--rl-code-pack release --rl-image docker:<registry>/<repo>@sha256:<digest>`.
+At start the island checks its source tree hash against the release manifest.
+See `docker/yeto-release/README.md`.
+
+Current scope: release images are built on `MILES_NEXT_IMAGE`, while the K3.1
+full-parameter recipe defaults to `MILES_K31_FULL_IMAGE`. Release mode has been
+launched on Modal only. Recommended practice for K3.1 full-parameter runs:
+`git-patch` (or `auto`) on the full-parameter image. Use `release` once a
+release image built on the matching base is available.
+
+Switching a running run between packs or images goes through
+`--rl-code-pack-upgrade "<reason>"` ([section 5.4](#54-upgrading-the-code-of-a-running-run)).
+
+## 10. Full-parameter parallel layout (64 and 128 experts)
+
+### 10.1 What is trained
+
+Kimi K3.1 has 93 decoder layers. The first is dense, so 92 layers are MoE,
+each with 896 routed experts (top-16). The full-parameter form trains a
+selected subset of routed experts in every MoE layer in place. Typical subsets
+are 64 or 128 per layer, and any count that EP divides is accepted. The
+other experts stay frozen in MXFP4, and the non-expert weights stay frozen in
+bf16. LoRA is intended for infrastructure tests only.
+
+### 10.2 Parallelism knobs
+
+| Flag | Meaning and constraints |
+|---|---|
+| `--gpu modal:<nodes>x8xb300` | Island size: whole B300 nodes of 8 GPUs. |
+| `--tensor-parallel` (TP) | 8 in the provided examples (within one node). |
+| `--pipeline-parallel` (PP) | Splits the 93 layers into stages. An uneven split is derived automatically (e.g. PP6: first 17, four middle stages of 15, last 16), and a split that does not add up is refused before any GPU starts. |
+| `--expert-parallel` (EP) | Routed experts sharded over EP ranks. EP shares ranks with TP x DP; it is not an additional multiplier. EP must divide both 896 and the trainable count, so 8, 16, 32 or 64 for 128 experts. It must equal the selection file's `ep_size`. |
+| Expert tensor parallel (ETP) | Fixed at 1 by the Miles backend. |
+| `--context-parallel` (CP) | Splits long sequences. Recommended above 64k tokens. |
+| `--rl-optimizer-offload-fraction F` | Keeps the fraction F of the FP32 Adam state (master, m, v) in host memory. `1.0` moves all of it to the host. |
+| `--modal-memory-gib` | Host memory requested per Modal container (default 32 GiB per GPU). Size it for the offloaded optimizer state. |
+
+GPU count = nodes x 8 = TP x PP x DP.
+
+### 10.3 Expert selection file
+
+`--rl-expert-selection <expert_selection.json>` (schema 1) lists, for every MoE
+layer, the `trainable` expert ids and a `slot_order` (the slot-to-expert
+permutation of the 896 experts for a given EP size). It also carries `sha256`
+and `trainable_sha256`. Each MoE layer selects its own experts. The sha256 is
+written into every release manifest and must match the sampler spec's
+`expert_selection_sha256`.
+
+Generate it with the selection tool:
+
+```
+# first run, before routing statistics exist: uniform selection
+python -m yeto.rl.adapters.miles.models.partial_experts.selection --model kimi_k31 \
+  --num-experts 896 --num-trainable 128 --ep-size <EP> --moe-layer-offset 1 \
+  --mode uniform --num-moe-layers 92 --output expert_selection.json
+
+# from routing statistics: sample-buffer group payloads or router counts
+python -m yeto.rl.adapters.miles.models.partial_experts.selection --model kimi_k31 \
+  --num-experts 896 --num-trainable 128 --ep-size <EP> --moe-layer-offset 1 \
+  --payload group-*.json --output expert_selection.json      # or --counts routed_counts.json
+
+# a new EP size for the same trainable set (keeps trainable_sha256)
+python -m yeto.rl.adapters.miles.models.partial_experts.selection \
+  --input expert_selection.json --ep-size <EP> --output expert_selection.ep<EP>.json
+
+# check a file
+python -m yeto.rl.adapters.miles.models.partial_experts.selection --validate expert_selection.json
+```
+
+**Moving from 64 to 128 experts** means generating a new selection with
+`--num-trainable 128` (and the `--ep-size` of the new layout). Then update
+`--rl-expert-selection` and `--expert-parallel` in `trainer.argv` and
+`expert_selection_sha256` in the sampler spec. The trainable set changes,
+so this is a new run, not a resume of a 64-expert run. `yeto launch` (and
+`--dry-run`) validates the selection against `--expert-parallel` and, when the
+checkpoint's `config.json` is readable, against the model's layer count
+(`yeto/launch/k31_checks.py`).
+
+### 10.4 Memory estimator
+
+The trainer dry run (`yeto launch ... --dry-run`, part of `yeto run up`
+preflight) prints a per-GPU estimate for the busiest pipeline stage
+(`kimi_k31_full.memory`, from `memory_estimate` in
+`yeto/launch/k31_checks.py`). It breaks HBM down into trainable experts,
+frozen MXFP4 experts, non-expert weights, activation checkpoints, the MoE
+working set and the logits. It also reports `host_optimizer_gib_per_gpu`.
+The estimate warns above 85% of the card's capacity and never refuses a
+launch.
+
+The estimate is first-order. It leaves out allocator fragmentation, NCCL
+buffers and CUDA graphs. Observed on the validated 64-expert layout below:
+
+| | Estimator | Observed |
+|---|---|---|
+| HBM peak per GPU | ~162 GiB | ~251 GiB (about 1.55x) |
+| Host memory per node | ~1.1 TiB (8 x 135.8 GiB offloaded optimizer) | ~1.9 TB of 2 TB |
+
+Recommended practice: plan HBM at about 1.6x the estimate and host memory at
+about 1.8x the offloaded-optimizer estimate, and keep at least 10-15% free on
+both.
+
+### 10.5 Recommended layouts
+
+Validated: 64-expert full-parameter on 2×8 B300; 128-expert layout per
+estimator.
+
+All rows use B300 (about 282 GiB usable per GPU), TP8, CP1,
+`--seq-len 32768`, `--rl-optimizer-offload-fraction 1.0`.
+
+| Trainable experts | GPUs | Layout | Estimator HBM / GPU | HBM planned at 1.6x | Host optimizer / node (estimator) | Status |
+|---|---|---|---|---|---|---|
+| 64 | 16 (2x8) | TP8 PP1 EP16 (DP2) | 162 GiB | ~260 GiB (observed ~251) | ~1.1 TiB (observed ~1.9 TB) | Validated |
+| 128 | 16 (2x8) | TP8 PP1 EP16 | 224 GiB | ~360 GiB | ~2.1 TiB | Exceeds a B300; not recommended |
+| 128 | 32 (4x8) | TP8 PP2 EP16 (DP2) | 116 GiB | ~185 GiB | ~1.1 TiB (same as the validated 64-expert host load) | Minimum |
+| 128 | **48 (6x8)** | **TP8 PP3 EP16 (DP2)** | **81 GiB** | **~130 GiB** | **~0.7 TiB** | **Recommended** |
+
+Recommended for 128 experts: **6 nodes x 8 B300 = 48 GPUs, TP8 PP3 EP16.**
+The 93 layers split evenly (31 per stage). The selection is built with
+`--ep-size 16`. The estimate leaves room on HBM for longer sequences, and
+host memory has comfortable headroom against the 2 TB of a node.
+
+The 4x8 layout fits the estimate, but its host memory load equals the
+validated 64-expert run, which used about 1.9 TB of 2 TB. Use it only with
+care, or with `--rl-optimizer-offload-fraction` below 1.0, which trades
+host memory for HBM.
+
+For longer contexts, raise `--context-parallel` or `--pipeline-parallel` and
+re-read the estimator's output (it warns for `--seq-len` >= 65536 with CP1).
+
+Current scope: the 128-expert layouts above come from the estimator and the
+observed 64-expert ratios. Recommended practice: run a short
+`--rl-stop-after-rounds` job on the chosen layout and check the HBM and host
+peaks before a long run.
+
 ## Planned enhancements
 
 - The padded-sample fraction as a dashboard column next to the padded sample
   count.
 - Pool configuration changes (accounts, limits) without a pool restart. Today,
   adding accounts takes a pool restart; the target can change at run time.
+- Release-mode images on the K3.1 full-parameter base.
+- On-hardware validation of the 128-expert full-parameter layout.
