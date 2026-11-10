@@ -43,6 +43,7 @@ from .buffer_rollout import (
     SampleBufferRolloutError,
     SamplerRoundWriter,
     apply_data_slot,
+    check_xhw_downweight,
     convertible_mode,
     merged_release_mode,
     open_buffer,
@@ -198,6 +199,7 @@ class _BufferRound:
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
         self.args = args
+        check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)))
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)

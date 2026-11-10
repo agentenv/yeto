@@ -1177,6 +1177,19 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
     return out, meta
 
 
+def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None) -> None:
+    """At the reader's start: ``YETO_RL_XHW_GUARD`` with ``action=downweight`` under GRPO
+    std normalization (Miles' default) is refused here, not at the first round the guard
+    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run)."""
+    from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
+
+    guard = XhwGuard.from_env(os.environ if environ is None else environ)
+    if guard is not None and guard.action == "downweight" and std_normalized:
+        raise SampleBufferRolloutError(
+            "YETO_RL_XHW_GUARD action=downweight scales the centered rewards; GRPO std "
+            "normalization (on) cancels it: use action=quarantine, or turn std normalization off")
+
+
 def executor_set_xhw_actions(_executor: Any, actions: Mapping[str, Mapping[str, Any]]) -> dict | None:
     """Runs INSIDE the rollout executor actor: the xhw_guard actions the next takes
     follow (None before the reader exists)."""

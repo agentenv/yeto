@@ -824,3 +824,13 @@ def test_the_reader_waits_while_groups_keep_arriving(tmp_path):
     with pytest.raises(br.SampleBufferRolloutError, match="without a new group"):
         reader.take(1, 1, current_version=1)
     assert 50 < now[0] - 120 <= 70
+
+
+def test_xhw_downweight_under_std_normalization_is_refused_at_the_start():
+    """Not at the first round the guard trips (the trainer would stop mid-run)."""
+    env = {"YETO_RL_XHW_GUARD": "action=downweight"}
+    with pytest.raises(br.SampleBufferRolloutError, match="action=quarantine"):
+        br.check_xhw_downweight(std_normalized=True, environ=env)
+    br.check_xhw_downweight(std_normalized=False, environ=env)
+    br.check_xhw_downweight(std_normalized=True, environ={"YETO_RL_XHW_GUARD": "1"})
+    br.check_xhw_downweight(std_normalized=True, environ={})
