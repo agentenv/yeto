@@ -209,9 +209,10 @@ def cut_bytes_per_node(args, num_nodes: int) -> float | None:
     Known for the Kimi-K3.1 partial-experts form (``--rl-expert-selection``); None otherwise."""
     if not getattr(args, "rl_expert_selection", None):
         return None
-    from ..rl.adapters.miles.models.kimi_k31 import model as k31
+    from ..rl.engine import backends
     from .k31_checks import NON_EXPERT_PER_LAYER, check_expert_selection
 
+    k31 = backends.module("kimi_k31_model", "miles")
     sel = check_expert_selection(args) or {}
     layers = int(sel.get("moe_layers") or k31.NUM_MOE_LAYERS)
     params = layers * (int(sel.get("num_trainable") or 0) * k31.EXPERT_PARAMETERS + NON_EXPERT_PER_LAYER)

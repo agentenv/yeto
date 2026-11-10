@@ -57,7 +57,9 @@ def _write_run_manifest(args) -> dict | None:
     from .. import rl as _rl
     from .. import runs
 
-    from ..rl.adapters.miles.pins import image_miles_commit
+    from ..rl.engine import backends
+
+    image_miles_commit = backends.module("pins", "miles").image_miles_commit
 
     manifest = {
         "rl_engine": "ports",

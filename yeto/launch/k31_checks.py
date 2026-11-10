@@ -60,19 +60,21 @@ def check_expert_selection(args) -> dict[str, Any] | None:
     path = getattr(args, "rl_expert_selection", None)
     if not path:
         return None
-    from ..rl.adapters.miles.models.kimi_k31.model import MODEL_TYPE, NUM_EXPERTS, NUM_MOE_LAYERS
-    from ..rl.adapters.miles.models.partial_experts.selection import ExpertSelection, SelectionError
+    from ..rl.engine import backends
+
+    k31 = backends.module("kimi_k31_model", "miles")
+    sel = backends.module("expert_selection", "miles")
 
     hint = ("generate one with python -m yeto.rl.adapters.miles.models.partial_experts.selection "
             "--model kimi_k31 --num-trainable 64 --ep-size <EP> ... and check it with --validate")
     try:
-        selection = ExpertSelection.load_file(os.path.expanduser(str(path)))
+        selection = sel.ExpertSelection.load_file(os.path.expanduser(str(path)))
     except FileNotFoundError:
         raise ValueError(f"--rl-expert-selection {path}: no such file; {hint}") from None
-    except (SelectionError, ValueError, KeyError, TypeError) as exc:
+    except (sel.SelectionError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"--rl-expert-selection {path} is not a valid selection: {exc}; {hint}") from None
-    if selection.model != MODEL_TYPE:
-        raise ValueError(f"--rl-expert-selection is for model {selection.model!r}, not {MODEL_TYPE!r}")
+    if selection.model != k31.MODEL_TYPE:
+        raise ValueError(f"--rl-expert-selection is for model {selection.model!r}, not {k31.MODEL_TYPE!r}")
     ep = int(getattr(args, "expert_parallel", 0) or 0)
     if ep and selection.ep_size != ep:
         raise ValueError(
@@ -93,13 +95,13 @@ def check_expert_selection(args) -> dict[str, Any] | None:
         if layers is not None:
             try:
                 selection.check_layers(range(dense, int(layers)))
-            except SelectionError as exc:
+            except sel.SelectionError as exc:
                 raise ValueError(f"--rl-expert-selection does not match the checkpoint: {exc}") from None
     else:
-        if selection.num_experts != NUM_EXPERTS or len(selection.trainable) != NUM_MOE_LAYERS:
+        if selection.num_experts != k31.NUM_EXPERTS or len(selection.trainable) != k31.NUM_MOE_LAYERS:
             warnings.append(
                 f"--rl-expert-selection covers {len(selection.trainable)} MoE layers x "
-                f"{selection.num_experts} experts; Kimi-K3.1-Pro has {NUM_MOE_LAYERS} x {NUM_EXPERTS}. "
+                f"{selection.num_experts} experts; Kimi-K3.1-Pro has {k31.NUM_MOE_LAYERS} x {k31.NUM_EXPERTS}. "
                 "The model's config.json is not readable here, so the layer check runs on the island")
     return {
         "sha256": selection.sha256,
@@ -114,7 +116,9 @@ def check_expert_selection(args) -> dict[str, Any] | None:
 def memory_estimate(args, *, num_trainable: int, moe_layers: int, gpu: str | None) -> dict[str, Any]:
     """Rough per-GPU memory of the K3.1 full form on the busiest pipeline stage."""
     from ..memory_estimate import gpu_capacity_gib
-    from ..rl.adapters.miles.models.kimi_k31 import model as k31
+    from ..rl.engine import backends
+
+    k31 = backends.module("kimi_k31_model", "miles")
 
     tp = max(1, int(getattr(args, "tensor_parallel", 1) or 1))
     pp = max(1, int(getattr(args, "pipeline_parallel", 1) or 1))

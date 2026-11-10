@@ -59,6 +59,8 @@ class BackendEntry:
     #   offpolicy_correction  correction_mapping(spec) + FORBIDDEN (rl-offpolicy-correction
     #                 -passthrough; neutral side: yeto.rl.engine.offpolicy_correction)
     #   expert_selection  ExpertSelection (partial-expert selection files; init_from_release)
+    #   pins          the pinned engine source and image_miles_commit (launcher, run manifest)
+    #   kimi_k31_model  Kimi-K3.1 shape constants (launch checks, memory / cut estimates)
     roles: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -83,6 +85,8 @@ _REGISTRY: dict[str, BackendEntry] = {
         "policy_age": f"{_MILES}.policy_age",
         "offpolicy_correction": f"{_MILES}.offpolicy_correction",
         "expert_selection": f"{_MILES}.models.partial_experts.selection",
+        "pins": f"{_MILES}.pins",
+        "kimi_k31_model": f"{_MILES}.models.kimi_k31.model",
     }),
     # rl-verl-backend: FSDP2 + vLLM islands, and the Megatron engine
     # island (EP/TP/PP); codex/elastic-pool roles are not provided yet and

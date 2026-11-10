@@ -459,7 +459,9 @@ def make_miles_island_task(
     if getattr(args, "rl_init_from_release", None):
         flags += f" --rl-init-from-release-dir {RL_INIT_RELEASE_DIR}"
     if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
-        from yeto.rl.adapters.miles.pins import image_miles_commit
+        from yeto.rl.engine import backends
+
+        image_miles_commit = backends.module("pins", "miles").image_miles_commit
 
         miles_setup, sglang_setup = _miles_source_setup(
             image_miles_commit(getattr(args, "rl_image", None)))
@@ -836,7 +838,9 @@ def _echoes_events(args, spec) -> bool:
 
 def _image_miles_commit_flag(args) -> str:
     """``--miles-commit`` when the run's --rl-image carries a Miles commit other than the pin."""
-    from yeto.rl.adapters.miles.pins import image_miles_commit
+    from yeto.rl.engine import backends
+
+    image_miles_commit = backends.module("pins", "miles").image_miles_commit
 
     commit = image_miles_commit(getattr(args, "rl_image", None))
     return f" --miles-commit {commit}" if commit else ""
