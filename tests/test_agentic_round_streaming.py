@@ -661,3 +661,34 @@ def test_spec_reload_max_defer_s_defaults_to_600_and_null_disables():
     assert island_config(base).reload_max_defer_s == 600.0
     assert island_config({**base, "reload_max_defer_s": 120}).reload_max_defer_s == 120.0
     assert island_config({**base, "reload_max_defer_s": None}).reload_max_defer_s is None
+
+
+def test_a_row_dispensed_twice_in_one_round_gets_its_own_sessions_and_group(tmp_path):
+    # q06-nc-e2e-20261110T2255Z: dispense positions 74 and 75 both mapped to row7
+    # (epoch wrap of a small dataset); both groups opened '<inc>-r410-row7-0' and the
+    # recorder's "already open" stopped the island with INFRA_FAILED.
+    harness = Harness({"row7": 0.0})
+
+    class Twice(Prompts):
+        def __call__(self, rollout_id):
+            meta = [{"agent_task": dict(TASK), DISPENSE_POSITION_KEY: spot} for spot in (74, 75)]
+            return [PromptItem("row7", "task row7", metadata=m) for m in meta]
+
+    prompts = Twice({}, dispensed=True)
+
+    class Strict(Recorder):
+        async def open(self, trajectory_id, sampling_params):
+            assert trajectory_id not in self.opened, f"{trajectory_id} already open"
+            return await super().open(trajectory_id, sampling_params)
+
+    rnd, engine, events = _round(tmp_path, harness, prompts, incarnation="132f9179")
+    rnd.recorder = Strict(engine)
+    try:
+        rnd(410)
+        rnd.flush()
+    finally:
+        rnd.close()
+    assert len(set(harness.started)) == len(harness.started) == 2 * N
+    entries, _ = _entries(tmp_path)
+    assert sorted(e.sample_id for e in entries) == ["s-132f9179-r410-row7", "s-132f9179-r410-row7-p75"]
+    assert sorted(c[1] for c in prompts.calls) == [[74], [75]]

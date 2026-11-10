@@ -89,6 +89,31 @@ class PromptItem:
 Reward = Callable[[PromptItem, Completion], float]
 
 
+def unique_prompt_ids(items: Sequence[PromptItem]) -> list[PromptItem]:
+    """``items`` with a prompt id that repeats in the round made unique.
+
+    A dispenser can hand out the same row twice in one round (two dispense
+    positions of one row across an epoch wrap of a small dataset, or a requeued
+    row next to its fresh copy). The round's names -- the buffer group key and
+    the agentic recorder sessions ``<incarnation>-r<rollout>-<prompt>-<j>`` --
+    are built from the prompt id, so a repeat would collide; the second copy
+    gets its dispense position (else its position in the round) appended.
+    """
+    seen: set[str] = set()
+    out = []
+    for position, item in enumerate(items):
+        if item.prompt_id in seen:
+            spot = dispense_position(item)
+            tag = f"p{spot}" if spot is not None else f"i{position}"
+            prompt_id = f"{item.prompt_id}-{tag}"
+            while prompt_id in seen:
+                prompt_id = f"{prompt_id}-i{position}"
+            item = PromptItem(prompt_id=prompt_id, prompt=item.prompt, label=item.label, metadata=item.metadata)
+        seen.add(item.prompt_id)
+        out.append(item)
+    return out
+
+
 def _accepted_kwargs(fn: Callable[..., Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
     """The keyword arguments of ``kwargs`` that ``fn`` accepts (all with ``**kwargs``)."""
     import inspect  # noqa: PLC0415
@@ -265,7 +290,7 @@ class EngineRound:
         rollout_id = int(rollout_id)
         if self.guard is not None:
             self.guard.check(rollout_id)
-        items = list(self.prompts(rollout_id))
+        items = unique_prompt_ids(list(self.prompts(rollout_id)))
         version = self.engine.served_version()
         if version is None:
             raise SamplerEngineError("the engine serves no version; it cannot generate")

@@ -97,7 +97,7 @@ from typing import Any
 
 from .buffer_payload import (ENGINE_META, ROLLOUT_ROUTED_EXPERTS, ROLLOUT_TOP_LOGPROBS, ROLLOUT_TOP_LOGPROBS_IDS,
                              TOP_LOGPROBS_DTYPE, TOP_LOGPROBS_IDS_DTYPE, routed_experts_uint16)
-from .engine_sampler import ROUND_EVENT, EngineRound, PromptItem, dispense_position
+from .engine_sampler import ROUND_EVENT, EngineRound, PromptItem, dispense_position, unique_prompt_ids
 from .policy_versions import engine_weight_version
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
 
@@ -803,7 +803,7 @@ class AgenticRound(EngineRound):
         self._raise()
         if self.guard is not None:
             self.guard.check(rollout_id)
-        items = list(self.prompts(rollout_id))
+        items = unique_prompt_ids(list(self.prompts(rollout_id)))
         if self.engine.served_version() is None:
             raise SamplerEngineError("the engine serves no version; it cannot generate")
         prefix = self.incarnation or "s"
