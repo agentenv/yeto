@@ -211,3 +211,28 @@ def test_a_marker_left_by_the_previous_incarnation_does_not_arm_the_deadline(tmp
         assert deadline.armed_at is None and exits == [] and not marker.exists()
     finally:
         deadline.cancel()
+
+
+def test_zero_variance_groups_are_detected_by_their_rewards():
+    from yeto.rl.engine.engine_sampler import zero_variance
+
+    assert zero_variance([{"reward": 1.0}, {"reward": 1.0}])
+    assert zero_variance([{"reward": 0.0}] * 4)
+    assert not zero_variance([{"reward": 1.0}, {"reward": 0.0}])
+
+
+def test_the_spec_switches_the_zero_variance_filter_on():
+    import inspect
+
+    from yeto.rl.engine import engine_sampler, engine_sampler_entry
+
+    assert engine_sampler.EngineSamplerConfig.__dataclass_fields__["drop_zero_variance_groups"].default is False
+    assert "drop_zero_variance_groups" in inspect.getsource(engine_sampler_entry)
+
+
+def test_an_island_with_the_filter_writes_no_zero_variance_group(tmp_path):
+    spec = {**_spec(tmp_path, rounds=2), "drop_zero_variance_groups": True}
+    entry.run(spec, resource_sampler=lambda emit: None, incarnation="aaaa0001")
+    assert not (tmp_path / "store" / "sample-buffer" / "payloads").exists() or not _payloads(tmp_path)
+    rounds = [e for p in (tmp_path / "tape").glob("events.*.jsonl") for e in _tape(p) if e.get("zero_variance_groups")]
+    assert rounds and all(e["groups"] == 0 and e["zero_variance_groups"] == 2 for e in rounds)

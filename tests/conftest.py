@@ -29,6 +29,40 @@ import os as _os
 
 import pytest as _pytest
 
+# YETO_REQUIRE_MILES=1 (the Miles image venv): a test that would skip because a
+# ``miles.*`` module is not importable fails instead. Without it the loss_hub
+# -> loss/hub move silently skipped every upstream-parity test.
+if _os.environ.get("YETO_REQUIRE_MILES") == "1":
+    _importorskip = _pytest.importorskip
+
+    def _importorskip_requiring_miles(modname, *args, **kwargs):
+        if modname == "miles" or modname.startswith(("miles.", "miles_plugins")):
+            import importlib
+
+            importlib.import_module(modname)  # ImportError: the path moved or Miles is missing
+        return _importorskip(modname, *args, **kwargs)
+
+    _pytest.importorskip = _importorskip_requiring_miles
+
+@_pytest.fixture
+def ports_v1_pin(monkeypatch):
+    """Pin the run to the frozen ports-v1 lineage head (the DiLoCo fork/image).
+
+    Feature gates (DP replicas, sharded masters, distopt reader, loss variants)
+    and the pin-bound GPU declarations hold on that lineage; on the k31 lineage
+    they are off until the batch that brings the feature back (B2/B8) or the
+    GPU re-verification lands (yeto-adapter.md 4.2/4.5). Tests of the gate and
+    declaration machinery use this fixture; test_rl_engine_pins checks the k31
+    pin's own (empty) state.
+    """
+    from yeto.rl.adapters.miles import config as miles_config
+    from yeto.rl.adapters.miles import pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_PORTS_V1_COMMIT)
+    monkeypatch.setattr(miles_config, "MILES_NEXT_COMMIT", pins.MILES_PORTS_V1_COMMIT)
+    return pins.MILES_PORTS_V1_COMMIT
+
+
 # decoupling 7.7a: islands must declare a compat_group (no default in code).
 # Unit tests that build identities at import time run as one H100 island;
 # tests of the missing-value error delete it with monkeypatch.
@@ -223,3 +257,12 @@ from syncer_reaper import (  # noqa: E402,F401
     pytest_sessionfinish,
     pytest_sessionstart,
 )
+
+
+# Most launch tests build RL argv without --inner-lr; yeto refuses that
+# (yeto.launch.rl_args.refuse_unset_inner_lr). Before any test module builds a
+# parser (some at import), the CLI default reads as an explicit value here;
+# tests/test_rl_inner_lr_guard.py puts the marked default back.
+import yeto.cli as _yeto_cli  # noqa: E402
+
+_yeto_cli.DEFAULT_INNER_LR = 3e-4

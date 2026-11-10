@@ -202,7 +202,7 @@
   "--global-batch-size",
   "8",
   "--balance-data",
-  "--rollout-max-context-len",
+  "--max-seq-len",
   "2048",
   "--rollout-max-response-len",
   "128",
@@ -249,7 +249,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "8545800520cd18d7ee951fbb8a06d012cbb6bbd39d70968e85f35c1b05d2c6e7",
+ "miles_argv_sha256": "7da9d36df6bd1baaacc20e92030467993f6250a47405d873476a64cf10b742eb",
  "name": "drgrpo",
  "placement": {
   "allow_cross_node_engine_tp": false,

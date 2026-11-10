@@ -37,7 +37,7 @@ from yeto.rl.engine.algorithm import (  # noqa: E402
 )
 from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
 
-ICEPOP = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+ICEPOP = "miles.backends.training_utils.loss.hub.corrections.icepop_function"
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
 TINY_QWEN3 = {
     "architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "hidden_size": 64,

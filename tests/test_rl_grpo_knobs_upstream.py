@@ -104,7 +104,7 @@ def test_kl_loss_triggers_ref_load_branch():
 
 
 def _policy_loss():
-    from miles.backends.training_utils.loss_hub import math_utils
+    from miles.backends.training_utils.loss.hub import math_utils
 
     fn = math_utils.compute_policy_loss
     return getattr(fn, "_torchdynamo_orig_callable", fn)
@@ -213,7 +213,7 @@ def test_reducer_errors(monkeypatch):
 
 
 def test_remove_sample_semantics(monkeypatch):
-    from miles.backends.training_utils import cp_utils
+    from miles.backends.training_utils.data import context_parallel as cp_utils
     from miles.ray.rollout import train_data_conversion as tdc
     from miles.utils.types import Sample
 

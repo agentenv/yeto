@@ -26,6 +26,11 @@ from yeto.rl.adapters.miles.algorithm_flags import (
 )
 from yeto.rl.adapters.miles.entry import miles_capabilities
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 FINGERPRINT = "sha256:" + "0" * 64
 CHECK = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
 HAS_MASKED_FRACTION = "masked_fraction" in {f.name for f in dataclasses.fields(TrainStepMetrics)}

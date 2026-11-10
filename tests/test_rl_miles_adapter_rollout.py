@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles.proc_state import pop_proc_state, proc_state, set_proc_state
 from yeto.rl.adapters.miles.rollout import (
     DirMetadataSource,
     MilesRolloutPool,
@@ -69,17 +70,18 @@ def run_hooks(args, kept, filtered, sink):
     all_samples = sorted(kept + filtered, key=lambda g: g[0].index)
     hook.put_to_sink(hook.build_metadata(args, all_samples, sink), sink)
     for attr in ("_yeto_trained_group_keys", "_yeto_bounded_filter_state"):
-        setattr(args, attr, None)
+        pop_proc_state(args, attr)
 
 
 def test_hook_extracts_metadata_only(tmp_path, monkeypatch):
     monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{tmp_path}")
-    args = SimpleNamespace(_yeto_bounded_filter_state={"rollout_id": None})
+    args = SimpleNamespace()
+    set_proc_state(args, "_yeto_bounded_filter_state", {"rollout_id": None})
     kept = [group(0, [1.0, 0.0]), group(2, [1.0, 1.0])]
     filtered = [group(1, [0.0, 0.0], status=Status.ABORTED)]
     hook.record_trained_groups(args, kept)
     hook.extract_rollout_metadata(args, sorted(kept + filtered, key=lambda g: g[0].index), None)
-    assert args._yeto_bounded_filter_state is None  # per-rollout reset
+    assert proc_state(args, "_yeto_bounded_filter_state") is None  # per-rollout reset
     raw = (tmp_path / "rollout-3.json").read_text()
     payload = json.loads(raw)
     assert "tokens" not in raw and "[1, 2, 3]" not in raw
@@ -364,7 +366,7 @@ def test_over_sampling_submitted_and_aborted_in_flight_groups(tmp_path):
     kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
     dropped = [group(2, [1.0, 1.0])]
     args = SimpleNamespace()
-    args._yeto_data_source_offset = 0
+    set_proc_state(args, "_yeto_data_source_offset", 0)
     hook.record_trained_groups(args, kept)
     import os
 
@@ -415,3 +417,28 @@ def test_fork_abort_discard_stats_reach_the_handle(tmp_path):
     h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
     assert (h.aborted_in_flight_groups, h.aborted_in_flight_trajectories,
             h.aborted_in_flight_tokens, h.aborted_in_flight_unknown_groups) == (4, 8, 1234, 1)
+
+
+def test_buffer_group_of_an_older_version_names_it_under_a_policy_age_limit():
+    """GPU-A it11: a sample-buffer trainer's round 2 trains groups an engine sampler
+    generated with version 0 while the round expects version 1. The samples carry one
+    weight version each and no per-token segments; under max_policy_age > 0 the group
+    names that version, so the trainer's token check defers to the driver's age window."""
+    from yeto.rl.adapters.miles.rollout import require_policy_tokens
+    from yeto.rl.engine.ports import GroupMetadata
+
+    old = "yeto:0:" + "e" * 64
+    g = group(0, [1.0, 0.0])
+    for s in g:  # a buffer sample: the generating version in its metadata, no spans
+        s.weight_versions = None
+        s.metadata = {**(getattr(s, "metadata", None) or {}), "weight_version": old}
+    rec = hook.group_record(SimpleNamespace(yeto_rl_max_policy_age=2), g)
+    assert rec["policy_token"] == old and rec["policy_versions"] == [0]
+    meta = GroupMetadata(group_id=rec["group_id"], sample_ids=tuple(rec["sample_ids"]),
+                         policy_token=rec["policy_token"], reward_mean=0.5, reward_std=0.5,
+                         token_count=rec["token_count"], policy_versions=tuple(rec["policy_versions"]))
+    require_policy_tokens(SimpleNamespace(groups=(meta,), external_cut=None,
+                                          mismatched_groups=lambda t: (meta,) if t != old else ()),
+                          "yeto:1:" + "f" * 64)
+    # limit 0: no version list, the strict check stays
+    assert "policy_versions" not in hook.group_record(SimpleNamespace(yeto_rl_max_policy_age=0), g)

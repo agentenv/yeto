@@ -20,6 +20,7 @@ import pytest
 
 from yeto.rl import codex_backend as cb
 from yeto.rl.harness import reasoning_loss_mask as rlm
+from yeto.rl.adapters.miles.proc_state import proc_state
 
 OPEN, CLOSE = 900, 901
 IM_START, ASSISTANT, NL, IM_END, TOOL = 10, 11, 12, 13, 14
@@ -81,7 +82,7 @@ def test_default_touches_nothing(args):
 
     assert rlm.apply_from_args(args, data, tokenizer_loader=boom) is None
     assert [[vars(s) for s in g] for g in data] == [[vars(s) for s in g] for g in before]
-    assert not hasattr(args, "_yeto_reasoning_marker_ids")
+    assert proc_state(args, "_yeto_reasoning_marker_ids") is None
 
 
 @pytest.mark.parametrize("profile", sorted(cb._PROFILES))

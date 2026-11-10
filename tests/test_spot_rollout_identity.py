@@ -249,19 +249,20 @@ def test_local_schemas_keep_their_exact_envelope_fields(tmp_path):
 def test_miles_evidence_port_writes_schema_5_for_a_relay_round(tmp_path):
     from yeto.rl.adapters.miles.buffer_rollout import EXTERNAL_CUT_ROUND_ATTR
     from yeto.rl.adapters.miles.full_parameter.evidence import persist_published_round_evidence
+    from yeto.rl.adapters.miles.proc_state import set_proc_state
     from yeto.rl.engine.policy_versions import PublishedPolicies
 
     args = SimpleNamespace(yeto_rl_trajectory_evidence_dir=str(tmp_path / "ev"),
                            yeto_rl_trajectory_evidence_kind="reward-function",
                            yeto_rl_trajectory_evidence_schema_version=2,
                            yeto_rl_reward_sha256=REWARD, yeto_rl_max_policy_age=2)
-    setattr(args, EXTERNAL_CUT_ROUND_ATTR, {"rollout_id": 4, "merged_version": 3})
+    set_proc_state(args, EXTERNAL_CUT_ROUND_ATTR, {"rollout_id": 4, "merged_version": 3})
     groups = [[_cut_sample(group_index=0, index=0, merged=3), _cut_sample(group_index=0, index=1, merged=2)]]
     persist_published_round_evidence(args, groups, f"yeto:4:{ROUND}", PublishedPolicies(), rollout_id=4)
     evidence = read_trajectory_batch_evidence(tmp_path / "ev" / "rollout-00000004.json")
     assert evidence.schema_version == 5 and evidence.merged_version == 3 and evidence.max_policy_age == 2
     assert [e.behavior_merged_version for e in evidence.envelopes] == [3, 2]
-    setattr(args, EXTERNAL_CUT_ROUND_ATTR, {"rollout_id": 4, "merged_version": 3})
+    set_proc_state(args, EXTERNAL_CUT_ROUND_ATTR, {"rollout_id": 4, "merged_version": 3})
     with pytest.raises(RuntimeError, match="relay take was for round 4"):
         persist_published_round_evidence(args, groups, f"yeto:5:{ROUND}", PublishedPolicies(), rollout_id=5)
 

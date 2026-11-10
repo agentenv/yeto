@@ -94,7 +94,7 @@ class ForkController:
         return SimpleNamespace(rollout_engines=[self.engines[c] for c in cells],
                                snapshot_cell_id_to_hashes={c: "h" for c in cells})
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.log.append(("end_update_weights",))
 
     async def abort_update_weights(self):

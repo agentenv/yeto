@@ -166,21 +166,6 @@ def _local_data_plan(path: Path):
     return plan
 
 
-def _tms_patch_contract():
-    return {
-        "repository": ssh_harness.TMS_PRELOAD_PATCH_REPOSITORY,
-        "base_commit": ssh_harness.TMS_PRELOAD_PATCH_BASE_COMMIT,
-        "patch_commit": ssh_harness.TMS_PRELOAD_PATCH_COMMIT,
-        "source_path": (
-            "yeto/rl/vendor/torch_memory_saver/"
-            "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
-        ),
-        "container_path": ssh_harness.TMS_PRELOAD_PATCH_CONTAINER_PATH,
-        "base_binary_sha256": ssh_harness.TMS_PRELOAD_BASE_BINARY_SHA256,
-        "binary_sha256": "2" * 64,
-    }
-
-
 def _tms_disk_backup_contract(plan):
     return ssh_harness._tms_train_disk_backup_contract(
         "/data/yeto-rl/tms-disk-backup",
@@ -1287,14 +1272,10 @@ def test_node_mounts_only_exact_remote_model_roots():
     assert "--volume /data/hf:/data/hf" not in script
 
 
-def test_offloaded_training_requires_attests_and_mounts_the_tms_fix():
+def test_offloaded_training_needs_the_disk_backup_and_takes_no_tms_preload_patch():
     plan = _plan()
     plan["learner"]["rl_offload_train"] = True
 
-    with pytest.raises(HarnessError, match="TMS preload patch"):
-        ssh_harness._validate_plan(plan)
-
-    plan["tms_preload_patch"] = _tms_patch_contract()
     with pytest.raises(HarnessError, match="disk-backup contract"):
         ssh_harness._validate_plan(plan)
 
@@ -1304,21 +1285,14 @@ def test_offloaded_training_requires_attests_and_mounts_the_tms_fix():
     start = _node_start_script(plan, 0, 0)
     second = _node_start_script(plan, 0, 1)
 
-    assert plan["tms_preload_patch"]["binary_sha256"] in setup
-    assert ssh_harness.TMS_PRELOAD_BASE_BINARY_SHA256 in setup
-    assert "docker run --rm --entrypoint sha256sum" in setup
+    # the ports-v1 TMS free-while-paused preload patch is not part of the k31 image
+    assert "TMS_PATCH" not in setup and "torch_memory_saver_hook_mode_preload" not in start
     assert "MILES_TMS_TRAIN_DISK_BACKUP_DIR=/workspace/tms-disk-backup" in start
     assert "MILES_TMS_TRAIN_DISK_BACKUP_CHUNK_MB=256" in start
     assert "acceptance/island-0-node-0" in start
     assert "acceptance/island-0-node-1" in second
     assert '--volume "$TMS_DISK_BACKUP_HOST:/workspace/tms-disk-backup"' in start
     assert "--volume /data:/data" not in start
-    assert (
-        '"$RUN/source/yeto/rl/vendor/torch_memory_saver/'
-        "torch_memory_saver_hook_mode_preload_cu13.abi3.so:"
-        "/usr/local/lib/python3.12/dist-packages/"
-        'torch_memory_saver_hook_mode_preload_cu13.abi3.so:ro"'
-    ) in start
 
     with pytest.raises(HarnessError, match="dedicated"):
         ssh_harness._tms_train_disk_backup_contract(
@@ -1328,13 +1302,8 @@ def test_offloaded_training_requires_attests_and_mounts_the_tms_fix():
             256,
         )
 
-    plan["tms_preload_patch"]["base_binary_sha256"] = "3" * 64
-    with pytest.raises(HarnessError, match="pinned TMS"):
-        ssh_harness._validate_plan(plan)
-
-    plan["tms_preload_patch"] = _tms_patch_contract()
-    plan["tms_preload_patch"]["patch_commit"] = "3" * 40
-    with pytest.raises(HarnessError, match="pinned TMS"):
+    plan["tms_preload_patch"] = {"repository": "x"}  # a stale ports-v1 plan
+    with pytest.raises(HarnessError, match="tms_preload_patch"):
         ssh_harness._validate_plan(plan)
 
 
@@ -1359,7 +1328,6 @@ def test_tms_disk_backup_cli_and_non_offload_rejection():
     assert parsed.jit_cache_root == "/data/yeto-rl/jit-cache"
 
     plan = _plan()
-    plan["tms_preload_patch"] = _tms_patch_contract()
     plan["tms_train_disk_backup"] = _tms_disk_backup_contract(plan)
     with pytest.raises(HarnessError, match="requires --rl-offload-train"):
         ssh_harness._validate_plan(plan)
@@ -1615,7 +1583,6 @@ def test_decoupled_plan_propagates_fragment_and_variance_filter_settings():
             "rl_distributed_timeout_minutes": 7,
         }
     )
-    plan["tms_preload_patch"] = _tms_patch_contract()
     plan["tms_train_disk_backup"] = _tms_disk_backup_contract(plan)
     ssh_harness._validate_plan(plan)
 

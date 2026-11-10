@@ -263,7 +263,7 @@ _NON_RL_LITERALS = frozenset({
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     # task dispenser (syncer flags)
     "--dispense", "--dispense-lease-s", "--dispense-log", "--dispense-max-redo", "--dispense-passes",
-    "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
+    "--entrypoint", "--expected-island-contract", "--expert-selection", "--out", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
     "--grace-arrival-quantile", "--grace-min-ms", "--terminal-grace-ms",
     "--format", "--get", "--global", "--gpus", "--head",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",

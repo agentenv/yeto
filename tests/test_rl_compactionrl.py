@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from yeto.rl import critic_warmup as cw
 from yeto.rl.algos import critic
 from yeto.rl.algos.compactionrl import DESIGN_PARAMETERS, PAPER_PARAMETERS, compactionrl_spec
@@ -14,6 +16,11 @@ from yeto.rl.adapters.miles import config as mc
 from yeto.rl.engine.run_config import CriticRunConfig, LrSchedule
 
 from test_rl_miles_adapter_config import make_config
+
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
 
 CRL_ARGV = [
     "--calculate-per-token-loss",

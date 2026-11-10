@@ -32,6 +32,11 @@ from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
 from yeto.rl.adapters.miles.entry import miles_capabilities  # noqa: E402
 
 load_extensions()
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 NAME = "base_model.model.layer.lora_A.weight"
 FP = "sha256:" + "0" * 64
 RUN = {"rollout_batch_size": 4, "rollout_max_response_len": 384,

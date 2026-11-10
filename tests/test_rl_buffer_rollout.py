@@ -161,6 +161,20 @@ def test_payload_keeps_per_token_logprobs_versions_and_arrays():
     assert br.group_entry_fields([s, sample(1, 0, 5)]) == (3, 6)  # oldest token version
 
 
+def test_entry_reads_miles_per_call_weight_version_dicts():
+    """Miles Sample.to_dict() (k31 pin 63834eaa) writes one WeightVersionsPerCall
+    dict per generate call, {"spans": [...], "prefill_spans": [...], ...}."""
+    from yeto.rl.engine import buffer_payload
+
+    s = sample(0, 0, 4)
+    s["weight_versions"] = [{"spans": [{"version": "5", "abs_start": 0, "abs_end": 2},
+                                       {"version": "6", "abs_start": 2, "abs_end": 4}],
+                             "prefill_spans": [], "output_start": 0, "prompt_tokens": 3}]
+    back = br.decode_group(br.encode_group([s]))[0]
+    assert buffer_payload.behavior_versions(back) == [5, 6]
+    assert br.group_entry_fields([back, sample(1, 0, 5)]) == (5, 6)
+
+
 def test_payload_stores_integer_arrays_in_the_narrowest_dtype():
     """R3 expert ids (0..127, int32 on the engine) are stored as uint8 and read
     back as int32 with the same values; a payload without ``cast`` (written
@@ -495,5 +509,215 @@ def test_reader_round_reports_its_stale_groups_as_round_metadata(monkeypatch):
     reader.groups, reader.samples_per_group = 1, 2
     reader.reader = SimpleNamespace(take=lambda rid, n, current_version: ([(3, group)], report))
     out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
-    assert calls == [("meta", 2, {"buffer_stale_groups": 3}), ("all",)]
+    fill = {"buffer_incomplete_groups": 0, "buffer_dropped_small_groups": 0,
+            "buffer_carried_over_groups": 0, "buffer_padded_samples": 0}
+    assert calls == [("meta", 2, {"buffer_stale_groups": 3, **fill}), ("all",)]
     assert out["metrics"]["sample_buffer/stale_groups"] == 3.0
+
+
+def test_reader_round_pads_a_short_round_to_exactly_the_global_batch(monkeypatch):
+    """A short group is trained; Miles still gets rollout_batch_size * n samples:
+    the padding comes after the end-of-round hooks, each in a group of its own."""
+    from types import SimpleNamespace
+
+    calls = []
+    registry = {"all": lambda args, samples, source: calls.append(("all", sum(len(g) for g in samples)))}
+    plugin = _import_plugin_with_stub_miles(monkeypatch, registry)
+    monkeypatch.setattr(plugin, "record_round_metadata",
+                        lambda args, rid, **counts: calls.append(("meta", rid, counts)))
+    monkeypatch.setattr(plugin, "Sample", SimpleNamespace(from_dict=lambda d: d))
+    monkeypatch.setattr(plugin, "RolloutFnTrainOutput", lambda **kw: kw)
+    monkeypatch.setattr(plugin, "offpolicy_source_event", lambda *a, **kw: {})
+    monkeypatch.setattr(plugin, "flat_metrics", lambda source: {})
+    groups = [(0, _short(0, 4, 4)), (1, _short(1, 4, 3))]
+    report = br.TakeReport(rollout_id=2, groups=2, stale_groups=0, start=0, end=3, incomplete_groups=1,
+                           carried_over_groups=1)
+    reader = plugin._BufferRound.__new__(plugin._BufferRound)
+    reader.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path="all")
+    reader.groups, reader.samples_per_group = 2, 4
+    reader.reader = SimpleNamespace(take=lambda rid, n, current_version: (groups, report))
+    out = reader(SimpleNamespace(evaluation=False, rollout_id=2, weight_version=4))
+    assert calls[0][2]["buffer_padded_samples"] == 1 and calls[0][2]["buffer_carried_over_groups"] == 1
+    assert calls[1] == ("all", 7)  # the hooks see the real samples only
+    samples = out["samples"]
+    assert [len(g) for g in samples] == [4, 3, 1] and sum(len(g) for g in samples) == 2 * 4
+    assert samples[1][0]["group_index"] == 1 and samples[2][0]["remove_sample"]
+    assert samples[2][0]["loss_mask"] == [0, 0, 0]
+    assert out["metrics"]["sample_buffer/padded_samples"] == 1.0
+
+
+def test_engine_sampler_sample_gets_one_miles_version_span():
+    """An engine-sampler sample (metadata.weight_version only) reaches Miles with one
+    WeightVersionsPerCall covering its response tokens; Miles' own spans are kept and
+    a mid-generation version change gets none."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.carry_over import sample_versions
+    from yeto.rl.engine import buffer_payload
+
+    s = {"index": 0, "tokens": [1, 2, 3, 10, 11], "response_length": 2,
+         "metadata": {"weight_version": "4"}}
+    out = buffer_payload.miles_sample_dict(s)
+    assert out["weight_versions"] == [{"spans": [{"version": "4", "abs_start": 3, "abs_end": 5}],
+                                       "prefill_spans": [], "output_start": 3, "prompt_tokens": 3}]
+    spans = [SimpleNamespace(spans=[SimpleNamespace(**sp) for sp in out["weight_versions"][0]["spans"]])]
+    assert sample_versions(SimpleNamespace(tokens=out["tokens"], response_length=2, weight_versions=spans)) == [4]
+    miles = {**s, "weight_versions": [{"spans": [{"version": "7", "abs_start": 3, "abs_end": 5}],
+                                       "prefill_spans": [], "output_start": 3}]}
+    assert buffer_payload.miles_sample_dict(miles)["weight_versions"] == miles["weight_versions"]
+    moved = {**s, "metadata": {"weight_version": "4", "final_weight_version": "5"}}
+    assert "weight_versions" not in buffer_payload.miles_sample_dict(moved)
+
+
+
+def _buffer_island(tmp_path, store, name, *, trained=True):
+    import test_rl_resume_from_checkpoint as rfc
+    from test_rl_resume_from_checkpoint import _cp, _rctl, _trained_island
+
+    reader, pool = _reader_link(tmp_path / name)
+    if trained:
+        for rid in range(NEXT + 1):  # rounds 0..NEXT-1 trained, round NEXT selected ahead
+            reader.take(rid, 2, current_version=1)
+        _rank, _ctl_, driver, cp = _trained_island(tmp_path, store, NEXT, name=name)
+    else:  # a freshly built trainer of a new island
+        rank = make_rank(9)
+        driver = rfc._Driver(rank)
+        cp = _cp(_rctl(tmp_path, name, store), driver, rfc._trainer(rank), rfc._Ledger(NEXT))
+    args = type("Args", (), {"rollout_function_path": br.ROLLOUT_FUNCTION_PATHS["trainer"]})()
+    _wire_sample_buffer(cp, driver=type("D", (), {"rollout": pool})(), miles_args=args)
+    return reader, driver, cp
+
+
+def test_a_buffer_reader_cuts_in_the_background_on_a_store_that_commits_beside_it(tmp_path, monkeypatch):
+    """A staged object store (cut_commits_beside_buffer_reads): the buffer-reading
+    trainer's periodic cut is deferred (the next rounds do not wait for its upload);
+    wait_uploads_durable completes it with the cut's watermark, and a new island
+    resumes there."""
+    import yeto.rl.engine.resume as rs
+
+    monkeypatch.setattr(CheckpointStore, "cut_commits_beside_buffer_reads", property(lambda self: True))
+    store = CheckpointStore(tmp_path / "store")
+    _reader, driver, cp = _buffer_island(tmp_path, store, "a")
+    assert cp.background_commit
+    info = cp.save(driver, rollout_id=NEXT)
+    assert info["store_commit"] == "deferred"
+    assert cp.pointer() is None and rs.read_latest(store.root) is None  # nothing committed yet
+    done = cp.wait_uploads_durable(driver)
+    assert done == {"in_flight": False, "ok": True, "cut_id": info["cut_id"],
+                    "pointed_cut_id": info["cut_id"], "error": None}
+    assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
+    assert cp.pointer()[CUT_KEY]["buffer_watermark"] == 2 * NEXT
+    assert cp.wait_uploads_durable(driver)["cut_id"] is None  # nothing left in flight
+
+    reader_b, driver_b, cp_b = _buffer_island(tmp_path, store, "b", trained=False)
+    cp_b.resume(driver_b)
+    assert reader_b.buffer.watermark == reader_b.buffer.read_cursor == 2 * NEXT
+
+
+def test_a_buffer_reader_still_cuts_inline_on_a_store_that_does_not(tmp_path):
+    store = CheckpointStore(tmp_path / "store")
+    _reader, driver, cp = _buffer_island(tmp_path, store, "a")
+    assert cp.background_commit and not cp._defer(final=False)
+    assert cp.save(driver, rollout_id=NEXT)["store_commit"] == "inline"
+
+
+def _short(g, version, k, n=4):
+    """Group ``g`` with ``k`` of its ``n`` samples (a sampler lost the rest)."""
+    return [sample(n * g + j, g, version) for j in range(k)]
+
+
+def _reader(tmp_path, **kwargs):
+    return br.BatchReader(_buffer(tmp_path), max_policy_age=1, wait_s=0.0, poll_s=0.0, group_size=4, **kwargs)
+
+
+def test_reader_trains_short_groups_and_skips_only_groups_without_spread(tmp_path):
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, k in enumerate((4, 1, 3, 2, 4)):  # g1: one sample, no in-group spread
+        writer.write(_short(g, 1, k), group_key=f"g{g}")
+    reader = _reader(tmp_path)
+    groups, report = reader.take(0, 2, current_version=1)
+    # g0 + g2 = 7 of 8: g3 (2) overflows the missing 1, so it is carried over
+    assert [(pos, len(g)) for pos, g in groups] == [(0, 4), (2, 3)]
+    assert (report.incomplete_groups, report.dropped_small_groups) == (1, 1)
+    assert (report.carried_over_groups, report.padded_samples, report.end) == (1, 1, 3)
+    assert report.behavior_versions == {1: 2} and set(report.position_sources) == {0, 2}
+    metrics = report.metrics()
+    assert metrics["sample_buffer/carried_over_groups"] == 1.0 and metrics["sample_buffer/padded_samples"] == 1.0
+    assert reader.watermark_before(1) == 3  # the carried group is not past the watermark
+    groups, report = reader.take(1, 2, current_version=1)
+    assert [(pos, len(g)) for pos, g in groups] == [(3, 2), (4, 4)]  # the carried group first, whole
+    assert (report.start, report.end, report.carried_over_groups, report.padded_samples) == (3, 5, 0, 2)
+    assert reader.watermark_before(2) == 5
+
+
+def test_reader_tops_a_short_round_up_with_whole_groups_that_fit(tmp_path):
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, k in enumerate((4, 2, 2, 4)):
+        writer.write(_short(g, 1, k), group_key=f"g{g}")
+    groups, report = _reader(tmp_path).take(0, 2, current_version=1)
+    assert sum(len(g) for _, g in groups) == 8 and [pos for pos, _ in groups] == [0, 1, 2]
+    assert (report.carried_over_groups, report.padded_samples, report.end, report.incomplete_groups) == (0, 0, 3, 2)
+
+
+def test_a_reset_drops_the_carried_group_so_it_is_selected_again(tmp_path):
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, k in enumerate((4, 3, 4)):
+        writer.write(_short(g, 1, k), group_key=f"g{g}")
+    reader = _reader(tmp_path)
+    _groups, report = reader.take(0, 2, current_version=1)
+    assert (report.end, report.carried_over_groups) == (2, 1)
+    reader.reset(reader.watermark_before(1))
+    groups, _report = reader.take(1, 1, current_version=1)
+    assert [(pos, len(g)) for pos, g in groups] == [(2, 4)]
+
+
+def test_a_stale_carried_group_is_not_trained(tmp_path):
+    writer = br.GroupWriter(_buffer(tmp_path), "s0")
+    for g, k in enumerate((4, 3, 4, 4, 4)):
+        writer.write(_short(g, 1 if g < 3 else 3, k), group_key=f"g{g}")
+    reader = _reader(tmp_path)
+    _groups, report = reader.take(0, 2, current_version=1)
+    assert report.carried_over_groups == 1
+    groups, report = reader.take(1, 2, current_version=3)  # max_policy_age 1: version 1 is too old
+    assert [pos for pos, _ in groups] == [3, 4] and report.stale_groups == 1
+
+
+def test_padding_fills_the_global_batch_without_touching_real_advantages():
+    groups = [_short(0, 1, 4), _short(1, 1, 3)]
+    for g, rewards in zip(groups, ([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), strict=True):
+        for d, r in zip(g, rewards, strict=True):
+            d["reward"] = r
+    groups[1][2]["tokens"] = [1, 2, 3]  # the shortest sample is the one copied
+    pads = br.padding_samples(groups, 1, samples_per_group=4)
+    batch = [d for g in groups for d in g] + pads
+    assert len(batch) == 2 * 4  # rollout_batch_size * n_samples_per_prompt
+    (pad,) = pads
+    assert pad["loss_mask"] == [0, 0, 0] and pad["remove_sample"] and pad["metadata"]["yeto_padding"]
+    assert pad["tokens"] == [1, 2, 3] and pad["rollout_id"] is None
+    assert pad["group_index"] not in {d["group_index"] for g in groups for d in g}
+    # group-relative centering (Miles' reward_group_segments groups by group_index):
+    # the real groups' means use real samples only; a padding group centers to 0
+    by_group: dict[int, list[float]] = {}
+    for d in batch:
+        by_group.setdefault(d["group_index"], []).append(d["reward"])
+    centered = {g: [r - sum(v) / len(v) for r in v] for g, v in by_group.items()}
+    assert centered[1] == pytest.approx([2 / 3, -1 / 3, -1 / 3]) and centered[pad["group_index"]] == [0.0]
+    assert br.padding_samples(groups, 0, samples_per_group=4) == []
+
+
+def test_padding_matches_miles_reward_normalization():
+    miles = pytest.importorskip("miles.ray.rollout.train_data_conversion")
+    from types import SimpleNamespace
+
+    from miles.utils.types import Sample
+
+    groups = [_short(0, 1, 4), _short(1, 1, 3)]
+    for g, rewards in zip(groups, ([1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0]), strict=True):
+        for d, r in zip(g, rewards, strict=True):
+            d["reward"] = r
+    batch = [Sample.from_dict(d) for d in [x for g in groups for x in g] + br.padding_samples(
+        groups, 1, samples_per_group=4)]
+    args = SimpleNamespace(advantage_estimator="grpo", grpo_std_normalization=False, n_samples_per_prompt=4,
+                           rollout_batch_size=2, reward_key=None)
+    out = miles._normalize_rewards_by_rollout(args, batch, [s.reward for s in batch], None)
+    assert out == pytest.approx([0.5, -0.5, -0.5, 0.5, 2 / 3, -1 / 3, -1 / 3, 0.0])

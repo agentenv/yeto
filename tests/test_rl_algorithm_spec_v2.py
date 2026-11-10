@@ -245,7 +245,7 @@ def test_plugin_namespace_not_allowed():
         PluginRef("os.path.join", "a" * 64)
     with pytest.raises(AlgorithmSpecError, match="allowed namespaces"):
         PluginRef.from_path("json.dumps")
-    PluginRef("miles.backends.training_utils.loss_hub.corrections.icepop_function", "b" * 64)
+    PluginRef("miles.backends.training_utils.loss.hub.corrections.icepop_function", "b" * 64)
 
 
 def test_plugin_identity_enters_hash():

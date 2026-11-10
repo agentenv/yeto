@@ -24,8 +24,8 @@ import loss_reference as ref
 import rl_loss_variant_reference as paper
 from yeto.rl import MILES_NEXT_COMMIT
 
-MATH = "miles/backends/training_utils/loss_hub/math_utils.py"
-CORR = "miles/backends/training_utils/loss_hub/corrections.py"
+MATH = "miles/backends/training_utils/loss/hub/math_utils.py"
+CORR = "miles/backends/training_utils/loss/hub/corrections.py"
 REPO = Path(os.environ.get("YETO_MILES_REPO", "/nonexistent-miles-checkout"))
 
 

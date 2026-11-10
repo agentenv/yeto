@@ -448,9 +448,17 @@ def _fake_miles(monkeypatch, order):
     """Upstream Miles modules the island entries import: engines record, then stop."""
     import types
 
-    async def create_rollout_components(miles_args):
+    async def create_rollout_components(miles_args, *, capability, trainer_handles):
         order.append("engines")
         raise _Stop
+
+    class _StartupInfo:
+        def __init__(self, args):
+            self.args, self.all_args = args, args
+
+        @classmethod
+        def create(cls, all_args):
+            return cls(all_args)
 
     class Disposer:
         async def __aenter__(self):
@@ -464,12 +472,15 @@ def _fake_miles(monkeypatch, order):
 
     mods = {
         "miles.ray.placement_group": dict(create_rollout_components=create_rollout_components,
+                                          create_trainer_handles=lambda args, **kw: {},
                                           create_training_models=None),
         "miles.ray.rollout.eval_dispatch": dict(EvalDispatcher=None),
+        "miles.ray.specs.train": dict(compute_trainer_configs=lambda args: []),
         "miles.utils.async_utils": dict(Disposer=Disposer),
-        "miles.utils.orchestration_utils": dict(init_orchestration_script=lambda *a, **k: None),
+        "miles.utils.orchestration_utils": dict(init_orchestration_script=lambda *a, **k: None,
+                                                ArgvOrchestratorStartupInfo=_StartupInfo),
     }
-    for name in ("miles", "miles.ray", "miles.ray.rollout", "miles.utils"):
+    for name in ("miles", "miles.ray", "miles.ray.rollout", "miles.ray.specs", "miles.utils"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     for name, attrs in mods.items():
         mod = types.ModuleType(name)

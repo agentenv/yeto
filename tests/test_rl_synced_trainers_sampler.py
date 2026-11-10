@@ -83,6 +83,10 @@ class _Actor:
     async def export_hf(self, *, rollout_id: int, path: str) -> None:
         torch.save(self.engine.published_tensors, Path(path) / "model.pt")
 
+    async def run_plugin(self, name: str, kwargs: dict) -> None:
+        """The staged release writer (every rank writes a share): the same file."""
+        await self.export_hf(rollout_id=int(kwargs["rollout_id"]), path=kwargs["path"])
+
 
 def _sampler(store_root: Path, stop: threading.Event, loads: list, groups_ahead: int) -> None:
     store = CheckpointStore(store_root)

@@ -324,6 +324,7 @@ def _commands(tmp_path, monkeypatch, extra):
 
 
 @pytest.mark.parametrize("path", sorted(UNSUPPORTED))
+@pytest.mark.usefixtures("ports_v1_pin")  # algo-eff-miles uses clip_higher: GPU-declared on ports-v1 only
 def test_auto_on_a_path_the_dispenser_does_not_cover_is_byte_identical_to_stride(
         tmp_path, monkeypatch, capsys, path):
     """Before the default change, auto meant stride. On every path the

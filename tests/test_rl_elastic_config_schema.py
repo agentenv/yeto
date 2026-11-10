@@ -10,6 +10,11 @@ from yeto.rl.elastic_benchmark import capabilities as caps
 from yeto.rl.elastic_benchmark.manifest import ManifestError, example_manifest, manifest_hash
 from yeto.rl.elastic_benchmark.plan import build_plan
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 G = [f"GPU-{i:08d}" for i in range(8)]
 
 

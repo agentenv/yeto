@@ -155,7 +155,7 @@
   "--global-batch-size",
   "8",
   "--balance-data",
-  "--rollout-max-context-len",
+  "--max-seq-len",
   "2048",
   "--rollout-max-response-len",
   "128",
@@ -199,7 +199,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "6ff6da47c19cf9f9eac0ec0b9040e9e199220578244928625c5bec362379ccf6",
+ "miles_argv_sha256": "ff738cd485fb4d5191a55a91d9d46c488443854cbfbf0a32685d7b2c31a33f5a",
  "name": "decoupled",
  "placement": {
   "allow_cross_node_engine_tp": false,

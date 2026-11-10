@@ -84,9 +84,12 @@ def test_first_start_writes_pack_and_resume_reuses_it(launch):
     assert pack["upgrades"] == []
     assert code_pack.code_workdir(args) == args.code_pack_tree
     assert code_pack.code_pack_island_flag(args) == f" --code-pack-digest {pack['digest']}"
-    # the local tree changes; the next start of the same run keeps the run pack
+    # the local tree changes: a plain relaunch is refused (no silent stale code);
+    # --rl-code-pack-keep resumes on the run pack
     (launch.repo / "yeto" / "a.py").write_text("A = 2\n")
-    args2, manifest2 = launch()
+    with pytest.raises(CodePackError, match="--rl-code-pack-keep"):
+        launch()
+    args2, manifest2 = launch("--rl-code-pack-keep")
     assert manifest2["code_pack"] == pack
     assert (Path(args2.code_pack_tree) / "yeto" / "a.py").read_text() == "A = 1\n"
 

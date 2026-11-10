@@ -513,7 +513,6 @@ def test_manifest_written_by_launcher(monkeypatch, tmp_path):
                            cluster_prefix="neg", _launch_preflight_manifest={
                                "negative_test": True, "island_overrides": [{"island": 1}],
                                "preflight": {"threads": {"total": 1}}})
-    monkeypatch.setattr("yeto.launch.manifest._miles_overlay_manifest", lambda a: {})
     launcher._write_run_manifest(args)
     data = json.loads((tmp_path / "neg" / "run_manifest.json").read_text())
     assert data["negative_test"] is True and data["island_overrides"] == [{"island": 1}]
@@ -540,7 +539,7 @@ def test_page_renders_negative_badge():
     import yeto.dashboard as d
 
     js = (Path(d.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
-    assert "function negBadge(c)" in js and js.count("negBadge(c)+stBadge(c.status)") == 2
+    assert "function negBadge(c)" in js and js.count("negBadge(c)+stBadge(c.status,c)") == 2
 
 
 # --- 3.6 resume / merge refusal ---------------------------------------------------------

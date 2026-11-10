@@ -93,8 +93,8 @@ def trainer_cross_node_evidence(head, worker):
                is a finite number > 0 for >= 1 round;
     param_update = rl_publication payload hash changes between consecutive policy versions AND policy_version strictly
                increases over >= 2 publications (driver.publish: sync/publication_payload_hash is the hash of the LoRA
-               weights pushed to the engines). rl_local_round.delta_l2_norm is hard-coded 0.0 by the driver
-               (driver.py rl_local_round emit) and is therefore NOT used."""
+               weights pushed to the engines). rl_local_round.delta_l2_norm is null (not measured) on the
+               engine-driver path (driver.py _stats) and is therefore NOT used."""
     both = bool(re.search(r"MegatronTrainRayActor", head)) and bool(re.search(r"MegatronTrainRayActor", worker))
     tokens = [e.get("action_tokens") or 0 for e in local_rounds]
     grads = [e.get("grad_norm") for e in local_rounds if isinstance(e.get("grad_norm"), (int, float))]
@@ -108,7 +108,7 @@ def trainer_cross_node_evidence(head, worker):
                                             and len({h for _, h in hashes if h}) >= 2),
     }
     notes.append(f"grad_norms={grads[:4]} pub_hashes={[(v, (h or '')[:8]) for v, h in hashes][:4]} "
-                 f"loss_logged={bool(re.search(r'lm loss|forward', read('pulled/run.log')))} (delta_l2_norm unused: driver hard-codes 0.0)")
+                 f"loss_logged={bool(re.search(r'lm loss|forward', read('pulled/run.log')))} (delta_l2_norm unused: not measured by the driver)")
     return ev
 
 if rc == 124 and not (CASE == "g0" and len(rounds_trained) >= 1 and len(generates) >= 1):

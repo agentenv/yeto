@@ -183,8 +183,10 @@ def test_infra_failed_trial_is_run_again_and_its_group_written_whole(tmp_path, q
     agentic = round_event["agentic"]
     assert agentic["lost"] == {} and agentic["groups_below_min"] == 0
     assert agentic["infra_retries"] == {"RuntimeError": 1} and agentic["groups_refilled"] == 1
+    assert (agentic["retried_trials"], agentic["lost_trials"]) == (1, 0)
     groups = [f for n, f in events if n == "rl_agentic_group"]
     assert sorted(g["infra_retries"] for g in groups) == [[0, 0], [1, 0]]
+    assert sorted(g["retried_trials"] for g in groups) == [0, 1] and all(g["lost_trials"] == 0 for g in groups)
 
 
 def test_infra_retries_stop_at_the_limit(tmp_path, qwen):
@@ -324,3 +326,18 @@ def test_nemotron3_codex_loop_records_one_aligned_stream(nemotron3):
     assert records["counters"].get("render_drift_turns", 0) == 0
     (sample,) = records["sessions"][0]["samples"]
     assert [t["kind"] for t in sample["turns"]] == ["action"] * 3
+
+
+def test_chat_renderer_passes_the_template_kwargs():
+    from yeto.rl.engine.engine_sampler_entry import chat_renderer
+
+    seen = {}
+
+    class Tok:
+        def apply_chat_template(self, messages, **kw):
+            seen.update(kw)
+            return messages[0]["content"]
+
+    render = chat_renderer("unused", template_kwargs={"thinking_effort": "low"}, tokenizer=Tok())
+    assert render("q") == "q"
+    assert seen["thinking_effort"] == "low" and seen["add_generation_prompt"] is True

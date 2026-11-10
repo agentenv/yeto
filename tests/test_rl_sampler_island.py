@@ -239,9 +239,17 @@ def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_
     assert [a for a in node.argv if a not in base.argv] == [
         "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["convertible"],
         "--save-hf", mc.RELEASE_EXPORTER_SAVE_HF]
+    # full parameters on the colocated node (the K3.1 form: whole-checkpoint releases) are
+    # accepted with the same switchable rollout; a node whose engines sit on other GPUs is not
     full = sub(cfg, "trainable", parameter_mode="full", target_modules=())
-    with pytest.raises(mc.MilesConfigError, match="LoRA on a colocated island"):
-        mc.translate_run_config(full, _tolerant(), max_policy_age=1)
+    full_node = mc.translate_run_config(full, _tolerant(), max_policy_age=1,
+                                        full_parameter_sync=False)  # a pool has no syncer
+    assert flag_value(full_node.argv, "--rollout-function-path") == br.ROLLOUT_FUNCTION_PATHS["convertible"]
+    assert "--colocate" in full_node.argv and "--lora-rank" not in full_node.argv
+    apart = dataclasses.replace(make_config(colocated=False), sample_buffer=sample_roles.SampleBufferConfig(
+        role="convertible", store="/mnt/store"))
+    with pytest.raises(mc.MilesConfigError, match="on a colocated island"):
+        mc.translate_run_config(apart, _tolerant(), max_policy_age=1, full_parameter_sync=False)
 
 
 # ---------------------------------------------------------------- releases
@@ -535,7 +543,7 @@ class _Controller:
         self.log.append(("lock",))
         return SimpleNamespace(rollout_engines=self.engines, snapshot_cell_id_to_hashes={"c0": "x"})
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.log.append(("end", snapshot_cell_id_to_hashes))
 
     async def abort_update_weights(self):
@@ -729,14 +737,61 @@ def test_wire_policy_releases_exports_only_the_adapter_in_lora_mode(tmp_path):
     assert PolicyReleaseStore(CheckpointStore(tmp_path)).latest().weights == LORA
 
 
-def test_release_plugin_writes_the_adapter_with_the_snapshot_publisher(tmp_path):
+def _fake_adapter_library(mp, calls, *, plain_peft=True):
+    """Upstream adapter library (hf_export.save_hf_model's ``adapter/`` write):
+    ``single_lora_parametrization`` + ``write_{peft,sampler}_export`` under
+    ``write_checkpoint_dir``; ``SnapshotPublisher`` writes models only."""
+    import sys
+    import types
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        mp.setitem(sys.modules, name, mod)
+        return mod
+
+    for name in ("miles", "miles.backends", "miles.backends.megatron_utils", "miles.backends.megatron_utils.lora",
+                 "miles.backends.training_utils", "miles.backends.training_utils.checkpoint",
+                 "miles.backends.training_utils.checkpoint.adapter", "miles.utils", "miles.utils.hf_utils"):
+        mp.setitem(sys.modules, name, types.ModuleType(name))
+    module("miles.backends.megatron_utils.lora.checkpoint",
+           single_lora_parametrization=lambda slots, args: ("param", args.lora_rank))
+    module("miles.backends.training_utils.checkpoint.adapter.adapter_dir",
+           write_peft_export=lambda d, slots, slot, param, targets, *, lora_dropout: calls.append(
+               ("peft", d, slot, param, targets, lora_dropout)),
+           write_sampler_export=lambda d, slots, slot, param, targets, *, lora_dropout: calls.append(
+               ("sampler", d, slot, param, targets, lora_dropout)))
+    module("miles.backends.training_utils.checkpoint.adapter.adapter_exports",
+           has_plain_peft_form=lambda param, targets: plain_peft)
+
+    def write_checkpoint_dir(path, write, *, completion_marker=None):
+        calls.append(("dir", path, completion_marker))
+        write(path)
+
+    module("miles.backends.training_utils.checkpoint.io", write_checkpoint_dir=write_checkpoint_dir)
+    module("miles.utils.hf_utils.config", HF_EXPORT_COMPLETE_MARKER=".complete")
+
+
+def test_release_plugin_writes_the_adapter_through_the_adapter_library(tmp_path):
     from yeto.rl.adapters.miles import release_plugin
 
-    written = []
-    actor = SimpleNamespace(snapshot_publisher=SimpleNamespace(
-        write_adapter=lambda adapter, path: written.append((adapter, path))))
-    assert release_plugin.write_lora_adapter(actor, path=str(tmp_path)) == {"path": str(tmp_path)}
-    assert written == [(None, tmp_path)]
+    calls = []
+    args = SimpleNamespace(lora_rank=8, lora_dropout=0.0, offload_train=False)
+    slots = SimpleNamespace(bf16_adapter_key_style="peft", targets="TARGETS")
+    with pytest.MonkeyPatch.context() as mp:
+        _fake_adapter_library(mp, calls)
+        out = release_plugin.write_lora_adapter(SimpleNamespace(adapter_slots=slots, args=args), path=str(tmp_path))
+    assert out == {"path": str(tmp_path), "layout": "peft"}
+    assert calls == [("dir", tmp_path, ".complete"), ("peft", tmp_path, 0, ("param", 8), "TARGETS", 0.0)]
+    # the sampler layout: asked for by the slots, or when there is no plain PEFT form
+    for style, plain in (("sampler", True), ("peft", False)):
+        calls.clear()
+        with pytest.MonkeyPatch.context() as mp:
+            _fake_adapter_library(mp, calls, plain_peft=plain)
+            out = release_plugin.write_lora_adapter(
+                SimpleNamespace(adapter_slots=SimpleNamespace(bf16_adapter_key_style=style, targets="T"), args=args),
+                path=str(tmp_path))
+        assert out["layout"] == "sampler" and calls[1][0] == "sampler"
     # an asleep colocated actor: groups reloaded, memory saver disabled, groups destroyed
     import sys
     calls = []
@@ -755,17 +810,15 @@ def test_release_plugin_writes_the_adapter_with_the_snapshot_publisher(tmp_path)
     fake_pg = SimpleNamespace(reload_process_groups=lambda: calls.append("reload"),
                               destroy_process_groups=lambda: calls.append("destroy"))
     with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "miles", SimpleNamespace())
-        mp.setitem(sys.modules, "miles.utils", SimpleNamespace())
+        _fake_adapter_library(mp, calls)
         mp.setitem(sys.modules, "miles.utils.reloadable_process_group", fake_pg)
         mp.setitem(sys.modules, "torch_memory_saver", SimpleNamespace(torch_memory_saver=_Saver()))
-        asleep = SimpleNamespace(args=SimpleNamespace(offload_train=True), _asleep=True,
-                                 snapshot_publisher=SimpleNamespace(
-                                     write_adapter=lambda a, p: calls.append("write")))
+        asleep = SimpleNamespace(args=SimpleNamespace(offload_train=True, lora_rank=8, lora_dropout=0.0),
+                                 _asleep=True, adapter_slots=slots)
         release_plugin.write_lora_adapter(asleep, path=str(tmp_path))
-    assert calls == ["reload", "disable", "write", "enable", "destroy"]
-    with pytest.raises(RuntimeError, match="snapshot publisher"):
-        release_plugin.write_lora_adapter(SimpleNamespace(snapshot_publisher=None), path="x")
+    assert [c if isinstance(c, str) else c[0] for c in calls] == ["reload", "disable", "dir", "peft", "enable", "destroy"]
+    with pytest.raises(RuntimeError, match="adapter slots"):
+        release_plugin.write_lora_adapter(SimpleNamespace(adapter_slots=None), path="x")
 
 
 def test_wire_policy_releases_only_on_a_trainer_island(tmp_path):
@@ -1003,3 +1056,30 @@ def test_the_rollout_executor_is_called_from_the_upload_thread_without_the_event
     local = MilesRolloutPool.__new__(MilesRolloutPool)
     local._executor = SimpleNamespace(data_source="source")
     assert local._in_executor_from_thread(lambda executor: executor.data_source) == "source"
+
+
+# ---------------------------------------------------------------- upstream TrainParallelConfig
+def test_sampler_train_parallel_config_names_every_upstream_field(monkeypatch):
+    """Upstream ``RolloutExecutor.set_train_parallel_config`` takes a pydantic
+    ``miles.utils.dp_schedule.TrainParallelConfig`` whose six fields are all required
+    (``postprocess_rollout_data`` reads them as attributes); the sampler is DP=1."""
+    import sys
+    import types
+
+    upstream_fields = ("dp_size", "cp_size", "vpp_size", "microbatch_group_size_per_vp_stage",
+                       "independent_dp", "supports_precomputed_schedule")
+    assert tuple(si.SAMPLER_TRAIN_PARALLEL_CONFIG) == upstream_fields
+    assert si.SAMPLER_TRAIN_PARALLEL_CONFIG["dp_size"] == 1
+
+    class TrainParallelConfig:  # strict: every field, no extras (FrozenStrictBaseModel)
+        def __init__(self, **fields):
+            assert set(fields) == set(upstream_fields), fields
+            self.__dict__.update(fields)
+
+    for name in ("miles", "miles.utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    module = types.ModuleType("miles.utils.dp_schedule")
+    module.TrainParallelConfig = TrainParallelConfig
+    monkeypatch.setitem(sys.modules, "miles.utils.dp_schedule", module)
+    config = si.sampler_train_parallel_config()
+    assert (config.dp_size, config.cp_size, config.independent_dp) == (1, 1, False)

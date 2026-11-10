@@ -304,16 +304,16 @@ def test_pool_gpus_reach_build_elastic_only_with_trainer_edges(monkeypatch):
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
     base = {"resources": {"gpus": [{"uuid": "u0"}, {"uuid": "u1"}], "configs": {}},
             "attestation": None, "state_dir": "/s", "initial_config": "c0", "declared_cells": ()}
-    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=dict(base), use_miles_router=True), profile="P",
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=dict(base), router="miles"), profile="P",
                              fingerprint="F")
     assert "pool_gpus" not in seen
     seen.clear()
-    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic={**base, "trainer_edges": True}, use_miles_router=True),
+    entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic={**base, "trainer_edges": True}, router="miles"),
                              profile="P", fingerprint="F")
     assert seen["pool_gpus"] == ("u0", "u1")
 
 
-def test_trainer_view_prefers_the_public_slice_pg_info(monkeypatch):
+def test_trainer_view_uses_the_public_slice_pg_info_only(monkeypatch):
     import sys
     import types
 
@@ -337,5 +337,8 @@ def test_trainer_view_prefers_the_public_slice_pg_info(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles.ray", ray_mod)
     monkeypatch.setitem(sys.modules, "miles.ray.placement_group", pg)
     assert trainer_view("S", (1, 2)) == "V" and calls == [("public", (1, 2))]
+    # the private name of the pre-2f23a0fc fork is not read any more (k31/b4 publishes slice_pg_info)
     del pg.slice_pg_info
-    assert trainer_view("S", (0,)) == "P"
+    with pytest.raises(RuntimeError, match="slice_pg_info is missing"):
+        trainer_view("S", (0,))
+    assert calls == [("public", (1, 2))]

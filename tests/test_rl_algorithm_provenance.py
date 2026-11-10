@@ -380,7 +380,7 @@ def test_selection_event_records_absorbed_flags_and_allowance():
 def test_verify_records_allowance_on_namespace(tmp_path):
     miles_args, _ = _check(tmp_path, V2.sha256(), allow=["clip_higher", "clip_higher"])
     assert miles_args.yeto_rl_unverified_mechanisms == ("clip_higher",)
-    assert miles_args.yeto_rl_algorithm_absorbed_flags == {}
+    assert not hasattr(miles_args, "yeto_rl_algorithm_absorbed_flags")  # unread: no longer set
 
 
 def test_launch_check_refuses_translation():
@@ -1050,3 +1050,23 @@ def test_algorithm_hash_ignores_placement_capabilities():
         _prepare_ports_algorithm(args)
         hashes.append(args.rl_expected_algorithm_sha256)
     assert hashes[0] == hashes[1]
+
+
+def test_relaunch_of_the_same_run_moves_earlier_tapes_aside(monkeypatch, tmp_path):
+    import yeto.launcher as launcher
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--controller", "local"),
+                          gpu="modal:1xa100")
+    run_dir = tmp_path / "runs" / args.cluster_prefix
+    (run_dir / "events").mkdir(parents=True)
+    (run_dir / "events" / "old.jsonl").write_text("{}\n")
+    (run_dir / "run_manifest.json").write_text("{}")
+    try:
+        launcher.run(args)
+    except Exception as error:  # noqa: BLE001 - provisioning is not mocked; only the tape check matters
+        assert "event tapes already exist" not in str(error)
+    assert not (run_dir / "events" / "old.jsonl").exists()
+    assert list((run_dir / "events" / "previous").glob("*/old.jsonl"))

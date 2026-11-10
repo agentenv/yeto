@@ -460,7 +460,7 @@ def test_verl_loop_aborts_on_misaligned_tokens_and_infra_errors(verl_loop):
     loop_mod, _ = verl_loop
     from yeto.rl.harness.harbor import HarborHarness
 
-    bad = [_turn([5, 6], [40]), _turn([5, 6, 77, 1], [41])]  # history rewritten (compaction)
+    bad = [_turn([5, 6], [40]), _turn([5, 9, 77, 1], [41])]  # even the first prompt rewritten (no rebase)
     _FakeTrial.result = _result({"reward": 1.0})
     loop = _make_loop(loop_mod, _Recorder(bad), HarborHarness(lambda t, u: {}, trial_cls=_FakeTrial))
 

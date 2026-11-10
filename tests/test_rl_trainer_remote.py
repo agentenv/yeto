@@ -418,6 +418,8 @@ def test_check_refuses_without_a_bound_trainer_island(tmp_path, monkeypatch):
     launch_loop.check(args)
     assert launch_loop.held_island(args) == 0
     args.rl_checkpoint_store = "s3://bucket"
+    launch_loop.check(args)  # an s3:// store is reached by object API on Modal (P1)
+    args.rl_checkpoint_store = "gs://bucket"
     with pytest.raises(SystemExit, match="modal-volume"):
         launch_loop.check(args)
 

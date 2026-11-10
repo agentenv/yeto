@@ -472,6 +472,21 @@ def test_stop_run_cli_only_writes_the_flag(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "myrun" / "meta.json").exists()  # nothing else touched
 
 
+def test_a_reused_run_name_starts_without_the_previous_runs_stop_flag(tmp_path, monkeypatch):
+    """A STOP flag left by an earlier run of the same name (stop-run, the cost guard's
+    budget/idle stop) must not end the new run at its first fleet poll."""
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    runs.create_run("myrun", {})
+    runs.request_stop("myrun")
+    assert runs.stop_flag_path("myrun").exists()
+    runs.create_run("myrun", {})
+    assert not runs.stop_flag_path("myrun").exists()
+    runs.request_stop("myrun")  # a stop of the new run still works
+    assert runs.stop_flag_path("myrun").exists()
+
+
 def test_launcher_wires_the_stop_flag_of_its_run(monkeypatch, tmp_path, _fake_sky_module):
     from yeto import runs
 

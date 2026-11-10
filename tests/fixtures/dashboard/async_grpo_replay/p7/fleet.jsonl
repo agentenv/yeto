@@ -1,0 +1,11 @@
+{"cpus":4,"event":"island_ready","gpus":1,"initial":true,"island":"run-l0-modal","island_id":0,"memory_gib":32.0,"price_key":null,"region":null,"time_unix":1790000141.64}
+{"cpus":4,"event":"island_ready","gpus":1,"initial":true,"island":"run-l1-modal","island_id":1,"memory_gib":32.0,"price_key":null,"region":null,"time_unix":1790000141.641}
+{"cpus":4,"event":"island_ready","gpus":1,"initial":true,"island":"run-l2-modal","island_id":2,"memory_gib":32.0,"price_key":null,"region":null,"time_unix":1790000141.642}
+{"cpus":4,"event":"island_ready","gpus":1,"initial":true,"island":"run-l3-modal","island_id":3,"memory_gib":32.0,"price_key":null,"region":null,"time_unix":1790000141.642}
+{"event":"cost_tick","time_unix":1790000141.643}
+{"event":"cost_tick","time_unix":1790000468.748}
+{"event":"cost_tick","time_unix":1790000795.793}
+{"event":"cost_tick","time_unix":1790001124.38}
+{"cpus":4,"event":"island_done","gpus":1,"island":"run-l1-modal","island_id":1,"memory_gib":32.0,"price_key":null,"region":null,"time_unix":1790001847.828}
+{"event":"cost_tick","time_unix":1790001880.889}
+{"event":"cost_tick","time_unix":1790002187.221}

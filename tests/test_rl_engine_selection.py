@@ -432,7 +432,7 @@ class _Controller:
     async def start_update_weights(self):
         return SimpleNamespace(rollout_engines=[self.engine], snapshot_cell_id_to_hashes={"c0": "h"})
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.calls.append(("end_update",))
 
     async def abort_update_weights(self):

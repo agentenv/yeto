@@ -771,6 +771,50 @@ def test_engine_samplers_claim_from_the_dispenser_and_give_back_what_they_did_no
         labelled.stop()
 
 
+def test_agentic_engine_sampler_draws_agent_tasks_from_the_dispenser(syncer_binary, tmp_path, monkeypatch):
+    """prompts.format agentic + prompts.dispense: each drawn row carries its agent
+    task as JsonlPrompts gives it; a row without a task is reported dropped."""
+    from yeto.rl.engine.engine_sampler_entry import JsonlPrompts, SamplerSpecError, build_prompts
+
+    rows = [{"text": f"t{i}", "task": {"task_id": f"task-{i}", "agent": "pi", "provider": "docker"}}
+            for i in range(4)] + [{"text": "no task"}]
+    prompts_file = _rows(tmp_path / "prompts.jsonl", rows)
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", KEY.decode())
+    syncer = Syncer(syncer_binary, tmp_path, "--dispense-passes", "1")
+    try:
+        spec = {"agentic": {"template": "qwen3_2507"},
+                "prompts": {"format": "agentic", "path": str(prompts_file), "input_key": "text",
+                            "task_key": "task", "groups_per_round": 2,
+                            "dispense": {"address": f"127.0.0.1:{syncer.port}",
+                                         "learner_id": td.sampler_holder_id("agentic"), "seed": 3,
+                                         "prefetch_blocks": 1}}}
+        prompts = build_prompts(spec)
+        drawn = []
+        for rid in range(4):
+            try:
+                items = prompts(rid)
+            except td.DispenseEnded:
+                break
+            drawn += items  # each group written, as EngineRound reports it
+            prompts.written(rid, [i.metadata[td.DISPENSE_POSITION_KEY] for i in items])
+        assert len(drawn) == 4, "the row without a task is not drawn"
+        for item in drawn:
+            row = int(item.metadata["row"])
+            assert item.metadata["agent_task"] == rows[row]["task"]
+            assert item.metadata[td.DISPENSE_POSITION_KEY] is not None
+        prompts.close()
+        summary = check(syncer.records())
+        assert summary["ok"] and (summary["trained"], summary["dropped"]) == (4, 1), summary
+    finally:
+        syncer.stop()
+    # the same rows from the file carry the same task mapping
+    plain = JsonlPrompts(_rows(tmp_path / "plain.jsonl", rows[:4]), input_key="text", label_key=None,
+                         groups_per_round=1, task_key="task")
+    assert plain(0)[0].metadata["agent_task"] == rows[0]["task"]
+    with pytest.raises(SamplerSpecError, match="go together"):
+        build_prompts({"prompts": {**spec["prompts"], "format": "text"}, "agentic": spec["agentic"]})
+
+
 def test_a_verl_sampler_spec_claims_from_the_dispenser():
     from yeto.rl.adapters.verl import sampler_entry as verl
 

@@ -583,8 +583,10 @@ def test_miles_pool_member_states_from_describe_cells():
     pool = MilesRolloutPool(inference_controller=Ctl(), rollout_executor=object(), metadata=None,
                             expected_policy=lambda: (1, "h"), declared_cells=["c0", "c1"])
     assert pool.member_states() == {
-        "engine:c0": {"state": "running", "tracked": True, "serving": True, "awaiting_admission": False},
-        "engine:c1": {"state": "unbound", "tracked": False, "serving": False, "awaiting_admission": False}}
+        "engine:c0": {"state": "running", "lost_workers": None, "tracked": True, "serving": True,
+                      "awaiting_admission": False},
+        "engine:c1": {"state": "unbound", "lost_workers": None, "tracked": False, "serving": False,
+                      "awaiting_admission": False}}
     pool2 = MilesRolloutPool(inference_controller=object(), rollout_executor=object(), metadata=None,
                              expected_policy=lambda: (1, "h"), declared_cells=["c0"])
     assert pool2.member_states() is None

@@ -799,3 +799,57 @@ def test_parse_entrypoints_expose_revision_and_trust_controls():
     for parsed in (causal, diffusion, megatron, mlx, sampler):
         assert parsed.model_revision is None
         assert parsed.trust_remote_code is False
+
+
+def test_module_spec_resolves_through_an_editable_install_finder(monkeypatch, tmp_path):
+    """pip install -e registers a meta-path finder, not a sys.path entry."""
+    import importlib.machinery
+    import importlib.util
+
+    package = tmp_path / "editable_pkg_x"
+    package.mkdir()
+    (package / "__init__.py").write_text("raise RuntimeError('initializer must not run')\n")
+    (package / "rewards.py").write_text("def score(*a):\n    return 0.0\n")
+
+    class EditableFinder:
+        @staticmethod
+        def find_spec(name, path=None, target=None):
+            if name != "editable_pkg_x":
+                return None
+            return importlib.util.spec_from_file_location(
+                name, package / "__init__.py", submodule_search_locations=[str(package)]
+            )
+
+    monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, EditableFinder])
+    assert importlib.machinery.PathFinder.find_spec("editable_pkg_x") is None
+    path = provenance.python_spec_path("editable_pkg_x.rewards:score")
+    assert path == (package / "rewards.py").resolve()
+    assert "editable_pkg_x" not in sys.modules
+
+
+def test_module_spec_falls_back_to_the_repository_root(tmp_path, monkeypatch):
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "__init__.py").write_text("")
+    (tmp_path / "proj" / "r.py").write_text("def f():\n    return 1\n")
+    monkeypatch.chdir("/")
+    assert provenance.python_spec_path("proj.r:f", base_dir=tmp_path) == (
+        tmp_path / "proj" / "r.py"
+    ).resolve()
+
+
+def test_file_spec_inside_the_repository_becomes_a_module_spec(tmp_path):
+    (tmp_path / "examples").mkdir()
+    (tmp_path / "examples" / "math_reward.py").write_text("def f():\n    return 1\n")
+    assert (
+        provenance.python_module_spec_form("examples/math_reward.py:f", base_dir=tmp_path)
+        == "examples.math_reward:f"
+    )
+    assert provenance.python_module_spec_form("pkg.mod:f", base_dir=tmp_path) == "pkg.mod:f"
+    outside = tmp_path.parent / "elsewhere_reward.py"
+    outside.write_text("def f():\n    return 1\n")
+    with pytest.raises(provenance.ProvenanceError, match="outside the repository"):
+        provenance.python_module_spec_form(f"{outside}:f", base_dir=tmp_path)
+    (tmp_path / "bad-dir").mkdir()
+    (tmp_path / "bad-dir" / "r.py").write_text("")
+    with pytest.raises(provenance.ProvenanceError, match="identifier"):
+        provenance.python_module_spec_form("bad-dir/r.py:f", base_dir=tmp_path)

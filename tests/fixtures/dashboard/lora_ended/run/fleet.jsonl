@@ -1,0 +1,5 @@
+{"cpus":32,"event":"island_ready","gpus":8,"initial":true,"island":"run-l0-modal","island_id":0,"memory_gib":256.0,"price_key":null,"region":null,"time_unix":1790002561.28}
+{"event":"cost_tick","time_unix":1790002561.283}
+{"event":"cost_tick","time_unix":1790002867.908}
+{"cpus":32,"event":"island_ready","gpus":8,"initial":true,"island":"run-l0-modal","island_id":0,"memory_gib":256.0,"price_key":null,"region":null,"time_unix":1790003134.189}
+{"event":"cost_tick","time_unix":1790003134.189}

@@ -225,22 +225,37 @@ class Controller:
     async def get_cell_statuses(self):
         return {f"c{i}": SimpleNamespace(phase="Running") for i in range(len(self.engines))}
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.log.append("end")
 
     async def abort_update_weights(self):
         self.log.append("abort")
 
     async def check_weights(self, action, **kw):
-        return [{"success": self.checksum_ok, "ranks": [{"checksums": {"w": "x"}}]} for _ in self.engines]
+        # upstream: one (ServerCellMetadata, body) per engine
+        return [(SimpleNamespace(cell_id=f"c{i}"),
+                 {"success": self.checksum_ok,
+                  "ranks": [{"checksums": {"w": "x"},
+                             "parallelism_info": [{"rank": 0}]}]})
+                for i, _ in enumerate(self.engines)]
 
 
-def flatten(raw):  # mirrors upstream flatten_inference_engine_checksums
-    out = []
-    for body in raw:
-        assert body["success"], body
-        out.append({f"rank0/{k}": v for r in body["ranks"] for k, v in r["checksums"].items()})
+def _merge_ranks(body):  # mirrors upstream checksum_utils.merge_inference_engine_ranks
+    assert body.get("success", False), body
+    ranks = body.get("ranks", []) or []
+    assert ranks, body
+    out = {}
+    for rank_info in ranks:
+        rank = {r["rank"] for r in rank_info["parallelism_info"]}.pop()
+        for k, v in rank_info["checksums"].items():
+            out[f"rank{rank}/{k}"] = v
     return out
+
+
+def flatten(raw):
+    from yeto.rl.adapters.miles.publish import flatten_engine_checksums
+
+    return flatten_engine_checksums(raw, merge=_merge_ranks)
 
 
 class PluginActor:
@@ -611,3 +626,71 @@ def test_an_unverified_publication_skips_only_the_engine_read_back():
     assert pub.last_engine_checksums is None and calls == ["update_weights"]
     with pytest.raises(PublicationError, match="checksum"):
         pub.publish(state())  # a verified (spot-check) round still fails on a bad read-back
+
+
+# ---------------------------------------------------------------- upstream check_weights shape
+def test_flatten_engine_checksums_follows_upstream_check_weights_shape():
+    """Upstream ``check_weights`` answers ``[(ServerCellMetadata, body), ...]``; a None
+    body (no answer) is skipped, every other body goes through
+    ``merge_inference_engine_ranks`` (rank-prefixed, ranks sorted)."""
+    from yeto.rl.adapters.miles.publish import flatten_engine_checksums
+
+    body = {"success": True, "ranks": [
+        {"checksums": {"w": "r1"}, "parallelism_info": [{"rank": 1}]},
+        {"checksums": {"w": "r0"}, "parallelism_info": [{"rank": 0}]}]}
+    out = flatten_engine_checksums([("meta0", body), ("meta1", None)], merge=_merge_ranks)
+    assert out == [{"rank1/w": "r1", "rank0/w": "r0"}]
+    with pytest.raises(AssertionError, match="no engine checksum body"):
+        flatten_engine_checksums([("meta0", None)], merge=_merge_ranks)
+    with pytest.raises(AssertionError):  # a failed engine body, as the removed upstream flatten did
+        flatten_engine_checksums([("meta0", {"success": False, "ranks": []})], merge=_merge_ranks)
+
+
+def test_read_engine_checksums_turns_an_empty_answer_into_payload_mismatch():
+    from yeto.rl.adapters.miles.publish import read_engine_checksums
+
+    class _Ctl:
+        async def check_weights(self, action, **kw):
+            return [("meta0", None)]
+
+    import asyncio
+
+    with pytest.raises(PublicationError) as info:
+        asyncio.run(read_engine_checksums(_Ctl(), flatten))
+    assert info.value.cause is PublicationCause.PAYLOAD_MISMATCH
+
+
+# ---------------------------------------------------------------- published policy identity (proc_state)
+def test_published_policy_identity_lives_in_process_state_and_survives_a_frozen_view():
+    """The identity setter runs in the RolloutManager process on a frozen args
+    view (new Miles): the record is proc_state, the token/eval version are
+    mirrored onto the namespace only where it is writable."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.proc_state import proc_state
+    from yeto.rl.adapters.miles.publish import (
+        get_current_published_policy_identity,
+        set_current_published_policy_identity,
+    )
+
+    class _Frozen:
+        run_uuid = "run-1"
+
+        def __setattr__(self, name, value):
+            raise AttributeError("frozen")
+
+    frozen = _Frozen()
+    digest = "a" * 64
+    assert set_current_published_policy_identity(frozen, policy_version=3, policy_hash=digest) == (3, digest)
+    assert get_current_published_policy_identity(frozen, expected_policy_version=3) == (3, digest)
+    assert proc_state(frozen, "yeto_rl_policy_token") == f"yeto:3:{digest}"
+    with pytest.raises(RuntimeError, match="cannot move backwards"):
+        set_current_published_policy_identity(frozen, policy_version=2, policy_hash=digest)
+    with pytest.raises(RuntimeError, match="hash changed"):
+        set_current_published_policy_identity(frozen, policy_version=3, policy_hash="b" * 64)
+    # a writable namespace (pinned Miles / driver facade) also carries the names
+    writable = SimpleNamespace()
+    set_current_published_policy_identity(writable, policy_version=1, policy_hash=digest)
+    assert writable.yeto_rl_policy_token == f"yeto:1:{digest}" and writable.yeto_rl_eval_policy_version == 1
+    with pytest.raises(RuntimeError, match="no current published policy identity"):
+        get_current_published_policy_identity(SimpleNamespace(), expected_policy_version=1)

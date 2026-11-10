@@ -162,37 +162,127 @@ def test_verify_miles_revision_ports_rejects_dirty_tree(tmp_path, monkeypatch):
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)
 
 
-# -- rl-code-quality-cleanup 0.7: one source for fork lineage and harness pins --
+# -- rl-code-quality-cleanup 0.7 / k31 sync: lineages, features, evidence, harness pins --
 def test_fork_lineage_is_the_single_source_of_every_fork_commit_set():
     from yeto.rl.adapters.miles import entry
     from yeto.rl.adapters.miles import pins
     from yeto.rl.algos import critic_fork, loss_variants
 
-    lineage = pins.MILES_FORK_LINEAGE
-    assert len(set(lineage)) == len(lineage) and lineage[-1] == rl.MILES_NEXT_COMMIT
+    v1 = pins.MILES_LINEAGES["ports-v1"]
+    assert v1.commits is pins.MILES_FORK_LINEAGE and v1.commits[-1] == pins.MILES_PORTS_V1_COMMIT
     # Miles declarations: 0af62f4d onwards; loss variants: 5c1b49eb onwards (one fewer).
-    assert entry._PINS_0AF62F4D_PLUS == frozenset(lineage)
-    assert loss_variants.FORK_COMMITS == frozenset(lineage[1:])
-    assert loss_variants.FORK_COMMITS < entry._PINS_0AF62F4D_PLUS
-    assert critic_fork.FORK_COMMITS == frozenset(pins.CRITIC_FORK_LINEAGE)
-    assert critic_fork.CRITIC_FORK_PIN == pins.CRITIC_FORK_LINEAGE[-1]
+    assert entry.MILES_DECLARED_PINS["loss_aggregations:token"] == frozenset(v1.commits)
+    # ... and on the k31 lineage from k31/b8 on (feature loss_variants in both tables)
+    k31 = pins.MILES_LINEAGES["k31"]
+    assert loss_variants.FORK_COMMITS == frozenset(v1.commits[1:]) | k31.from_commit(pins.MILES_K31_B8_COMMIT)
+    assert loss_variants.FORK_COMMITS == pins.commits_with("loss_variants")
+    # the critic family: the k31 lineage from k31/b8 on (no separate local chain any more)
+    assert pins.CRITIC_FORK_LINEAGE == tuple(k31.commits[k31.commits.index(pins.MILES_K31_B8_COMMIT):])
+    assert critic_fork.FORK_COMMITS == frozenset(pins.CRITIC_FORK_LINEAGE) == pins.commits_with("critic_family")
+    assert critic_fork.CRITIC_FORK_PIN == pins.MILES_K31_B8_COMMIT == pins.CRITIC_FORK_LINEAGE[0]
 
 
-def test_appending_a_fork_commit_reaches_every_derived_set(monkeypatch):
+def test_every_lineage_is_consistent():
     from yeto.rl.adapters.miles import pins
 
-    new = "f" * 40
-    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", pins.MILES_FORK_LINEAGE + (new,))
-    assert new in pins.miles_fork_lineage_from(pins.MILES_FORK_LINEAGE[0])
-    assert new in pins.miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba")
+    seen: set[str] = set()
+    for name, lineage in pins.MILES_LINEAGES.items():
+        assert lineage.name == name
+        assert len(set(lineage.commits)) == len(lineage.commits) >= 1
+        assert not seen & set(lineage.commits)  # two lineages never share a commit
+        seen |= set(lineage.commits)
+        assert all(len(c) == 40 for c in (*lineage.commits, lineage.upstream_base))
+        assert set(lineage.features.values()) <= set(lineage.commits)
+        for feature, first in lineage.features.items():
+            assert lineage.has(feature, first) and lineage.has(feature, lineage.commits[-1])
+            before = lineage.commits[:lineage.commits.index(first)]
+            assert not any(lineage.has(feature, c) for c in before)
+    current = pins.MILES_LINEAGES[pins.CURRENT_LINEAGE]
+    assert pins.MILES_NEXT_COMMIT == rl.MILES_NEXT_COMMIT and current.index(pins.MILES_NEXT_COMMIT) is not None
+    # commits past the pin are reachable only through an image that names them (--miles-commit)
+    later = current.commits[current.index(pins.MILES_NEXT_COMMIT) + 1:]
+    assert set(later) <= set(pins.IMAGE_MILES_COMMITS.values())
+    assert pins.image_miles_commit("docker:x@sha256:" + pins.MILES_K31_FULL_IMAGE.rpartition("@sha256:")[2]) \
+        == pins.MILES_K31_FULL_E_COMMIT
+    assert pins.MILES_NEXT_UPSTREAM_COMMIT == current.upstream_base
+    assert pins.MILES_NEXT_PINS.commit == pins.MILES_NEXT_COMMIT
+    assert pins.MILES_PORTS_V1_PINS.commit == pins.MILES_PORTS_V1_COMMIT
 
 
-def test_ssh_harness_pins_come_from_the_pin_module():
+def test_pin_has_never_raises_and_is_lineage_local():
+    from yeto.rl.adapters.miles import pins
+
+    unknown = "f" * 40
+    assert pins.lineage_of(unknown) is None and pins.lineage_of(None) is None
+    assert pins.miles_fork_lineage_from(unknown) == frozenset()
+    assert pins.pin_has("run_plugin", unknown) is False
+    assert pins.pin_has("no_such_feature") is False
+    # ports-v1 features stop at the ports-v1 head; the k31 lineage registers its own
+    assert pins.pin_has("loss_variants", pins.MILES_PORTS_V1_COMMIT)
+    assert pins.pin_has("dp_replica_full_parameter", pins.MILES_PORTS_V1_COMMIT)
+    assert not pins.pin_has("loss_variants", pins.MILES_K31_F1_COMMIT)
+    assert not pins.pin_has("loss_variants", pins.MILES_K31_B4_COMMIT)
+    assert pins.pin_has("loss_variants", pins.MILES_K31_B8_COMMIT)
+    assert not pins.pin_has("dp_replica_full_parameter", pins.MILES_K31_F1_COMMIT)
+    assert pins.pin_has("run_plugin", pins.MILES_K31_F1_COMMIT) and pins.pin_has("yeto_ext")
+    # the old "first commit" constants are the ports-v1 feature entries
+    v1 = pins.PORTS_V1_FEATURES
+    assert v1["distopt_full_parameter"] == pins.MILES_DISTOPT_FULL_PARAMETER_COMMIT
+    assert v1["dp_replica_full_parameter"] == pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT
+    assert v1["dp_sharded_master"] == pins.MILES_DP_SHARDED_MASTER_COMMIT
+    assert pins.miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba") == frozenset(
+        pins.MILES_FORK_LINEAGE[1:])
+
+
+def test_current_miles_commit_honours_the_island_override():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles import pins
+
+    assert pins.current_miles_commit() == pins.MILES_NEXT_COMMIT
+    assert pins.current_miles_commit(SimpleNamespace(miles_commit=None)) == pins.MILES_NEXT_COMMIT
+    assert pins.current_miles_commit(SimpleNamespace(miles_commit="a" * 40)) == "a" * 40
+
+
+def test_declared_evidence_is_lineage_bound():
+    from yeto.rl.adapters.miles import entry, pins
+
+    for mechanism, refs in entry.MILES_DECLARED_EVIDENCE.items():
+        assert mechanism in entry.MILES_DECLARED
+        for ref in refs:
+            lineage = pins.MILES_LINEAGES[ref.lineage]
+            assert ref.from_commit in lineage.commits and ref.run_id and ref.judgment_path
+            assert entry.evidence_covers(ref, lineage.commits[-1])
+            assert not entry.evidence_covers(ref, pins.MILES_K31_F1_COMMIT)
+    # the 11 pin-bound mechanisms: declared on the ports-v1 head, not on the k31 pin
+    v1 = entry.declared_by_dimension(pins.MILES_PORTS_V1_COMMIT)
+    k31 = entry.declared_by_dimension(pins.MILES_K31_F1_COMMIT)
+    for mechanism in entry.MILES_DECLARED_EVIDENCE:
+        dimension, name = mechanism.split(":", 1)
+        assert name in v1[dimension] and name not in k31.get(dimension, set())
+    # the mechanisms without pin-bound evidence stay declared on both
+    assert "tis" in v1["corrections"] and "tis" in k31["corrections"]
+    assert entry.declared_by_dimension() == k31  # the default is the current pin
+
+
+def test_ssh_harness_takes_no_tms_preload_patch():
+    """The TMS preload patch belonged to the ports-v1 image; its pins stay in
+    pins.py for that lineage, the harness no longer attests or mounts it."""
     from yeto.rl import ssh_harness
     from yeto.rl.adapters.miles import pins
 
     for name in ("TMS_PRELOAD_PATCH_REPOSITORY", "TMS_PRELOAD_PATCH_BASE_COMMIT",
                  "TMS_PRELOAD_PATCH_COMMIT", "TMS_PRELOAD_BASE_BINARY_SHA256"):
-        assert getattr(ssh_harness, name) == getattr(pins, name)
-    source = (Path(ssh_harness.__file__)).read_text()
-    assert 'TMS_PRELOAD_PATCH_COMMIT = "' not in source
+        assert getattr(pins, name)
+        assert not hasattr(ssh_harness, name)
+    source = Path(ssh_harness.__file__).read_text()
+    assert "--tms-preload-patch" not in source and "TMS_PRELOAD" not in source
+
+
+def test_sglang_k31_pin_is_the_branch_head_full_sha():
+    from yeto.rl.adapters.miles import pins
+
+    assert pins.SGLANG_K31_COMMIT == "35708f76dfb720f831f7028ddb68250b6caa8f12"
+    assert pins.SGLANG_K31_BRANCH == "sglang-miles-kimi-k31"
+    assert pins.SGLANG_NEXT_COMMIT == pins.SGLANG_K31_COMMIT
+    assert pins.SGLANG_PORTS_V1_COMMIT == "2fa880182eefdb31e64d8ea70317be27f9f32121"

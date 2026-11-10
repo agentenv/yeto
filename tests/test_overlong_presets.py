@@ -18,6 +18,11 @@ from yeto.rl.algos import grpo_knobs as gk
 from yeto.rl.algos import reward_pipeline as rp
 from yeto.rl.engine.algorithm import AlgorithmSpec
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 REPO = Path(__file__).resolve().parents[1]
 PEN = {"pen2048": 2048, "pen3072": 3072, "pen4096": 4096}
 

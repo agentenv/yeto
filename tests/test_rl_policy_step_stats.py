@@ -24,7 +24,7 @@ def _miles_compute_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, eps_
 
 @pytest.fixture
 def fake_miles(monkeypatch):
-    losses_mod = types.ModuleType("miles.backends.training_utils.loss_hub.losses")
+    losses_mod = types.ModuleType("miles.backends.training_utils.loss.hub.losses")
     model_mod = types.ModuleType("miles.backends.megatron_utils.model")
     losses_mod.compute_policy_loss = _miles_compute_policy_loss
     seen = {}
@@ -38,8 +38,9 @@ def fake_miles(monkeypatch):
     losses_mod.policy_loss_function = policy_loss_function
     pkg = {name: types.ModuleType(name) for name in (
         "miles", "miles.backends", "miles.backends.training_utils",
-        "miles.backends.training_utils.loss_hub", "miles.backends.megatron_utils")}
-    pkg["miles.backends.training_utils.loss_hub"].losses = losses_mod
+        "miles.backends.training_utils.loss", "miles.backends.training_utils.loss.hub",
+        "miles.backends.megatron_utils")}
+    pkg["miles.backends.training_utils.loss.hub"].losses = losses_mod
     pkg["miles.backends.megatron_utils"].model = model_mod
     for name, module in {**pkg, losses_mod.__name__: losses_mod, model_mod.__name__: model_mod}.items():
         monkeypatch.setitem(sys.modules, name, module)

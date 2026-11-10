@@ -57,12 +57,20 @@ def test_ir1_agent_flags_pass_through_with_agentic_generate():
     i = argv.index("--custom-agent-function-path")
     assert argv[i + 1] == "yeto.rl.adapters.miles.harbor_agent.run"
     assert argv[argv.index("--max-seq-len") + 1] == "8192"
+    assert argv.count("--max-seq-len") == 1  # one core field: the agentic value replaces seq_len
     assert argv[argv.index("--custom-generate-function-path") + 1] == AGENTIC
+
+
+def test_max_seq_len_is_emitted_once_and_defaults_to_seq_len():
+    argv = cfg.translate_run_config(make_config(), AlgorithmSpec()).argv
+    assert argv.count("--max-seq-len") == 1 and "--rollout-max-context-len" not in argv
+    assert argv[argv.index("--max-seq-len") + 1] == str(make_config().batch.seq_len)
 
 
 @pytest.mark.parametrize("field, value", [
     ("custom_agent_function_path", "a.b.c"),
-    ("agent_max_seq_len", 4096),
+    # agent_max_seq_len is --max-seq-len, a core RolloutConfig field upstream (#4699):
+    # every generate reads it, so it no longer requires the agentic generate
 ])
 @pytest.mark.parametrize("generate", [None, "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"])
 def test_ir1_agent_flags_need_agentic_generate(field, value, generate):

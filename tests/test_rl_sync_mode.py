@@ -43,6 +43,8 @@ CONTROL_CASES = {
 _PLAN_SCRIPT = r"""
 import json, sys, types
 sys.path[:0] = [sys.argv[1] + "/tests", sys.argv[1]]
+import yeto.cli
+yeto.cli.DEFAULT_INNER_LR = 3e-4  # as tests/conftest.py (no conftest in this process)
 from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task
 sys.modules["sky"] = types.SimpleNamespace(
     Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode)

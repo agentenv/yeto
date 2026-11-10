@@ -204,19 +204,104 @@ def test_mini_island_argv_translates_to_a_miles_argv_on_cpu(tmp_path):
     assert miles[miles.index("--megatron-to-hf-mode") + 1] == "raw"
 
 
-def test_align_weight_version_is_a_no_op_on_a_trainer_only_island():
+def _fake_model_companion(monkeypatch):
+    """Upstream ``miles.backends.training_utils.model_companion`` (#3423): the
+    companion submodule carries ``weight_version``; ``update_weights`` reads it."""
+    import sys
+    import types
+
+    class Utils:
+        @staticmethod
+        def is_companion_parameter(name):
+            return "model_companion" in name.split(".")
+
+    module = types.ModuleType("miles.backends.training_utils.model_companion")
+    module.ModelCompanionInstallationUtils = Utils
+    module._get_companions_of_model = lambda model: [
+        chunk.model_companion for chunk in model if hasattr(chunk, "model_companion")]
+    for name in ("miles", "miles.backends", "miles.backends.training_utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
+def test_align_weight_version_writes_the_companion_weight_version(monkeypatch):
+    """S1: upstream stamps the companions' weight_version (bumped per optimizer
+    step) on the engines and the executor; the plugin sets it to the yeto policy
+    version itself, in the model and in the actor's CPU backup."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from yeto.rl.adapters.miles.state_plugin import align_weight_version
+
+    _fake_model_companion(monkeypatch)
+    companion = SimpleNamespace(weight_version=torch.zeros((), dtype=torch.int64))
+    backup = {"model_companion.weight_version": torch.zeros((), dtype=torch.int64),
+              "model_companion.sample_consumptions": torch.zeros(2, dtype=torch.int64),
+              "decoder.weight": torch.zeros(2)}
+    backuper = SimpleNamespace(backup_tags=["actor"], get=lambda tag: backup)
+    actor = SimpleNamespace(model=[SimpleNamespace(model_companion=companion), SimpleNamespace()],
+                            weights_backuper=backuper, args=SimpleNamespace(debug_train_only=False))
+    align_weight_version(actor, next_version=3)
+    assert int(companion.weight_version) == 3  # not next_version - 1: no bump at update time
+    assert int(backup["model_companion.weight_version"]) == 3
+    assert backup["model_companion.sample_consumptions"].tolist() == [0, 0]
+    # a backup of another tag only is left alone
+    actor.weights_backuper = SimpleNamespace(backup_tags=["ref"], get=lambda tag: 1 / 0)
+    align_weight_version(actor, next_version=4)
+    assert int(companion.weight_version) == 4
+
+
+def test_align_weight_version_is_a_no_op_on_a_trainer_only_island(monkeypatch):
     from types import SimpleNamespace
 
     from yeto.rl.adapters.miles.state_plugin import align_weight_version
 
-    align_weight_version(SimpleNamespace(weight_updater=None, args=SimpleNamespace(debug_train_only=True)),
+    _fake_model_companion(monkeypatch)
+    align_weight_version(SimpleNamespace(model=[SimpleNamespace()], args=SimpleNamespace(debug_train_only=True)),
                          next_version=3)
-    with pytest.raises(RuntimeError, match="no weight_updater"):
-        align_weight_version(SimpleNamespace(weight_updater=None, args=SimpleNamespace(debug_train_only=False)),
+    with pytest.raises(RuntimeError, match="no companion"):
+        align_weight_version(SimpleNamespace(model=[SimpleNamespace()], args=SimpleNamespace(debug_train_only=False)),
                              next_version=3)
-    updater = SimpleNamespace(weight_version=0)
-    align_weight_version(SimpleNamespace(weight_updater=updater, args=None), next_version=3)
-    assert updater.weight_version == 2
+
+
+def test_export_full_digest_skips_the_model_companion(monkeypatch):
+    """S2: the companion's parameters (weight_version, sample_consumptions) change
+    every step and per island; the shard digest must not depend on them."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from yeto.rl.adapters.miles import state_plugin as sp
+
+    _fake_model_companion(monkeypatch)
+    monkeypatch.setattr(sp, "install_grad_norm_recorder", lambda: True)
+    monkeypatch.setattr(sp, "_is_main_rank", lambda actor: False)
+
+    def chunk(version):
+        weight = torch.nn.Parameter(torch.ones(2))
+        companion = torch.nn.Parameter(torch.tensor(version), requires_grad=False)
+        return SimpleNamespace(named_parameters=lambda: [("decoder.weight", weight),
+                                                          ("model_companion.weight_version", companion)])
+
+    digest = lambda version: sp.export_full_digest(  # noqa: E731
+        SimpleNamespace(model=[chunk(version)], args=SimpleNamespace(offload_train=False), _asleep=False),
+        policy_version=1)
+    first, second = digest(1), digest(2)
+    assert first["shard_hash"] == second["shard_hash"] and first["shard_tensors"] == 1
+
+
+def test_miles_module_or_absent_fails_loudly_when_miles_is_installed_but_the_path_moved(monkeypatch):
+    """S4: an ImportError may switch a recorder off only when Miles itself is absent."""
+    import sys
+    import types
+
+    from yeto.rl.adapters.miles.state_plugin import miles_module_or_absent
+
+    assert miles_module_or_absent("miles.no_such_module_xyz") is None  # CPU venv: no miles
+    monkeypatch.setitem(sys.modules, "miles", types.ModuleType("miles"))  # Miles importable
+    with pytest.raises(ImportError):
+        miles_module_or_absent("miles.no_such_module_xyz")
 
 
 def test_cut_state_walk_does_not_touch_the_chained_optimizer_property():

@@ -9,7 +9,7 @@
 #
 # --- algorithm extensions (A1-A5)
 yeto/rl/algos/reducers.py	megatron	# A3 :35,41 -- kept for now (reducers are not moved)
-yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils -- kept for now
+yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 data.context_parallel -- kept for now
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 -- kept for now
 #
 # --- rewards and filters (R1-R3)

@@ -104,14 +104,15 @@ def test_math_neutral_form_needs_miles_graders():
 
 def test_filter_state_reset_by_round_hook_is_honoured():
     from yeto.rl import filters
+    from yeto.rl.engine.proc_state import pop_proc_state, proc_state
 
     args = SimpleNamespace(yeto_rl_policy_version=1, yeto_rl_dynamic_sampling_max_replacements=1)
     group = [cases.FakeSample("r", None, index=0, reward=0.0)]
     assert filters.bounded_nonzero_reward_std(args, group).keep is False
     assert filters.bounded_nonzero_reward_std(args, group).keep is False  # memoized
-    args._yeto_bounded_filter_state = None  # rollout_meta_hook per-round reset
+    pop_proc_state(args, filters.BOUNDED_FILTER_STATE_ATTR)  # rollout_meta_hook per-round reset
     assert filters.bounded_nonzero_reward_std(args, group).keep is False
-    assert args._yeto_bounded_filter_state["rejections"] == 1
+    assert proc_state(args, filters.BOUNDED_FILTER_STATE_ATTR)["rejections"] == 1
     other = [cases.FakeSample("r", None, index=1, reward=0.0)]
     out = filters.bounded_nonzero_reward_std(args, other)
     assert (out.keep, out.reason) == (True, "bounded_fallback_after_1_replacements")

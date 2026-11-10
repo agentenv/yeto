@@ -242,3 +242,48 @@ def test_tb21_lists_regenerate_byte_identical():
     ids = [i["task_id"] for i in train["items"]]
     assert tl.dump_jsonl(tl.miles_rows(tasks, ids)) == (REPO / "data/tb2/tb2.1-train-miles.jsonl").read_text()
     assert tl.dump_jsonl(tl.verl_rows(tasks, ids)) == (REPO / "data/tb2/tb2.1-train-verl.jsonl").read_text()
+
+
+def test_custom_task_set_names_buckets_and_holds_out(tmp_path):
+    root = _checkout(tmp_path / "mine")
+    tasks = tl.HarborTaskSet(root, benchmark="myset", version="myset@v1")
+    assert tasks.name == "myset" and tasks.facts("easy-0").eval_bucket == "myset-easy"
+    assert tasks.task_spec("easy-0").benchmark == "myset"
+    holdout, train = tl.build_lists(tasks, quotas={"myset-medium": 3}, seed=7, rule="r",
+                                    unusable={"med-00": "unusable/x: broken"})
+    held = bm.holdout_ids(holdout)
+    assert len(held) == 3 and "med-00" not in held
+    train_ids = [i["task_id"] for i in train["items"]]
+    assert not set(train_ids) & set(held) and "med-00" not in train_ids
+    rows = tl.miles_rows(tasks, train_ids[:2], agent="pi", provider="remote-docker", holdout=holdout)
+    assert rows[0]["metadata"]["provider"] == "remote-docker" and rows[0]["metadata"]["agent_name"] == "pi"
+    assert rows[0]["metadata"]["eval_bucket"].startswith("myset-")
+    with pytest.raises(ValueError, match="leak"):
+        tl.miles_rows(tasks, held[:1], holdout=holdout)
+    with pytest.raises(ValueError, match="bad benchmark"):
+        tl.HarborTaskSet(root, benchmark="a b")
+
+
+def test_rows_and_images_command_line(tmp_path):
+    root = _checkout(tmp_path / "mine")
+    tasks = tl.HarborTaskSet(root, benchmark="myset")
+    holdout, _ = tl.build_lists(tasks, quotas={"myset-medium": 2}, seed=1, rule="r")
+    (tmp_path / "h.json").write_text(json.dumps(holdout))
+    held = bm.holdout_ids(holdout)
+    ids = tmp_path / "ids.txt"
+    ids.write_text("# comment\neasy-0\neasy-1\n")
+    out = tmp_path / "rows.jsonl"
+    assert tl.main(["rows", "--tasks-dir", str(root), "--benchmark", "myset", "--ids", str(ids),
+                    "--holdout", str(tmp_path / "h.json"), "--provider", "remote-docker", "--out", str(out)]) == 0
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["metadata"]["instance_id"] for r in rows] == ["easy-0", "easy-1"]
+    assert all(r["metadata"]["agent_name"] == "pi" and r["metadata"]["provider"] == "remote-docker" for r in rows)
+    ids.write_text(held[0] + "\n")
+    with pytest.raises(ValueError, match="leak"):
+        tl.main(["rows", "--tasks-dir", str(root), "--ids", str(ids), "--holdout", str(tmp_path / "h.json")])
+    assert tl.main(["images", "--tasks-dir", str(root), "--out", str(tmp_path / "img.txt")]) == 0
+    assert (tmp_path / "img.txt").read_text() == "img\n"
+    (root / "easy-0" / "task.toml").write_text((root / "easy-0" / "task.toml").read_text()
+                                                .replace('docker_image = "img"\n', ""))
+    with pytest.raises(ValueError, match="prebuilt"):
+        tl.task_images(tl.HarborTaskSet(root), ["easy-0"])

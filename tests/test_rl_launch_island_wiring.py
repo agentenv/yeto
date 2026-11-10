@@ -76,7 +76,7 @@ def test_observe_and_tool_wait_board_reach_the_island_wiring(tmp_path, monkeypat
                                                   "--rl-elastic-tool-wait-board"), monkeypatch)
     args, _ = learner_from_run(run, tmp_path / "home")
     assert args.rl_observe_timeline and args.rl_elastic_tool_wait_board
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, router="miles")
     learner.apply_ports_infra_switches(args, miles_args, {})
     assert miles_args.yeto_rl_observe_timeline is True
     seen = {}
@@ -97,7 +97,7 @@ def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     from yeto.rl.adapters.miles import elastic_wiring, entry
 
     args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, router="miles")
     learner.apply_ports_infra_switches(args, miles_args, {})
     assert not hasattr(miles_args, "yeto_rl_observe_timeline")
     seen = {}
@@ -428,7 +428,7 @@ def _argv_from(args_ns):
     return mc.translate_run_config(rc.resolve_rl_run_config(merged, **kwargs), AlgorithmSpec()).argv
 
 
-ELASTIC_ONLY_FLAGS = {"--use-miles-router": 0, "--update-weight-group-timeout-s": 1}
+ELASTIC_ONLY_FLAGS = {"--router": 1, "--update-weight-engine-request-timeout": 1}
 
 
 def _without_elastic_flags(argv):
@@ -456,11 +456,11 @@ def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
     with_edges, elastic_only, off = _argv_from(edges), _argv_from(plain), _argv_from(default)
     assert "--balance-data" not in with_edges
     assert "--balance-data" in elastic_only and "--balance-data" in off
-    # elastic adds only --use-miles-router and the bounded weight-update group
+    # elastic adds only --router miles and the bounded weight-update group
     # timeout (A27); trainer edges only drop --balance-data
     assert _without_elastic_flags(elastic_only) == list(off)
     assert [a for a in elastic_only if a != "--balance-data"] == list(with_edges)
-    miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
+    miles_args = SimpleNamespace(yeto_rl_learner_id=0, router="miles")
     learner.apply_ports_infra_switches(edges, miles_args, {})
     assert miles_args.yeto_rl_elastic["trainer_edges"] is True
 
@@ -558,14 +558,14 @@ def test_elastic_runs_carry_use_miles_router_and_defaults_do_not(tmp_path, monke
         return mc.translate_run_config(rc.resolve_rl_run_config(ns, **kwargs), AlgorithmSpec()).argv
 
     on, off = argv(elastic), argv(default)
-    assert "--use-miles-router" in on and "--use-miles-router" not in off
+    assert on[on.index("--router") + 1] == "miles" and "--router" not in off
     # A27: elastic bounds the fork's weight-update group rendezvous (120 s);
     # non-elastic runs never pass the flag (older fork images reject it).
-    assert on[on.index("--update-weight-group-timeout-s") + 1] == "120"
-    assert "--update-weight-group-timeout-s" not in off
+    assert on[on.index("--update-weight-engine-request-timeout") + 1] == "120"
+    assert "--update-weight-engine-request-timeout" not in off
     assert _without_elastic_flags(on) == list(off)
     plain = argparse.Namespace(**{**vars(base)})
-    assert "--use-miles-router" not in mc.translate_run_config(
+    assert "--router" not in mc.translate_run_config(
         rc.resolve_rl_run_config(plain, **kwargs), AlgorithmSpec()).argv
 
 
@@ -578,14 +578,14 @@ def test_elastic_wiring_refuses_missing_fork_verb_preconditions():
 
     cfg = {"resources": {}, "attestation": None, "state_dir": "/s", "initial_config": "c0",
            "declared_cells": ()}
-    with pytest.raises(ValueError, match="--use-miles-router"):
-        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, use_miles_router=False),
+    with pytest.raises(ValueError, match="--router miles"):
+        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, router="sglang"),
                                  profile=None, fingerprint="f")
     with pytest.raises(ValueError, match="rollout offload"):
-        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, use_miles_router=True,
+        entry.elastic_wiring_for(SimpleNamespace(yeto_rl_elastic=cfg, router="miles",
                                                  offload_rollout=True), profile=None,
                                  fingerprint="f")
-    entry.check_elastic_miles_args(SimpleNamespace(use_miles_router=True))
+    entry.check_elastic_miles_args(SimpleNamespace(router="miles"))
 
 
 # ---------------------------------------------------------------- controller timeouts
@@ -609,7 +609,7 @@ def test_drain_and_recovery_timeouts_reach_the_controller(tmp_path, monkeypatch)
         args, _ = learner_from_run(island_run(cli + extra, monkeypatch), home)
         args.rl_elastic_resources = str(res)
         args.rl_elastic_state_dir = str(home / "state")
-        miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
+        miles_args = SimpleNamespace(yeto_rl_learner_id=0, router="miles")
         learner.apply_ports_infra_switches(args, miles_args, {})
         return entry.elastic_wiring_for(miles_args, profile=profile, fingerprint="f").controller
 

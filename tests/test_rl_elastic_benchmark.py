@@ -23,6 +23,11 @@ from yeto.rl.elastic_benchmark.manifest import (
 )
 from yeto.rl.elastic_benchmark.plan import build_plan
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "benchmark_rl_elastic.py"
 

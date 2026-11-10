@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -151,9 +152,61 @@ def test_resume_takes_the_manifest_pack_after_local_change(repo: Path, tmp_path:
     manifest = {"code_pack": first.pack.record(), "semantic_sha256": "s"}
     again = codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
                                       cache_root=tmp_path / "c2", semantic_sha256="s",
-                                      log=lambda _m: None)
+                                      keep_pinned=True, log=lambda _m: None)
     assert again.reused and again.pack == first.pack
     assert (again.tree / "yeto" / "a.py").read_text() == "A = 1\n"
+
+
+def _git_commit(repo: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", message], check=True,
+                   env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+
+def test_relaunch_after_a_code_change_refuses_the_stale_pack(repo: Path, tmp_path: Path) -> None:
+    store = DirPackStore(tmp_path / "store", uri_base="file-store://run")
+    first = codepack.resolve_run_pack(previous=None, repo=repo, store=store,
+                                      cache_root=tmp_path / "c1", semantic_sha256="s",
+                                      log=lambda _m: None)
+    manifest = {"code_pack": first.pack.record(), "semantic_sha256": "s"}
+    # an unchanged tree resumes on its pack without any flag
+    same = codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                     cache_root=tmp_path / "c2", semantic_sha256="s",
+                                     log=lambda _m: None)
+    assert same.reused and same.pack == first.pack
+    # a new commit (and, separately, a dirty edit) invalidates the pinned pack
+    (repo / "yeto" / "a.py").write_text("A = 2\n")
+    with pytest.raises(codepack.CodePackError, match="dirty"):
+        codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                  cache_root=tmp_path / "c3", semantic_sha256="s", log=lambda _m: None)
+    _git_commit(repo, "fix")
+    with pytest.raises(codepack.CodePackError, match="--rl-code-pack-keep"):
+        codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                  cache_root=tmp_path / "c4", semantic_sha256="s", log=lambda _m: None)
+    moved = codepack.resolve_run_pack(previous=manifest, repo=repo, store=store,
+                                      cache_root=tmp_path / "c5", semantic_sha256="s",
+                                      upgrade_reason="fix", log=lambda _m: None)
+    assert not moved.reused and moved.pack.commit != first.pack.commit
+    assert (moved.tree / "yeto" / "a.py").read_text() == "A = 2\n"
+
+
+def test_same_prefix_on_another_store_is_a_new_run(repo: Path, tmp_path: Path) -> None:
+    # The run manifest is keyed by cluster prefix; a fresh launch of that prefix on a
+    # new checkpoint store must ship the current tree, not the earlier run's pack.
+    old_store = DirPackStore(tmp_path / "old", uri_base="file-store://run-a")
+    first = codepack.resolve_run_pack(previous=None, repo=repo, store=old_store,
+                                      cache_root=tmp_path / "c1", semantic_sha256="s",
+                                      log=lambda _m: None)
+    (repo / "yeto" / "a.py").write_text("A = 2\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "change"], check=True)
+    new_store = DirPackStore(tmp_path / "new", uri_base="file-store://run-b")
+    manifest = {"code_pack": first.pack.record(), "semantic_sha256": "s"}
+    fresh = codepack.resolve_run_pack(previous=manifest, repo=repo, store=new_store,
+                                      cache_root=tmp_path / "c2", semantic_sha256="s",
+                                      log=lambda _m: None)
+    assert not fresh.reused and fresh.pack.digest != first.pack.digest
+    assert fresh.pack.pack_uri.startswith("file-store://run-b/")
+    assert (fresh.tree / "yeto" / "a.py").read_text() == "A = 2\n"
 
 
 def test_upgrade_needs_equal_semantic_hash(repo: Path, tmp_path: Path) -> None:

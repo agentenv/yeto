@@ -2,9 +2,10 @@
 
 CPU protocol test, NOT GPU evidence. Every rank is simulated in one process
 with duck-typed Megatron DistOpt leaves (``gbuf_ranges``, main-param shards,
-Adam moments) and the REAL fork-M5 helpers (``dp_invariant_state`` at the
-current Miles fork pin, read from a local Miles checkout; skipped when
-absent).
+Adam moments) and the REAL fork-M5 helpers: the copy vendored into
+``yeto.rl.adapters.miles.dp_invariant_state`` (what the cut plugin runs) and,
+when ``YETO_MILES_DISTOPT_CHECKOUT`` names a Miles checkout, the fork's own
+file at ed5f64fd7 (skipped when absent).
 save -> fresh rebuild -> restore -> re-export must be element-wise equal, and
 the full FP32 masters gathered for the republish (state_plugin.full_masters)
 must equal the pre-cut ones. A different DP/EP layout is refused.
@@ -46,12 +47,15 @@ def _load_dps(checkout, ref):
     return module
 
 
-_LOADED = {label: _load_dps(*source) for label, source in DPS_SOURCES.items()}
+from yeto.rl.adapters.miles import dp_invariant_state as _vendored_dps
+
+_LOADED = {"vendored": _vendored_dps, **{label: _load_dps(*source) for label, source in DPS_SOURCES.items()}}
 DPS = None  # set per test by the ``dps`` fixture
 
 
-@pytest.fixture(params=sorted(DPS_SOURCES))
+@pytest.fixture(params=sorted(_LOADED))
 def dps(request, monkeypatch):
+    """The vendored helpers (what cut_plugin runs), plus the fork's own copy when a checkout is given."""
     module = _LOADED[request.param]
     if module is None:
         pytest.skip(f"Miles checkout with the fork-M5 helpers at {DPS_SOURCES[request.param]} not available")

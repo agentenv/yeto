@@ -103,6 +103,18 @@ def _base(owned):
     )
 
 
+def _trainer_args() -> SimpleNamespace:
+    """The trainer args the Miles transport reads, for either lineage: ports-v1
+    reads the flat Megatron fields with getattr defaults; k31 (k31/b2 on) reads
+    the typed fields directly and the Megatron-owned ones through ``args.backend``."""
+    backend = SimpleNamespace(global_batch_size=1, swiglu=False, overlap_param_gather=False,
+                              num_distributed_optimizer_instances=1)
+    return SimpleNamespace(lora_rank=0, lora_adapter_path=None, num_steps_per_rollout=1, global_batch_size=1,
+                           start_rollout_id=None, backend=backend, full_parameter_lora_hybrid=False,
+                           lora_base_cpu_backup=False, rematerialize_param_from_master_weight=False,
+                           stream_optimizer_state_to_disk=False)
+
+
 class FakeRank:
     """One fake Megatron rank of an island with ``world`` ranks, TP ``tp`` and EP ``ep``."""
 
@@ -134,11 +146,10 @@ class FakeRank:
             "dense": (self.replication.dense_ranks, [name for name in self.locals if not params[name].expert]),
             "expert": (self.replication.expert_ranks, [name for name in self.locals if params[name].expert]),
         }
-        self.args = SimpleNamespace(
-            lora_rank=0, lora_adapter_path=None, num_steps_per_rollout=1, global_batch_size=1, start_rollout_id=None
-        )
+        self.args = _trainer_args()
         self.opt_param_scheduler = SimpleNamespace(num_steps=0)
-        self.weights_backuper = SimpleNamespace(backup=lambda role: None)
+        self.weights_backuper = SimpleNamespace(backup=lambda role: None, backup_tensors=lambda tag, ids: 0)
+        self._enable_weight_backup = True
         self._last_rollout_id = 0
         self.sharded_masters = sharded_masters
         self.ranges: dict[str, tuple[int, int]] = {}

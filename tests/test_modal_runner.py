@@ -94,8 +94,8 @@ def test_syncer_must_be_reachable_from_modal(monkeypatch):
     assert not mr.is_public_address("10.1.2.3") and not mr.is_public_address("127.0.0.1")
     assert mr.resolve_syncer_for_modal("8.8.8.8:5000", None) == "8.8.8.8:5000"
     with pytest.raises(ValueError, match="not reachable from Modal.*--syncer-public-addr"):
-        mr.resolve_syncer_for_modal("192.168.1.10:5000", None)
-    assert mr.resolve_syncer_for_modal("192.168.1.10:5000", "tunnel.example.com:5000") == "tunnel.example.com:5000"
+        mr.resolve_syncer_for_modal("192.0.2.1:5000", None)
+    assert mr.resolve_syncer_for_modal("192.0.2.1:5000", "tunnel.example.com:5000") == "tunnel.example.com:5000"
 
 
 # --- fake modal SDK -------------------------------------------------------------------
@@ -721,3 +721,47 @@ def test_define_sizes_the_container_disk_in_mib(monkeypatch):
     mr.ModalOps("yeto-run").define(_cfg(ephemeral_disk_gib=634))
     _fn, kwargs = state["functions"]["island-1"]
     assert kwargs["ephemeral_disk"] == 634 * 1024
+
+
+# --- Modal: B300, clustered API -----------------------------------------------
+
+
+def test_b300_is_a_whole_node_modal_gpu():
+    assert mr.MODAL_GPUS["B300"] == "B300" and mr.MODAL_FULL_NODE["B300"] == 8
+    assert set(mr.MODAL_GPU_NAME_PATTERNS) == set(mr.MODAL_GPUS)
+    mr.validate_modal_shape("B300", 8, 6)
+    with pytest.raises(ValueError, match="whole nodes"):
+        mr.validate_modal_shape("B300", 4, 2)
+    mr.check_gpu_names("B300", ["NVIDIA B300"] * 8, 8)
+    with pytest.raises(RuntimeError, match="B300"):
+        mr.check_gpu_names("B300", ["NVIDIA B200"] * 8, 8)
+    assert _cfg(gpu="B300", num_nodes=6).gpu_request == "B300:8"
+
+
+def test_clustered_prefers_the_ga_api_and_falls_back_to_experimental(monkeypatch):
+    state = fake_modal(monkeypatch)
+    modal = sys.modules["modal"]
+    # pre-GA client: only modal.experimental.clustered exists
+    assert mr.clustered_decorator(modal) is modal.experimental.clustered
+    assert mr.cluster_info(modal).rank == 0
+    # GA client: modal.clustered and modal.get_cluster_info win
+    ga = []
+    modal.clustered = lambda size, rdma=False, **kw: (lambda fn: (ga.append((size, rdma)) or fn))
+    modal.get_cluster_info = lambda: types.SimpleNamespace(rank=3, container_ips=["fdaa::3"])
+    mr.ModalOps("yeto-run").define(_cfg(gpu="B300", num_nodes=6))
+    assert ga == [(6, True)] and "clustered" not in state
+    assert mr.cluster_info(modal).rank == 3
+    # neither: a clear error, not an AttributeError
+    del modal.clustered
+    experimental = types.ModuleType("modal.experimental")
+    monkeypatch.setitem(sys.modules, "modal.experimental", experimental)
+    modal.experimental = experimental
+    with pytest.raises(RuntimeError, match="modal.clustered"):
+        mr.clustered_decorator(modal)
+
+
+def test_define_falls_back_to_the_experimental_clustered_api(monkeypatch):
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("yeto-run").define(_cfg(gpu="B300", num_nodes=2))
+    assert state["clustered"] == (2, True)
+    assert state["functions"]["island-1"][1]["gpu"] == "B300:8"
