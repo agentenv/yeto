@@ -170,7 +170,11 @@ class Run:
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "status", "--envs", self.envs, "--store", self.cfg["store"]),
                             log="preflight.log") == 0
-        ok &= self._cmd(self.yeto("launch", *self.cfg["trainer"]["argv"], "--dry-run"), log="preflight.log") == 0
+        if self.trainer_restart():
+            _log("preflight: an earlier trainer launch of this run exists: a start from the base would hit "
+                 "the rounds its ledger recorded on the island volume (LedgerError); the trainer starts "
+                 "with --rl-ledger-set-aside-before, which sets that ledger aside (ledger.before-<ts>)")
+        ok &= self._cmd(self.yeto("launch", *self.trainer_argv(), "--dry-run"), log="preflight.log") == 0
         for argv in (self.cfg.get("preflight") or {}).get("commands") or ():
             ok &= self._cmd([os.path.expanduser(a) for a in argv], log="preflight.log") == 0
         self.mark("preflight", ok=bool(ok))
@@ -226,8 +230,22 @@ class Run:
         _log("first group: timed out")
         return "first group timed out"
 
+    def trainer_restart(self) -> bool:
+        """An earlier trainer launch of this run exists (this ``run up`` restarts it)."""
+        return bool((self.state.get("procs") or {}).get("trainer") or (self.state.get("steps") or {}).get("trainer"))
+
+    def trainer_argv(self, now: float | None = None) -> list[str]:
+        """The trainer's ``yeto launch`` argv. On a restart it adds
+        ``--rl-ledger-set-aside-before <now>``: a start from the base (no cut / release to
+        continue) sets aside the ledger the earlier launch left on the island's volume
+        (``ledger.before-<ts>``) instead of failing on it (LedgerError) after the start-up."""
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        if self.trainer_restart() and not any(a.startswith("--rl-ledger-set-aside-before") for a in argv):
+            argv += ["--rl-ledger-set-aside-before", f"{time.time() if now is None else now:.0f}"]
+        return argv
+
     def trainer(self) -> None:
-        self._spawn("trainer", self.yeto("launch", *self.cfg["trainer"]["argv"]))
+        self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 

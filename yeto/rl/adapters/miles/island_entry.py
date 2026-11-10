@@ -480,6 +480,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
+    if getattr(args, "rl_ledger_set_aside_before", None) is not None:
+        miles_args.yeto_rl_ledger_set_aside_before = float(args.rl_ledger_set_aside_before)
     auto = _cut_auto(args)
     if auto:
         miles_args.yeto_rl_cut_auto = auto  # a timed interval (any cut store)

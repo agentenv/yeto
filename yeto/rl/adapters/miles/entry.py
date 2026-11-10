@@ -889,6 +889,7 @@ def compose_island(
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
     driver.round_phases = True  # per-round time breakdown (rl_round_phases) for MFU
+    driver.ledger_set_aside_before = getattr(miles_args, "yeto_rl_ledger_set_aside_before", None)
     # publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     # --rl-verify-every N (no-sync island): hash the policy only every N-th version

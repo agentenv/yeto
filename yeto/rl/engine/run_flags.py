@@ -748,6 +748,11 @@ _RESUME = (
     shared_flag("--rl-cut-keep", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
                 "(default 2); older ones are deleted only after the new LATEST is committed"),
+    shared_flag("--rl-ledger-set-aside-before", type=float, default=None, metavar="UNIX_S",
+                help="a start from the base (rollout 0) sets aside a batch ledger on the "
+                "island's state dir whose rounds were all recorded before this time (an "
+                "earlier launch) instead of refusing it; yeto run up sets it on a trainer "
+                "restart"),
     shared_flag("--rl-resume-allow-config-change", action="store_true",
                 help="resume a cut even though the run configuration differs (the "
                 "differences are written to the rl_resume event); refused by default"),

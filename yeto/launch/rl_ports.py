@@ -799,6 +799,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             flags += f" {flag} {float(getattr(args, name))!r}"
     if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_resume_allow_config_change", False):
         flags += " --rl-resume-allow-config-change"
+    if getattr(args, "rl_ledger_set_aside_before", None) is not None:
+        flags += f" --rl-ledger-set-aside-before {float(args.rl_ledger_set_aside_before)!r}"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "

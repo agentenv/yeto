@@ -618,3 +618,35 @@ def test_no_sync_restart_hits_the_ledger_and_the_restart_loop_is_bounded(tmp_pat
     out = subprocess.run(["bash", "-c", script], env={"YETO_RL_RESTART_ATTEMPTS": "2", "LOG": str(log), "PATH": "/usr/bin:/bin"},
                          capture_output=True, text=True)
     assert "rc=86" in out.stdout and out.stderr.count("in-place restart") == 2  # bounded: 1 + 2 attempts, then the exit code
+
+
+def test_a_new_launch_from_the_base_sets_the_earlier_ledger_aside(tmp_path):
+    """yeto run up restarts the trainer from the base with --rl-ledger-set-aside-before:
+    rounds an earlier launch recorded no longer fail the start (LedgerError); the old
+    ledger moves to ledger.before-<ts>. Rounds recorded by this launch are still refused."""
+    import time as _time
+
+    from yeto.rl.engine.ledger import LedgerError
+
+    clock = {"t": 1000.0}
+    driver, ctl, *_ = _island(tmp_path, clock=clock, ledger=BatchLedger(tmp_path / "state"))
+    driver.run(); ctl.close(); driver.ledger.close()
+    # an in-place restart of the same launch (its cutoff predates its own rounds): refused
+    driver, ctl, *_ = _island(tmp_path, clock=clock, ledger=BatchLedger(tmp_path / "state"))
+    driver.ledger_set_aside_before = 1.0
+    with pytest.raises(LedgerError, match="behind outer-recorded rollouts"):
+        driver.run()
+    ctl.close(); driver.ledger.close()
+    # a new launch: every recorded round is older than its cutoff
+    driver, ctl, fork, pool, publisher, engine = _island(tmp_path, clock=clock,
+                                                         ledger=BatchLedger(tmp_path / "state"))
+    driver.ledger_set_aside_before = _time.time() + 1
+    events = []
+    real_emit = driver.emit
+    driver.emit = lambda name, **kw: (events.append((name, kw)), real_emit(name, **kw))[1]
+    driver.run()
+    ctl.close(); driver.ledger.close()
+    moved = list((tmp_path / "state").glob("ledger.before-*"))
+    assert len(moved) == 1 and [c for c in engine.calls if c[0] == "generate"]
+    aside = [kw for name, kw in events if name == "rl_ledger_set_aside"]
+    assert aside and aside[0]["moved_to"] == str(moved[0]) and aside[0]["recorded_count"] >= 1

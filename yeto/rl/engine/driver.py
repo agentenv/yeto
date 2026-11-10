@@ -2705,6 +2705,32 @@ class IslandDriver:
             "sync_preset": getattr(self.sync, "OUTER_SYNC_KIND", None),
         })
 
+    # ``--rl-ledger-set-aside-before T`` (unix seconds; ``yeto run up`` sets it on a trainer
+    # restart): rounds recorded before T belong to an earlier launch
+    ledger_set_aside_before: float | None = None
+
+    def _set_aside_ledger_of_a_base_restart(self, start_rollout_id: int) -> None:
+        """A launch that starts at rollout 0 starts from the base (no cut, no release to
+        continue from). Rounds an earlier launch recorded in the ledger on the island's
+        volume are not this history: ``rebase(0)`` would refuse them (LedgerError) after the
+        whole trainer start-up. With ``ledger_set_aside_before`` and every recorded round
+        older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead. A round
+        recorded by this launch (an in-place restart at 0) is still refused."""
+        cutoff = self.ledger_set_aside_before
+        recorded = self.ledger.recorded_rollouts() if start_rollout_id == 0 and cutoff is not None else []
+        set_aside = getattr(self.ledger, "set_aside", None)
+        if not recorded or not callable(set_aside):
+            return
+        last = self.ledger.last_recorded_at()
+        if last is None or last >= float(cutoff):
+            return  # this launch's own rounds (or no time to tell): rebase refuses them
+        import time as _time
+
+        dest = set_aside(_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()))
+        self.emit("rl_ledger_set_aside", rollout_id=0, recorded_rollouts=recorded[-8:],
+                  recorded_count=len(recorded), moved_to=str(dest),
+                  why="start from the base (rollout 0) over a ledger of an earlier attempt")
+
     def run(self) -> TrainableState:
         with self._telemetry_threads():
             return self._run()
@@ -2721,6 +2747,7 @@ class IslandDriver:
                     start = self.sync.start(self)
                     self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
+                        self._set_aside_ledger_of_a_base_restart(start.rollout_id)
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):

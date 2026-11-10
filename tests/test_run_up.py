@@ -307,3 +307,17 @@ def test_preflight_refuses_a_disabled_stall_timeout(make_run, flag, monkeypatch)
     run = make_run()
     run.cfg["trainer"]["argv"] += flag
     assert run.preflight() is False and run.calls == []
+
+
+def test_a_trainer_restart_sets_the_earlier_ledger_aside(make_run, monkeypatch):
+    monkeypatch.setattr(launch_preflight, "modal_sdk_problem", lambda env: None)
+    run = make_run()
+    assert "--rl-ledger-set-aside-before" not in run.trainer_argv()  # the first launch
+    run.preflight()
+    assert not any("--rl-ledger-set-aside-before" in a for a in run.calls[1])
+    run.state["procs"] = {"trainer": {"pid": 2 ** 22 + 1, "log": "x"}}
+    argv = run.trainer_argv(now=1234.0)
+    assert argv[-2:] == ["--rl-ledger-set-aside-before", "1234"]
+    run.calls = []
+    run.preflight()  # the dry run checks the argv the restart uses
+    assert any("--rl-ledger-set-aside-before" in argv for argv in run.calls)
