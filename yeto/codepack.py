@@ -143,7 +143,10 @@ def dirty_patch(repo: str | os.PathLike[str]) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         index = Path(tmp) / "index"
         if (git_dir / "index").is_file():
-            shutil.copyfile(git_dir / "index", index)
+            # copy2 keeps the index mtime: git re-reads a file whose mtime is not older
+            # than the index ("racily clean"); a fresh mtime on the copy would hide an
+            # edit of the same size made in the same second as the last index write.
+            shutil.copy2(git_dir / "index", index)
         env = {"GIT_INDEX_FILE": str(index)}
         _git(root, "add", "-A", "--", ".", env=env)
         return _git(root, "diff", "--binary", "--cached", "--no-color", "--no-ext-diff",
