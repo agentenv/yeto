@@ -378,18 +378,6 @@ _ALGORITHM = (
         ),
     ),
     cli_flag(
-        "--rl-sampler-engine",
-        choices=("sglang", "vllm"),
-        default=None,
-        help=(
-            "--rl-sample-role trainer: the engine of the separate samplers that load "
-            "this run's releases. Kimi-K3.1 LoRA checks the adapter targets against it: "
-            "vllm (A-card, MXFP4 experts) takes --lora-targets attention only; "
-            "all-linear (routed experts) needs sglang. Default: not declared "
-            "(all-linear is refused)"
-        ),
-    ),
-    cli_flag(
         "--rl-allow-local-data",
         action="store_true",
         help=(
