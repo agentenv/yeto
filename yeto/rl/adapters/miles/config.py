@@ -1597,12 +1597,14 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     a trainer reads the buffer and can export HF snapshots for its releases; a
     convertible node does both with one switchable rollout function, and
     releases what it trains too (the other nodes load the releases)."""
-    from .buffer_rollout import SAMPLER, rollout_argv
+    from .buffer_rollout import ROLLOUT_LOG_FUNCTION, SAMPLER, rollout_argv
 
     argv = rollout_argv(role, max_policy_age=max_policy_age)
     if role == SAMPLER:
         return (*argv, SAMPLER_ONLY_FLAG)
-    return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
+    # a reader pads short rounds: its rollout metrics leave the padding samples out
+    return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF,
+            "--custom-rollout-log-function-path", ROLLOUT_LOG_FUNCTION)
 
 
 def _is_sampler_island(sample_buffer: Any) -> bool:

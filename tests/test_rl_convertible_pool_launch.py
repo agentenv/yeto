@@ -86,7 +86,9 @@ def test_pool_miles_argv_selects_the_convertible_rollout_function():
     # the node releases what it trains: the release exporter needs --save-hf
     assert argv == ("--rollout-function-path",
                     "yeto.rl.adapters.miles.buffer_rollout_miles.ConvertibleRolloutFn",
-                    "--save-hf", RELEASE_EXPORTER_SAVE_HF)
+                    "--save-hf", RELEASE_EXPORTER_SAVE_HF,
+                    "--custom-rollout-log-function-path",
+                    "yeto.rl.adapters.miles.buffer_rollout_miles.log_rollout_data")
 
 
 def test_pool_refuses_an_island_that_is_not_convertible():

@@ -110,6 +110,8 @@ ROLLOUT_FUNCTION_PATHS = {
     TRAINER: f"{_MODULE}.BufferReaderRolloutFn",
     CONVERTIBLE: f"{_MODULE}.ConvertibleRolloutFn",
 }
+# a reader's rollout log: Miles' rollout metrics over the real samples (padding left out)
+ROLLOUT_LOG_FUNCTION = f"{_MODULE}.log_rollout_data"
 # the rollout functions that read the buffer (the trainer keeps a watermark)
 READER_FUNCTION_PATHS = (ROLLOUT_FUNCTION_PATHS[TRAINER], ROLLOUT_FUNCTION_PATHS[CONVERTIBLE])
 
@@ -309,6 +311,12 @@ def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
         pad["index"] = (PADDING_GROUP_BASE + k) * int(samples_per_group)
         out.append(pad)
     return out
+
+
+def is_padding(sample: Any) -> bool:
+    """A padding sample of :func:`padding_samples` (a dict or a Miles ``Sample``)."""
+    meta = sample.get("metadata") if isinstance(sample, dict) else getattr(sample, "metadata", None)
+    return bool((meta or {}).get(PADDING_KEY))
 
 
 # ---------------------------------------------------------------------- sampler side

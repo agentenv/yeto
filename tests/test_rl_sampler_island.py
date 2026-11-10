@@ -238,7 +238,8 @@ def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_
     assert "--debug-rollout-only" not in node.argv
     assert [a for a in node.argv if a not in base.argv] == [
         "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["convertible"],
-        "--save-hf", mc.RELEASE_EXPORTER_SAVE_HF]
+        "--save-hf", mc.RELEASE_EXPORTER_SAVE_HF,
+        "--custom-rollout-log-function-path", br.ROLLOUT_LOG_FUNCTION]
     # full parameters on the colocated node (the K3.1 form: whole-checkpoint releases) are
     # accepted with the same switchable rollout; a node whose engines sit on other GPUs is not
     full = sub(cfg, "trainable", parameter_mode="full", target_modules=())

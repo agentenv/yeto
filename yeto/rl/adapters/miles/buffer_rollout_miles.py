@@ -27,6 +27,7 @@ from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event
 
 from .buffer_rollout import (
     DATA_SLOT_ENV,
+    is_padding,
     EXTERNAL_CUT_ROUND_ATTR,
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
@@ -71,6 +72,47 @@ def _flat(group: Any) -> list[Any]:
     for item in group if isinstance(group, list) else [group]:
         out.extend(_flat(item) if isinstance(item, list) else [item])
     return out
+
+
+class _DefaultRolloutLog:
+    """Miles' args with no custom rollout log (its default logging, called once more)."""
+
+    def __init__(self, args: Any) -> None:
+        self._args = args
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "custom_rollout_log_function_path":
+            return None
+        return getattr(self._args, name)
+
+    def __iter__(self):
+        for key, value in dict(self._args).items():
+            yield key, (None if key == "custom_rollout_log_function_path" else value)
+
+    def keys(self):
+        return dict(self).keys()
+
+    def __getitem__(self, key: str) -> Any:
+        return dict(self)[key]
+
+
+def log_rollout_data(rollout_id: Any, args: Any, samples: Any, rollout_extra_metrics: Any,
+                     rollout_time: Any) -> bool:
+    """``--custom-rollout-log-function-path`` of a buffer reader: Miles' default rollout
+    metrics (rewards, response lengths, truncation, ...) over the real samples only; the
+    padding samples of a short round (``metadata.yeto_padding``) would pull them toward
+    one copied sample. Adds ``rollout/padded_samples`` and ``rollout/padded_fraction``.
+    True: Miles skips its own logging (done here)."""
+    flat = _flat(list(samples))
+    real = [s for s in flat if not is_padding(s)]
+    if len(real) == len(flat):
+        return False  # nothing padded: Miles logs as usual
+    from miles.ray.rollout import metrics as miles_metrics  # noqa: PLC0415
+
+    extra = {**(rollout_extra_metrics or {}), "rollout/padded_samples": len(flat) - len(real),
+             "rollout/padded_fraction": (len(flat) - len(real)) / max(1, len(flat))}
+    miles_metrics.log_rollout_data(rollout_id, _DefaultRolloutLog(args), real, extra, rollout_time)
+    return True
 
 
 class BufferWriterRolloutFn(InferenceRolloutFn):

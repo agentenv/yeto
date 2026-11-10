@@ -721,3 +721,29 @@ def test_padding_matches_miles_reward_normalization():
                            rollout_batch_size=2, reward_key=None)
     out = miles._normalize_rewards_by_rollout(args, batch, [s.reward for s in batch], None)
     assert out == pytest.approx([0.5, -0.5, -0.5, 0.5, 2 / 3, -1 / 3, -1 / 3, 0.0])
+
+
+def test_the_reader_rollout_log_leaves_the_padding_samples_out(monkeypatch):
+    """F1: padding samples (copies of the shortest real one) must not enter Miles'
+    rollout metrics; the reader's custom rollout log calls Miles' default logging over
+    the real samples only, with the custom hook off (no recursion)."""
+    import types
+
+    plugin = _import_plugin_with_stub_miles(monkeypatch, {})
+    logged = []
+
+    def default_log(rollout_id, args, samples, extra, rollout_time):
+        logged.append((rollout_id, args.custom_rollout_log_function_path, args.seed, samples, extra))
+
+    monkeypatch.setitem(sys.modules, "miles.ray.rollout",
+                        types.SimpleNamespace(metrics=types.SimpleNamespace(log_rollout_data=default_log)))
+    real = [types.SimpleNamespace(metadata={}, reward=1.0) for _ in range(3)]
+    pads = [types.SimpleNamespace(metadata={br.PADDING_KEY: True}, reward=1.0)]
+    args = types.SimpleNamespace(custom_rollout_log_function_path=br.ROLLOUT_LOG_FUNCTION, seed=7)
+    assert plugin.log_rollout_data(4, args, real + pads, {"x": 1}, 2.0) is True
+    (rid, hook, seed, samples, extra), = logged
+    assert rid == 4 and hook is None and seed == 7 and samples == real
+    assert extra == {"x": 1, "rollout/padded_samples": 1, "rollout/padded_fraction": 0.25}
+    # nothing padded: Miles logs as usual
+    assert plugin.log_rollout_data(5, args, real, None, 2.0) is False and len(logged) == 1
+    assert br.is_padding({"metadata": {br.PADDING_KEY: True}}) and not br.is_padding({"metadata": None})
