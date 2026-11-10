@@ -809,8 +809,8 @@ _RESUME = (
                 "--rl-max-policy-age >= 3; size it as ceil(upload_s / step_s) + "
                 "ceil(download_s / step_s) + backlog_groups / groups_per_step"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
-                help="--rl-sample-role trainer: max seconds to wait for one full round from "
-                "the buffer (default 3600)"),
+                help="--rl-sample-role trainer: max seconds without a new group in the buffer "
+                "while a round fills (default 3600)"),
     shared_flag("--rl-sampler-node", default=None, metavar="NAME",
                 help="--rl-sample-role sampler: this island's node name (set by the launcher "
                 "per island of --rl-island-sample-role; the sampler id that a replacement "

@@ -82,7 +82,7 @@ ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
 
 BUFFER_ROOT_ENV = "YETO_SAMPLE_BUFFER_ROOT"  # checkpoint store path holding sample-buffer/
 SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a sampler writes
-WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full round
+WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds without a new group while a round fills
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
@@ -631,12 +631,14 @@ class BatchReader:
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
         """``groups`` ``(buffer position, decoded group)`` pairs for ``rollout_id``.
-        Waits up to ``wait_s`` for them; after the data end returns what is left
-        (raises when nothing is)."""
+        Waits for them while the samplers write: it raises only after ``wait_s``
+        seconds in which no new group reached the buffer (a slow round that keeps
+        arriving is waited for); after the data end returns what is left (raises
+        when nothing is)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
         rollout_id = int(rollout_id)
-        started = self.clock()
+        started = progress = self.clock()
         self._stop_prefetching()
         ahead = dict(self._reads)
         self._reads.clear()
@@ -700,14 +702,16 @@ class BatchReader:
             if self.group_size is not None and selected:
                 dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
                                                        source_tokens, position_sources)
+            if selected:
+                progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
                 continue
             if self.buffer.data_ended:
                 break
-            if self.clock() - started > self.wait_s:
+            if self.clock() - progress > self.wait_s:
                 raise SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"(buffer position {self.buffer.read_cursor})")
+                    f"without a new group (buffer position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
         end = self.buffer.read_cursor
         carried_out = padded = 0

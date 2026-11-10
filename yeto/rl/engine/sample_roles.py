@@ -92,7 +92,7 @@ class SampleBufferConfig:
     ``store``: the checkpoint store path that holds the buffer and the releases;
     ``max_backlog_groups``: sampler or convertible node admission cap (unconsumed
     groups);
-    ``wait_s``: trainer, max seconds to wait for one full round;
+    ``wait_s``: trainer, max seconds without a new group while a round fills;
     ``min_round_s``: sampler, min seconds from one round start to the next (a
     throttle, so a test can make the sampler slower than the trainer);
     ``fused_stage``: LoRA sampler, check the release digest while copying the

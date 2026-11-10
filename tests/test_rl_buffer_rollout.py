@@ -800,3 +800,27 @@ def test_a_group_with_a_non_finite_reward_is_consumed_not_trained(tmp_path):
     assert br.finite_rewards([{"reward": {"acc": 1.0}}, {"index": 0}]) is True
     assert br.finite_rewards([{"reward": float("inf")}]) is False
 
+
+def test_the_reader_waits_while_groups_keep_arriving(tmp_path):
+    """wait_s bounds the time without a new group, not the whole round: a round
+    that fills slowly (a 1M-context agentic round) is waited for; a stalled one fails."""
+    buffer = _buffer(tmp_path)
+    writer = br.GroupWriter(buffer, "s0")
+    now = [0.0]
+    arrivals = iter(range(1, 4))
+
+    def sleep(seconds):
+        now[0] += seconds
+        if now[0] % 40 == 0:  # one group every 40 s: the round needs 120 s > wait_s
+            g = next(arrivals, None)
+            if g is not None:
+                writer.write(_short(g, 1, 4), group_key=f"g{g}")
+
+    writer.write(_short(0, 1, 4), group_key="g0")
+    reader = br.BatchReader(buffer, max_policy_age=1, wait_s=50.0, poll_s=10.0, group_size=4,
+                            clock=lambda: now[0], sleep=sleep, prefetch=False)
+    groups, report = reader.take(0, 4, current_version=1)
+    assert [pos for pos, _ in groups] == [0, 1, 2, 3] and now[0] >= 120
+    with pytest.raises(br.SampleBufferRolloutError, match="without a new group"):
+        reader.take(1, 1, current_version=1)
+    assert 50 < now[0] - 120 <= 70
