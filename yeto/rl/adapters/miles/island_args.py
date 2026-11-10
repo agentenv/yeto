@@ -87,6 +87,7 @@ DRIVER_KEYS: frozenset[str] = frozenset({
     "rl_unverified_mechanisms",
     "rl_verify_every",
     "rl_verify_every_round",
+    "rl_ledger_set_aside_before",
     "rollout_quant_fp8_source",
     "rollout_quant_tier",
     # elastic_hook.TUNING (``--rl-auto-*`` / ``--rl-recommend-*``)
