@@ -289,7 +289,8 @@ def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
                     samples_per_group: int) -> list[dict[str, Any]]:
     """``count`` samples that fill a round to Miles' global batch without training.
 
-    Each is a copy of the round's shortest real sample (the cheapest forward pass)
+    Each is a copy of the round's shortest real sample with a response (the cheapest
+    forward pass)
     with ``loss_mask`` all 0 and ``remove_sample`` set (no loss, no gradient), and a
     group of its own (``group_index`` from ``PADDING_GROUP_BASE``): a one-sample group
     centers to advantage 0 and takes no part in a real group's mean or spread.
@@ -299,7 +300,10 @@ def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
     real = [d for group in groups for d in group]
     if not real:
         raise SampleBufferRolloutError("no real sample to build padding from")
-    shortest = min(real, key=lambda d: len(d.get("tokens") or ()))
+    # a sample with a response (an empty one, e.g. an engine that stopped at once, gives
+    # Miles a zero-length response row: ``x[-0:]`` is the whole sequence, not nothing)
+    responded = [d for d in real if int(d.get("response_length") or 0) > 0] or real
+    shortest = min(responded, key=lambda d: len(d.get("tokens") or ()))
     out = []
     for k in range(int(count)):
         pad = dict(shortest)

@@ -834,3 +834,12 @@ def test_xhw_downweight_under_std_normalization_is_refused_at_the_start():
     br.check_xhw_downweight(std_normalized=False, environ=env)
     br.check_xhw_downweight(std_normalized=True, environ={"YETO_RL_XHW_GUARD": "1"})
     br.check_xhw_downweight(std_normalized=True, environ={})
+
+
+def test_padding_is_never_a_copy_of_an_empty_response():
+    groups = [_short(0, 1, 2)]
+    groups[0][0].update(tokens=[1, 2], response_length=0, loss_mask=[])  # an engine that stopped at once
+    (pad,) = br.padding_samples(groups, 1, samples_per_group=4)
+    assert pad["response_length"] == 3 and pad["loss_mask"] == [0, 0, 0]
+    groups[0][1].update(tokens=[1, 2], response_length=0, loss_mask=[])
+    assert br.padding_samples(groups, 1, samples_per_group=4)[0]["response_length"] == 0  # nothing else
