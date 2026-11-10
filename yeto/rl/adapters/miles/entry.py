@@ -716,8 +716,14 @@ def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
         raise ValueError(f"{EXPORT_HF_FLAG} writes full weights; a LoRA island has no full export")
     one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
     return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
-                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node),
+                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node,
+                                                 base_dir=_hf_dir(miles_args)),
                           staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
+
+
+def _hf_dir(miles_args: Any) -> Path | None:
+    path = getattr(miles_args, "hf_checkpoint", None)
+    return Path(path) if path and Path(path).is_dir() else None
 
 
 def _is_full_parameter_sync(sync: Any) -> bool:

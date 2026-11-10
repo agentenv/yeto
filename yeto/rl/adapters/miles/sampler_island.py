@@ -1059,7 +1059,8 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"
 
     # local disk: every rank writes a share of the files
-    write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write)
+    write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write,
+                                        base_dir=_local_dir(getattr(miles_args, "hf_checkpoint", None)))
 
     def export(version: int, directory: Path) -> None:
         if lora:
@@ -1092,6 +1093,11 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
         start_trainer_releaser(miles_args, config, environ)
     return publisher
+
+
+def _local_dir(path: Any) -> Path | None:
+    """``--hf-checkpoint`` when it is a directory on this node (else None)."""
+    return Path(path) if path and Path(path).is_dir() else None
 
 
 def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
