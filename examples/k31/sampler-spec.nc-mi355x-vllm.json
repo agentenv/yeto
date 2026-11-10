@@ -1,0 +1,92 @@
+{
+  "_comment": [
+    "Engine sampler spec of one National Compute MI355X node (8 x MI355X, vLLM ROCm) for a",
+    "Kimi-K3.1 async GRPO run, in the dedicated image pins.VLLM_SAMPLER_IMAGE_ROCM",
+    "(vllm/vllm-openai-rocm:kimi-k31): python -m yeto.rl.engine.engine_sampler --spec THIS.json",
+    "(scripts/sampler_node/run_engine_sampler.sh --python /opt/runtime-venv/bin/python --pip-install",
+    "--spec THIS.json --r2-env-file ENV). The engine section is the vllm-server adapter on the",
+    "upstream line with the k31_preset amd-article (AMD's published TP8 + DCP8 layout without",
+    "speculative decoding and CPU KV offload); rl-precision is the same layout with BF16",
+    "all-reduce / MoE combine / KDA input projections and an FP32 KDA state. vLLM refuses R3",
+    "(routed_experts) with DCP / PCP > 1, so this R3 server runs the preset at DCP 1 (the MLA KV",
+    "cache whole on every rank, about 1/8 of the DCP8 KV token capacity; the load detail records",
+    "it as r3_cp_overrides): keep max_num_seqs x max_model_len inside it. Reload is by restart",
+    "(in-place reload_weights is not measured on this image). Every value in angle brackets is a",
+    "site value the launch layer fills in; the store and prompts sections are as in",
+    "sampler-spec.nc-mi355x.json."
+  ],
+  "sampler_id": "<nc-node-id>",
+  "platform": "rocm",
+  "rollout_fields": {
+    "routed_experts": true,
+    "top_logprobs_num": 128,
+    "fp32_lm_head": true
+  },
+  "expert_selection_sha256": "<sha256 of expert_selection.json>",
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "vllm-server",
+    "server": {
+      "base_dir": "<nvme path of the Kimi-K3.1 MXFP4 checkpoint>",
+      "port": 30000,
+      "python": "/opt/runtime-venv/bin/python",
+      "card_model": "MI355X",
+      "device_family": "rocm",
+      "engine_version": "vllm-kimi-k31@0.0.0+mum.14d1ec2336",
+      "precision": "mxfp4",
+      "quant_scheme": "MXFP4_EXPERTS_RTN",
+      "topology": "tp8",
+      "max_model_len": 32768,
+      "in_place_reload": false,
+      "start_timeout_s": 7200.0,
+      "extra_args": []
+    },
+    "options": {
+      "tp": 8,
+      "max_num_seqs": 48,
+      "k31_preset": "amd-article",
+      "tool_call_parser": "kimi_k3",
+      "reasoning_parser": "kimi_k3",
+      "pin_version": "0.0.0+mum.14d1ec2336"
+    }
+  },
+  "sampling": {
+    "max_tokens": 8192,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "n": 8
+  },
+  "num_rollouts": 1000000,
+  "max_backlog_groups": 256,
+  "max_prompt_tokens": 4096,
+  "base_version": 0,
+  "poll_s": 5.0,
+  "min_round_s": null,
+  "store": "<local stage dir>/<bucket>/<run>",
+  "release_dir": "policy-releases",
+  "buffer_shards": [
+    "<nc-node-id>"
+  ],
+  "prompts": {
+    "path": "<local prompts.jsonl>",
+    "input_key": "prompt",
+    "label_key": "answer",
+    "groups_per_round": 32,
+    "format": "chat",
+    "tokenizer": "<nvme path of the Kimi-K3.1 MXFP4 checkpoint>",
+    "trust_remote_code": true
+  },
+  "reward": "yeto.rl.numeric_answer_reward:score",
+  "reward_kind": "miles",
+  "checks": {
+    "expected_expert_matrices": null,
+    "allow_unverified_count": true,
+    "require_fixed_answers": false
+  },
+  "incarnation_lease": true,
+  "peers": [
+    "<peer-node-ip>:8431"
+  ],
+  "event_tape": "<local log dir>/events.jsonl"
+}

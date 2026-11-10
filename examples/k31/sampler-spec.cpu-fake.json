@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "The CPU rehearsal of the Kimi-K3.1 sampler node (tests/test_rl_k31_e2e_cpu.py): the fake",
+    "engine returns the K3-4layer shape of the K3.1 rollout fields (R3 routed experts",
+    "uint16[T, 3, 16] below 896 with 0xFFFF pads, 128 top-K log-probs, fp32 lm-head) and takes",
+    "a release's changed expert files through the k31_release plan. Paths in angle brackets",
+    "are local scratch directories. Run: python -m yeto.rl.engine.engine_sampler --spec THIS.json"
+  ],
+  "sampler_id": "cpu-fake-0",
+  "platform": "rocm",
+  "rollout_fields": {"routed_experts": true, "top_logprobs_num": 128, "fp32_lm_head": true},
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "fake",
+    "kwargs": {"routed_experts": [896, 3, 16], "routed_experts_pad_rows": 1, "expert_file_update": true,
+               "max_model_len": 4096}
+  },
+  "sampling": {"max_tokens": 64, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "n": 4},
+  "num_rollouts": 8,
+  "max_backlog_groups": 64,
+  "max_prompt_tokens": 512,
+  "store": "<scratch>/store",
+  "prompts": {"path": "<scratch>/prompts.jsonl", "input_key": "prompt", "label_key": "answer",
+              "groups_per_round": 4, "format": "text"},
+  "reward": "yeto.rl.numeric_answer_reward:score",
+  "reward_kind": "miles",
+  "checks": {"require_fixed_answers": false},
+  "incarnation_lease": false,
+  "event_tape": "<scratch>/events.jsonl"
+}

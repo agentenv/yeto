@@ -1,0 +1,69 @@
+{
+  "_comment": [
+    "Engine sampler spec of one National Compute MI355X node (8 x MI355X, SGLang ROCm) for a",
+    "Kimi-K3.1 async GRPO run: python -m yeto.rl.engine.engine_sampler --spec THIS.json",
+    "(scripts/sampler_node/run_engine_sampler.sh --spec THIS.json --r2-env-file ENV).",
+    "Every value in angle brackets is a site value the launch layer fills in; nothing here",
+    "is specific to one account or bucket. The store is reached by object key (no mount):",
+    "the environment carries YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env,",
+    "YETO_RL_STORE_S3_URI=s3://<bucket>/<run>, YETO_RL_STORE_S3_STAGE=<local stage dir>,",
+    "YETO_RL_STORE_S3_ENDPOINT_URL=<r2 endpoint>, YETO_RL_STORE_S3_REGION=auto and the",
+    "store credentials (yeto.cloud.s3_store); `store` below is the stage path of that URI.",
+    "rollout_fields and platform describe what the trainer needs; expert_selection_sha256 is",
+    "the sha256 of the run's expert_selection.json (the trainer's release manifest must name",
+    "the same selection or the release is refused and the served weights kept)."
+  ],
+  "sampler_id": "<nc-node-id>",
+  "platform": "rocm",
+  "rollout_fields": {"routed_experts": true, "top_logprobs_num": 128, "fp32_lm_head": true},
+  "expert_selection_sha256": "<sha256 of expert_selection.json>",
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "sglang-server",
+    "server": {
+      "base_dir": "<nvme path of the Kimi-K3.1 MXFP4 checkpoint>",
+      "port": 30000,
+      "card_model": "MI355X",
+      "device_family": "rocm",
+      "engine_version": "sglang-miles-kimi-k31@35708f76",
+      "precision": "mxfp4",
+      "quant_scheme": "MXFP4_EXPERTS_RTN",
+      "topology": "tp8",
+      "max_model_len": 32768,
+      "in_place_reload": true,
+      "extra_args": ["--trust-remote-code", "--context-length", "32768"]
+    },
+    "options": {
+      "tp": 8,
+      "dp_attention_flag": "attn-dp-size",
+      "expert_file_update": "auto",
+      "expert_update_probe": true,
+      "live_update": false
+    }
+  },
+  "sampling": {"max_tokens": 8192, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "n": 8},
+  "num_rollouts": 1000000,
+  "max_backlog_groups": 256,
+  "max_prompt_tokens": 4096,
+  "base_version": 0,
+  "poll_s": 5.0,
+  "min_round_s": null,
+  "store": "<local stage dir>/<bucket>/<run>",
+  "release_dir": "policy-releases",
+  "buffer_shards": ["<nc-node-id>"],
+  "prompts": {
+    "path": "<local prompts.jsonl>",
+    "input_key": "prompt",
+    "label_key": "answer",
+    "groups_per_round": 32,
+    "format": "chat",
+    "tokenizer": "<nvme path of the Kimi-K3.1 MXFP4 checkpoint>",
+    "trust_remote_code": true
+  },
+  "reward": "yeto.rl.numeric_answer_reward:score",
+  "reward_kind": "miles",
+  "checks": {"expected_expert_matrices": null, "allow_unverified_count": true, "require_fixed_answers": false},
+  "incarnation_lease": true,
+  "peers": ["<peer-node-ip>:8431"],
+  "event_tape": "<local log dir>/events.jsonl"
+}
