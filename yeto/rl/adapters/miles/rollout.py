@@ -501,8 +501,12 @@ def handle_from_metadata(
         raise RolloutMetadataError(f"rollout {rollout_id} produced no trained groups")
     indices = getattr(data_pack, "sample_indices", None)
     if indices is not None:
+        from .buffer_rollout import PADDING_GROUP_BASE
+
         expected = sorted(int(i) for i in payload.get("trained_sample_indices", ()))
-        if sorted(int(i) for i in indices) != expected:
+        # padding samples (loss_mask 0, added by the buffer reader after the metadata
+        # hook ran) carry indices from PADDING_GROUP_BASE on; they are not trained samples
+        if sorted(int(i) for i in indices if int(i) < PADDING_GROUP_BASE) != expected:
             raise RolloutMetadataError(
                 f"rollout {rollout_id}: metadata samples do not match the training batch"
             )

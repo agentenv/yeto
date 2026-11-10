@@ -223,3 +223,22 @@ def test_launcher_parses_forwards_and_checks_the_flag(monkeypatch):
         run_config_rules.check_host_sync_free(True)  # the default never needs it
         with pytest.raises(ValueError, match="--no-rl-host-sync-free needs Miles"):
             run_config_rules.check_host_sync_free(False)
+
+
+def test_rollout_metadata_ignores_padding_samples_of_the_buffer_reader(tmp_path, k31_channel):
+    """The buffer reader pads a short round after the metadata hook ran: the padding
+    indices (from PADDING_GROUP_BASE on) are in the training batch but are no trained
+    samples, so the batch still matches its metadata; a real extra index does not."""
+    from yeto.rl.adapters.miles.buffer_rollout import PADDING_GROUP_BASE
+    from yeto.rl.adapters.miles.rollout import RolloutMetadataError
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    payload = _extract(SimpleNamespace(), tmp_path, kept)
+    real = list(payload["trained_sample_indices"])
+    pads = [(PADDING_GROUP_BASE + k) * 2 for k in range(2)]
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H,
+                             data_pack=SimpleNamespace(sample_indices=real + pads))
+    assert len(h.groups) == 2
+    with pytest.raises(RolloutMetadataError, match="do not match"):
+        handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H,
+                             data_pack=SimpleNamespace(sample_indices=real + [max(real) + 1]))
