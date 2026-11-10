@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -467,6 +468,8 @@ def test_example_convertible_spec_runs_and_the_launch_draft_parses(tmp_path):
     subprocess.run(["bash", "-n", str(EXAMPLES / "launch-convertible-modal.sh")], check=True)
     text = (EXAMPLES / "launch-convertible-modal.sh").read_text()
     assert "r2.cloudflarestorage.com/" not in text
+    bucket = os.environ.get("YETO_E2E_R2_BUCKET")  # the real bucket name: never in an example
+    assert not bucket or bucket not in text
     assert "yeto.rl.engine.role_switch --spec" in text and "--rl-sample-role trainer" in text
     spec = _filled(json.loads((EXAMPLES / "convertible-spec.cpu-fake.json").read_text()), tmp_path)
     Path(spec["prompts"]["path"]).parent.mkdir(parents=True, exist_ok=True)

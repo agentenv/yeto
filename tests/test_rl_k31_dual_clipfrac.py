@@ -4,9 +4,9 @@ Miles k31/b8 port drops, reported by the yeto state plugin instead.
 The bitwise check runs the real k31/b8 loss (``policy_loss_function`` on the
 loss/hub layout) with the yeto wrappers installed, in a subprocess so the Miles
 checkout and the stubs of its absent heavy dependencies never leak into this
-process. The Miles checkout comes from ``YETO_TEST_MILES_K31_B8`` (a Miles
-k31/b8 checkout) and must be at ``pins.MILES_K31_B8_COMMIT``; without
-it, or without torch, the test is skipped.
+process. The Miles checkout comes from ``YETO_TEST_MILES_K31_B8`` and must be at
+``pins.MILES_K31_B8_COMMIT``; without it (unset or no checkout there), or without
+torch, the test is skipped.
 """
 
 from __future__ import annotations
@@ -184,9 +184,10 @@ print("RESULT " + json.dumps(out))
 
 
 def _miles_b8() -> Path:
-    if not os.environ.get("YETO_TEST_MILES_K31_B8"):
+    value = os.environ.get("YETO_TEST_MILES_K31_B8")
+    if not value:
         pytest.skip("set YETO_TEST_MILES_K31_B8 to a Miles k31/b8 checkout")
-    path = Path(os.environ["YETO_TEST_MILES_K31_B8"]).expanduser()
+    path = Path(value).expanduser()
     if not (path / "miles" / "backends" / "training_utils" / "loss" / "hub" / "losses.py").is_file():
         pytest.skip(f"no Miles k31/b8 checkout at {path}")
     try:

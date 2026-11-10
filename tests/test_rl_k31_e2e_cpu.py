@@ -887,7 +887,8 @@ R2_ENV = "YETO_E2E_R2"
 def test_sampler_and_trainer_hand_off_through_the_real_r2_bucket(tmp_path):
     """The same chain over the real bucket (``s3://<bucket>/_e2e/<run>/``): small
     objects only, every key removed at the end. Credentials come from the aws
-    profile ``YETO_E2E_R2_PROFILE`` and the bucket ``YETO_E2E_R2_BUCKET`` (both required) and are never printed."""
+    profile ``YETO_E2E_R2_PROFILE`` and are never printed; the bucket is ``YETO_E2E_R2_BUCKET``
+    (skipped when either is unset)."""
     import uuid
 
     import boto3
@@ -895,7 +896,7 @@ def test_sampler_and_trainer_hand_off_through_the_real_r2_bucket(tmp_path):
     profile = os.environ.get("YETO_E2E_R2_PROFILE")
     bucket_name = os.environ.get("YETO_E2E_R2_BUCKET")
     if not profile or not bucket_name:
-        pytest.skip("set YETO_E2E_R2_PROFILE and YETO_E2E_R2_BUCKET for the real-bucket check")
+        pytest.skip("set YETO_E2E_R2_PROFILE and YETO_E2E_R2_BUCKET for the real R2 bucket")
     session = boto3.Session(profile_name=profile)
     client = session.client("s3")
     run = f"_e2e/e1-{uuid.uuid4().hex[:8]}"
@@ -970,6 +971,8 @@ def test_example_specs_and_launch_drafts_are_loadable(tmp_path):
         subprocess.run(["bash", "-n", str(EXAMPLES / script)], check=True)
         text = (EXAMPLES / script).read_text()
         assert "r2.cloudflarestorage.com/" not in text  # placeholders only
+        bucket = os.environ.get("YETO_E2E_R2_BUCKET")
+        assert not bucket or bucket not in text
     # the CPU rehearsal spec runs the fake sampler end to end
     spec = _filled(json.loads((EXAMPLES / "sampler-spec.cpu-fake.json").read_text()), tmp_path)
     Path(spec["prompts"]["path"]).parent.mkdir(parents=True, exist_ok=True)

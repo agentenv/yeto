@@ -475,8 +475,8 @@ def test_intent_is_resolved_only_by_one_exact_name_match(runs_dir):
     assert cleanup_mod.cleanup_run("r", ops, include_nc=True, log=lambda m: None)
     assert ("stop_app", "ap-9") in ops.calls and ("stop_app", "ap-x") not in ops.calls
     led2 = ResourceLedger.for_run("r2")
-    led2.intent("modal_app", "store-app")
-    ops = FakeOps(apps_named={"store-app": ["ap-1", "ap-2"]})
+    led2.intent("modal_app", "app-x")
+    ops = FakeOps(apps_named={"app-x": ["ap-1", "ap-2"]})
     assert not cleanup_mod.cleanup_run("r2", ops, include_nc=True, log=lambda m: None)
     assert not [c for c in ops.calls if c[0] == "stop_app"]
     led3 = ResourceLedger.for_run("r3")
