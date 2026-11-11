@@ -691,6 +691,23 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
     return notes
 
 
+def pool_has_dispenser(cfg: dict[str, Any]) -> bool:
+    """The pool's samplers take their tasks from a dispenser (no task goes to two
+    of them, so the pool may add or remove samplers): the store dispenser
+    (:func:`pool_dispense`), or on ``data_path: syncer`` the syncer's task
+    dispenser (``prompts.dispense`` of the spec with the default ``tcp`` backend)."""
+    if pool_dispense(cfg) is not None:
+        return True
+    if cfg.get("data_path", "r2") != "syncer":
+        return False
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return False
+    found = (spec.get("prompts") or {}).get("dispense") if isinstance(spec, dict) else None
+    return isinstance(found, dict) and str(found.get("backend") or "tcp") == "tcp"
+
+
 def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
     """The store dispenser config of a pool's samplers (``sampler.dispense`` of the pool
     config, else ``prompts.dispense`` of the spec with ``backend: store``); None: none

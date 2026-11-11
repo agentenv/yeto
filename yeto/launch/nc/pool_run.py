@@ -695,11 +695,11 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
         return (f"target {target} > {len(pc.accounts)} slots (one {w['unit']} per slot: the pool config's "
                 f"'accounts'; add slots and restart the pool)")
     before = current_target(cfg, doc)
-    if target != before and cli.pool_dispense(cfg) is None:
+    if target != before and not cli.pool_has_dispenser(cfg):
         if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
-            return ("the samplers have no store dispenser (prompts.dispense.backend store): every sampler "
-                    "reads every prompt, so another node repeats every task; set sampler.dispense in the "
-                    "pool config (an elastic run needs it)")
+            return ("the samplers have no dispenser (prompts.dispense.backend store, or the syncer's "
+                    "dispenser on data_path syncer): every sampler reads every prompt, so another node "
+                    "repeats every task; set sampler.dispense in the pool config (an elastic run needs it)")
         if pc.data_slots is not None and not force_static:
             return (f"static data_slots {pc.data_slots}: a removed node's slot pauses (its prompts wait "
                     f"until a scale up continues the slot) and no scale up goes past {pc.data_slots} nodes; "
