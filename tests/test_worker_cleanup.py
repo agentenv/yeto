@@ -8,7 +8,7 @@ import sys
 import time
 from types import SimpleNamespace
 
-from yeto import cli, runs
+from yeto import cli, launch_preflight, runs
 
 
 def _fake_worker(name: str) -> subprocess.Popen:
@@ -29,6 +29,7 @@ def test_down_stops_a_worker_the_record_lost(monkeypatch, tmp_path, capsys):
     try:
         assert worker.pid in runs.worker_pids(name)
         monkeypatch.setattr(cli, "_fleet_args_error", lambda args: None)
+        monkeypatch.setattr(launch_preflight, "modal_sdk_problem", lambda: None)  # no Modal SDK in CI
         code = cli.cmd_launch(SimpleNamespace(cluster_prefix=name, gpu="modal:8xh100"))
         assert code == 1
         assert f"`yeto down {name}`" in capsys.readouterr().err
