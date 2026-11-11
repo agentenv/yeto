@@ -36,6 +36,8 @@ Run config (JSON; paths may use ``~``)::
      "preflight": {"commands": [["python", "check.py"]]},
      "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40,
                  "max_containers_per_sampler": 20},  # the alert line: the larger of the two
+     # several sandbox hosts: "docker_host": ["ssh://h1", "ssh://h2"], or "envs" (every host
+     # of the envs file); the containers of the run are counted and removed on each
      "pool": {"config": "<pool.json>", "interval_s": 30},
      # or several rollout pools (any provider; yeto.launch.rollout.pools):
      # "samplers": [{"name": "nc", "provider": "nc", "config": "<pool.json>"},
@@ -501,18 +503,42 @@ class Run:
         scaled = per * max(1, nodes)
         return max(fixed or 0, scaled)
 
-    def run_containers(self) -> int | None:
-        sb = self.cfg.get("sandbox") or {}
-        if not sb.get("docker_host"):
-            return None
+    def sandbox_hosts(self) -> list[str]:
+        """The docker endpoints of the sandbox hosts (``sandbox.docker_host``: one, a list,
+        or ``"envs"`` for every host of ``sandbox.envs``)."""
+        value = (self.cfg.get("sandbox") or {}).get("docker_host")
+        if not value:
+            return []
+        if value == "envs":
+            if not self.envs:
+                raise ValueError('sandbox.docker_host "envs" needs sandbox.envs')
+            from yeto.sandbox.envs import load_envs  # noqa: PLC0415
+
+            return [h.docker_host for h in load_envs(self.envs, run=self.run).hosts]
+        return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+    def _host_containers(self, host: str, *, every: bool = False) -> list[str] | None:
         try:  # an ssh hang to the sandbox host must not end the monitor (and its guards)
-            out = subprocess.run(["docker", "-H", sb["docker_host"], "ps", "-q", "--filter",
+            out = subprocess.run(["docker", "-H", host, "ps", "-aq" if every else "-q", "--filter",
                                   f"label=ai.yeto.run={self.run}"],
                                  env=self.env, capture_output=True, text=True, timeout=60, check=False)
         except (subprocess.TimeoutExpired, OSError) as error:
-            _log(f"sandbox: docker ps failed: {type(error).__name__}")
+            _log(f"sandbox: docker ps on {host} failed: {type(error).__name__}")
             return None
-        return len(out.stdout.split()) if out.returncode == 0 else None
+        return out.stdout.split() if out.returncode == 0 else None
+
+    def run_containers(self) -> int | None:
+        """This run's running trial containers on every sandbox host (asked at once);
+        None when no host answered."""
+        hosts = self.sandbox_hosts()
+        if not hosts:
+            return None
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        with ThreadPoolExecutor(max_workers=min(16, len(hosts))) as pool:
+            counts = list(pool.map(self._host_containers, hosts))
+        known = [len(c) for c in counts if c is not None]
+        return sum(known) if known else None
 
     def breach(self, *, trainer: bool = True) -> str | None:
         """Why the run must stop, else None. ``trainer=False`` (the first-group wait, before
@@ -781,13 +807,12 @@ class Run:
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
                             log="down.log", timeout=600) == 0
-        sb = self.cfg.get("sandbox") or {}
-        if sb.get("docker_host"):  # Harbor trial containers of this run (ai.yeto.run label) and their networks
-            host = sb["docker_host"]
-            ids = subprocess.run(["docker", "-H", host, "ps", "-aq", "--filter", f"label=ai.yeto.run={self.run}"],
-                                 env=self.env, capture_output=True, text=True, timeout=120, check=False).stdout.split()
-            if ids:
-                self._cmd(["docker", "-H", host, "rm", "-f", *ids], log="down.log", timeout=600)
+        hosts = self.sandbox_hosts()
+        if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
+            for host in hosts:
+                ids = self._host_containers(host, every=True) or []
+                if ids:
+                    self._cmd(["docker", "-H", host, "rm", "-f", *ids], log="down.log", timeout=600)
             left = self.run_containers()
             _log(f"sandbox: {left} container(s) of this run left")
             ok &= left == 0

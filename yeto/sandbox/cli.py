@@ -11,7 +11,7 @@ from typing import Any
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("sandbox", help="task environments on sandbox hosts (agentic.envs): "
                        "prepare / status / validate / teardown")
-    ssub = p.add_subparsers(dest="sandbox_command", metavar="{prepare,status,validate,teardown}")
+    ssub = p.add_subparsers(dest="sandbox_command", metavar="{prepare,status,validate,teardown,assign}")
     ssub.required = True
 
     def common(q: argparse.ArgumentParser) -> None:
@@ -39,6 +39,15 @@ def add_parser(sub: Any) -> None:
     common(td)
     td.add_argument("--images", action="store_true", help="also remove images this run built")
     td.add_argument("--dry-run", action="store_true")
+    asg = ssub.add_parser("assign", help="which sandbox host each sampler drives (sandbox.docker_host \"envs\") "
+                          "and whether every host has room; no host is contacted")
+    asg.add_argument("--envs", required=True, help="sampler spec JSON (its agentic.envs) or a standalone envs JSON")
+    asg.add_argument("--run", default=None, help="run label (overrides agentic.envs.run)")
+    asg.add_argument("--islands", type=int, required=True, help="sampler shards 0 .. N-1")
+    asg.add_argument("--shard-base", default="smp", help="sampler id prefix (<base>-<k>; the pool's shard_base)")
+    asg.add_argument("--per-sampler", type=int, default=None,
+                     help="trial containers one sampler runs at once (its HARBOR_MAX_SANDBOXES)")
+    asg.add_argument("--json", action="store_true", help="print JSON")
 
 
 def _objects(store: str) -> Any:
@@ -58,8 +67,19 @@ def main(args: argparse.Namespace) -> int:
     except (EnvsError, OSError, ValueError) as exc:
         print(f"[yeto sandbox] {exc}", file=sys.stderr)
         return 2
-    objects = _objects(args.store)
     cmd = args.sandbox_command
+    if cmd == "assign":
+        from .envs import assignment_report  # noqa: PLC0415
+
+        try:
+            report = assignment_report(cfg, [f"{args.shard_base}-{k}" for k in range(int(args.islands))],
+                                       per_sampler=args.per_sampler)
+        except EnvsError as exc:
+            print(f"[yeto sandbox] {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, indent=1, sort_keys=True) if args.json else _brief(cmd, report))
+        return 1 if any("> max_sandboxes" in w for w in report["warnings"]) else 0
+    objects = _objects(args.store)
     try:
         if cmd == "prepare":
             stage = args.stage_dir or str(Path("~/.yeto/sandbox").expanduser() / cfg.run / "stage")
@@ -98,12 +118,21 @@ def _brief(cmd: str, report: dict[str, Any]) -> str:
                          f"ours {r.get('containers_ours')} {free} images {r.get('images_ready')} "
                          f"sidecars {r.get('sidecars_running')} dispense {r.get('dispense')}"
                          + (f" ERROR {r['error']}" if r.get("error") else ""))
+            running, cap = r.get("containers_running"), r.get("max_sandboxes")
+            if isinstance(running, int) and cap and running >= 0.9 * cap:
+                lines.append(f"  WARNING {h} is at {running}/{cap} trial containers: samplers on it wait for room "
+                             "(add a host to agentic.envs.hosts for new samplers, or lower HARBOR_MAX_SANDBOXES)")
             lines += [f"  unhealthy {k}" for k in r.get("sidecars_unhealthy") or []]
     elif cmd == "validate":
         for r in report["results"]:
             lines.append(f"{r['host']}/{r['task_id']}: passed={r.get('passed')} oracle={r.get('oracle')} "
                          f"nop={r.get('nop')} {r.get('reason') or ''}".rstrip())
         lines.append(f"passed: {len(report['passed'])}")
+    elif cmd == "assign":
+        for h, r in report["hosts"].items():
+            lines.append(f"{h}: {len(r['samplers'])} samplers, containers {r['containers_needed'] or '?'}"
+                         f"/{r['max_sandboxes'] or '-'}: {' '.join(r['samplers'])}")
+        lines += [f"  WARNING {w}" for w in report["warnings"]]
     else:
         for h, r in report.items():
             lines.append(f"{h}: removed {len(r['containers'])} containers, {len(r['images'])} images"
