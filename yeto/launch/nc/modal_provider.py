@@ -10,8 +10,10 @@ call itself. So the provider splits like this:
   calls nothing (nothing bills before the call is spawned); ``status``: a ticket
   without a call reads ``active`` (ready to start), a call that runs reads
   ``active``, a call that ended reads ended (``released`` when this provider
-  cancelled it, ``lost`` when it exited by itself or failed: fence, release its
-  claims, refill); a failed status call raises (a control-plane blip). ``release``
+  cancelled it, ``lost`` when it failed or its sampler exited non-zero: fence,
+  release its claims, refill); a call whose sampler exited 0 (the run finished)
+  reads ``active`` and the probe's exited sampler ends it as finished, with no
+  refill; a failed status call raises (a control-plane blip). ``release``
   cancels the call (``terminate_containers=True``) and confirms it no longer
   runs; only tickets of this run (name prefix *and* the record) are touched.
 * :class:`ModalPoolOps` (the pool's ``PoolOps``, replacing the SSH node route):
@@ -176,6 +178,11 @@ class ModalProvider:
             return LeaseStatus("active")
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
+        if state == SUCCEEDED:
+            # the call returned with its sampler's exit 0 (the run finished, the data
+            # ended): the island is not lost; the probe reads the exited sampler, the
+            # pool drains it and orders no replacement
+            return LeaseStatus("active")
         return LeaseStatus("ended", end_reason="lost")
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
@@ -402,15 +409,19 @@ class ModalSdkClient:
         return str(fn.spawn(payload).object_id)
 
     def status(self, call_id: str) -> str:
+        """RUNNING; SUCCEEDED: the body returned and its sampler exited 0; FAILED: it
+        raised (cancelled, function timeout) or its sampler exited non-zero."""
         call = self.modal.FunctionCall.from_id(call_id)
         try:
-            call.get(timeout=0)
+            result = call.get(timeout=0)
         except TimeoutError:
             return RUNNING
         except Exception as exc:  # noqa: BLE001 - a raised result is a failed island
             if "timeout" in str(exc).lower() and type(exc).__name__ in ("TimeoutError", "OutputExpiredError"):
                 return RUNNING
             return FAILED
+        if isinstance(result, dict) and result.get("rc") not in (0, None):
+            return FAILED  # rollout_sampler_body returns the sampler's exit code
         return SUCCEEDED
 
     def cancel(self, call_id: str) -> None:

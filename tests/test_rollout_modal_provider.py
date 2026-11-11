@@ -91,7 +91,9 @@ def test_provider_maps_call_states_and_releases_only_its_own_tickets(tmp_path):
     assert p.status(1, ticket).state == "active" and not p.account_free(1) and p.account_free(2)
     call = p.spawn(ticket, {"shard": "m-0"})
     assert p.status(1, ticket).state == "active"
-    client.states[call] = SUCCEEDED  # the sampler exited by itself (or hit the function timeout)
+    client.states[call] = SUCCEEDED  # the sampler exited 0 (the run finished): not lost
+    assert p.status(1, ticket) == el.LeaseStatus("active")
+    client.states[call] = FAILED  # it crashed, was cancelled outside, or hit the function timeout
     assert p.status(1, ticket) == el.LeaseStatus("ended", end_reason="lost")
     client.fail_status = True
     with pytest.raises(ConnectionError):  # a blip to the pool, never an end
@@ -197,6 +199,31 @@ def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
         t[0] += 60
     names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
     assert "member_ready" not in names and "start_timeout" in names
+
+
+def test_a_sampler_that_finished_ends_the_pool_without_a_refill(tmp_path):
+    """The syncer told the run's samplers the run finished: the sampler exits 0, the call
+    returns. The pool reads a finished sampler (released, nothing ordered again), not a
+    lost island (a real Modal run refilled it and the new island found no run)."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, _ = _ops(tmp_path)
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
+                     ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    for _ in range(3):
+        pool.tick()
+        t[0] += 30
+    [m] = [m for m in pool.members if m.state == READY]
+    client.states[ops.provider.call_id(m.ticket)] = SUCCEEDED
+    for _ in range(4):
+        pool.tick()
+        t[0] += 30
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "sampler_finished" in names and "evicted" not in names
+    assert names.count("ordered") == 1 and pool.finished and not pool.live()
 
 
 def test_the_call_body_reports_ready_once_the_tape_has_the_join(tmp_path, monkeypatch):
@@ -368,3 +395,7 @@ def test_the_sdk_client_spawns_through_a_deployed_function():
     assert client.status("fc-9") == RUNNING
     client.cancel("fc-9")
     assert modal.spawned[-1] == ("cancel", {"terminate_containers": True})
+    # a returned call is SUCCEEDED only when its sampler exited 0 (the body returns its rc)
+    results = {"fc-0": {"rc": 0}, "fc-1": {"rc": 1}}
+    modal.FunctionCall = SimpleNamespace(from_id=lambda c: SimpleNamespace(get=lambda timeout=None: results[c]))
+    assert client.status("fc-0") == SUCCEEDED and client.status("fc-1") == FAILED
