@@ -49,6 +49,29 @@ def connect_syncer(spec: str, learner_id: int, layout: FragmentLayout, wire_dtyp
     return client
 
 
+def supersede_pull_attempts(pulls: list[PullRequest]) -> list[PullRequest]:
+    """``pulls`` without any pull a newer attempt of the same round replaced.
+
+    A round the syncer reopens after a quorum timeout sends a new pull with
+    a higher ``round_attempt``; a push answering the old attempt would be
+    rejected as out of round, so only the newest attempt is kept, in order.
+    A repeat of the same attempt (resent after a redial) is kept once, so the
+    fragment is not pushed twice for it.
+    """
+    newest: dict[tuple[int, int], int] = {}
+    for pull in pulls:
+        key = (int(pull.fragment_id), int(pull.global_step))
+        newest[key] = max(newest.get(key, -1), int(pull.round_attempt))
+    kept, seen = [], set()
+    for pull in pulls:
+        key = (int(pull.fragment_id), int(pull.global_step))
+        attempt = int(pull.round_attempt)
+        if attempt == newest[key] and (key, attempt) not in seen:
+            seen.add((key, attempt))
+            kept.append(pull)
+    return kept
+
+
 def take_ready_pulls(
     state: DiLoCoSyncState,
     *,
@@ -61,7 +84,7 @@ def take_ready_pulls(
     now (the fragment trained ``min_steps`` steps since its last broadcast and
     has an anchor); the others stay pending, in order."""
     ready, still = [], []
-    for pull in state.pending_pulls:
+    for pull in supersede_pull_attempts(state.pending_pulls):
         fid = pull.fragment_id
         c_steps = steps_total - state.steps_at_reset[fid]
         if c_steps < max(1, min_steps) or not anchored(fid):

@@ -54,13 +54,18 @@ ms-swift's argument parser, so environment variables are the only channel):
                                   run (default cpu, gloo mirrors)
   YETO_DILOCO_HMAC_KEY_PATH       path to the HMAC key file (optional)
   YETO_DILOCO_DISABLE             set to 1 to make the callback a no-op
+  YETO_DILOCO_INITIAL_CUT_TIMEOUT seconds to install the syncer's initial cut
+                                  fragment by fragment before training (0 =
+                                  apply it at the boundaries; default 0)
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -103,6 +108,7 @@ class DiLoCoHookConfig:
     hmac_key_path: Optional[str] = None
     final_cut_payload: str = "full"
     transport: str = "cpu"
+    initial_cut_timeout: float = 0.0
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -123,6 +129,13 @@ class DiLoCoHookConfig:
             except (TypeError, ValueError):
                 raise ValueError(f"{ENV_PREFIX}{name} must be an integer, got {raw!r}") from None
 
+        def get_float(name: str, default: float) -> float:
+            raw = get(name, str(default))
+            try:
+                return float(raw)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                raise ValueError(f"{ENV_PREFIX}{name} must be a number, got {raw!r}") from None
+
         cfg = cls(
             syncer=get("SYNCER", required=True),  # type: ignore[arg-type]
             learner_id=get_int("LEARNER_ID", required=True),
@@ -133,7 +146,10 @@ class DiLoCoHookConfig:
             hmac_key_path=get("HMAC_KEY_PATH"),
             final_cut_payload=get("FINAL_CUT_PAYLOAD", default="full"),  # type: ignore[arg-type]
             transport=get("TRANSPORT", default="cpu"),  # type: ignore[arg-type]
+            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
         )
+        if cfg.initial_cut_timeout < 0:
+            raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
         if cfg.num_learners < 1 or not 0 <= cfg.learner_id < cfg.num_learners:
             raise ValueError(f"invalid learner_id={cfg.learner_id} for num_learners={cfg.num_learners}")
         if cfg.fragments < 1 or cfg.sync_interval_steps < 1:
@@ -223,6 +239,7 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
         trainable_filter=trainable_filter,
         final_cut_payload=cfg.final_cut_payload,
         transport=cfg.transport,
+        initial_cut_timeout=cfg.initial_cut_timeout,
     )
 
 
@@ -314,14 +331,40 @@ class YetoDiLoCoCallback(_CallbackBase):
         # step was skipped; the skipped step then contributes zero tokens.
         global_tokens = int(type(self).token_reducer(local_tokens))
         target_tokens = global_tokens if update_successful else 0
+        stats = getattr(self.sync, "stats", None) or {}
+        before = {k: stats.get(k, 0) for k in ("applied", "pushed", "apply_s", "export_s")}
+        started = time.perf_counter()
         self.sync.after_optimizer_step(iteration, target_tokens,
                                        update_successful=update_successful)
+        self._log_step(iteration, target_tokens, time.perf_counter() - started, before, stats)
         if getattr(self.sync, "finished", False) and iteration < int(self.args.train_iters):
             # The final cut is installed: stop here (ms-swift's default_flow
             # saves at train_iters) instead of training past the global result.
             logger.warning("yeto DiLoCo: final cut installed at iteration %d; ending training (train_iters %d)",
                            iteration, int(self.args.train_iters))
             self.args.train_iters = iteration
+
+    def _log_step(self, iteration: int, target_tokens: int, sync_s: float,
+                  before: dict, stats: dict) -> None:
+        """Append one JSON line per step (sync rank 0 only) to ``<prefix>STEP_LOG``.
+
+        ``sync_s`` is the wall time the training loop spent inside the sync
+        boundary; ``export_s`` / ``apply_s`` split out the fp32 master gather
+        for a push and the write-back of a received broadcast."""
+        path = os.environ.get(ENV_PREFIX + "STEP_LOG")
+        if not path or getattr(self.sync, "rank", 0) != 0:
+            return
+        record = {"iteration": iteration, "time": time.time(), "target_tokens": target_tokens,
+                  "sync_s": round(sync_s, 4),
+                  "export_s": round(stats.get("export_s", 0) - before["export_s"], 4),
+                  "apply_s": round(stats.get("apply_s", 0) - before["apply_s"], 4),
+                  "pushes_sent": stats.get("pushed", 0) - before["pushed"],
+                  "applies": stats.get("applied", 0) - before["applied"]}
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\n")
+        except OSError as error:  # never let bookkeeping kill a training step
+            logger.warning("yeto DiLoCo: cannot write step log %s: %s", path, error)
 
     def on_train_end(self):
         self.close()
