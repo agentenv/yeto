@@ -326,10 +326,14 @@ def daytona_problems(cfg: dict[str, Any]) -> list[str]:
     return problems
 
 
-def model_present(uri: str, env_file: str | os.PathLike[str]) -> bool:
-    """``config.json`` exists under ``uri`` (the model directory in the bucket), read
-    with the nodes' credentials from the store env file."""
-    return bool(elastic.s3_fence_store(uri, env_file).objects.exists("config.json"))
+def model_problems(uri: str, env_file: str | os.PathLike[str]) -> list[str]:
+    """What is missing of the model directory ``uri`` in the bucket, read with the
+    nodes' credentials from the store env file: ``config.json`` and every weight
+    shard ``model.safetensors.index.json`` names (or ``model.safetensors``). One
+    paginated LIST of the prefix plus the index; no weight file is read."""
+    from yeto.launch import model_check  # noqa: PLC0415
+
+    return model_check.store_problems(elastic.s3_fence_store(uri, env_file).objects, uri)
 
 
 def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str], bucket: str) -> list[str]:
@@ -351,13 +355,12 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
                         f"(at {ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST]}); leave dest unset")
     uri = f"s3://{bucket}/{str(pull['src_key']).strip('/')}"
     try:
-        present = model_present(uri, env_file)
+        missing = model_problems(uri, env_file)
     except Exception as error:  # noqa: BLE001 - reported, the operator decides
-        problems.append(f"model_pull: cannot read {uri}/config.json with the store env file: {error!r}"[:400])
+        problems.append(f"model_pull: cannot list {uri} with the store env file: {error!r}"[:400])
     else:
-        if not present:
-            problems.append(f"model_pull: no {uri}/config.json: upload the model to the bucket first "
-                            "(docs/KIMI_K31_ASYNC_RL_GUIDE.md, Model weights)")
+        problems += [f"model_pull: {m}: upload the model to the bucket first "
+                     "(docs/KIMI_K31_ASYNC_RL_GUIDE.md, Model weights)" for m in missing]
     return problems
 
 

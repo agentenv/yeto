@@ -31,9 +31,11 @@ function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)
 function negBadge(c){return c&&c.negative_test?' <span class="st wn" title="'+esc(c.negative_test.label)+'"><i></i>'+esc(c.negative_test.label)+'</span> ':""}
 function islColor(id){var ids=(O.islands||[]).map(function(c){return c.id}),i=ids.indexOf(id);return i>=0&&i<3?ISL_COLORS[i]:"var(--i3)"}
 function kind(){return layout==="auto"?O.run_kind:layout}
+/* why an island left: "left: evicted (preempted) at 05:09, replaced by <ticket>" */
+function leftText(s,l){return (s==="lost"?"lost":"left")+": "+(l.reason||"?")+(fin(l.ts)?" at "+clock(l.ts).slice(0,5):"")+(l.replaced_by?", replaced by "+l.replaced_by:"")}
 function stBadge(s,c){var m={ok:["ok","healthy"],starting:["wn","starting"],stopped:["mu","stopped"],stale:["bd","stale"],waiting:["wn","waiting"],lost:["bd","lost"],
   left:["mu","left the run"],recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];var t=m[1];
-  if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if(s==="left"&&c.left)t="left the run ("+(c.left.reason||"?")+")"}
+  if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if((s==="left"||s==="lost")&&c.left)t=leftText(s,c.left)}
   return '<span class="st '+m[0]+'" title="'+esc(c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
 
 /* theme + layout */

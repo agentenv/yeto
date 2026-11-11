@@ -126,6 +126,13 @@ def _no_real_nebius_sg_cleanup(request, monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_real_model_preflight(monkeypatch):
+    """The launch's model preflight asks the Hub / Modal / the bucket; unit tests
+    never reach them. Tests of the check set --preflight-model and fake the probes."""
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+
+
+@_pytest.fixture(autouse=True)
 def _fixed_thread_reading(monkeypatch):
     """launch-preflight-guards: launch() reads this user's thread count from
     /proc; unit tests must not depend on (or wait for) the host's threads.
