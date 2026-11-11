@@ -60,7 +60,7 @@ class StoreContract:
         self.path = tmp_path / "prompts.jsonl"
         self.path.write_text("".join(json.dumps(r) + "\n" for r in rows))
         self.config = {"backend": "store", "namespace": NAMESPACE, "lease_s": float(config["lease_s"]),
-                       "max_redo": int(config["max_redo"]), "passes": int(config["passes"]), "seed": 0,
+                       "max_redo": int(config.get("max_redo", sd.DEFAULT_MAX_REDO)), "passes": int(config["passes"]), "seed": 0,
                        "scan_s": 0.0, "max_scan_s": 0.0}
         self.leases: dict[str, str] = {}  # holder -> the incarnation its incarnation lease names
         self.members: dict[Member, sd.StoreDispensedPrompts] = {}

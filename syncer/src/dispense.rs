@@ -100,7 +100,10 @@ const LIVE_LIMIT: usize = 4096;
 pub const WAIT_RETRY: Duration = Duration::from_millis(1000);
 
 pub const DEFAULT_LEASE: Duration = Duration::from_secs(300);
-pub const DEFAULT_MAX_REDO: u32 = 1;
+/// Counted redos (stale requeues and lease expiries) before a position is settled
+/// exhausted; the same as the store ledger (`store_dispense.DEFAULT_MAX_REDO`), so a
+/// row outlives two holders that died with it.
+pub const DEFAULT_MAX_REDO: u32 = 2;
 pub const DEFAULT_MAX_BLOCK: u32 = 1 << 16;
 
 /// Start of a refusal that means "this incarnation is fenced": the client

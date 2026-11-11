@@ -134,7 +134,7 @@ def _check_dispense(args, plan) -> None:
     from ..rl.engine.data_split import DATA_SPLIT_FLAG
     from .syncer import syncer_shard_count
 
-    dispense_only = {"rl_data_passes": None, "rl_dispense_max_redo": 1,
+    dispense_only = {"rl_data_passes": None, "rl_dispense_max_redo": 2,
                      "rl_dispense_lease_s": 300.0, "rl_dispense_prefetch_blocks": 2}
     if not plan.dispense:
         named = [name for name, default in dispense_only.items()
@@ -153,7 +153,7 @@ def _check_dispense(args, plan) -> None:
         raise ValueError("--rl-data-passes needs islands that may end on their own when the data "
                          "ends (asynchronous rounds or an island pool); a strict roster trains "
                          "every island in every round")
-    if int(getattr(args, "rl_dispense_max_redo", 1)) < 0:
+    if int(getattr(args, "rl_dispense_max_redo", 2)) < 0:
         raise ValueError("--rl-dispense-max-redo must be >= 0")
     if not float(getattr(args, "rl_dispense_lease_s", 300.0)) > 0:
         raise ValueError("--rl-dispense-lease-s must be positive")

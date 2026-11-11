@@ -209,7 +209,8 @@ impl SyncerContract {
         let cfg = DispenseConfig {
             lease: Duration::from_secs_f64(config.at("lease_s").num()),
             passes: Some(config.at("passes").num() as u64),
-            max_redo: config.at("max_redo").num() as u32,
+            // no max_redo in the case: the dispenser's default (the same as the store ledger's)
+            max_redo: config.get("max_redo").map_or(crate::dispense::DEFAULT_MAX_REDO, |v| v.num() as u32),
             max_block: 1 << 16,
         };
         Self {

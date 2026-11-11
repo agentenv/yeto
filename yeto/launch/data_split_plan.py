@@ -153,7 +153,7 @@ def dispense_syncer_flags(args) -> str:
         return ""  # a sampler launch of its own claims from another launch's dispenser
     flags = (" --dispense"
              f" --dispense-lease-s {float(getattr(args, 'rl_dispense_lease_s', 300.0))!r}"
-             f" --dispense-max-redo {int(getattr(args, 'rl_dispense_max_redo', 1))}"
+             f" --dispense-max-redo {int(getattr(args, 'rl_dispense_max_redo', 2))}"
              " --dispense-log ~/yeto-output/task-dispense.jsonl")
     passes = getattr(args, "rl_data_passes", None)
     if passes is not None:

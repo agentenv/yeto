@@ -1350,6 +1350,179 @@
      }
     }
    ]
+  },
+  {
+   "name": "default_max_redo_survives_two_holder_deaths",
+   "why": "real run: lease expiries count toward max_redo, so the default must let a row outlive two dead holders; both dispensers use the same default (no max_redo in the config)",
+   "config": {
+    "rows": 1,
+    "passes": 1,
+    "lease_s": 60
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "C#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "C#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "C#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "C#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 1,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "default_max_redo_exhausts_after_three_holder_deaths",
+   "why": "the default still bounds a row that kills every sampler: a third expiry settles it exhausted",
+   "config": {
+    "rows": 1,
+    "passes": 1,
+    "lease_s": 60
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "C#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "C#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "D#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "D#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 0,
+      "dropped": 0,
+      "exhausted": 1
+     }
+    }
+   ]
   }
  ]
 }
