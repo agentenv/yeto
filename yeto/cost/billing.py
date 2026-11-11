@@ -277,6 +277,14 @@ def _span_cost(r: Resource, start: float, now: float, rate: float | None, note: 
     return item
 
 
+def _provider_cost(kind: str):
+    """The registered cost function of an island provider's ledger kind (None: not one)."""
+    from yeto.launch.pool import provider as providers  # noqa: PLC0415
+
+    entry = providers.ledger_kinds().get(kind)
+    return None if entry is None or entry.resource_cost is None else providers.resolve(entry.resource_cost)
+
+
 def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | None = None,
                    billing: ModalBilling | None = None) -> CostSummary:
     rates = rates or Rates()
@@ -292,14 +300,8 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                 items.append(_span_cost(r, r.created_at, now, None, "app id unknown (intent only)"))
             else:
                 items.append(_modal_app_cost(r, rows, now, rates))
-        elif r.kind == "nc_lease":
-            start = _ts(r.attrs.get("granted_at")) or r.created_at
-            note = ""
-            until = _ts(r.attrs.get("lease_until"))
-            end = r.released_at if r.released_at is not None else now
-            if until is not None and end > until:
-                note = f"{(end - until) / 60:.0f} min past lease_until"
-            items.append(_span_cost(r, start, now, _nc_rate(r, rates), note))
+        elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
+            items.append(_provider_cost(r.kind)(r, now, rates))
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
             rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)

@@ -12,7 +12,9 @@ Rules:
 * A Modal app marked ``shared`` (reused by other runs) is not stopped; only this
   run's FunctionCalls in it are cancelled.
 * NC leases go through the NC lease manager's own guarded release
-  (``yeto.launch.nc.cli.down``: refuses tickets it did not create).
+  (``yeto.launch.nc.cli.down``: refuses tickets it did not create). The ledger
+  kinds of island providers (``nc_lease``) are dispatched through the provider
+  registry (``yeto.launch.pool.provider``): each registers its release.
 * Order: FunctionCalls, then apps, then NC leases, then sky clusters. Each
   success is recorded as ``release`` in the ledger (a rerun skips it); each
   failure as ``release_failed`` (a rerun retries it).
@@ -26,9 +28,12 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from yeto.launch.pool import provider as providers
+
 from .ledger import Resource, ResourceLedger
 
-ORDER = {"modal_call": 0, "modal_app": 1, "nc_lease": 2, "sky_cluster": 3}
+ORDER = {"modal_call": 0, "modal_app": 1, "sky_cluster": 3,
+         **{kind: e.cleanup_order for kind, e in providers.ledger_kinds().items()}}
 
 
 class CleanupOps(Protocol):
@@ -129,15 +134,12 @@ def _release_one(r: Resource, ops: CleanupOps, ledger: ResourceLedger, dry_run: 
             ledger.created("modal_app", app_id, r.name, resolved_by="cleanup")
         ledger.released("modal_app", app_id, r.name, by="cleanup")
         return Action(r.key, f"stopped app {app_id}", True)
-    if r.kind == "nc_lease":
-        account = r.attrs.get("account")
-        if account is None:
-            return Action(r.key, "NC lease without account in the ledger: not released", False)
-        if dry_run:
-            return Action(r.key, f"would release NC ticket {r.id} (account {account})", True)
-        res = ops.nc_release(int(account), r.id)
-        ledger.released("nc_lease", r.id, r.name, by="cleanup", result=res)
-        return Action(r.key, f"released NC ticket {r.id}: {res}", True)
+    entry = providers.ledger_kinds().get(r.kind)
+    if entry is not None and entry.release_resource is not None:  # an island provider's machine
+        ok, action, res = providers.resolve(entry.release_resource)(r, ops, dry_run)
+        if ok and not dry_run:
+            ledger.released(r.kind, r.id, r.name, by="cleanup", result=res)
+        return Action(r.key, action, ok)
     if r.kind == "sky_cluster":
         if dry_run:
             return Action(r.key, f"would sky down {r.id}", True)
@@ -170,7 +172,7 @@ def cleanup(ledger: ResourceLedger, ops: CleanupOps, *, dry_run: bool = False,
 # launch that fails or exits must never release them (2026-11-10: a failed trainer launch's
 # backstop cleanup released a healthy, set-up sampler node). Only an explicit
 # `yeto cleanup --run R --include-nc` (or pool-stop) releases them.
-POOL_OWNED_KINDS = frozenset({"nc_lease"})
+POOL_OWNED_KINDS = providers.pool_owned_ledger_kinds()  # {"nc_lease"}
 
 
 def cleanup_run(run: str, ops: CleanupOps | None = None, *, dry_run: bool = False,

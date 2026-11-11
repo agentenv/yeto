@@ -82,6 +82,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..pool.provider import ProviderCaps
 from .client import NodeLease
 from .elastic import LeaseStatus
 from .tunnel import state_dir
@@ -114,6 +115,9 @@ def _not_found(error: BaseException) -> bool:
 
 
 class DaytonaProvider:
+    kind = "daytona"
+    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd")
+
     def __init__(self, run_id: str, *, slots: list[int], image: str | None = None, snapshot: str | None = None,
                  gpus: int = 8, gpu_type: str = "MI355X", spot: bool = True, cpu: int | None = None,
                  memory_gib: int | None = None, disk_gib: int | None = None, name_prefix: str = "yeto-smp",
@@ -386,3 +390,8 @@ def from_config(cfg: dict[str, Any], run_id: str, *, sdk: Any = None, client: An
         raise ValueError(f"daytona provider: unknown keys {sorted(unknown)}")
     section.pop("kind", None)
     return DaytonaProvider(run_id, slots=[int(a) for a in cfg["accounts"]], sdk=sdk, client=client, **section)
+
+
+def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) -> DaytonaProvider:  # noqa: ARG001
+    """The registered ``daytona`` factory (``yeto.launch.pool.provider``)."""
+    return from_config(cfg, run_id)
