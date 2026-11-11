@@ -1371,6 +1371,11 @@ class IslandPool:
         self.log(f"pool: stopping: {why}")
         self._event("pool_stopped", why=why)
         for m in self.live():
+            # Retire the member in the work contract first (syncer member
+            # table / store dispenser): its open claims go back at once
+            # instead of waiting out their lease. Best effort, as for an eviction.
+            if m.state != DRAINING:
+                self._fence(m, "stop")
             self._drain(m, "stop")
 
     def drain_all(self, why: str, *, attempts: int = 3, wait_s: float = 10.0,

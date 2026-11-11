@@ -728,3 +728,56 @@ def test_registered_pool_ops_replace_the_ssh_route_and_provider_rates_charge_the
     pool, *_ = make_pool(nc, [1], target=1, clock=clock)
     ticks(pool, 4, clock, step=10)
     assert pool.live()[0].hourly_ucr == 3600 and pool.budget.spent_ucr == pytest.approx(20.0)  # granted at the 2nd tick
+
+
+def test_pool_stop_retires_every_live_member_before_its_release():
+    """A whole-pool stop retires each live member in the work contract (its
+    claims go back at once) before the machine is released."""
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    pool, _route, fencer = make_pool(nc, [1, 2], target=2, clock=clock)
+    ticks(pool, 3, clock)
+    live = pool.live()
+    assert len(live) == 2 and all(m.started is not None for m in live)
+    fencer.fenced.clear()
+    pool.drain_all("pool-stop", sleep=lambda _s: None)
+    assert sorted(shard for shard, _by in fencer.fenced) == sorted(m.shard for m in live)
+    assert all(m.state == GONE for m in live)
+    kinds = names(pool)
+    assert kinds.index("pool_stopped") < kinds.index("shard_fenced") < kinds.index("released")
+
+
+def test_pool_stop_releases_a_sampler_claim_on_the_real_syncer_at_once(tmp_path):
+    """data_path: syncer. The stopped pool's sampler held positions under a 600 s
+    lease; the stop retires it on the syncer, so another island claims them now."""
+    from test_dispense_syncer import FP, KEY, Syncer, _cargo_env  # noqa: F401
+    import subprocess
+
+    from yeto.launch.pool.data_path import SyncerDataPath
+    from yeto.rl.engine import task_dispense as td
+
+    root = Path(__file__).resolve().parent.parent
+    subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True, env=_cargo_env())
+    syncer = Syncer(root / "syncer/target/debug/yeto-syncer", tmp_path, "--dispense-passes", "1", lease_s=600.0)
+    try:
+        path = SyncerDataPath(("127.0.0.1", syncer.port), key=KEY)
+        clock = Clock()
+        pool, *_ = make_pool(FakeProvider("nc", clock), [1], target=1, clock=clock, fencer=path)
+        ticks(pool, 3, clock)
+        (member,) = pool.live()
+        holder = td.sampler_holder_id(member.shard)
+        sampler = td.DispenseConnection(("127.0.0.1", syncer.port), learner_id=holder, incarnation=7,
+                                        rows=8, fingerprint=FP, key=KEY, timeout_s=5.0)
+        assert sampler.claim(1, 3).ranges == ((0, 3),)
+        pool.drain_all("pool-stop", sleep=lambda _s: None)
+        assert member.state == GONE and "fence_failed" not in names(pool)
+        other = td.DispenseConnection(("127.0.0.1", syncer.port), learner_id=2, incarnation=9,
+                                      rows=8, fingerprint=FP, key=KEY, timeout_s=5.0)
+        taken = sorted(p for start, end in other.claim(1, 4).ranges for p in range(start, end))
+        assert taken == [0, 1, 2, 3]  # no wait for the lease
+        with pytest.raises(td.DispenseFenced):
+            sampler.claim(2, 1)
+        sampler.close()
+        other.close()
+    finally:
+        syncer.stop()
