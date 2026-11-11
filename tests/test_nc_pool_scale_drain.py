@@ -540,3 +540,20 @@ def test_ssh_ops_drain_request_goes_to_the_dispensers_ledger_in_the_run_store(tm
     bare = cli.NcSshOps(cfg, run=lambda *a, **k: None, provider=SimpleNamespace())
     with pytest.raises(cli.NcError, match="no store dispenser"):
         bare.request_drain(m)
+
+
+def test_run_up_preflight_refuses_score_centering_without_the_samplers_top_logprobs(tmp_path, monkeypatch):
+    run = _run_cfg(tmp_path, monkeypatch)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"sampler_id": "__SHARD__"}))
+    (tmp_path / "pool.json").write_text(json.dumps({"target": 1, "accounts": [1], "shard_base": "nc",
+                                                    "run": "run-a", "spec": str(spec)}))
+    run.cfg["trainer"]["argv"] = ["--rl-loss", "policy_loss"]
+    assert run.rollout_fields_problem() is None
+    run.cfg["trainer"]["argv"] = ["--rl-loss", "score_centering"]
+    assert "top_logprobs_num unset" in run.rollout_fields_problem()
+    spec.write_text(json.dumps({"rollout_fields": {"top_logprobs_num": 128}}))
+    assert run.rollout_fields_problem() is None
+    run.cfg["trainer"]["argv"] = ["--rl-loss=score_centering", "--rl-rollout-top-logprobs-num", "64"]
+    assert "top-64" in run.rollout_fields_problem()
+    assert run.preflight() is False
