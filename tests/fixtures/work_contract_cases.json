@@ -1,197 +1,1201 @@
 {
-  "about": "WorkContract conformance cases (yeto/rl/engine/work_contract.py). Run by tests/test_work_contract.py (store ledger) and syncer/src/work_contract.rs (syncer dispenser). Members are 'holder#incarnation'. Items are slots / positions (one plain stream, seed 0). 'claim' expects {'items': [...]} (compared as a set), 'wait', 'end' or 'fenced'; 'done' / 'drop' / 'fail' / 'release' expect 'ok' or 'not_held'; 'join' and 'retire' expect the number of open claims released; 'holds' a boolean; 'totals' item counts. 'advance' moves the one clock by seconds.",
-  "version": 1,
-  "cases": [
+ "about": "WorkContract conformance cases (yeto/rl/engine/work_contract.py). Run by tests/test_work_contract.py (store ledger) and syncer/src/work_contract.rs (syncer dispenser). Members are 'holder#incarnation'. Items are slots / positions (one plain stream, seed 0). 'claim' expects {'items': [...]} (compared as a set), 'wait', 'end' or 'fenced'; 'done' / 'drop' / 'fail' / 'release' expect 'ok' or 'not_held'; 'join' and 'retire' expect the number of open claims released; 'holds' a boolean; 'totals' item counts. 'advance' moves the one clock by seconds. 'drain' / 'undrain' are the scale-down that keeps work in flight (no new claim, the held items finish); 'drained' expects whether the member has confirmed it holds nothing under the drain.",
+ "version": 1,
+ "cases": [
+  {
+   "name": "claim_done_and_data_end",
+   "why": "items go out once; END only once every item is settled and none is held",
+   "config": {
+    "rows": 3,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 60
+   },
+   "steps": [
     {
-      "name": "claim_done_and_data_end",
-      "why": "items go out once; END only once every item is settled and none is held",
-      "config": {"rows": 3, "passes": 1, "max_redo": 1, "lease_s": 60},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "join", "m": "B#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [0, 1]}},
-        {"op": "done", "m": "A#1", "items": [0, 1], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [2]}},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": "wait"},
-        {"op": "done", "m": "A#1", "items": [2], "expect": "ok"},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": "end"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 3, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
     },
     {
-      "name": "fence_releases_claims_at_once",
-      "why": "real run: a hard-reclaimed NC island's claims went to the other island within a minute, not after the lease",
-      "config": {"rows": 4, "passes": 1, "max_redo": 1, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "join", "m": "B#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [0, 1]}},
-        {"op": "fence", "m": "A#1"},
-        {"op": "claim", "m": "B#1", "n": 3, "expect": {"items": [0, 1, 2]}},
-        {"op": "holds", "m": "A#1", "item": 0, "expect": false},
-        {"op": "done", "m": "A#1", "items": [0], "expect": "not_held"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "fenced"},
-        {"op": "done", "m": "B#1", "items": [0, 1, 2], "expect": "ok"},
-        {"op": "totals", "expect": {"trained": 3, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
     },
     {
-      "name": "retire_releases_claims_at_once_and_is_idempotent",
-      "why": "scale-down: the controller retires a member; its claims go back to the front, uncounted, and it is fenced",
-      "config": {"rows": 4, "passes": 1, "max_redo": 0, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "join", "m": "B#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [0, 1]}},
-        {"op": "retire", "m": "A#1", "expect": 2},
-        {"op": "retire", "m": "A#1", "expect": 0},
-        {"op": "retire", "m": "C#1", "expect": 0},
-        {"op": "holds", "m": "A#1", "item": 1, "expect": false},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "fenced"},
-        {"op": "claim", "m": "B#1", "n": 4, "expect": {"items": [0, 1, 2, 3]}},
-        {"op": "done", "m": "A#1", "items": [1], "expect": "not_held"},
-        {"op": "fail", "m": "B#1", "items": [0], "expect": "ok"},
-        {"op": "done", "m": "B#1", "items": [1, 2, 3], "expect": "ok"},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 3, "dropped": 0, "exhausted": 1}}
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
       ]
+     }
     },
     {
-      "name": "retired_holder_rejoins_as_a_new_incarnation",
-      "why": "a replacement process on the same holder id is admitted; the retired incarnation stays fenced",
-      "config": {"rows": 2, "passes": 1, "max_redo": 1, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "retire", "m": "A#1", "expect": 1},
-        {"op": "join", "m": "A#2", "expect": 0},
-        {"op": "claim", "m": "A#2", "n": 1, "expect": {"items": [0]}},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "fenced"},
-        {"op": "holds", "m": "A#2", "item": 0, "expect": true},
-        {"op": "done", "m": "A#2", "items": [0], "expect": "ok"},
-        {"op": "totals", "expect": {"trained": 1, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0,
+      1
+     ],
+     "expect": "ok"
     },
     {
-      "name": "new_incarnation_supersedes_at_once",
-      "why": "an island restarted in place: its earlier incarnation's claims are released, not counted",
-      "config": {"rows": 3, "passes": 1, "max_redo": 0, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [0, 1]}},
-        {"op": "join", "m": "A#2", "expect": 2},
-        {"op": "holds", "m": "A#1", "item": 0, "expect": false},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "fenced"},
-        {"op": "claim", "m": "A#2", "n": 3, "expect": {"items": [0, 1, 2]}},
-        {"op": "done", "m": "A#2", "items": [0, 1, 2], "expect": "ok"},
-        {"op": "totals", "expect": {"trained": 3, "dropped": 0, "exhausted": 0}}
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       2
       ]
+     }
     },
     {
-      "name": "holder_death_expires_its_claims",
-      "why": "a sampler dies without a word: its claims come back after the lease, a beating member keeps its own",
-      "config": {"rows": 4, "passes": 1, "max_redo": 2, "lease_s": 60},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "join", "m": "B#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "advance", "s": 30},
-        {"op": "beat", "m": "A#1"},
-        {"op": "beat", "m": "B#1"},
-        {"op": "advance", "s": 40},
-        {"op": "beat", "m": "B#1"},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": {"items": [1]}},
-        {"op": "holds", "m": "A#1", "item": 0, "expect": true},
-        {"op": "advance", "s": 40},
-        {"op": "beat", "m": "B#1"},
-        {"op": "claim", "m": "B#1", "n": 2, "expect": {"items": [0, 2]}},
-        {"op": "holds", "m": "A#1", "item": 0, "expect": false},
-        {"op": "done", "m": "A#1", "items": [0], "expect": "not_held"},
-        {"op": "done", "m": "B#1", "items": [0, 1, 2], "expect": "ok"},
-        {"op": "totals", "expect": {"trained": 3, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "wait"
     },
     {
-      "name": "redo_limit_exhausts",
-      "why": "an item failing on infrastructure is retried max_redo times, then settled exhausted (not lost, not looping)",
-      "config": {"rows": 2, "passes": 1, "max_redo": 1, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "fail", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "fail", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [1]}},
-        {"op": "done", "m": "A#1", "items": [1], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 1, "dropped": 0, "exhausted": 1}}
-      ]
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      2
+     ],
+     "expect": "ok"
     },
     {
-      "name": "expiry_counts_toward_redo",
-      "why": "a task that kills its sampler must not loop: a lease expiry is a counted failure",
-      "config": {"rows": 2, "passes": 1, "max_redo": 1, "lease_s": 60},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "advance", "s": 61},
-        {"op": "join", "m": "B#1", "expect": 0},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "fail", "m": "B#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "B#1", "n": 2, "expect": {"items": [1]}},
-        {"op": "done", "m": "B#1", "items": [1], "expect": "ok"},
-        {"op": "claim", "m": "B#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 1, "dropped": 0, "exhausted": 1}}
-      ]
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "end"
     },
     {
-      "name": "release_is_not_counted",
-      "why": "an item given back unconsumed (closing, unwritten, fenced, retired) never exhausts",
-      "config": {"rows": 1, "passes": 1, "max_redo": 0, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "release", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "release", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "done", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 1, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "end"
     },
     {
-      "name": "passes_cross_the_epoch_boundary_in_one_claim",
-      "why": "real run: a small data set handed one row at two items of one round (an epoch wrap); items are slots, not rows, and both go out",
-      "config": {"rows": 3, "passes": 2, "max_redo": 1, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 4, "expect": {"items": [0, 1, 2, 3]}},
-        {"op": "release", "m": "A#1", "items": [3], "expect": "ok"},
-        {"op": "done", "m": "A#1", "items": [0, 1, 2], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [3, 4]}},
-        {"op": "done", "m": "A#1", "items": [3, 4], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 4, "expect": {"items": [5]}},
-        {"op": "drop", "m": "A#1", "items": [5], "expect": "ok"},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": "end"},
-        {"op": "totals", "expect": {"trained": 5, "dropped": 1, "exhausted": 0}}
-      ]
-    },
-    {
-      "name": "settle_twice_is_not_held",
-      "why": "a settled item is never settled again nor handed out again",
-      "config": {"rows": 2, "passes": 1, "max_redo": 1, "lease_s": 900},
-      "steps": [
-        {"op": "join", "m": "A#1", "expect": 0},
-        {"op": "claim", "m": "A#1", "n": 1, "expect": {"items": [0]}},
-        {"op": "done", "m": "A#1", "items": [0], "expect": "ok"},
-        {"op": "done", "m": "A#1", "items": [0], "expect": "not_held"},
-        {"op": "fail", "m": "A#1", "items": [0], "expect": "not_held"},
-        {"op": "claim", "m": "A#1", "n": 2, "expect": {"items": [1]}},
-        {"op": "done", "m": "A#1", "items": [1], "expect": "ok"},
-        {"op": "totals", "expect": {"trained": 2, "dropped": 0, "exhausted": 0}}
-      ]
+     "op": "totals",
+     "expect": {
+      "trained": 3,
+      "dropped": 0,
+      "exhausted": 0
+     }
     }
-  ]
+   ]
+  },
+  {
+   "name": "fence_releases_claims_at_once",
+   "why": "real run: a hard-reclaimed NC island's claims went to the other island within a minute, not after the lease",
+   "config": {
+    "rows": 4,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
+      ]
+     }
+    },
+    {
+     "op": "fence",
+     "m": "A#1"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 3,
+     "expect": {
+      "items": [
+       0,
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": false
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "not_held"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "fenced"
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      0,
+      1,
+      2
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 3,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "retire_releases_claims_at_once_and_is_idempotent",
+   "why": "scale-down: the controller retires a member; its claims go back to the front, uncounted, and it is fenced",
+   "config": {
+    "rows": 4,
+    "passes": 1,
+    "max_redo": 0,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
+      ]
+     }
+    },
+    {
+     "op": "retire",
+     "m": "A#1",
+     "expect": 2
+    },
+    {
+     "op": "retire",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "retire",
+     "m": "C#1",
+     "expect": 0
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 1,
+     "expect": false
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "fenced"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 4,
+     "expect": {
+      "items": [
+       0,
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      1
+     ],
+     "expect": "not_held"
+    },
+    {
+     "op": "fail",
+     "m": "B#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      1,
+      2,
+      3
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 3,
+      "dropped": 0,
+      "exhausted": 1
+     }
+    }
+   ]
+  },
+  {
+   "name": "retired_holder_rejoins_as_a_new_incarnation",
+   "why": "a replacement process on the same holder id is admitted; the retired incarnation stays fenced",
+   "config": {
+    "rows": 2,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "retire",
+     "m": "A#1",
+     "expect": 1
+    },
+    {
+     "op": "join",
+     "m": "A#2",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#2",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "fenced"
+    },
+    {
+     "op": "holds",
+     "m": "A#2",
+     "item": 0,
+     "expect": true
+    },
+    {
+     "op": "done",
+     "m": "A#2",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 1,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "new_incarnation_supersedes_at_once",
+   "why": "an island restarted in place: its earlier incarnation's claims are released, not counted",
+   "config": {
+    "rows": 3,
+    "passes": 1,
+    "max_redo": 0,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
+      ]
+     }
+    },
+    {
+     "op": "join",
+     "m": "A#2",
+     "expect": 2
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": false
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "fenced"
+    },
+    {
+     "op": "claim",
+     "m": "A#2",
+     "n": 3,
+     "expect": {
+      "items": [
+       0,
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#2",
+     "items": [
+      0,
+      1,
+      2
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 3,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "holder_death_expires_its_claims",
+   "why": "a sampler dies without a word: its claims come back after the lease, a beating member keeps its own",
+   "config": {
+    "rows": 4,
+    "passes": 1,
+    "max_redo": 2,
+    "lease_s": 60
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 30
+    },
+    {
+     "op": "beat",
+     "m": "A#1"
+    },
+    {
+     "op": "beat",
+     "m": "B#1"
+    },
+    {
+     "op": "advance",
+     "s": 40
+    },
+    {
+     "op": "beat",
+     "m": "B#1"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       1
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": true
+    },
+    {
+     "op": "advance",
+     "s": 40
+    },
+    {
+     "op": "beat",
+     "m": "B#1"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       2
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": false
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "not_held"
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      0,
+      1,
+      2
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 3,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "redo_limit_exhausts",
+   "why": "an item failing on infrastructure is retried max_redo times, then settled exhausted (not lost, not looping)",
+   "config": {
+    "rows": 2,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "fail",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "fail",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       1
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 1,
+      "dropped": 0,
+      "exhausted": 1
+     }
+    }
+   ]
+  },
+  {
+   "name": "expiry_counts_toward_redo",
+   "why": "a task that kills its sampler must not loop: a lease expiry is a counted failure",
+   "config": {
+    "rows": 2,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 60
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "advance",
+     "s": 61
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "fail",
+     "m": "B#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       1
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 1,
+      "dropped": 0,
+      "exhausted": 1
+     }
+    }
+   ]
+  },
+  {
+   "name": "release_is_not_counted",
+   "why": "an item given back unconsumed (closing, unwritten, fenced, retired) never exhausts",
+   "config": {
+    "rows": 1,
+    "passes": 1,
+    "max_redo": 0,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "release",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "release",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 1,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "passes_cross_the_epoch_boundary_in_one_claim",
+   "why": "real run: a small data set handed one row at two items of one round (an epoch wrap); items are slots, not rows, and both go out",
+   "config": {
+    "rows": 3,
+    "passes": 2,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 4,
+     "expect": {
+      "items": [
+       0,
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "op": "release",
+     "m": "A#1",
+     "items": [
+      3
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0,
+      1,
+      2
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       3,
+       4
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      3,
+      4
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 4,
+     "expect": {
+      "items": [
+       5
+      ]
+     }
+    },
+    {
+     "op": "drop",
+     "m": "A#1",
+     "items": [
+      5
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 5,
+      "dropped": 1,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "settle_twice_is_not_held",
+   "why": "a settled item is never settled again nor handed out again",
+   "config": {
+    "rows": 2,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       0
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "not_held"
+    },
+    {
+     "op": "fail",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "not_held"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       1
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 2,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "drain_finishes_in_flight_then_fence",
+   "why": "scale down without losing trials: a drained member claims nothing new, finishes what it holds, confirms, then is retired",
+   "config": {
+    "rows": 4,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
+      ]
+     }
+    },
+    {
+     "op": "drain",
+     "m": "A#1"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "wait"
+    },
+    {
+     "op": "drained",
+     "m": "A#1",
+     "expect": false
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 4,
+     "expect": {
+      "items": [
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "wait"
+    },
+    {
+     "op": "drained",
+     "m": "A#1",
+     "expect": false
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 1,
+     "expect": true
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "wait"
+    },
+    {
+     "op": "drained",
+     "m": "A#1",
+     "expect": true
+    },
+    {
+     "op": "retire",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "fenced"
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      2,
+      3
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 4,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "undrain_claims_again",
+   "why": "a cancelled scale-down: the member takes work again",
+   "config": {
+    "rows": 2,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "drain",
+     "m": "A#1"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "wait"
+    },
+    {
+     "op": "drained",
+     "m": "A#1",
+     "expect": true
+    },
+    {
+     "op": "undrain",
+     "m": "A#1"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 2,
+     "expect": {
+      "items": [
+       0,
+       1
+      ]
+     }
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0,
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 2,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
+  }
+ ]
 }

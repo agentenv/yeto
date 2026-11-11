@@ -93,8 +93,20 @@ Operations (pre-condition, effect, idempotency, concurrency)
     claim of any member takes it; nothing waits for in-flight work: a group
     the retired member still finishes is refused by ``still_holds`` / the
     ``fenced`` answer and by the incarnation gate). Idempotent. A graceful
-    drain is the island's own business: stop it (its ``close()`` releases what
-    it holds), then retire it.
+    stop of the island itself: its ``close()`` releases what
+    it holds, then retire it; or ``drain`` it first.
+
+``drain(holder, on=True)`` / ``drained(holder) -> bool``
+    The scale-down that keeps the work in flight (retire, drain mode): the
+    holder (every incarnation of it) claims nothing new (``WAIT``) while what
+    it holds is settled as usual; once it holds nothing the drain is
+    **confirmed** (store: the sampler writes ``drained/<holder>`` with the
+    request's ``seq`` at its next scan; syncer: the MEMBER_RETIRE drain answer
+    says ``drained``). The controller then retires it (fence-release, which
+    now releases nothing). ``on=False`` lets it claim again. Idempotent; a
+    controller that times out the drain retires anyway (the rest is
+    released, nothing is lost). Scale-down order: drain -> drained (or
+    timeout) -> retire / fence -> stop the machine.
 
 ``still_holds(member, item) -> bool``
     The member may still deliver the item's result: it is live, the item's
@@ -137,6 +149,8 @@ still_holds               ``still_holds``                              ``Dispens
 fence                     incarnation lease (``fence_shard``)           MEMBER_RETIRE (no separate lease)
 retire                    ``store_dispense.retire`` /                  ``task_dispense.retire_member`` (MEMBER_RETIRE
                           ``python -m ...store_dispense retire``       frame, island HMAC key)
+drain / drained           ``store_dispense.request_drain`` /           ``retire_member(..., mode="drain")`` until
+                          ``drain_answered``                           ``status == "drained"``; ``mode="undrain"``
 ========================  ==========================================  ==============================================
 """
 
@@ -191,6 +205,12 @@ class WorkContract(Protocol):
 
     def retire(self, holder: str, incarnation: str | None = None, reason: str = "scale_down") -> int:
         """Retire now; the number of open claims released."""
+
+    def drain(self, member: Member, on: bool = True) -> None:
+        """Stop (``on``) or resume new claims of the member's holder."""
+
+    def drained(self, member: Member) -> bool:
+        """The holder confirmed it holds nothing under the open drain."""
 
     def totals(self) -> dict[str, int]:
         """``{"trained", "dropped", "exhausted"}`` item counts."""

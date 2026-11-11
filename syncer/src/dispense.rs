@@ -496,6 +496,11 @@ pub struct Dispenser {
     members: SharedMembers,
     pub totals: Totals,
     events: Vec<DispenseEvent>,
+    /// Island ids the controller is draining (scale-down that keeps the
+    /// work in flight): their claims get WAIT, their reports go on. Kept per
+    /// id, so a restarted incarnation stays drained; not persisted (the
+    /// controller repeats its idempotent request).
+    draining: BTreeSet<u32>,
 }
 
 impl Dispenser {
@@ -517,6 +522,7 @@ impl Dispenser {
             members,
             totals: Totals::default(),
             events: Vec::new(),
+            draining: BTreeSet::new(),
         }
     }
 
@@ -871,6 +877,15 @@ impl Dispenser {
                 self.cfg.max_block
             )));
         }
+        if self.draining.contains(&holder.learner_id) {
+            // drained by the controller: nothing new, what it holds finishes
+            let live = self.live.get_mut(&holder).expect("checked live");
+            if !live.waiting {
+                live.waiting = true;
+                self.events.push(DispenseEvent::Wait { holder });
+            }
+            return Ok(Claim::Wait);
+        }
         let accept = self.live.get(&holder).expect("checked live").accept.clone();
         let mut need = u64::from(wanted);
         let mut spans: Vec<Span> = Vec::new();
@@ -1072,6 +1087,29 @@ impl Dispenser {
             _ => 0,
         };
         (holder, retired, reclaimed)
+    }
+
+    /// The controller drains `learner_id` (`on`) or lets it claim again: a
+    /// draining island gets WAIT for every claim while its blocks in flight
+    /// are reported as usual (WorkContract `retire` in drain mode). Returns
+    /// the positions its live incarnations still hold (0: drained).
+    /// Idempotent.
+    pub fn set_drain(&mut self, learner_id: u32, on: bool) -> u64 {
+        if on {
+            self.draining.insert(learner_id);
+        } else {
+            self.draining.remove(&learner_id);
+        }
+        self.held_by(learner_id)
+    }
+
+    /// Unreported positions held by the live incarnations of `learner_id`.
+    pub fn held_by(&self, learner_id: u32) -> u64 {
+        self.blocks
+            .values()
+            .filter(|b| b.holder.learner_id == learner_id)
+            .flat_map(|b| b.open.iter().map(|(s, (e, _))| e - s))
+            .sum()
     }
 
     /// Whether live `holder` holds `position` unreported (WorkContract `still_holds`).

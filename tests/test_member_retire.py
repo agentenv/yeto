@@ -13,14 +13,16 @@ from yeto.rl.engine import task_dispense as td
 def test_wire_bytes_match_the_rust_golden_vectors():
     """Same vectors as ``member_retire::tests::wire_golden_vectors``."""
     body = td.encode_member_retire(0x8000_0007, 0x0102030405060708, "scale_down")
-    assert body.hex() == "0100070000800108070605040302010a007363616c655f646f776e"
+    assert body.hex() == "010007000080000108070605040302010a007363616c655f646f776e"
     sealed = td.seal_member_retire(body, b"k")
-    assert sealed[len(body):].hex() == "e9c1742d535f0684c680c579c1091feee6d588c661aff106e512642b0acfddcf"
+    assert sealed[len(body):].hex() == "849fde556efa2a58e6b8fa18640e0c32cc4cd3f7996b97ad0598b77b35693b7b"
     assert td.seal_member_retire(body, None) == body
-    assert td.decode_member_retired(bytes.fromhex("0009000000000000000600000000000000")) == {
-        "status": "retired", "incarnation": 9, "reclaimed": 6}
-    current = td.encode_member_retire(5, None)
-    assert current[6] == 0 and current[7:15] == bytes(8)
+    assert td.decode_member_retired(bytes.fromhex("00090000000000000006000000000000000000000000000000")) == {
+        "status": "retired", "incarnation": 9, "reclaimed": 6, "held": 0}
+    assert td.decode_member_retired(bytes.fromhex("03090000000000000000000000000000000200000000000000"))[
+        "status"] == "draining"
+    current = td.encode_member_retire(5, None, mode="drain")
+    assert current[6] == 1 and current[7] == 0 and current[8:16] == bytes(8)
     with pytest.raises(ValueError):
         td.encode_member_retire(1, None, "x" * 257)
 
@@ -40,7 +42,7 @@ def test_retire_on_the_real_syncer_releases_at_once_and_fences(syncer_binary, tm
         with pytest.raises(td.DispenseError, match="HMAC"):
             td.retire_member(address, 1, key=b"wrong")
         assert td.retire_member(address, 1, reason="scale_down", key=KEY) == {
-            "status": "retired", "incarnation": 11, "reclaimed": 3}
+            "status": "retired", "incarnation": 11, "reclaimed": 3, "held": 0}
         assert td.retire_member(address, 1, 11, key=KEY)["status"] == "already_retired"
         assert td.retire_member(address, 1, key=KEY)["status"] == "no_member"
         # no wait for the 600 s lease: the next claim of another island takes them first
@@ -52,6 +54,22 @@ def test_retire_on_the_real_syncer_releases_at_once_and_fences(syncer_binary, tm
         b.close()
         reclaims = [r for r in syncer.records() if r.get("kind") == "dispense_reclaim"]
         assert [(r["reason"], r["positions"]) for r in reclaims] == [("retired", 3)]
+    finally:
+        syncer.stop()
+
+
+def test_drain_then_retire_on_the_real_syncer(syncer_binary, tmp_path):  # noqa: F811
+    syncer = Syncer(syncer_binary, tmp_path, "--dispense-passes", "1", lease_s=600.0)
+    address = ("127.0.0.1", syncer.port)
+    try:
+        a = _conn(syncer.port, 1, 11)
+        grant = a.claim(1, 2)
+        assert td.retire_member(address, 1, mode="drain", key=KEY)["held"] == 2
+        assert a.claim(2, 1).status == td.WAIT
+        a.report(3, [(grant.block, td.TRAINED, list(grant.ranges))])
+        assert td.retire_member(address, 1, mode="drain", key=KEY)["status"] == "drained"
+        assert td.retire_member(address, 1, key=KEY)["reclaimed"] == 0
+        a.close()
     finally:
         syncer.stop()
 

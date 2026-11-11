@@ -9,7 +9,8 @@
 //! [`Dispenser`] with every request preceded by an expiry pass (as
 //! `dispense_service.rs` does). `fence` and `retire` both map to
 //! MEMBER_RETIRE ([`Dispenser::retire_member`]): the syncer has no separate
-//! incarnation lease.
+//! incarnation lease. `drain` / `drained` are MEMBER_RETIRE in drain mode
+//! ([`Dispenser::set_drain`]; drained when it returns 0 held).
 
 #![cfg(test)]
 
@@ -314,6 +315,17 @@ impl SyncerContract {
         self.d.retire_member(m.learner_id, Some(m.incarnation)).2
     }
 
+    fn drain(&mut self, m: Holder, on: bool) {
+        self.tick();
+        self.d.set_drain(m.learner_id, on);
+    }
+
+    /// The controller's drain answer: drained once the id holds nothing.
+    fn drained(&mut self, m: Holder) -> bool {
+        self.tick();
+        self.d.set_drain(m.learner_id, true) == 0
+    }
+
     fn totals(&mut self) -> (u64, u64, u64) {
         self.tick();
         let t = self.d.totals;
@@ -387,6 +399,9 @@ fn run_case(case: &Json) {
                 c.retire(m);
             }
             "retire" => assert_eq!(c.retire(m), step.at("expect").num() as u64, "{where_}"),
+            "drain" => c.drain(m, true),
+            "undrain" => c.drain(m, false),
+            "drained" => assert_eq!(c.drained(m), step.at("expect") == &Json::Bool(true), "{where_}"),
             other => panic!("unknown op {other:?} ({where_})"),
         }
     }

@@ -64,6 +64,7 @@ class StoreContract:
                        "scan_s": 0.0, "max_scan_s": 0.0}
         self.leases: dict[str, str] = {}  # holder -> the incarnation its incarnation lease names
         self.members: dict[Member, sd.StoreDispensedPrompts] = {}
+        self.drains: dict[str, str] = {}  # holder -> the open drain request's seq
 
     def _prompts(self, m: Member) -> sd.StoreDispensedPrompts:
         if m not in self.members:
@@ -127,6 +128,17 @@ class StoreContract:
     def retire(self, holder: str, incarnation: str | None = None, reason: str = "scale_down") -> int:
         return sd.retire(self.objects, NAMESPACE, holder, incarnation, reason=reason)["released"]
 
+    def drain(self, m: Member, on: bool = True) -> None:
+        seq = sd.request_drain(self.objects, NAMESPACE, m.holder, on=on, seq=f"d{len(self.drains)}-{on}")
+        if on:
+            self.drains[m.holder] = seq
+        else:
+            self.drains.pop(m.holder, None)
+
+    def drained(self, m: Member) -> bool:
+        seq = self.drains.get(m.holder)
+        return seq is not None and sd.drain_answered(self.objects, NAMESPACE, m.holder, seq)
+
     def advance(self, seconds: float) -> None:
         self.objects.now += float(seconds)
 
@@ -169,6 +181,10 @@ def run_case(contract, case) -> None:
             contract.beat(m)
         elif op == "fence":
             contract.fence(m)
+        elif op in ("drain", "undrain"):
+            contract.drain(m, op == "drain")
+        elif op == "drained":
+            assert contract.drained(m) is step["expect"], where
         elif op == "retire":
             assert contract.retire(m.holder, m.incarnation) == step["expect"], where
         else:
@@ -189,7 +205,7 @@ def test_store_ledger_conforms(tmp_path, case):
 def test_case_table_covers_every_operation():
     ops = {step["op"] for case in _cases() for step in case["steps"]}
     assert ops >= {"join", "claim", "done", "drop", "fail", "release", "beat", "holds", "fence", "retire",
-                   "advance", "totals"}
+                   "advance", "totals", "drain", "undrain", "drained"}
     names = {case["name"] for case in _cases()}
     assert len(names) == len(_cases())
 

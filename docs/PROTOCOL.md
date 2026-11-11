@@ -883,14 +883,17 @@ rule.
   client sends one every 10 s), every relay request of a producer.
 - The controller may retire a member at once (scale-down, evict): a
   connection whose first frame is MEMBER_RETIRE (57), `u16 version (=1) |
-  u32 learner_id | u8 has_incarnation | u64 incarnation | u16 reason_len |
-  reason`, sealed with the domain `yeto-member-retire-mac-v1\0` when the
+  u32 learner_id | u8 mode | u8 has_incarnation | u64 incarnation |
+  u16 reason_len | reason` (mode 0 retire, 1 drain, 2 undrain), sealed with the domain `yeto-member-retire-mac-v1\0` when the
   syncer has an island HMAC key (without a key only a loopback peer is
   accepted). `has_incarnation = 0` retires the id's current incarnation; an
   explicit incarnation that never joined is fenced ahead. The answer
   MEMBER_RETIRED (58) is `u8 status (0 retired, 1 already retired, 2 no
-  current incarnation) | u64 incarnation | u64 reclaimed` (positions put back
-  at the queue front). Idempotent. Client: `task_dispense.retire_member`.
+  current incarnation, 3 draining, 4 drained, 5 resumed) | u64 incarnation |
+  u64 reclaimed | u64 held` (`reclaimed`: positions put back at the queue
+  front; `held`: what a draining id still holds). Drain: the id's claims get
+  WAIT while its reports go on; the controller repeats the drain until
+  `drained`, then retires. Idempotent. Client: `task_dispense.retire_member`.
 - A superseded, expired or retired member is retired: its later requests on any
   channel are refused with an ERROR that starts with `fenced: dispense`,
   `fenced: subscriber` or `fenced: relay` and ends with the reason in

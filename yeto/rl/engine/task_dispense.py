@@ -79,7 +79,8 @@ MSG_MEMBER_RETIRED = 58
 MEMBER_RETIRE_VERSION = 1
 MEMBER_RETIRE_MAC_DOMAIN = b"yeto-member-retire-mac-v1\0"
 MAX_RETIRE_REASON = 256
-RETIRE_STATUS = {0: "retired", 1: "already_retired", 2: "no_member"}
+RETIRE_STATUS = {0: "retired", 1: "already_retired", 2: "no_member", 3: "draining", 4: "drained", 5: "resumed"}
+RETIRE_MODES = {"retire": 0, "drain": 1, "undrain": 2}
 
 # streams (syncer/src/dispense.rs)
 STREAM_SHIFT = 40
@@ -596,13 +597,14 @@ def _refusal(text: str) -> Exception:
     return DispenseError(text)
 
 
-def encode_member_retire(learner_id: int, incarnation: int | None, reason: str = "") -> bytes:
+def encode_member_retire(learner_id: int, incarnation: int | None, reason: str = "", *,
+                         mode: str = "retire") -> bytes:
     """The MEMBER_RETIRE body (``syncer/src/member_retire.rs``)."""
     text = str(reason).encode("utf-8")
     if len(text) > MAX_RETIRE_REASON:
         raise ValueError(f"retire reason longer than {MAX_RETIRE_REASON} bytes")
-    return struct.pack("<HIBQH", MEMBER_RETIRE_VERSION, int(learner_id), int(incarnation is not None),
-                       int(incarnation or 0), len(text)) + text
+    return struct.pack("<HIBBQH", MEMBER_RETIRE_VERSION, int(learner_id), RETIRE_MODES[mode],
+                       int(incarnation is not None), int(incarnation or 0), len(text)) + text
 
 
 def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
@@ -612,19 +614,24 @@ def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
 
 
 def decode_member_retired(payload: bytes) -> dict[str, Any]:
-    status, incarnation, reclaimed = struct.unpack("<BQQ", payload)
-    return {"status": RETIRE_STATUS.get(status, str(status)), "incarnation": incarnation, "reclaimed": reclaimed}
+    status, incarnation, reclaimed, held = struct.unpack("<BQQQ", payload)
+    return {"status": RETIRE_STATUS.get(status, str(status)), "incarnation": incarnation, "reclaimed": reclaimed,
+            "held": held}
 
 
 def retire_member(address: tuple[str, int], learner_id: int, incarnation: int | None = None, *,
-                  reason: str = "scale_down", key: bytes | None = None, timeout_s: float = 10.0) -> dict[str, Any]:
+                  reason: str = "scale_down", key: bytes | None = None, timeout_s: float = 10.0,
+                  mode: str = "retire") -> dict[str, Any]:
     """Retire syncer member ``learner_id`` (``incarnation=None``: its current
     one) now: the WorkContract's ``retire`` on the syncer data path. The
     dispenser puts its unreported positions back at the queue front (not
     counted), the relay refuses its PUTs, its subscriber connection closes.
     ``key``: the island HMAC key (without one the syncer accepts only its own
-    host). Returns ``{"status", "incarnation", "reclaimed"}``; idempotent."""
-    payload = seal_member_retire(encode_member_retire(learner_id, incarnation, reason), key)
+    host). ``mode="drain"``: claim nothing new, finish what it holds (status
+    ``draining`` with ``held`` > 0, then ``drained``: repeat until drained, then
+    retire); ``"undrain"``: claim again. Returns ``{"status", "incarnation",
+    "reclaimed", "held"}``; idempotent."""
+    payload = seal_member_retire(encode_member_retire(learner_id, incarnation, reason, mode=mode), key)
     with socket.create_connection(address, timeout=timeout_s) as sock:
         sock.sendall(_HEADER.pack(MAGIC, MSG_MEMBER_RETIRE, len(payload)) + payload)
         head = b""
