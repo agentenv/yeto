@@ -453,6 +453,51 @@ def test_crashed_sampler_restarts_in_place_then_the_node_is_replaced():
     assert pool.members[-1].replaces_shard == m.shard
 
 
+def test_a_restart_before_the_first_join_does_not_use_up_the_crash_budget():
+    """Setup-time restarts (the sampler died before it ever joined) are not a crash
+    loop: the first crash after the join (e.g. an OOM kill) restarts in place."""
+    clock = Clock()
+    cloud = Cloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, accounts=(1, 4), max_sampler_restarts=1)
+    while not any(k == "start" for k, *_ in cloud.log):
+        pool.tick()
+        clock.t += 60
+    m = pool.members[0]
+    cloud.tickets[m.ticket].update(sampler="exited", exit=1)
+    pool.tick()
+    assert cloud.kinds("restart") and m.restarts == 1
+    _run(pool, clock, clock.t + 900)
+    assert m.state == READY and m.restarts == 0
+    cloud.tickets[m.ticket].update(sampler="exited", exit=137)
+    pool.tick()
+    assert len(cloud.kinds("restart")) == 2 and "sampler_crash_loop" not in _names(pool) and m.state != GONE
+
+
+def test_the_restart_count_resets_after_a_healthy_stretch_but_not_in_a_loop():
+    clock = Clock()
+    cloud = Cloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, accounts=(1, 4), max_sampler_restarts=1, sampler_restart_reset_s=3600)
+    m = _ready_member(pool, clock, cloud)
+    cloud.tickets[m.ticket].update(sampler="exited", exit=137)
+    pool.tick()
+    assert m.restarts == 1
+    _run(pool, clock, clock.t + 3600 + 900)  # rejoined, then healthy past the reset window
+    assert m.state == READY
+    cloud.tickets[m.ticket].update(sampler="exited", exit=137)
+    pool.tick()
+    assert len(cloud.kinds("restart")) == 2 and m.state != GONE and m.restarts == 1
+    _run(pool, clock, clock.t + 900)  # rejoined, crashes again inside the window: a loop
+    cloud.tickets[m.ticket].update(sampler="exited", exit=137)
+    pool.tick()
+    assert "sampler_crash_loop" in _names(pool) and m.state == GONE
+
+
+def test_sampler_restart_reset_s_is_validated():
+    with pytest.raises(ValueError, match="sampler_restart_reset_s"):
+        el.ElasticConfig.from_dict({"sampler_restart_reset_s": -1})
+    assert el.ElasticConfig.from_dict({"sampler_restart_reset_s": None}).sampler_restart_reset_s is None
+
+
 def test_sampler_exit_zero_ends_the_pool():
     clock = Clock()
     cloud = Cloud(clock)
