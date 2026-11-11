@@ -12,7 +12,7 @@ import pytest
 from tests.test_nc_elastic import Clock, Cloud, _names, _pool, _run
 from tests.test_nc_pool_run import Signals, _cfg
 from yeto.launch.nc import cli, pool_run
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 
 @pytest.fixture(autouse=True)
@@ -152,8 +152,8 @@ def test_the_target_outlives_a_pool_restart(tmp_path):
     pool.save(pool.state_path)
     drains = len(cloud.kinds("drain"))
     # a new pool process: config target 3, the scale file says 2
-    again = LeasePool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
-                              log=lambda m: None, events=pool.events)
+    again = IslandPool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
+                               log=lambda m: None, events=pool.events)
     again.scale_path = pool_run.scale_path(cfg)
     orders = len(cloud.kinds("order"))
     _run(again, clock, clock.t + 1800)

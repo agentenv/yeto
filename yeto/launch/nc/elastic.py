@@ -1,6 +1,6 @@
 """Eviction-tolerant ("elastic") policy pieces of the National Compute sampler pool.
 
-:class:`~.lease_pool.LeasePool` keeps ``target`` samplers writing one buffer
+:class:`~yeto.launch.pool.island_pool.IslandPool` keeps ``target`` samplers writing one buffer
 across 4 h leases. This module holds what it needs to survive a lease that goes
 away *early* or *late*, and nothing that talks to a cloud:
 
@@ -39,8 +39,8 @@ Pieces:
 
 The provider-neutral pieces (:class:`LeaseStatus`, :class:`Probe`,
 :func:`classify`, :class:`ElasticConfig`, :class:`Breaker`, :class:`Budget`,
-:class:`EventLog`, the verdicts) live in :mod:`yeto.launch.pool.status` and are
-re-exported here; this module keeps the node probe script and the shard fencing.
+:class:`EventLog`, the verdicts) live in :mod:`yeto.launch.pool.status`; this
+module keeps the node probe script and the shard fencing.
 """
 
 from __future__ import annotations
@@ -51,42 +51,6 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from ..pool.status import (  # noqa: F401 - re-exported: the pool status moved to yeto.launch.pool
-    BALANCE,
-    CONFIG_ERROR,
-    CONFIG_EXIT_CODES,
-    CONTROL_BLIP,
-    CRASHED,
-    EVICTED,
-    EVICTION_REASONS,
-    EXPIRED,
-    EXTERNAL_RELEASE_MODES,
-    FINISHED,
-    HEALTHY,
-    LOST,
-    NETWORK_BLIP,
-    OVERDUE,
-    PREEMPT_NOTICE,
-    PROBE_CRASHED,
-    PROBE_OK,
-    PROBE_STARTING,
-    PROBE_UNREACHABLE,
-    RELEASED,
-    SCALE_DOWN_MODES,
-    WAITING,
-    Breaker,
-    Budget,
-    ElasticConfig,
-    EventLog,
-    LeaseStatus,
-    Probe,
-    Verdict,
-    classify,
-    command_hook,
-    effective_end,
-    resolve_metrics_port,
-    snapshot,
-)
 
 def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler_join",
                  metrics_port: int | None = None, *, state_script: str | None = None,

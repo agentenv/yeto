@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from yeto.launch.nc import elastic as el
-from yeto.launch.nc.lease_pool import GONE, READY, STARTING
+from yeto.launch.nc import elastic
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, STARTING
 from yeto.rl.engine.incarnation_lease import IncarnationLease, read_lease
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -41,7 +42,7 @@ class MetricsCloud(Cloud):
                         running=e["running"], queued=e["queued"], trainer_wait=e["tw"])
 
     def fence_incarnation(self, m):
-        el.fence_incarnation(self.store, m.shard, by=m.ticket, clock=self.clock)
+        elastic.fence_incarnation(self.store, m.shard, by=m.ticket, clock=self.clock)
         self.fenced_incarnations.append(m.ticket)
 
 
@@ -58,7 +59,7 @@ def test_probe_line_carries_the_engine_metrics():
     assert (p.gen_tokens, p.running, p.queued, p.trainer_wait) == (12345.0, 4, 2, True)
     p = el.Probe.parse("YETO_NC_PROBE status=running exit=0 joined=1 age=3 tw=0 tok=- run=- wq=-", 0)
     assert (p.gen_tokens, p.running, p.queued, p.trainer_wait) == (None, None, None, False)
-    script = el.probe_script("c", "/x/events-*.jsonl", metrics_port=30000)
+    script = elastic.probe_script("c", "/x/events-*.jsonl", metrics_port=30000)
     assert "127.0.0.1:30000/metrics" in script and "vllm:generation_tokens_total" in script
     assert "rm " not in script and "stop" not in script
     assert el.ElasticConfig().engine_stall_s == 600 and el.ElasticConfig().max_stall_restart_failures == 3

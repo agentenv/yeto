@@ -17,7 +17,7 @@ from tests.test_nc_elastic import _names, _run
 from tests.test_nc_pool_scale_drain import NS, _elastic, _events, _ready, _save
 from yeto.dashboard.async_rl import AsyncState
 from yeto.launch.nc import cli, pool_run
-from yeto.launch.nc.lease_pool import GONE, READY, STARTING, LeasePool
+from yeto.launch.pool.island_pool import GONE, READY, STARTING, IslandPool
 from yeto.rl import up
 from yeto.rl.engine import store_dispense as sd
 
@@ -34,8 +34,8 @@ def _env(tmp_path, monkeypatch):
 
 
 def _restart(cfg, pool, cloud, clock):
-    again = LeasePool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
-                              log=lambda m: None, events=pool.events)
+    again = IslandPool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
+                               log=lambda m: None, events=pool.events)
     again.scale_path, again.scale_run = pool.scale_path, pool.scale_run
     return again
 

@@ -1,9 +1,8 @@
-"""The National Compute island provider (:class:`NCProvider`) and the old names
-of the provider contract.
+"""The National Compute island provider (:class:`NCProvider`).
 
-The contract, :class:`~yeto.launch.pool.provider.MultiProvider` and the provider
-registry live in :mod:`yeto.launch.pool.provider` (``LeaseProvider`` here is
-:class:`~yeto.launch.pool.provider.IslandProvider`). The pool's National Compute +
+The contract (:class:`~yeto.launch.pool.provider.IslandProvider`),
+:class:`~yeto.launch.pool.provider.MultiProvider` and the provider registry live
+in :mod:`yeto.launch.pool.provider`. The pool's National Compute +
 SSH ops (:class:`~.cli.NcSshOps`) compose this provider with the SSH + docker node
 route and the shard fence.
 
@@ -23,11 +22,8 @@ from typing import Any
 
 from ..pool import provider as registry
 from ..pool.provider import IslandProvider, ProviderCaps
+from ..pool.status import LeaseStatus
 from .client import Ledger, NcClient, NodeLease, configure_tools, hourly_cost_ucr
-from .elastic import LeaseStatus
-
-# the pool's provider contract (``yeto.launch.pool.provider.IslandProvider``), by its old name
-LeaseProvider = IslandProvider
 
 
 class NCProvider:
@@ -77,9 +73,6 @@ class NCProvider:
         return hourly_cost_ucr()
 
 
-NcProvider = NCProvider  # the old name
-
-
 def is_national_compute(cfg: dict[str, Any]) -> bool:
     """The pool orders National Compute nodes (its accounts are NC accounts, its
     tools and ledger apply); False for ``provider.factory`` and ``kind: daytona``."""
@@ -111,7 +104,7 @@ def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) 
     return _with_tools(nc_provider)(cfg, run_id, section)
 
 
-def load_provider(cfg: dict[str, Any], run_id: str, *, nc_factory) -> LeaseProvider:
+def load_provider(cfg: dict[str, Any], run_id: str, *, nc_factory) -> IslandProvider:
     """The provider of a pool config (:func:`yeto.launch.pool.provider.load`).
     ``nc_factory(cfg, run_id)`` builds the National Compute one."""
     return registry.load(cfg, run_id, factories={"nc": _with_tools(nc_factory)})

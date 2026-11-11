@@ -42,10 +42,12 @@ from pathlib import Path
 from typing import Any
 
 from .. import agentic_setup
+from ..pool import status as island_status
+from ..pool.island_pool import Member
 from . import elastic, node_pool, scale_args, ssh_sampler, tasks, tunnel
 from .client import Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time
-from .lease_pool import Member, PoolConfig
-from .provider import NcProvider, load_provider
+from .lease_pool import PoolConfig
+from .provider import NCProvider, load_provider
 
 
 def _log(msg: str) -> None:
@@ -341,7 +343,7 @@ class NcSshOps:
     def order(self, account: int) -> str:
         return self.provider.order(account)
 
-    def poll(self, m: Member) -> elastic.LeaseStatus:
+    def poll(self, m: Member) -> island_status.LeaseStatus:
         status = self.provider.status(m.account, m.ticket)
         if status.state == "active" and (not leases_path().exists()
                                          or m.ticket not in json.loads(leases_path().read_text())):
@@ -388,7 +390,7 @@ class NcSshOps:
         """The engine's ``/metrics`` port on the node (``elastic.metrics_port``; by default
         the sampler spec's ``engine.server.port``)."""
         if not hasattr(self, "_metrics_port"):
-            value = elastic.ElasticConfig.from_dict(self.cfg.get("elastic")).metrics_port
+            value = island_status.ElasticConfig.from_dict(self.cfg.get("elastic")).metrics_port
             spec = None
             if value == "spec":
                 try:
@@ -396,7 +398,7 @@ class NcSshOps:
                 except (KeyError, OSError, ValueError) as error:
                     _log(f"pool: cannot read the sampler spec for its server port ({error!r}); "
                          "engine metrics are not read")
-            self._metrics_port = elastic.resolve_metrics_port(value, spec)
+            self._metrics_port = island_status.resolve_metrics_port(value, spec)
         return self._metrics_port
 
     @property
@@ -421,7 +423,7 @@ class NcSshOps:
             self._route = route
         return self._route
 
-    def probe(self, m: Member) -> elastic.Probe:
+    def probe(self, m: Member) -> island_status.Probe:
         alias = node_pool.host_alias(m.ticket)
         if self.sampler_route is not None:
             script = self.sampler_route.probe_script(m.shard, self._tape_glob(m.shard), self.metrics_port)
@@ -434,8 +436,8 @@ class NcSshOps:
                             capture_output=True, text=True, timeout=float(self.cfg.get("probe_timeout_s", 90)),
                             check=False)
         except subprocess.TimeoutExpired:
-            return elastic.Probe(node=elastic.PROBE_UNREACHABLE)
-        return elastic.Probe.parse(out.stdout or "", out.returncode)
+            return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
+        return island_status.Probe.parse(out.stdout or "", out.returncode)
 
     def fence(self, m: Member) -> None:
         self.data_path().fence_shard(m.shard, by=m.ticket)
@@ -648,9 +650,9 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
     return spec
 
 
-def nc_provider(cfg: dict[str, Any], run: str) -> NcProvider:
+def nc_provider(cfg: dict[str, Any], run: str) -> NCProvider:
     """The National Compute provider of a pool: this tool's ledger, lease key and relay."""
-    return NcProvider([int(a) for a in cfg["accounts"]], run, ledger=ledger(), allowed=allowed_accounts(),
+    return NCProvider([int(a) for a in cfg["accounts"]], run, ledger=ledger(), allowed=allowed_accounts(),
                       model=machine_type(cfg), pubkey=node_pool.ensure_key, before_order=ensure_relay)
 
 
@@ -836,7 +838,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
                       end_margin_s=float(cfg.get("end_margin_s", 600)),
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
-                      data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")),
+                      data_slots=slots, elastic=island_status.ElasticConfig.from_dict(cfg.get("elastic")),
                       hourly_cost=pool_hourly_ucr(cfg), slot_name=label)
 
 

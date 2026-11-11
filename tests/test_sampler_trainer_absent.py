@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from yeto.launch.nc import elastic as el
+from yeto.launch.pool import status as el
 from yeto.rl.engine import sampler_loop as sl
 
 

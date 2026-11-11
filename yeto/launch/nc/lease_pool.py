@@ -55,14 +55,13 @@ Eviction tolerance (:mod:`.elastic`; every knob in :class:`~.elastic.ElasticConf
   sampler start was cut off as STARTING when its sampler container runs (the
   start is not run again: no second model pull, no new incarnation).
 
-:class:`LeasePool` is pure policy over :class:`PoolOps` (the provision, start,
+:class:`~yeto.launch.pool.island_pool.IslandPool` is pure policy over :class:`PoolOps` (the provision, start,
 probe, fence, drain and balance calls) and a clock, so the tests drive it with
 fakes; :mod:`.cli` wires the National Compute implementation.
 
 The policy itself is provider-neutral and lives in
-:mod:`yeto.launch.pool.island_pool` (:class:`LeasePool` is
-:class:`~yeto.launch.pool.island_pool.IslandPool`); this module re-exports its
-names and adds the National Compute :class:`PoolConfig` (a node hour at the
+:mod:`yeto.launch.pool.island_pool` (:class:`~yeto.launch.pool.island_pool.IslandPool`);
+this module adds the National Compute :class:`PoolConfig` (a node hour at the
 MI355X rate in ucr for the budget gate and the order floor).
 """
 
@@ -70,18 +69,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..pool.island_pool import (  # noqa: F401 - re-exported
-    DRAINING,
-    GONE,
-    METRICS_MISS_ALERT,
-    PROVISIONING,
-    READY,
-    STARTING,
-    IslandPool,
-    Member,
-    PoolOps,
-    is_config_error,
-)
 from ..pool.island_pool import PoolConfig as IslandPoolConfig
 from .client import hourly_cost_ucr
 
@@ -95,5 +82,3 @@ class PoolConfig(IslandPoolConfig):
     def hourly(self) -> float:
         return self.hourly_cost or hourly_cost_ucr()
 
-
-LeasePool = IslandPool

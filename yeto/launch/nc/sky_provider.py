@@ -1,5 +1,5 @@
 """SkyPilot lease provider: rollout nodes on clouds sky can launch (Nebius, AWS,
-GCP, Kubernetes, ...), behind the same :class:`~.provider.LeaseProvider`
+GCP, Kubernetes, ...), behind the same :class:`~yeto.launch.pool.provider.IslandProvider`
 contract as National Compute. The pool's policy (eviction handling, fencing,
 events, budget, breaker, scale) and the SSH + docker node route are unchanged;
 only the supply differs. It also carries the machine management of the spot
@@ -55,8 +55,8 @@ from typing import Any
 from yeto.launch.rollout.offers import Offer, offers_from_config
 
 from ..pool.provider import ProviderCaps
+from ..pool.status import LeaseStatus
 from .client import NodeLease
-from .elastic import LeaseStatus
 from .tunnel import state_dir
 
 UP, INIT, STOPPED = "UP", "INIT", "STOPPED"
@@ -152,7 +152,7 @@ class SkyProvider:
     def cursor(self) -> int:
         return int(self._doc().get("cursor", 0)) % len(self.offers)
 
-    # -- LeaseProvider
+    # -- IslandProvider
     def order(self, account: int) -> str:
         doc = self._doc()
         n = 1 + max([int(r.get("n", 0)) for r in doc["clusters"].values()] or [0])

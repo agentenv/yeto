@@ -43,9 +43,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..pool import status as island_status
+from ..pool.island_pool import GONE, IslandPool, Member
 from . import cli, elastic, ssh_sampler, tunnel
 from .client import LEASE_HOURS, NcTools
-from .lease_pool import GONE, LeasePool, Member
 from .provider import is_national_compute, provider_kind
 
 LEASE_WARNING = ("National Compute does NOT end a lease at lease_until: the node stays active and billed "
@@ -508,12 +509,19 @@ class _Signals:
         self.wake.set()
 
 
-def _drain_all(pool: LeasePool, why: str, *, sleep=None, wait_s: float = 10.0) -> list[Member]:
+def _drain_all(pool: IslandPool, why: str, *, sleep=None, wait_s: float = 10.0) -> list[Member]:
     """Stop the pool and retry failed drains a few times; returns the members left."""
     return pool.drain_all(why, attempts=DRAIN_ATTEMPTS, wait_s=wait_s, sleep=sleep or time.sleep)
 
 
-def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: LeasePool | None = None,
+def event_log(cfg: dict[str, Any]) -> island_status.EventLog:
+    """The pool's event log (its events file, the run id, the ``event_command`` hook),
+    the same for the foreground loop and a :class:`~yeto.launch.pool.controller.RolloutController`."""
+    hook = island_status.command_hook(cfg["event_command"]) if cfg.get("event_command") else None
+    return island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log, hook=hook)
+
+
+def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: IslandPool | None = None,
              signals: _Signals | None = None) -> int:
     """The foreground control loop of a pool (``pool --config F``)."""
     external = not is_national_compute(cfg)
@@ -539,7 +547,7 @@ def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: Le
         lock.close()
 
 
-def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: LeasePool | None,
+def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: float, pool: IslandPool | None,
                      signals: _Signals | None) -> int:
     if cfg.get("route", "ssh") == "ssh":
         try:
@@ -548,9 +556,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
             raise SystemExit(f"pool: CONFIGURATION ERROR, nothing ordered: {error}") from None
     state = cli.pool_state_path(cfg)
     if pool is None:
-        hook = elastic.command_hook(cfg["event_command"]) if cfg.get("event_command") else None
-        events = elastic.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log, hook=hook)
-        pool = LeasePool.restore(state, pc, cli.pool_ops(cfg), log=cli._log, events=events)
+        pool = IslandPool.restore(state, pc, cli.pool_ops(cfg), log=cli._log, events=event_log(cfg))
     if pool.scale_path is None:
         pool.scale_path = scale_path(cfg)
         pool.scale_run = cli.run_id(cfg)
@@ -607,7 +613,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
     return 0 if not pool.live() else 1
 
 
-def _retry_in_loop(pool: LeasePool, config_path: str) -> None:
+def _retry_in_loop(pool: IslandPool, config_path: str) -> None:
     """A pool-retry request: re-read the fixed config, check it, restart in place."""
     _remove(retry_path(pool_cfg_of(config_path)))
     try:
@@ -662,7 +668,7 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
 # -- scale ---------------------------------------------------------------------
 
 def _counted(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """State-file members that count against the target (LeasePool.counted)."""
+    """State-file members that count against the target (IslandPool.counted)."""
     return [m for m in billed_members(doc) if m.get("state") != "draining" and m.get("retiring_since") is None
             and not (m.get("replaced_by") and m.get("state") == "ready")]
 
@@ -765,8 +771,8 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
     The control file keeps the manual entries (paused tickets, released tickets) and
     the tickets of an earlier request the loop has not applied yet."""
     retire = list(retire or []) + list(remove or [])
-    if mode is not None and mode not in elastic.SCALE_DOWN_MODES:
-        print(f"pool-scale: refused: mode {mode!r} is not one of {list(elastic.SCALE_DOWN_MODES)}")
+    if mode is not None and mode not in island_status.SCALE_DOWN_MODES:
+        print(f"pool-scale: refused: mode {mode!r} is not one of {list(island_status.SCALE_DOWN_MODES)}")
         return 2
     state = cli.pool_state_path(cfg)
     path = scale_path(cfg)
@@ -999,9 +1005,9 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
 def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
     if proc is not None and not proc.get("alive"):
         _say(f"pool-stop: no pool process alive (stale pid {proc.get('pid')}); releasing from the state file")
-    pool = LeasePool.restore(state, cli.pool_config(cfg, allowed=None), ops or cli.pool_ops(cfg), log=cli._log,
-                             events=elastic.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg),
-                                                     log=cli._log))
+    pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), ops or cli.pool_ops(cfg), log=cli._log,
+                              events=island_status.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg),
+                                                            log=cli._log))
     left = _drain_all(pool, "pool-stop", sleep=sleep)
     pool.save(state)
     _remove(pid_path(cfg))

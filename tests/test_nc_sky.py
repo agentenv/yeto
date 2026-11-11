@@ -16,7 +16,8 @@ import yaml
 
 from yeto.launch.nc import client as ncc
 from yeto.launch.nc import node_pool, tasks, tunnel
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 
 @pytest.fixture(autouse=True)
@@ -326,7 +327,7 @@ def _run(pool, clock, until, step=60):
 def test_pool_replaces_before_lease_end_on_second_account():
     clock = Clock()
     ops = FakeOps(clock)
-    pool = LeasePool(PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), ops, clock=clock, log=lambda m: None)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), ops, clock=clock, log=lambda m: None)
     _run(pool, clock, 5 * 3600)
     orders = [e for e in ops.events if e[0] == "order"]
     drains = [e for e in ops.events if e[0] == "drain"]
@@ -341,7 +342,7 @@ def test_pool_replaces_before_lease_end_on_second_account():
 def test_pool_single_account_waits_for_the_old_order():
     clock = Clock()
     ops = FakeOps(clock)
-    pool = LeasePool(PoolConfig(target=1, accounts=[1], shard_base="nc"), ops, clock=clock, log=lambda m: None)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="nc"), ops, clock=clock, log=lambda m: None)
     _run(pool, clock, 4 * 3600 + 1200)
     orders = [e for e in ops.events if e[0] == "order"]
     drains = [e for e in ops.events if e[0] == "drain"]
@@ -353,8 +354,8 @@ def test_pool_single_account_waits_for_the_old_order():
 def test_pool_stops_below_balance():
     clock = Clock()
     ops = FakeOps(clock)
-    pool = LeasePool(PoolConfig(target=1, accounts=[1], shard_base="nc", stop_below_ucr=50_000_000),
-                     ops, clock=clock, log=lambda m: None)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="nc", stop_below_ucr=50_000_000),
+                      ops, clock=clock, log=lambda m: None)
     _run(pool, clock, 3600)
     assert any(m.state == READY for m in pool.members)
     ops.bal = 40_000_000
@@ -368,7 +369,7 @@ def test_pool_stops_below_balance():
 def test_pool_does_not_order_below_floor():
     clock = Clock()
     ops = FakeOps(clock, balance=30_000_000)  # above stop (20M) but below stop + 1 h (44M)
-    pool = LeasePool(PoolConfig(target=1, accounts=[1], shard_base="nc"), ops, clock=clock, log=lambda m: None)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="nc"), ops, clock=clock, log=lambda m: None)
     pool.tick()
     assert not ops.events and not pool.stopped
 
@@ -377,11 +378,11 @@ def test_pool_state_roundtrip(tmp_path):
     clock = Clock()
     ops = FakeOps(clock)
     cfg = PoolConfig(target=1, accounts=[1], shard_base="nc")
-    pool = LeasePool(cfg, ops, clock=clock, log=lambda m: None)
+    pool = IslandPool(cfg, ops, clock=clock, log=lambda m: None)
     _run(pool, clock, 3600)
     path = tmp_path / "pool.json"
     pool.save(path)
-    again = LeasePool.restore(path, cfg, ops, clock=clock, log=lambda m: None)
+    again = IslandPool.restore(path, cfg, ops, clock=clock, log=lambda m: None)
     assert again.snapshot() == pool.snapshot()
     time.sleep(0)
 
@@ -601,8 +602,8 @@ def test_sampler_overrides_refuse_bad_values():
 def test_pool_members_split_the_prompts_and_a_replacement_keeps_the_slot():
     clock = Clock()
     ops = FakeOps(clock)
-    pool = LeasePool(PoolConfig(target=3, accounts=[1, 2, 3, 4, 5, 6], shard_base="nc", data_slots=3), ops,
-                     clock=clock, log=lambda m: None)
+    pool = IslandPool(PoolConfig(target=3, accounts=[1, 2, 3, 4, 5, 6], shard_base="nc", data_slots=3), ops,
+                      clock=clock, log=lambda m: None)
     _run(pool, clock, 5 * 3600)
     first = {m.ticket: m.data_slot for m in pool.members[:3]}
     assert sorted(first.values()) == ["0/3", "1/3", "2/3"]
