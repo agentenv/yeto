@@ -100,6 +100,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import threading
@@ -113,7 +114,7 @@ from typing import Any
 
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
-from .object_store import ObjectStore, download_file, object_size
+from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
@@ -464,6 +465,7 @@ class PolicyReleaseStore:
         # the release the engines serve (``mark_served``): a download never drops it,
         # its files are what a restart or a whole reload reads
         self.serving: str | None = None
+        self.resumed_files = 0  # files the last download found whole from an earlier, failed one
         self.cache_dir = Path(cache_dir).expanduser()
         if str(cache_dir) == DEFAULT_CACHE_DIR:  # the shared default: one sub-directory per store
             self.cache_dir = default_cache_dir() / store_cache_key(store)
@@ -530,15 +532,23 @@ class PolicyReleaseStore:
                          for name in release.files}
                 if (error := _incomplete(release, sizes)) is not None:
                     raise error
-            if prune_cache:  # free older downloads first (two 207 GB Kimi-K3.1 releases
-                self._prune_cache(keep=())  # fill a sampler's disk); never the served one
             staging = self.cache_dir / f".{release.path}.partial"
-            shutil.rmtree(staging, ignore_errors=True)
+            if prune_cache:  # free older downloads first (two 207 GB Kimi-K3.1 releases fill a
+                self._prune_cache(keep=(staging.name,))  # sampler's disk); never the served one
+            # a download that failed part way is resumed: a file at its final name was
+            # renamed there whole (object_store.DOWNLOAD_SUFFIX), and with the record's
+            # sizes it is kept only at its recorded size; a 207 GB release whose last
+            # file failed is not fetched again from the start (16 samplers would pull
+            # 16 x 207 GB again from the store)
+            keys = self._still_needed(release, prefix, keys, staging)
+
             def fetch(key: str) -> None:
                 path = staging / key[len(prefix):]
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if not download_file(objects, key, path):
+                part = Path(f"{path}{DOWNLOAD_SUFFIX}")
+                if not download_file(objects, key, part):
                     raise ReleaseIncomplete(f"release object {key} disappeared during the download")
+                part.replace(path)
 
             # several files at once: one file tops out near 100 MB/s on R2
             # (TransferSettings), a 207 GB Kimi-K3.1 release took 28 minutes file by file;
@@ -555,7 +565,7 @@ class PolicyReleaseStore:
                 missing = read_files(items)
                 if missing:
                     raise ReleaseIncomplete(f"release object {missing[0]} disappeared during the download")
-            elif workers == 1:
+            elif workers <= 1:
                 for key in keys:
                     fetch(key)
             else:
@@ -569,6 +579,24 @@ class PolicyReleaseStore:
         if prune_cache:
             self._prune_cache(keep=(release.path,))
         return target
+
+    def _still_needed(self, release: PolicyRelease, prefix: str, keys: list[str], staging: Path) -> list[str]:
+        """The keys of ``release`` whose file is not in ``staging`` already (an earlier,
+        failed download); leftovers of interrupted files are removed."""
+        if not staging.is_dir():
+            return keys
+        for leftover in staging.rglob(f"*{DOWNLOAD_SUFFIX}"):
+            leftover.unlink(missing_ok=True)
+        sizes = release.files or {}
+        need = []
+        for key in keys:
+            path = staging / key[len(prefix):]
+            name = key[len(prefix):]
+            if path.is_file() and (name not in sizes or path.stat().st_size == sizes[name]) and name != RECORD:
+                continue
+            need.append(key)
+        self.resumed_files = len(keys) - len(need)
+        return need
 
     def mark_served(self, release: PolicyRelease) -> None:
         """The engines serve ``release`` now (a load succeeded): drop the other
@@ -1248,7 +1276,8 @@ class PolicyFollower:
             return None
         if not fetch.reported:
             fetch.reported = True
-            fetch.retry_at = self.timer() + self.download_retry_s
+            # jittered: samplers that failed together (a store refusal) do not retry together
+            fetch.retry_at = self.timer() + self.download_retry_s * random.uniform(0.75, 1.0)
             if isinstance(error, ReleaseDeltaError):
                 self._fetch = None
                 self._rebuild_failed(latest, error)
