@@ -329,7 +329,8 @@ def test_status_summarises_every_pool(tmp_path, capsys):
     refs = pools.resolve(run_cfg, tmp_path / "s")
     state = nc_cli.pool_state_path(json.loads(open(nc_path).read()))
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps({"target": 1, "members": [{"ticket": "t1", "shard": "nc-0", "state": "ready"}]}))
+    state.write_text(json.dumps({"target": 1, "members": [{"account": 1, "ticket": "t1", "shard": "nc-0",
+                                                                  "state": "ready"}]}))
     assert entry.status(refs) == 1  # an island bills with no loop alive: warned
     doc = json.loads(capsys.readouterr().out)
     by = {r["pool"]: r for r in doc["pools"]}
@@ -337,6 +338,8 @@ def test_status_summarises_every_pool(tmp_path, capsys):
     assert "pool-stop" in by["nc"]["warning"]
     assert by["modal"]["provider"] == "modal" and by["modal"]["islands"] == 0
     assert doc["total"] == {"target": 2, "islands": 1}
+    ctl = by["nc"]["controller"]  # RolloutController.status() over the restored state, read-only
+    assert [m["ticket"] for m in ctl["members"]] == ["t1"] and ctl["stopped"] is None and "controller" in by["modal"]
     assert entry.status(refs, provider="sky") == 2
 
 

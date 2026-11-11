@@ -111,6 +111,32 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
     return out
 
 
+class _NoOps:
+    """The pool ops of a read-only view: restoring a pool for its status never calls a provider."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(f"read-only pool view: {name} is not available")
+
+
+def view(refs: list[rollout_pools.PoolRef]) -> Any:
+    """A :class:`~yeto.launch.pool.controller.RolloutController` over the saved state of
+    ``refs`` (restored read-only: no lock, no pid, no scale file consumed, never started),
+    for its ``status()``. Pools whose config does not load are left out."""
+    from yeto.launch.nc import cli  # noqa: PLC0415
+    from yeto.launch.pool.controller import RolloutController  # noqa: PLC0415
+    from yeto.launch.pool.island_pool import IslandPool  # noqa: PLC0415
+
+    pools = {}
+    for ref in refs:
+        try:
+            cfg = ref.load()
+            pc = cli.pool_config(cfg, allowed=None)
+            pools[ref.name] = IslandPool.restore(cli.pool_state_path(cfg), pc, _NoOps(), log=lambda _m: None)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            cli._log(f"rollout status: pool {ref.name}: {error}")  # noqa: SLF001
+    return RolloutController(pools, drain_on_exit=False, log=lambda _m: None)
+
+
 def status(refs: list[rollout_pools.PoolRef], *, pool: str | None = None, provider: str | None = None,
            env: dict[str, str] | None = None, detail: bool = False, events: int = 20) -> int:
     chosen = rollout_pools.select(refs, pool=pool, provider=provider)
@@ -119,6 +145,10 @@ def status(refs: list[rollout_pools.PoolRef], *, pool: str | None = None, provid
         return 2
     with run_env(env):
         rows = [pool_summary(r) for r in chosen]
+        controlled = view(chosen).status()["pools"]
+        for row in rows:
+            if row["pool"] in controlled:
+                row["controller"] = controlled[row["pool"]]
         print(json.dumps({"pools": rows, "total": {"target": sum(r.get("target", 0) for r in rows),
                                                    "islands": sum(r.get("islands", 0) for r in rows)}},
                          indent=1, default=str))
