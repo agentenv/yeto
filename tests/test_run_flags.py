@@ -295,6 +295,9 @@ _NON_RL_LITERALS = frozenset({
     "--target", "--upgrade", "--version", "--events", "--max-backoff-s", "--retry-s", "--settle-s",
     # the partial-expert selection tool named in k31_checks.py's hint
     "--ep-size", "--input", "--num-trainable", "--validate",
+    # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
+    # git rev-parse, curl, and the engine_sampler entry's own CLI
+    "--short", "--cacert", "--spec",
 })
 
 
