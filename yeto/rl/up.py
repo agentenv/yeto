@@ -88,6 +88,29 @@ def load_config(path: str) -> dict[str, Any]:
     return cfg
 
 
+def _pythonpath_without_start_dir(env: dict[str, str]) -> dict[str, str]:
+    """``PYTHONSAFEPATH`` only drops the implicit sys.path[0]; a ``PYTHONPATH`` of
+    ``.`` (or an empty entry) puts the start directory right back. Resolve relative
+    entries now and drop the ones naming the start directory, unless that directory
+    is where this ``yeto`` package lives (children must import the same yeto)."""
+    raw = env.get("PYTHONPATH")
+    if raw is None:
+        return {}
+    start = Path.cwd().resolve()
+    own_root = Path(__file__).resolve().parents[2]
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        path = Path(entry or ".")
+        if not path.is_absolute():
+            resolved = path.resolve()
+            if resolved == start and resolved != own_root:
+                continue
+            entry = str(resolved)
+        if entry not in kept:
+            kept.append(entry)
+    return {"PYTHONPATH": os.pathsep.join(kept)}
+
+
 class Run:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -103,6 +126,7 @@ class Run:
         # without this the directory ``up`` was started from is sys.path[0] of each,
         # and a stray ``h2.py`` / ``json.py`` there replaces a real module.
         self.env.setdefault("PYTHONSAFEPATH", "1")
+        self.env.update(_pythonpath_without_start_dir(self.env))
         self.py = sys.executable
 
     # -- state

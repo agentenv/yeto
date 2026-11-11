@@ -343,16 +343,20 @@ def test_preflight_refuses_a_zero_budget_with_prices_set(make_run, monkeypatch):
 def test_children_do_not_import_from_the_start_directory(make_run, tmp_path, monkeypatch):
     """A stray module in the directory ``up`` starts from (a ``h2.py`` shadowed the
     HTTP/2 package of every ``python -m modal`` child) must not reach the children."""
+    import os
     import subprocess
     import sys
 
     (tmp_path / "h2.py").write_text("raise SystemExit('shadowed')\n")
     monkeypatch.chdir(tmp_path)
+    # CI runs pytest with ``PYTHONPATH=.``: that entry must not re-add the start dir
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", "", "rel/lib", "/abs/lib"]))
     run = make_run()
     assert run.env["PYTHONSAFEPATH"] == "1"
     out = subprocess.run([sys.executable, "-c", "import h2"], env=run.env, cwd=tmp_path,
                          capture_output=True, text=True)
     assert "shadowed" not in (out.stdout + out.stderr)
+    assert run.env["PYTHONPATH"].split(os.pathsep) == [str((tmp_path / "rel/lib").resolve()), "/abs/lib"]
 
 
 def test_dashboard_gets_the_run_name_budget_and_prices(make_run, tmp_path):
