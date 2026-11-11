@@ -12,6 +12,7 @@ import pytest
 
 from yeto.dashboard.async_rl import AsyncState
 from yeto.launch.nc import elastic as el
+from yeto.launch.pool.status import Probe
 from yeto.rl.adapters.sampler_engines import vllm_expert_reload as ver
 from yeto.rl.adapters.sampler_engines.vllm_server import VllmOptions, VllmServerEngine
 from yeto.rl.engine import vram_guard as vg
@@ -72,9 +73,9 @@ def test_the_resource_sampler_feeds_the_watch_from_its_card_samples():
 
 
 def test_the_pool_probe_and_pool_report_a_new_alert_once():
-    probe = el.Probe.parse("YETO_NC_PROBE status=running exit=0 joined=1 age=3 tw=0 tok=- run=- wq=- vh=2 vm=0.981", 0)
+    probe = Probe.parse("YETO_NC_PROBE status=running exit=0 joined=1 age=3 tw=0 tok=- run=- wq=- vh=2 vm=0.981", 0)
     assert probe.vram_alerts == 2 and probe.vram_max_frac == pytest.approx(0.981)
-    assert el.Probe.parse("YETO_NC_PROBE status=running exit=0 joined=1 age=3", 0).vram_alerts is None
+    assert Probe.parse("YETO_NC_PROBE status=running exit=0 joined=1 age=3", 0).vram_alerts is None
     script = el.probe_script("yeto-sampler-nc-0", "/w/events*.jsonl")
     assert "rl_sampler_vram_high" in script and "vh=$vh vm=$vm" in script
 
@@ -86,8 +87,8 @@ def test_the_pool_probe_and_pool_report_a_new_alert_once():
     m = Member(account=1, ticket="t1", shard="nc-0")
     pool._vram_seen(m, probe)
     pool._vram_seen(m, probe)  # the same alert count: no second event
-    pool._vram_seen(m, el.Probe(node="ok", vram_alerts=1, vram_max_frac=0.98))  # a new incarnation's tape
-    pool._vram_seen(m, el.Probe(node="ok", vram_alerts=2, vram_max_frac=0.99))
+    pool._vram_seen(m, Probe(node="ok", vram_alerts=1, vram_max_frac=0.98))  # a new incarnation's tape
+    pool._vram_seen(m, Probe(node="ok", vram_alerts=2, vram_max_frac=0.99))
     assert [(n, d["alerts"], d["max_frac"]) for n, d in seen] == [
         ("sampler_vram_high", 2, pytest.approx(0.981)), ("sampler_vram_high", 1, 0.98), ("sampler_vram_high", 2, 0.99)]
 
@@ -118,11 +119,11 @@ def test_the_probe_script_counts_the_alerts_of_the_newest_tape(tmp_path):
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30, env=env).stdout
 
     out = run_probe()
-    probe = el.Probe.parse(out, 0)
+    probe = Probe.parse(out, 0)
     assert probe.vram_alerts == 2 and probe.vram_max_frac == pytest.approx(0.9812), out
     tape.write_text(json.dumps({"event": "rl_sampler_join"}) + "\n")
     out = run_probe()
-    probe = el.Probe.parse(out, 0)
+    probe = Probe.parse(out, 0)
     assert probe.vram_alerts == 0 and probe.vram_max_frac is None and probe.sampler == "running", out
 
 
