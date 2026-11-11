@@ -409,4 +409,14 @@ register(ProviderKind(
     caps=ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)))
 register(ProviderKind(
     "daytona", "yeto.launch.nc.daytona_provider:registry_factory",
+    offline_problems="yeto.launch.nc.pool_run:daytona_problems",
     caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd")))
+register(ProviderKind(
+    "sky", "yeto.launch.nc.sky_provider:registry_factory",
+    offline_problems="yeto.launch.nc.sky_provider:offline_problems",
+    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=1800)))
+register(ProviderKind(
+    "modal", "yeto.launch.nc.modal_provider:registry_factory",
+    pool_ops="yeto.launch.nc.modal_provider:pool_ops",
+    offline_problems="yeto.launch.nc.modal_provider:offline_problems",
+    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=900)))

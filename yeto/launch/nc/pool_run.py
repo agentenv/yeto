@@ -46,7 +46,7 @@ from typing import Any
 from . import cli, elastic, tunnel
 from .client import LEASE_HOURS, NcTools, hourly_cost_ucr
 from .lease_pool import GONE, LeasePool, Member
-from .provider import is_national_compute
+from .provider import is_national_compute, provider_kind
 
 LEASE_WARNING = ("National Compute does NOT end a lease at lease_until: the node stays active and billed "
                  "until its ticket is deleted. Keep this pool running, or release its nodes with "
@@ -57,9 +57,15 @@ SANDBOX_WARNING = ("Daytona sandboxes are created with auto-stop off: a sandbox 
 DRAIN_ATTEMPTS = 3
 
 
+CLOUD_WARNING = ("Cloud rollout islands ({kind}) bill until they are released: keep this pool running, "
+                 "or release them with `python -m yeto.launch.nc pool-stop --config <file>`.")
+
+
 def lease_warning(cfg: dict[str, Any], config_path: str) -> str:
-    """The billing warning of the pool's provider (a National Compute lease or a sandbox)."""
-    text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING
+    """The billing warning of the pool's provider (a National Compute lease, a sandbox, a cloud island)."""
+    kind = provider_kind(cfg)
+    text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING if kind == "daytona" else \
+        CLOUD_WARNING.format(kind=kind)
     return text.replace("<file>", config_path)
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
 
@@ -331,8 +337,12 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             bucket_env = cfg.get("bucket_env", "R2_BUCKET")
             if bucket_env not in elastic.read_env_file(env_file):
                 problems.append(f"store env file has no {bucket_env} (the bucket key; set 'bucket_env')")
-    if (cfg.get("provider") or {}).get("kind") == "daytona" and "factory" not in cfg["provider"]:
-        problems += daytona_problems(cfg)
+    from ..pool import provider as registry  # noqa: PLC0415
+
+    entry = registry.registered(provider_kind(cfg))
+    check = registry.resolve(entry.offline_problems) if entry is not None else None
+    if check is not None:  # the provider kind's own offline checks (registered)
+        problems += list(check(cfg))
     elif external:
         module = str(cfg["provider"]["factory"]).partition(":")[0]
         if importlib.util.find_spec(module) is None:

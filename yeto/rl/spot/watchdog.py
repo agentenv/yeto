@@ -22,7 +22,13 @@ One process owns one island (one sky cluster name at a time). It
   JSONL log; the spend total survives a watchdog restart (``--state``).
 
 The external calls (sky, nebius, boat sweep, ready probe) sit behind
-:class:`Ops`; tests inject a fake.
+:class:`Ops`; tests inject a fake. ``--via-provider`` puts the machine calls behind the
+rollout :class:`~yeto.launch.nc.sky_provider.SkyProvider` instead (:class:`ProviderOps`);
+the candidate list is the shared one of :mod:`yeto.launch.rollout.offers`.
+
+Deprecated for new runs: a sky rollout pool (``"provider": {"kind": "sky", "candidates":
+{...}}``, ``yeto rollout scale --provider sky``) runs the same candidate rotation under the
+shared pool policy (several islands, fencing, scale, one budget).
 
     python -m yeto.rl.spot.watchdog --yaml SKY_TASK.yaml --cluster-prefix spot-h100 --run-id RUN \\
         --island spot-0 --budget-usd 120 --env CARD=H100 --env TP=8 --env BOAT_STARTS_PER_HOUR=60 \\
@@ -42,66 +48,22 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from yeto.launch.rollout.offers import PRICES_8GPU, Candidate, candidates, load_prices  # noqa: F401 - re-exported
 
 REPO = Path(__file__).resolve().parents[3]
 SKY = os.path.expanduser(os.environ.get("YETO_SPOT_SKY") or "sky")
 NEBIUS = os.path.expanduser(os.environ.get("YETO_SPOT_NEBIUS") or "nebius")
 SKY_CONFIG = os.path.expanduser(os.environ.get("YETO_SPOT_SKY_CONFIG") or "~/.sky/config.yaml")
 
-# Default 8-GPU hourly prices (USD) from `sky gpus list H100:8|H200:8 --infra nebius --all-regions`
-# on 2026-11-02; ``--prices FILE`` replaces the table. H200 is NOT the same price as H100 (spot H100 eu-north1 $6.32, cheapest
-# spot H200 $11.20). A region missing here has no such preset in the sky catalog; Nebius
-# quotas: compute.instance.gpu.h100 only in eu-north1, gpu.h200 in eu-north1/eu-west1/us-central1.
-PRICES_8GPU: dict[tuple[str, str], tuple[float, float]] = {  # (gpu, region) -> (on-demand, spot)
-    ("H100", "eu-north1"): (36.00, 6.32),
-    ("H200", "eu-west1"): (43.20, 11.20),
-    ("H200", "eu-north1"): (43.20, 16.00),
-    ("H200", "us-central1"): (43.20, 39.92),
-}
 DEFAULT_OWN_NAME = r"spot"  # only ever touch our own clusters (--own-name-re)
 
 # Watchdog.try_launch results
 UP, FAILED, RECLAIMED, STOPPED = "up", "failed", "reclaimed", "stopped"
-
-
-@dataclass(frozen=True)
-class Candidate:
-    gpu: str
-    region: str
-    spot: bool
-    price_hr: float  # for the whole VM (``count`` GPUs)
-    count: int = 8
-
-    @property
-    def key(self) -> str:
-        return f"{self.gpu}:{self.count}@{self.region}/{'spot' if self.spot else 'od'}"
-
-
-def candidates(*, gpus: Iterable[str] = ("H100", "H200"), regions: Iterable[str] | None = None,
-               count: int = 8, prices: dict[tuple[str, str], tuple[float, float]] | None = None,
-               allow_ondemand_h200: bool = False, spot_only: bool = False,
-               availability: dict[tuple[str, str], int] | None = None) -> list[Candidate]:
-    """On-demand H100 first, then spot cheapest first (better availability first
-    at equal price), then on-demand H200 if allowed."""
-    prices = PRICES_8GPU if prices is None else prices
-    gpus = [g.upper() for g in gpus]
-    regs = set(regions) if regions is not None else None
-    scale = count / 8.0
-    avail = availability or {}
-    pool = [(g, r, od * scale, sp * scale) for (g, r), (od, sp) in prices.items()
-            if g in gpus and (regs is None or r in regs)]
-    out: list[Candidate] = []
-    if not spot_only:
-        out += [Candidate(g, r, False, od, count) for g, r, od, _ in sorted(pool, key=lambda x: x[2]) if g == "H100"]
-    spot = sorted(pool, key=lambda x: (x[3], -avail.get((x[0], x[1]), 0)))
-    out += [Candidate(g, r, True, sp, count) for g, r, _, sp in spot]
-    if allow_ondemand_h200 and not spot_only:
-        out += [Candidate(g, r, False, od, count) for g, r, od, _ in sorted(pool, key=lambda x: x[2]) if g == "H200"]
-    return out
 
 
 class Ops:
@@ -181,10 +143,59 @@ class Ops:
         return p.returncode == 0
 
 
-def load_prices(path: str) -> dict[tuple[str, str], tuple[float, float]]:
-    """A price table file: ``[[gpu, region, on_demand_usd_hr, spot_usd_hr], ...]`` (8 GPUs)."""
-    rows = json.loads(Path(path).expanduser().read_text())
-    return {(str(g).upper(), str(r)): (float(od), float(sp)) for g, r, od, sp in rows}
+class ProviderOps:
+    """:class:`Ops` over :class:`yeto.launch.nc.sky_provider.SkyProvider` (``--via-provider``):
+    the watchdog keeps its loop (candidates, budget, stop marker, orphan sweep, ready
+    probe) and the machine calls go through the rollout provider (sky SDK launch / status /
+    down, its record and resource ledger, the own-name guard). The rollout pool
+    (``yeto rollout scale --provider sky``) uses the same provider."""
+
+    STATES = {"UP": "RUNNING", "INIT": "STARTING", "STOPPED": "STOPPED"}
+
+    def __init__(self, provider: Any, *, own_name: str = DEFAULT_OWN_NAME, sweep: Callable[[str, str], str] | None = None,
+                 ready: Callable[[str, str], bool] | None = None):
+        self.provider, self.own_name = provider, re.compile(own_name)
+        legacy = Ops(yaml="", envs=[], secrets=[], own_name=own_name)
+        self._sweep, self._ready = sweep or legacy.sweep, ready or legacy.ready
+
+    def launch(self, cluster: str, cand: Candidate, timeout_s: float) -> tuple[bool, str]:
+        assert self.own_name.search(cluster), cluster
+        self.provider.envs = {**self.provider.envs, "CARD": cand.gpu}  # CARD follows the candidate's GPU kind
+        try:
+            self.provider.launch_cluster(cluster, cand.offer(), slot=1)
+        except Exception as error:  # noqa: BLE001 - a failed launch: the next candidate
+            return False, f"{type(error).__name__}: {error}"[:300]
+        return True, ""
+
+    def ip(self, cluster: str) -> str:
+        try:
+            return self.provider.node(1, cluster).ip
+        except Exception:  # noqa: BLE001 - the IP is only logged
+            return ""
+
+    def state(self, cluster: str, region: str) -> str | None:
+        record = self.provider._record(cluster)  # raises on an API error: not a preemption
+        if record is None:
+            return None
+        from yeto.launch.nc.sky_provider import _status_name  # noqa: PLC0415
+
+        name = _status_name(record.get("status"))
+        return self.STATES.get(name, name)
+
+    def down(self, cluster: str) -> bool:
+        assert self.own_name.search(cluster), cluster
+        try:
+            self.provider.run_tickets()  # a cluster of an earlier watchdog process is recorded first
+            self.provider.release(1, cluster)
+        except Exception:  # noqa: BLE001 - the VM may still run: the watchdog retries
+            return False
+        return True
+
+    def sweep(self, run: str, island: str) -> str:
+        return self._sweep(run, island)
+
+    def ready(self, cluster: str, cmd: str) -> bool:
+        return self._ready(cluster, cmd)
 
 
 def project_ids() -> dict[str, str]:
@@ -437,6 +448,17 @@ class Watchdog:
                 return "budget"
 
 
+def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str], *, sky: Any = None) -> ProviderOps:
+    """The ``--via-provider`` ops: one SkyProvider slot, this watchdog's cluster prefix."""
+    from yeto.launch.nc.sky_provider import SkyProvider  # noqa: PLC0415
+
+    provider = SkyProvider(a.run_id, slots=[1], offers=[c.offer() for c in cands], exact_prefix=a.cluster_prefix,
+                           task_yaml=a.yaml, envs=dict(e.split("=", 1) for e in envs),
+                           secrets={s: s for s in a.secret}, start_timeout_s=a.starting_timeout_s, sky=sky,
+                           record=Path(a.dir) / f"{a.cluster_prefix}.clusters.json")
+    return ProviderOps(provider, own_name=a.own_name_re)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--cluster-prefix", required=True, help="must match --own-name-re; clusters are PREFIX-<n>")
@@ -468,6 +490,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-rounds", type=int, default=0)
     p.add_argument("--dir", default="/tmp/vm-watchdog")
     p.add_argument("--dry-run", action="store_true", help="print the candidate order and exit")
+    p.add_argument("--via-provider", action="store_true",
+                   help="machine calls through the rollout SkyProvider (sky SDK, its record and resource "
+                        "ledger) instead of the sky / nebius CLIs")
     a = p.parse_args(argv)
     cands = candidates(gpus=a.gpus.split(","), regions=[r for r in a.regions.split(",") if r] or None,
                        count=a.gpu_count, prices=load_prices(a.prices) if a.prices else None,
@@ -492,7 +517,9 @@ def main(argv: list[str] | None = None) -> int:
             self.envs = [e for e in envs if not e.startswith("CARD=")] + [f"CARD={cand.gpu}"]
             return super().launch(cluster, cand, timeout_s)
 
-    wd = Watchdog(cfg, cands, _Ops(yaml=a.yaml, envs=envs, secrets=a.secret, own_name=a.own_name_re))
+    ops = provider_ops(a, cands, envs) if a.via_provider else \
+        _Ops(yaml=a.yaml, envs=envs, secrets=a.secret, own_name=a.own_name_re)
+    wd = Watchdog(cfg, cands, ops)
     print(f"log {cfg.log}; stop marker: touch {cfg.stop_file}", flush=True)
     print(wd.run())
     return 0

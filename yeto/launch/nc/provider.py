@@ -86,6 +86,16 @@ def is_national_compute(cfg: dict[str, Any]) -> bool:
     return registry.is_national(cfg)
 
 
+def provider_kind(cfg: dict[str, Any]) -> str:
+    """The provider kind of a pool config: a registered kind (``nc`` by default), or
+    ``factory`` for a ``provider.factory`` (the sky factory reads as ``sky``)."""
+    kind = registry.kind_of(cfg)
+    if kind is not None:
+        return kind
+    factory = str((cfg.get("provider") or {}).get("factory", ""))
+    return "sky" if factory.startswith("yeto.launch.nc.sky_provider:") else "factory"
+
+
 def _with_tools(nc_factory):
     def factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]):
         configure_tools(section)
