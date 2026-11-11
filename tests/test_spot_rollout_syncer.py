@@ -265,6 +265,45 @@ def test_reclaimed_subscriber_does_not_stop_merges_and_a_new_one_catches_up(sync
 
 
 @needs_cargo
+def test_a_new_subscriber_gets_the_merged_cut_while_merges_wait(syncer_binary, tmp_path):
+    """A subscriber that joins while no merge happens gets every fragment at its
+    newest merged version at once, not at the next merge: a replacement spot
+    sampler on the base weights under the trainer's policy-age gate is what the
+    merges wait for (a real Modal run: the trainer skipped its stale groups and
+    the subscriber, offered the cut only at the next publish, never got one)."""
+    from yeto.rl.spot_rollout.subscriber import WeightFollower
+
+    total = 6 * P
+    process, port, log = start_syncer(syncer_binary, tmp_path, total_steps=total,
+                                      extra=("--max-subscribers", "1"))
+    gate = threading.Event()
+    gate.set()
+    merged: list[int] = []
+    learner = Learner(port, hold=gate, on_merge=lambda fid, v: merged.append(v)).start()
+    late = None
+    try:
+        wait_for(lambda: len(merged) >= 2 * P, "the first merges did not happen")
+        gate.clear()  # the learner waits: no merge until the subscriber has a cut
+        time.sleep(0.5)
+        at_hold = len(merged)
+        late = subscriber(port)
+        follow = WeightFollower(late, P)
+        late.start()
+        cut = wait_for(lambda: (follow.drain(), follow.cut())[1], "a late subscriber got no cut without a merge",
+                       timeout=20)
+        assert min(cut.versions) >= 1 and len(merged) == at_hold  # it came with no merge in between
+        gate.set()
+        finish(process, learner)
+    finally:
+        gate.set()
+        if late is not None:
+            late.close()
+        if process.poll() is None:
+            process.kill()
+    assert learner.pushed == list(range(1, total + 1))
+
+
+@needs_cargo
 def test_a_subscriber_that_never_reads_does_not_slow_the_merges(syncer_binary, tmp_path):
     from yeto.protocol import (
         MSG_DATA_HELLO,
