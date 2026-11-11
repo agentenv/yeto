@@ -180,6 +180,47 @@ def test_pool_over_modal_refills_a_lost_island_and_scales_down(tmp_path):
     assert len(ops.provider.run_tickets()) == 1 and cancelled
 
 
+def test_a_retired_modal_island_drains_then_fences_then_stops(tmp_path):
+    """--retire T with the drain scale down: the sampler is asked to claim no new task,
+    stays billed until it answers drained, then is fenced and its call cancelled."""
+    from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, _ = _ops(tmp_path, sampler={"dispense": {"backend": "store", "namespace": "run-m/dispense"}})
+    store = SimpleNamespace(objects=store_dispense.DirObjects(tmp_path / "store"))  # the run store's object API
+    ops._store = store
+    ops.start_in_background = False
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = LeasePool(PoolConfig(target=2, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(scale_drain_timeout_s=3600)),
+                     ops, clock=clock, log=lambda m: None, events=events)
+    for _ in range(4):
+        pool.tick()
+        t[0] += 60
+    victim = [m for m in pool.members if m.state == READY][0]
+    scale = tmp_path / "scale.json"
+    scale.write_text(json.dumps({"run": "run-m", "target": 1, "seq": 1, "retire": [victim.ticket], "mode": "drain"}))
+    pool.scale_path, pool.scale_run = scale, "run-m"
+    pool.tick()
+    t[0] += 60
+    call = ops.provider.call_id(victim.ticket)
+    drain = json.loads(store.objects.read(store_dispense.drain_key("run-m/dispense", victim.shard)))
+    assert drain["drain"] and victim.retiring_since is not None and client.states[call] == RUNNING
+    pool.tick()  # not answered yet: still billed, still running
+    assert client.states[call] == RUNNING
+    store.objects.write(store_dispense.drained_key("run-m/dispense", victim.shard), json.dumps(
+        {"seq": drain["seq"]}).encode())  # the sampler holds no claim any more
+    for _ in range(3):
+        t[0] += 60
+        pool.tick()
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "scale_draining" in names and "shard_fenced" in names
+    assert names.index("scale_draining") < names.index("shard_fenced")
+    assert victim.state == GONE and ("cancel", call) in client.log
+    assert len([m for m in pool.members if m.state != GONE]) == 1
+
+
 def test_kind_modal_routes_to_its_own_pool_ops_and_dry_run_checks(tmp_path, capsys):
     cfg = _cfg(tmp_path)
     assert prov.provider_kind(cfg) == "modal"
