@@ -4,17 +4,9 @@ Compatibility entry (same spec, same command line); the runtime is
 :mod:`yeto.rl.engine.engine_sampler_entry` with ``data_path: syncer``
 (:mod:`yeto.rl.engine.rollout_data_path`, :mod:`.syncer_path`).
 
-A spot sampler is the engine sampler island (:mod:`yeto.rl.engine.engine_sampler`,
-:mod:`yeto.rl.engine.engine_sampler_entry`): ``SamplerLoop`` admits rounds
-by backlog, ``PolicyFollower`` loads new policies through ``PortReleaseLoader``
-with the post-load checks, ``EngineRound`` generates, scores and writes each
-group with ``GroupWriter``, ``SamplerMembership`` and the reclaim marker
-handle replacement. Only its two channels differ:
-
-* weights: :class:`~.release_store.SubscriberReleaseStore` (a syncer
-  subscriber, no store) instead of the volume's ``PolicyReleaseStore``;
-* samples: :class:`~.relay_buffer.RelaySampleBuffer` (the head's relay)
-  instead of the volume's ``FileSampleBuffer``.
+Weights come from :class:`~.syncer_path.SyncerBroadcast` (the syncer
+subscriber) and groups go through :class:`~.syncer_path.SyncerRelay` (the
+head's relay); everything else is the one runtime's.
 
 It stops when the syncer says the run finished, when the syncer link stays
 down for ``syncer_lost_s``, when the relay did not answer for ``relay_gone_s``,
