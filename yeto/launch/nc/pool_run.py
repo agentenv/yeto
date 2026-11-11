@@ -411,17 +411,7 @@ class _Signals:
 
 def _drain_all(pool: LeasePool, why: str, *, sleep=None, wait_s: float = 10.0) -> list[Member]:
     """Stop the pool and retry failed drains a few times; returns the members left."""
-    sleep = sleep or time.sleep
-    pool.stop(why)
-    for _ in range(DRAIN_ATTEMPTS - 1):
-        left = pool.live()
-        if not left:
-            break
-        sleep(wait_s)
-        for m in left:
-            pool._drain(m, "stop retry")
-    pool._patrol(pool.clock())
-    return pool.live()
+    return pool.drain_all(why, attempts=DRAIN_ATTEMPTS, wait_s=wait_s, sleep=sleep or time.sleep)
 
 
 def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: LeasePool | None = None,
