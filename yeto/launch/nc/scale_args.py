@@ -9,7 +9,11 @@ from typing import Any
 def add_scale_args(p: Any, *, target_flag: str) -> None:
     """The flags of ``pool-scale`` and ``yeto run scale`` (one of target / --add / --remove)."""
     how = p.add_mutually_exclusive_group(required=True)
-    how.add_argument(target_flag, dest="target", type=int, help="samplers wanted (0 or more)")
+    if target_flag.startswith("-"):
+        how.add_argument(target_flag, dest="target", type=int, help="samplers wanted (0 or more)")
+    else:  # a positional (``yeto rollout scale N``)
+        how.add_argument("target", nargs="?", type=int, default=None, metavar=target_flag,
+                         help="samplers wanted (0 or more)")
     how.add_argument("--add", type=int, default=0, metavar="K", help="K more samplers than the current target")
     how.add_argument("--remove", action="append", default=[], metavar="TICKET",
                      help="release this node and lower the target by one (repeatable)")

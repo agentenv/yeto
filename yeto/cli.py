@@ -1093,6 +1093,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_rl_up_parser(sub)
 
+    from .launch.rollout.entry import add_parser as _add_rollout_parser
+
+    _add_rollout_parser(sub)
+
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
     logs.add_argument(
@@ -2528,6 +2532,10 @@ def main(argv=None) -> int:
         from .rl.up import main as rl_up_main
 
         return rl_up_main(args)
+    if args.command == "rollout":
+        from .launch.rollout.entry import main as rollout_main
+
+        return rollout_main(args)
     if args.command == "sandbox":
         from .sandbox.cli import main as sandbox_main
 

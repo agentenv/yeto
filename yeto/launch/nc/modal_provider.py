@@ -47,6 +47,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..pool.provider import ProviderCaps
 from . import elastic
 from .client import NodeLease
 from .elastic import LeaseStatus
@@ -71,7 +72,8 @@ def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
 class ModalProvider:
     kind = KIND
     ledger_kind = LEDGER_KIND
-    lease_bounded = False  # a call ends at the function timeout; the pool refills it as lost
+    # no lease end (a call ends at the function timeout; the pool refills it as lost)
+    caps = ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=900)
 
     def __init__(self, run_id: str, *, slots: list[int], client: Any = None, name_prefix: str = "yeto-smp",
                  price_usd_h: float | None = None, record: Path | None = None, clock=time.time,
@@ -180,7 +182,7 @@ class ModalProvider:
     def run_tickets(self) -> list[tuple[int, str]]:
         return [(int(r["slot"]), name) for name, r in self._rows().items() if r.get("open")]
 
-    def hourly_usd(self, ticket: str) -> float | None:
+    def hourly_cost(self, ticket: str | None = None) -> float | None:  # noqa: ARG002 - one price per pool
         return self.price_usd_h
 
 
@@ -255,11 +257,39 @@ class ModalPoolOps:
             self._store = elastic.s3_fence_store(uri, self.cfg["r2_env_file"])
         return self._store
 
+    # the work contract, as on the SSH route (yeto.launch.nc.cli.pool_data_path): fence,
+    # and the "drain" scale down (the sampler claims no new task, answers drained)
+    def _dispense_ledger(self) -> tuple[Any, str]:
+        from .cli import NcSshOps  # noqa: PLC0415
+
+        return NcSshOps._dispense_ledger(self)  # type: ignore[arg-type]
+
+    def data_path(self) -> Any:
+        from .cli import pool_data_path, pool_dispense  # noqa: PLC0415
+
+        return pool_data_path(self.cfg, self._fence_store,
+                              lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
+
     def fence(self, m) -> None:
-        elastic.fence_shard(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_shard(m.shard, by=m.ticket)
 
     def fence_incarnation(self, m) -> None:
-        elastic.fence_incarnation(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_incarnation(m.shard, by=m.ticket)
+
+    def request_drain(self, m) -> None:
+        import time as _time  # noqa: PLC0415
+
+        m.drain_seq = self.data_path().request_drain(m.shard, seq=f"{m.ticket}:{_time.time():.3f}")
+
+    def drained(self, m) -> bool:
+        return m.drain_seq is not None and bool(self.data_path().drain_answered(m.shard, m.drain_seq))
+
+    def cancel_drain(self, m) -> None:
+        self.data_path().cancel_drain(m.shard)
+        m.drain_seq = None
+
+    def hourly_cost(self, m) -> float | None:
+        return self.provider.hourly_cost(m.ticket)
 
     def drain(self, m) -> None:
         self.provider.release(m.account, m.ticket)
@@ -365,6 +395,16 @@ def rollout_sampler_body(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # -- config ---------------------------------------------------------------------------
+
+def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) -> ModalProvider:  # noqa: ARG001
+    """The registered ``modal`` factory (``yeto.launch.pool.provider``)."""
+    return from_config(cfg, run_id)
+
+
+def pool_ops(cfg: dict[str, Any]) -> ModalPoolOps:
+    """The registered ``modal`` pool ops (a FunctionCall is not an SSH node)."""
+    return ModalPoolOps(cfg)
+
 
 def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> ModalProvider:
     section = dict(cfg.get("provider") or {})

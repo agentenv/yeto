@@ -434,13 +434,9 @@ class NcSshOps:
         self.data_path().fence_incarnation(m.shard, by=m.ticket)
 
     def data_path(self) -> Any:
-        """The R2 data path of the work contract (``yeto.launch.pool.data_path``): a fence
-        claims the shard's incarnation lease and, with a store dispenser, retires the
-        sampler there (its open claims released at once)."""
-        from ..pool.data_path import R2DataPath  # noqa: PLC0415
-
-        return R2DataPath(self._fence_store,
-                          lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
+        """The work contract's data path of this pool (:func:`pool_data_path`)."""
+        return pool_data_path(self.cfg, self._fence_store,
+                              lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
 
     def _fence_store(self) -> Any:
         env = elastic.read_env_file(self.cfg["r2_env_file"])
@@ -464,24 +460,17 @@ class NcSshOps:
         return store.objects, str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
 
     def request_drain(self, m: Member) -> None:
-        from yeto.rl.engine import store_dispense  # noqa: PLC0415
-
-        objects, namespace = self._dispense_ledger()
-        m.drain_seq = store_dispense.request_drain(objects, namespace, m.shard, seq=f"{m.ticket}:{time.time():.3f}")
+        if self.cfg.get("data_path", "r2") == "r2" and pool_dispense(self.cfg) is None:
+            raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
+        m.drain_seq = self.data_path().request_drain(m.shard, seq=f"{m.ticket}:{time.time():.3f}")
 
     def drained(self, m: Member) -> bool:
-        from yeto.rl.engine import store_dispense  # noqa: PLC0415
-
         if m.drain_seq is None:
             return False
-        objects, namespace = self._dispense_ledger()
-        return store_dispense.drain_answered(objects, namespace, m.shard, m.drain_seq)
+        return bool(self.data_path().drain_answered(m.shard, m.drain_seq))
 
     def cancel_drain(self, m: Member) -> None:
-        from yeto.rl.engine import store_dispense  # noqa: PLC0415
-
-        objects, namespace = self._dispense_ledger()
-        store_dispense.request_drain(objects, namespace, m.shard, on=False)
+        self.data_path().cancel_drain(m.shard)
         m.drain_seq = None
 
     def drain(self, m: Member) -> None:
@@ -577,6 +566,39 @@ class NcSshOps:
         return f"{stem}*.jsonl"
 
 
+SYNCER_KEYS = frozenset({"address", "key_env", "timeout_s"})
+
+
+def syncer_address(value: Any) -> tuple[str, int]:
+    """``"host:port"`` or ``[host, port]`` -> ``(host, port)``."""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return str(value[0]), int(value[1])
+    host, sep, port = str(value or "").rpartition(":")
+    if not sep or not host or not port.isdigit():
+        raise ValueError(f"pool config: syncer.address {value!r} must be 'host:port'")
+    return host, int(port)
+
+
+def pool_data_path(cfg: dict[str, Any], records: Any, dispense: Any) -> Any:
+    """The work contract's data path of a pool (``yeto.launch.pool.data_path``).
+
+    ``data_path: r2`` (default): :class:`R2DataPath` over the run store (``records``,
+    ``dispense``: values or callables). ``data_path: syncer``: :class:`SyncerDataPath`
+    on the pool config's ``syncer`` section (``address`` ``"host:port"``, ``key_env``
+    the environment variable holding the island HMAC key, default
+    ``YETO_ISLAND_HMAC_KEY``; unset: the syncer accepts only its own host)."""
+    from ..pool.data_path import R2DataPath, SyncerDataPath  # noqa: PLC0415
+
+    if cfg.get("data_path", "r2") == "r2":
+        return R2DataPath(records, dispense)
+    section = dict(cfg.get("syncer") or {})
+    if "address" not in section:
+        raise NcError("pool config: data_path syncer needs syncer.address (the syncer's host:port)")
+    key = os.environ.get(str(section.get("key_env") or "YETO_ISLAND_HMAC_KEY"), "")
+    return SyncerDataPath(syncer_address(section["address"]), key=key.encode() if key else None,
+                          timeout_s=float(section.get("timeout_s", 10.0)))
+
+
 def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, Any]:
     """The sampler spec of pool member ``m`` (the pool config's spec file and knobs)."""
     text = Path(cfg["spec"]).read_text().replace("__RUN_PREFIX__", cfg["run_prefix"].strip("/"))
@@ -612,7 +634,8 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "shard_base", "run",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment", "sampler_route"})
+                       "workdir", "comment", "sampler_route", "data_path", "syncer"})
+DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "accounts", "shard_base")
 # the SSH route renders the sampler spec and starts it with the store credentials
 REQUIRED_SSH_KEYS = ("spec", "run_prefix", "r2_env_file")
@@ -717,6 +740,12 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
             raise ValueError(f"pool config: node_hooks[{i}].where must be node or local")
     if cfg.get("backlog"):
         _unknown("backlog", cfg["backlog"], BACKLOG_KEYS)
+    if cfg.get("data_path", "r2") not in DATA_PATHS:
+        raise ValueError(f"pool config: data_path {cfg.get('data_path')!r} is not one of {DATA_PATHS}")
+    if cfg.get("syncer") is not None:
+        _unknown("syncer", cfg["syncer"], SYNCER_KEYS)
+    if cfg.get("data_path", "r2") == "syncer":
+        syncer_address((cfg.get("syncer") or {}).get("address"))
     if cfg.get("route", "ssh") not in ("ssh", "sky"):
         raise ValueError(f"pool config: route {cfg.get('route')!r} is not ssh or sky")
     run_id(cfg)
@@ -766,10 +795,6 @@ def pool_ops(cfg: dict[str, Any]):
     if entry is not None and entry.pool_ops is not None:
         return providers.resolve(entry.pool_ops)(cfg)
     route = cfg.get("route", "ssh")
-    if (cfg.get("provider") or {}).get("kind") == "modal":  # a function call, no node to reach
-        from .modal_provider import ModalPoolOps  # noqa: PLC0415
-
-        return ModalPoolOps(cfg)
     if route == "ssh":
         return NcSshOps(cfg)
     if route == "sky":
