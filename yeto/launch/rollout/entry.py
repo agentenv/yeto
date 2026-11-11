@@ -176,8 +176,8 @@ def _status_refs(args) -> tuple[list[rollout_pools.PoolRef], dict[str, str]]:
 def add_parser(sub: Any) -> None:
     from yeto.launch.nc.scale_args import add_scale_args  # noqa: PLC0415 - no imports of its own
 
-    p = sub.add_parser("rollout", help="rollout islands of a run on any provider: scale / status")
-    rsub = p.add_subparsers(dest="rollout_command", metavar="{scale,status}")
+    p = sub.add_parser("rollout", help="rollout islands of a run on any provider: scale / status / plan")
+    rsub = p.add_subparsers(dest="rollout_command", metavar="{scale,status,plan}")
     rsub.required = True
 
     def source(q) -> None:
@@ -198,9 +198,18 @@ def add_parser(sub: Any) -> None:
     source(st)
     st.add_argument("--detail", action="store_true", help="each pool's full pool-status too")
     st.add_argument("--events", type=int, default=20, help="with --detail: last events per pool")
+    from .plan import add_args as _plan_args  # noqa: PLC0415
+
+    pl = rsub.add_parser("plan", help="offline capacity estimate of a sampler fleet: cold start, release "
+                         "fan-out, group balance, sandbox hosts, cost (no API call)")
+    _plan_args(pl)
 
 
 def main(args: Any) -> int:
+    if args.rollout_command == "plan":
+        from .plan import main as plan_main  # noqa: PLC0415
+
+        return plan_main(args)
     try:
         if args.rollout_command == "scale":
             if args.pool_config and args.pool:
