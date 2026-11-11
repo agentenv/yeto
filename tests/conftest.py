@@ -266,3 +266,11 @@ from syncer_reaper import (  # noqa: E402,F401
 import yeto.cli as _yeto_cli  # noqa: E402
 
 _yeto_cli.DEFAULT_INNER_LR = 3e-4
+
+
+@_pytest.fixture(autouse=True)
+def _no_release_download_spread(monkeypatch):
+    """Background release downloads start at once in tests (production spreads them 0..5 s)."""
+    from yeto.rl.engine import policy_release as _pr
+
+    monkeypatch.setattr(_pr, "DOWNLOAD_SPREAD_S", 0.0)

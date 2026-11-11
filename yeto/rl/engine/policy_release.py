@@ -1007,6 +1007,9 @@ class FollowerCounters:
 
 
 DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
+# a background download starts after a random 0..DOWNLOAD_SPREAD_S delay: samplers that see
+# the same LATEST together do not open their range reads on the store in the same second
+DOWNLOAD_SPREAD_S = 5.0
 DOWNLOAD_WAIT_S = 5.0  # refresh waits this long for a download it starts before going on
 
 
@@ -1032,6 +1035,7 @@ class _Fetch:
 
     def start(self, releases: "PolicyReleaseStore", *, from_store: bool, timer: Callable[[], float]) -> None:
         def run() -> None:
+            time.sleep(random.uniform(0.0, DOWNLOAD_SPREAD_S))
             began = timer()
             try:
                 self.directory = releases.resolve(self.release, from_store=from_store)

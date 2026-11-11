@@ -68,7 +68,7 @@ RANGE_READ_ATTEMPTS = 5
 # "standard" mode backs off exponentially with jitter, so 16 samplers refused at
 # once by the store do not come back in lock step; AWS_RETRY_MODE /
 # AWS_MAX_ATTEMPTS in the environment win
-RETRIES = {"mode": "standard", "max_attempts": 10}
+RETRIES = {"mode": "standard", "max_attempts": 8}
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
