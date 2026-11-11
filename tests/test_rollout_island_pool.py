@@ -291,6 +291,20 @@ def test_scale_file_of_another_run_is_ignored(tmp_path):
     assert pool.config.target == 1 and len(pool.live()) == 1
 
 
+def test_a_scale_file_overriding_the_config_target_is_announced_once(tmp_path):
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    pool, *_ = make_pool(nc, [1, 2], target=1, clock=clock)
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", None
+    write_scale(pool.scale_path, 2, 1)
+    logs = []
+    pool.log = logs.append
+    ticks(pool, 3, clock)
+    assert pool.config.target == 2
+    warned = [line for line in logs if "the scale file wins" in line]
+    assert len(warned) == 1 and "target 1" in warned[0]
+
+
 # -- adoption ------------------------------------------------------------------------
 
 

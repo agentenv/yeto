@@ -438,6 +438,13 @@ class IslandPool:
         if target < 0:
             return
         source = str(doc.get("source") or "manual")
+        if "scale_vs_config" not in self._warned:  # first read: say which target wins
+            self._warned.add("scale_vs_config")
+            if target != self.config.target:
+                self._event("config_target_overridden", config=self.config.target, scale=target, source=source)
+                self.log(f"pool: the pool config says target {self.config.target}, the scale file "
+                         f"{self.scale_path} says {target} ({source}): the scale file wins (a scale outlives "
+                         f"restarts); change it with `yeto run scale --samplers N`, not by editing the config")
         if target != self.config.target:
             if target < self.config.target:
                 self.shrink = max(self.shrink, len(self.counted()) - target)

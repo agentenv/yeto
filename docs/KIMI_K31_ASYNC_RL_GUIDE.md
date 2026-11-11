@@ -572,7 +572,7 @@ yeto run scale --config <run.json> --add 2 --dry-run        # check only; nothin
 `yeto run scale` checks the run's own guards, then runs
 `python -m yeto.launch.nc pool-scale --config <pool.json> ...` (same flags,
 with `--target` for `--samplers`). The running pool applies the request at its
-next tick (within `pool.interval_s`). The new target outlives a pool restart.
+next tick (within `pool.interval_s`). The new target outlives a pool restart. The `target` in `pool.json` is only the starting value: once a scale has run, the scale file's target wins, also after a restart of the same run, and editing `pool.json` changes nothing (the pool logs `the scale file wins` and records a `config_target_overridden` event). Change the number of samplers with `yeto run scale --samplers N`. A new run (another run id) ignores an older run's scale file.
 `yeto run status` shows the target, the billed nodes and each node's state
 (`retiring: true` while it drains); the dashboard shows the same (section 6).
 
