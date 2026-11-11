@@ -543,3 +543,58 @@ def test_a_bad_data_path_is_refused(spec):
 
     with pytest.raises(entry.SamplerSpecError):
         resolve_data_path(spec)
+
+
+# ------------------------------------------- scale-down drain / pause --hold-tasks
+
+@pytest.mark.parametrize("lift", [False, True], ids=["drain", "hold_then_resume"])
+def test_a_drained_sampler_claims_nothing_new_writes_its_groups_and_answers(path, tmp_path, lift):
+    """The pool's drain request on the store dispenser (a scale down; ``pool-pause
+    --hold-tasks`` writes the same request): the island writes the groups it holds to
+    its data path's sink, claims nothing more and answers ``drained``; once the
+    request is lifted (``pool-resume``) it claims again."""
+    from tests.test_store_dispense import Clock, FakeObjects, _open, _rows, _write
+    from yeto.rl.engine import store_dispense as sd
+
+    store = FakeObjects()
+    rows = _write(tmp_path, _rows(6))
+    clock = Clock(store)
+    prompts = _open(rows, store, holder="nc-0", groups=2, clock=clock)
+    other = _open(rows, store, holder="nc-1", groups=2)
+    state: dict[str, Any] = {"answered": False}
+
+    class Drained:
+        written = staticmethod(prompts.written)
+
+        def cursor(self, rollout_id):
+            return {"row_offset": int(rollout_id)}
+
+        def __call__(self, rollout_id):
+            items = prompts(rollout_id)
+            if "seq" not in state:  # the pool asks for a drain while round 0's rows are in flight
+                state["seq"] = sd.request_drain(store, "run/dispense", "nc-0")
+                for _ in range(1 if lift else 2):  # the other sampler takes the rest (all, or two)
+                    spots = [it.metadata[DISPENSE_POSITION_KEY] for it in other(0)]
+                    other.written(0, spots)
+            return items
+
+    def sleep(s):  # the pool reads the answer; hold_then_resume then lifts the request
+        if not state["answered"] and sd.drain_answered(store, "run/dispense", "nc-0", state["seq"]):
+            state["answered"] = True
+            if lift:
+                sd.request_drain(store, "run/dispense", "nc-0", on=False)
+            else:  # a drained sampler waits; the pool then stops it (a fence / RETIRE)
+                from yeto.rl.engine.task_dispense import DispenseEnded
+
+                raise DispenseEnded("stopped by the pool after its drain answer")
+        clock.sleep(s)
+
+    prompts._sleep = sleep
+    island, _ = _island(path, Drained(), num_rollouts=20)
+    island.run()
+    assert state["answered"] is True
+    tasks = {t["slot"]: t for t in sd.status(store, "run/dispense")["tasks"]}
+    assert len(tasks) == 6 and all(t["state"] == "trained" for t in tasks.values())
+    mine = sorted(s for s, t in tasks.items() if t["holder"] == "nc-0")
+    assert mine == ([0, 1, 4, 5] if lift else [0, 1])
+    assert len(path.groups()) == len(mine)  # every group it held reached its sink, nothing else
