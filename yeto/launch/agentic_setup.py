@@ -769,8 +769,8 @@ class Provisioner:
         r = shlex.quote(self.node.host(self.setup.root))
         out = self.node.sh(f"sudo mkdir -p {r}/bin {r}/site {r}/home/.ssh {r}/home/.docker/cli-plugins {r}/tasks "
                            f"{r}/trials {r}/events && sudo chmod 700 {r}/home/.ssh && sudo mkdir -p "
-                           f"{shlex.quote(self.node.nvme)}/agentic-tunnel && sudo chmod 700 "
-                           f"{shlex.quote(self.node.nvme)}/agentic-tunnel", timeout=120)
+                           f"{shlex.quote(self.tunnel_dir)} && sudo chmod 700 "
+                           f"{shlex.quote(self.tunnel_dir)}", timeout=120)
         if out.returncode != 0:
             raise self._fail("layout", f"creating {self.node.host(self.setup.root)}: {(out.stderr or '')[-300:]}")
         self._done("layout", "ok")
@@ -913,12 +913,11 @@ class Provisioner:
                 raise self._fail("tasks", "a store: task source needs the store env file on the node "
                                           "(--r2-env-file)")
             keys = [f"{t.store_prefix}/{i}" for i in t.ids] or [t.store_prefix]
+            into = self._store_sync_root(dest)
             body = " && ".join(
-                f'aws s3 sync --only-show-errors "s3://$R2_BUCKET/{k}/" /tasks/{shlex.quote(k[len(t.store_prefix):].strip("/"))} '
+                f'aws s3 sync --only-show-errors "s3://$R2_BUCKET/{k}/" {into}/{shlex.quote(k[len(t.store_prefix):].strip("/"))} '
                 '--endpoint-url "$AWS_ENDPOINT_URL"' for k in keys)
-            out = self.node.sh(f"sudo docker run --rm --network host --env-file {shlex.quote(self.store_env_file)} "
-                               f"-v {shlex.quote(dest)}:/tasks --entrypoint sh {AWS_IMAGE} -c {shlex.quote(body)}",
-                               timeout=1800)
+            out = self.node.sh(self._store_sync_command(dest, body), timeout=1800)
             if out.returncode != 0:
                 raise self._fail("tasks", f"store sync of {t.source} failed: {(out.stderr or '').strip()[-300:]}")
             changed = True
@@ -931,6 +930,28 @@ class Provisioner:
                                           f"(source {t.source})")
         self._done("tasks", "changed" if changed else "ok", f"{len(t.ids) or 'all'} task(s)")
 
+    # -- the docker-specific pieces (a subclass without docker replaces them)
+    @property
+    def tunnel_dir(self) -> str:
+        """The tunnel key directory on the node (outside the sampler's ``/work``)."""
+        return f"{self.node.nvme}/agentic-tunnel"
+
+    def _store_sync_root(self, dest: str) -> str:  # noqa: ARG002 (dest is mounted at /tasks)
+        return "/tasks"
+
+    def _store_sync_command(self, dest: str, body: str) -> str:
+        return (f"sudo docker run --rm --network host --env-file {shlex.quote(str(self.store_env_file))} "
+                f"-v {shlex.quote(dest)}:/tasks --entrypoint sh {AWS_IMAGE} -c {shlex.quote(body)}")
+
+    def _tunnel_running(self) -> bool:
+        out = self.node.sh(f"sudo docker inspect -f '{{{{.State.Running}}}} {{{{index .Config.Labels "
+                           f"\"yeto.setup\"}}}}' {TUNNEL_CONTAINER} 2>/dev/null || true", timeout=60)
+        return (out.stdout or "").strip() == f"true {self.setup.fingerprint()}"
+
+    def _tunnel_start(self) -> Any:
+        return self.node.sh(f"sudo docker rm -f {TUNNEL_CONTAINER} >/dev/null 2>&1; "
+                            + shlex.join(tunnel_run_argv(self.setup, self.node)), timeout=300)
+
     def _tunnel_lines(self) -> list[dict[str, Any]]:
         out = self.node.sh(f"sudo tail -n 50 {shlex.quote(self.node.host(self.setup.tunnel_events))} 2>/dev/null",
                            timeout=60)
@@ -940,19 +961,16 @@ class Provisioner:
         t = self.setup.tunnel
         if t is None:
             return
-        tdir = f"{self.node.nvme}/agentic-tunnel"
+        tdir = self.tunnel_dir
         changed = self.node.put(t.key.read(self.environ), f"{tdir}/key")
         changed |= self.node.put(_tunnel_config(self.setup), f"{tdir}/config")
         if self.setup.sandbox.known_hosts:
             changed |= self.node.put(self.setup.sandbox.known_hosts.read(self.environ), f"{tdir}/known_hosts",
                                      mode="644")
-        out = self.node.sh(f"sudo docker inspect -f '{{{{.State.Running}}}} {{{{index .Config.Labels "
-                           f"\"yeto.setup\"}}}}' {TUNNEL_CONTAINER} 2>/dev/null || true", timeout=60)
-        running = (out.stdout or "").strip() == f"true {self.setup.fingerprint()}"
+        running = self._tunnel_running()
         before = len(self._tunnel_lines()) if not running or changed else None
         if not running or changed:
-            out = self.node.sh(f"sudo docker rm -f {TUNNEL_CONTAINER} >/dev/null 2>&1; "
-                               + shlex.join(tunnel_run_argv(self.setup, self.node)), timeout=300)
+            out = self._tunnel_start()
             if out.returncode != 0:
                 raise self._fail("tunnel", f"starting {TUNNEL_CONTAINER}: {(out.stderr or '').strip()[-300:]}")
         deadline = self.clock() + t.ready_timeout_s

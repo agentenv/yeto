@@ -393,10 +393,31 @@ class NcSshOps:
     def reads_metrics(self) -> bool:
         return self.metrics_port is not None
 
+    @property
+    def sampler_route(self) -> Any:
+        """A sampler route without docker (``start`` / ``probe_script`` / ``stop_command`` /
+        ``pull``): the provider's ``sampler_route``, or pool config ``"sampler_route":
+        "process"`` (:class:`yeto.launch.daytona_sampler.DaytonaSamplerRoute`); None: the
+        docker route of :mod:`.ssh_sampler`."""
+        if not hasattr(self, "_route"):
+            route = getattr(self.provider, "sampler_route", None)
+            kind = self.cfg.get("sampler_route")
+            if route is None and kind == "process":
+                from ..daytona_sampler import DaytonaSamplerRoute  # noqa: PLC0415
+
+                route = DaytonaSamplerRoute(gpus=int(getattr(self.provider, "gpus", 8) or 8))
+            elif route is None and kind not in (None, "docker"):
+                raise NcError(f"sampler_route {kind!r}: 'docker' (default) or 'process'")
+            self._route = route
+        return self._route
+
     def probe(self, m: Member) -> elastic.Probe:
         alias = node_pool.host_alias(m.ticket)
-        script = elastic.probe_script(ssh_sampler.container_name(m.shard), self._tape_glob(m.shard),
-                                      metrics_port=self.metrics_port)
+        if self.sampler_route is not None:
+            script = self.sampler_route.probe_script(m.shard, self._tape_glob(m.shard), self.metrics_port)
+        else:
+            script = elastic.probe_script(ssh_sampler.container_name(m.shard), self._tape_glob(m.shard),
+                                          metrics_port=self.metrics_port)
         try:
             out = self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o",
                              f"ConnectTimeout={int(self.cfg.get('probe_connect_timeout_s', 20))}", alias, script],
@@ -425,12 +446,13 @@ class NcSshOps:
         then the guarded delete of the ticket and its ``ended`` confirmation."""
         if m.shard and leases_path().exists() and m.ticket in json.loads(leases_path().read_text()):
             name = ssh_sampler.container_name(m.shard)
+            stop = (self.sampler_route.stop_command(m.shard, grace_s=30) if self.sampler_route is not None else
+                    f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
+                    f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
+                    ">/dev/null 2>&1; echo stopped")
             try:
                 self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                           node_pool.host_alias(m.ticket),
-                           f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
-                           f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
-                           ">/dev/null 2>&1; echo stopped"],
+                           node_pool.host_alias(m.ticket), stop],
                           capture_output=True, text=True, timeout=120, check=False)
             except subprocess.TimeoutExpired:
                 _log(f"drain {m.ticket}: sampler stop timed out (node unreachable); deleting the ticket")
@@ -440,12 +462,19 @@ class NcSshOps:
 
     # -- pieces
     def _pull(self, lease: NodeLease, pull: dict[str, Any]) -> None:
-        ssh_sampler.pull_model(lease, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
-                               dest=pull.get("dest", ssh_sampler.MODEL_HOST), include=pull.get("include"),
-                               max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
+        route, alias = self.sampler_route, node_pool.host_alias(lease.ticket)
+        if route is not None:  # dest: the sandbox path (default the spec's /models/kimi-k3.1-pro)
+            route.pull(alias, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
+                       **({"dest": pull["dest"]} if pull.get("dest") else {}), include=pull.get("include"),
+                       max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
+        else:
+            ssh_sampler.pull_model(lease, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
+                                   dest=pull.get("dest", ssh_sampler.MODEL_HOST), include=pull.get("include"),
+                                   max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
         deadline = time.monotonic() + float(pull.get("timeout_s", 3600))
         while time.monotonic() < deadline:
-            status = ssh_sampler.pull_status(lease, run=self._run)
+            status = (route.pull_status(alias, run=self._run) if route is not None
+                      else ssh_sampler.pull_status(lease, run=self._run))
             if "YETO_NC_PULL done" in status:
                 return
             if "YETO_NC_PULL fail" in status or status.startswith("exited 1"):
@@ -476,6 +505,13 @@ class NcSshOps:
         return render_spec(self.cfg, m, shards)
 
     def _start_sampler(self, lease: NodeLease, m: Member, shards: list[str]) -> None:
+        if self.sampler_route is not None:
+            self.sampler_route.start(node_pool.host_alias(lease.ticket), spec=self._spec(m, shards), shard=m.shard,
+                                     run_prefix=self.cfg["run_prefix"], r2_env_file=self.cfg["r2_env_file"],
+                                     protected=frozenset(self.cfg.get("protected_prefixes", ())),
+                                     agentic_env_file=self.cfg.get("agentic_env_file"),
+                                     spec_dir=Path(self.cfg["spec"]).expanduser().parent, run=self._run)
+            return
         ssh_sampler.start_sampler(lease, spec=self._spec(m, shards), shard=m.shard, run_prefix=self.cfg["run_prefix"],
                                   r2_env_file=self.cfg["r2_env_file"], image=self.cfg.get("image", ssh_sampler.IMAGE),
                                   protected=frozenset(self.cfg.get("protected_prefixes", ())),
@@ -489,10 +525,11 @@ class NcSshOps:
             tape = json.loads(Path(self.cfg["spec"]).read_text()).get("event_tape")
         except (OSError, ValueError, KeyError):
             tape = None
+        root = "" if self.sampler_route is not None else ssh_sampler.NVME  # a process sees /work itself
         if not tape:
-            return f"{ssh_sampler.NVME}/work/sampler/events-{shard}*.jsonl"
+            return f"{root}/work/sampler/events-{shard}*.jsonl"
         tape = str(tape).replace("__RUN_PREFIX__", self.cfg["run_prefix"].strip("/"))
-        host = tape.replace("/work/", f"{ssh_sampler.NVME}/work/", 1) if tape.startswith("/work/") else tape
+        host = tape.replace("/work/", f"{root}/work/", 1) if tape.startswith("/work/") else tape
         stem = host[:-len(".jsonl")] if host.endswith(".jsonl") else host
         return f"{stem}*.jsonl"
 
@@ -532,7 +569,7 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "shard_base", "run",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment"})
+                       "workdir", "comment", "sampler_route"})
 REQUIRED_KEYS = ("target", "accounts", "shard_base")
 # the SSH route renders the sampler spec and starts it with the store credentials
 REQUIRED_SSH_KEYS = ("spec", "run_prefix", "r2_env_file")
