@@ -78,12 +78,23 @@ class DockerHost:
                 return word
         return None
 
+    def bridge_subnets(self) -> list[str]:
+        """The subnets of the default ``bridge`` network (trial containers take addresses from it)."""
+        rc, out, _ = self.docker("network", "inspect", "bridge", "--format",
+                                 "{{range .IPAM.Config}}{{.Subnet}} {{end}}", check=False)
+        return [w for w in out.split() if "/" in w] if rc == 0 else []
+
     def image_id(self, ref: str) -> str | None:
         rc, out, _ = self.docker("image", "inspect", "--format", "{{.Id}}", ref, check=False)
         return out.strip() or None if rc == 0 else None
 
     def pull(self, ref: str) -> None:
         self.docker("pull", ref)
+
+    def image_size(self, ref: str) -> int | None:
+        """Bytes of a present image (None: not present)."""
+        rc, out, _ = self.docker("image", "inspect", "--format", "{{.Size}}", ref, check=False)
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else None
 
     def build(self, tag: str, context: str | None, *, dockerfile: str | None = None,
               labels: Mapping[str, str] | None = None) -> None:

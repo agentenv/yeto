@@ -21,7 +21,7 @@ Spec section (container paths; every key optional unless marked)::
         "root": "/work/harbor",
         "harbor": {"version": "0.20.0", "keep": ["httpx", "filelock"]},
         "docker_cli": {"version": "29.0.2", "compose_version": "2.40.3"},
-        "sandbox": {"docker_host": "ssh://<user>@<host>[:<port>]",          # required
+        "sandbox": {"docker_host": "ssh://<user>@<host>[:<port>]" | "envs", # required
                     "alias": "yeto-sandbox",
                     "key": {"path": "<local file>"} | {"env": "<VAR>"},      # required
                     "known_hosts": {"path": ...} | {"env": ...}},
@@ -56,6 +56,14 @@ step and what to do):
                  to the sampler container; reconnects on every drop and writes
                  ``rl_agentic_tunnel`` up/down events to ``<root>/events/tunnel.jsonl``
 
+Several sandbox hosts: ``sandbox.docker_host: "envs"`` takes the sampler's host
+from ``agentic.envs.hosts`` (:func:`yeto.sandbox.envs.assign_host`: by shard index,
+weighted by ``max_sandboxes``; a replacement of a shard keeps the shard's host). The
+docker connection and the reverse tunnel then both go to that host (``tunnel.host``
+must be unset); a host entry's ``tunnel_listen_host`` replaces the address part of
+``tunnel.listen`` on that host. The sampler's env names the host
+(``YETO_SANDBOX_HOST``) so the dispenser gate counts that host's containers.
+
 The sampler container then gets :meth:`AgenticSetup.container_env` (``HOME``,
 ``PATH``, ``DOCKER_HOST``, ``HARBOR_*`` directories, the proxy's public base and
 secret file) as an env file ahead of the operator's ``--agentic-env`` file, which
@@ -84,6 +92,7 @@ SETUP_EVENT = "rl_agentic_setup"
 TUNNEL_EVENT = "rl_agentic_tunnel"
 DEFAULT_ROOT = "/work/harbor"
 DEFAULT_ALIAS = "yeto-sandbox"
+ENVS_DOCKER_HOST = "envs"  # yeto.sandbox.envs.ENVS_DOCKER_HOST: the host comes from agentic.envs.hosts
 TUNNEL_ALIAS = "yeto-tunnel"
 TUNNEL_CONTAINER = "yeto-agentic-tunnel"
 DOCKER_CLI_VERSION = "29.0.2"
@@ -210,6 +219,7 @@ class AgenticSetup:
     tasks: TasksSpec | None
     records_secret: SecretRef | str | None
     notes: tuple[str, ...] = field(default=())
+    sandbox_host: str | None = None  # the agentic.envs.hosts name of the sandbox host
 
     # -- container paths
     @property
@@ -239,6 +249,8 @@ class AgenticSetup:
             env["YETO_RECORDS_PROXY_SECRET_FILE"] = self.secret_file
         if self.tunnel is not None:
             env["YETO_RECORDS_PROXY_PUBLIC_BASE"] = f"http://{self.tunnel.listen}"
+        if self.sandbox_host is not None:
+            env["YETO_SANDBOX_HOST"] = self.sandbox_host  # yeto.sandbox.gate.HOST_ENV
         return env
 
     def python_path(self, base: str = "/yeto") -> str:
@@ -343,7 +355,13 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
             raise ValueError(f"agentic.setup.{what} must be a pinned x.y.z version, got {v!r}")
 
     sb = _section(doc, "sandbox")
-    url = urlsplit(str(sb.get("docker_host") or ""))
+    envs_host = None
+    if str(sb.get("docker_host") or "") == ENVS_DOCKER_HOST:
+        envs_host = _envs_host(spec, agentic)
+        url = urlsplit(envs_host.docker_host)
+    else:
+        url = urlsplit(str(sb.get("docker_host") or ""))
+        envs_host = _envs_host_of(spec, agentic, url)
     if url.scheme != "ssh" or not url.hostname or not url.username:
         raise ValueError("agentic.setup.sandbox.docker_host must be ssh://<user>@<host>[:<port>], got "
                          f"{sb.get('docker_host')!r}")
@@ -366,6 +384,11 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
         host, _, port = listen.rpartition(":")
         if not host or not port:
             raise ValueError(f"agentic.setup.tunnel.listen must be <private ip>:<port>, got {listen!r}")
+        if envs_host is not None and str(sb.get("docker_host")) == ENVS_DOCKER_HOST:
+            if tn.get("host"):
+                raise ValueError("agentic.setup.tunnel.host must be unset with sandbox.docker_host \"envs\": "
+                                 "the tunnel goes to the sampler's assigned sandbox host")
+            host = envs_host.tunnel_listen_host or host
         proxy_port = (agentic.get("proxy") or {}).get("port")
         target = tn.get("target_port", proxy_port)
         if not target:
@@ -429,7 +452,49 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
         raise ValueError(f"agentic.setup prepares remote-docker sandboxes; task_defaults.provider is {provider!r}")
     return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
                         docker_cli_version=cli_version, compose_version=compose, sandbox=sandbox, tunnel=tunnel,
-                        tasks=tasks, records_secret=secret, notes=tuple(notes))
+                        tasks=tasks, records_secret=secret, notes=tuple(notes),
+                        sandbox_host=None if envs_host is None else envs_host.name)
+
+
+def _envs(spec: Mapping[str, Any], agentic: Mapping[str, Any]) -> Any:
+    from yeto.sandbox.envs import EnvsError, parse_envs  # noqa: PLC0415
+
+    section = agentic.get("envs")
+    if not section:
+        return None
+    try:
+        return parse_envs(section, run=str(section.get("run") or spec.get("run_prefix") or "run"))
+    except EnvsError as error:
+        raise ValueError(str(error)) from None
+
+
+def _envs_host(spec: Mapping[str, Any], agentic: Mapping[str, Any]) -> Any:
+    """The sandbox host this sampler drives (``docker_host: "envs"``)."""
+    from yeto.sandbox.envs import EnvsError, assign_host  # noqa: PLC0415
+
+    cfg = _envs(spec, agentic)
+    if cfg is None or not cfg.hosts:
+        raise ValueError("agentic.setup.sandbox.docker_host \"envs\" needs agentic.envs.hosts")
+    try:
+        return assign_host(cfg, spec.get("sampler_id"))
+    except EnvsError as error:
+        raise ValueError(f"agentic.setup.sandbox.docker_host \"envs\": {error}") from None
+
+
+def _envs_host_of(spec: Mapping[str, Any], agentic: Mapping[str, Any], url: Any) -> Any:
+    """The ``agentic.envs.hosts`` entry of an explicit ``docker_host`` (None: no envs section,
+    or no entry for it), so the gate can still find the sampler's host."""
+    try:
+        cfg = _envs(spec, agentic)
+    except ValueError:
+        return None
+    if cfg is None or not url.hostname:
+        return None
+    for h in cfg.hosts:
+        u = urlsplit(h.docker_host)
+        if u.hostname == url.hostname and (u.port or 22) == (url.port or 22):
+            return h
+    return None
 
 
 def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = None) -> list[str]:
@@ -484,7 +549,9 @@ def describe(setup: AgenticSetup) -> list[str]:
              f"  docker_cli: docker {setup.docker_cli_version} + compose v{setup.compose_version} in {setup.root}/bin",
              f"  harbor: {setup.harbor_version} @ {setup.harbor_commit[:12]} into {setup.site} "
              f"(keep {list(setup.harbor_keep)})",
-             f"  sandbox: DOCKER_HOST=ssh://{s.alias} -> {s.user}@{s.host}:{s.port}, key {s.key.describe()}, "
+             f"  sandbox: DOCKER_HOST=ssh://{s.alias} -> {s.user}@{s.host}:{s.port}"
+             + (f" (agentic.envs host {setup.sandbox_host})" if setup.sandbox_host else "")
+             + f", key {s.key.describe()}, "
              f"known_hosts {s.known_hosts.describe() if s.known_hosts else 'accept-new'}"]
     if t:
         lines.append(f"  tunnel: -R {t.listen} -> 127.0.0.1:{t.target_port} via {t.user}@{t.host}:{t.port}, "

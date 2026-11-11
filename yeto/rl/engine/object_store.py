@@ -37,6 +37,10 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 TMP_SUFFIX = ".tmp"
+# a download in progress next to its target (``S3ObjectStore.read_file``,
+# ``DirectoryObjectStore.read_file``): renamed onto the target once whole, so a file
+# at its final name is complete and a resumed release download keeps it
+DOWNLOAD_SUFFIX = ".yeto-get" + TMP_SUFFIX
 
 
 class ObjectStoreError(RuntimeError):
@@ -156,7 +160,9 @@ class DirectoryObjectStore:
         path = self._path(key)
         if not path.is_file():
             return False
-        shutil.copyfile(path, target)
+        part = f"{target}{DOWNLOAD_SUFFIX}"
+        shutil.copyfile(path, part)
+        os.replace(part, target)
         return True
 
     def list(self, prefix: str, *, start_after: str = "") -> list[str]:

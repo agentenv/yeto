@@ -408,6 +408,8 @@ class UnmergedShards:
         the index length)."""
         names = shard_names(self.objects)
         for shard in names:
+            if shard in self._ended:  # its end record is its last: no LIST per poll for it (a spot
+                continue  # pool leaves one ended shard per reclaim, the run lists only live ones)
             reader = self._readers.get(shard)
             if reader is None:
                 reader = self._readers[shard] = ObjectIndex(self.objects, prefix=shard_prefix(shard))
