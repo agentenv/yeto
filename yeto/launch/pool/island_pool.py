@@ -315,6 +315,12 @@ class IslandPool:
         if m.granted is None:
             return
         start = m.charged_to if m.charged_to is not None else m.granted
+        if m.hourly_ucr is None and getattr(self.ops, "hourly_cost", None) is not None:
+            try:  # the provider's own rate (in its cost unit), once
+                rate = self.ops.hourly_cost(m)
+                m.hourly_ucr = None if rate is None else int(round(float(rate)))
+            except Exception:  # noqa: BLE001 - fall back to the config's node hour
+                pass
         self.budget.charge(now - start, m.hourly_ucr or self.config.hourly())
         m.charged_to = now
 

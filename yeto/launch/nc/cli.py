@@ -756,6 +756,15 @@ def pool_events_path(cfg: dict[str, Any]) -> Path:
 
 
 def pool_ops(cfg: dict[str, Any]):
+    """The pool ops of a pool config: a registered provider kind's own ``pool_ops``
+    (a machine that is not an SSH node, e.g. a Modal FunctionCall), else the SSH +
+    docker route (``route: ssh``) or the sky route."""
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    kind = providers.kind_of(cfg)
+    entry = providers.registered(kind) if kind is not None else None
+    if entry is not None and entry.pool_ops is not None:
+        return providers.resolve(entry.pool_ops)(cfg)
     route = cfg.get("route", "ssh")
     if route == "ssh":
         return NcSshOps(cfg)

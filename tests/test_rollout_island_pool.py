@@ -588,3 +588,20 @@ def test_syncer_data_path_drains_then_retires_in_the_island_pool(tmp_path):
     ticks(pool, 2, clock)
     assert victim.state == GONE and ("retire", hash(victim.shard)) in calls
     assert calls.index(("retire", hash(victim.shard))) > calls.index(("drain", hash(victim.shard)))
+
+
+def test_registered_pool_ops_replace_the_ssh_route_and_provider_rates_charge_the_budget():
+    from yeto.launch.nc import cli
+
+    sentinel = object()
+    providers.register(providers.ProviderKind("fake-ops", lambda c, r, s: None, pool_ops=lambda cfg: sentinel))
+    try:
+        assert cli.pool_ops({"provider": {"kind": "fake-ops"}}) is sentinel
+    finally:
+        providers._REGISTRY.pop("fake-ops")  # noqa: SLF001
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    nc.hourly_cost = lambda ticket: 3600
+    pool, *_ = make_pool(nc, [1], target=1, clock=clock)
+    ticks(pool, 4, clock, step=10)
+    assert pool.live()[0].hourly_ucr == 3600 and pool.budget.spent_ucr == pytest.approx(20.0)  # granted at the 2nd tick

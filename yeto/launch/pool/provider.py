@@ -27,9 +27,11 @@ call as a control-plane blip, never as an end):
   (ledger rows, labels): the pool adopts them; cleanup releases them.
 
 Optional: ``kind`` (registry name), ``caps`` (:class:`ProviderCaps`),
-``attach(lease, *, ssh_run)`` (its own reach + host setup), ``sampler_route``,
-``sweep()`` (delete every machine of this run: orphan cleanup),
-``hourly_cost()`` (one machine hour in ``caps.currency``).
+``ledger_kind``, ``attach(lease, *, ssh_run)`` (its own reach + host setup),
+``sampler_route``, ``sweep()`` (delete every machine of this run: orphan cleanup),
+``owned()`` (same as ``run_tickets``), ``hourly_cost(ticket=None)`` (one machine
+hour in ``caps.currency``; the pool charges a member's budget with it when the
+status carries no rate), ``released_by_us(ticket)``.
 
 The registry maps a pool config's ``provider.kind`` to a factory and, for
 providers whose machines are recorded in the run's resource ledger
@@ -241,7 +243,18 @@ class ProviderPoolOps:
         return self.provider.account_free(account)
 
     def run_tickets(self) -> list[tuple[Any, str]]:
-        return self.provider.run_tickets()
+        run_tickets = getattr(self.provider, "run_tickets", None) or self.provider.owned
+        return run_tickets()
+
+    def hourly_cost(self, member: Any) -> float | None:
+        """One machine hour of ``member`` from the provider (None: unknown)."""
+        rate = getattr(self.provider, "hourly_cost", None)
+        if rate is None:
+            return None
+        try:
+            return rate(member.ticket)
+        except TypeError:
+            return rate()
 
     def ready(self, member: Any) -> bool:  # noqa: ARG002 - without a route, active is ready
         return True
@@ -305,7 +318,9 @@ class ProviderKind:
     ops, dry_run) -> (ok, action)`` for ``yeto cleanup``; ``resource_cost``:
     ``(resource, now, rates) -> billing.ItemCost`` for ``yeto cost``; ``pool_owned``:
     a trainer launch's backstop cleanup leaves these to the pool;
-    ``cleanup_order``: position among the ledger kinds in a cleanup."""
+    ``cleanup_order``: position among the ledger kinds in a cleanup; ``pool_ops``:
+    ``(cfg) -> PoolOps`` replacing the SSH node route; ``offline_problems``: ``(cfg) ->
+    [str]`` for ``pool --dry-run``."""
 
     kind: str
     factory: str | Callable[..., Any]
@@ -316,6 +331,10 @@ class ProviderKind:
     pool_owned: bool = True
     cleanup_order: int = 2
     caps: ProviderCaps = field(default_factory=ProviderCaps)
+    # ``(cfg) -> PoolOps`` for machines that are not SSH nodes (None: the SSH / sky route)
+    pool_ops: str | Callable[..., Any] | None = None
+    # ``(cfg) -> [problem]`` checked by ``pool --dry-run`` without an API call
+    offline_problems: str | Callable[..., Any] | None = None
 
 
 _REGISTRY: dict[str, ProviderKind] = {}
