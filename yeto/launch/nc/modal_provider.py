@@ -447,14 +447,21 @@ def store_env(payload: dict[str, Any], environ: dict[str, str]) -> dict[str, str
     return env
 
 
-def join_seen(spec: dict[str, Any]) -> bool:
-    """The sampler's tape (any incarnation's ``events.<inc>.jsonl`` next to the
-    spec's ``event_tape``) has the join event."""
+def tape_files(spec: dict[str, Any]) -> set[Path]:
+    """Every incarnation's tape next to the spec's ``event_tape`` (``events.<inc>.jsonl``)."""
     tape = spec.get("event_tape")
     if not tape:
-        return False
+        return set()
     path = Path(str(tape)).expanduser()
-    for f in sorted(path.parent.glob(f"{path.stem}*{path.suffix or '.jsonl'}")):
+    return set(path.parent.glob(f"{path.stem}*{path.suffix or '.jsonl'}"))
+
+
+def join_seen(spec: dict[str, Any], *, before: set[Path] | frozenset[Path] = frozenset()) -> bool:
+    """The sampler's tape (an incarnation's ``events.<inc>.jsonl`` next to the
+    spec's ``event_tape``) has the join event. ``before``: tapes that existed before
+    this call started its sampler -- Modal reuses a warm container for the next
+    call, so an earlier call's tape (and its join) may still be on its disk."""
+    for f in sorted(tape_files(spec) - set(before)):
         try:
             if JOIN_PATTERN in f.read_text(errors="replace"):
                 return True
@@ -475,11 +482,12 @@ def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects:
     out.mkdir(parents=True, exist_ok=True)
     (out / "spec.json").write_text(json.dumps(payload["spec"], indent=1))
     env = dict(os.environ, **store_env(payload, dict(os.environ)))
+    before = tape_files(payload["spec"])  # a reused container keeps an earlier call's tapes
     proc = (popen or subprocess.Popen)([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler",
                                         "--spec", str(out / "spec.json")], env=env)
     key, reported = payload.get("ready_key"), False
     while proc.poll() is None:
-        if key and not reported and join_seen(payload["spec"]):
+        if key and not reported and join_seen(payload["spec"], before=before):
             try:
                 if objects is None:
                     from yeto.cloud import s3_store  # noqa: PLC0415

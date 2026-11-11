@@ -201,6 +201,38 @@ def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
     assert "member_ready" not in names and "start_timeout" in names
 
 
+def test_a_reused_container_does_not_report_the_earlier_calls_join(tmp_path, monkeypatch):
+    """Modal ran the next call in the same warm container: the earlier call's tape (with
+    its rl_sampler_join) was still on disk and the new call reported ready at once,
+    while its sampler still waited for the layout. Only a tape this call's sampler
+    writes counts."""
+    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+
+    tape = tmp_path / "tape" / "events.jsonl"
+    tape.parent.mkdir()
+    (tape.parent / "events.old1.jsonl").write_text('{"event": "rl_sampler_join"}\n')  # the earlier call
+    objects, polls = Objects(), [0]
+
+    class Proc:
+        returncode = 0
+
+        def poll(self):
+            polls[0] += 1
+            if polls[0] == 3:
+                (tape.parent / "events.new2.jsonl").write_text('{"event": "rl_sampler_join"}\n')
+            return None if polls[0] < 5 else 0
+
+    seen = []
+    payload = {"shard": "m-0", "bucket": "b", "run_prefix": "r", "ready_key": "pool-ready/m-0/t.2.json",
+               "spec": {"event_tape": str(tape)}}
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
+    real_write = objects.write
+    objects.write = lambda k, v: seen.append(polls[0]) or real_write(k, v)
+    out = rollout_sampler_body(payload, popen=lambda *a, **k: Proc(), objects=objects, sleep=lambda s: None,
+                               root=str(tmp_path / "rollout"))
+    assert out["reported_ready"] and seen == [3]  # not at the first poll (the old tape)
+
+
 def test_a_sampler_that_finished_ends_the_pool_without_a_refill(tmp_path):
     """The syncer told the run's samplers the run finished: the sampler exits 0, the call
     returns. The pool reads a finished sampler (released, nothing ordered again), not a
