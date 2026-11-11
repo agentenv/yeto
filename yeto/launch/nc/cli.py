@@ -766,6 +766,10 @@ def pool_ops(cfg: dict[str, Any]):
     if entry is not None and entry.pool_ops is not None:
         return providers.resolve(entry.pool_ops)(cfg)
     route = cfg.get("route", "ssh")
+    if (cfg.get("provider") or {}).get("kind") == "modal":  # a function call, no node to reach
+        from .modal_provider import ModalPoolOps  # noqa: PLC0415
+
+        return ModalPoolOps(cfg)
     if route == "ssh":
         return NcSshOps(cfg)
     if route == "sky":
