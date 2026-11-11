@@ -204,6 +204,14 @@ def check_synced_group(args: Any, num_islands: int) -> None:
         raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
                          f"rounds of {trainers} trainers; trainers x total steps must be a multiple "
                          "of the sampler count")
+    if getattr(args, "rl_sync_preset", None) == "decoupled":
+        # Its sampler islands run as no-sync islands, which the island entry refuses
+        # with the decoupled preset; the decoupled trainers also have no single merged
+        # version to release (per-fragment versions). Refuse before any GPU starts.
+        raise ValueError("--rl-sync-preset decoupled does not combine with a synced group "
+                         "(--rl-island-sample-role M:sampler): decoupled islands generate "
+                         "their own rollouts (colocated); use --rl-sync-preset strict-avg or "
+                         f"{FULL_PARAMETER_SYNC_PRESET} for a synced group")
     if int(getattr(args, "external_learners", 0) or 0):
         raise ValueError("a synced group does not take external learners")
     if getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
