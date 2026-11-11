@@ -273,6 +273,14 @@ _UNMAPPED = [
     # spec (yeto.rl.algos.sao.sao_algorithm_spec), so they are refused.
     "--sao-online-recipe",
     "--sao-compaction",
+    # Upstream score centering (--loss-type score_centering, Kimi-K3.1 recipe):
+    # mapped by algo_flag_rows from yeto.rl.algos.score_centering; listed here
+    # so they are adapter-owned from import time.
+    "--score-centering-is",
+    "--score-centering-tis-clip",
+    "--score-centering-mis-low",
+    "--score-centering-mis-high",
+    "--rollout-top-logprobs-num",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}

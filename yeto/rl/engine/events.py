@@ -16,14 +16,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine.ext_attrs import ext_attr
+
 EventWriter = Callable[[Any, dict[str, Any]], None]
 
 
 def append_tape_event(args, event: dict[str, Any]) -> None:
-    path = Path(args.yeto_rl_event_tape).expanduser()
+    path = Path(ext_attr(args, "rl_event_tape")).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     event = {
-        "island_id": int(args.yeto_rl_learner_id),
+        "island_id": int(ext_attr(args, "rl_learner_id")),
         "time_unix": time.time(),
         **event,
     }

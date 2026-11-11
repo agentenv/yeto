@@ -63,11 +63,13 @@ def check_island_env(*, placement: str, env_pairs) -> None:
                 "option or use --rl-placement fixed-partition")
 
 
-def _miles_pin_gap(first: str, feature: str) -> str | None:
-    """Why the pinned Miles lacks ``feature``, first in fork commit ``first``; None when it has it."""
+def _miles_pin_gap(first: str, feature: str, *, feature_name: str) -> str | None:
+    """Why the pinned Miles lacks ``feature`` (registered as ``feature_name`` in
+    the lineage tables, first carried by fork commit ``first`` on ports-v1);
+    None when the pin carries it."""
     from yeto.rl.adapters.miles import pins
 
-    if first in pins.MILES_FORK_LINEAGE and pins.MILES_NEXT_COMMIT in pins.miles_fork_lineage_from(first):
+    if pins.pin_has(feature_name, pins.MILES_NEXT_COMMIT):
         return None
     return f"Miles {first[:9]} or later ({feature}); the pinned image ships {pins.MILES_NEXT_COMMIT[:9]}"
 
@@ -80,7 +82,8 @@ def full_parameter_dp_replica_gap() -> str | None:
     and apply the owner's bytes on the other replicas."""
     from yeto.rl.adapters.miles import pins
 
-    return _miles_pin_gap(pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT, "data-parallel replicas")
+    return _miles_pin_gap(pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT, "data-parallel replicas",
+                          feature_name="dp_replica_full_parameter")
 
 
 def full_parameter_dp_sharded_master_gap() -> str | None:
@@ -93,4 +96,27 @@ def full_parameter_dp_sharded_master_gap() -> str | None:
     and the local range. Without it DP>1 needs the non-distributed optimizer."""
     from yeto.rl.adapters.miles import pins
 
-    return _miles_pin_gap(pins.MILES_DP_SHARDED_MASTER_COMMIT, "distributed optimizer at DP>1")
+    return _miles_pin_gap(pins.MILES_DP_SHARDED_MASTER_COMMIT, "distributed optimizer at DP>1",
+                          feature_name="dp_sharded_master")
+
+
+def host_sync_free_gap() -> str | None:
+    """Why the pinned Miles cannot take ``--no-host-sync-free``; None when it can.
+
+    The switch is the typed ``DebugConfig.host_sync_free`` of Miles k31/b3-b7
+    (pins feature ``host_sync_free_flag``); the ports-v1 fork only read the
+    ``MILES_HOST_SYNC_FREE`` environment variable, and k31 before b3-b7 has no
+    sync-free paths at all."""
+    from yeto.rl.adapters.miles import pins
+
+    return _miles_pin_gap(pins.MILES_K31_B3B7_COMMIT, "the typed --host-sync-free switch",
+                          feature_name="host_sync_free_flag")
+
+
+def check_host_sync_free(enabled: bool) -> None:
+    """``--no-rl-host-sync-free`` on a pin without the switch: refused before launch."""
+    if enabled:
+        return
+    gap = host_sync_free_gap()
+    if gap is not None:
+        raise ValueError(f"--no-rl-host-sync-free needs {gap}")

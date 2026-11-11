@@ -86,7 +86,9 @@ def test_pool_miles_argv_selects_the_convertible_rollout_function():
     # the node releases what it trains: the release exporter needs --save-hf
     assert argv == ("--rollout-function-path",
                     "yeto.rl.adapters.miles.buffer_rollout_miles.ConvertibleRolloutFn",
-                    "--save-hf", RELEASE_EXPORTER_SAVE_HF)
+                    "--save-hf", RELEASE_EXPORTER_SAVE_HF,
+                    "--custom-rollout-log-function-path",
+                    "yeto.rl.adapters.miles.buffer_rollout_miles.log_rollout_data")
 
 
 def test_pool_refuses_an_island_that_is_not_convertible():
@@ -103,11 +105,13 @@ def test_pool_refuses_a_held_trainer_island():
         trainer_loop.check(args)
 
 
-def test_pool_needs_lora_colocated_and_a_modal_volume_store():
+def test_pool_needs_lora_or_full_colocated_and_a_modal_volume_store():
     from yeto.launch import trainer_loop
 
-    with pytest.raises((ValueError, SystemExit), match="lora|colocated"):
-        _args(base=[("full" if t == "lora" else t) for t in POOL])
+    # --tuning full is the K3.1 form of a convertible node (whole-checkpoint releases)
+    assert _args(base=[("full" if t == "lora" else t) for t in POOL]).tuning == "full"
+    with pytest.raises(Exception, match="colocated|fixed partition"):  # engines on other GPUs: no handoff
+        _args(("--rl-placement", "fixed-partition", "--rollout-num-gpus", "1"))
     args = _args()
     args.rl_checkpoint_store = "/tmp/store"
     with pytest.raises(SystemExit, match="modal-volume"):

@@ -28,6 +28,7 @@ PEAK_TFLOPS_BF16: dict[str, float] = {
     "H100": 989.0,
     "H200": 989.0,
     "B200": 2250.0,
+    "B300": 2250.0,  # Blackwell Ultra: the FP4 rate doubles, dense bf16 stays at the B200 class
 }
 
 

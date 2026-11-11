@@ -163,15 +163,17 @@ def bind_sao_streaming_runtime(
     if stat.S_IMODE(evidence.stat().st_mode) != 0o700:
         raise RuntimeError("SAO trajectory evidence directory is not private")
 
+    from yeto.rl.adapters.miles.island_args import as_island
+
     actor = runtime.actor
+    # yeto names live on the island facade (a frozen Miles config refuses them)
+    args = as_island(args)
     setattr(args, CONFIG_ATTRIBUTE, sync)
     args.yeto_rl_trajectory_evidence_dir = str(evidence)
     args.yeto_rl_trajectory_evidence_kind = runtime.trajectory_evidence_kind
     args.yeto_rl_trajectory_evidence_schema_version = (
         runtime.trajectory_evidence_schema_version
     )
-    args.yeto_rl_learner_generation = actor.learner_generation
-    args.yeto_rl_learner_generations = actor.learner_generations
     args.yeto_rl_num_fragments = actor.expected_fragments
     args.yeto_rl_total_fragment_steps = actor.total_fragment_steps
     return evidence

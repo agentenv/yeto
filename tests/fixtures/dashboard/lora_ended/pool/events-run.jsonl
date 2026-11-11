@@ -1,0 +1,6 @@
+{"account":5,"continues_shard":null,"data_slot":null,"event":"nc_elastic_ordered","replaces":null,"shard":"run-0","t":1790000352.001,"ticket":"tk1"}
+{"attempt":1,"detail":"sampler exited exit=2 before join","event":"nc_elastic_sampler_restart","shard":"run-0","t":1790001495.553,"ticket":"tk1"}
+{"detail":"sampler exited exit=2 before join","event":"nc_elastic_sampler_crash_loop","restarts":1,"shard":"run-0","t":1790001583.95,"ticket":"tk1"}
+{"event":"nc_elastic_shard_fenced","shard":"run-0","t":1790001585.42,"ticket":"tk1","why":"sampler crash loop"}
+{"attempt":1,"detail":"sampler exited exit=2 before join","event":"nc_elastic_sampler_restart","shard":"run-1","t":1790001740.626,"ticket":"tk1"}
+{"account":5,"continues_shard":null,"event":"nc_elastic_member_ready","grant_to_ready_s":1865,"order_to_ready_s":769,"restarts":0,"shard":"run-1","t":1790002267.316,"ticket":"tk1"}

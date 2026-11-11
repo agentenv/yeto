@@ -30,6 +30,11 @@ from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
 from yeto.rl.adapters.miles.entry import miles_capabilities
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 FP = "sha256:" + "e" * 64
 NAME = "base_model.model.layer.lora_A.weight"
 
@@ -640,3 +645,13 @@ def test_pinned_declaration_only_on_its_verified_miles_commit():
     assert "token" in entry.declared_by_dimension(good)["loss_aggregations"]
     # an older (unfixed) Miles pin: token is not declared
     assert "token" not in entry.declared_by_dimension("9e4260d" + "0" * 33)["loss_aggregations"]
+
+
+@pytest.mark.xfail(strict=True, reason="GPU re-verification of the pin-bound mechanisms on the k31 lineage "
+                                       "(yeto-adapter.md 4.5): add k31 EvidenceRefs to entry.MILES_DECLARED_EVIDENCE")
+def test_k31_pin_declares_the_pin_bound_mechanisms(monkeypatch):
+    from yeto.rl.adapters.miles import entry, pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_K31_F1_COMMIT)
+    declared = {f"{d}:{n}" for d, names in entry.declared_by_dimension().items() for n in names}
+    assert set(entry.MILES_DECLARED_EVIDENCE) <= declared

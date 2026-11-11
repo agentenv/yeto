@@ -74,13 +74,15 @@ from yeto.rl.engine.merged_release import (
     merges_shards,
 )
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
+from yeto.rl.engine.policy_age import age_floor
+from yeto.rl.engine.xhw_guard import downweight_group, rollout_stats, source_key
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
 
 BUFFER_ROOT_ENV = "YETO_SAMPLE_BUFFER_ROOT"  # checkpoint store path holding sample-buffer/
 SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a sampler writes
-WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full round
+WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds without a new group while a round fills
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
@@ -108,6 +110,8 @@ ROLLOUT_FUNCTION_PATHS = {
     TRAINER: f"{_MODULE}.BufferReaderRolloutFn",
     CONVERTIBLE: f"{_MODULE}.ConvertibleRolloutFn",
 }
+# a reader's rollout log: Miles' rollout metrics over the real samples (padding left out)
+ROLLOUT_LOG_FUNCTION = f"{_MODULE}.log_rollout_data"
 # the rollout functions that read the buffer (the trainer keeps a watermark)
 READER_FUNCTION_PATHS = (ROLLOUT_FUNCTION_PATHS[TRAINER], ROLLOUT_FUNCTION_PATHS[CONVERTIBLE])
 
@@ -222,11 +226,28 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
         merge = reader
     lane = BufferLane.parse(env.get(LANE_ENV)) if reader else None
     merge = merge and merges_shards(lane)
-    return FileSampleBuffer(store, batch_size=batch_size,
-                            index=INDEX if shard is None else shard_index(shard),
-                            create_index=create_index, merge_shards=merge,
-                            expected_shards=named if merge and named else None,
-                            lane=lane)
+    buffer = FileSampleBuffer(store, batch_size=batch_size,
+                              index=INDEX if shard is None else shard_index(shard),
+                              create_index=create_index, merge_shards=merge,
+                              expected_shards=named if merge and named else None,
+                              lane=lane)
+    if reader and shard is None and lane is None and not merge:
+        check_unmerged_shards(buffer)
+    return buffer
+
+
+def check_unmerged_shards(buffer: Any) -> None:
+    """A single trainer that does not merge shards reads only the merged index: when
+    that index is empty but sampler islands wrote shards (each sampler its own
+    ``shards/<name>``, as on a store with ``buffer_shards`` or a multi-sampler run),
+    the trainer would poll an index nobody writes until its wait runs out. Refuse at
+    open and name the flag that makes it merge them."""
+    names = list(buffer.index.shard_names())
+    if names and len(buffer) == 0:
+        raise SampleBufferRolloutError(
+            f"the sample buffer holds sampler shards {names} but no merged index, and this "
+            f"trainer does not merge shards: launch it with --rl-buffer-shards {','.join(names)} "
+            "(every sampler shard of the run)")
 
 
 def open_lane_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
@@ -258,6 +279,72 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
                       index=int(position) * int(samples_per_group) + j)
         out.append(sample)
     return out
+
+
+def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samples_per_group: int,
+                 r3_layers: tuple[int, int] | None = None, r3_num_experts: int | None = None
+                 ) -> tuple[list[tuple[int, list[dict[str, Any]]]], list[str]]:
+    """The taken groups renumbered (:func:`renumber_group`) and in Miles' sample form
+    (``buffer_payload.miles_sample_dict``), and why each group that cannot be converted
+    was left out. One malformed sample (an R3 routing row that mixes pads and ids, an
+    expert id past the model's, a layer count of another model) leaves its group out
+    of the round, which is padded instead, rather than stopping the trainer (the caller
+    takes again when no group of a take converts, and fails after a few such takes)."""
+    from yeto.rl.engine.buffer_payload import miles_sample_dict  # noqa: PLC0415
+
+    kept, problems = [], []
+    for position, group in groups:
+        try:
+            kept.append((position, [miles_sample_dict(d, r3_layers=r3_layers, r3_num_experts=r3_num_experts)
+                                    for d in renumber_group(group, position=position,
+                                                            samples_per_group=samples_per_group)]))
+        except SampleBufferRolloutError as error:
+            problems.append(f"buffer position {position}: {error}")
+    for problem in problems:
+        print(f"[sample-buffer] WARNING: group left out of the round: {problem}", flush=True)
+    return kept, problems
+
+
+PADDING_GROUP_BASE = 1 << 40  # group_index of padding samples: past any buffer position
+PADDING_KEY = "yeto_padding"
+
+
+def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
+                    samples_per_group: int) -> list[dict[str, Any]]:
+    """``count`` samples that fill a round to Miles' global batch without training.
+
+    Each is a copy of the round's shortest real sample with a response (the cheapest
+    forward pass)
+    with ``loss_mask`` all 0 and ``remove_sample`` set (no loss, no gradient), and a
+    group of its own (``group_index`` from ``PADDING_GROUP_BASE``): a one-sample group
+    centers to advantage 0 and takes no part in a real group's mean or spread.
+    ``metadata["yeto_padding"]`` marks it for the statistics."""
+    if int(count) <= 0:
+        return []
+    real = [d for group in groups for d in group]
+    if not real:
+        raise SampleBufferRolloutError("no real sample to build padding from")
+    # a sample with a response (an empty one, e.g. an engine that stopped at once, gives
+    # Miles a zero-length response row: ``x[-0:]`` is the whole sequence, not nothing)
+    responded = [d for d in real if int(d.get("response_length") or 0) > 0] or real
+    shortest = min(responded, key=lambda d: len(d.get("tokens") or ()))
+    out = []
+    for k in range(int(count)):
+        pad = dict(shortest)
+        pad["loss_mask"] = [0] * int(pad.get("response_length") or 0)
+        pad["remove_sample"] = True
+        pad["rollout_id"] = None
+        pad["metadata"] = {**dict(pad.get("metadata") or {}), PADDING_KEY: True}
+        pad["group_index"] = PADDING_GROUP_BASE + k
+        pad["index"] = (PADDING_GROUP_BASE + k) * int(samples_per_group)
+        out.append(pad)
+    return out
+
+
+def is_padding(sample: Any) -> bool:
+    """A padding sample of :func:`padding_samples` (a dict or a Miles ``Sample``)."""
+    meta = sample.get("metadata") if isinstance(sample, dict) else getattr(sample, "metadata", None)
+    return bool((meta or {}).get(PADDING_KEY))
 
 
 # ---------------------------------------------------------------------- sampler side
@@ -401,6 +488,32 @@ class TakeReport:
     stale_positions: list[int] = field(default_factory=list)
     # the version the max_policy_age gate compared against (not a metric)
     gate_version: int | None = None
+    # per-source (xhw_guard.source_key) groups and tokens of the trained groups, the
+    # source of each chosen buffer position, and the groups a quarantine passed over
+    source_groups: dict[str, int] = field(default_factory=dict)
+    source_tokens: dict[str, int] = field(default_factory=dict)
+    position_sources: dict[int, str] = field(default_factory=dict)
+    quarantined_groups: int = 0
+    # groups of a fenced (superseded) sampler incarnation written after its successor
+    # claimed the shard's lease (incarnation_lease.IncarnationGate): consumed, never read
+    stale_incarnation_groups: int = 0
+    # groups with fewer samples than the group size (a sampler lost trials) that are
+    # trained anyway (their advantages use their own samples only); groups with fewer
+    # than MIN_GROUP_SAMPLES (no in-group spread) or more than the group size are
+    # consumed, never trained
+    incomplete_groups: int = 0
+    dropped_small_groups: int = 0
+    # the round's samples fall short of groups * group_size: the whole group that
+    # would overflow it waits for the next take (carried over, never split), and the
+    # rest is filled with padding samples (loss mask 0, a group of their own)
+    carried_over_groups: int = 0
+    padded_samples: int = 0
+    # padded_samples over the round's global batch: Miles divides the round's loss by the
+    # full batch, so the real samples' gradient shrinks by this fraction (not rescaled)
+    padded_fraction: float = 0.0
+    # groups with a sample whose reward is missing or not finite (a failed reward call):
+    # consumed, never trained (one NaN reward makes the whole group's advantages NaN)
+    nonfinite_reward_groups: int = 0
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -410,9 +523,43 @@ class TakeReport:
                 "sample_buffer/select_s": float(self.select_s),
                 "sample_buffer/read_s": float(self.read_s),
                 "sample_buffer/decode_s": float(self.decode_s),
-                "sample_buffer/prefetched_groups": float(self.prefetched)}
+                "sample_buffer/prefetched_groups": float(self.prefetched),
+                "sample_buffer/xhw_quarantined_groups": float(self.quarantined_groups),
+                "sample_buffer/stale_incarnation_groups": float(self.stale_incarnation_groups),
+                "sample_buffer/incomplete_groups": float(self.incomplete_groups),
+                "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
+                "sample_buffer/carried_over_groups": float(self.carried_over_groups),
+                "sample_buffer/padded_samples": float(self.padded_samples),
+                "sample_buffer/padded_fraction": float(self.padded_fraction),
+                "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups)}
 
 
+def _dispense_position(entry: Any) -> int | None:
+    """The task-dispenser position of a buffer entry (its sampler had a dispenser)."""
+    position = (getattr(entry, "sampler_round", None) or {}).get("dispense_position")
+    return position if isinstance(position, int) and not isinstance(position, bool) else None
+
+
+MIN_GROUP_SAMPLES = 2  # fewer: no in-group spread, no group-relative advantage
+
+
+def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every sample of a decoded group has a finite reward. A missing
+    (None) or NaN/inf scalar reward (a reward call that failed) makes the group's
+    centered advantages NaN in Miles, hence a non-finite loss, or the driver's
+    ``nonfinite_reward`` stop; such a group is consumed, never trained. A reward
+    dict (a multi-key reward Miles reads by ``reward_key``) is not judged here."""
+    import math
+
+    for sample in group:
+        if "reward" not in sample:
+            continue  # a payload without the field (not a Miles Sample.to_dict()): not judged
+        reward = sample["reward"]
+        if isinstance(reward, Mapping):
+            continue
+        if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+            return False
+    return True
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
 
@@ -436,11 +583,26 @@ class BatchReader:
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
                  cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
-                 read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True) -> None:
+                 read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
+                 incarnation_gate: Any = "auto", group_size: int | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
-        buffer with ``peek`` (the class doc)."""
+        buffer with ``peek`` (the class doc). ``incarnation_gate``: an
+        ``incarnation_lease.IncarnationGate``; a group a superseded sampler
+        incarnation wrote after its successor claimed the lease (an NC node the pool
+        fenced and replaced, still writing) is passed over unread
+        (``TakeReport.stale_incarnation_groups``). ``"auto"`` builds it over the
+        buffer's store (:func:`~yeto.rl.engine.incarnation_lease.default_incarnation_gate`,
+        ``YETO_BUFFER_INCARNATION_FENCE=0`` turns it off); None: no gate.
+        ``group_size``: the round must hold exactly ``groups * group_size`` samples
+        (Miles' global batch). A short group (a sampler lost trials) is trained with
+        its own samples (``TakeReport.incomplete_groups``); one with fewer than
+        ``MIN_GROUP_SAMPLES`` or more than ``group_size`` is consumed, not trained.
+        A round that falls short selects more whole groups while they fit; the first
+        that does not is carried over to the next take (the round's end, hence the
+        watermark, stays before it); what is still missing is reported as
+        ``padded_samples`` (:func:`padding_samples` builds them). None: no check."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -460,8 +622,29 @@ class BatchReader:
         self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
         self._prefetcher: threading.Thread | None = None
         self._stop_prefetch = threading.Event()
+        # xhw_guard actions {source: {"action", ...}} set by the driver after each step
+        self.xhw_actions: dict[str, dict[str, Any]] = {}
         if cursor_log is not None:
             self.buffer.reset_to(cursor_log.last_cursor())
+        if incarnation_gate == "auto":
+            from yeto.rl.engine.incarnation_lease import default_incarnation_gate  # noqa: PLC0415
+
+            incarnation_gate = default_incarnation_gate(buffer)
+        self.gate = incarnation_gate
+        self.group_size = None if group_size is None else int(group_size)
+        # a whole group selected by a take that did not fit its round:
+        # (position, decoded group, behavior version, tokens, source, dispense position)
+        self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
+        self._nonfinite = 0
+
+    def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+        self.xhw_actions = {str(k): dict(v) for k, v in (actions or {}).items()}
+        return self.xhw_actions
+
+    def _quarantined(self, source: str, rollout_id: int) -> bool:
+        action = self.xhw_actions.get(source) or {}
+        until = action.get("until_round")
+        return action.get("action") == "quarantine" and (until is None or rollout_id < int(until))
 
     def _read(self, ref: str) -> Future:
         if self._pool is None:
@@ -476,12 +659,14 @@ class BatchReader:
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
         """``groups`` ``(buffer position, decoded group)`` pairs for ``rollout_id``.
-        Waits up to ``wait_s`` for them; after the data end returns what is left
-        (raises when nothing is)."""
+        Waits for them while the samplers write: it raises only after ``wait_s``
+        seconds in which no new group reached the buffer (a slow round that keeps
+        arriving is waited for); after the data end returns what is left (raises
+        when nothing is)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
         rollout_id = int(rollout_id)
-        started = self.clock()
+        started = progress = self.clock()
         self._stop_prefetching()
         ahead = dict(self._reads)
         self._reads.clear()
@@ -490,9 +675,30 @@ class BatchReader:
         versions: dict[int, int] = {}
         stale = 0
         stale_positions: list[int] = []
+        quarantined = 0
+        fenced = 0
+        incomplete = 0
+        decoded: dict[int, list[dict[str, Any]]] = {}
+        accounted: dict[int, tuple[int, int]] = {}  # position -> (behavior version, tokens)
+        source_groups: dict[str, int] = {}
+        source_tokens: dict[str, int] = {}
+        position_sources: dict[int, str] = {}
         select_s = read_s = 0.0
         current_version = gate_version(current_version, self.gate_version)
-        floor = None if current_version is None else int(current_version) - self.max_policy_age
+        floor = None if current_version is None else age_floor(int(current_version), self.max_policy_age)
+        dropped_small = 0
+        self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
+        carried_in, self._carry = self._carry, None
+        if carried_in is not None:  # selected by the last take; its position is that round's end
+            position, group, version, tokens, source, dispensed = carried_in
+            start = min(start, position)
+            if floor is not None and version < floor:  # aged out while it waited: stale
+                stale += 1
+                if dispensed is not None:
+                    stale_positions.append(dispensed)
+            else:
+                self._choose(position, group, version, tokens, source, chosen, decoded, accounted,
+                             versions, source_groups, source_tokens, position_sources)
         while len(chosen) < groups:
             # the reads of the last selection end before the next refresh (a reload)
             read_s += self._settle([read for _, read, _ in chosen])
@@ -502,35 +708,70 @@ class BatchReader:
             for item in selected:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
-                    position = (item.entry.sampler_round or {}).get("dispense_position")
-                    if isinstance(position, int) and not isinstance(position, bool):
+                    position = _dispense_position(item.entry)
+                    if position is not None:
                         stale_positions.append(position)
                     continue
+                if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+                    fenced += 1  # a fenced incarnation's late write: never trained, never read
+                    continue
+                source = source_key(item.entry.provenance, self._shard_at(item.position))
+                if self._quarantined(source, rollout_id):
+                    quarantined += 1
+                    continue
+                source_groups[source] = source_groups.get(source, 0) + 1
+                source_tokens[source] = source_tokens.get(source, 0) + int(item.entry.tokens or 0)
+                position_sources[int(item.position)] = source
                 ref = item.entry.payload_ref
                 read = ahead.pop(ref, None)
                 chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
+                accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
+            if self.group_size is not None and selected:
+                dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
+                                                       source_tokens, position_sources)
+            if selected:
+                progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
                 continue
             if self.buffer.data_ended:
                 break
-            if self.clock() - started > self.wait_s:
+            if self.clock() - progress > self.wait_s:
                 raise SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"(buffer position {self.buffer.read_cursor})")
+                    f"without a new group (buffer position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
+        end = self.buffer.read_cursor
+        carried_out = padded = 0
+        if self.group_size is not None and chosen:
+            skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
+                                       "nonfinite": 0}
+            end, carried_out, padded, more_small = self._fill(
+                int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
+                source_groups, source_tokens, position_sources, skipped)
+            dropped_small += more_small
+            stale += skipped["stale"]
+            stale_positions += skipped["stale_positions"]
+            fenced += skipped["fenced"]
+            quarantined += skipped["quarantined"]
+            self._nonfinite += skipped["nonfinite"]
+            incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
         read_s += self._settle([read for _, read, _ in chosen])
         begun = self.clock()
-        out = [(position, decode_group(read.result())) for position, read, _ in chosen]
+        out = [(position, decoded[position] if position in decoded else decode_group(read.result()))
+               for position, read, _ in chosen]
         decode_s = self.clock() - begun
-        end = self.buffer.read_cursor
+        nonfinite = self._nonfinite
         if not out:
             raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
                                         f"with no trainable group (position {end}, {stale} passed "
-                                        "over as too old)")
+                                        f"over as too old, {fenced} from fenced incarnations, "
+                                        f"{dropped_small} too small, {nonfinite} without a finite reward)")
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
-            self.cursor_log.append(rollout_id, [position for position, _ in out], end)
+            positions_of = getattr(self.buffer, "shard_positions", None)
+            self.cursor_log.append(rollout_id, [position for position, _ in out], end,
+                                   shards=positions_of(end) if callable(positions_of) else None)
         if self.prefetch and not self.buffer.data_ended:
             next_floor = None if current_version is None else floor + 1  # the next take's
             self._start_prefetching(int(groups), next_floor)
@@ -540,7 +781,119 @@ class BatchReader:
                                read_s=round(read_s, 3), decode_s=round(decode_s, 3),
                                prefetched=sum(1 for _, _, early in chosen if early),
                                stale_positions=stale_positions,
-                               gate_version=None if current_version is None else int(current_version))
+                               gate_version=None if current_version is None else int(current_version),
+                               source_groups=dict(sorted(source_groups.items())),
+                               source_tokens=dict(sorted(source_tokens.items())),
+                               position_sources=position_sources, quarantined_groups=quarantined,
+                               stale_incarnation_groups=fenced, incomplete_groups=incomplete,
+                               dropped_small_groups=dropped_small, carried_over_groups=carried_out,
+                               padded_samples=padded, nonfinite_reward_groups=nonfinite)
+
+    @staticmethod
+    def _choose(position: int, group: list, version: int, tokens: int, source: str, chosen: list,
+                decoded: dict, accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
+                position_sources: dict) -> None:
+        """Add an already decoded group to the take and its accounting."""
+        done: Future = Future()
+        done.set_result(None)
+        chosen.append((position, done, False))
+        decoded[position] = group
+        versions[version] = versions.get(version, 0) + 1
+        accounted[position] = (version, tokens)
+        source_groups[source] = source_groups.get(source, 0) + 1
+        source_tokens[source] = source_tokens.get(source, 0) + tokens
+        position_sources[position] = source
+
+    def _fill(self, target: int, end: int, rollout_id: int, floor: int | None, chosen: list, decoded: dict,
+              accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
+              position_sources: dict, skipped: dict | None = None) -> tuple[int, int, int, int]:
+        """Top the chosen groups up to ``target`` samples with whole groups selected
+        one by one, without waiting (what is not in the buffer yet is padded). The
+        first group that would overflow is carried over (``self._carry``) and the
+        round ends at its position, so the watermark never passes it untrained.
+        Returns ``(end, carried groups, padded samples, groups dropped as too small)``; the
+        groups passed over (too old, a fenced incarnation's, quarantined) are counted in
+        ``skipped`` like the main selection counts them."""
+        skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
+                                                       "quarantined": 0}
+        missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
+        dropped = 0
+        while missing > 0:
+            selected = self.buffer.select(self.consumer, 1)
+            if not selected:
+                break
+            item = selected[0]
+            end = self.buffer.read_cursor
+            if floor is not None and item.entry.behavior_version < floor:
+                skipped["stale"] += 1  # too old: consumed unread, as in the main selection
+                dispensed = _dispense_position(item.entry)
+                if dispensed is not None:
+                    skipped["stale_positions"].append(dispensed)
+                continue
+            if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+                skipped["fenced"] += 1
+                continue
+            source = source_key(item.entry.provenance, self._shard_at(item.position))
+            if self._quarantined(source, rollout_id):
+                skipped["quarantined"] += 1
+                continue
+            group = decode_group(self.buffer.read_payload(item.entry.payload_ref))
+            if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
+                dropped += 1
+                continue
+            if not finite_rewards(group):
+                skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
+                continue
+            position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
+            if len(group) > missing:
+                self._carry = (position, group, version, tokens, source, _dispense_position(item.entry))
+                return position, 1, missing, dropped
+            self._choose(position, group, version, tokens, source, chosen, decoded, accounted, versions,
+                         source_groups, source_tokens, position_sources)
+            missing -= len(group)
+        return end, 0, max(0, missing), dropped
+
+    def _drop_incomplete(self, chosen: list, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
+                         source_tokens: dict, position_sources: dict) -> int:
+        """Decode the chosen groups not yet decoded; drop (in place) those whose
+        sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a non-finite
+        reward (:func:`finite_rewards`, counted apart) and undo their accounting.
+        Returns the number dropped for their size. Their positions stay consumed (the
+        cursor moved past them)."""
+        fresh = [(position, read) for position, read, _ in chosen if position not in decoded]
+        low, high = MIN_GROUP_SAMPLES, int(self.group_size)
+        if not fresh:
+            return 0
+        self._settle([read for _, read in fresh])
+        drop: set[int] = set()
+        nonfinite = 0
+        for position, read in fresh:
+            group = decode_group(read.result())
+            if low <= len(group) <= high and finite_rewards(group):
+                decoded[position] = group
+                continue
+            if low <= len(group) <= high:
+                nonfinite += 1
+            drop.add(position)
+            version, tokens = accounted.pop(int(position))
+            versions[version] -= 1
+            if not versions[version]:
+                del versions[version]
+            source = position_sources.pop(int(position), None)
+            if source is not None:
+                source_groups[source] -= 1
+                source_tokens[source] -= tokens
+                if not source_groups[source]:
+                    del source_groups[source]
+                    source_tokens.pop(source, None)
+        if drop:
+            chosen[:] = [c for c in chosen if c[0] not in drop]
+        self._nonfinite += nonfinite
+        return len(drop) - nonfinite
+
+    def _shard_at(self, position: int) -> str | None:
+        shard_at = getattr(self.buffer, "shard_at", None)
+        return shard_at(int(position)) if callable(shard_at) else None
 
     def _settle(self, reads: list[Future]) -> float:
         """Wait for ``reads`` (their errors surface at ``result()``); the seconds waited."""
@@ -602,6 +955,7 @@ class BatchReader:
         """Continue at the restored cut's watermark (rounds after it are selected again)."""
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
+        self._carry = None  # its position is at or past the watermark: selected again
         return int(self.buffer.watermark)
 
 
@@ -610,6 +964,35 @@ _ACTIVE: dict[str, BatchReader] = {}
 # the mode of a convertible node's rollout function (``ConvertibleRolloutFn``):
 # SAMPLER generates into the node's shard, TRAINER reads the buffer
 _MODE: dict[str, str] = {CONVERTIBLE: SAMPLER}
+
+
+def r3_layer_layout(hf_checkpoint: str | None) -> tuple[int, int] | None:
+    """``(num_hidden_layers, first_k_dense_replace)`` of the checkpoint's (text) config,
+    or None when there is no readable config.json (R3 is then passed to Miles as is)."""
+    import json
+    from pathlib import Path
+
+    if not hf_checkpoint or not (Path(hf_checkpoint) / "config.json").is_file():
+        return None
+    config = json.loads((Path(hf_checkpoint) / "config.json").read_text())
+    text = config.get("text_config") or config
+    layers = text.get("num_hidden_layers")
+    if layers is None:
+        return None
+    return int(layers), int(text.get("first_k_dense_replace") or 0)
+
+
+def r3_num_experts(hf_checkpoint: str | None) -> int | None:
+    """The routed expert count of the checkpoint's (text) config, or None."""
+    import json
+    from pathlib import Path
+
+    if not hf_checkpoint or not (Path(hf_checkpoint) / "config.json").is_file():
+        return None
+    config = json.loads((Path(hf_checkpoint) / "config.json").read_text())
+    text = config.get("text_config") or config
+    value = text.get("n_routed_experts", text.get("num_experts"))
+    return None if value is None else int(value)
 
 
 def convertible_mode() -> str:
@@ -633,6 +1016,27 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
     return previous
 
 
+def reader_basis_version(weight_version: int | None, policy_token: str | None) -> int | None:
+    """The version a trainer's ``BatchReader.take`` measures policy age from.
+
+    The driver accepts the round against its ``published_version`` and hands
+    the rollout side exactly that version in the policy token
+    (``yeto:<published_version>:<hash>``, ``set_policy_token``); the reader
+    uses the same basis (:func:`yeto.rl.engine.policy_age.age_floor`). Miles'
+    ``RolloutFnInput.weight_version`` is only the fallback without a token: it
+    can lag the publication by one (the round's publication is announced to
+    Miles after the take), so a group the reader kept as exactly
+    ``max_policy_age`` old was one version past the driver's window."""
+    if policy_token:
+        from yeto.rl.engine.policy_age import token_version
+
+        version = token_version(policy_token)
+        if version is None:
+            raise SampleBufferRolloutError(f"malformed driver policy token {policy_token!r}")
+        return version
+    return None if weight_version is None else int(weight_version)
+
+
 def register_reader(reader: BatchReader) -> None:
     """Called by the reader rollout function in the rollout executor's process."""
     _ACTIVE[TRAINER] = reader
@@ -644,8 +1048,10 @@ def register_reader(reader: BatchReader) -> None:
 # A relay trainer's gate version set before its reader exists (the first
 # publication precedes the first rollout call, which builds the reader).
 _PENDING_RELAY_GATE: dict[str, int] = {}
-# Relay mode: the round and the gate version of the last take, on the rollout
-# args, for the trajectory evidence of that round (full_parameter.evidence).
+# Relay mode: the round and the gate version of the last take, for the
+# trajectory evidence of that round (full_parameter.evidence). Rollout-process
+# state under this key (adapters.miles.proc_state): upstream hands rollout
+# functions and hooks a frozen view of the args.
 EXTERNAL_CUT_ROUND_ATTR = "yeto_rl_external_cut_round"
 
 
@@ -685,6 +1091,138 @@ def executor_set_relay_gate_version(_executor: Any, version: int) -> int | None:
         _PENDING_RELAY_GATE[TRAINER] = int(version)
         return None
     return executor_set_gate_version(_executor, version)
+
+
+# A merged-lane synced trainer (not its own lane, not relay): merged release
+# version -> the release's policy hash, pushed by the driver at every publish
+# (executor_set_merged_releases). Its groups were generated by merged releases,
+# not by this island's publications, so the round's evidence names each
+# trajectory's release as an external merged cut (yeto.rl.engine.external_policy;
+# digest = the release's policy hash) and counts its age in merged versions.
+_MERGED_RELEASES: dict[int, str] = {}
+# where the rollout process re-reads the release records on a miss: a release
+# can reach a sampler (and its groups the buffer) before the driver's next push
+_MERGED_RELEASE_STORE: dict[str, str] = {}
+_MERGED_MODE: dict[str, bool] = {}  # set by the first push, also before any release exists
+
+
+def executor_set_merged_releases(_executor: Any, releases: Mapping[int, str],
+                                 gate_version: int, store: str | None = None,
+                                 release_dir: str | None = None) -> int:
+    """Runs INSIDE the rollout executor actor: record the merged releases the
+    driver knows and set the merged gate (kept until the reader exists, like the
+    relay gate). Returns how many releases are known."""
+    for version, policy_hash in releases.items():
+        _MERGED_RELEASES[int(version)] = str(policy_hash)
+    if store and release_dir:
+        _MERGED_RELEASE_STORE.update(store=str(store), release_dir=str(release_dir))
+    _MERGED_MODE[TRAINER] = True
+    executor_set_relay_gate_version(_executor, int(gate_version))
+    return len(_MERGED_RELEASES)
+
+
+def _refresh_merged_releases() -> None:
+    if not _MERGED_RELEASE_STORE:
+        return
+    from yeto.rl.engine.policy_release import PolicyReleaseStore
+    from yeto.rl.engine.resume import store_for
+
+    releases = PolicyReleaseStore(store_for(_MERGED_RELEASE_STORE["store"]),
+                                  release_dir=_MERGED_RELEASE_STORE["release_dir"])
+    for record in releases.records():
+        if record.derived_from is None and record.policy_hash:
+            _MERGED_RELEASES[int(record.version)] = str(record.policy_hash)
+
+
+def merged_release_mode() -> bool:
+    return bool(_MERGED_MODE.get(TRAINER))
+
+
+def stamp_merged_release_cuts(group: list[dict[str, Any]]) -> bool:
+    """Name every sample's oldest behavior version as the merged release cut that
+    generated it (sample metadata :data:`~yeto.rl.engine.external_policy.CUT_METADATA_KEY`).
+
+    Returns False, stamping nothing, for a group of a release the store already
+    pruned before this trainer saw it (a relaunched trainer's lane backlog: the
+    store keeps the newest few releases, the age gate may be wider): its cut
+    cannot be named, so the caller passes it over as too old. A release newer
+    than every known one is not visible yet and still raises."""
+    from yeto.rl.engine.buffer_payload import behavior_versions
+    from yeto.rl.engine.external_policy import CUT_METADATA_KEY, cut_record
+
+    cuts = []
+    for sample in group:
+        oldest = min(behavior_versions(sample))
+        if oldest not in _MERGED_RELEASES:
+            _refresh_merged_releases()
+        policy_hash = _MERGED_RELEASES.get(oldest)
+        if policy_hash is None:
+            later = [v for v in _MERGED_RELEASES if v > 0]
+            if oldest > 0 and later and oldest < min(later):
+                return False
+            raise SampleBufferRolloutError(
+                f"buffered group of merged release v{oldest}: that release is not known to "
+                f"this trainer (known: {sorted(_MERGED_RELEASES)})")
+        cuts.append((sample, cut_record(oldest, policy_hash)))
+    for sample, cut in cuts:
+        meta = sample.setdefault("metadata", {})
+        if not isinstance(meta, dict):
+            raise SampleBufferRolloutError("buffered sample metadata is not an object")
+        meta[CUT_METADATA_KEY] = cut
+    return True
+
+
+def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeReport,
+              actions: Mapping[str, Mapping[str, Any]], *, std_normalized: bool,
+              enabled: bool = True) -> tuple[list[tuple[int, list[dict[str, Any]]]], dict[str, Any]]:
+    """The per-source side of one take (yeto.rl.engine.xhw_guard): the groups with the
+    ``downweight`` actions applied, and the round metadata the driver's guard reads
+    (``buffer_source_tokens``, ``buffer_source_stats``, ``buffer_xhw_quarantined``).
+    Downweighting scales the centered rewards, which is the advantage scale only
+    without GRPO std normalization; with it the action is refused. ``enabled`` False
+    (``YETO_RL_XHW_GUARD`` unset): the groups unchanged and no metadata."""
+    if not enabled:
+        return list(groups), {}
+    out, by_source = [], {}
+    downweighted = 0
+    for position, group in groups:
+        source = getattr(report, "position_sources", {}).get(int(position))
+        action = (actions.get(source) or {}) if source is not None else {}
+        if action.get("action") == "downweight":
+            if std_normalized:
+                raise SampleBufferRolloutError(
+                    "xhw_guard downweight scales the centered rewards; GRPO std normalization "
+                    "cancels it (use action=quarantine, or turn std normalization off)")
+            group = downweight_group(group, float(action.get("weight", 1.0)))
+            downweighted += 1
+        by_source.setdefault(source or "unknown", []).extend(group)
+        out.append((position, group))
+    meta = {"buffer_source_tokens": {k: int(v) for k, v in getattr(report, "source_tokens", {}).items()},
+            "buffer_source_stats": {k: {**rollout_stats(v), "groups": report.source_groups.get(k, 0)}
+                                    for k, v in sorted(by_source.items())},
+            "buffer_xhw_quarantined": int(report.quarantined_groups),
+            "buffer_xhw_downweighted": downweighted}
+    return out, meta
+
+
+def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None) -> None:
+    """At the reader's start: ``YETO_RL_XHW_GUARD`` with ``action=downweight`` under GRPO
+    std normalization (Miles' default) is refused here, not at the first round the guard
+    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run)."""
+    from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
+
+    guard = XhwGuard.from_env(os.environ if environ is None else environ)
+    if guard is not None and guard.action == "downweight" and std_normalized:
+        raise SampleBufferRolloutError(
+            "YETO_RL_XHW_GUARD action=downweight scales the centered rewards; GRPO std "
+            "normalization (on) cancels it: use action=quarantine, or turn std normalization off")
+
+
+def executor_set_xhw_actions(_executor: Any, actions: Mapping[str, Mapping[str, Any]]) -> dict | None:
+    """Runs INSIDE the rollout executor actor: the xhw_guard actions the next takes
+    follow (None before the reader exists)."""
+    reader = _ACTIVE.get(TRAINER)
+    return None if reader is None else reader.set_xhw_actions(actions)
 
 
 def executor_set_gate_version(_executor: Any, version: int) -> int | None:

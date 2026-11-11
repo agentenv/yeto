@@ -169,7 +169,7 @@ def test_rl_image_default_is_the_ports_image(monkeypatch):
     ports = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(ports)
     assert ports.rl_image == MILES_NEXT_IMAGE
-    assert "ghcr.io/agentenv" not in ports.rl_image
+    assert "@sha256:" in ports.rl_image  # digest-pinned; the registry is YETO_IMAGE_REGISTRY (yeto.rl.image_registry)
     assert _island_task(ports, monkeypatch).resources.image_id == MILES_NEXT_IMAGE
     explicit = "docker:example/miles@sha256:" + "e" * 64
     pinned = _cli(("--rl-engine", "ports", "--rl-image", explicit))
@@ -432,7 +432,7 @@ class _Controller:
     async def start_update_weights(self):
         return SimpleNamespace(rollout_engines=[self.engine], snapshot_cell_id_to_hashes={"c0": "h"})
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.calls.append(("end_update",))
 
     async def abort_update_weights(self):

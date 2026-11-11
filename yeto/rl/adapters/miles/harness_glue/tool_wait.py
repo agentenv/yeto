@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from yeto.rl import tool_wait_workload as twl
+from yeto.rl.adapters.miles.ext_args import ext_attr
 
 
 async def generate(input: Any) -> Any:  # noqa: A002 - Miles GenerateFnInput protocol
@@ -18,7 +19,7 @@ async def generate(input: Any) -> Any:  # noqa: A002 - Miles GenerateFnInput pro
 
     delay = twl.tool_delay_s()
     if delay > 0 and not input.evaluation:
-        learner_id = int(getattr(input.args, "yeto_rl_learner_id", 0) or 0)
+        learner_id = int(ext_attr(input.args, "rl_learner_id", 0) or 0)
         await twl.tool_call(input.sample, delay=delay, board=twl._board(learner_id))
     sample = await stock_generate(input.args, input.sample, input.sampling_params,
                                   evaluation=input.evaluation)

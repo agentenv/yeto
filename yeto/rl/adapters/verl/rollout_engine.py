@@ -82,6 +82,7 @@ from yeto.rl.harness.gateway.records_env import (
     SAMPLING_ENV,
     TEMPLATE_ENV,
     TOKENIZER_ENV,
+    TRUST_REMOTE_CODE_ENV,
 )
 
 CALL_TIMEOUT_S = 1800.0
@@ -298,7 +299,8 @@ def records_proxy_from_env() -> Any:
                               card_model=os.environ.get(CARD_ENV, UNKNOWN), precision="bf16",
                               quant_scheme="bf16", topology=UNKNOWN)
     engine = VerlRolloutEngine(max_model_len=max_model_len, identity=identity)
-    template = ChatTemplate.load(template_name, tokenizer_path=tokenizer)
+    template = ChatTemplate.load(template_name, tokenizer_path=tokenizer,
+                                 trust_remote_code=os.environ.get(TRUST_REMOTE_CODE_ENV) == "1")
     return RecordsProxy(engine, template, model=model, signed_sampling=signed,
                         sampler_id="verl-rollout-records")
 

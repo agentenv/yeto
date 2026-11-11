@@ -22,15 +22,18 @@ Anything else is passed through to the events view. Missing values stay
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections import deque
 from typing import Any, Iterable
 
 from . import alerts as alerts_mod
+from . import async_rl
 from . import cost as cost_mod
 from . import sft as sft_mod
 
-FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "cost_tick"})
+FLEET_EVENTS = frozenset({"island_launch", "island_ready", "island_lost", "island_stop", "island_done",
+                          "cost_tick"})
 POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
 SYNCER_ISLAND_EVENTS = frozenset({"rl_fragment_push", "rl_policy_apply", "rl_pull_resend",
                                   "rl_member_publication"})
@@ -50,6 +53,10 @@ METRICS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("reward_p90", "reward p90", ("reward_p90",)),
     ("pg_loss", "pg_loss", ("pg_loss", "train_metrics.pg_loss", "train/pg_loss")),
     ("kl", "KL", ("mean_kl", "train_metrics.ppo_kl", "train_metrics.kl_loss", "train/train_rollout_kl")),
+    # async GRPO: the train-vs-rollout KL (a buffer step's PPO KL is 0 by construction)
+    ("kl_tr", "train-rollout KL", ("mean_kl", "train_metrics.train_rollout_kl", "mismatch.train_rollout_kl",
+                                   "train/train_rollout_kl")),
+    ("tis_clip", "TIS clipfrac", ("mismatch.tis_clipfrac", "train_metrics.tis_clipfrac", "train/tis_clipfrac")),
     ("entropy", "entropy", ("entropy", "train_metrics.entropy", "train_metrics.entropy_loss")),
     ("grad_norm", "grad_norm", ("grad_norm", "train_metrics.grad_norm", "train/grad_norm")),
     ("clip", "clip total", ("clip_fraction", "train_metrics.pg_clipfrac", "train/pg_clipfrac")),
@@ -57,6 +64,14 @@ METRICS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("clip_hi", "clip high side", ("train_metrics.pg_clipfrac_upper", "train_metrics.pg_clipfrac_high")),
     ("resp_len", "response len", ("resp_len_mean",)),
     ("tok_s", "tok/s", ("tok_per_s",)),
+    ("policy_age", "policy age mean", ("policy_age_mean",)),
+    ("policy_age_max", "policy age max", ("policy_age_max",)),
+    # score centering: the off-policy guard is the IS weight, not a PPO ratio clip
+    ("is_clip", "IS clipped tokens", ("train_metrics.sc_is_clipped", "train/sc_is_clipped")),
+    ("is_weight", "IS weight mean", ("train_metrics.sc_importance_weight", "train/sc_importance_weight")),
+    ("tail_ratio", "tail ratio", ("train_metrics.sc_tail_ratio", "train/sc_tail_ratio")),
+    # YETO_RL_NAN_SKIP: cumulative rounds skipped for a non-finite grad_norm (rl_round_trained)
+    ("nan_skipped", "NaN-skipped rounds", ("nan_skipped",)),
 )
 EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("loss", ("loss", "train_metrics.loss", "train/loss")),
@@ -68,6 +83,7 @@ EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("resp_p95", ("resp_len_p95",)),
     ("logprob_diff", ("train_metrics.train_rollout_logprob_abs_diff", "train/train_rollout_logprob_abs_diff")),
     ("train_step", ("train_step",)),
+    ("step_s", ("step_seconds",)),
 )
 
 
@@ -117,6 +133,8 @@ def classify(record: dict) -> str:
     event = record.get("event")
     if isinstance(event, str) and event.startswith("sft_"):
         return "sft"
+    if isinstance(event, str) and event.startswith(async_rl.POOL_PREFIX):
+        return "pool"
     if event in FLEET_EVENTS:
         return "fleet"
     if "kind" in record and "seq" in record and event is None:
@@ -136,6 +154,8 @@ NODE_SERIES_MAX = 20000
 NODE_SERIES_POINTS = 300
 # rl_timeline_span task -> page phase: R rollout / T training / S post-train sync / P publish
 SPAN_PHASES = {"generate": "R", "train": "T", "outer_sync": "S", "publish": "P"}
+# rl_driver_phase name -> rl_timeline_span task (derived spans)
+DRIVER_PHASE_TASK = {"sync": "outer_sync"}
 # rl_rollout_cutoff fields shown per round
 CUTOFF_KEYS = ("submitted_groups", "target_groups", "filtered_groups", "discarded_groups",
                "discarded_trajectories", "discarded_tokens", "discarded_unknown_groups", "mechanism")
@@ -147,7 +167,9 @@ LOAD_KEYS = ("kv_used_tokens", "kv_capacity_tokens", "queued_requests", "running
 UTIL_TRAJ_MAX = 400  # per-trajectory rows sent to the page (most recent)
 # Events only written once driver.run() is going (older tapes may lack rl_driver_start).
 DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
-                                   "rl_resource_sample", "rl_publication"})
+                                   "rl_resource_sample", "rl_publication",
+                                   # a sampler island runs no driver: its loop's events
+                                   "rl_sampler_start", "rl_sampler_round"})
 
 
 def _fmt_override_value(value: Any) -> str:
@@ -204,8 +226,13 @@ def _new_island(iid: str) -> dict:
         "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
         # cutoff per round, per-trajectory timing, load samples
         "cutoffs": {}, "trajs": [], "load": deque(maxlen=NODE_SERIES_MAX),
+        # rl_driver_phase marks (wall clock): phase spans when the tape has no rl_timeline_span
+        "phase_marks": [],
         # launch-preflight-guards 3.5: rl_island_override (negative-test island)
         "negative_test": None,
+        # store tape launches (tapes/<island>/<launch>/: one per trainer restart) and
+        # trainer_start_phase marks of the current launch
+        "launches": {}, "launch": None, "launch_ts": None, "start_phase": None, "start_phase_ts": None,
     }
 
 
@@ -240,10 +267,13 @@ class Reducer:
         self.label: str | None = None  # display label when compared (7.6)
         self.compare: list["Reducer"] = []  #
         self.sft = sft_mod.SftState()  # ms-swift SFT islands + syncer side streams (sft.py)
+        self._source_island: dict[str, str] = {}  # tape path -> the island its records name
+        self.async_ = async_rl.AsyncState()  # samplers / buffer / releases / NC pool (async_rl.py)
+        self._superseded = False  # the record being fed is from a superseded trainer launch
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
-             island: str | None = None, node: str | None = None) -> bool:
+             island: str | None = None, node: str | None = None, island_fixed: bool = False) -> bool:
         """Fold one record. Returns False when skipped as already consumed."""
         if source not in self.sources_seen and source != "-":
             self.sources_seen.append(source)
@@ -260,11 +290,24 @@ class Reducer:
             self.spot.append(_spot_row(record))
         kind = classify(record)
         self.counts[kind] = self.counts.get(kind, 0) + 1
-        ts = record_ts(record)
+        ts = record_ts(record) if kind != "pool" else async_rl.pool_ts(record)
         if ts is not None:
             self.max_ts = ts if self.max_ts is None else max(self.max_ts, ts)
             self.min_ts = ts if self.min_ts is None else min(self.min_ts, ts)
-        iid = _iid(record.get("island_id", record.get("learner_id"))) or island
+        iid = (_iid(island) if island_fixed and island is not None and kind == "learner" else None) \
+            or _iid(record.get("island_id", record.get("learner_id"))) or island \
+            or (_iid(record.get("sampler_id")) if kind == "learner" else None)
+        if record.get("event") in ("dashboard_source_lost", "dashboard_source_restored") and source.endswith(
+                ".source.jsonl"):
+            # a mirror's status file names the island by the mirror's --island label; the
+            # records of the mirrored tape (the same path without .source.jsonl) name it
+            iid = self._source_island.get(source[: -len(".source.jsonl")], iid)
+        elif kind == "learner" and iid is not None and source != "-":
+            self._source_island[source] = iid
+        self._superseded = False
+        launch = _store_launch(source)
+        if kind == "learner" and iid is not None and launch is not None:
+            self._superseded = self._launch(self.island(iid), launch, ts)
         if kind != "sft" and sft_mod.is_syncer_tape(record):
             # The syncer writes the same tape for RL and SFT runs: the SFT page
             # reads it too, but it alone does not make a run an SFT run.
@@ -348,6 +391,8 @@ class Reducer:
         stop = self.operator_stop()
         if stop is None or stop.get("time_unix") is None:
             return False
+        if stop.get("cause") == "teardown" and (isl["last_event_ts"] or 0) > stop["time_unix"] + 60:
+            return False  # an older launch's teardown.json: this island ran after it
         fails = [x["ts"] for x in isl["recovery_required"] if x.get("ts") is not None]
         if isl["lost_ts"] is not None:
             fails.append(isl["lost_ts"])
@@ -356,6 +401,31 @@ class Reducer:
     def feed_many(self, records: Iterable[dict], **kw: Any) -> None:
         for r in records:
             self.feed(r, **kw)
+
+    def _launch(self, isl: dict, launch: str, ts: float | None) -> bool:
+        """Note a record of store tape ``launch`` (``tapes/<island>/<launch>/``). A launch
+        that starts after the current one is a restart: the island's startup state starts
+        over. Returns True for a record of a superseded (older) launch, which must not
+        move the startup state of the current one."""
+        row = isl["launches"].get(launch)
+        if row is None:
+            row = isl["launches"][launch] = {"launch": launch, "first_ts": ts, "last_ts": ts}
+        elif ts is not None:
+            row["first_ts"] = ts if row["first_ts"] is None else min(row["first_ts"], ts)
+            row["last_ts"] = ts if row["last_ts"] is None else max(row["last_ts"], ts)
+        cur = isl["launches"].get(isl["launch"]) if isl["launch"] is not None else None
+        if cur is None:
+            isl["launch"], isl["launch_ts"] = launch, row["first_ts"]
+            return False
+        if launch == isl["launch"]:
+            return False
+        if row["first_ts"] is not None and (cur["first_ts"] is None or row["first_ts"] > cur["first_ts"]):
+            isl["launch"] = launch  # a restart: a new launch of the same island
+            isl.update({"driver_started": False, "startup_steps": {}, "startup_step": None,
+                        "startup_step_ts": None, "start_phase": None, "start_phase_ts": None,
+                        "launch_ts": row["first_ts"]})
+            return False
+        return True
 
     def island(self, iid: str) -> dict:
         isl = self.islands.get(iid)
@@ -380,15 +450,29 @@ class Reducer:
         if iid is None:
             return  # no island identity: never fabricate a "?" island
         isl = self.island(iid)
-        self._touch(isl, ts)
+        if not event.startswith("dashboard_"):  # the mirror's own status is not island activity
+            self._touch(isl, ts)
         isl["events_by_type"][event] = isl["events_by_type"].get(event, 0) + 1
         isl["recent"].append({"ts": ts, "type": event, "summary": _summary(r)})
+        self.async_.fold(r, iid, ts)
         if r.get("policy_version") is not None and event in (
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
-                "rl_round_cut", "rl_member_publication", "rl_resume"):
+                "rl_round_cut", "rl_member_publication", "rl_resume",
+                # a sampler's policy is the version it serves
+                "rl_sampler_round", "rl_sampler_policy_loaded"):
             isl["policy_version"] = r.get("policy_version")
         if event == "rl_island_hardware":  # decoupling 7.7: recorded, never a refusal reason
             isl["hardware"] = {k: r.get(k) for k in ("compat_group", "driver_version", "cuda_version")}
+        if getattr(self, "_superseded", False) and (
+                event in ("rl_driver_start", "rl_startup_step", "trainer_start_phase", "rl_heartbeat")
+                or event in DRIVER_RUNNING_EVENTS):
+            return  # a stopped launch's late records: not this island's current state
+        if event == "remote_code_prewarm" and isinstance(r.get("nodes"), list):
+            isl["nodes_seen"] = max(len(r["nodes"]), isl.get("nodes_seen") or 0)
+        if event == "trainer_start_phase" and r.get("phase") is not None:
+            isl["start_phase"] = str(r.get("phase"))
+            if ts is not None:
+                isl["start_phase_ts"] = ts
         if event == "rl_driver_start" and isl.get("driver_start_ts") is None:
             isl["driver_start_ts"] = ts
         if event == "rl_driver_start":
@@ -397,6 +481,8 @@ class Reducer:
             isl["driver_started"] = True
         if event == "rl_driver_phase":
             isl["phase"] = r.get("phase")
+            if ts is not None and len(isl["phase_marks"]) < NODE_SERIES_MAX:
+                isl["phase_marks"].append((ts, r.get("phase"), r.get("rollout_id")))
         elif event == "rl_startup_step":
             step = r.get("step")
             if step is not None:
@@ -421,6 +507,26 @@ class Reducer:
                 isl["pubs"][pv] = ts
         elif event == "rl_resource_sample":
             isl["resource"] = _resource(r, ts)
+            gl = [g for g in (r.get("gpus") or []) if isinstance(g, dict)]
+            if gl:
+                isl["gpus_per_node"] = max(len(gl), isl.get("gpus_per_node") or 0)
+                isl["gpu_mem_total_mb"] = finite(gl[0].get("mem_total_mb")) or isl.get("gpu_mem_total_mb")
+            gm = [finite(g.get("mem_used_mb")) for g in isl["resource"]["gpus"]]
+            gm = [g for g in gm if g is not None]
+            if ts is not None and gm:  # NVML samples of the driver's node (no host probe needed)
+                ser = isl["node_series"].setdefault("nvml", deque(maxlen=NODE_SERIES_MAX))
+                ser.append([ts, round(sum(gm) / len(gm) / 1024, 2), isl["resource"]["util_pct"]])
+        elif event == "rl_rollout_carry_over":
+            self._derived_resp_len(isl, r)
+        elif event == "rl_round_phases" and isinstance(r.get("rollout_id"), int):
+            self._point(isl, r["rollout_id"] + 1, {"round_s": finite(r.get("wall_seconds")),
+                                                   "tokens": finite(r.get("trained_tokens"))})
+        elif event == "rl_eval":
+            v = next((finite(r[k]) for k in sorted(r) if k.startswith("eval/") and finite(r.get(k)) is not None
+                      and any(w in k for w in ("reward", "acc", "pass", "score"))), None)
+            if v is not None and ts is not None:
+                isl.setdefault("evals", []).append([ts, v, next(k for k in sorted(r) if finite(r.get(k)) == v
+                                                                 and k.startswith("eval/"))])
         elif event == "rl_rollout_cutoff":
             rid = r.get("rollout_id")
             if isinstance(rid, int):
@@ -476,6 +582,35 @@ class Reducer:
                 elif event == "rl_pull_resend":
                     self.resends[step] = self.resends.get(step, 0) + 1
 
+    def _derived_resp_len(self, isl: dict, r: dict) -> None:
+        """Mean response length of a round whose rl_round_trained has no batch
+        summary: the carry-over record's trained response tokens over the round's
+        trained samples (both counted on the trained batch)."""
+        rid = r.get("rollout_id")
+        if not isinstance(rid, int):
+            return
+        row = (self.async_.trainer.get(isl["id"]) or {}).get("rounds", {}).get(rid) or {}
+        toks, n = finite(r.get("trained_response_tokens")), finite(row.get("trained_samples"))
+        pt = isl["points"].get(rid + 1, {})
+        if toks is not None and n and pt.get("resp_len") is None:
+            self._point(isl, rid + 1, {"resp_len": toks / n, "resp_len_derived": True})
+
+    def phase_spans(self, isl: dict) -> list[dict]:
+        """rl_timeline_span spans; without them (observation off) the wall-clock
+        spans between consecutive rl_driver_phase marks: a phase lasts until the next
+        mark. A publish mark has no rollout_id (round_records attaches it by time)."""
+        if isl["spans"]:
+            return isl["spans"]
+        out = []
+        marks = isl["phase_marks"]
+        for (t, phase, rid), nxt in zip(marks, marks[1:]):
+            task = SPAN_PHASES.get(DRIVER_PHASE_TASK.get(phase, phase))
+            if task is None or nxt[0] < t:
+                continue
+            out.append({"phase": task, "rollout_id": rid if isinstance(rid, int) else None,
+                        "start": t, "end": nxt[0], "derived": True})
+        return out
+
     def _span(self, isl: dict, r: dict) -> None:
         """Keep phase spans on the wall clock. ``start``/``end`` are the driver's
         monotonic seconds; the record's ``time_unix`` is written at ``end``."""
@@ -491,8 +626,9 @@ class Reducer:
         A publish span has no rollout_id: it belongs to the round whose sync it follows
         (it publishes policy rollout_id+1). Missing values stay None."""
         rounds: dict[int, dict] = {}
-        pubs = sorted((s for s in isl["spans"] if s["phase"] == "P"), key=lambda s: s["start"])
-        for sp in isl["spans"]:
+        spans = self.phase_spans(isl)
+        pubs = sorted((s for s in spans if s["phase"] == "P"), key=lambda s: s["start"])
+        for sp in spans:
             rid = sp["rollout_id"]
             if sp["phase"] != "P" and isinstance(rid, int):
                 rounds.setdefault(rid, {})[sp["phase"]] = [sp["start"], sp["end"]]
@@ -513,7 +649,10 @@ class Reducer:
                 "p10": pt.get("reward_p10"), "p50": pt.get("reward_p50"), "p90": pt.get("reward_p90"),
                 "trunc": pt.get("trunc"), "logprob_diff": pt.get("logprob_diff"),
                 "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
-                "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"),
+                "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"), "kl_tr": pt.get("kl_tr"),
+                "tis_clip": pt.get("tis_clip"), "resp_derived": bool(pt.get("resp_len_derived")),
+                "ts": pt.get("t"), "lr": pt.get("lr"), "step_s": pt.get("step_s"), "round_s": pt.get("round_s"),
+                "tokens": pt.get("tokens"),
                 "phases": ph, "dur": {k: round(v[1] - v[0], 1) for k, v in ph.items()},
                 "discarded_trainings": self.discarded_trainings(isl, rid),
             })
@@ -621,12 +760,18 @@ class Reducer:
                 "driver_start_ts": isl.get("driver_start_ts") or (starts[0] if starts else None),
                 "cells": len(isl["cells"] or []), "hardware": isl.get("hardware"),
                 "transactions": len(isl["tx_order"]), "ray_embed": self.ray_embed(isl, self.island_ids().index(iid)),
+                "role": self.async_.role(iid), "gpu_mem_note": gpu_mem_note(isl),
+                "evals": list(isl.get("evals") or [])[-500:],
+                "hbm_total_gib": _hbm_total_gib(isl), "last_ts": isl["last_event_ts"],
             }
         usage = {"syncer": self.counts["syncer"] > 0, "journal": self.counts["journal"] > 0,
                  "cells": any(v["cells"] for v in isl_extra.values()),
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
         view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
                 "label": self.label, "spot": list(self.spot)}
+        asy = self.async_.view()
+        if asy is not None:
+            view["async"] = asy
         sft = self.sft_view(now)
         if sft is not None:
             view["sft"] = sft
@@ -661,6 +806,9 @@ class Reducer:
                 values["tok_s_derived"] = True
         elif values.get("tok_s") is not None:
             values["tok_s_derived"] = False  # measured tok_per_s wins over the derived estimate
+        if values.get("lr") is None and isinstance(r.get("applied_lrs"), list) and r["applied_lrs"]:
+            values["lr"] = finite(r["applied_lrs"][0])
+        values["t"] = record_ts(r)  # wall clock of the round (the metrics page plots over time)
         if nonfinite_seen(r, ("grad_norm", "train_metrics.grad_norm", "loss", "pg_loss")):
             isl["nonfinite"].append(x)
         self._point(isl, x, values)
@@ -807,7 +955,7 @@ class Reducer:
             if isl["open_ts"] is None:
                 isl["open_ts"] = ts
             isl["stop_ts"] = None
-        elif event in ("island_lost", "island_stop") and ts is not None:
+        elif event in ("island_lost", "island_stop", "island_done") and ts is not None:
             if event == "island_lost":
                 isl["lost_ts"] = ts
             else:
@@ -815,6 +963,9 @@ class Reducer:
             if isl["open_ts"] is not None:
                 isl["closed_s"] += max(0.0, ts - isl["open_ts"])
                 isl["open_ts"] = None
+
+    def _feed_pool(self, r: dict, iid: str | None, ts: float | None) -> None:
+        self.async_.fold_pool(r)
 
     def _feed_sft(self, r: dict, iid: str | None, ts: float | None) -> None:
         self.sft.fold(r, ts)
@@ -884,7 +1035,14 @@ class Reducer:
         age = (now - last_any) if last_any is not None else None
         hb_age = (now - isl["last_heartbeat_ts"]) if isl["last_heartbeat_ts"] is not None else None
         res = isl["resource"] or {}
-        starting = not isl["driver_started"] and not isl["finalized"] and isl["fleet_state"] not in ("lost", "stop")
+        role = self.async_.role(isl["id"])
+        ended = isl["fleet_state"] in ("lost", "stop", "done")
+        starting = not isl["driver_started"] and not isl["finalized"] and not ended
+        samp = self.async_.sampler_state(isl["id"]) if role == "sampler" else None
+        if samp is not None:
+            # a sampler is starting until its first round (engine load + checks + the
+            # first generation write nothing for minutes)
+            starting = not samp["started_rounds"] and not samp["ended"] and not ended
         if starting and isl["ready_ts"] is not None:
             # A container that is still loading weights may have written nothing yet:
             # count the startup age from island_ready as well.
@@ -892,7 +1050,34 @@ class Reducer:
             age = now - ref
         startup_s = (now - min(t for t in (isl["ready_ts"], isl["first_ts"]) if t is not None)
                      if starting and (isl["ready_ts"] is not None or isl["first_ts"] is not None) else None)
+        if starting and len(isl["launches"]) > 1 and isl["launch_ts"] is not None:
+            startup_s = now - isl["launch_ts"]  # a restarted trainer: since its current launch
+        stage = self._startup_stage(isl, now) if starting else None
+        # the current step began at the last startup step / start phase mark (of this launch)
+        step_ref = max([t for t in (isl["startup_step_ts"], isl["start_phase_ts"]) if t is not None], default=None) \
+            or (isl["launch_ts"] if len(isl["launches"]) > 1 else None) or isl["first_ts"]
         stopped = self.stopped_by_us(isl)
+        waiting_why = samp["waiting"] if samp else None
+        waiting = bool(waiting_why) or (bool(isl["recent"]) and isl["recent"][-1]["type"] == "rl_sampler_backlog_full")
+        left = self._trainer_left(isl)
+        pool = self.async_.pool_exit(isl["id"], after=isl["last_event_ts"]) if role == "sampler" else None
+        if left is None and pool is not None and pool["status"] != "done":
+            left = {"ts": pool["ts"], "reason": pool["event"].replace("nc_elastic_", "") + (
+                f": {pool['why']}" if pool.get("why") else ""), "source": "nc pool", "lost": pool["status"] == "lost"}
+        sl = isl["source_lost"]
+        if left is None and sl and not sl.get("recovered") and sl.get("ts") is not None \
+                and (isl["last_event_ts"] or 0) <= sl["ts"] + STOP_SLACK_S and not isl["finalized"]:
+            # the follow of its tape broke and nothing arrived since: the node is gone for this page
+            left = {"ts": sl["ts"], "reason": "tape source lost: " + str(sl.get("error") or "")[:120],
+                    "source": "mirror", "lost": True}
+        role = role or self._guess_role(isl)
+        # no heartbeats: the island's own cadence (round / generation / load times) sets
+        # how long a quiet island is still healthy
+        gap = self.async_.expected_gap_s(isl["id"])
+        warn_s = self.thresholds["heartbeat_warn_s"]
+        if not isl["heartbeat_seen"] and gap is not None:
+            warn_s = max(warn_s, gap)
+        trainers_done = role == "sampler" and self._trainers_done()
         if stopped and not isl["finalized"]:
             status = "stopped"
             starting = False
@@ -900,11 +1085,32 @@ class Reducer:
             status = "recovery"
         elif isl["fleet_state"] == "lost":
             status = "lost"
-        elif isl["finalized"] or isl["fleet_state"] == "stop":
+        elif left is not None and not isl["finalized"]:
+            # left the run before finishing (island_leave, or the NC pool released / lost its node)
+            status = "lost" if left.get("lost") else "left"
+            starting = False
+        elif pool is not None and pool["status"] == "done":
             status = "done"
+            starting = False
+        elif role == "unrecognized":
+            status = "unknown"  # a tape whose records name no trainer / sampler event
+            starting = False
+        elif isl["finalized"] or isl["fleet_state"] in ("stop", "done") or (samp and samp["ended"]):
+            status = "done"
+        elif trainers_done:
+            status = "done"  # a sampler that runs until its trainers end
+            starting = False
+        elif waiting:
+            status = "waiting"
+            starting = False
         elif starting and age is not None:
-            status = "stale" if age > self.thresholds["startup_warn_s"] else "starting"
-        elif age is not None and age > self.thresholds["heartbeat_warn_s"]:
+            # loading (weights, Ray, engine, first generation) is not stale: the
+            # startup alerts report a slow start instead
+            status = "starting"
+        elif age is not None and not isl["heartbeat_seen"] and gap is not None \
+                and age > async_rl.LOST_FACTOR * warn_s:
+            status = "lost"  # silent for 3x its own cadence: counted as gone
+        elif age is not None and age > warn_s:
             status = "stale"
         elif age is None:
             status = "unknown"
@@ -914,14 +1120,23 @@ class Reducer:
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
             "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),
             "stopped_by_us": stopped, "starting": starting, "startup_s": _r(startup_s), "driver_started": isl["driver_started"],
+            # a sampler waiting at its backlog cap writes nothing until the trainers read
+            "waiting_backlog": waiting, "waiting_reason": waiting_why or ("backlog full" if waiting else None),
+            "role": role, "left": left, "stale_after_s": _r(warn_s),
+            "startup_slow": bool(starting and age is not None and age > (stage or {}).get(
+                "warn_s", self.thresholds["startup_warn_s"])),
+            # the current startup stage (trainer_start_phase / rl_startup_step) and its thresholds
+            "startup_stage": stage,
+            "launch": isl["launch"],
+            "launches": [{**v, "state": "current" if k == isl["launch"] else "superseded"}
+                         for k, v in sorted(isl["launches"].items(), key=lambda kv: kv[1]["first_ts"] or 0)],
             "nodes": [isl["nodes"][k] for k in sorted(isl["nodes"], key=lambda x: int(x) if x.isdigit() else 0)],
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
             "startup_steps": {k: {"seconds": v["seconds"], "step_s": v["step_s"]}
                               for k, v in isl["startup_steps"].items()},
             "startup_step": isl["startup_step"],
-            "startup_step_age_s": _r(now - (isl["startup_step_ts"] or isl["first_ts"]))
-            if starting and (isl["startup_step_ts"] or isl["first_ts"]) is not None else None,
+            "startup_step_age_s": _r(now - step_ref) if starting and step_ref is not None else None,
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
             "phase": isl["phase"], "staleness": isl["staleness"], "contribution": isl["contribution"],
             "gpu_util_pct": res.get("util_pct"), "mem_pct": res.get("mem_pct"),
@@ -934,6 +1149,82 @@ class Reducer:
             "segments": self.resume_segments(isl),
             "negative_test": isl["negative_test"],
         }
+
+    def infer_hardware(self) -> None:
+        """Cloud / accelerator / count of an island that no fleet.jsonl record names (a
+        store-only run): a sampler from its rl_sampler_start provenance (card model,
+        tpN) and the NC pool naming its shard; a trainer from its tape launch dir
+        (``l0-modal-...``), its NVML samples (per-GPU memory -> model, GPUs per node)
+        and the node count of remote_code_prewarm. Marked ``hw_inferred``."""
+        pool_shards = {str(p.get("shard")) for p in self.async_.pool if p.get("shard") is not None}
+        for iid, isl in self.islands.items():
+            if isl["cloud"] is not None and isl["gpu"] is not None and not isl.get("hw_inferred"):
+                continue
+            if self.async_.role(iid) == "sampler":
+                prov = (self.async_.sampler.get(iid) or {}).get("provenance") or {}
+                m = re.search(r"tp(\d+)", str(prov.get("topology") or ""))
+                hw = {"cloud": "nc" if iid in pool_shards else None, "gpu": prov.get("card_model"),
+                      "gpus": int(m.group(1)) if m else None}
+            elif isl["launch"] is not None or isl.get("gpu_mem_total_mb"):
+                per_node, mem = isl.get("gpus_per_node"), isl.get("gpu_mem_total_mb")
+                hw = {"cloud": "modal" if "-modal-" in f"-{isl['launch'] or ''}" else None,
+                      "gpu": _gpu_from_mem(mem),
+                      "gpus": per_node * max(1, isl.get("nodes_seen") or 1) if per_node else None}
+            else:
+                continue
+            for k, v in hw.items():
+                if v is not None and (isl[k] is None or isl.get("hw_inferred")):
+                    isl[k] = v
+                    isl["hw_inferred"] = True
+
+    def _startup_stage(self, isl: dict, now: float) -> dict:
+        """What a starting island is doing now and how long it may stay quiet: the actor
+        init stage (model build + weight load, K3.1 mbridge ~22 min with no log line)
+        gets ``startup_init_*`` thresholds instead of ``startup_*``."""
+        th = self.thresholds
+        phase, step = isl["start_phase"], isl["startup_step"]
+        ts = max([t for t in (isl["start_phase_ts"], isl["startup_step_ts"]) if t is not None], default=None)
+        init = phase in INIT_STAGE_PHASES or step in INIT_STAGE_STEPS
+        if phase is not None and (isl["start_phase_ts"] or 0) >= (isl["startup_step_ts"] or 0):
+            label = START_STAGE.get(phase, f"after {phase}")
+        elif step is not None:
+            from .alerts import _next_startup_step  # noqa: PLC0415
+            label = f"waiting for {_next_startup_step(step)}"
+        else:
+            label = "starting"
+        return {"phase": phase, "step": step, "label": label, "init": init,
+                "since_ts": ts, "age_s": _r(now - ts) if ts is not None else None,
+                "warn_s": th["startup_init_warn_s"] if init else th["startup_warn_s"],
+                "severe_s": th["startup_init_severe_s"] if init else th["startup_severe_s"]}
+
+    TRAINER_HINTS = ("rl_driver_", "trainer_start_", "rl_round_", "rl_local_round", "rl_publication",
+                     "rl_heartbeat", "rl_policy_release", "rl_engine_selected", "rl_learner_")
+
+    def _guess_role(self, isl: dict) -> str | None:
+        """Role from the tape's records, never from a file name: trainer events make a
+        trainer; a fleet.jsonl island with no tape yet stays None (a launcher island);
+        anything else (only dashboard / unknown events) is ``unrecognized``."""
+        types = isl["events_by_type"]
+        if any(t.startswith(self.TRAINER_HINTS) for t in types):
+            return "trainer"
+        if isl["fleet_state"] is not None or not types:
+            return None
+        return "unrecognized"
+
+    def _trainers_done(self) -> bool:
+        ids = [i for i, role in self.async_.roles.items() if role == "trainer" and i in self.islands]
+        return bool(ids) and all(
+            self.islands[i]["finalized"] or self.islands[i]["fleet_state"] in ("stop", "done", "lost")
+            or _clean_leave(self._trainer_left(self.islands[i])) for i in ids)
+
+    def _trainer_left(self, isl: dict) -> dict | None:
+        """The island_leave of the island's current launch: a leave older than the
+        current launch belongs to a launch that a restart replaced."""
+        left = self.async_.trainer_left(isl["id"])
+        if left and left.get("ts") is not None and isl.get("launch_ts") is not None \
+                and len(isl["launches"]) > 1 and left["ts"] < isl["launch_ts"]:
+            return None
+        return left
 
     def series(self, isl: dict) -> dict:
         out: dict[str, list] = {}
@@ -959,6 +1250,7 @@ class Reducer:
 
     def cost(self, now: float) -> dict:
         self.apply_run_host_shape()
+        self.infer_hardware()
         return cost_mod.cost_view(self, now)
 
     def overview(self, *, live: bool = False, now: float | None = None) -> dict:
@@ -967,7 +1259,9 @@ class Reducer:
         cost = self.cost(now)
         cards = [self._island_card(self.islands[k], now) for k in self.island_ids()]
         alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards)
-        n_bad = sum(1 for c in cards if c["status"] in ("stale", "lost", "recovery"))
+        torn_down = (self.operator_stop() or {}).get("cause") == "teardown"
+        n_bad = sum(1 for c in cards if c["status"] in ("stale", "recovery")
+                    or (c["status"] == "lost" and not torn_down))  # after teardown a lost node is expected
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
         stop = self.operator_stop()
         if not cards:
@@ -1103,9 +1397,69 @@ def modal_host_shape(args: dict) -> dict | None:
     return {"cpus": cpu * nodes, "memory_gib": mem * nodes}
 
 
+GPU_MEM_HOW = ("launch with --rl-resource-sample-interval <seconds> (trainer NVML, rl_resource_sample) "
+               "or set YETO_MODAL_HOSTMEM_SAMPLE_S=<seconds> (Modal per-node probe, modal_host_sample)")
+
+
+def _hbm_total_gib(isl: dict) -> float | None:
+    gpus = (isl["resource"] or {}).get("gpus") or []
+    tot = [finite(g.get("mem_total_mb")) for g in gpus]
+    tot = [t for t in tot if t]
+    return round(max(tot) / 1024, 1) if tot else None
+
+
+def gpu_mem_note(isl: dict) -> str | None:
+    """Why the GPU memory chart of an island is empty (None when it has data)."""
+    if isl["node_series"]:
+        return None
+    res = isl["resource"]
+    if res and res.get("available") is False:
+        return ("rl_resource_sample reported unavailable" + (f" ({res['reason']})" if res.get("reason") else "")
+                + ": the island's image lacks the card telemetry library (NVML: pynvml; ROCm: amdsmi)")
+    return "not sampled: " + GPU_MEM_HOW
+
+
 def _recovered_after(isl: dict) -> bool:
     last = isl["recovery_required"][-1]["ts"] or 0
     return any(r.get("result") == "RECOVERED" and (r.get("ts") or 0) > last for r in isl["reconfig"])
+
+
+# per-GPU memory (NVML mem_total_mb) -> accelerator model, largest first
+_GPU_BY_MEM = ((250_000, "B300"), (170_000, "B200"), (130_000, "H200"), (75_000, "H100"))
+
+
+def _gpu_from_mem(mb: float | None) -> str | None:
+    if not mb:
+        return None
+    return next((name for floor, name in _GPU_BY_MEM if mb >= floor), None)
+
+
+# island_leave reasons that end a run on purpose; a failed trainer (INFRA_FAILED ...)
+# is relaunched, so its samplers keep running and are not "done"
+CLEAN_LEAVE = frozenset({"STOPPED", "DONE", "FINISHED", "COMPLETED", "DRAINED"})
+
+
+def _clean_leave(left: dict | None) -> bool:
+    return bool(left) and str(left.get("reason") or "").upper() in CLEAN_LEAVE
+
+
+def _store_launch(source: str) -> str | None:
+    """``<label>:<island>/<launch>`` (store_tapes source) -> ``<launch>``; None otherwise.
+    Only the trainer's tape directory is one per launch (``l0-<host>-<utc>``); a sampler's
+    folder outlives its in-place restarts (rl_sampler_join carries those)."""
+    head, sep, rest = source.partition(":")
+    if not sep or "/" not in rest or rest.startswith("/"):
+        return None
+    island, _, launch = rest.partition("/")
+    return launch if island == "trainer" and launch and "/" not in launch else None
+
+
+# startup stages: (label, trainer_start_phase / rl_startup_step that ends it)
+START_STAGE = {"submitted": "container start", "container_ready": "island setup", "setup_done": "Ray start",
+               "ray_ready": "actor import", "actor_import_done": "actor init (model + weights load)",
+               "actor_init_done": "first step"}
+INIT_STAGE_PHASES = frozenset({"actor_import_done"})
+INIT_STAGE_STEPS = frozenset({"engine_ready"})  # waiting for weights_loaded
 
 
 def _r(v: float | None) -> float | None:
@@ -1114,7 +1468,8 @@ def _r(v: float | None) -> float | None:
 
 def _resource(r: dict, ts: float | None) -> dict:
     if r.get("available") is False:
-        return {"available": False, "ts": ts, "util_pct": None, "mem_pct": None, "gpus": []}
+        return {"available": False, "ts": ts, "util_pct": None, "mem_pct": None, "gpus": [],
+                "reason": r.get("reason")}
     gpus = [g for g in r.get("gpus") or [] if isinstance(g, dict)]
     utils = [finite(g.get("util_pct")) for g in gpus]
     utils = [u for u in utils if u is not None]

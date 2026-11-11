@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -32,8 +33,10 @@ from yeto.rl.agentic import AgentTask, HarnessConfigError, TrialVerdict
 from yeto.rl.agentic.trust import check_agent_env, task_dir
 
 from ...agentic.outcome import POLICY_LIMIT_EXCEPTIONS
-from .pins import CODEX_VERSION
+from .capacity import SandboxLimits, process_limits
+from .pins import CODEX_VERSION, PI_VERSION
 from .codex_provider import use_yeto_codex
+from .pi_config import PI_PROCESS_ENV, PROVIDER_ID as PI_PROVIDER_ID, use_yeto_pi
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +46,50 @@ TrialConfigBuilder = Callable[[AgentTask, str], Any]
 # (Harbor unchanged).  Key = ``AgentTask.provider``.
 CUSTOM_PROVIDERS: Mapping[str, str] = {
     "boat": "yeto.rl.harness.harbor.boat_env:BoatEnvironment",
+    # Harbor's docker environment on the daemon of DOCKER_HOST (another host)
+    "remote-docker": "yeto.rl.harness.harbor.remote_docker_env:RemoteDockerEnvironment",
 }
+
+# A deployment's own sandbox implementations: ``{"name": "module:Class"}``
+# (a Harbor ``BaseEnvironment`` subclass).  A task names the provider by its
+# key or by the ``module:Class`` itself; either must be registered here, so a
+# task row can never make the trial process import a module of its choice.
+PROVIDERS_ENV = "HARBOR_PROVIDERS"
+_IMPORT_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def registered_providers(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """:data:`CUSTOM_PROVIDERS` plus ``HARBOR_PROVIDERS`` (a JSON object name -> ``module:Class``)."""
+    environ = os.environ if environ is None else environ
+    raw = str(environ.get(PROVIDERS_ENV, "") or "").strip()
+    try:
+        extra = json.loads(raw) if raw else {}
+    except ValueError as exc:
+        raise HarnessConfigError(f"{PROVIDERS_ENV} must be a JSON object: {exc}") from exc
+    if not isinstance(extra, dict):
+        raise HarnessConfigError(f"{PROVIDERS_ENV} must be a JSON object name -> module:Class")
+    for name, path in extra.items():
+        if not isinstance(path, str) or not _IMPORT_PATH.match(path):
+            raise HarnessConfigError(f"{PROVIDERS_ENV}[{name!r}] must be module:Class, got {path!r}")
+        if name in CUSTOM_PROVIDERS and CUSTOM_PROVIDERS[name] != path:
+            raise HarnessConfigError(f"{PROVIDERS_ENV} may not redefine the built-in provider {name!r}")
+    return {**CUSTOM_PROVIDERS, **extra}
+
+
+def provider_import_path(provider: str, environ: Mapping[str, str] | None = None) -> str | None:
+    """The ``module:Class`` of a provider Harbor does not ship, None for Harbor's own.
+
+    ``provider`` is a registered name or a registered ``module:Class``; an
+    unregistered ``module:Class`` is refused (:data:`PROVIDERS_ENV`)."""
+    registry = registered_providers(environ)
+    if provider in registry:
+        return registry[provider]
+    if ":" in provider:
+        if provider in registry.values():
+            return provider
+        raise HarnessConfigError(f"provider {provider!r} is not registered; add it to {PROVIDERS_ENV} "
+                                 '(e.g. {"my-sandbox": "my_pkg.env:MyEnvironment"})')
+    return None
 
 # The agent sees a dummy key: the endpoint is yeto's recorder / Miles' session
 # server, which does not authenticate the agent.
@@ -63,6 +109,9 @@ class HarborSettings:
     provider_kwargs: Mapping[str, Any] = field(default_factory=dict)
     timeout_multiplier: float = 1.0
     setup_retries: int = 0  # HarborHarness retries of failures before the agent ran
+    # The records proxy's signed per-turn max_tokens; agents that send max_tokens
+    # on every call (pi) must send this value.  Set by the agentic round.
+    turn_max_tokens: int | None = None
 
     @classmethod
     def from_env(cls) -> HarborSettings:
@@ -112,12 +161,16 @@ def agent_env(agent: str, endpoint: str) -> dict[str, str]:
 
     yeto's codex agent (:mod:`.codex_agent`) writes ``OPENAI_BASE_URL`` into the
     ``yeto`` model provider in ``$CODEX_HOME/config.toml``.  Other OpenAI-protocol agents read one of the two
-    names.  Agents with another protocol (claude-code) are not wired here yet.
+    names; yeto's pi agent (:mod:`.pi_agent`) writes it into pi's ``models.json``
+    and runs pi offline (:data:`.pi_config.PI_PROCESS_ENV`).  Agents with another
+    protocol (claude-code) are not wired here yet.
     """
     if agent == "claude-code":
         raise HarnessConfigError("claude-code needs an Anthropic endpoint; not wired on the yeto path")
-    return check_agent_env({"OPENAI_BASE_URL": endpoint, "OPENAI_API_BASE": endpoint,
-                            "OPENAI_API_KEY": AGENT_API_KEY})
+    env = {"OPENAI_BASE_URL": endpoint, "OPENAI_API_BASE": endpoint, "OPENAI_API_KEY": AGENT_API_KEY}
+    if agent == "pi":
+        env.update(PI_PROCESS_ENV)
+    return check_agent_env(env)
 
 
 def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings) -> Any:
@@ -131,29 +184,35 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
 
     try:
         path = task_dir(settings.tasks_dir, task)
-        if task.provider in CUSTOM_PROVIDERS:
-            env_target: dict[str, Any] = {"import_path": CUSTOM_PROVIDERS[task.provider]}
+        import_path = provider_import_path(task.provider)
+        if import_path is not None:
+            env_target: dict[str, Any] = {"import_path": import_path}
         else:
             env_target = {"type": EnvironmentType(task.provider)}
     except (FileNotFoundError, ValueError) as exc:  # TrustViolation (escape) is not caught: it stops the run
         raise HarnessConfigError(str(exc)) from exc
     kwargs: dict[str, Any] = {}
-    version = task.agent_version or (CODEX_VERSION if task.agent == "codex" else None)
+    version = task.agent_version or {"codex": CODEX_VERSION, "pi": PI_VERSION}.get(task.agent)
     if version is not None:
         kwargs["version"] = version
     if task.agent == "codex":
         kwargs.update(CODEX_KWARGS)
     if task.budget.max_seq_len is not None and task.agent.startswith("terminus"):
         kwargs["max_seq_len"] = task.budget.max_seq_len
+    # pi: Harbor's ``--provider`` is the model-name prefix; ``yeto`` is the
+    # provider pi_config writes (and Harbor copies no host key for it).
+    model_provider = PI_PROVIDER_ID if task.agent == "pi" else "openai"
     agent = AgentConfig(
         name=task.agent,
-        model_name=f"openai/{task.model_name}",
+        model_name=f"{model_provider}/{task.model_name}",
         override_timeout_sec=task.budget.agent_timeout_s,
         env=agent_env(task.agent, endpoint),
         kwargs=kwargs,
     )
     if task.agent == "codex":
         use_yeto_codex(agent)
+    elif task.agent == "pi":
+        use_yeto_pi(agent, max_tokens=settings.turn_max_tokens)
     return TrialConfig(
         task=TaskConfig(path=path),
         agent=agent,
@@ -232,9 +291,11 @@ class HarborHarness:
     """
 
     def __init__(self, build_config: TrialConfigBuilder, *, trial_cls: Any = None, setup_retries: int = 0,
-                 retry_backoff_s: float = 5.0, sleep: Callable[[float], Any] = asyncio.sleep) -> None:
+                 retry_backoff_s: float = 5.0, sleep: Callable[[float], Any] = asyncio.sleep,
+                 limits: SandboxLimits | None = None) -> None:
         if setup_retries < 0:
             raise ValueError("setup_retries must be >= 0")
+        self._limits = limits  # None: the process-wide HARBOR_MAX_SANDBOXES caps (.capacity)
         self._build_config = build_config
         self._trial_cls = trial_cls
         self._setup_retries = setup_retries
@@ -251,14 +312,23 @@ class HarborHarness:
             self._trial_cls = Trial
         return self._trial_cls
 
+    async def _create_and_run(self, slots: Any, config: Any) -> tuple[Any, Any]:
+        if slots is None:
+            trial = await self._trial().create(config)
+            return trial, await trial.run()
+        async with slots.slot():  # held from create to teardown (.capacity)
+            trial = await self._trial().create(config)
+            return trial, await trial.run()
+
     async def run(self, task: AgentTask, endpoint: str) -> TrialVerdict:
         retried: list[str] = []
         attempt = 0
+        provider = getattr(task, "provider", None)
+        slots = None if provider is None else (self._limits or process_limits()).slots(provider)
         while True:
             config = self._build_config(task, endpoint)  # config errors raise: they fail every sample
-            trial = await self._trial().create(config)
             # Trial.run stops its environment on cancellation (the outer wall-clock cap).
-            result = await trial.run()
+            trial, result = await self._create_and_run(slots, config)
             failure = retryable_setup_failure(result)
             if failure is None or attempt >= self._setup_retries:
                 break

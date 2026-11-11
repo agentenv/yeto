@@ -1253,8 +1253,13 @@ class MilesChunkedFullParameterAdapter:
         *,
         commit_token: str | None = None,
         verified_fragments: Mapping[int, str] | None = None,
+        weight_version: int | None = None,
     ) -> int:
-        """``verified_fragments``: ``{fragment: payload hash}`` of replaced
+        """``weight_version``: the published weight version to stamp on every
+        rank with the apply (k31/b2 Miles ``apply_full_parameter_chunked_cut(...,
+        weight_version=)``); None leaves the companion alone.
+
+        ``verified_fragments``: ``{fragment: payload hash}`` of replaced
         fragments whose stored chunks were already checked off the trainer
         (``StoredAuthoritativeFragment.verified_payload_hash``); the trainer
         does not read them in its prepare.  Ignored by a Miles without it."""
@@ -1267,6 +1272,11 @@ class MilesChunkedFullParameterAdapter:
         extra = {"skip_resident_fragments": True} if skip_resident_supported(group) else {}
         if verified_fragments and verified_apply_supported(group):
             extra["verified_fragments"] = dict(verified_fragments)
+        if weight_version is not None and weight_version_apply_supported(group):
+            # k31/b2 Miles stamps the published version (model companion) in the
+            # same finalize, so every island publishes the merged policy under
+            # one number; older pins get it through the ALIGN_WEIGHT_VERSION plugin.
+            extra["weight_version"] = int(weight_version)
         applied = await group.apply_full_parameter_chunked_cut(
             target.transport_cut,
             commit_token=commit_token,
@@ -1378,6 +1388,12 @@ def transport_supports(group: Any, method: str, parameter: str, feature: str) ->
 
 # The switch names live in the engine stream (one switch for every engine).
 from yeto.rl.engine.full_parameter_stream import DEFER_CAPTURE_ENV, LAZY_CAPTURE_ENV, capture_switch_on  # noqa: E402
+
+
+def weight_version_apply_supported(group: Any) -> bool:
+    """Whether the group's apply stamps the published weight version itself
+    (k31/b2 Miles: ``apply_full_parameter_chunked_cut(weight_version=)``)."""
+    return transport_supports(group, "apply_full_parameter_chunked_cut", "weight_version", "weight_version")
 
 
 def defer_capture_supported(group: Any) -> bool:

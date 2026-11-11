@@ -9,22 +9,32 @@ var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG nam
 var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
 var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
-var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","KL"],["grad_norm","grad_norm"],
+var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","KL"],["kl_tr","train-rollout KL"],["tis_clip","TIS clipfrac"],["grad_norm","grad_norm"],
   ["clip","clip"],["entropy","entropy"],["resp_len","response length"],["tok_s","tok/s"]];
 function $(id){return document.getElementById(id)}
+(function(){var nj=document.getElementById("nojs");if(nj)nj.style.display="none"})();
 function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
 function fin(v){return typeof v==="number"&&isFinite(v)}
 function f(v,d){if(!fin(v))return "n/a";if(d==null)d=3;return Math.abs(v)>=100?v.toFixed(0):v.toFixed(d)}
 function pct(v){return fin(v)?(v*100).toFixed(1)+"%":"n/a"}
 function hm(s){return !fin(s)?"n/a":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toFixed(0)+" min")}
 function clock(t){if(!fin(t))return "n/a";var d=new Date(t*1000);function p(n){return (n<10?"0":"")+n}return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
-function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)e.setAttribute(k,a[k]);if(parent)parent.appendChild(e);return e}
+/* short island label (s0 / s1 / trainer 0) with the full id as tooltip: shard ids are long run names */
+function islShort(c){var id=String(c.id),m=/-(\d+)$/.exec(id),async=((V||{}).async||{}).samplers;
+  if(c.role==="sampler")return m?"s"+m[1]:id;if(c.role==="trainer"&&async&&Object.keys(async).length)return "trainer "+(m?m[1]:id);return m&&id.length>12?"island "+m[1]:"Island "+id}
+function islName(c){return '<span title="'+esc(String(c.id)+(c.name?" ("+c.name+")":""))+'">'+esc(islShort(c))+'</span>'}
+function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)e.setAttribute(k,a[k]);
+  /* a fixed viewBox stretched to a full-width panel scales its text 3-4x: cap the drawn width at 1.4x the viewBox */
+  if(tag==="svg"&&a&&a.viewBox){var vw=+String(a.viewBox).split(" ")[2];if(vw>0)e.style.maxWidth=Math.round(vw*1.4)+"px"}
+  if(parent)parent.appendChild(e);return e}
 // launch-preflight-guards 3.5: negative-test island badge (rl_island_override)
 function negBadge(c){return c&&c.negative_test?' <span class="st wn" title="'+esc(c.negative_test.label)+'"><i></i>'+esc(c.negative_test.label)+'</span> ':""}
 function islColor(id){var ids=(O.islands||[]).map(function(c){return c.id}),i=ids.indexOf(id);return i>=0&&i<3?ISL_COLORS[i]:"var(--i3)"}
 function kind(){return layout==="auto"?O.run_kind:layout}
-function stBadge(s){var m={ok:["ok","healthy"],starting:["wn","starting"],stopped:["mu","stopped"],stale:["bd","stale"],lost:["bd","lost"],
-  recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];return '<span class="st '+m[0]+'"><i></i>'+esc(m[1])+'</span>'}
+function stBadge(s,c){var m={ok:["ok","healthy"],starting:["wn","starting"],stopped:["mu","stopped"],stale:["bd","stale"],waiting:["wn","waiting"],lost:["bd","lost"],
+  left:["mu","left the run"],recovery:["bd","needs recovery"],done:["mu","finished"],unknown:["mu","no data"]}[s]||["mu",s];var t=m[1];
+  if(c){if(s==="starting"&&c.startup_slow)t="starting (slow)";if(s==="waiting"&&c.waiting_reason)t="waiting: "+c.waiting_reason;if(s==="left"&&c.left)t="left the run ("+(c.left.reason||"?")+")"}
+  return '<span class="st '+m[0]+'" title="'+esc(c&&c.role?c.role:"")+'"><i></i>'+esc(t)+'</span>'}
 
 /* theme + layout */
 var THEMES=["auto","light","dark"];
@@ -63,9 +73,9 @@ function wall(){
   var multi=kind()==="multi_island";$("islandWall").hidden=!multi;$("navWall").style.display=multi?"":"none";
   $("syncerBox").hidden=!(multi&&V.usage.syncer);
   if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
-    '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>Island '+esc(c.id)+'</b>'+negBadge(c)+stBadge(c.status)+'</div>'+
+    '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>'+islName(c)+'</b>'+negBadge(c)+stBadge(c.status,c)+'</div>'+
     '<div class="note mono">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</div>'+
-    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(c.reward)+'</span><span>phase</span><span class="num">'+esc(c.phase||"n/a")+'</span></div></div>'}).join("");
+    '<div class="kv"><span>policy version</span><span class="num">'+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(c.reward)+'</span><span>phase</span><span class="num">'+esc(c.phase||(c.role==="sampler"?"sampling":"n/a"))+'</span><span>role</span><span class="num">'+esc(c.role||"n/a")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
   if(multi&&V.usage.syncer){var rows=(V.rounds_syncer||[]).slice(-30).reverse();
     $("syncer").innerHTML='<table class="c"><tr><th>global round</th><th>expected/responded</th><th>missed</th><th>quorum ms</th><th>merge ms</th><th>resends</th></tr>'+rows.map(function(r){
@@ -73,9 +83,13 @@ function wall(){
 }
 /* chart 1: metric per round; reward gets the p10-p90 band; < 5 points: dots only, no line */
 var xOf=null;
+var metricPicked=false;
+function hasMetric(k,ids){return ids.some(function(id){return k==="trunc"||k==="logprob_diff"?((V.islands[id]||{}).rounds||[]).some(function(r){return fin(r[k])}):(((O.series||{})[id]||{})[k]||[]).length})}
 function chartMetric(){
+  var ids0=kind()==="multi_island"?(O.islands||[]).map(function(c){return c.id}):[SEL];
+  if(!metricPicked&&!hasMetric(metric,ids0)){var alt=METRICS.filter(function(m){return hasMetric(m[0],ids0)})[0];if(alt)metric=alt[0]}
   $("tabs").innerHTML=METRICS.map(function(m){return '<button class="btn'+(m[0]===metric?" on":"")+'" data-m="'+m[0]+'">'+m[1]+'</button>'}).join("");
-  Array.prototype.forEach.call($("tabs").querySelectorAll("button"),function(b){b.onclick=function(){metric=b.dataset.m;chartMetric();highlight()}});
+  Array.prototype.forEach.call($("tabs").querySelectorAll("button"),function(b){b.onclick=function(){metric=b.dataset.m;metricPicked=true;chartMetric();highlight()}});
   var multi=kind()==="multi_island",ids=multi?(O.islands||[]).map(function(c){return c.id}):[SEL];
   var series=ids.map(function(id){return {id:id,pts:((O.series||{})[id]||{})[metric==="trunc"||metric==="logprob_diff"?"_":metric]||[]}});
   if(metric==="trunc"||metric==="logprob_diff"){series=ids.map(function(id){var rr=(V.islands[id]||{}).rounds||[];return {id:id,pts:rr.filter(function(r){return fin(r[metric])}).map(function(r){return [r.round+1,r[metric]]})}})}
@@ -151,7 +165,7 @@ function tipHtml(r){
   var h='<div class="h">Round '+r.round+' · trained on policy v'+r.policy_version+' → published '+(r.published_version==null?"n/a":"v"+r.published_version)+'</div>';
   if(kind()==="multi_island"){return h+(O.islands||[]).map(function(c){var rr=((V.islands[c.id]||{}).rounds||[]).find(function(x){return x.round===r.round});
     return row('<i class="sw" style="background:'+islColor(c.id)+'"></i>Island '+esc(c.id),rr?f(rr.reward)+" · truncated "+pct(rr.trunc):"missed")}).join("")}
-  return h+row("reward mean",f(r.reward))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("truncation",pct(r.trunc))+
+  return h+row("reward mean",f(r.reward))+row("train-rollout KL / TIS clipfrac",f(r.kl_tr,5)+" / "+f(r.tis_clip,4))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("truncation",pct(r.trunc))+
     row("logprob diff",f(r.logprob_diff,4))+row("response length mean / p95",f(r.resp_mean,0)+" / "+f(r.resp_p95,0))+row("grad_norm",f(r.grad_norm,4))+
     PH.map(function(p){return row('<i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1],fin(r.dur[p[0]])?f(r.dur[p[0]],0)+" s":"n/a")}).join("")}
 function showTip(e){var r=RS.find(function(x){return x.round===cur});if(!r)return;var t=$("tip"),p=$("rounds").getBoundingClientRect();
@@ -284,7 +298,7 @@ function uCarry(runs){
 /* nodes */
 function chartNodes(){
   var ex=V.islands[SEL]||{},ns=ex.node_series||{},ks=Object.keys(ns).sort(),box=$("cNodes");box.innerHTML="";$("legNodes").innerHTML="";
-  if(!ks.length){box.innerHTML='<div class="note">not sampled (no host probe data)</div>';$("nodesNote").textContent="";return}
+  if(!ks.length){box.innerHTML='<div class="note">'+esc(ex.gpu_mem_note||"not sampled (no host probe data)")+'</div>';$("nodesNote").textContent="";return}
   var col=function(k){return k==="0"?"var(--T)":k==="1"?"var(--R)":"var(--i2)"};
   $("legNodes").innerHTML=ks.map(function(k){return '<span><i class="sw" style="background:'+col(k)+'"></i>node '+esc(k)+(k==="0"?" (driver)":"")+'</span>'}).join("");
   var all=[];ks.forEach(function(k){ns[k].forEach(function(p){all.push(p)})});
@@ -299,7 +313,7 @@ function chartNodes(){
 }
 function islands(){
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
-    return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>Island '+esc(c.id)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status)+'</summary>'+
+    return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>'+islName(c)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status,c)+'</summary>'+
     '<div class="kv"><span>cloud / GPU</span><span class="num">'+esc(c.cloud||"n/a")+' · '+esc(c.gpu||"n/a")+' × '+esc(c.gpus==null?"n/a":c.gpus)+'</span>'+
     '<span>phase / policy</span><span class="num">'+esc(c.phase||"n/a")+' · '+(c.policy_version==null?"n/a":"v"+esc(c.policy_version))+'</span>'+
     '<span>last event</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s ago":"n/a")+'</span>'+
@@ -322,14 +336,18 @@ function cost(){
     '<div class="note" style="margin-top:6px">'+esc(c.note||"")+'. Specs: '+(c.islands||[]).map(function(r){return "island "+esc(r.id)+" "+(r.cpus==null?"n/a":r.cpus)+" cores, "+(r.memory_gib==null?"n/a":r.memory_gib)+" GiB"}).join("; ")+'. Prices: '+esc(c.prices_source||"")+'</div>';
 }
 var EV_KEEP={rl_engine_selected:1,rl_driver_start:1,rl_driver_phase:1,rl_publication:1,rl_round_trained:1,rl_reconfiguration:1,rl_learner_finalized:1,
-  island_ready:1,island_lost:1,island_stop:1,operator_stop:1,dashboard_source_lost:1,rl_elastic_recommendation:1};
+  island_ready:1,island_lost:1,island_stop:1,island_done:1,island_leave:1,operator_stop:1,dashboard_source_lost:1,rl_elastic_recommendation:1,
+  rl_policy_released:1,rl_sampler_start:1,rl_sampler_join:1,rl_sampler_policy_loaded:1,rl_sampler_backlog_full:1,rl_sampler_admitted:1,rl_sampler_stopped:1};
+var POOL_BAD=/evicted|node_lost|crash_loop|failed|breaker|timeout|overdue|orphan|refused/;
+function keepEv(t){return EV_KEEP[t]||/^nc_elastic_/.test(t)}
 var EVENTS=[],EV_CURSOR=0;
-function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];if(t==="island_lost"||(t==="rl_reconfiguration"&&rec.result==="RECOVERY_REQUIRED"))return ["bd","failure"];
+function evLevel(t,rec){if(t==="operator_stop")return ["mu","stop"];
+  if(/^nc_elastic_/.test(t))return POOL_BAD.test(t)?["bd","pool"]:["wn","pool"];if(t==="island_leave")return ["wn","left"];if(t==="island_lost"||(t==="rl_reconfiguration"&&rec.result==="RECOVERY_REQUIRED"))return ["bd","failure"];
   if(t==="rl_publication"||t==="rl_round_trained")return ["ok","done"];if(t==="rl_reconfiguration"||t==="dashboard_source_lost")return ["wn","change"];return ["mu","info"]}
-function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version","result","cause","recommendation","marker"];
+function evText(e){var r=e.record||{},keys=["phase","rollout_id","policy_version","result","cause","recommendation","marker","reason_name","backlog_groups","buffer_selected","ticket","shard","why","detail"];
   return keys.filter(function(k){return r[k]!=null}).map(function(k){return k+"="+String(r[k]).slice(0,80)}).join(" ")}
 function events(){
-  var list=EVENTS.filter(function(e){return EV_KEEP[e.type]}).slice(-200).reverse();
+  var list=EVENTS.filter(function(e){return keepEv(e.type)}).slice(-200).reverse();
   $("evs").innerHTML=list.map(function(e){var l=evLevel(e.type,e.record||{});return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+l[0]+'" title="'+l[1]+'"><i></i>'+l[1]+'</span><span class="x"><b>'+esc(e.type.replace(/^rl_/,""))+'</b>'+(e.island!=null?" island "+esc(e.island):"")+' '+esc(evText(e))+'</span></div>'}).join("")||'<div class="note">none</div>';
 }
 function cmds(){
@@ -353,12 +371,78 @@ function spot(){
   var rows=(V.spot||[]).slice(-50).reverse();$("spotBox").hidden=!rows.length;if(!rows.length)return;
   $("spot").innerHTML='<table class="c"><tr><th>event</th><th>island</th><th>cloud / region</th><th>source</th><th>seconds left</th><th>saved</th><th>outcome</th><th>candidates/rejected</th></tr>'+rows.map(function(r){
     return '<tr><td>'+esc(r.event)+'</td><td>'+esc(r.island)+'</td><td class="mono">'+esc(r.cloud||"n/a")+' / '+esc(r.region||"n/a")+'</td><td>'+esc(r.source||"")+'</td><td class="num">'+f(r.remaining_s,1)+'</td><td>'+(r.saved==null?"":(r.saved?"yes":"no"))+'</td><td>'+esc(r.outcome||(r.auto_launch===false?"advice only":""))+'</td><td class="num">'+(r.candidates==null?"":esc(r.candidates)+' / '+esc(r.rejected))+'</td></tr>'}).join("")+'</table>'}
+/* async GRPO: trainer rounds, samplers, buffer backlog, releases, NC pool */
+function hist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return "age "+esc(k)+": "+f(h[k],0)}).join(" · "):"n/a"}
+function asyncPanel(){
+  var A=V.async;$("async").hidden=!A;$("navAsync").style.display=A?"":"none";if(!A)return;
+  var cards=O.islands||[],trs=cards.filter(function(c){return c.role==="trainer"}),sps=cards.filter(function(c){return c.role==="sampler"});
+  var tid=trs.some(function(c){return c.id===SEL})?SEL:(trs[0]||{}).id;$("aTrNote").textContent=tid!=null?"· island "+tid+(trs.length>1?" (pick another trainer on the island wall)":""):"";
+  var rr=((V.islands[tid]||{}).rounds||[]).filter(function(r){return fin(r.reward)||fin(r.kl_tr)||fin(r.kl)||fin(r.tok_s)}),ar={};
+  (((A.trainers||{})[tid]||{}).rounds||[]).forEach(function(x){ar[x.rollout_id]=x});
+  var T=(A.trainers||{})[tid]||{};
+  $("aTrainer").innerHTML=!rr.length?'<div class="note">no trained rounds on this trainer</div>':
+    '<div class="note">totals: trained groups '+f(T.trained_groups,0)+' · dropped as stale (older than max_policy_age) '+f(T.stale_groups,0)+' · off-policy gate dropped '+f(T.gate_dropped,0)+' · short groups trained '+f(T.incomplete_groups,0)+' · too small dropped '+f(T.dropped_small_groups,0)+' · carried over '+f(T.carried_over_groups,0)+' · padded samples '+f(T.padded_samples,0)+' · policy ages of trained groups: '+hist(T.age_hist)+'</div>'+
+    '<table class="c"><tr><th>round</th><th>reward mean ± std</th><th>p10 / p50 / p90</th><th>train-rollout KL</th><th>logprob |diff|</th><th>TIS clipfrac</th><th>grad_norm</th><th>resp len mean / p95</th><th>truncated</th><th>tok/s</th><th>groups</th><th>stale dropped</th><th>policy ages</th></tr>'+
+    rr.slice(-40).reverse().map(function(r){var a=ar[r.round]||{};return '<tr><td class="num">'+r.round+'</td><td class="num">'+f(r.reward)+(fin(r.reward_std)?" ± "+f(r.reward_std):"")+'</td><td class="num">'+f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2)+
+      '</td><td class="num">'+f(r.kl_tr,5)+'</td><td class="num">'+f(r.logprob_diff,4)+'</td><td class="num">'+f(r.tis_clip,4)+'</td><td class="num">'+f(r.grad_norm,4)+'</td><td class="num">'+f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+
+      '</td><td class="num">'+pct(r.trunc)+'</td><td class="num">'+f(r.tok_s,0)+'</td><td class="num">'+f(a.trained_groups,0)+'</td><td class="num">'+f(a.stale_groups,0)+'</td><td>'+hist(a.ages)+'</td></tr>'}).join("")+'</table>'+
+    (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
+  var S=A.samplers||{};
+  $("aSamplers").innerHTML=!sps.length?'<div class="note">no sampler islands on the tapes</div>':'<table class="c"><tr><th>sampler</th><th>status</th><th>policy</th><th>rounds</th><th>policy age p50 / max</th><th>age histogram (rounds)</th><th>generate s p50 / max</th><th>groups written</th><th>zero-variance groups seen / dropped</th><th>truncated samples</th><th>dropped groups</th><th>trials retried / lost</th><th>reward (last round)</th><th>backlog cap</th></tr>'+
+    sps.map(function(c){var x=S[c.id]||{};return '<tr><td>Island '+esc(c.id)+(c.name?' <span class="note">'+esc(c.name)+'</span>':"")+'</td><td>'+stBadge(c.status,c)+'</td><td class="num">'+(x.policy_version==null?"n/a":"v"+esc(x.policy_version))+'</td><td class="num">'+f(x.n_rounds,0)+
+      '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0)+
+      '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
+    (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in zero-variance / truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not)</div>':"");
+  aBacklog(A);aRel(A);
+  var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
+  $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>pool</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
+    esc(["ticket","account","shard","why","reason","detail","error"].filter(function(k){return e[k]!=null}).map(function(k){return k+"="+String(e[k]).slice(0,80)}).join(" "))+'</span></div>'}).join("");
+}
+function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)})}
+function aBacklog(A){
+  var box=$("aBacklog"),b=A.backlog;box.innerHTML="";$("legBacklog").innerHTML="";
+  if(!b||!(b.points||[]).length){box.innerHTML='<div class="note">no data (no rl_sampler_round with groups)</div>';return}
+  var pts=b.points,rep=b.reported||{},rk=Object.keys(rep),all=pts.map(function(p){return p[0]});rk.forEach(function(k){rep[k].forEach(function(p){all.push(p[0])})});
+  var t0=Math.min.apply(null,all),t1=Math.max.apply(null,all),vm=Math.max.apply(null,pts.map(function(p){return fin(p[3])?p[3]:0}).concat([1]));
+  rk.forEach(function(k){rep[k].forEach(function(p){vm=Math.max(vm,p[1])})});
+  var W=560,H=190,m={l:44,r:10,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
+  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Buffer backlog"},box),g=el("g",{"class":"grid"},s);
+  [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=Math.round(vm*q)});
+  var bp=pts.filter(function(p){return fin(p[3])});
+  if(bp.length)el("path",{d:"M"+bp.map(function(p){return sx(p[0])+","+sy(p[3])}).join("L"),fill:"none",stroke:"var(--T)","stroke-width":2},s);
+  rk.forEach(function(k,i){rep[k].forEach(function(p){el("circle",{cx:sx(p[0]),cy:sy(p[1]),r:3.5,fill:p[2]?"var(--bad)":RUN_COLORS[(i+1)%4]},s)})});
+  tAxis(s,t0,t1,sx,H);
+  $("legBacklog").innerHTML='<span><i class="sw" style="background:var(--T)"></i>backlog (written '+f(b.written,0)+' · read position '+f(b.read,0)+')</span>'+(rk.length?'<span><i class="sw" style="background:var(--bad)"></i>sampler reported: backlog full</span><span><i class="sw" style="background:var(--i1)"></i>sampler reported: admitted</span>':"")+
+    (b.has_reads&&b.read_source&&b.read_source!=="buffer_selected"?'<span>read position = '+esc(b.read_source)+' (no rl_policy_released.buffer_selected yet)</span>':"")+(b.has_reads?"":'<span>no read position on the tapes (no rl_policy_released.buffer_selected): backlog unknown</span>');
+}
+function aRel(A){
+  var box=$("aRelChart"),rows=A.releases||[],pool=(A.pool||[]).filter(function(e){return fin(e.ts)}),box2=$("aRelTable");box.innerHTML="";box2.innerHTML="";
+  var sids=[];rows.forEach(function(r){Object.keys(r.loads||{}).forEach(function(k){if(sids.indexOf(k)<0)sids.push(k)})});sids.sort();
+  var ts=[];rows.forEach(function(r){if(fin(r.released_at))ts.push(r.released_at);Object.keys(r.loads||{}).forEach(function(k){if(fin(r.loads[k].loaded_at))ts.push(r.loads[k].loaded_at)})});pool.forEach(function(e){ts.push(e.ts)});
+  if(!ts.length){box.innerHTML='<div class="note">no data (no rl_policy_released / rl_sampler_policy_loaded / nc_elastic_* events)</div>';$("legRel").innerHTML="";return}
+  var t0=Math.min.apply(null,ts),t1=Math.max.apply(null,ts),lanes=["trainer release"].concat(sids.map(function(k){return "sampler "+k}));
+  var rowH=24,W=560,m={l:86,r:10,t:6,b:22},H=m.t+m.b+rowH*lanes.length,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},ly=function(i){return m.t+rowH*i+rowH/2};
+  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Policy release timeline"},box);
+  lanes.forEach(function(n,i){el("text",{x:m.l-8,y:ly(i)+4,"text-anchor":"end"},s).textContent=n;el("line",{x1:m.l,x2:W-m.r,y1:ly(i),y2:ly(i),stroke:"var(--line)"},s)});
+  pool.forEach(function(e){var x=sx(e.ts),bad=POOL_BAD.test(e.event||"");el("line",{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:bad?"var(--bad)":"var(--warn)","stroke-dasharray":"3 3"},s);
+    el("title",{},el("rect",{x:x-3,y:m.t,width:6,height:H-m.t-m.b,fill:"transparent"},s)).textContent=e.event+" "+clock(e.ts)});
+  rows.forEach(function(r){if(!fin(r.released_at))return;var x0=sx(r.released_at);
+    el("rect",{x:x0-4,y:ly(0)-4,width:8,height:8,fill:"var(--P)",transform:"rotate(45 "+x0+" "+ly(0)+")"},s);
+    el("text",{x:x0,y:ly(0)-8,"text-anchor":"middle"},s).textContent="v"+r.policy_version;
+    sids.forEach(function(k,i){var ld=(r.loads||{})[k];if(!ld||!fin(ld.loaded_at))return;var x1=sx(ld.loaded_at);
+      el("line",{x1:x0,y1:ly(0),x2:x1,y2:ly(i+1),stroke:"var(--P)","stroke-opacity":.5},s);el("circle",{cx:x1,cy:ly(i+1),r:4,fill:"var(--P)"},s)})});
+  tAxis(s,t0,t1,sx,H);
+  $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
+  if(rows.length)box2.innerHTML='<table class="c"><tr><th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
+    rows.slice(-30).reverse().map(function(r){return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+esc(r.trainer==null?"n/a":r.trainer)+'</td><td class="num">'+clock(r.released_at)+'</td><td class="num">'+f(r.upload_s,1)+'</td>'+
+      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+" ("+f(ld.latency_s,0)+" s)":"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
+}
 function render(){
   if(!V)return;O=V.overview;
   var ids=(O.islands||[]).map(function(c){return c.id});if(ids.indexOf(SEL)<0)SEL=ids[0]||null;
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
   $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· island "+SEL:"";
-  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();spot();
+  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();asyncPanel();util();chartNodes();islands();cost();events();cmds();folds();spot();
   if(typeof YetoExt!=="undefined")YetoExt.render(V,OFFLINE);
 }
 // the server runs newer page code than this tab (redeployed): reload once per build, else say so

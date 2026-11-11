@@ -143,7 +143,10 @@ def dirty_patch(repo: str | os.PathLike[str]) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         index = Path(tmp) / "index"
         if (git_dir / "index").is_file():
-            shutil.copyfile(git_dir / "index", index)
+            # copy2 keeps the index mtime: git re-reads a file whose mtime is not older
+            # than the index ("racily clean"); a fresh mtime on the copy would hide an
+            # edit of the same size made in the same second as the last index write.
+            shutil.copy2(git_dir / "index", index)
         env = {"GIT_INDEX_FILE": str(index)}
         _git(root, "add", "-A", "--", ".", env=env)
         return _git(root, "diff", "--binary", "--cached", "--no-color", "--no-ext-diff",
@@ -550,7 +553,7 @@ class RunPack:
 def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathLike[str],
                      store: PackStore, cache_root: str | os.PathLike[str],
                      semantic_sha256: str | None, upgrade_reason: str | None = None,
-                     release_image: str | None = None,
+                     release_image: str | None = None, keep_pinned: bool = False,
                      log: Callable[[str], None] = print) -> RunPack:
     """The pack this start of the run uses.
 
@@ -562,13 +565,25 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
 
     With ``release_image`` the candidate pack is that image (:func:`release_pack`)
     instead of the local tree, and nothing is stored. A run started on one pack
-    moves to another (another image, or between modes) only by an explicit upgrade."""
+    moves to another (another image, or between modes) only by an explicit upgrade.
+
+    Drift guard: when the local tree (commit + dirty patch, i.e. the pack digest)
+    differs from the pinned pack, a plain relaunch is refused instead of silently
+    running the old code. ``keep_pinned`` (a deliberate resume on the run's pack)
+    reuses it anyway; ``upgrade_reason`` moves to the local tree."""
 
     old_record = (previous or {}).get("code_pack")
     if release_image is not None:
         return _resolve_release_pack(old_record, previous, release_image,
                                      semantic_sha256=semantic_sha256,
                                      upgrade_reason=upgrade_reason, log=log)
+    base = getattr(store, "base", None) or getattr(store, "uri_base", None)
+    old_uri = (old_record or {}).get("pack_uri")
+    if (old_uri and base and (old_record or {}).get("mode") != CODE_PACK_MODE_RELEASE and not str(old_uri).startswith(base.rstrip("/") + "/")):
+        # The manifest is keyed by cluster prefix: a previous run of the same prefix
+        # on another checkpoint store is a different run, not this run's resume.
+        log(f"[codepack] run manifest pack {old_uri} is not in store {base}: new run")
+        old_record = None
     if not old_record:
         pack, data = make_and_store(repo, store)
         log(f"[codepack] new run pack {pack.digest[:16]} (commit {pack.commit[:12]}"
@@ -588,6 +603,15 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
                              new_semantic=semantic_sha256, reason=upgrade_reason)
         log(f"[codepack] upgrade {old.digest[:16]} -> {new.digest[:16]}: {upgrade_reason}")
         return RunPack(new, unpack(data, new.digest, cache_root), reused=False)
+    if not keep_pinned:
+        local, _ = build_pack(repo)
+        if local.digest != old.digest:
+            raise CodePackError(
+                f"the run manifest pins code pack {old.digest[:16]} (commit {(old.commit or '?')[:12]}"
+                f"{', dirty' if old.dirty else ''}), but the local tree is {local.digest[:16]} "
+                f"(commit {local.commit[:12]}{', dirty' if local.dirty else ''}). Resume on the "
+                "pinned code with --rl-code-pack-keep, move the run to the local tree with "
+                "--rl-code-pack-upgrade REASON, or start a new run (another --cluster-prefix)")
     log(f"[codepack] reusing run pack {old.digest[:16]} from the run manifest")
     return RunPack(old, fetch_tree(old, store, cache_root), reused=True)
 

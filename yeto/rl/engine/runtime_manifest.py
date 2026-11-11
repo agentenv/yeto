@@ -13,6 +13,10 @@ Two halves:
   capability may only be declared when every interface it needs is present
   (a missing interface refuses certification).
 
+The engine sampler's SGLang server is pinned apart from this (``sampler_pins.SGLANG_SAMPLER_*``,
+upstream main images); its build is recorded per server by the ``sglang-server``
+adapter in ``server_info`` (``sglang_build_commit`` / ``sglang_pin_match``), not here.
+
 ``python -m yeto.rl.engine.runtime_manifest --image <digest> --out m.json``
 writes the manifest; ``--check m.json`` validates one against the pins.
 """

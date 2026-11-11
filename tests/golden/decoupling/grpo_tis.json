@@ -198,7 +198,7 @@
   "--global-batch-size",
   "8",
   "--balance-data",
-  "--rollout-max-context-len",
+  "--max-seq-len",
   "2048",
   "--rollout-max-response-len",
   "128",
@@ -247,7 +247,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "70d04ad1b86c39f254ac2631b2be4a32558c00f4e0e7cc8c1767e03ea84b03ee",
+ "miles_argv_sha256": "94a8f220ada63fc4863e269384723fe8742216fb0a935fb04c80e4f0f91db2d3",
  "name": "grpo_tis",
  "placement": {
   "allow_cross_node_engine_tp": false,

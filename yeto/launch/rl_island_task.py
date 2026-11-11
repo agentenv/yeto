@@ -12,7 +12,7 @@ from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group, launch_compat_group
 from .code_pack import code_pack_island_flag, code_workdir
 from .peer_recovery import island_flags as peer_recovery_island_flags
-from .rl_backend import _miles_overlay, _rl_backend_module
+from .rl_backend import _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
     model_prefetch,
@@ -30,7 +30,9 @@ from .syncer import (
 )
 from .credentials import registry_login_for, split_secret_envs
 from .storage import (
-    ELASTIC_CHECKPOINT_STORE_MOUNT, NODE0_LOCAL_CHECKPOINT_WARNING, RL_INITIAL_ADAPTER_PATH,
+    ELASTIC_CHECKPOINT_STORE_MOUNT, NODE0_LOCAL_CHECKPOINT_WARNING, RL_EXPERT_SELECTION_PATH,
+    RL_INIT_RELEASE_DIR,
+    RL_INITIAL_ADAPTER_PATH,
     _rl_checkpoint_mount, _rl_checkpoint_storage_name, modal_volume_store_env, model_store_env,
     model_store_filesystem, nebius_baked_image_id, rl_checkpoint_store_plan, store_object_envs,
 )
@@ -43,6 +45,73 @@ from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
 from .harness_env import check_compaction_launch, harbor_example_pythonpath
+
+
+
+# Stop the island's Ray by PID. The PIDs come from /proc: every process whose argv
+# names "$MILES_RAY_DIR/" except this shell and its parent (no pkill -f/pgrep -f, which
+# also match the shell or ssh command that carries the pattern). Same escalation as
+# `ray stop --force` (TERM, short grace, KILL), scoped to that dir: gcs_server, raylet
+# and the autoscaler monitor ignore a bare SIGTERM for 30 s or more.
+MILES_RAY_STOP_FUNCTIONS = (
+    "miles_ray_pids() {\n"
+    "  for d in \"${YETO_PROC_ROOT:-/proc}\"/[0-9]*; do\n"
+    '    p=${d##*/}\n'
+    '    case "$p" in "$$"|"$PPID"|"${BASHPID:-$$}") continue ;; esac\n'
+    "    c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null) || continue\n"
+    '    case "$c" in *"$MILES_RAY_DIR/"*) echo "$p" ;; esac\n'
+    "  done\n"
+    "}\n"
+    "stop_miles_ray() {\n"
+    "  pids=$(miles_ray_pids)\n"
+    '  [ -n "$pids" ] || return 0\n'
+    "  kill $pids >/dev/null 2>&1 || true\n"
+    "  for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
+    '    alive=""\n'
+    '    for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done\n'
+    '    [ -n "$alive" ] || return 0\n'
+    '    pids=$alive\n'
+    "    sleep 1\n"
+    "  done\n"
+    "  kill -KILL $pids >/dev/null 2>&1 || true\n"
+    "}\n"
+)
+
+
+def _k31_island_flags(args, selection_path: str | None = None) -> str:
+    """The Kimi-K3.1 / score-centering flags the island gets when the launcher
+    was given them (nothing otherwise: the default argv stays byte-identical).
+    ``selection_path`` is the island-side path of the mounted selection file
+    (the launcher mounts the local --rl-expert-selection there)."""
+    out = ""
+    selection = getattr(args, "rl_expert_selection", None)
+    if selection:
+        out += f" --rl-expert-selection {shlex.quote(str(selection_path or selection))}"
+    for tag in getattr(args, "rl_release_tag", None) or ():
+        out += f" --rl-release-tag {shlex.quote(str(tag))}"
+    for dest in ("rl_loss", "rl_score_centering_is", "rl_score_centering_tis_clip",
+                 "rl_score_centering_mis_low", "rl_score_centering_mis_high", "rl_rollout_top_logprobs_num",
+                 "rl_routed_expert_qat"):
+        value = getattr(args, dest, None)
+        if value is not None:
+            out += f" --{dest.replace('_', '-')} {shlex.quote(str(value))}"
+    return out
+
+def init_release_block(args, model: str) -> str:
+    """Run-script lines of --rl-init-from-release ("" without it): every node downloads
+    the release and lays it over the base before its Ray starts
+    (yeto.rl.engine.init_from_release); a failure ends the node."""
+    selector = getattr(args, "rl_init_from_release", None)
+    if not selector:
+        return ""
+    command = (f"python3 -m yeto.rl.engine.init_from_release --release {shlex.quote(str(selector))} "
+               f"--model {shlex.quote(model)} --out {RL_INIT_RELEASE_DIR}")
+    if args.model_revision:
+        command += f" --model-revision {shlex.quote(args.model_revision)}"
+    if getattr(args, "rl_expert_selection", None):
+        command += f" --expert-selection {RL_EXPERT_SELECTION_PATH}"
+    return (f"PYTHONPATH=$HOME/sky_workdir${{PYTHONPATH:+:$PYTHONPATH}} {command} "
+            "|| { echo '[yeto-island] --rl-init-from-release: the release could not be prepared' >&2; exit 1; }\n")
 
 
 def submitted_unix() -> float:
@@ -199,6 +268,7 @@ def make_miles_island_task(
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
         )
+        + _k31_island_flags(args, RL_EXPERT_SELECTION_PATH if getattr(args, "rl_expert_selection", None) else None)
         + f" --data {shlex.quote(island_data)}{island_data_flags}"
         + (
             " --rl-single-island-no-sync"
@@ -264,6 +334,7 @@ def make_miles_island_task(
         f" --wan-streams {args.wan_streams}"
         + _wan_transport_flags(args)
         + " --miles-root ~/miles"
+        + _image_miles_commit_flag(args)
     )
     if getattr(args, "wandb", False):
         flags += " --wandb"
@@ -385,8 +456,15 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
+    if getattr(args, "rl_init_from_release", None):
+        flags += f" --rl-init-from-release-dir {RL_INIT_RELEASE_DIR}"
     if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
-        miles_setup, sglang_setup = _miles_source_setup(_miles_overlay().resolve_overlay(args))
+        from yeto.rl.engine import backends
+
+        image_miles_commit = backends.module("pins", "miles").image_miles_commit
+
+        miles_setup, sglang_setup = _miles_source_setup(
+            image_miles_commit(getattr(args, "rl_image", None)))
     else:  # rl-verl-backend: the engine image carries its own pinned source
         miles_setup = sglang_setup = ": # no Miles/SGLang checkout for this backend"
     model = resolve(args.model)
@@ -417,6 +495,9 @@ def make_miles_island_task(
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
         file_mounts[HF_TOKEN_PATH] = local_token
+    if getattr(args, "rl_expert_selection", None):
+        # the selection file travels with the island like the initial adapter does
+        file_mounts[RL_EXPERT_SELECTION_PATH] = os.path.expanduser(args.rl_expert_selection)
     if rl_sao_streaming(args):
         file_mounts.update(sao_contract_mounts(args, learner_id))
     envs = {
@@ -470,7 +551,9 @@ def make_miles_island_task(
         )
     # One-run diagnostics of the pipeline-parallel sync island
     # (megatron_full_parameter._pp_probe); absent unless set on the launching shell.
-    for name in ("YETO_MEGATRON_PP_PROBE", "NCCL_DEBUG"):
+    # opt-in trainer switches read inside the island (absent unless set on the launching shell):
+    # the per-source cross-hardware log-prob guard (yeto.rl.engine.xhw_guard)
+    for name in ("YETO_RL_XHW_GUARD", "YETO_MEGATRON_PP_PROBE", "NCCL_DEBUG"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
     if os.environ.get("HF_TOKEN"):
@@ -544,6 +627,7 @@ def make_miles_island_task(
             "set -e\n"
             "cd ~/sky_workdir\n"
             f"{island_pre_run_block(getattr(args, 'rl_island_pre_run_script', None))}"
+            f"{init_release_block(args, model)}"
             f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can
@@ -551,21 +635,12 @@ def make_miles_island_task(
             # SkyPilot's runtime Ray (port 6380, /tmp/ray), after which every
             # status refresh marks the cluster INIT and the head relaunches
             # it forever.  Ray processes carry their session dir on the
-            # command line, so pkill by that path never touches sky's.
+            # command line, so stopping the PIDs whose argv names that path
+            # never touches sky's.
             f"{rl_island_gpu_env(args, spec)}"
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
             f"{rl_island_ray_spill_dir_prelude(args)}"
-            # Same escalation as `ray stop --force` (TERM, short grace, KILL)
-            # but scoped to this dir: gcs_server, raylet and the autoscaler
-            # monitor ignore a bare SIGTERM for 30 s or more.
-            "stop_miles_ray() {\n"
-            '  pkill -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true\n'
-            "  for _ in 1 2 3 4 5 6 7 8 9 10; do\n"
-            '    pgrep -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || return 0\n'
-            "    sleep 1\n"
-            "  done\n"
-            '  pkill -KILL -f "$MILES_RAY_DIR/" >/dev/null 2>&1 || true\n'
-            "}\n"
+            f"{MILES_RAY_STOP_FUNCTIONS}"
             "stop_miles_ray\n"
             'if [ "$SKYPILOT_NODE_RANK" = "0" ]; then\n'
             # Head-only RAY_* (plasma preallocation, start wait); "" when unset.
@@ -759,3 +834,13 @@ def _echoes_events(args, spec) -> bool:
     # Every RL island (sky too): rl_learner_finalized tells the launcher that a
     # later non-zero exit is a shutdown error, not an island failure.
     return getattr(args, "training_mode", "sft") == "rl"
+
+
+def _image_miles_commit_flag(args) -> str:
+    """``--miles-commit`` when the run's --rl-image carries a Miles commit other than the pin."""
+    from yeto.rl.engine import backends
+
+    image_miles_commit = backends.module("pins", "miles").image_miles_commit
+
+    commit = image_miles_commit(getattr(args, "rl_image", None))
+    return f" --miles-commit {commit}" if commit else ""

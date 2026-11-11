@@ -214,6 +214,27 @@ def test_guard_allow_env_downgrades_to_warning(tmp_path):
     assert "WARNING" in out.getvalue() and "AWS_SECRET_ACCESS_KEY" in out.getvalue()
 
 
+def test_guard_accepts_the_declared_aws_store_credential_only(tmp_path):
+    """A Modal island's s3 store credential is a Secret with the AWS names; the
+    launcher declares it with YETO_RL_STORE_S3_CREDENTIALS=aws-env (s3_store). Only
+    that pair is then allowed; any other cloud credential still errors."""
+    from yeto.cloud import s3_store
+
+    assert guard.STORE_CREDENTIALS_ENV == s3_store.CREDENTIALS_ENV
+    assert guard.STORE_CREDENTIALS_AWS == s3_store.CREDENTIALS_AWS_ENV
+    assert guard.AWS_STORE_PAIR == {s3_store.AWS_KEY_ID_ENV, s3_store.AWS_SECRET_ENV}
+    out = io.StringIO()
+    declared = {"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s", guard.STORE_CREDENTIALS_ENV: "aws-env"}
+    guard.check_island_credentials(declared, home=tmp_path, stream=out)
+    assert out.getvalue() == ""
+    with pytest.raises(guard.IslandCloudCredentialError) as info:
+        guard.check_island_credentials({**declared, "MODAL_TOKEN_SECRET": "t"}, home=tmp_path, stream=out)
+    assert "MODAL_TOKEN_SECRET" in str(info.value) and "AWS_" not in str(info.value)
+    with pytest.raises(guard.IslandCloudCredentialError):  # not declared: still an error
+        guard.check_island_credentials({"AWS_ACCESS_KEY_ID": "k", "AWS_SECRET_ACCESS_KEY": "s"},
+                                       home=tmp_path, stream=io.StringIO())
+
+
 def test_guard_warns_on_credential_files(tmp_path):
     (tmp_path / ".modal.toml").write_text("[default]\ntoken_secret = 'zzz'\n")
     out = io.StringIO()

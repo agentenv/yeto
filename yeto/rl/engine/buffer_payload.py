@@ -8,13 +8,29 @@ both. A sample carries ``response_length``, per-token ``rollout_log_probs`` and
 its engine weight version (``weight_versions`` spans or
 ``metadata.weight_version``); the entry's ``behavior_version`` is the oldest.
 
-Arrays (``numpy.ndarray`` fields, e.g. the R3 routed-expert ids
-``rollout_routed_experts``: tokens x layers x top-k) are stored as base64 bytes
-with their dtype and shape. An integer array is stored in the narrowest integer
-dtype that holds all its values (expert ids of 128 experts fit ``uint8``: a
-quarter of ``int32``), and ``cast`` names the dtype the reader returns (the
-array's original one), so a reader gets the same values in the same dtype. A
-payload written before ``cast`` existed decodes as before.
+Arrays (``numpy.ndarray`` fields) are stored as base64 bytes (little-endian,
+C order) with their dtype and shape. An integer array is stored in the
+narrowest integer dtype that holds all its values, and ``cast`` names the
+dtype the reader returns (the array's original one), so a reader gets the same
+values in the same dtype. A payload written before ``cast`` existed decodes as
+before.
+
+Rollout fields an engine sampler writes per sample (the trainer side reads
+them through :func:`rollout_routed_experts`, :func:`rollout_top_logprobs`):
+
+* ``rollout_routed_experts``: ``uint16[T, L_moe, top_k]``, the original ids of
+  the experts the engine routed each of the prompt + response - 1 positions to
+  (R3; Kimi K3.1 has 896 experts, so ``uint8`` cannot hold the ids). A padded
+  position (no routing, Miles writes -1) is :data:`ROUTED_EXPERTS_PAD` (0xFFFF)
+  and the field's record declares ``"pad": 65535`` (F2's trainer-side mapping
+  passes it through as -1). A payload written by an earlier engine sampler
+  holds ``uint8`` (or any integer dtype, -1 pads) and reads as ``uint16`` too;
+* ``rollout_top_logprobs_ids`` ``int32[T_resp, K]`` and ``rollout_top_logprobs``
+  ``float32[T_resp, K]``: the K most likely next tokens and their log-probs at
+  every response position (score_centering; K = the engine's ``top_logprobs_num``);
+* ``rollout_log_probs`` ``float32[T_resp]`` (a list in the payload);
+* ``metadata.engine``: ``{"version_fields": {"fp32_lm_head", "temperature",
+  "top_p", "top_k"}, "routed_experts": bool, "top_logprobs_num": K}``.
 """
 
 from __future__ import annotations
@@ -97,17 +113,38 @@ def _narrowest_int(array: Any) -> Any:
     return array.dtype
 
 
+class _Field:
+    """A sample field with extra record keys (``_FIELD_META``), e.g. the pad id."""
+
+    __slots__ = ("array", "meta")
+
+    def __init__(self, array: Any, meta: Mapping[str, Any]) -> None:
+        self.array, self.meta = array, dict(meta)
+
+
+def _with_field_meta(sample: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(sample)
+    for name, meta in _FIELD_META.items():
+        value = out.get(name)
+        if value is not None and hasattr(value, "dtype"):
+            out[name] = _Field(value, meta)
+    return out
+
+
 def _encode_value(value: Any) -> Any:
+    extra: dict[str, Any] = {}
+    if isinstance(value, _Field):
+        value, extra = value.array, value.meta
     tolist = getattr(value, "tolist", None)
     if callable(tolist) and hasattr(value, "dtype") and hasattr(value, "shape"):
         import numpy
 
         array = numpy.ascontiguousarray(value)
-        record: dict[str, Any] = {"dtype": str(array.dtype), "shape": list(array.shape)}
+        record: dict[str, Any] = {"dtype": str(array.dtype), "shape": list(array.shape), **extra}
         if array.dtype.kind in "iu":
             stored = _narrowest_int(array)
             if stored != array.dtype:
-                record = {"dtype": str(stored), _CAST: str(array.dtype), "shape": list(array.shape)}
+                record = {"dtype": str(stored), _CAST: str(array.dtype), "shape": list(array.shape), **extra}
                 array = array.astype(stored)
         return {_NDARRAY: base64.b64encode(array.tobytes()).decode("ascii"), **record}
     if hasattr(value, "value") and type(value).__module__ != "builtins":  # enum
@@ -126,9 +163,173 @@ def _decode_hook(obj: dict[str, Any]) -> Any:
     return obj
 
 
+ROLLOUT_ROUTED_EXPERTS = "rollout_routed_experts"
+ROLLOUT_TOP_LOGPROBS_IDS = "rollout_top_logprobs_ids"
+ROLLOUT_TOP_LOGPROBS = "rollout_top_logprobs"
+ROLLOUT_LOG_PROBS = "rollout_log_probs"
+ENGINE_META = "engine"  # metadata key: version_fields, routed_experts, top_logprobs_num
+ROUTED_EXPERTS_DTYPE = "uint16"
+ROUTED_EXPERTS_PAD = 65535  # 0xFFFF: a position without routing (-1 in a signed payload)
+# per-field record extras (next to dtype / shape) the writer declares
+_FIELD_META: dict[str, dict[str, Any]] = {ROLLOUT_ROUTED_EXPERTS: {"pad": ROUTED_EXPERTS_PAD}}
+TOP_LOGPROBS_IDS_DTYPE = "int32"
+TOP_LOGPROBS_DTYPE = "float32"
+
+
+def rollout_routed_experts(sample: Mapping[str, Any]) -> Any:
+    """The sample's R3 routed experts as ``uint16[T, L_moe, top_k]`` (module
+    doc), whatever integer dtype the payload holds (``uint8`` from an earlier
+    writer, ``int32`` from a Miles-style writer); None when the sample has none.
+    Raises :class:`SampleBufferRolloutError` on a value no expert id can take."""
+    import numpy
+
+    value = sample.get(ROLLOUT_ROUTED_EXPERTS)
+    if value is None:
+        return None
+    return routed_experts_uint16(value, where=f"sample {sample.get('index')}")
+
+
+def routed_experts_uint16(value: Any, *, where: str = "routed_experts") -> Any:
+    """``value`` (any integer array ``[T, L_moe, top_k]``) as ``uint16`` with -1
+    pads mapped to :data:`ROUTED_EXPERTS_PAD`; an id below -1 or above 65534 is
+    an error (65535 is the pad)."""
+    import numpy
+
+    array = numpy.asarray(value)
+    if array.dtype.kind not in "iu":
+        raise SampleBufferRolloutError(f"{where}: {ROLLOUT_ROUTED_EXPERTS} has dtype {array.dtype}, "
+                                       "expected an integer dtype")
+    if array.ndim != 3:
+        raise SampleBufferRolloutError(f"{where}: {ROLLOUT_ROUTED_EXPERTS} has shape {array.shape}, "
+                                       "expected [T, L_moe, top_k]")
+    if array.size:
+        low, high = int(array.min()), int(array.max())
+        if low < -1 or high > ROUTED_EXPERTS_PAD:
+            raise SampleBufferRolloutError(f"{where}: {ROLLOUT_ROUTED_EXPERTS} holds an id outside uint16 "
+                                           f"({low}..{high}; -1 / {ROUTED_EXPERTS_PAD} is the pad)")
+        if low == -1:
+            array = numpy.where(array == -1, ROUTED_EXPERTS_PAD, array)
+    return array.astype(ROUTED_EXPERTS_DTYPE, copy=False)
+
+
+def rollout_top_logprobs(sample: Mapping[str, Any]) -> tuple[Any, Any] | None:
+    """``(ids int32[T_resp, K], logprobs float32[T_resp, K])`` of the sample, or
+    None when it carries no top-K log-probs. The two must agree in shape and
+    cover every response token."""
+    import numpy
+
+    ids, vals = sample.get(ROLLOUT_TOP_LOGPROBS_IDS), sample.get(ROLLOUT_TOP_LOGPROBS)
+    if ids is None and vals is None:
+        return None
+    if ids is None or vals is None:
+        raise SampleBufferRolloutError(f"sample {sample.get('index')}: {ROLLOUT_TOP_LOGPROBS_IDS} and "
+                                       f"{ROLLOUT_TOP_LOGPROBS} come together")
+    ids, vals = numpy.asarray(ids), numpy.asarray(vals)
+    length = int(sample.get("response_length") or 0)
+    if ids.ndim != 2 or ids.shape != vals.shape or ids.shape[0] != length:
+        raise SampleBufferRolloutError(f"sample {sample.get('index')}: top log-probs ids {ids.shape} / values "
+                                       f"{vals.shape} do not cover response_length {length} as [T_resp, K]")
+    return ids.astype(TOP_LOGPROBS_IDS_DTYPE, copy=False), vals.astype(TOP_LOGPROBS_DTYPE, copy=False)
+
+
+# Miles ``Sample`` field names of the engine sampler's rollout fields (the trainer reads
+# the payload through :func:`miles_sample_dict` before ``Sample.from_dict``).
+MILES_TOPK_TOKEN_IDS = "rollout_topk_token_ids"
+MILES_TOPK_LOG_PROBS = "rollout_topk_log_probs"
+
+
+def miles_sample_dict(sample: Mapping[str, Any], *,
+                      r3_layers: tuple[int, int] | None = None,
+                      r3_num_experts: int | None = None) -> dict[str, Any]:
+    """``sample`` with the engine sampler's rollout fields in Miles' ``Sample`` form.
+
+    ``r3_num_experts``: the model's routed expert count (an id at or above it is an
+    error, as is a routing row that mixes pads and ids).
+    ``r3_layers`` = ``(num_layers, first_dense_layers)`` of the model: the engine's
+    R3 holds the MoE layers only (``L_moe = num_layers - first_dense_layers``, the
+    layer offset of the selection), Miles' replay indexes R3 by the global layer
+    number. An ``L_moe`` array gets ``first_dense_layers`` all ``-1`` rows in front
+    (the dense layers have no router, Miles never reads them); a ``num_layers``
+    array (a Miles sampler's) is kept; any other layer count is an error.
+
+    * ``rollout_top_logprobs_ids`` / ``rollout_top_logprobs`` become
+      ``rollout_topk_token_ids`` (int32) / ``rollout_topk_log_probs`` (float32):
+      Miles' score_centering reads only its own names and refuses a sample without
+      them. A sample that already holds the Miles names (a Miles sampler wrote it)
+      keeps them; holding both forms is an error.
+    * ``rollout_routed_experts`` (``uint16``, pad 0xFFFF) becomes ``int32`` with
+      -1 pads, the dtype and pad Miles' replay fill (``pad_func``) and the K3.1
+      slot mapping (negative = padding) work in; with ``r3_layers`` its layer axis
+      is the model's global layer number.
+    * a sample without ``weight_versions`` (an engine sampler's: one generate call
+      at one version, ``metadata.weight_version``, no in-call update) gets one
+      Miles ``WeightVersionsPerCall`` whose single output span covers the response
+      tokens at that version, so Miles' per-token version accounting (and the
+      full-parameter trajectory evidence) sees the behavior version. A sample whose
+      ``final_weight_version`` differs (an in-place update mid-generation) has no
+      per-token split and is left without spans (refused downstream as unknown).
+    """
+    import numpy
+
+    out = dict(sample)
+    spans = _engine_weight_version_call(out)
+    if spans is not None:
+        out["weight_versions"] = [spans]
+    top = rollout_top_logprobs(out)
+    if top is not None:
+        if out.get(MILES_TOPK_TOKEN_IDS) is not None or out.get(MILES_TOPK_LOG_PROBS) is not None:
+            raise SampleBufferRolloutError(f"sample {out.get('index')}: holds both {ROLLOUT_TOP_LOGPROBS_IDS} "
+                                           f"and {MILES_TOPK_TOKEN_IDS}")
+        del out[ROLLOUT_TOP_LOGPROBS_IDS], out[ROLLOUT_TOP_LOGPROBS]
+        out[MILES_TOPK_TOKEN_IDS] = numpy.ascontiguousarray(top[0], dtype=numpy.int32)
+        out[MILES_TOPK_LOG_PROBS] = numpy.ascontiguousarray(top[1], dtype=numpy.float32)
+    routed = rollout_routed_experts(out)
+    if routed is not None:
+        ids = routed.astype(numpy.int32)
+        ids[routed == ROUTED_EXPERTS_PAD] = -1
+        where = f"sample {out.get('index')}: {ROLLOUT_ROUTED_EXPERTS}"
+        pad = ids < 0
+        if (pad.any(axis=-1) & ~pad.all(axis=-1)).any():
+            raise SampleBufferRolloutError(f"{where} mixes pads and expert ids in one routing row")
+        if r3_num_experts is not None and ids.size and int(ids.max()) >= int(r3_num_experts):
+            raise SampleBufferRolloutError(f"{where} names expert {int(ids.max())}; the model has "
+                                           f"{int(r3_num_experts)}")
+        if r3_layers is not None:
+            total, dense = r3_layers
+            if ids.shape[1] == total - dense and dense:
+                rows = numpy.full((ids.shape[0], dense, ids.shape[2]), -1, dtype=numpy.int32)
+                ids = numpy.concatenate([rows, ids], axis=1)
+            elif ids.shape[1] != total:
+                raise SampleBufferRolloutError(
+                    f"sample {out.get('index')}: {ROLLOUT_ROUTED_EXPERTS} has {ids.shape[1]} layers; the model "
+                    f"has {total} layers, {total - dense} of them MoE")
+        out[ROLLOUT_ROUTED_EXPERTS] = ids
+    return out
+
+
+def _engine_weight_version_call(sample: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The one-span Miles call of an engine-sampler sample (miles_sample_dict doc)."""
+    if sample.get("weight_versions"):
+        return None
+    metadata = sample.get("metadata") or {}
+    version = metadata.get("weight_version")
+    if version is None or engine_version_number(version) is None:
+        return None
+    final = metadata.get("final_weight_version")
+    if final is not None and engine_version_number(final) != engine_version_number(version):
+        return None
+    tokens = len(sample.get("tokens") or ())
+    response = int(sample.get("response_length") or 0)
+    if response <= 0 or response > tokens:
+        return None
+    start = tokens - response
+    return {"spans": [{"version": str(version), "abs_start": start, "abs_end": tokens}],
+            "prefill_spans": [], "output_start": start, "prompt_tokens": start}
+
+
 def encode_group(samples: Sequence[Mapping[str, Any]]) -> bytes:
     """One payload: the group's samples as ``Sample.to_dict()`` mappings."""
-    record = {"schema": PAYLOAD_SCHEMA, "samples": [dict(s) for s in samples]}
+    record = {"schema": PAYLOAD_SCHEMA, "samples": [_with_field_meta(s) for s in samples]}
     return json.dumps(record, default=_encode_value, sort_keys=True, allow_nan=True).encode()
 
 
@@ -142,7 +343,10 @@ def decode_group(data: bytes) -> list[dict[str, Any]]:
 def _sample_versions(sample: Mapping[str, Any]) -> list[int]:
     versions = []
     for call in sample.get("weight_versions") or ():
-        for span in call or ():
+        # Miles Sample.to_dict(): one {"spans": [...], "prefill_spans": ...} per call
+        # (WeightVersionsPerCall); older payloads: a bare list of spans per call.
+        spans = call.get("spans") if isinstance(call, Mapping) else call
+        for span in spans or ():
             versions.append(span["version"])
     if not versions and (sample.get("metadata") or {}).get("weight_version") is not None:
         versions.append(sample["metadata"]["weight_version"])
@@ -210,6 +414,14 @@ def complete_prompt_tokens(sample: Mapping[str, Any],
     prompt = [int(t) for t in tokenize(str(sample.get("prompt") or ""))]
     if not prompt:
         raise SampleBufferRolloutError(f"{where}: the prompt text tokenizes to no ids")
+    routed = sample.get(ROLLOUT_ROUTED_EXPERTS)
+    if routed is not None and len(routed) != len(prompt) + len(response) - 1:
+        # R3 has one row per prompt + response - 1 position of the engine's own tokens:
+        # a different count means the trainer's prompt ids are not the engine's.
+        raise SampleBufferRolloutError(
+            f"{where}: the trainer tokenized the prompt to {len(prompt)} ids, but the engine's "
+            f"{ROLLOUT_ROUTED_EXPERTS} rows ({len(routed)}) imply {len(routed) + 1 - len(response)} prompt "
+            "ids; the routing replay would not line up with the tokens")
     return {**sample, "tokens": prompt + response,
             "metadata": {**metadata, PROMPT_TOKENIZED_BY: "trainer"}}
 

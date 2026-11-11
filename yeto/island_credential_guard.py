@@ -33,6 +33,14 @@ CLOUD_CREDENTIAL_ENV_NAMES = frozenset({
 })
 CLOUD_CREDENTIAL_FILES = (".modal.toml", ".aws/credentials", ".runpod", ".nebius", ".verda")
 ALLOW_ENV = "YETO_ALLOW_ISLAND_CLOUD_CREDENTIALS"
+# The s3 store credential of a Modal island arrives as a Modal Secret with the AWS
+# names (yeto.cloud.s3_store.CREDENTIALS_AWS_ENV); the launcher declares that by
+# setting STORE_CREDENTIALS_ENV to STORE_CREDENTIALS_AWS. Only then are the two AWS
+# names the island's own store credential, not a launcher credential shipped by
+# mistake (kept equal to the s3_store constants by a test; no import of yeto.cloud).
+STORE_CREDENTIALS_ENV = "YETO_RL_STORE_S3_CREDENTIALS"
+STORE_CREDENTIALS_AWS = "aws-env"
+AWS_STORE_PAIR = frozenset({"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"})
 
 
 class IslandCloudCredentialError(RuntimeError):
@@ -43,7 +51,10 @@ def find_cloud_credentials(environ: Mapping[str, str] | None = None,
                            home: str | os.PathLike | None = None) -> tuple[list[str], list[str]]:
     """(credential env names that are set, credential files that exist)."""
     environ = os.environ if environ is None else environ
-    names = sorted(n for n in CLOUD_CREDENTIAL_ENV_NAMES if environ.get(n))
+    checked = set(CLOUD_CREDENTIAL_ENV_NAMES)
+    if environ.get(STORE_CREDENTIALS_ENV) == STORE_CREDENTIALS_AWS:
+        checked -= AWS_STORE_PAIR  # the declared store credential (module comment)
+    names = sorted(n for n in checked if environ.get(n))
     base = Path(home if home is not None else environ.get("HOME") or Path.home())
     files = [f"~/{rel}" for rel in CLOUD_CREDENTIAL_FILES if (base / rel).exists()]
     return names, files

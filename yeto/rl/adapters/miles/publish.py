@@ -29,9 +29,12 @@ Member publication (fork M4 + 3.5a mechanism (a)),
 :meth:`MilesPublisher.publish_members`:
 
 1. ``wait_cells_tracked`` for the new members (started by ``add_engines``);
-2. upstream ``update_weights(members=cells, expected_epoch, admit_cordoned=True)``:
-   only these engines load the payload; they become Serving *cordoned* (no
-   router traffic) and every other engine keeps its weights and version;
+2. ``placement_group.update_member_weights(actor, controller, members=cells,
+   expected_epoch, admit_cordoned=True)`` (a pin with the ``member_publish``
+   feature, k31/b4+; ports-v1: the fork's ``update_weights(members=cells,
+   expected_epoch, admit_cordoned=True)``): only these engines load the
+   payload; they become Serving *cordoned* (no router traffic) and every other
+   engine keeps its weights and version;
 3. under the update lock limited to the members, stamp the policy token and
    read it back (as in the full path);
 4. payload read-back: ``check_weights(checksum)`` over every addressable engine
@@ -40,10 +43,12 @@ Member publication (fork M4 + 3.5a mechanism (a)),
    verified policy); no reference, a different shape or any difference fails
    closed and the members are never admitted;
 5. ``admit_cells(cells, expected_epoch, expected_weight_version=<version>)``;
-6. ``start_commit_weight_version(<version>, expected_epoch)`` ...
-   ``end_commit_weight_version``: under one hold of the controller lock, every
-   Serving engine reports the version at that epoch, and the rollout executor
-   takes it as its current version.
+6. ``placement_group.commit_weight_version(executor, controller,
+   weight_version=<version>, expected_epoch)`` (``member_publish`` pins; ports-v1:
+   ``start_commit_weight_version`` ... ``end_commit_weight_version`` directly):
+   under one hold of the controller lock, every Serving engine reports the
+   version at that epoch, and the rollout executor takes it as its current
+   version.
 """
 
 from __future__ import annotations
@@ -284,6 +289,33 @@ def _default_update_weights() -> Callable[..., Any]:
     return update_weights
 
 
+def _default_update_member_weights() -> Callable[..., Any]:
+    # k31/b4 member_publish: the full-fleet update_weights takes no members= any more
+    from miles.ray.placement_group import update_member_weights
+
+    return update_member_weights
+
+
+def _default_commit_weight_version() -> Callable[..., Any]:
+    from miles.ray.placement_group import commit_weight_version
+
+    return commit_weight_version
+
+
+def _pin_has_member_publish() -> bool:
+    from .pins import pin_has
+
+    return pin_has("member_publish")
+
+
+def _failed_member_cells(error: BaseException) -> tuple[str, ...]:
+    """The cells a k31/b4 ``MemberPublishFailedError`` names (they left service
+    through ``end_update_weights``); empty for any other error."""
+    if type(error).__name__ != "MemberPublishFailedError":
+        return ()
+    return tuple(str(c) for c in getattr(error, "failed_cell_ids", ()) or ())
+
+
 def lora_keys(body: dict[str, Any]) -> dict[str, Any]:
     """The adapter A/B entries of one engine's flattened checksum body. The patched
     sglang WeightChecker emits ``lora:<adapter>:<module>:<layer>:A|B``; the Miles
@@ -336,10 +368,25 @@ async def default_lora_warmup(engine: Any, adapter: str, timeout_s: float) -> di
             "completion_tokens": meta.get("completion_tokens")}
 
 
-def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
-    from miles.utils.audit_utils.checksum_utils import flatten_inference_engine_checksums
+def flatten_engine_checksums(raw: Any, merge: Callable[[Any], dict[str, Any]] | None = None
+                             ) -> list[dict[str, Any]]:
+    """Upstream ``check_weights(action="checksum")`` returns one
+    ``(ServerCellMetadata, body)`` per engine (``None`` body: the engine
+    answered nothing). Flatten every body with upstream
+    ``merge_inference_engine_ranks`` (``rank{r}/<tensor>`` keys, the ranks
+    sorted). As the removed ``flatten_inference_engine_checksums`` did, an
+    engine body reporting failure or no ranks raises ``AssertionError``
+    (``read_engine_checksums`` turns it into ``PAYLOAD_MISMATCH``), and so does
+    an answer with no body at all."""
+    if merge is None:
+        from miles.utils.audit_utils.checksum_utils import merge_inference_engine_ranks as merge
+    bodies = [body for _meta, body in raw if body is not None]
+    assert bodies, f"check_weights returned no engine checksum body: {raw!r}"
+    return [dict(merge(body)) for body in bodies]
 
-    return flatten_inference_engine_checksums
+
+def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
+    return flatten_engine_checksums
 
 
 def engine_checksum_digest(body: dict[str, Any]) -> str:
@@ -391,14 +438,27 @@ class MilesPublisher:
         update_weights: Callable[..., Any] | None = None,
         flatten_checksums: Callable[[Any], list[dict[str, Any]]] | None = None,
         runner: LoopRunner | None = None,
+        orchestrator_args: Any = None,
+        update_member_weights: Callable[..., Any] | None = None,
+        commit_weight_version: Callable[..., Any] | None = None,
     ) -> None:
         self._args = args
+        # upstream update_weights(args, ...) takes the OrchestratorConfig slice
+        # the components were built from (entry: ArgvOrchestratorStartupInfo.args)
+        self._orch = args if orchestrator_args is None else orchestrator_args
         self._actor = actor_model
         self._executor = rollout_executor
         self._controller = inference_controller
         self._export = export_trainer_state
         self._verify_checksums = verify_engine_checksums
         self._update_weights = update_weights
+        # Member publish / commit verbs (k31/b4 member_publish). The new API is used when
+        # one of them is injected, or when the pin carries ``member_publish`` and no
+        # whole-surface ``update_weights`` is injected: an injected ``update_weights``
+        # stands for the fork-era surface (update_weights(members=...) and the
+        # controller's start/end commit), as on a ports-v1 pin.
+        self._update_member_weights = update_member_weights
+        self._commit_weight_version = commit_weight_version
         self._flatten = flatten_checksums
         self._runner = runner or LoopRunner()
         self.last_engine_checksums: dict[str, dict[str, Any]] | None = None
@@ -532,7 +592,8 @@ class MilesPublisher:
         finally:
             if ok:
                 await self._controller.end_update_weights(
-                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
+                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes,
+                    failed_cell_ids=(),
                 )
             else:
                 await self._controller.abort_update_weights()
@@ -556,7 +617,7 @@ class MilesPublisher:
             if offload_rollout and self._published_once:
                 await self._controller.onload_weights()
             mark = time.monotonic()
-            await update_weights(self._args, self._actor, self._executor, self._controller)
+            await update_weights(self._orch, self._actor, self._executor, self._controller)
             self._time("update_weights_s", mark)
             if offload_rollout:
                 await self._controller.onload_kv()
@@ -606,7 +667,7 @@ class MilesPublisher:
     async def _load_version(self, version: int) -> None:
         update_weights = self._update_weights_to(version)
         try:
-            await update_weights(self._args, self._actor, self._executor, self._controller)
+            await update_weights(self._orch, self._actor, self._executor, self._controller)
         except Exception as exc:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
@@ -687,7 +748,28 @@ class MilesPublisher:
         del state  # the version names the weights through the driver's published map
         self._runner.run(self._commit_version(token_rollout_id, epoch))
 
+    def _uses_member_publish_api(self) -> bool:
+        """k31/b4 member publish verbs (``update_member_weights`` /
+        ``commit_weight_version``) instead of the fork-era ones."""
+        if self._update_member_weights is not None or self._commit_weight_version is not None:
+            return True
+        if self._update_weights is not None:
+            return False  # an injected fork-era surface
+        return _pin_has_member_publish()
+
     async def _commit_version(self, version: int, epoch: int) -> None:
+        if self._uses_member_publish_api():
+            # k31/b4 placement_group.commit_weight_version: start_commit_weight_version
+            # (every Serving cell reports the version at the epoch, the lock is held),
+            # the rollout executor takes the version, end_commit_weight_version.
+            commit = self._commit_weight_version or _default_commit_weight_version()
+            try:
+                await commit(self._executor, self._controller,
+                             weight_version=version, expected_epoch=epoch)
+            except Exception as exc:
+                raise PublicationError(f"serving engines do not all report v{version}: {exc}",
+                                       cause=PublicationCause.TOKEN_MISMATCH) from exc
+            return
         # fork context_lock: start_commit_weight_version is @acquires_lock -- on
         # failure it has already released the lock itself, so end (which
         # releases) is called only after a successful start. The executor takes
@@ -700,6 +782,31 @@ class MilesPublisher:
             raise PublicationError(f"serving engines do not all report v{version}: {exc}",
                                    cause=PublicationCause.TOKEN_MISMATCH) from exc
         await self._controller.end_commit_weight_version()
+
+    def _member_update_weights_to(self, version: int) -> Callable[[list[str], int], Any]:
+        """The member weight update that stamps ``version``: ``(cells, epoch) -> awaitable``.
+
+        k31/b4 (:meth:`_uses_member_publish_api`): ``update_member_weights(actor,
+        controller, members=, expected_epoch=, admit_cordoned=True)`` after aligning
+        Miles' weight-version counter, as the full path does. Otherwise the fork-era
+        ``update_weights(args, actor, executor, controller, members=,
+        expected_epoch=, admit_cordoned=True)`` (injected, or ports-v1's)."""
+        if self._uses_member_publish_api():
+            member_update = self._update_member_weights or _default_update_member_weights()
+
+            async def update(cells: list[str], epoch: int) -> Any:
+                await self._actor.run_plugin(ALIGN_WEIGHT_VERSION, {"next_version": int(version)})
+                return await member_update(self._actor, self._controller, members=cells,
+                                           expected_epoch=epoch, admit_cordoned=True)
+
+            return update
+        update_weights = self._update_weights_to(version)
+
+        def legacy(cells: list[str], epoch: int) -> Any:
+            return update_weights(self._orch, self._actor, self._executor, self._controller,
+                                  members=cells, expected_epoch=epoch, admit_cordoned=True)
+
+        return legacy
 
     def _update_weights_to(self, version: int) -> Callable[..., Any]:
         """The weight update that stamps ``version``.
@@ -725,7 +832,7 @@ class MilesPublisher:
             return
         self.event_sink(event, **fields)
 
-    async def _update_weights_watching_targets(self, update_weights: Callable[..., Any],
+    async def _update_weights_watching_targets(self, update_weights: Callable[[list[str], int], Any],
                                                cells: list[str], epoch: int) -> Any:
         """Run the member ``update_weights`` while watching the target cells' worker actors.
 
@@ -735,18 +842,16 @@ class MilesPublisher:
         of the other targets unblocks nothing and the run stalls. Here the targets are probed every
         ``target_watch_poll_s`` through the fork's ``RayWorkerManager`` (a named actor, not behind
         that lock). When one is dead the call gets ``dead_target_grace_s`` to fail on its own (with
-        the fork's bounded connect it does) and is cancelled otherwise; the fork's
-        ``placement_group.update_weights`` runs ``abort_update_weights`` on any BaseException,
-        CancelledError included, which releases the controller lock. A probe that cannot run
+        the fork's bounded connect it does) and is cancelled otherwise; the member update
+        (``placement_group.update_member_weights``, ports-v1 ``update_weights(members=)``) runs
+        ``abort_update_weights`` on any BaseException, CancelledError included, which releases
+        the controller lock. A probe that cannot run
         (no manager, older fork) leaves the call unwatched: the watch never invents a failure.
         Residual race (documented): a cancel landing while the fork's ``start_update_weights``
         is still acquiring the lock would leave that remote acquire running; the grace period
         makes this window practically unreachable (the acquire is sub-second once the cells are
         tracked, which ``wait_cells_tracked`` ensured before)."""
-        call = update_weights(
-            self._args, self._actor, self._executor, self._controller,
-            members=cells, expected_epoch=epoch, admit_cordoned=True,
-        )
+        call = update_weights(cells, epoch)
         if not self.watch_targets:
             return await call
         import sys
@@ -878,7 +983,7 @@ class MilesPublisher:
     async def _publish_members(
         self, version: int, token: str, cells: list[str], epoch: int
     ) -> dict[str, Any] | None:
-        update_weights = self._update_weights_to(version)
+        update_weights = self._member_update_weights_to(version)
         try:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
             if self._inject_block is not None and not self.injected_blocks:
@@ -918,10 +1023,13 @@ class MilesPublisher:
             raise PublicationError(f"member update_weights failed: {exc}", frozenset(lost),
                                    cause=PublicationCause.UPDATE_FAILED, engine_ids=lost) from exc
         except Exception as exc:
+            # k31/b4 MemberPublishFailedError names the members that failed (and left
+            # service); any other failure counts every target member
+            failed = [member_id(c) for c in (_failed_member_cells(exc) or cells)]
             raise PublicationError(f"member update_weights failed: {exc}",
-                                   frozenset(member_id(c) for c in cells),
+                                   frozenset(failed),
                                    cause=PublicationCause.UPDATE_FAILED,
-                                   engine_ids=[member_id(c) for c in cells]) from exc
+                                   engine_ids=failed) from exc
 
         info = await self._controller.start_update_weights(members=cells, expected_epoch=epoch)
         ok = False
@@ -939,7 +1047,8 @@ class MilesPublisher:
         finally:
             if ok:
                 await self._controller.end_update_weights(
-                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
+                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes,
+                    failed_cell_ids=(),
                 )
             else:
                 await self._controller.abort_update_weights()
@@ -1020,7 +1129,7 @@ class MilesPublisher:
 # ``--external-policy-identity-setter-path``; the SAO streaming runtime reads
 # it back.
 # ---------------------------------------------------------------------------
-_PUBLISHED_POLICY_IDENTITY_ATTRIBUTE = "_yeto_rl_current_published_policy_identity"
+_PUBLISHED_POLICY_IDENTITY_ATTRIBUTE = "_yeto_rl_current_published_policy_identity"  # proc_state key
 
 
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -1053,8 +1162,10 @@ def set_current_published_policy_identity(
     been applied atomically to Miles and published successfully to SGLang.
     """
 
+    from .proc_state import proc_state, set_proc_state
+
     identity = _validate_published_policy_identity(policy_version, policy_hash)
-    previous = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    previous = proc_state(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE)
     if previous is not None:
         if type(previous) is not tuple or len(previous) != 2:
             raise RuntimeError("current published policy identity is malformed")
@@ -1070,14 +1181,23 @@ def set_current_published_policy_identity(
             raise RuntimeError("published policy identity cannot move backwards")
         if policy_version == previous_version and policy_hash != previous_hash:
             raise RuntimeError("published policy hash changed at the same version")
-    setattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
+    # Process-local state (the hook's args are a frozen view on the new Miles),
+    # scoped like the attribute was: to this process and this args scope.
+    set_proc_state(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
     # The RolloutManager owns a serialized args namespace.  Installing the
     # identity through its remote setter is therefore also the only reliable
     # way to tell rollout admission and evaluation which exact published
-    # policy they are sampling.
-    args.yeto_rl_policy_token = f"yeto:{policy_version}:{policy_hash}"
-    args.yeto_rl_eval_policy_version = policy_version
-    args.yeto_rl_eval_policy_hash = policy_hash
+    # policy they are sampling: the token and the eval version go to the same
+    # process state, and onto the namespace itself where it is still writable
+    # (the pinned Miles, the driver facade) for the readers of those names.
+    token = f"yeto:{policy_version}:{policy_hash}"
+    set_proc_state(args, "yeto_rl_policy_token", token)
+    set_proc_state(args, "yeto_rl_eval_policy_version", policy_version)
+    for name, value in (("yeto_rl_policy_token", token), ("yeto_rl_eval_policy_version", policy_version)):
+        try:
+            setattr(args, name, value)
+        except (AttributeError, TypeError, ValueError):
+            pass  # frozen view: proc_state is the record
     return identity
 
 
@@ -1088,8 +1208,10 @@ def get_current_published_policy_identity(
 ) -> tuple[int, str]:
     """Return the exact inference-ready identity or fail closed."""
 
+    from .proc_state import proc_state
+
     _validate_published_policy_identity(expected_policy_version, "0" * 64)
-    identity = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    identity = proc_state(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE)
     if type(identity) is not tuple or len(identity) != 2:
         raise RuntimeError("Miles has no current published policy identity")
     try:

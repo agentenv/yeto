@@ -994,10 +994,11 @@ def _assert_island_ray_is_private(run: str) -> None:
     assert 'ray start --head --node-ip-address="$MASTER_ADDR"' in run
     assert 'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"' in run
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in run
-    assert 'pkill -f "$MILES_RAY_DIR/"' in run
+    # stopped by PID (never pkill -f / pgrep -f, which match their own shell)
+    assert "pkill" not in run and "pgrep" not in run
+    assert '*"$MILES_RAY_DIR/"*' in run
     # gcs_server/raylet sit on SIGTERM for 30 s+; the trap must escalate.
-    assert 'pkill -KILL -f "$MILES_RAY_DIR/"' in run
-    assert run.index('pkill -f "$MILES_RAY_DIR/"') < run.index('pkill -KILL -f "$MILES_RAY_DIR/"')
+    assert run.index("kill $pids") < run.index("kill -KILL $pids")
     assert "trap stop_miles_ray EXIT" in run
     # Cleanup runs before the head starts, so a stale island Ray from an
     # earlier attempt on the same node cannot block ``ray start --head``.
@@ -1007,6 +1008,7 @@ def _assert_island_ray_is_private(run: str) -> None:
 def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch):
     monkeypatch.setenv("CYBERGYM_API_KEY", "test-secret")
     monkeypatch.setenv("CYBERGYM_REWARD_SCHEME", "shaped_v1")
+    monkeypatch.setenv("YETO_RL_XHW_GUARD", "warn_abs_diff=0.10,act_abs_diff=0.15")
     monkeypatch.setenv("CYBERGYM_REWARD_VIEW", "train")
     monkeypatch.setitem(
         sys.modules,
@@ -1106,6 +1108,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert "CYBERGYM_API_KEY" not in task.envs  # secret-handling-hardening
     assert task.secrets["CYBERGYM_API_KEY"] == "test-secret"
     assert task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
+    assert task.envs["YETO_RL_XHW_GUARD"] == "warn_abs_diff=0.10,act_abs_diff=0.15"
     assert task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run
     assert "$HOME/sglang/python" in task.run
@@ -1848,3 +1851,38 @@ def test_nebius_island_caps_the_ray_object_store_at_dev_shm(tmp_path):
     _prepare_rl_args(aws)
     run = make_miles_island_task(aws, parse_gpu_spec(aws.gpu)[0], 0, 1, "127.0.0.1:29400").run
     assert f"--object-store-memory={600 << 30}" in run and "/dev/shm" not in run
+
+
+def test_stop_miles_ray_kills_only_the_island_ray_pids(tmp_path):
+    """The stop function signals the PIDs whose argv names the island's Ray dir,
+    escalates, and spares this shell and everything else (a fake /proc)."""
+    import subprocess
+
+    from yeto.launch.rl_island_task import MILES_RAY_STOP_FUNCTIONS
+
+    ray_dir = tmp_path / "miles-ray"
+    proc = tmp_path / "proc"
+    stubborn = subprocess.Popen(["bash", "-c", "trap '' TERM; while :; do sleep 0.1; done"])
+    polite = subprocess.Popen(["sleep", "60"])
+    bystander = subprocess.Popen(["sleep", "60"])
+    try:
+        for p, argv in ((stubborn.pid, f"gcs_server --session-dir={ray_dir}/session"),
+                        (polite.pid, f"raylet {ray_dir}/sockets"),
+                        (bystander.pid, "raylet /tmp/ray/session_latest")):
+            (proc / str(p)).mkdir(parents=True)
+            (proc / str(p) / "cmdline").write_bytes(argv.replace(" ", "\0").encode())
+        script = (f"{MILES_RAY_STOP_FUNCTIONS}set -e\n"
+                  "mkdir -p \"$YETO_PROC_ROOT/$$\"; printf 'x $MILES_RAY_DIR/y' > \"$YETO_PROC_ROOT/$$/cmdline\"\n"
+                  "stop_miles_ray\necho done\n")
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                             env={"PATH": "/usr/bin:/bin", "YETO_PROC_ROOT": str(proc),
+                                  "MILES_RAY_DIR": str(ray_dir)})
+        assert out.returncode == 0 and out.stdout.strip() == "done", out.stderr
+        for child in (stubborn, polite):
+            child.wait(timeout=10)
+        assert bystander.poll() is None
+    finally:
+        for child in (stubborn, polite, bystander):
+            if child.poll() is None:
+                child.kill()
+                child.wait()

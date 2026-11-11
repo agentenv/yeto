@@ -46,6 +46,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine.ext_attrs import ext_attr
+
 GRAD_AUDIT_ENV = "YETO_RL_AUDIT_GRADS"
 GRAD_AUDIT_DIR_ATTR = "yeto_rl_grad_audit_dir"
 CANONICAL_PREFIX = "base_model.model."
@@ -258,7 +260,7 @@ def arm(
 
     if not enabled(environ) or optimizer is None:
         return False
-    directory = getattr(args, GRAD_AUDIT_DIR_ATTR, None)
+    directory = ext_attr(args, GRAD_AUDIT_DIR_ATTR, None)
     if not directory:
         raise GradAuditError(f"{GRAD_AUDIT_ENV}=1 but args.{GRAD_AUDIT_DIR_ATTR} is not set")
     check_supported(args, dp_world=dp_world)

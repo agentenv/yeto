@@ -13,9 +13,23 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   layer, e.g. ``yeto.rl.adapters.sampler_engines.from_spec:build``) builds the
   engine from this section;
 * ``sampling``: :class:`~.sampler_engine.SamplingParams` fields;
+* ``rollout_fields`` (optional): ``{"routed_experts": bool, "top_logprobs_num": int,
+  "fp32_lm_head": bool}``, the per-token fields every sample must carry
+  (R3 routed experts; the top-K log-probs of score_centering, K default 128;
+  the fp32 lm-head the trainer's ``engine.version_fields`` check expects). The
+  section is handed to the engine factory inside the engine section and checked
+  against the built engine's capabilities (:func:`check_rollout_fields`);
+* ``platform`` (optional): ``cuda`` (default) / ``rocm`` / ``ppu`` / ``npu``, the
+  accelerator the engine runs on; handed to the engine factory the same way
+  (``rocm`` turns on the SGLang ROCm environment preset and the AMD card check);
 * ``num_rollouts``, ``max_backlog_groups``, ``max_prompt_tokens``;
   optional ``base_version`` (0), ``base_dir`` (the engine's base weights),
+  ``start_on_latest`` (false: start on ``base_dir``; true: on the store's newest
+  release, ``role_switch.sampler_spec_on_release``, so a restarted sampler does
+  not generate its first round on the base weights),
   ``min_round_s``, ``poll_s``, ``live_poll_s``, ``max_consecutive_load_failures``;
+  ``reload_max_defer_s`` (default 600; null: no bound): the longest a release
+  waits on running agentic trials before it is loaded anyway;
 * ``store``: the run's checkpoint store (``store_for``; an ``oss://`` store
   needs the store environment of :mod:`yeto.cloud.oss_store`);
   ``release_dir``: the release directory the sampler follows (optional,
@@ -36,6 +50,14 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``reward_kind`` is ``"miles"``;
 * ``checks``: :class:`~.sampler_checks.PostLoadChecks` keyword overrides
   (optional; e.g. ``expected_expert_matrices``);
+* ``expert_selection_sha256`` (optional): the partial-experts selection the
+  trainer runs with (Kimi-K3.1, INTERFACES 2.3); a release whose record's
+  ``manifest.expert_selection_sha256`` differs is refused and the served
+  weights are kept;
+* ``expert_trainable_sha256`` (optional): the selection's ``trainable_sha256``; when
+  set the gate compares ``manifest.partial_experts.trainable_sha256`` instead, so a
+  trainer running the same trainable experts under another EP layout (another slot
+  order, hence another ``expert_selection_sha256``) is accepted;
 * ``rollout_quant``: optional ``{"tier", "apply"}``, applied first
   (:func:`apply_rollout_quant`);
 * ``incarnation_lease``: optional (default on, in the buffer store): ``false``, or
@@ -76,12 +98,24 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
+from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, EngineSamplerConfig, PromptItem, Reward,
+                             build_engine_sampler)
 from .sampler_checks import PostLoadChecks
 from .data_split import DataSlot
-from .sampler_engine import Completion, SamplerEngine, SamplingParams
+from .sampler_engine import (
+    Completion,
+    SamplerEngine,
+    SamplingParams,
+    returns_routed_experts,
+    top_logprobs_num,
+    version_fields,
+)
 
 PROMPT_FORMATS = ("text", "chat", "agentic")
+ROLLOUT_FIELDS = "rollout_fields"
+ROLLOUT_FIELD_KEYS = ("routed_experts", "top_logprobs_num", "fp32_lm_head")
+PLATFORM = "platform"
+PLATFORMS = ("cuda", "rocm", "ppu", "npu")
 REWARD_KINDS = ("neutral", "miles")
 
 
@@ -108,12 +142,50 @@ def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
     """The engine adapter of ``spec["engine"]``: ``factory`` (``module:callable``,
     an adapter-layer function) builds it from the engine section. The neutral
     core names no adapter (import boundaries, ``yeto/rl/engine/README.md``)."""
-    engine = _require(spec, "engine")
+    engine = dict(_require(spec, "engine"))
+    fields = spec.get(ROLLOUT_FIELDS)
+    if fields is not None:
+        if not isinstance(fields, Mapping) or set(fields) - set(ROLLOUT_FIELD_KEYS):
+            raise SamplerSpecError(f"{ROLLOUT_FIELDS} must be a mapping with keys from {ROLLOUT_FIELD_KEYS}")
+        if ROLLOUT_FIELDS in engine and dict(engine[ROLLOUT_FIELDS]) != dict(fields):
+            raise SamplerSpecError(f"{ROLLOUT_FIELDS} given twice (spec and engine section) and they differ")
+        engine[ROLLOUT_FIELDS] = dict(fields)
+    platform = spec.get(PLATFORM)
+    if platform is not None:
+        if platform not in PLATFORMS:
+            raise SamplerSpecError(f"{PLATFORM} must be one of {PLATFORMS}, got {platform!r}")
+        if PLATFORM in engine and engine[PLATFORM] != platform:
+            raise SamplerSpecError(f"{PLATFORM} given twice (spec and engine section) and they differ")
+        engine[PLATFORM] = platform
     factory = _import(_require(engine, "factory", "engine"))
     try:
-        return factory(engine)
+        built = factory(engine)
     except (KeyError, TypeError, ValueError) as error:
         raise SamplerSpecError(f"engine: {error}") from None
+    check_rollout_fields(spec, built)
+    return built
+
+
+def check_rollout_fields(spec: Mapping[str, Any], engine: Any) -> dict[str, Any]:
+    """The built engine must return every field ``spec["rollout_fields"]`` asks
+    for (the trainer refuses a buffer without them much later, after GPU time
+    was spent). Returns what the engine will write: the R3 flag, K and the
+    ``engine.version_fields`` of the spec's sampling."""
+    fields = spec.get(ROLLOUT_FIELDS) or {}
+    sampling = dict(spec.get("sampling") or {"max_tokens": 1})
+    sampling["stop"] = tuple(sampling.get("stop") or ())
+    have = {"routed_experts": returns_routed_experts(engine), "top_logprobs_num": top_logprobs_num(engine),
+            "version_fields": version_fields(engine, SamplingParams(**sampling))}
+    if fields.get("routed_experts") and not have["routed_experts"]:
+        raise SamplerSpecError(f"{ROLLOUT_FIELDS}.routed_experts: the engine {type(engine).__name__} returns "
+                               "no routed experts (R3)")
+    want_k = fields.get("top_logprobs_num", 128 if fields else 0) or 0
+    if int(want_k) > 0 and have["top_logprobs_num"] < int(want_k):
+        raise SamplerSpecError(f"{ROLLOUT_FIELDS}.top_logprobs_num = {want_k}: the engine returns "
+                               f"{have['top_logprobs_num']}")
+    if fields.get("fp32_lm_head") and not have["version_fields"]["fp32_lm_head"]:
+        raise SamplerSpecError(f"{ROLLOUT_FIELDS}.fp32_lm_head: the engine serves no fp32 lm-head")
+    return have
 
 
 def apply_rollout_quant(spec: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -154,6 +226,12 @@ class JsonlPrompts:
         self.rows = [row for _, row in rows]
         if int(groups_per_round) < 1:
             raise SamplerSpecError("prompts.groups_per_round must be >= 1")
+        if int(groups_per_round) > len(self.rows):
+            # rounds wrap over the file, but one round drawing a row twice would write two
+            # groups under one key (the payload name carries the row): refuse before any GPU time
+            raise SamplerSpecError(f"prompts.groups_per_round {int(groups_per_round)} exceeds the {len(self.rows)} "
+                                   f"rows of {self.path}{'' if data_slot is None else f' in slot {data_slot}'}: "
+                                   "a round would draw a prompt twice")
         self.input_key, self.label_key = input_key, label_key
         self.groups_per_round = int(groups_per_round)
         self.render = render
@@ -187,7 +265,7 @@ class JsonlPrompts:
 def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key: str,
                       label_key: str | None, groups_per_round: int,
                       render: Callable[[Any], str] = str, key: bytes | None = None,
-                      environ: Any = None) -> "Any":
+                      environ: Any = None, task_key: str | None = None) -> "Any":
     """The engine sampler's prompts from the task dispenser: the
     sibling of :class:`JsonlPrompts` that a sampler island of any backend uses
     (``task_dispense.DispensedPrompts``). ``config``: ``prompts.dispense`` of the
@@ -196,18 +274,79 @@ def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key:
 
     return DispensedPrompts.open(path, config, input_key=input_key, label_key=label_key,
                                  groups_per_round=groups_per_round, render=render, key=key,
-                                 environ=environ)
+                                 environ=environ, task_key=task_key)
 
 
-def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False) -> Callable[[Any], str]:
-    from transformers import AutoTokenizer  # noqa: PLC0415 - only the chat format needs it
+def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], str] = str,
+                            task_key: str | None = None, environ: Any = None) -> "Any":
+    """The engine sampler's prompts from the store ledger (``prompts.dispense``
+    with ``backend: "store"``; ``store_dispense.StoreDispensedPrompts``): the
+    ledger lives under ``namespace`` of the run's store (``dispense.store``, else
+    ``buffer_root`` / ``store``), so samplers that share only the bucket share
+    the tasks. The holder is the sampler id, the incarnation this process's;
+    the incarnation leases of the other samplers (same store) free the claims of
+    a fenced one at once."""
+    from .incarnation_lease import read_lease  # noqa: PLC0415
+    from .resume import store_for  # noqa: PLC0415
+    from .store_dispense import StoreDispensedPrompts  # noqa: PLC0415
+    from .task_dispense import SAMPLER_INCARNATION_ENV, DispenseError  # noqa: PLC0415
 
-    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), trust_remote_code=remote_code)
+    prompts = spec["prompts"]
+    config = dict(prompts["dispense"])
+    env = os.environ if environ is None else environ
+    incarnation = env.get(SAMPLER_INCARNATION_ENV)
+    if not incarnation:
+        raise SamplerSpecError("prompts.dispense backend store needs the sampler incarnation "
+                               f"({SAMPLER_INCARNATION_ENV}; set by engine_sampler_entry.run)")
+    root = str(config.get("store") or spec.get("buffer_root") or _require(spec, "store"))
+    store = store_for(root, environ=environ)
+    lease_store = store
+    section = spec.get("incarnation_lease", True)
+    if isinstance(section, Mapping) and section.get("store"):
+        lease_store = store_for(str(section["store"]), environ=environ)
+    lease_off = section is False or section is None
+
+    def lease_of_holder(sampler: str) -> str | None:
+        record = read_lease(lease_store, sampler)
+        return None if not record or record.get("incarnation") is None else str(record["incarnation"])
+
+    try:
+        gate = None
+        if isinstance(spec.get("agentic"), Mapping) and spec["agentic"].get("envs"):
+            # sandbox readiness manifest + free capacity (yeto.sandbox.gate); a runtime filter, not in the plan
+            from yeto.sandbox.gate import gate_from_spec  # noqa: PLC0415
+            from yeto.sandbox.envs import EnvsError  # noqa: PLC0415
+
+            from .store_dispense import ledger_objects  # noqa: PLC0415
+
+            try:
+                gate = gate_from_spec(spec, ledger_objects(store), environ=env)
+            except EnvsError as error:
+                raise SamplerSpecError(str(error)) from error
+        return StoreDispensedPrompts.open(
+            _require(prompts, "path", "prompts"), config, store=store, holder=str(_require(spec, "sampler_id")),
+            incarnation=str(incarnation), input_key=str(_require(prompts, "input_key", "prompts")),
+            label_key=prompts.get("label_key"),
+            groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
+            task_key=task_key, lease_of_holder=None if lease_off else lease_of_holder, gate=gate)
+    except DispenseError as error:
+        raise SamplerSpecError(str(error)) from error
+
+
+def chat_renderer(tokenizer_dir: str | Path, *, remote_code: bool = False,
+                  template_kwargs: Mapping[str, Any] | None = None, tokenizer: Any = None) -> Callable[[Any], str]:
+    """``template_kwargs``: extra chat template variables (``prompts.chat_template_kwargs``,
+    e.g. Kimi-K3.1's ``{"thinking_effort": "low"}``)."""
+    if tokenizer is None:
+        from transformers import AutoTokenizer  # noqa: PLC0415 - only the chat format needs it
+
+        tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir), trust_remote_code=remote_code)
+    extra = dict(template_kwargs or {})
 
     def render(messages: Any) -> str:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **extra)
 
     return render
 
@@ -223,24 +362,31 @@ def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
             or (spec.get("engine") or {}).get("server", {}).get("base_dir")
         if not tokenizer:
             raise SamplerSpecError("prompts.format chat needs prompts.tokenizer or a base_dir")
-        render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)))
+        kwargs = prompts.get("chat_template_kwargs") or {}
+        if not isinstance(kwargs, Mapping):
+            raise SamplerSpecError("prompts.chat_template_kwargs must be an object")
+        render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)),
+                               template_kwargs=kwargs)
+    if (fmt == "agentic") != bool(spec.get("agentic")):
+        raise SamplerSpecError("prompts.format agentic and the spec's agentic section go together")
+    task_key = str(prompts.get("task_key", "metadata")) if fmt == "agentic" else None
     if prompts.get("dispense"):  # Rows from the task dispenser, not a slot
         if prompts.get("data_slot"):
             raise SamplerSpecError("prompts.dispense and prompts.data_slot exclude each other")
+        if str((prompts["dispense"] or {}).get("backend") or "tcp") == "store":
+            return store_dispensed_prompts(spec, render=render, task_key=task_key, environ=environ)
         from yeto.protocol import island_hmac_key_from_env  # noqa: PLC0415
 
         return dispensed_prompts(_require(prompts, "path", "prompts"), prompts["dispense"],
                                  input_key=str(_require(prompts, "input_key", "prompts")),
                                  label_key=prompts.get("label_key"),
                                  groups_per_round=int(_require(prompts, "groups_per_round", "prompts")),
-                                 render=render, key=island_hmac_key_from_env(), environ=environ)
-    if (fmt == "agentic") != bool(spec.get("agentic")):
-        raise SamplerSpecError("prompts.format agentic and the spec's agentic section go together")
+                                 render=render, key=island_hmac_key_from_env(), environ=environ,
+                                 task_key=task_key)
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
                         groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
-                        data_slot=prompts.get("data_slot"),
-                        task_key=str(prompts.get("task_key", "metadata")) if fmt == "agentic" else None)
+                        data_slot=prompts.get("data_slot"), task_key=task_key)
 
 
 # ------------------------------------------------------------------- reward
@@ -330,7 +476,14 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
         base_version=int(spec.get("base_version", 0)), base_dir=None if base_dir is None else Path(base_dir),
         min_round_s=spec.get("min_round_s"), poll_s=float(spec.get("poll_s", 5.0)),
         live_poll_s=None if spec.get("live_poll_s") is None else float(spec["live_poll_s"]),
-        max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)))
+        reload_max_defer_s=(None if "reload_max_defer_s" in spec and spec["reload_max_defer_s"] is None
+                            else float(spec.get("reload_max_defer_s", DEFAULT_RELOAD_MAX_DEFER_S))),
+        max_consecutive_load_failures=int(spec.get("max_consecutive_load_failures", 3)),
+        expert_selection_sha256=(None if spec.get("expert_selection_sha256") is None
+                                 else str(spec["expert_selection_sha256"])),
+        expert_trainable_sha256=(None if spec.get("expert_trainable_sha256") is None
+                                 else str(spec["expert_trainable_sha256"])),
+        drop_zero_variance_groups=bool(spec.get("drop_zero_variance_groups", False)))
 
 
 def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
@@ -369,14 +522,14 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         from yeto.rl.spot_rollout.sampler import label_boat_sandboxes  # noqa: PLC0415
 
         label_boat_sandboxes(spec, incarnation, environ=env)
-    with _member_incarnation_env(env, incarnation):
+    with _member_incarnation_env(env, incarnation, shard=spec.get("sampler_id")):
         return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
                     stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason,
                     reclaim_deadline=reclaim_deadline)
 
 
 @contextlib.contextmanager
-def _member_incarnation_env(env: Any, incarnation: str):
+def _member_incarnation_env(env: Any, incarnation: str, *, shard: Any = None):
     """The member incarnation of every channel this process opens to the
     head (task dispenser, spot subscriber, relay) derives from the process
     incarnation (``task_dispense.member_incarnation``), as on a Miles sampler
@@ -386,15 +539,56 @@ def _member_incarnation_env(env: Any, incarnation: str):
     if not isinstance(env, MutableMapping):
         yield
         return
-    previous = env.get(SAMPLER_INCARNATION_ENV)
-    env[SAMPLER_INCARNATION_ENV] = incarnation
+    from yeto.sandbox.trial_labels import SHARD_ENV  # noqa: PLC0415
+
+    # the sampler id labels this process's Harbor trial containers (ai.yeto.shard, with ai.yeto.inc)
+    values = {SAMPLER_INCARNATION_ENV: incarnation}
+    if shard:
+        values[SHARD_ENV] = str(shard)
+    previous = {k: env.get(k) for k in values}
+    env.update(values)
     try:
         yield
     finally:
-        if previous is None:
-            env.pop(SAMPLER_INCARNATION_ENV, None)
-        else:
-            env[SAMPLER_INCARNATION_ENV] = previous
+        for k, v in previous.items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+
+
+POOL_FENCE_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: the lease a pool fence writes
+
+
+def predecessor_fenced(member_store: Any, predecessor: str) -> bool:
+    """Whether a pool fence holds ``predecessor``'s incarnation lease (its node is
+    taken for gone: no incarnation of it writes again)."""
+    from .incarnation_lease import read_lease  # noqa: PLC0415
+
+    try:
+        lease = read_lease(member_store, predecessor) or {}
+    except Exception:  # noqa: BLE001 - unknown: not fenced (nothing is swept)
+        return False
+    return str(lease.get("incarnation") or "").startswith(POOL_FENCE_PREFIX)
+
+
+def sweep_predecessor(prompts: Any, member_store: Any, predecessor: str, left: bool,
+                      emit: Callable[..., None]) -> int:
+    """A replacement (``continues_shard``) runs in a new shard id, so the stale sweep
+    of its own shard never reaches the trial containers the predecessor left on the
+    sandbox host (a node evicted or killed runs no teardown). Once the predecessor
+    left or a pool fence holds its lease, remove them (``rl_sandbox_orphans_removed``
+    with ``shard``). A predecessor still running unfenced is left alone."""
+    sweep = getattr(getattr(prompts, "gate", None), "sweep_shard", None)
+    if not callable(sweep):
+        return 0
+    if not (left or predecessor_fenced(member_store, predecessor)):
+        return 0
+    removed = int(sweep(predecessor) or 0)
+    if removed:
+        emit("rl_sandbox_orphans_removed", removed=removed, shard=predecessor,
+             why="predecessor_left" if left else "predecessor_fenced")
+    return removed
 
 
 def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
@@ -426,6 +620,15 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             on_event(event, **fields)
 
     releases, buffer = build_stores(spec, environ) if stores is None else stores(incarnation, emit)
+    if spec.get("start_on_latest"):
+        # a restarted sampler starts its engine on the newest release (no first round
+        # on the base weights; the follower then never reloads it)
+        from .role_switch import sampler_spec_on_release  # noqa: PLC0415
+
+        spec = sampler_spec_on_release(spec, releases)
+        config = island_config(spec)
+        emit("rl_sampler_start_on_latest", base_version=config.base_version,
+             base_dir=None if config.base_dir is None else str(config.base_dir))
     prompts, reward = build_prompts(spec, env), build_reward(spec)
     checks = PostLoadChecks(**dict(spec.get("checks") or {}))
     reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
@@ -433,6 +636,10 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         install_marker_signals(env)
     buffer.refresh()
     resume = resume_point(buffer.entries(), config.sampler_id)
+    if callable(getattr(prompts, "recover", None)):  # store dispenser: settle what was written, free the rest
+        if getattr(prompts, "emit", False) is None:
+            prompts.emit = emit
+        prompts.recover(buffer.entries())
     from .resume import store_for  # noqa: PLC0415
 
     member_store = store_for(str(spec.get("buffer_root") or spec["store"]), environ=environ)
@@ -441,6 +648,12 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
     lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ)
     fenced = lambda: lease is not None and lease.fenced  # noqa: E731
     island = None
+    from .sampler_resume import handoff_requested  # noqa: PLC0415
+
+    handed_off = lambda: handoff_requested(member_store, config.sampler_id)  # noqa: E731
+    predecessor = spec.get("continues_shard")
+    if predecessor is not None and str(predecessor) == config.sampler_id:
+        raise SamplerSpecError("continues_shard names this sampler's own shard")
 
     def leave(reason: LeaveReason, **detail: Any) -> None:
         version = None if island is None else island.follower.version
@@ -463,6 +676,17 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         reclaim_deadline.add_cleanup("engine", engine.stop)
     watcher = ReclaimWatcher(reclaimed, on_reclaim).start()
     fence_watcher = None
+    # the dashboard reads every island's tape from the store (tapes/<sampler>/<incarnation>/)
+    from .tape_upload import TapeUploader, store_objects, upload_interval_s  # noqa: PLC0415
+
+    upload_s = upload_interval_s(spec.get("tape_upload_s"), env)
+    uploader = None
+    if upload_s is not None:
+        try:
+            uploader = TapeUploader(store_objects(member_store), tape, island=config.sampler_id,
+                                    incarnation=incarnation, interval_s=upload_s).start()
+        except Exception as error:  # noqa: BLE001 - observation only
+            print(f"[engine-sampler] tape upload off: {type(error).__name__}: {error}", flush=True)
     try:
         make_round = None
         if spec.get("agentic"):  # Harbor trials through the records proxy
@@ -475,7 +699,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
                 reclaim_deadline.add_cleanup("boat_sandboxes", close_pools_now)
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
-                                      should_stop=lambda: reclaimed() or fenced() or (stop is not None and stop()),
+                                      should_stop=lambda: (reclaimed() or fenced() or handed_off()
+                                                           or (stop is not None and stop())),
                                       reclaimed=lambda: reclaimed() or fenced(), incarnation=incarnation,
                                       resume=resume,
                                       data_cursor=getattr(prompts, "cursor", None), make_round=make_round)
@@ -487,6 +712,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
             emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
                  superseded=claimed["superseded"], sealed=claimed["sealed"])
             island.round.write_fenced = lease.check_before_write
+            if hasattr(prompts, "fenced"):  # store dispenser: a fenced incarnation renews and writes nothing
+                prompts.fenced = lambda: lease.fenced
 
             def on_fenced() -> None:
                 print(f"[engine-sampler] fenced: incarnation {lease.fenced_by} holds the lease of "
@@ -495,7 +722,25 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
 
             fence_watcher = ReclaimWatcher(lease.poll, on_fenced, poll_s=lease_poll_s,
                                            name="sampler-lease-watcher").start()
-        rounds = 0 if buffer.data_ended else island.run()
+        start = None
+        if predecessor and not resume.resumed:  # a fresh replacement: continue the predecessor's prompts
+            from .sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+            from .sampler_resume import HANDOFF_EVENT, handoff_start  # noqa: PLC0415
+
+            def predecessor_entries() -> list[Any]:
+                shard = FileSampleBuffer(buffer.store, batch_size=1, index=shard_index(str(predecessor)),
+                                         create_index=False)
+                return shard.entries()
+
+            start, detail = handoff_start(member_store, str(predecessor), config.sampler_id, predecessor_entries,
+                                          wait_s=float(spec.get("handoff_wait_s") or 900.0))
+            emit(HANDOFF_EVENT, **detail)
+            sweep_predecessor(prompts, member_store, str(predecessor), bool(detail.get("predecessor_left")), emit)
+        rounds = 0 if buffer.data_ended else island.run(start)
+        if handed_off() and not buffer.data_ended and not reclaimed():
+            # a successor continues the prompts in its own shard: this shard gets no more
+            # groups, so it ends (the trainer's merged index ends once every shard has)
+            buffer.mark_data_end()
         preempted = reclaimed()
         fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
             else None if stop_reason is None else stop_reason()
@@ -523,6 +768,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         raise
     finally:
         watcher.stop()
+        if uploader is not None:
+            uploader.stop()
         if fence_watcher is not None:
             fence_watcher.stop()
         closer = getattr(getattr(island, "round", None), "close", None)

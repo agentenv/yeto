@@ -581,7 +581,8 @@ class LocalRoundStats:
     mean_kl: float | None
     ess_ratio: float | None
     clip_fraction: float | None
-    delta_l2_norm: float
+    # None: not measured on this path (the engine driver has no per-step update norm)
+    delta_l2_norm: float | None
     rollout_seconds: float
     train_seconds: float
     train_step: int | None = None
@@ -649,7 +650,6 @@ class LocalRoundStats:
             "group_p95_seconds",
             "group_p99_seconds",
             "zero_variance_group_ratio",
-            "delta_l2_norm",
             "rollout_seconds",
             "train_seconds",
         ):
@@ -659,6 +659,7 @@ class LocalRoundStats:
             "mean_kl",
             "ess_ratio",
             "clip_fraction",
+            "delta_l2_norm",
             "loss",
             "pg_loss",
             "grad_norm",

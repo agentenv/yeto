@@ -1,7 +1,8 @@
 """Same-shape trainer rebuild + full cut restore (failure paths for 4.5).
 
-Only the trainer subprocesses are rebuilt (fork-M6 ``rebuild_training_models``
-with the startup sizes, i.e. same TP/PP/CP/EP/DP); learner, driver, bridge,
+Only the trainer subprocesses are rebuilt (Miles ``rebuild_training_models``:
+``miles.ray.trainer_rebuild`` on k31/b4+, the ports-v1 fork's
+``placement_group`` before; with the startup sizes, i.e. same TP/PP/CP/EP/DP); learner, driver, bridge,
 rollout manager and engines stay alive. The actor handle is shared by the
 trainer, policy-state and publisher ports (and the eval dispatcher), so it is
 held in a :class:`SwappableActor`: the driver keeps its port objects and only
@@ -152,16 +153,31 @@ class RebuildResult:
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _default_rebuild() -> Callable[..., Awaitable[tuple[Any, Any]]]:
-    from miles.ray import placement_group
-    from miles.ray.placement_group import rebuild_training_models
+def rebuild_module() -> Any:
+    """The Miles module holding ``rebuild_training_models`` (and the
+    ``create_training_models`` it calls by its module-global name):
+    ``miles.ray.trainer_rebuild`` on a pin with the ``trainer_rebuild`` feature
+    (k31/b4+; placement_group does not re-export it, that would be an import
+    cycle), else the ports-v1 fork's ``miles.ray.placement_group``."""
+    from .pins import pin_has
 
+    if pin_has("trainer_rebuild"):
+        from miles.ray import trainer_rebuild
+
+        return trainer_rebuild
+    from miles.ray import placement_group
+
+    return placement_group
+
+
+def _default_rebuild() -> Callable[..., Awaitable[tuple[Any, Any]]]:
     from . import cut_injection
 
+    module = rebuild_module()
     failures = cut_injection.rebuild_fail_count()
     if not failures:
-        return rebuild_training_models
-    return inject_rebuild_failures(rebuild_training_models, placement_group, failures)
+        return module.rebuild_training_models
+    return inject_rebuild_failures(module.rebuild_training_models, module, failures)
 
 
 def inject_rebuild_failures(rebuild: Callable[..., Awaitable[Any]], module: Any,
@@ -320,27 +336,25 @@ def resized_args(args: Any, trainer_gpus: int) -> Any:
 def trainer_view(startup_view: Any, bundle_positions: tuple[int, ...]) -> Any:
     """Slice of the startup placement group used as the trainer ("actor") view (M1 bundle map).
 
-    Uses the fork's ``_slice_pg_info`` (private; fork gap noted in
-    evidence/infra-e3/plan.md): positions index the startup view's
-    reordered bundle list.
+    Uses Miles' public ``placement_group.slice_pg_info`` (ports-v1 fork
+    2f23a0fc+, k31/b4+; the private ``_slice_pg_info`` of older fork commits is
+    no longer read): positions index the startup view's reordered bundle list.
     """
     from miles.ray import placement_group
 
-    # fork 2f23a0fc publishes slice_pg_info; the private name stays as a fallback
-    fn = check_slice_pg_info(getattr(placement_group, "slice_pg_info", None)
-                             or getattr(placement_group, "_slice_pg_info", None))
+    fn = check_slice_pg_info(getattr(placement_group, "slice_pg_info", None))
     return fn(startup_view, tuple(bundle_positions))
 
 
 def check_slice_pg_info(fn: Any) -> Callable[..., Any]:
-    """Fail loudly (not silently) if the fork renames/changes the private ``_slice_pg_info(info, indices)``."""
+    """Fail loudly (not silently) if Miles renames/changes ``slice_pg_info(info, indices)``."""
     import inspect
 
     if not callable(fn):
-        raise RuntimeError("fork miles.ray.placement_group._slice_pg_info is missing")
+        raise RuntimeError("miles.ray.placement_group.slice_pg_info is missing")
     params = list(inspect.signature(fn).parameters)
     if params != ["info", "indices"]:
-        raise RuntimeError(f"fork _slice_pg_info signature changed: {params} (expected ['info', 'indices'])")
+        raise RuntimeError(f"slice_pg_info signature changed: {params} (expected ['info', 'indices'])")
     return fn
 
 

@@ -25,6 +25,11 @@ lag behind the trainer's ``released_at``) to ``$S3_METRICS`` for the patrol scri
     S3_BUCKET=<bucket> S3_PREFIX=<run> S3_REGION=<region> \
         python3 -m yeto.rl.spot.s3_delivery pull-loop --store <store>
 
+Near-region fan-out (:mod:`.peer_fanout`): with ``--peers host:port,...`` (or
+``$YETO_RELEASE_PEERS``) the VM asks those peers for the release first and takes the object
+store only when none delivers; with ``--serve-port`` it serves its own placed releases to
+the other VMs of the cluster. The pointer's digest guards both paths the same way.
+
 Environment: S3_BUCKET, S3_PREFIX and S3_REGION (required), S3_PROXY (empty: direct),
 S3_TRANSFERS (4), RCLONE (rclone), AWS_PROFILE (unset: the default credential chain),
 S3_METRICS (<store>/s3-delivery.jsonl),
@@ -41,9 +46,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.spot import peer_fanout
 from yeto.rl.spot_rollout import cut_manifest as cm
 
 REMOTE = "s3w"
@@ -206,8 +213,10 @@ def publish_loop(s3: S3, store: Path, interval: float) -> None:
 
 
 # ---------------------------------------------------------------- VM side
-def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth: int = 0) -> dict[str, Any] | None:
-    """Download and place ``release`` (and missing bases first) into ``store``."""
+def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth: int = 0,
+         peers: Sequence[str] = (), fetch: peer_fanout.Fetch = peer_fanout.urllib_fetch) -> dict[str, Any] | None:
+    """Download and place ``release`` (and missing bases first) into ``store``:
+    from the first of ``peers`` that holds it, else from S3 (module doc)."""
     cm.check_release_name(release)
     root = store / cm.RELEASES
     if (root / release).is_dir():
@@ -222,34 +231,37 @@ def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth:
     if base and not (root / base).is_dir():
         if depth >= 64:
             raise cm.ManifestError(f"delta chain of {release} too deep")
-        pull(s3, store, str(base), depth=depth + 1)
-    staged = store / f"staged-{release}"
-    staged.mkdir(parents=True, exist_ok=True)
-    t0 = time.time()
-    s3.copy_down(release, staged)
-    seconds = time.time() - t0
-    cm.place(manifest, staged, store, expected_digest=expected)
-    shutil.rmtree(staged, ignore_errors=True)
-    placed = time.time()
+        pull(s3, store, str(base), depth=depth + 1, peers=peers, fetch=fetch)
     pub = s3.get_json(f"pub/{release}.json") or {}
     released = manifest["record"].get("released_at")
-    row = {"side": "pull", "release": release, "bytes": manifest["bytes"], "download_s": round(seconds, 1),
-           "MBps": round(manifest["bytes"] / 1e6 / max(seconds, 1e-6), 2), "placed_at": round(placed, 1),
-           "published_at": pub.get("published_at"),
-           "lag_s": round(placed - float(released), 1) if released else None}
+    row = peer_fanout.pull_from_peers(peers, store, release, digest=expected, fetch=fetch, log=log) if peers else None
+    if row is None:
+        staged = store / f"staged-{release}"
+        staged.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        s3.copy_down(release, staged)
+        seconds = time.time() - t0
+        cm.place(manifest, staged, store, expected_digest=expected)
+        shutil.rmtree(staged, ignore_errors=True)
+        peer_fanout.save_manifest(store, manifest)  # this node can now serve the release
+        row = {"side": "pull", "source": "s3", "release": release, "bytes": manifest["bytes"],
+               "download_s": round(seconds, 1),
+               "MBps": round(manifest["bytes"] / 1e6 / max(seconds, 1e-6), 2), "placed_at": round(time.time(), 1)}
+    row.update(published_at=pub.get("published_at"),
+               lag_s=round(row["placed_at"] - float(released), 1) if released else None)
     metrics(store, row)
-    log(f"placed {release}: {manifest['bytes'] / 1e9:.2f} GB in {seconds:.0f} s ({row['MBps']} MB/s), "
-        f"trainer->island lag {row['lag_s']} s")
+    log(f"placed {release} from {row['source']}: {manifest['bytes'] / 1e9:.2f} GB in {row['download_s']:.0f} s "
+        f"({row['MBps']} MB/s), trainer->island lag {row['lag_s']} s")
     return row
 
 
-def pull_loop(s3: S3, store: Path, interval: float) -> None:
+def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = ()) -> None:
     failures = 0
     while True:
         try:
             pointer = s3.get_json(cm.LATEST)
             if pointer:
-                pull(s3, store, str(pointer["release"]), digest=pointer.get("digest"))
+                pull(s3, store, str(pointer["release"]), digest=pointer.get("digest"), peers=peers)
             failures = 0
         except Exception as error:
             failures += 1
@@ -265,8 +277,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("release", nargs="?")
     p.add_argument("--store", required=True, type=Path)
     p.add_argument("--interval", type=float, default=30.0)
+    p.add_argument("--peers", default=None, help="host:port,... of peer file servers to pull from first "
+                                                 f"(default: ${peer_fanout.PEERS_ENV})")
+    p.add_argument("--serve-port", type=int, default=None,
+                   help="serve this store's placed releases to peers on this port (pull / pull-loop)")
     a = p.parse_args(argv)
     s3 = S3()
+    peers = peer_fanout.parse_peers(a.peers) if a.peers is not None else peer_fanout.peers_from(environ=os.environ)
+    server = None
+    if a.serve_port is not None and a.cmd in ("pull", "pull-loop"):
+        server = peer_fanout.ReleaseFileServer(a.store, port=a.serve_port).start()
+        log(f"serving placed releases to peers on port {server.port}")
     if a.cmd == "publish":
         publish(s3, a.store, a.release or json.loads((a.store / cm.RELEASES / cm.LATEST).read_text())["path"])
     elif a.cmd == "publish-loop":
@@ -274,9 +295,12 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "pull":
         pointer = s3.get_json(cm.LATEST) or {}
         release = a.release or pointer["release"]
-        pull(s3, a.store, release, digest=pointer.get("digest") if pointer.get("release") == release else None)
+        pull(s3, a.store, release, digest=pointer.get("digest") if pointer.get("release") == release else None,
+             peers=peers)
+        if server is not None:
+            server.stop()
     elif a.cmd == "pull-loop":
-        pull_loop(s3, a.store, a.interval)
+        pull_loop(s3, a.store, a.interval, peers=peers)
     else:
         print(json.dumps(s3.get_json(cm.LATEST)))
     return 0

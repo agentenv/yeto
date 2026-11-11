@@ -11,6 +11,7 @@ import pytest
 from yeto.rl.algos import grpo_knobs as gk
 from yeto.rl.algos import reward_pipeline as rp
 from yeto.rl.algos import sample_filters as sf
+from yeto.rl.adapters.miles.proc_state import proc_state
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     AlgorithmSpec,
@@ -368,7 +369,7 @@ def test_overlong_filter_default_is_noop():
     data = [_group(["truncated", "truncated"])]
     assert sf.apply_sample_filters(args, data) is None
     assert [s.remove_sample for s in data[0]] == [False, False]
-    assert not hasattr(args, sf.FILTER_COUNTS_ATTR) and sf.metadata_fields(args) == {}
+    assert proc_state(args, sf.FILTER_COUNTS_ATTR) is None and sf.metadata_fields(args) == {}
 
 
 # ---------------------------------------------------------------- shared hooks (1b-shared.patch)
@@ -579,6 +580,7 @@ def test_stale_plugin_hash_warns_not_rejected():
 
 def test_unknown_transform_refused_at_launch():
     spec = pipeline_spec(reward_shapers=[OVERLONG])
+    _foreign.__module__ = "yeto.rl.algos.reducers"  # an allowed namespace; independent of test order
     rp.register_advantage_transform("test_gone", _foreign)
     try:
         gone = pipeline_spec(transform="test_gone")

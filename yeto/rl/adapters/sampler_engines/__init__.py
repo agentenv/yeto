@@ -3,7 +3,7 @@
 
 * ``sglang-server`` (:mod:`.sglang_server`): an SGLang HTTP server, PPU stage 1;
 * ``vllm-server`` (:mod:`.vllm_server`): a vLLM OpenAI-compatible server
-  (vllm-ascend on 910B), stage 2;
+  (vllm-ascend on 910B, stage 2; upstream vLLM main on CUDA / ROCm for Kimi-K3.1);
 * ``fake`` (:mod:`.fake`): deterministic in-memory engine for CPU tests.
 
 Vendor facts (patches, environment variables, launch flags, weight-name maps)

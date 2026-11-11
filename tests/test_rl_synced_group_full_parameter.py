@@ -27,7 +27,7 @@ GROUP = ("--rl-sync-preset", "full-parameter", "--rl-sync-full-parameter-rounds"
          "--local-rl-rounds-per-sync", "2",
          "--rl-sample-role", "trainer", "--rl-island-sample-role", "2:sampler",
          "--rl-island-sample-role", "3:sampler", "--rl-max-policy-age", "2",
-         "--rl-sampler-max-backlog-rounds", "1", "--rl-sample-wait-s", "900",
+         "--rl-sampler-max-backlog-rounds", "12", "--rl-sample-wait-s", "900",
          "--rl-checkpoint-store", STORE, "--rollout-num-gpus-per-engine", "2",
          "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json",
          "--cluster-prefix", "gbg-group")
@@ -88,7 +88,7 @@ def test_merged_follow_islands_parse_and_share_one_store():
         assert sampler.rl_single_island_no_sync and sampler.sync_preset == "strict-avg"
         assert sampler.parameter_mode == "full" and sampler.fragments == 1
         assert sampler.rl_resume_store == MOUNT and sampler.learner_id == 0
-        assert sampler.rl_sampler_max_backlog_rounds == 1
+        assert sampler.rl_sampler_max_backlog_rounds == 12
         assert sampler.rl_sampler_data_slot == f"{j}/2"
         assert sampler.rl_buffer_shards == ["island2", "island3"]
         assert sampler.global_rounds == 3  # 2 trainers x 3 rounds over 2 samplers
@@ -226,3 +226,44 @@ def test_a_trainer_marks_its_end_and_its_samplers_stop(tmp_path):
     assert mark_trainer_end(trainer, learner_id=0) and stop_one() and not stop_two()
     assert mark_trainer_end(trainer, learner_id=0) and trainers_ended(store) == 1  # one record each
     assert mark_trainer_end(trainer, learner_id=1) and stop_two()
+
+
+def test_sampler_backlog_covers_the_rounds_until_the_next_merged_release():
+    """The publisher releases when the merged version advances (fragments x local
+    rounds of every trainer, plus the pipeline); a sampler capped below that
+    stops before the next release and the trainers wait for groups forever
+    (seen on Modal: 2 trainers, 8 fragments, the default cap of 4 rounds)."""
+    args, _ = _plan()
+    need = sample_roles.min_full_parameter_backlog_rounds(args, 2, 4)
+    assert need == -(-2 * (4 * 2 + args.pipeline) // 2)
+    args.rl_sampler_max_backlog_rounds = None
+    assert sample_roles.full_parameter_sampler_backlog_rounds(args, 2, 4) == (
+        need + sample_roles.DEFAULT_MAX_BACKLOG_ROUNDS)
+    args.rl_sampler_max_backlog_rounds = need - 1
+    with pytest.raises(ValueError, match="stalls a full-parameter synced group"):
+        sample_roles.full_parameter_sampler_backlog_rounds(args, 2, 4)
+    with pytest.raises((ValueError, SystemExit), match="stalls a full-parameter synced group"):
+        _plan(("--rl-sampler-max-backlog-rounds", "1"))
+
+
+def test_nc_ssh_sampler_backlog_matches_the_launcher():
+    """The NC SSH sampler (yeto.launch.nc) sizes its cap with the same sample_roles
+    functions as the launcher's synced-group sampler."""
+    from yeto.launch.nc import tasks
+
+    args, _ = _plan()
+    args.rl_sampler_max_backlog_rounds = None
+    launcher = sample_roles.full_parameter_sampler_backlog_rounds(args, 2, 4)
+    nc = tasks.backlog_groups(groups_per_round=1, synced=True, trainers=2, samplers=2,
+                              fragments=args.fragments, local_rounds=args.local_rl_rounds_per_sync,
+                              pipeline=args.pipeline)
+    assert nc == launcher
+
+
+def test_the_group_samplers_are_fleet_followers():
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launcher import _follower_islands
+
+    args, _ = _plan()
+    names = [f"gbg-group-l{m}" for m in range(4)]
+    assert _follower_islands(args, parse_gpu_spec(GROUP_GPU), names) == names[2:]

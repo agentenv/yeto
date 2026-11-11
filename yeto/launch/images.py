@@ -6,7 +6,6 @@ import shlex
 import sys
 
 from ..gpu_spec import ClusterSpec
-from .rl_backend import _miles_overlay
 
 
 # AWS keeps this SSM parameter pointing at the CURRENT Deep Learning Base
@@ -162,12 +161,12 @@ def image_manifest_check(package: str, key: str, want: str, *, fallback: str,
     )
 
 
-def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
+def _miles_source_setup(miles_commit: str | None = None) -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps of the pinned Miles/SGLang forks.
 
-    ``overlay`` (default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
-    patch applied to the image's ~/miles after the checkout checks.
-    """
+    ``miles_commit``: the Miles commit the run's image ships when it is not
+    MILES_NEXT_COMMIT (pins.image_miles_commit); the checkout and the manifest
+    check then use it, so the island does not fetch a pin the image lacks."""
 
     from ..rl import (
         MILES_NEXT_COMMIT,
@@ -178,6 +177,8 @@ def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
         SGLANG_NEXT_COMMIT,
         SGLANG_NEXT_REPOSITORY,
     )
+
+    MILES_NEXT_COMMIT = miles_commit or MILES_NEXT_COMMIT  # noqa: N806
 
     def checkout(
         path: str, repository: str, commit: str, refreshed_flag: str = ""
@@ -271,8 +272,7 @@ def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
         "else\n"
         "python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'\n"
-        "fi"
-        + (f"\n{_miles_overlay().overlay_setup(overlay)}" if overlay else ""),
+        "fi",
         "SGLANG_IN_IMAGE=0\n"
         f"if {sglang_checkout_in_image}; then\n"
         f"{sglang_check}\n"

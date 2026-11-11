@@ -27,7 +27,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.algorithm import (
@@ -126,7 +126,11 @@ MILES_DECLARED: dict[str, str] = {
     "losses:cispo": "GPU run: round-1 step-2 pg_loss -0.0324 vs GRPO 0.000166",
     "losses:sapo": "GPU run: round-1 step-2 pg_loss -0.0148 vs GRPO 0.000166",
     "losses:gmpo": "GPU run: clip_fraction equals the gmpo num/den ratio",
-    "features:dual_clip": "GPU run: eps_clip_c 1.01, dual_clipfrac > 0",
+    "features:dual_clip": (
+        "GPU run: eps_clip_c 1.01, dual_clipfrac > 0 (ports-v1 64b591a4b: the fork's loss metric "
+        "dual_clipfrac; on k31 the evidence is yeto/dual_clipfrac, which the yeto state plugin "
+        "reports with the fork's definition)"
+    ),
     "features:kl_unbiased": "GPU run: kl_loss differs from k3",
     "corrections:opsm_rollout": "GPU run: opsm_clipfrac > 0 with opsm_old_logprob_source=rollout",
     "features:rollout_logprobs_as_old": "GPU run: use_rollout_logprobs=true in the event spec",
@@ -152,67 +156,122 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
         f"MILES_DECLARED must not declare user-code mechanisms: {sorted(NEVER_DECLARABLE & set(MILES_DECLARED))}"
     )
 
-# Declarations whose evidence holds only for specific Miles pins (exact
-# commits; a new pin must be re-verified before it is added here).
-# 5c1b49eb = 0af62f4d + the 2b loss variants: carried over by code diff, not
-# by a rerun -- `git diff 0af62f4d..5c1b49eb -- miles` touches only
-# loss_hub/{losses,math_utils}.py and arguments.py; with the default
-# --policy-loss-variant policy_loss the loss path calls the same
-# compute_policy_loss with the same arguments, need_full_log_probs is
-# unchanged, and the new flags only add parser entries/validation.
-# 2f23a0fc = 5c1b49eb + fork cell declaration, same basis: `git diff --stat 5c1b49eb..2f23a0fc
-# -- miles` touches only miles/ray/{placement_group,rollout/inference_controller,
-# specs/inference}.py, miles/utils/workers/* and the --yeto-placement-map help
-# text in arguments.py -- no loss_hub/backends file; without rollout_cells /
-# deferred cells the startup path starts the same cells.
-# fb04d6ff / e3a11ab3 = 2f23a0fc + LoRA DP-invariant restore fix, same basis: `git diff --stat
-# 2f23a0fc..e3a11ab3
-# -- miles` touches only megatron_utils/lora/dp_invariant_state.py, reached
-# only with --lora-dp-invariant-state (default off); default training/loss
-# path unchanged.
-# 1023269 = e3a11ab3 + Qwen3.8-Next LoRA layout + worker loss, same basis: `git diff
-# --name-only e3a11ab38..1023269 -- miles miles_plugins` touches
-# megatron_utils/model.py (a new is_qwen3_8_next_model LoRA-injection branch
-# only), update_weight/hf_weight_iterator_direct.py, utils/lora/*,
-# miles_plugins/models/qwen3_8_next/lora.py, sglang_utils/sglang_api_client.py,
-# weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
-# parser entries in arguments.py -- no loss_hub/training-loss file.
-# Derived from the single lineage in pins.py: 0af62f4d and every later commit.
-_PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
-# 64b591a4b and later: 56068bd56 .. 386ae3b07 add only full-parameter state/transport,
-# LoRA-hybrid publish and SAO streaming files (no loss_hub or training-loss file), so the GPU evidence carries over by code diff.
-_PINS_SUPP = miles_fork_lineage_from("64b591a4bec1ffa37fb089d3e3b99c84773b1ffc")
-MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
+# GPU evidence behind a declaration is bound to a Miles lineage: it holds for
+# ``from_commit`` and the later commits of that lineage (the carry-over
+# arguments by code diff live in the lineage comments of pins.py), never for
+# a commit of another lineage. On the k31 lineage every mechanism below is
+# undeclared until its GPU re-verification lands a k31 EvidenceRef here
+# (yeto-adapter.md 4.5; K31_REVERIFY says what each re-run has to show).
+class EvidenceRef(NamedTuple):
+    lineage: str  # key of pins.MILES_LINEAGES
+    from_commit: str  # first commit of that lineage the evidence holds for
+    run_id: str  # the GPU run (or carry-over argument) that produced the judgment
+    judgment_path: str  # where the judgment is recorded (repo-relative or external)
+
+
+_PORTS_V1_0AF62F4D = EvidenceRef(
+    "ports-v1", "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
+    "lora-per-token-loss-smoke", "docs/RL_ALGORITHMS.md#declarations",
+)
+_PORTS_V1_64B591A4B = EvidenceRef(
+    "ports-v1", "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+    "rl-algo-supplement-phase1-gpu", "rl-algo-supplement/evidence/phase1-gpu (archived outside the repo)",
+)
+MILES_DECLARED_EVIDENCE: dict[str, tuple[EvidenceRef, ...]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss
     # (grad_norm bit-identical to the baseline)
-    "loss_aggregations:token": _PINS_0AF62F4D_PLUS,
-    "features:over_sampling": _PINS_0AF62F4D_PLUS,
-    "features:overlong_filter": _PINS_0AF62F4D_PLUS,
-    "features:clip_higher": _PINS_0AF62F4D_PLUS,
+    "loss_aggregations:token": (_PORTS_V1_0AF62F4D,),
+    "features:over_sampling": (_PORTS_V1_0AF62F4D,),
+    "features:overlong_filter": (_PORTS_V1_0AF62F4D,),
+    "features:clip_higher": (_PORTS_V1_0AF62F4D,),
     # the loss-supplement GPU smoke ran on 64b591a4b; clip_higher was re-run there too.
-    **{m: _PINS_SUPP for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
-                               "features:kl_unbiased", "corrections:opsm_rollout",
-                               "features:rollout_logprobs_as_old")},
+    **{m: (_PORTS_V1_64B591A4B,) for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
+                                            "features:kl_unbiased", "corrections:opsm_rollout",
+                                            "features:rollout_logprobs_as_old")},
 }
+
+
+# The pin-bound mechanisms whose ports-v1 GPU evidence does not carry over to the
+# k31 lineage (B8 report 5.3), with why each needs its own k31 GPU re-run. On a
+# k31 pin they are undeclared: requesting one is refused like any unverified
+# mechanism (a single island without outer sync may pass
+# --rl-allow-unverified-mechanism <name>); default GRPO needs none of them. An
+# entry stops applying once a k31 EvidenceRef in MILES_DECLARED_EVIDENCE covers
+# the pin (:func:`needs_k31_reverification`).
+K31_REVERIFY: dict[str, str] = {
+    **{m: ("loss and metrics bitwise equal to the fork on CPU (k31/b8 4ff093a8), but the flags reach "
+           "the loss through the typed config slice and the CUDA torch.compile path is unverified")
+       for m in ("losses:cispo", "losses:sapo", "losses:gmpo")},
+    "features:dual_clip": ("loss bitwise equal; the evidence metric moved from the fork's dual_clipfrac "
+                           "to yeto/dual_clipfrac (state plugin)"),
+    "features:kl_unbiased": "upstream code, loss bitwise equal on CPU; a new pin is re-run on GPU",
+    "features:clip_higher": "upstream code, loss bitwise equal on CPU; a new pin is re-run on GPU",
+    "loss_aggregations:token": ("the LoRA path is the upstream adapter library on a newer Megatron-Bridge "
+                                "(the ports-v1 evidence was the bridge's calculate_per_token_loss fix)"),
+    "features:over_sampling": "rollout side: upstream rewrote the DataSource / RolloutFn path",
+    "features:overlong_filter": "rollout side: upstream rewrote the DataSource / RolloutFn path",
+    "corrections:opsm_rollout": ("loss bitwise equal; rollout_log_probs transport, CP split and dtype "
+                                 "changed upstream"),
+    "features:rollout_logprobs_as_old": ("rollout_log_probs transport, CP split and dtype changed "
+                                         "upstream"),
+}
+
+
+def needs_k31_reverification(miles_commit: str | None = None) -> dict[str, str]:
+    """The :data:`K31_REVERIFY` mechanisms still undeclared on ``miles_commit``
+    (default :func:`pins.current_miles_commit`): empty off the k31 lineage, and
+    for a mechanism a k31 EvidenceRef already covers."""
+    from .pins import current_miles_commit, lineage_of
+
+    commit = current_miles_commit() if miles_commit is None else miles_commit
+    lineage = lineage_of(commit)
+    if lineage is None or lineage.name != "k31":
+        return {}
+    return {m: why for m, why in K31_REVERIFY.items()
+            if not any(evidence_covers(ref, commit) for ref in MILES_DECLARED_EVIDENCE.get(m, ()))}
+
+
+def evidence_covers(ref: EvidenceRef, miles_commit: str) -> bool:
+    """``miles_commit`` is ``ref.from_commit`` or later on ``ref.lineage``."""
+    from .pins import MILES_LINEAGES
+
+    lineage = MILES_LINEAGES[ref.lineage]
+    position = lineage.index(miles_commit)
+    return position is not None and position >= lineage.commits.index(ref.from_commit)
+
+
+def _declared_pins() -> dict[str, frozenset[str]]:
+    return {
+        mechanism: frozenset().union(*(miles_fork_lineage_from(ref.from_commit) for ref in refs))
+        for mechanism, refs in MILES_DECLARED_EVIDENCE.items()
+    }
+
+
+# mechanism -> every commit its evidence covers (derived from MILES_DECLARED_EVIDENCE).
+MILES_DECLARED_PINS: dict[str, frozenset[str]] = _declared_pins()
 
 
 def declared_by_dimension(miles_commit: str | None = None) -> dict[str, set[str]]:
     """R0 mechanism sets plus :data:`MILES_DECLARED`, per dimension.
 
-    An entry of :data:`MILES_DECLARED_PINS` is declared only when the Miles
-    pin (``miles_commit``, default ``yeto.rl.MILES_NEXT_COMMIT``) is one of
-    its verified commits.
+    A mechanism with :data:`MILES_DECLARED_EVIDENCE` is declared only when
+    one of its evidence references covers the Miles pin (``miles_commit``,
+    default :func:`pins.current_miles_commit`): same lineage, at or after the
+    evidence commit. A pin of another lineage (the k31 sync) declares none of
+    them until re-verified there.
     """
 
     from yeto.rl.engine.capabilities import R0_MECHANISMS
 
+    from .pins import current_miles_commit
+
     if miles_commit is None:
-        from yeto.rl import MILES_NEXT_COMMIT as miles_commit
+        miles_commit = current_miles_commit()
     out = {dim: set(names) for dim, names in R0_MECHANISMS.items()}
     out["advantage_estimators"] = {"grpo"}
     for mechanism in MILES_DECLARED:
-        pins = MILES_DECLARED_PINS.get(mechanism)
-        if pins is not None and miles_commit not in pins:
+        refs = MILES_DECLARED_EVIDENCE.get(mechanism)
+        if refs is not None and not any(evidence_covers(ref, miles_commit) for ref in refs):
             continue
         dimension, name = mechanism.split(":", 1)
         out.setdefault(dimension, set()).add(name)
@@ -402,7 +461,7 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
     if board is not None:
         return board
-    custom = getattr(miles_args, "custom_generate_function_path", None)
+    custom = custom_function_path(getattr(miles_args, "custom_generate_function_path", None))
     if not custom:
         return TOOL_WAIT_NO_BOARD_STOCK
     from yeto.rl.tool_wait_workload import GENERATE_PATH
@@ -438,7 +497,7 @@ def harness_source(miles_args: Any, elastic: Any = None) -> Any:
     board = getattr(elastic, "harness_board", None) if elastic is not None else None
     if board is not None:
         return board
-    if getattr(miles_args, "custom_agent_function_path", None):
+    if custom_function_path(getattr(miles_args, "custom_agent_function_path", None)):
         from .elastic_wiring import LazyBoardActor
         from yeto.rl.engine.tool_wait import harness_board_actor
 
@@ -657,8 +716,14 @@ def hf_exports_for(miles_args: Any, *, actor_model: Any, runner: Any,
         raise ValueError(f"{EXPORT_HF_FLAG} writes full weights; a LoRA island has no full export")
     one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
     return HfRoundExports(ExportRounds.parse(config["rounds"]), store_for(config["store"], environ=environ),
-                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node),
+                          full_checkpoint_writer(actor_model, runner, all_ranks=one_node,
+                                                 base_dir=_hf_dir(miles_args)),
                           staging=Path(tempfile.gettempdir()) / HF_EXPORT_STAGING)
+
+
+def _hf_dir(miles_args: Any) -> Path | None:
+    path = getattr(miles_args, "hf_checkpoint", None)
+    return Path(path) if path and Path(path).is_dir() else None
 
 
 def _is_full_parameter_sync(sync: Any) -> bool:
@@ -714,8 +779,13 @@ def compose_island(
     elastic: Any = None,
     evaluate_start: Callable[[int], Any] | None = None,
     critic_model: Any = None,
+    orchestrator_args: Any = None,
 ):
     """Wire the adapter ports into an ``IslandDriver`` (no upstream imports).
+
+    ``orchestrator_args``: the upstream ``OrchestratorConfig`` slice the
+    components were built from (``ArgvOrchestratorStartupInfo.args``); the
+    publisher hands it to upstream ``update_weights``. Defaults to ``miles_args``.
 
     ``critic_model``: the upstream critic
     ``TrainGroup`` of a critic algorithm (shared actor/critic PPO), trained
@@ -794,6 +864,7 @@ def compose_island(
         policy_state=policy_state,
         publisher=MilesPublisher(
             args=miles_args,
+            orchestrator_args=orchestrator_args,
             actor_model=actor_model,
             rollout_executor=rollout_executor,
             inference_controller=inference_controller,
@@ -824,6 +895,7 @@ def compose_island(
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
     driver.round_phases = True  # per-round time breakdown (rl_round_phases) for MFU
+    driver.ledger_set_aside_before = getattr(miles_args, "yeto_rl_ledger_set_aside_before", None)
     # publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     # --rl-verify-every N (no-sync island): hash the policy only every N-th version
@@ -953,6 +1025,11 @@ def run_fingerprint_of(miles_args: Any, algorithm: Any) -> dict[str, Any]:
     out = {name: plain(getattr(miles_args, name, None)) for name in RUN_FINGERPRINT_ARGS}
     sha = getattr(algorithm, "sha256", None)
     out["algorithm_spec_sha256"] = sha() if callable(sha) else None
+    # a partial-experts run: the cut's trainable slots belong to this selection (the argv
+    # names only the file's path); absent for every other recipe, so their fingerprints stay
+    selection = (getattr(miles_args, "yeto_rl_release_manifest", None) or {}).get("expert_selection_sha256")
+    if selection is not None:
+        out["expert_selection_sha256"] = str(selection)
     return out
 
 
@@ -1082,7 +1159,11 @@ def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -
     900 s")."""
     from .buffer_rollout import READER_FUNCTION_PATHS
 
-    if checkpoint is not None and getattr(miles_args, "rollout_function_path", None) in READER_FUNCTION_PATHS:
+    store = getattr(getattr(checkpoint, "controller", None), "store", None)
+    if getattr(store, "cut_commits_beside_buffer_reads", False):
+        return  # a staged object store: the buffer reader never waits on the cut (round_cut._defer)
+    if checkpoint is not None and custom_function_path(
+            getattr(miles_args, "rollout_function_path", None)) in READER_FUNCTION_PATHS:
         checkpoint.background_commit = False
 
 
@@ -1105,7 +1186,7 @@ def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> Non
     (also a convertible node, whose rollout function reads in trainer mode)."""
     from .buffer_rollout import READER_FUNCTION_PATHS, wire_sample_buffer
 
-    if getattr(miles_args, "rollout_function_path", None) not in READER_FUNCTION_PATHS:
+    if custom_function_path(getattr(miles_args, "rollout_function_path", None)) not in READER_FUNCTION_PATHS:
         return
     if checkpoint is None:
         raise RuntimeError("a trainer that reads the sample buffer needs round cuts "
@@ -1458,7 +1539,9 @@ def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: 
     count = tiers.check_native_base(out)
     print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)} trainer source: {miles_args.hf_checkpoint} -> {out} "
           f"({count} FP8 modules)", flush=True)
-    miles_args.rollout_hf_checkpoint = str(out)
+    from .island_args import override_native
+
+    override_native(miles_args, rollout_hf_checkpoint=str(out))  # a native Miles field: before the slice
     return out
 
 
@@ -1565,13 +1648,30 @@ def _elastic_timeouts(config: Any) -> dict:
     return {"timeouts": replace(Timeouts(), **given)}
 
 
+def uses_miles_router(miles_args: Any) -> bool:
+    """Upstream (#4322) selects the router with ``--router {miles,...}``;
+    ``--use-miles-router`` is an alias of ``--router miles`` and the namespace
+    has no ``use_miles_router`` any more."""
+    return getattr(miles_args, "router", None) == "miles"
+
+
+def custom_function_path(value: Any) -> str | None:
+    """The dotted path of a ``*-path`` argument. Upstream (#3522) parses every
+    custom-function flag into a ``CustomFunctionConfig`` (``.path``); a plain
+    string is what an older pin, or a test namespace, holds."""
+    if value is None:
+        return None
+    path = getattr(value, "path", value)
+    return str(path) if path else None
+
+
 def check_elastic_miles_args(miles_args: Any) -> None:
     """Miles preconditions of the fork verbs the elastic controller uses, refused before
     Ray: cordon / drain_cells / admit_cells / cordoned update_weights need the
     Miles router; member publication needs a resident partitioned rollout."""
     problems = []
-    if not getattr(miles_args, "use_miles_router", False):
-        problems.append("--use-miles-router (fork cordon/drain/admit_cordoned need the Miles router)")
+    if not uses_miles_router(miles_args):
+        problems.append("--router miles (fork cordon/drain/admit_cordoned need the Miles router)")
     if getattr(miles_args, "colocate", False):
         problems.append("no --colocate (elastic needs a fixed partition)")
     if getattr(miles_args, "offload_rollout", False):
@@ -2111,11 +2211,17 @@ def run_ports_island(
     # engine or trainer actor imports from it (concurrent first imports raced).
     prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
 
-    from miles.ray.placement_group import create_rollout_components, create_training_models
+    from miles.ray.placement_group import (
+        create_rollout_components,
+        create_trainer_handles,
+        create_training_models,
+    )
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
+    from miles.ray.specs.train import compute_trainer_configs
     from miles.utils.async_utils import Disposer
-    from miles.utils.orchestration_utils import init_orchestration_script
+    from miles.utils.orchestration_utils import ArgvOrchestratorStartupInfo, init_orchestration_script
 
+    from .island_args import miles_config
     from .rollout import RayMetadataSink
 
     append_tape_event(
@@ -2130,14 +2236,25 @@ def run_ports_island(
     )
     runner = LoopRunner()
     disposer = Disposer()
+    # Upstream assembly order (miles train.py): the orchestrator works on the
+    # OrchestratorConfig slice of the parsed AllConfig; create_training_models
+    # writes start_rollout_id back onto that slice, so it is the authority
+    # for the resumed rollout id from here on.
+    # miles_args may be the driver facade (island_args.IslandArgs, immutable Miles
+    # config): Miles' own API takes the configuration behind it.
+    startup_info = ArgvOrchestratorStartupInfo.create(miles_config(miles_args))
+    orch = startup_info.args
 
     async def init():
         await disposer.__aenter__()
-        init_orchestration_script(miles_args, disposer=disposer)
-        controller, executor, _ = await create_rollout_components(miles_args)
+        capability = init_orchestration_script(startup_info, disposer=disposer)
+        handles = create_trainer_handles(
+            orch, trainer_configs=compute_trainer_configs(orch), capability=capability)
+        controller, executor, _ = await create_rollout_components(
+            orch, capability=capability, trainer_handles=handles)
         disposer.add(controller, executor)
         startup.step("engine_ready")
-        actor, critic = await create_training_models(miles_args, executor)
+        actor, critic = await create_training_models(orch, executor, handles=handles)
         startup.step("weights_loaded")
         imported = trainer_actor_import_done_unix()
         if imported is None:
@@ -2165,7 +2282,7 @@ def run_ports_island(
         if critic is not None:
             critic = SwappableActor(critic)
             disposer.add(critic)
-        dispatcher = EvalDispatcher(miles_args, actor, executor)
+        dispatcher = EvalDispatcher(orch, actor, executor)
         disposer.add(dispatcher.drain)
         return controller, executor, actor, critic, dispatcher
 
@@ -2190,6 +2307,7 @@ def run_ports_island(
             )
             driver = compose_island(
                 miles_args=miles_args,
+                orchestrator_args=orch,
                 launch=launch,
                 algorithm=algorithm,
                 inference_controller=controller,

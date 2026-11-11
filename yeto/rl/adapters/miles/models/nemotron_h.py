@@ -67,7 +67,8 @@ from yeto.rl.hybrid_params import VL_ARCHITECTURE
 
 MILES_BRIDGE_PLUGINS = "miles_plugins.megatron_bridge"
 KEEP_MTP_ENV = "MILES_NEMOTRONH_KEEP_MTP"
-# Miles commit that adds MilesNemotronHLanguageOnlyBridge .
+# Miles commits that add MilesNemotronHLanguageOnlyBridge: ports-v1 b7868074c,
+# k31/b3-b7 (B7, pins.K31_FEATURES "nemotron_h_vl_bridge").
 MILES_VL_BRIDGE_COMMIT = "b7868074c"
 
 
@@ -112,9 +113,12 @@ def register_miles_bridges(model_path: str | Path) -> bool:
     if _is_vl(config):
         plugin = importlib.import_module(f"{MILES_BRIDGE_PLUGINS}.nemotron_h")
         if getattr(plugin, "NEMOTRON_H_OMNI_ARCHITECTURE", None) != VL_ARCHITECTURE:
+            from yeto.rl.adapters.miles import pins
+
             raise NemotronHRecipeError(
                 f"a {VL_ARCHITECTURE} checkpoint needs Miles' language-only VL bridge "
-                f"(michaellchung/miles {MILES_VL_BRIDGE_COMMIT} or later); this image's Miles has none")
+                f"(michaellchung/miles ports-v1 {MILES_VL_BRIDGE_COMMIT} or k31/b3-b7 "
+                f"{pins.MILES_K31_B3B7_COMMIT[:9]} or later); this image's Miles has none")
     return True
 
 

@@ -13,7 +13,7 @@ from yeto.rl.adapters.miles import algorithm_flags as af
 
 load_extensions()
 
-PIN = "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39"  # yeto-critic-c357-tied (6e7365b60 + tied critic head fix)
+PIN = "efc83590dcb8daf9b230c71b45ffb4f1e6b54cb3"  # Miles k31/b8 head: the critic family in the k31 lineage
 SAO_UNDECLARED = ("advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
                   "features:gae_decoupled", "features:gae_length_adaptive", "features:sao_dis",
                   "features:value_hl_gauss")
@@ -31,9 +31,14 @@ def _extra(spec):
     return " ".join(["--advantage-estimator", "ppo", *argv])
 
 
-def test_pin_is_the_merged_fork_commit():
+def test_pin_is_the_k31_b8_commit():
     assert critic_fork.CRITIC_FORK_PIN == PIN and PIN in critic_fork.FORK_COMMITS
     assert sao.FORK_COMMITS is critic_fork.FORK_COMMITS
+    assert critic_fork.fork_carries_critic_family()  # the current pin (the k31 head)
+    from yeto.rl.adapters.miles import pins
+
+    assert not critic_fork.fork_carries_critic_family(pins.MILES_K31_B4_COMMIT)
+    assert not critic_fork.fork_carries_critic_family("6574a9c82edeed17f4b00bc64db6c7cd6b45cb39")  # the old overlay pin
 
 
 @pytest.mark.parametrize("make", [vapo_spec, compactionrl_spec,
@@ -58,9 +63,11 @@ def test_sao_dry_run_needs_unverified_flags_then_absorbs_to_the_same_hash(domain
 
 
 def test_sao_rejected_when_the_pin_is_not_a_fork_commit(monkeypatch):
-    monkeypatch.setattr(sao, "CRITIC_FORK_PIN", "0" * 40)
+    from yeto.rl.adapters.miles import pins
+
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_K31_B4_COMMIT)  # k31 before B8
     problems = " ".join(sao.sao_algorithm_spec("coding").rejections())
-    assert "sao_dis" in problems
+    assert "sao_dis" in problems and "k31/b8" in problems
 
 
 def test_hl_gauss_without_sao_stays_refused():

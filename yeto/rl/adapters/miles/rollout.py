@@ -41,6 +41,7 @@ from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_samplin
 from .traits import MILES_ABORT_MECHANISM
 from . import LoopRunner
 from .rollout_meta_hook import (
+    BUFFER_FILL_KEYS,
     DEFAULT_SINK_ACTOR,
     METADATA_SCHEMA,
     ROUND_META_SCHEMA,
@@ -500,8 +501,12 @@ def handle_from_metadata(
         raise RolloutMetadataError(f"rollout {rollout_id} produced no trained groups")
     indices = getattr(data_pack, "sample_indices", None)
     if indices is not None:
+        from .buffer_rollout import PADDING_GROUP_BASE
+
         expected = sorted(int(i) for i in payload.get("trained_sample_indices", ()))
-        if sorted(int(i) for i in indices) != expected:
+        # padding samples (loss_mask 0, added by the buffer reader after the metadata
+        # hook ran) carry indices from PADDING_GROUP_BASE on; they are not trained samples
+        if sorted(int(i) for i in indices if int(i) < PADDING_GROUP_BASE) != expected:
             raise RolloutMetadataError(
                 f"rollout {rollout_id}: metadata samples do not match the training batch"
             )
@@ -543,6 +548,22 @@ def handle_from_metadata(
             [[int(v) for v in run] for run in payload["buffer_stale_positions"]]
             if payload.get("buffer_stale_positions") else None
         ),
+        buffer_source_tokens=(
+            {str(k): int(v) for k, v in payload["buffer_source_tokens"].items()}
+            if isinstance(payload.get("buffer_source_tokens"), dict) else None
+        ),
+        buffer_source_stats=(
+            {str(k): {str(n): float(x) for n, x in v.items()}
+             for k, v in payload["buffer_source_stats"].items()}
+            if isinstance(payload.get("buffer_source_stats"), dict) else None
+        ),
+        buffer_xhw_quarantined=(
+            int(payload["buffer_xhw_quarantined"]) if "buffer_xhw_quarantined" in payload else None
+        ),
+        buffer_xhw_downweighted=(
+            int(payload["buffer_xhw_downweighted"]) if "buffer_xhw_downweighted" in payload else None
+        ),
+        **{key: int(payload[key]) if key in payload else None for key in BUFFER_FILL_KEYS},
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
@@ -1061,9 +1082,9 @@ class MilesRolloutPool:
     def _router_inflight(self, http_get: Callable[[str], Any]) -> dict[str, Any] | None:
         """Per-engine in-flight counts from the router.
 
-        Miles router (``--use-miles-router``, fork M3): ``GET /worker_inflight``.
+        Miles router (``--router miles``, fork M3): ``GET /worker_inflight``.
         The stock sglang-router / sgl-model-gateway (Miles' default when
-        ``use_miles_router`` is False, e.g. non-elastic Flash-Next stage A) has no
+        ``--router`` is not ``miles``, e.g. non-elastic Flash-Next stage A) has no
         such route; fall back to its ``GET /workers`` (``{"workers": [{"url",
         "load", ...}]}``, ``load`` = router-side in-flight). No cordon there: 0.
         """
@@ -1100,7 +1121,7 @@ class MilesRolloutPool:
                     return {"inflight": inflight, "cordoned": ()}
             errors.append(f"GET {base}/workers: no workers with url/load")
         self._load_diag("; ".join(errors)
-                        + f" (use_miles_router={getattr(args, 'use_miles_router', None)!r})")
+                        + f" (router={getattr(args, 'router', None)!r})")
         return None
 
     def _tool_wait_count(self) -> int | None:
@@ -1626,16 +1647,25 @@ class MilesRolloutPool:
         }
 
     def member_states(self) -> dict[str, dict[str, Any]] | None:
-        """Per declared member (fork ``describe_cells``): ``state`` (unbound /
-        stopped / running), ``tracked``, ``serving``, ``awaiting_admission``. Used by
-        the restart recovery (3.7) to refuse unbound targets and to verify router
-        admission before release. None on a fork without ``describe_cells``."""
+        """Per declared member (fork ``describe_cells``): ``state``, ``lost_workers``,
+        ``tracked``, ``serving``, ``awaiting_admission``. Used by the restart recovery
+        (3.7) to refuse unbound targets and to verify router admission before release.
+        None on a fork without ``describe_cells``.
+
+        ``state`` is ``unbound`` (a deferred cell with no binding), ``stopped``,
+        ``running`` or ``workers_lost``: the fork's liveness scan found workers of the
+        cell dead and tore the cell down (Miles k31/b4-lost efc83590; the ports-v1 fork
+        since 857fc9592), as opposed to a cell stopped on purpose or never started.
+        ``lost_workers`` names the dead workers in state ``workers_lost`` and is None in
+        every other state, and on a fork whose ``describe_cells`` has no such field
+        (k31 before efc83590 reports such a cell ``stopped``)."""
         describe = getattr(self._controller, "describe_cells", None)
         if not callable(describe):
             return None
         described = dict(self._run(describe()) or {})
         return {
-            member_id(c): {"state": d.get("state"), "tracked": bool(d.get("tracked")),
+            member_id(c): {"state": d.get("state"), "lost_workers": _lost_workers(d),
+                           "tracked": bool(d.get("tracked")),
                            "serving": bool(d.get("serving")),
                            "awaiting_admission": bool(d.get("awaiting_admission"))}
             for c, d in described.items() if isinstance(d, dict)
@@ -1658,6 +1688,15 @@ class MilesRolloutPool:
             epoch=epoch, incomplete=cells(incomplete), last_op=cells(last_op),
             expected_current_epoch=expected_current_epoch,
         )))
+
+
+def _lost_workers(described: Mapping[str, Any]) -> list[str] | None:
+    """``lost_workers`` of one ``describe_cells`` entry as a list of worker names; None
+    unless the cell is in state ``workers_lost`` (or the fork does not report it)."""
+    lost = described.get("lost_workers")
+    if described.get("state") != "workers_lost" or lost is None:
+        return None
+    return [str(w) for w in lost]
 
 
 def _release(data_pack: Any) -> None:

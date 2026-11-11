@@ -47,7 +47,8 @@ def check_loopback(host: str) -> None:
 class DashboardState:
     """Reducer + followed sources behind one lock."""
 
-    def __init__(self, reducer: Reducer, paths: list[str]):
+    def __init__(self, reducer: Reducer, paths: list[str], store: Any = None):
+        self.store = store  # store_tapes.StoreTapes: island tapes uploaded to the run store
         self.reducer = reducer
         self.paths = list(paths)
         self.sources: dict[str, TapeSource] = {}
@@ -63,6 +64,8 @@ class DashboardState:
         with self.lock:
             for src in self.sources.values():
                 n += src.pump(self.reducer)
+            if self.store is not None:
+                n += self.store.pump(self.reducer)
             for rec in operator_stops_near(self.paths):  # appears mid-run when we stop the app
                 self.reducer.feed_operator_stop(rec)
             self.last_poll = time.time()
@@ -163,9 +166,9 @@ def tunnel_hint(port: int, head: str | None = None) -> str:
 
 
 def serve(paths: list[str], *, reducer: Reducer, host: str = "127.0.0.1", port: int = 8787,
-          interval: float = 2.0, head: str | None = None) -> int:
+          interval: float = 2.0, head: str | None = None, store: Any = None) -> int:
     check_loopback(host)
-    state = DashboardState(reducer, paths)
+    state = DashboardState(reducer, paths, store=store)
     n = state.poll()
     srv = make_server(state, host, port)
     stop = threading.Event()

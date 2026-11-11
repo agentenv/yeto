@@ -102,7 +102,6 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
                              "(or auto with a bucket / modal-volume:// checkpoint store)")
         return
     from .. import codepack
-    from ..provenance import source_tree_sha256
 
     if mode == CODE_PACK_RELEASE:
         if (getattr(args, "rl_backend", None) or "miles") != "miles":
@@ -129,7 +128,10 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
     resolved = codepack.resolve_run_pack(
         previous=_previous_manifest(args.cluster_prefix), repo=repo or REPO_ROOT,
         store=store, cache_root=Path(cache_root or CODE_PACK_CACHE).expanduser(),
-        semantic_sha256=_semantic_sha256(args), upgrade_reason=upgrade)
+        semantic_sha256=_semantic_sha256(args), upgrade_reason=upgrade,
+        keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)))
+    from ..provenance import source_tree_sha256
+
     # sky syncs a workdir minus its .gitignore matches; the pack holds no ignored
     # untracked file, and .skyignore (when present) replaces .gitignore, so a
     # force-added ignored file still ships. The extra file is not part of the digest.

@@ -79,7 +79,49 @@ def is_alive(pid) -> bool:
         return True  # exists, owned by someone else
     except (OverflowError, ValueError, OSError):
         return False
-    return True
+    return _process_state(int(pid)) != "Z"  # a zombie has exited; only its entry is left
+
+
+def _ps_rows() -> list[tuple[int, str, str]]:
+    """``(pid, state, args)`` of every process (``ps``; empty when it fails)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["ps", "-ww", "-eo", "pid=,stat=,args="], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1], parts[2] if len(parts) > 2 else ""))
+    return rows
+
+
+def _process_state(pid: int) -> str:
+    for row_pid, state, _args in _ps_rows():
+        if row_pid == pid:
+            return state[:1]
+    return ""
+
+
+def worker_pids(name: str) -> list[int]:
+    """PIDs of live ``yeto.cli _worker <name>`` processes (not this process).
+
+    Found from ``ps`` by argv tokens, so a worker whose pid the run record lost
+    (the launcher was killed before it wrote it, or a second worker) is found too."""
+    own = os.getpid()
+    found = []
+    for pid, state, args in _ps_rows():
+        tokens = args.split()
+        if pid == own or state.startswith("Z") or "yeto.cli" not in tokens:
+            continue
+        for i, token in enumerate(tokens[:-1]):
+            if token == "_worker" and tokens[i + 1] == name:
+                found.append(pid)
+                break
+    return found
 
 
 def _write_meta(name: str, meta: dict) -> None:
@@ -115,7 +157,9 @@ def _locked(name: str):
 def create_run(name: str, args_dict: dict) -> dict:
     """Create (or reset, for a reused name) the registry entry for a run.
 
-    Truncates launcher.log so a reused name starts with a fresh stream.
+    Truncates launcher.log so a reused name starts with a fresh stream, and removes
+    the STOP flag a previous run of that name left (``yeto stop-run``, the cost
+    guard): the new run must not end at its first fleet poll.
     """
     meta = {
         "name": name,
@@ -130,6 +174,7 @@ def create_run(name: str, args_dict: dict) -> dict:
     with _locked(name):
         _write_meta(name, meta)
         log_path(name).write_text("")
+        stop_flag_path(name).unlink(missing_ok=True)
     return meta
 
 

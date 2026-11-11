@@ -421,16 +421,26 @@ def cut_dir(root: str | os.PathLike[str], cut_id: str) -> Path:
     return Path(root) / cut_id
 
 
-def commit_manifest(root: str | os.PathLike[str], manifest: CutManifest, *, check_files: bool = True) -> Path:
+def commit_manifest(root: str | os.PathLike[str], manifest: CutManifest, *, check_files: bool = True,
+                    remote_sizes: Mapping[str, int | None] | None = None,
+                    remote_checksums: Mapping[str, tuple[str, str | None]] | None = None) -> Path:
     """Validate completeness (and, when visible here, every shard), then publish the manifest atomically.
 
     The ranks have already fsynced their shards; ``check_files=False`` is for
     shards that live on other nodes (each rank re-verifies its own on restore).
+    ``remote_sizes`` (shard path -> the size the object store reports, None when
+    absent): a shard its rank uploaded from another node of a staged store is not
+    on this disk; it passes when the object store holds it with the manifest's size
+    (its sha256 was taken by the writing rank). ``remote_checksums`` (shard path ->
+    (the checksum its rank saw the store keep after the upload, the one the store
+    reports now)): a shard uploaded with part checksums passes only when the two
+    agree, on this disk or not (:func:`uploaded_shard_checksums`).
     """
     problems = manifest.completeness_problems()
     directory = cut_dir(root, manifest.cut_id)
     if check_files:
-        problems += file_problems(directory, manifest.files)
+        problems += file_problems(directory, manifest.files, remote_sizes=remote_sizes)
+        problems += checksum_problems(remote_checksums)
     if problems:
         raise CutError("refusing an incomplete cut: " + "; ".join(problems))
     final = directory / MANIFEST_NAME
@@ -446,11 +456,29 @@ def commit_manifest(root: str | os.PathLike[str], manifest: CutManifest, *, chec
     return final
 
 
-def file_problems(directory: Path, files: Iterable[CutFile]) -> list[str]:
+def checksum_problems(remote_checksums: Mapping[str, tuple[str, str | None]] | None) -> list[str]:
+    out = []
+    for path, (uploaded, now) in sorted((remote_checksums or {}).items()):
+        if now is None:
+            out.append(f"shard {path}: the object store reports no checksum, its rank uploaded {uploaded}")
+        elif now != uploaded:
+            out.append(f"shard {path}: the object store reports checksum {now}, its rank uploaded {uploaded}")
+    return out
+
+
+def file_problems(directory: Path, files: Iterable[CutFile], *,
+                  remote_sizes: Mapping[str, int | None] | None = None) -> list[str]:
     out = []
     for f in files:
         path = directory / f.path
         if not path.is_file():
+            if remote_sizes is not None and f.path in remote_sizes:
+                remote = remote_sizes[f.path]
+                if remote is None:
+                    out.append(f"missing shard {f.path} (neither on this disk nor in the object store)")
+                elif int(remote) != f.bytes:
+                    out.append(f"shard {f.path} is {remote} bytes in the object store, manifest says {f.bytes}")
+                continue
             out.append(f"missing shard {f.path}")
             continue
         size = path.stat().st_size
@@ -489,6 +517,9 @@ class CutContext:
     ledger: Mapping[str, Any]
     outer: Mapping[str, Any]
     shared_filesystem: bool = True
+    # the checkpoint store of the cut root (its object API checks shards a rank on
+    # another node uploaded, commit_manifest(remote_sizes)); None: not known here
+    store: Any = None
     # agentic-rollout-utilization 3.3: unfinished trajectories (limit > 0 only)
     in_flight: tuple[Mapping[str, Any], ...] = ()
 
@@ -535,3 +566,88 @@ def verify_cut(
     if problems:
         raise CutError(f"cut {cut_id!r} rejected: " + "; ".join(problems))
     return manifest
+
+
+SHARD_PUSH_ENV = "YETO_RL_CUT_SHARD_PUSH"  # "0": ranks leave their shards to the driver's store push
+SHARD_EVICT_ENV = "YETO_RL_CUT_SHARD_EVICT"  # "0": keep the local copy of a shard its rank uploaded
+
+
+def push_shard_from_rank(final: str | os.PathLike[str], *, environ: Mapping[str, str] | None = None,
+                         store_kwargs: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+    """On the rank that wrote it: upload the cut shard ``final`` into the object
+    store when the island's store stages its files on each node's disk (a staged
+    ``s3://`` / ``oss://`` store, ``push_local_file``). On a multi-node island the
+    driver's commit only sees its own node's disk, so a shard written on another
+    node reached the store only this way; on one node the rank's upload runs next to
+    the other ranks' (all shards at once) and the driver's push skips it.
+
+    Returns ``{"object_key", "object_bytes"}`` (bytes as the object store reports
+    them; plus ``object_checksum``, the SHA-256 checksum the store keeps, when the
+    upload carried part checksums: the driver checks it again before the commit), ``{"object_push_error": ...}`` when the upload failed (the cut's commit
+    then refuses a shard it finds nowhere; the trainer keeps running), or None when
+    the store has no per-node stage (a shared mount, a Modal Volume, no store)."""
+    from .resume import STORE_IMPL_ENV, store_for
+
+    env = os.environ if environ is None else environ
+    if str(env.get(SHARD_PUSH_ENV, "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    if not env.get(STORE_IMPL_ENV):
+        return None
+    final = Path(final).resolve()
+    try:
+        store = store_for(str(final.parent), environ=env, **dict(store_kwargs or {}))
+        push = getattr(store, "push_local_file", None)
+        if push is None:
+            return None
+        try:
+            relative = final.relative_to(Path(store.root).expanduser().resolve()).as_posix()
+        except ValueError:  # not under this node's stage
+            return None
+        size = push(relative)
+        checksum_of = getattr(store, "local_file_checksum", None)
+        checksum = checksum_of(relative) if size is not None and callable(checksum_of) else None
+    except Exception as error:  # noqa: BLE001 - reported in the shard summary, never fatal here
+        return {"object_push_error": f"{type(error).__name__}: {error}"[:500]}
+    if size is None:
+        return None
+    evict = getattr(store, "evict_local_file", None)
+    if callable(evict) and str(env.get(SHARD_EVICT_ENV, "1")).strip().lower() not in {"0", "false", "no", "off"}:
+        try:  # the bucket holds it; a restore pulls it back (a cut must not fill the node's disk)
+            evict(relative)
+        except Exception as error:  # noqa: BLE001 - a full disk later is the worse outcome, but not fatal here
+            print(f"[cut] could not drop the local copy of {relative}: {type(error).__name__}: {error}",
+                  flush=True)
+    return {"object_key": relative, "object_bytes": int(size),
+            **({"object_checksum": checksum} if checksum else {})}
+
+
+def uploaded_shard_sizes(store: Any, summaries: Iterable[Mapping[str, Any]]) -> dict[str, int | None] | None:
+    """The sizes the object store reports now (one HEAD each) for the shards whose
+    rank uploaded them (:func:`push_shard_from_rank`), by shard path; None for a
+    shard whose upload failed or when the store has no object API. None when no
+    rank uploaded anything (every shard is checked on this disk as before)."""
+    from .object_store import object_size
+
+    pushed = [s for s in summaries if s.get("object_key") or s.get("object_push_error")]
+    if not pushed:
+        return None
+    objects = getattr(store, "objects", None) if store is not None else None
+    return {str(s["path"]): (object_size(objects, str(s["object_key"]))
+                             if s.get("object_key") and objects is not None else None)
+            for s in pushed}
+
+
+def uploaded_shard_checksums(store: Any, summaries: Iterable[Mapping[str, Any]]
+                             ) -> dict[str, tuple[str, str | None]] | None:
+    """For each shard its rank uploaded with a checksum (``object_checksum``):
+    (that checksum, the one the object store reports now, one HEAD each), by shard
+    path, for :func:`commit_manifest`. None when no shard carries a checksum."""
+    from .object_store import object_checksum
+
+    pushed = [s for s in summaries if s.get("object_key") and s.get("object_checksum")]
+    if not pushed:
+        return None
+    objects = getattr(store, "objects", None) if store is not None else None
+    return {str(s["path"]): (str(s["object_checksum"]),
+                             object_checksum(objects, str(s["object_key"])) if objects is not None else None)
+            for s in pushed}

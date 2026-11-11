@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from ..wandb_logger import NullRun, WandbRun, init
+from yeto.rl.engine.ext_attrs import ext_attr
 
 log = logging.getLogger("wandb-rl")
 
@@ -222,7 +223,7 @@ class RlTelemetry:
 
     def run(self, args) -> NullRun | WandbRun:
         if self._run is None:
-            learner_id = getattr(args, "yeto_rl_learner_id", 0)
+            learner_id = ext_attr(args, "rl_learner_id", 0)
             self._run = init(
                 args,
                 job_type="rl-learner",
@@ -230,7 +231,7 @@ class RlTelemetry:
                 config_override={
                     "island_backend": "rl-miles",
                     "learner_id": learner_id,
-                    "rl_sync_preset": getattr(args, "yeto_rl_sync_preset", None),
+                    "rl_sync_preset": ext_attr(args, "rl_sync_preset", None),
                 },
                 step_metrics=STEP_METRICS,
             )

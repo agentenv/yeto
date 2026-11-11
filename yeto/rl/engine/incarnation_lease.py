@@ -44,6 +44,7 @@ line). Nothing here talks to a cloud.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections import Counter
@@ -246,3 +247,25 @@ class IncarnationGate:
         self.stale += 1
         return (f"incarnation {inc} of {sampler} superseded by {holder} (generation "
                 f"{lease.get('generation')}); entry {ordinal} of it, {sealed} sealed")
+
+
+INCARNATION_FENCE_ENV = "YETO_BUFFER_INCARNATION_FENCE"  # "0": no stale-incarnation gate
+LEASE_ROOT_ENV = "YETO_INCARNATION_LEASE_ROOT"  # the store holding the sampler leases (default: the buffer's)
+
+
+def default_incarnation_gate(buffer: Any, environ: Mapping[str, str] | None = None) -> Any:
+    """The feed's stale-incarnation gate over the buffer's store (or
+    :data:`LEASE_ROOT_ENV`); None when off (:data:`INCARNATION_FENCE_ENV` ``0``) or
+    the buffer has no store / entries (test doubles)."""
+    env = os.environ if environ is None else environ
+    if str(env.get(INCARNATION_FENCE_ENV, "1")).strip() == "0":
+        return None
+    entries = getattr(buffer, "entries", None)
+    store = getattr(buffer, "store", None)
+    if env.get(LEASE_ROOT_ENV):
+        from yeto.rl.engine.resume import store_for
+
+        store = store_for(str(env[LEASE_ROOT_ENV]), environ=env)
+    if store is None or not callable(entries):
+        return None
+    return IncarnationGate(store, entries)

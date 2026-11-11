@@ -5,8 +5,14 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from yeto.rl.engine.ext_attrs import ext_attr
+from yeto.rl.engine.proc_state import proc_state, set_proc_state
 from yeto.rl.rewards.builtin import BoundedNonzeroStdFilter
 from yeto.rl.rewards.types import Trajectory
+
+# process-local state (replaces the ``args._yeto_bounded_filter*`` attributes)
+BOUNDED_FILTER_STATE = "_yeto_bounded_filter"
+BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 
 
 def _group_key(samples: list[Any]) -> tuple[Any, ...]:
@@ -46,22 +52,18 @@ def bounded_nonzero_reward_std(args, samples: list[Any], **kwargs):
     kept on ``args`` with its state dict exposed as before.
     """
 
-    flt = getattr(args, "_yeto_bounded_filter", None)
-    if flt is None:
-        flt = BoundedNonzeroStdFilter()
-        args._yeto_bounded_filter = flt
-    # The Miles round hook resets ``args._yeto_bounded_filter_state`` to None
-    # per rollout; the attribute stays the source of truth for the state.
-    shared = getattr(args, "_yeto_bounded_filter_state", None)
+    flt = proc_state(args, BOUNDED_FILTER_STATE, BoundedNonzeroStdFilter)
+    # The Miles round hook drops the ``BOUNDED_FILTER_STATE_ATTR`` state per
+    # rollout; that process-local state stays the source of truth.
+    shared = proc_state(args, BOUNDED_FILTER_STATE_ATTR)
     flt.state = shared if isinstance(shared, dict) else {}
-    round_id = getattr(args, "yeto_rl_policy_version", None)
+    round_id = ext_attr(args, "rl_policy_version", None)
     key = _group_key(samples)
     decision = flt.cached(round_id=round_id, key=key)
     if decision is None:
         group = [Trajectory(index=getattr(s, "index", None), reward=_reward(args, s))
                  for s in samples]
         decision = flt(group, round_id=round_id, key=key,
-                       max_replacements=getattr(args, "yeto_rl_dynamic_sampling_max_replacements",
-                                                None))
-    args._yeto_bounded_filter_state = flt.state
+                       max_replacements=ext_attr(args, "rl_dynamic_sampling_max_replacements", None))
+    set_proc_state(args, BOUNDED_FILTER_STATE_ATTR, flt.state)
     return _output(decision.keep, decision.reason)

@@ -31,6 +31,7 @@ from yeto.rl.engine.run_flags import (
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.adapters.miles.revision import verify_miles_revision
+from yeto.rl.adapters.miles.island_args import as_island, miles_config, override_fork_field, override_native
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_recommend_arguments(parser)  # elastic hook
     add_wandb_arguments(parser)
     return parser
+
+
+SKIP_ATTESTATION_ENV = "YETO_TEST_SKIP_TREE_ATTESTATION"
+
+
+def skip_tree_attestation(environ=None) -> bool:
+    """TEST ONLY: skip the island's source tree and code pack checks, so files patched into a held
+    container's workdir can run. Exactly ``1`` enables it; never set it for a real run."""
+
+    return (os.environ if environ is None else environ).get(SKIP_ATTESTATION_ENV) == "1"
 
 
 def verify_island_code_pack(digest: str | None, tree: str | Path | None = None, *,
@@ -73,6 +84,9 @@ def verify_island_code_pack(digest: str | None, tree: str | Path | None = None, 
 def parse_args(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "rl_expert_selection", None):
+        # the launcher mounts the file at ~/yeto-rl-expert-selection.json (quoted: no shell expansion)
+        args.rl_expert_selection = os.path.expanduser(args.rl_expert_selection)
     if args.parameter_mode == "lora" and (
         args.lora_r is None or args.lora_targets is None
     ):
@@ -150,7 +164,7 @@ def build_ports_launch(args, run_config, extra_argv=()):
     from yeto.rl.adapters.miles.algorithm_flags import absorb_extra_argv
     from yeto.rl.adapters.miles.config import translate_run_config
 
-    base_algorithm = resolve_ports_algorithm(args)
+    base_algorithm = resolve_algorithm_with_loss(args)
     absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
     run_config = dataclasses.replace(
         run_config,
@@ -415,13 +429,15 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     if getattr(args, "rl_debug_dump", False):
         out = os.path.dirname(os.path.abspath(os.path.expanduser(
             getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
-        miles_args.save_debug_rollout_data = f"{out}/miles-rollout-{{rollout_id}}.pt"
-        miles_args.save_debug_train_data = f"{out}/miles-train-{{rollout_id}}_{{rank}}.pt"
+        override_native(miles_args,
+                        save_debug_rollout_data=f"{out}/miles-rollout-{{rollout_id}}.pt",
+                        save_debug_train_data=f"{out}/miles-train-{{rollout_id}}_{{rank}}.pt")
     if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
         from .harbor_agent import AGENT_FUNCTION as HARBOR_AGENT_FUNCTION
         from .policy_age import SUPPORT, check_task
 
-        SUPPORT.check(int(args.rl_max_policy_age))
+        SUPPORT.check(int(args.rl_max_policy_age),
+                      buffer_trainer=getattr(args, "rl_sample_role", None) == "trainer")
         check_task(int(args.rl_max_policy_age),
                    custom_generate=getattr(miles_args, "custom_generate_function_path", None),
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
@@ -464,6 +480,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
+    if getattr(args, "rl_ledger_set_aside_before", None) is not None:
+        miles_args.yeto_rl_ledger_set_aside_before = float(args.rl_ledger_set_aside_before)
     auto = _cut_auto(args)
     if auto:
         miles_args.yeto_rl_cut_auto = auto  # a timed interval (any cut store)
@@ -661,7 +679,6 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
             f"expected {expected.lower()}; refusing to join outer sync"
         )
     _append_correction_record(args, miles_args, algorithm)
-    miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
     miles_args.yeto_rl_outer_sync = not getattr(args, "rl_single_island_no_sync", False)
     # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
     # (a partitioned run without it is refused there).
@@ -709,6 +726,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         placement=getattr(args, "rl_placement", "colocated"),
         island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
         extra_argv=tuple(extra_argv),
+        sample_role=getattr(args, "rl_sample_role", None) or "both",
     )
 
 
@@ -841,6 +859,55 @@ def _configure_deepseek_v4_env(args, *, clone_only_lora: bool, expert_full: bool
         _require_env("YETO_DSV4_EXPERT_FULL_COUNT", str(args.expert_full_count))
         _require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
         _require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+
+
+def release_tags(values) -> dict[str, str]:
+    """``--rl-release-tag KEY=VALUE`` values as a mapping (a repeated key is an error)."""
+
+    tags: dict[str, str] = {}
+    for value in values or ():
+        key, sep, label = str(value).partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"--rl-release-tag {value!r}: expected KEY=VALUE")
+        if key.strip() in tags:
+            raise ValueError(f"--rl-release-tag {key.strip()!r} given twice")
+        tags[key.strip()] = label
+    return tags
+
+
+def release_manifest(args, provider) -> dict | None:
+    """``PolicyRelease.manifest`` of this island: the kimi_k31 fields and the
+    ``--rl-release-tag`` labels under ``tags``; None when there is neither."""
+
+    manifest = _kimi_k31_release_manifest(args, provider)
+    tags = release_tags(getattr(args, "rl_release_tag", None))
+    if tags:
+        manifest = {**(manifest or {}), "tags": tags}
+    return manifest
+
+
+def _kimi_k31_release_manifest(args, provider) -> dict | None:
+    """``PolicyRelease.manifest`` of a kimi_k31 run: the selection's sha256 and
+    summary (``models.kimi_k31.release.release_manifest_fields``), checked
+    against the checkpoint's MoE layers; None for every other recipe."""
+
+    if getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
+        return None
+    if getattr(args, "parameter_mode", "full") == "lora":
+        # a LoRA release: the adapter's shape and targets (models/kimi_k31/lora.py), no selection
+        from yeto.rl.engine import kimi_k31_lora
+
+        return kimi_k31_lora.manifest_fields(rank=args.lora_r, lora_targets=args.lora_targets)
+    from yeto.rl.adapters.miles.models.kimi_k31 import release as kimi_k31_release
+    from yeto.rl.adapters.miles.models.partial_experts.selection import ExpertSelection
+
+    selection = ExpertSelection.load_file(args.rl_expert_selection)
+    dense = int(getattr(provider, "first_k_dense_replace", 1))
+    layers = range(dense, int(provider.num_layers))
+    num_experts = getattr(provider, "num_moe_experts", None)
+    return kimi_k31_release.release_manifest_fields(
+        selection, layers=layers, num_experts=None if num_experts is None else int(num_experts)
+    )
 
 
 def _trains_base_parameters(args) -> bool:
@@ -1909,6 +1976,41 @@ def run_miles(
         provider = glm5_next_recipe.glm5_next_provider(model_path)
         attention_specs = specs = ()
         canonical_targets = []
+    elif getattr(args, "rl_model_recipe", "generic") == "kimi_k31":
+        # AutoBridge cannot read kimi_k3 / kimi_k31 either; Miles trains it through the
+        # F1 plugin spec and the F2 partial-experts path, so the island reads the geometry
+        # from config.json (models/kimi_k31/provider.py). Full parameters: the 128
+        # selected experts per MoE layer train in place, everything else is frozen by Miles.
+        # LoRA (engine/kimi_k31_lora.py): an adapter over the frozen MXFP4 checkpoint;
+        # Miles resolves the HF targets, so no layout is predicted here (specs == ()):
+        # the state plugin exports through Miles' native adapter slots and the layout is
+        # learned from the first export, also behind the syncer (strict-avg / island pool).
+        from yeto.rl.engine import kimi_k31_lora
+        from yeto.rl.adapters.miles.models.kimi_k31 import ports_runtime as kimi_k31_runtime
+        from yeto.rl.adapters.miles.models.kimi_k31 import provider as kimi_k31_view
+
+        if expert_full or clone_only_lora:
+            raise ValueError("the kimi_k31 recipe trains full parameters or a plain LoRA adapter")
+        if not full_parameter:
+            kimi_k31_lora.check_tuning(
+                parameter_mode,
+                expert_selection=getattr(args, "rl_expert_selection", None),
+                routed_expert_qat=getattr(args, "rl_routed_expert_qat", None),
+                lora_targets=args.lora_targets, policy_sync=yeto_policy_sync,
+                sync_preset=sync_preset)
+            native_lora_export = kimi_k31_lora.NATIVE_EXPORT
+        elif not getattr(args, "rl_expert_selection", None):
+            raise ValueError("the kimi_k31 recipe needs --rl-expert-selection PATH (expert_selection.json)")
+        model_bridge = None
+        provider = kimi_k31_view.kimi_k31_provider(model_path)
+        attention_specs = specs = ()
+        canonical_targets = [] if full_parameter else list(kimi_k31_lora.target_modules(args.lora_targets))
+        if full_parameter:
+            # the trainer-side optimizer patch (sitecustomize path, as the DSV4 runtime): Ray
+            # workers inherit the flag; the patch arms the import hook in this process. It
+            # checks the partial experts' masters, which a LoRA run does not have.
+            _require_env(kimi_k31_runtime.ENV_FLAG, "1")
+            kimi_k31_runtime.install()
     else:
         from megatron.bridge import AutoBridge
 
@@ -1980,7 +2082,7 @@ def run_miles(
     ports_launch = build_ports_launch(args, run_config, extra_argv)
     ports_algorithm = ports_launch.algorithm
     miles_argv = list(ports_launch.argv)
-    miles_args = parse_miles_args(ports_launch)
+    miles_args = as_island(parse_miles_args(ports_launch))
     verify_ports_algorithm(args, miles_args, ports_launch)
     if print_attestation_fingerprint(args, ports_launch):
         return  # CPU entry: nothing below (Ray, GPU, sync) runs
@@ -1997,6 +2099,14 @@ def run_miles(
     code_pack_digest = _island_code_pack_digest(args)
     # every island (also --rl-single-island-no-sync): the remote-code prewarm reads it
     miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
+    # every island (also --rl-single-island-no-sync, which publishes releases too): the
+    # kimi_k31 selection file and the release manifest every release carries
+    # (expert_selection_sha256, INTERFACES 2.3; None for every other recipe), plus the
+    # --rl-release-tag labels
+    miles_args.yeto_rl_expert_selection = getattr(args, "rl_expert_selection", None) or None
+    # --rl-init-from-release: the loaded release (sampler_island._resume_single_trainer)
+    miles_args.yeto_rl_init_release = getattr(args, "rl_init_release", None)
+    miles_args.yeto_rl_release_manifest = release_manifest(args, provider)
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -2014,7 +2124,9 @@ def run_miles(
         else:
             from yeto.rl.core import canonical_layout_hash
 
-            layout_hash = canonical_layout_hash(specs)
+            # a native export (kimi_k31 LoRA): the layout is learned from the first
+            # export (None here; the sync sessions take it from the initial state)
+            layout_hash = None if native_lora_export is not None else canonical_layout_hash(specs)
             lora_config_hash = _lora_config_hash(args, canonical_targets)
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
@@ -2026,16 +2138,6 @@ def run_miles(
         miles_args.yeto_rl_lora_config_hash = lora_config_hash
         miles_args.yeto_rl_layout_hash = layout_hash
         miles_args.yeto_rl_parameter_mode = parameter_mode
-        miles_args.yeto_rl_clone_only_lora = clone_only_lora
-        if expert_full:
-            miles_args.yeto_rl_expected_specs = specs
-        if clone_only_lora:
-            # The Bridge exposes one representative mapping per packed expert
-            # parameter.  Miles needs the sparse canonical clone set at the
-            # external policy boundary and reconstructs frozen originals as zeros.
-            miles_args.yeto_rl_canonical_lora_names = tuple(
-                spec.name for spec in specs
-            )
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
@@ -2046,20 +2148,21 @@ def run_miles(
         # W&B reads the same namespace the rest of the yeto context rides in;
         # yeto.rl.wandb_rl starts the island's run off these.
         miles_args.wandb = getattr(args, "wandb", False)
-        miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
         miles_args.wandb_entity = getattr(args, "wandb_entity", None)
-        miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
+        override_native(miles_args, wandb_project=getattr(args, "wandb_project", "yeto"),
+                        wandb_mode=getattr(args, "wandb_mode", "online"))
         if getattr(args, "eval_only", False):
             miles_args.yeto_rl_eval_policy_version = args.global_rounds
         miles_args.yeto_rl_sync_preset = sync_preset
-        miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
+        # ports-v1 fork flag; the k31 lineage carries it in yeto_ext
+        override_fork_field(miles_args, external_policy_sync_run_until_stop=sync_preset == "decoupled")
         if dense_full:
             from yeto.rl.adapters.miles.full_parameter.session import CONFIG_ATTRIBUTE
             from yeto.rl.trajectory_evidence import REWARD_FUNCTION_EVIDENCE_KIND
 
-            miles_args.external_policy_identity_setter_path = (
+            override_fork_field(miles_args, external_policy_identity_setter_path=(
                 "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
-            )
+            ))
             miles_args.yeto_rl_trajectory_evidence_dir = str(
                 _private_trajectory_evidence_dir(args)
             )
@@ -2246,12 +2349,20 @@ def _configure_grad_audit(args, miles_args) -> bool:
 
 
 def _ports_spec(args, extra_argv: Sequence[str] = ()):
-    from yeto.rl.engine.algorithm import resolve_ports_algorithm
     from yeto.rl.adapters.miles.algorithm_flags import absorb_extra_argv
 
-    spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args),
-                                   tuple(extra_argv))
+    spec, _, _ = absorb_extra_argv(resolve_algorithm_with_loss(args), tuple(extra_argv))
     return spec
+
+
+def resolve_algorithm_with_loss(args):
+    """The ports algorithm spec (``--rl-algorithm-spec`` / the legacy CLI) with the
+    ``--rl-loss`` family applied (``yeto.rl.algos.score_centering``); without
+    ``--rl-loss`` the resolved spec is returned as is."""
+    from yeto.rl.algos.score_centering import spec_from_rl_loss_args
+    from yeto.rl.engine.algorithm import resolve_ports_algorithm
+
+    return spec_from_rl_loss_args(args, resolve_ports_algorithm(args))
 
 
 def _run_critic_warmup_stage(args, run_config, extra_argv: Sequence[str] = ()):
@@ -2339,11 +2450,30 @@ def _run_test_debug_rollout_replay(args, miles_args) -> bool:
     from yeto.rl.adapters.miles.entry import connect_island_ray
 
     # same job runtime_env as the ports island (PYTHONPATH -> pinned Miles/Megatron in the actors)
-    connect_island_ray(miles_args=miles_args)
+    connect_island_ray(miles_args=miles_config(miles_args))
+    from yeto.rl.adapters.miles.synth_rollout import synth_spec_from_env, write_synth_dumps_on_every_node
+
+    synth = synth_spec_from_env()
+    if synth is not None:
+        import ray
+
+        if not ray.is_initialized():
+            ray.init(address=os.environ.get("RAY_ADDRESS") or "auto")
+        nodes = write_synth_dumps_on_every_node(synth, miles_args.load_debug_rollout_data)
+        print(f"[rl] TEST ONLY: synthetic rollouts {list(synth.lengths)} on {nodes} nodes", flush=True)
     print(f"[rl] TEST ONLY: upstream Miles train loop on {miles_args.load_debug_rollout_data}", flush=True)
-    asyncio.run(with_disposer(module.train, miles_args))
+    from miles.utils.orchestration_utils import ArgvOrchestratorStartupInfo
+
+    # train.py's train() takes the startup info (upstream __main__), not the config
+    asyncio.run(with_disposer(module.train, ArgvOrchestratorStartupInfo.create(miles_config(miles_args))))
     print("[rl] TEST ONLY: upstream Miles train loop finished", flush=True)
     return True
+
+
+def _handoff(miles_args):
+    """Freeze the cross-process yeto keys into the Miles config and return what
+    the orchestration entry points take (island_args.IslandArgs.handoff)."""
+    return miles_args.handoff() if hasattr(miles_args, "handoff") else miles_args
 
 
 def _run_ports(
@@ -2359,9 +2489,11 @@ def _run_ports(
 ) -> None:
     """Ports path: yeto's IslandDriver over upstream Miles.
 
-    ``native_lora_export`` (Flash-Next): the LoRA layout is not
+    ``native_lora_export`` (Flash-Next, Kimi-K3.1 LoRA): the LoRA layout is not
     predictable on the CPU side, so no hash is pinned here; the policy state
     learns it from the first export (before any receipt) and pins it after.
+    Only the K3.1 export (exact fp32 masters through Miles' adapter slots) has an
+    apply contract, so only it runs behind the syncer.
     """
 
     from yeto.rl.core import canonical_layout_hash
@@ -2376,7 +2508,9 @@ def _run_ports(
     elif native_lora_export is not None:
         if specs:
             raise ValueError("native LoRA export must not carry predicted specs")
-        if yeto_policy_sync:
+        from yeto.rl.engine import kimi_k31_lora
+
+        if yeto_policy_sync and native_lora_export != kimi_k31_lora.NATIVE_EXPORT:
             raise ValueError("native LoRA export runs only without Yeto policy sync")
         lora_config_hash = _lora_config_hash(args, canonical_targets)
         layout_hash = None
@@ -2400,9 +2534,9 @@ def _run_ports(
     # fleet-dashboard 1.4: the ports EventTape tees into W&B (wandb_rl.tee)
     # off the same namespace fields as run_miles.
     miles_args.wandb = getattr(args, "wandb", False)
-    miles_args.wandb_project = getattr(args, "wandb_project", "yeto")
     miles_args.wandb_entity = getattr(args, "wandb_entity", None)
-    miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
+    override_native(miles_args, wandb_project=getattr(args, "wandb_project", "yeto"),
+                    wandb_mode=getattr(args, "wandb_mode", "online"))
     apply_ports_infra_switches(args, miles_args)
     if _run_test_debug_rollout_replay(args, miles_args):
         return
@@ -2411,10 +2545,10 @@ def _run_ports(
     if sample_role(args) == SAMPLER:  # Generate into the sample buffer, never train
         from yeto.rl.adapters.miles.sampler_island import run_sampler_island
 
-        run_sampler_island(miles_args)
+        run_sampler_island(_handoff(miles_args))
         return
     run_ports_island(
-        miles_args,
+        _handoff(miles_args),
         launch,
         algorithm,
         learner_id=args.learner_id,
@@ -2440,7 +2574,10 @@ def main(argv=None) -> None:
 
     # With a run code pack the pack digest check replaces
     # the source tree check (the launcher attests --source-sha256 on the pack tree).
-    if getattr(args, "code_pack_digest", None):
+    if skip_tree_attestation():
+        print(f"[yeto-island] TEST ONLY: {SKIP_ATTESTATION_ENV}=1, the source tree and code pack checks "
+              "are skipped; this run's code is not attested", flush=True)
+    elif getattr(args, "code_pack_digest", None):
         release = verify_island_code_pack(args.code_pack_digest,
                                           mode=getattr(args, "code_pack_mode", None))
         if release is not None:  # the launcher's --source-sha256 is its local tree, not the image's
@@ -2486,7 +2623,18 @@ def main(argv=None) -> None:
     else:
         model_path = snapshot_download(repo_id=model, revision=args.model_revision)
     rollout_model = resolve(args.rollout_model) if args.rollout_model else model
-    if rollout_model == model:
+    if getattr(args, "rl_init_from_release_dir", None):
+        from yeto.rl.engine.init_from_release import island_model_path
+
+        # the trainer loads the release laid over the base (its node prepared it);
+        # the release wiring checks the resumed numbering starts at it
+        model_path, args.rl_init_release = island_model_path(args.rl_init_from_release_dir, model_path)
+        rollout_model, rollout_model_path = None, model_path
+        print(f"[rl] --rl-init-from-release: loading {args.rl_init_release['path']} "
+              f"(v{args.rl_init_release['version']}) from {model_path}", flush=True)
+    if rollout_model is None:
+        pass
+    elif rollout_model == model:
         rollout_model_path = model_path
     elif is_local_reference(rollout_model):
         rollout_model_path = str(Path(rollout_model).expanduser().resolve())
@@ -2526,6 +2674,22 @@ def main(argv=None) -> None:
         )
     if getattr(args, "rl_critic_baseline_rounds", 0):
         run_critic_baseline(args, learner_argv)
+    from yeto.rl.engine.tape_upload import trainer_uploader
+
+    try:  # observation only: the trainer's tape into the run store (tapes/trainer/<incarnation>/)
+        tape_uploader = trainer_uploader(getattr(args, "event_tape", None),
+                                         learner_id=getattr(args, "learner_id", 0))
+    except Exception as error:  # noqa: BLE001
+        print(f"[yeto-island] tape upload off: {type(error).__name__}: {error}", flush=True)
+        tape_uploader = None
+    try:
+        _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_prompt_path, island_tasks)
+    finally:
+        if tape_uploader is not None:
+            tape_uploader.stop()
+
+
+def _run_miles_island(args, model_path, rollout_model_path, prompt_path, eval_prompt_path, island_tasks) -> None:
     run_miles(
         args,
         model_path=model_path,

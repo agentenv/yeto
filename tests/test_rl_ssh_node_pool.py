@@ -241,7 +241,7 @@ def test_an_unknown_card_name_is_refused_instead_of_defaulting_to_cuda():
     with pytest.raises(UnknownCard, match="not in the yeto card catalog"):
         device_type_of("910C9")
     with pytest.raises(UnknownCard):
-        device_family_of("MI300X")
+        device_family_of("XPU9000")
 
 
 def test_device_family_and_torch_device_type_differ_on_a_ppu():
@@ -430,7 +430,7 @@ def test_parse_islands_records_the_requested_card():
     assert islands[0]["accelerator"] == "910B4"
     assert ssh_harness._parse_islands(["root@n0"], 8)[0]["accelerator"] == "H200"
     with pytest.raises(HarnessError, match="not in the yeto card catalog"):
-        ssh_harness._parse_islands(["root@n0"], 8, "mi300x")
+        ssh_harness._parse_islands(["root@n0"], 8, "xpu9000")
 
 
 def test_the_host_setup_script_runs_the_card_tool_of_the_family():

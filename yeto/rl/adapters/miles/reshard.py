@@ -206,7 +206,7 @@ def require_reshard(plan: ReshardPlan, **kwargs: Any) -> None:
 
 
 def miles_microbatch_loss_scale(*, num_microbatches: int, num_rollouts: int, dp: int, cp: int = 1) -> Fraction:
-    """Factor fork ``training_utils/loss.py:loss_function`` multiplies a micro-batch's summed sample means by.
+    """Factor upstream ``training_utils/loss/objective.py:loss_function`` multiplies a micro-batch's summed sample means by.
 
     ``apply_megatron_loss_scaling`` branch, not per-token:
     ``loss * num_microbatches / loss_normalizer * loss_parallel_size`` with

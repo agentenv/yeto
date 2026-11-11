@@ -10,7 +10,7 @@ outcome classification, the trust boundary and metrics.  Backend adapters:
 from .admission import AdmissionClosed, AdmissionGate, HarnessMetrics
 from .outcome import classify
 from .recorder import TokenRecorder
-from .runner import AgentHarness, HarnessConfigError, run_agent_task
+from .runner import AgentHarness, HarnessConfigError, SessionAlreadyOpen, run_agent_task
 from .tokens import join_turns
 from .trust import TrustViolation
 from .types import (
@@ -27,7 +27,7 @@ from .types import (
 
 __all__ = [
     "OUTCOME_KEY", "AdmissionClosed", "AdmissionGate", "AgentBudget", "AgentHarness", "AgentTask",
-    "AgentTrajectory", "HarnessConfigError", "HarnessMetrics", "Outcome", "TokenAlignmentError",
+    "AgentTrajectory", "HarnessConfigError", "SessionAlreadyOpen", "HarnessMetrics", "Outcome", "TokenAlignmentError",
     "TokenRecorder", "TokenSegments", "TokenTurn", "TrialVerdict", "TrustViolation", "classify", "join_turns",
     "run_agent_task",
 ]

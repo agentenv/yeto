@@ -200,11 +200,20 @@ def test_driver_limit_zero_tapes_no_group_policies(tmp_path):
     assert '"rl_group_policies"' not in (tmp_path / "e.jsonl").read_text()
 
 
-def test_driver_limit_one_refuses_a_group_two_versions_old(tmp_path):
-    from yeto.rl.engine.driver import PolicyIdentityError
-
-    with pytest.raises(PolicyIdentityError, match="exceeds max_policy_age=1"):
-        _driver(tmp_path, 1, versions=lambda rid: (max(0, rid - 2), rid)).run()
+def test_driver_limit_one_discards_a_group_two_versions_old(tmp_path):
+    """S3: a group past the window is dropped and reported, the run goes on."""
+    driver = _driver(tmp_path, 1, versions=lambda rid: (max(0, rid - 2), rid))
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    assert len([e for e in events if e["event"] == "rl_round_trained"]) == 3
+    [dropped] = [e for e in events if e["event"] == "rl_policy_age_discarded"]
+    assert (dropped["rollout_id"], dropped["basis_version"], dropped["max_policy_age"]) == (2, 2, 1)
+    assert dropped["groups"] == [["r2-g0", 0]]
+    assert dropped["over_age_discarded_groups"] == 1
+    assert dropped["over_age_discarded_trajectories"] == 2
+    assert dropped["over_age_discarded_tokens"] == 6
+    [round2] = [e for e in events if e["event"] == "rl_group_policies" and e["rollout_id"] == 2]
+    assert "r2-g0" not in [g[0] for g in round2["groups"]]
 
 
 # ------------------------------------------------------ 2.4 Miles derivation

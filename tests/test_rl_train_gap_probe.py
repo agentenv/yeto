@@ -582,7 +582,7 @@ def test_install_actor_recorders_without_miles_still_returns_the_recorder_result
 
 @pytest.mark.parametrize("multiplier,tp_rank,tp_size,sp", [(128, 0, 1, False), (8, 1, 2, True)])
 def test_compact_equals_miles_fill_replay_data(multiplier, tp_rank, tp_size, sp):
-    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay.data")
     parallel = pytest.importorskip("miles.backends.training_utils.parallel")
     state = _state(tp_rank=tp_rank, tp_size=tp_size)
     parallel.set_parallel_state(state)
@@ -605,7 +605,7 @@ def test_compact_equals_miles_fill_replay_data(multiplier, tp_rank, tp_size, sp)
 
 
 def test_shadow_check_against_miles_fill_replay_data():
-    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay.data")
     parallel = pytest.importorskip("miles.backends.training_utils.parallel")
     state = _state(tp_rank=1, tp_size=2)
     parallel.set_parallel_state(state)
@@ -639,7 +639,7 @@ def test_serial_equals_multithreaded_miles_fill_on_nano_like_shapes():
     """The serial fill is Miles' own fill on one thread; with tensors above torch's parallel grain
     (52 streams x topk 6, hundreds of rows per sample) the multi-threaded run takes the OpenMP
     paths, and the recorded tensors must not change."""
-    replay_data = pytest.importorskip("miles.backends.training_utils.replay_data")
+    replay_data = pytest.importorskip("miles.backends.training_utils.replay.data")
     parallel = pytest.importorskip("miles.backends.training_utils.parallel")
     state = _state()
     parallel.set_parallel_state(state)

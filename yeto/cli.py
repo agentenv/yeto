@@ -47,8 +47,21 @@ SUBCOMMANDS = (
     "stop-run",
     "_worker",
     "_head",
+    "cost",
+    "cleanup",
+    "breaker",
+    "_reaper",
 )
 
+
+
+
+class _DefaultLR(float):
+    """The --inner-lr default (an SFT learning rate): its type tells an unset flag
+    from an explicit 3e-4 (yeto.launch.rl_args refuses it for full-parameter RL)."""
+
+
+DEFAULT_INNER_LR = _DefaultLR(3e-4)
 
 def _add_launch_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
@@ -237,7 +250,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="auto",
         help="adapter placement: attention-only, expanded-V4 "
         "attention+routed-expert clones, every linear, or auto "
-        "(attention for ordinary MoE — router and routed experts stay frozen)",
+        "(attention for ordinary MoE and Kimi-K3.1 — router and routed experts "
+        "stay frozen; all-linear must be named explicitly)",
     )
     parent = tune.add_mutually_exclusive_group()
     parent.add_argument(
@@ -309,7 +323,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="accumulation steps with an explicit micro batch; with 'auto', "
         "the requested per-rank effective sequence batch",
     )
-    tune.add_argument("--inner-lr", type=float, default=3e-4)
+    tune.add_argument("--inner-lr", type=float, default=DEFAULT_INNER_LR)
     tune.add_argument("--max-rows", type=int, default=None, help="cap dataset rows per learner")
     tune.add_argument(
         "--tokenize",
@@ -634,6 +648,31 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "fails closed when either variable is missing. Refused for non-Modal islands",
     )
     infra.add_argument(
+        "--modal-store-secret",
+        default=None,
+        metavar="NAME",
+        help="Modal islands with an s3:// --rl-checkpoint-store: attach the named Modal Secret "
+        "(AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_ENDPOINT_URL / AWS_REGION for an "
+        "S3-compatible store such as R2) to the island function instead of shipping the store "
+        "credentials from the launching environment. Refused for non-Modal islands",
+    )
+    infra.add_argument(
+        "--rl-object-store-endpoint",
+        default=None,
+        metavar="URL",
+        help="S3-compatible endpoint of an s3:// --rl-checkpoint-store (R2, MinIO), for the head "
+        "and every island; default: AWS_ENDPOINT_URL from the environment, the endpoint_url of "
+        "--rl-object-store-profile, else AWS S3",
+    )
+    infra.add_argument(
+        "--rl-object-store-profile",
+        default=None,
+        metavar="NAME",
+        help="AWS profile (~/.aws) of an s3:// --rl-checkpoint-store: the head reads with it, and its "
+        "key, endpoint_url and region go to every island (unless --modal-store-secret); "
+        "default: YETO_RL_STORE_S3_PROFILE",
+    )
+    infra.add_argument(
         "--modal-timeout-s",
         type=int,
         default=None,
@@ -746,6 +785,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     from .launch import trainer_loop as _trainer_loop
 
     _trainer_loop.add_arguments(infra)
+    from .cost.report import add_launch_arguments as _add_cost_launch_arguments
+
+    _add_cost_launch_arguments(p)
 
     # W&B telemetry. One group per fleet (this run's name), one run per
     # island plus one for the syncer's event tape; see docs/WANDB.md.
@@ -862,7 +904,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(
         dest="command",
-        metavar="{launch,shape,merge,rl,sample-diffusion,status,logs,down}",
+        metavar="{launch,shape,merge,rl,sample-diffusion,engine-sampler-modal,status,"
+        "dashboard,logs,down,stop-run}",
     )
 
     launch = sub.add_parser(
@@ -1015,6 +1058,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_diffusion_sample_args(sample)
 
+    engine_sampler = sub.add_parser(
+        "engine-sampler-modal",
+        help="start one engine sampler island (SGLang) on Modal that writes its own buffer shard",
+    )
+    _add_engine_sampler_modal_args(engine_sampler)
+
+    from .cost.report import add_parsers as _add_cost_parsers
+
+    _add_cost_parsers(sub)
+    from .rl.breaker import add_parser as _add_breaker_parser
+
+    _add_breaker_parser(sub)
+    reaper = sub.add_parser("_reaper")
+    reaper.add_argument("run")
+    reaper.add_argument("pid", type=int)
+
     status = sub.add_parser("status", help="table of known runs")
     status.add_argument(
         "--tape",
@@ -1025,6 +1084,14 @@ def build_parser() -> argparse.ArgumentParser:
     from .dashboard.cli import add_parser as _add_dashboard_parser
 
     _add_dashboard_parser(sub)
+
+    from .sandbox.cli import add_parser as _add_sandbox_parser
+
+    _add_sandbox_parser(sub)
+
+    from .rl.up import add_parser as _add_rl_up_parser
+
+    _add_rl_up_parser(sub)
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -1064,10 +1131,14 @@ def _spawn_worker(name: str) -> subprocess.Popen:
     survives this CLI exiting and never touches the controlling TTY;
     `-u` keeps its output unbuffered so log tailing is live.
     """
+    from .cost.ledger import LEDGER_ENV, ResourceLedger
+
     env = dict(os.environ)
     env["YETO_RUNS_DIR"] = str(runs.RUNS_DIR)
+    # processes of this run (and the reaper) record / read the same resource ledger
+    env[LEDGER_ENV] = str(ResourceLedger.for_run(name).path)
     with open(runs.log_path(name), "ab") as log_f:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-u", "-m", "yeto.cli", "_worker", name],
             stdout=log_f,
             stderr=subprocess.STDOUT,
@@ -1075,6 +1146,21 @@ def _spawn_worker(name: str) -> subprocess.Popen:
             start_new_session=True,
             env=env,
         )
+        _spawn_reaper(name, proc.pid, env, log_f)
+        return proc
+
+
+def _spawn_reaper(name: str, worker_pid: int, env: dict, log_f) -> None:
+    """A detached watcher in its own session: when the worker dies (also by SIGKILL)
+    it releases whatever the run's resource ledger still lists (yeto.cost.reaper)."""
+    try:
+        subprocess.Popen(
+            [sys.executable, "-u", "-m", "yeto.cli", "_reaper", name, str(worker_pid)],
+            stdout=log_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True, env=env)
+    except OSError as e:
+        print(f"[yeto] WARNING: no resource reaper for {name} ({e}); after a crash run "
+              f"`yeto cleanup --run {name}`", file=sys.stderr)
 
 
 def _stream_log(name: str, follow: bool = True, alive=None) -> None:
@@ -1222,14 +1308,22 @@ def cmd_launch(args) -> int:
         code = _resolve_auto_fleet(args)
         if code:
             return 0 if code == 2 else code  # user said no: clean exit
+    if "modal:" in str(args.gpu or "") and not getattr(args, "dry_run", False):
+        from .launch_preflight import modal_sdk_problem
+
+        problem = modal_sdk_problem()  # the worker drives Modal through this interpreter
+        if problem is not None:
+            print(f"[yeto] --gpu {args.gpu}: {problem}", file=sys.stderr)
+            return 1
     name = args.cluster_prefix
     existing = runs.load_run(name)
-    if existing is not None and runs.is_alive(existing.get("pid")):
+    live = sorted(set(runs.worker_pids(name)) | (
+        {int(existing["pid"])} if existing is not None and runs.is_alive(existing.get("pid")) else set()))
+    if live:
         print(
-            f"[yeto] run '{name}' already has a live worker "
-            f"(pid {existing['pid']}). Use `yeto logs {name}` to attach, "
-            f"`yeto down {name}` to stop it, or pick a different "
-            f"--cluster-prefix.",
+            f"[yeto] run '{name}' already has a live worker (pid {', '.join(map(str, live))}). "
+            f"Run `yeto down {name}` to stop it and its clusters, `yeto logs {name}` to attach, "
+            f"or pick a different --cluster-prefix.",
             file=sys.stderr,
         )
         return 1
@@ -1289,6 +1383,47 @@ def cmd_launch(args) -> int:
     state, code = _final_state(runs.load_run(name) or {"name": name})
     print(f"[yeto] run '{name}' finished: {state} (exit code {code})")
     return code
+
+
+def _add_engine_sampler_modal_args(p: argparse.ArgumentParser) -> None:
+    p.description = ("Configuration from the environment (RUN, SHARD, SELECTION, PROMPTS, RELOAD, DROP_ZV, "
+                     "N, MAX_TOKENS, GROUPS, BACKLOG, THINKING_EFFORT, DATA_SLOT, EP, ...; "
+                     "yeto.cloud.modal_engine_sampler); the flags below override it.")
+    p.add_argument("--run", default=None, help="run name: the store is s3://BUCKET/runs/RUN")
+    p.add_argument("--shard", default=None, help="this sampler's buffer shard (the trainer lists it "
+                   "in --rl-buffer-shards)")
+    p.add_argument("--data-slot", default=None, metavar="I/N",
+                   help="read prompt rows i with i %% N == I (one slot per sampler)")
+    p.add_argument("--bucket", default=None)
+    p.add_argument("--selection", default=None, help="expert selection JSON (its sha256 gates releases)")
+    p.add_argument("--prompts", default=None, help="local prompts JSONL")
+    p.add_argument("--reload", choices=["hot", "restart"], default=None)
+    p.add_argument("--secret", default=None, help="Modal Secret with the store credentials and endpoint")
+    p.add_argument("--app-name", default=None)
+    p.add_argument("--image", default=None, help="sampler image <registry>/<image>@sha256:<digest> "
+                   "(required: no default; Kimi-K3.1 samplers run on A-card vLLM nodes, not here)")
+    p.add_argument("--dry-run", action="store_true", help="print the spec and checks; no Modal call")
+    p.add_argument("--no-wait", action="store_true", help="return after the spawn (print the call id)")
+
+
+def cmd_engine_sampler_modal(args) -> int:
+    from .cloud import modal_engine_sampler as mes
+
+    try:
+        config = mes.SamplerConfig.from_env(
+            run=args.run, shard=args.shard, data_slot=args.data_slot, bucket=args.bucket,
+            selection=args.selection, prompts=args.prompts, reload=args.reload, secret=args.secret,
+            app_name=args.app_name, image=getattr(args, "image", None))
+        report = mes.dry_run(config)
+    except (ValueError, KeyError, OSError) as e:
+        print(f"[sampler] {e}", file=sys.stderr)
+        return 2
+    if args.dry_run or report["problems"]:
+        print(json.dumps(report, indent=2))
+        return 1 if report["problems"] else 0
+    result = mes.launch(config, wait=not args.no_wait)
+    print(json.dumps(result) if isinstance(result, dict) else result)
+    return 0 if not isinstance(result, dict) or result.get("rc") == 0 else 1
 
 
 def cmd_sample_diffusion(args) -> int:
@@ -1741,6 +1876,15 @@ def cmd_worker(name: str) -> int:
 
     from .launcher import run as launcher_run
 
+    def on_term(signum, _frame):
+        # `yeto down` / a supervisor: unwind through the launcher's teardown (finally)
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, on_term)
+        except (ValueError, OSError):
+            pass
     try:
         import inspect
 
@@ -1755,8 +1899,10 @@ def cmd_worker(name: str) -> int:
 
         traceback.print_exc()
         runs.update_run(name, state=runs.FAILED, exit_code=1, finished_at=time.time())
+        _backstop_cleanup(name, args)
         return 1
     code = int(code or 0)
+    _backstop_cleanup(name, args)
     runs.update_run(
         name,
         state=runs.SUCCEEDED if code == 0 else runs.FAILED,
@@ -1764,6 +1910,25 @@ def cmd_worker(name: str) -> int:
         finished_at=time.time(),
     )
     return code
+
+
+def _backstop_cleanup(name: str, args) -> None:
+    """After the launcher (its own teardown ran): release whatever the run's resource
+    ledger still lists (e.g. a Modal app the teardown could not stop, a sampler app a
+    script of this run started, an NC lease). Skipped with --keep."""
+    if getattr(args, "keep", False):
+        return
+    try:
+        from .cost.cleanup import cleanup_run
+        from .cost.ledger import ResourceLedger
+
+        if ResourceLedger.for_run(name).open_resources():
+            print(f"[yeto] resource ledger of {name} still lists open resources; releasing them",
+                  flush=True)
+            cleanup_run(name)
+    except Exception as e:  # noqa: BLE001
+        print(f"[yeto] WARNING: backstop cleanup failed ({e}); run `yeto cleanup --run {name}`",
+              file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2050,7 +2215,8 @@ def _modal_stop_app(run_name: str) -> None:
 
     try:
         ModalOps(modal_app_name(run_name)).stop_app()
-        print(f"[yeto] Modal app {modal_app_name(run_name)}: stopped")
+        print(f"[yeto] Modal app {modal_app_name(run_name)}: stop requested (modal app stop --yes "
+              "exited 0); checking its state")
     except Exception as e:  # the status check below decides; this is advisory
         if "already stopped" in str(e):
             print(f"[yeto] Modal app {modal_app_name(run_name)}: already stopped")
@@ -2071,6 +2237,24 @@ def _signal_worker(pid: int, sig: int) -> None:
 
 
 def cmd_down(args) -> int:
+    code = _cmd_down_clusters(args)
+    meta = runs.load_run(args.run)
+    if meta is None:
+        return code
+    # then every resource of the run's ledger (by exact id), e.g. sampler apps / NC leases
+    # that are no cluster of the run record
+    from .cost.cleanup import cleanup_run
+    from .cost.ledger import ResourceLedger
+
+    if ResourceLedger.for_run(args.run).open_resources():
+        if not cleanup_run(args.run):
+            print(f"[yeto] resource ledger of {args.run}: not every resource confirmed released; "
+                  f"rerun `yeto cleanup --run {args.run}`", file=sys.stderr)
+            return code or 1
+    return code
+
+
+def _cmd_down_clusters(args) -> int:
     name = args.run
     meta = runs.load_run(name)
     if meta is None:
@@ -2079,15 +2263,28 @@ def cmd_down(args) -> int:
         return 1
 
     pid = meta.get("pid")
-    if runs.is_alive(pid):
-        print(f"[yeto] stopping worker pid {pid} (SIGTERM)")
-        _signal_worker(int(pid), signal.SIGTERM)
+    # the recorded worker plus any other `_worker <run>` process (a launcher killed
+    # before it recorded the pid, or a second worker) -- each by PID
+    pids = sorted(set(runs.worker_pids(name)) | ({int(pid)} if runs.is_alive(pid) else set()))
+    if pids:
+        print(f"[yeto] stopping worker pid {', '.join(map(str, pids))} (SIGTERM)")
+        for p in pids:
+            _signal_worker(p, signal.SIGTERM)
         deadline = time.time() + 10
-        while runs.is_alive(pid) and time.time() < deadline:
+        while any(runs.is_alive(p) for p in pids) and time.time() < deadline:
             time.sleep(0.2)
-        if runs.is_alive(pid):
-            print(f"[yeto] worker pid {pid} did not exit; sending SIGKILL")
-            _signal_worker(int(pid), signal.SIGKILL)
+        stuck = [p for p in pids if runs.is_alive(p)]
+        if stuck:
+            print(f"[yeto] worker pid {', '.join(map(str, stuck))} did not exit; sending SIGKILL")
+            for p in stuck:
+                _signal_worker(p, signal.SIGKILL)
+            deadline = time.time() + 5
+            while any(runs.is_alive(p) for p in stuck) and time.time() < deadline:
+                time.sleep(0.2)
+        left = [p for p in pids if runs.is_alive(p)]
+        if left:
+            print(f"[yeto] worker pid {', '.join(map(str, left))} is still alive after SIGKILL",
+                  file=sys.stderr)
     else:
         print("[yeto] worker is not running")
 
@@ -2319,12 +2516,22 @@ def main(argv=None) -> int:
         return 0
     if args.command == "sample-diffusion":
         return cmd_sample_diffusion(args)
+    if args.command == "engine-sampler-modal":
+        return cmd_engine_sampler_modal(args)
     if args.command == "status":
         return cmd_status(args)
     if args.command == "dashboard":
         from .dashboard.cli import main as dashboard_main
 
         return dashboard_main(args)
+    if args.command == "run":
+        from .rl.up import main as rl_up_main
+
+        return rl_up_main(args)
+    if args.command == "sandbox":
+        from .sandbox.cli import main as sandbox_main
+
+        return sandbox_main(args)
     if args.command == "logs":
         return cmd_logs(args)
     if args.command == "down":
@@ -2334,6 +2541,22 @@ def main(argv=None) -> int:
         return 0
     if args.command == "_worker":
         return cmd_worker(args.run)
+    if args.command == "breaker":
+        from .rl.breaker import cmd_breaker
+
+        return cmd_breaker(args)
+    if args.command == "cost":
+        from .cost.report import cmd_cost
+
+        return cmd_cost(args)
+    if args.command == "cleanup":
+        from .cost.report import cmd_cleanup
+
+        return cmd_cleanup(args)
+    if args.command == "_reaper":
+        from .cost.reaper import reap
+
+        return reap(args.run, args.pid)
     if args.command == "_head":
         return cmd_head(args.args_json)
     parser.print_help()

@@ -63,11 +63,14 @@ SAO_HL_GAUSS_BINS = 51
 HL_GAUSS_SIGMA_RATIO = 0.75
 VALUE_REWARD_RANGE = (0.0, 1.0)
 
-# Commits of michaellchung/miles carrying --policy-objective sao_dis and the
-# classification value loss: the critic-family fork pin (yeto-critic-family
-# e07e51c07 = yeto-sao 6b5bd88c merged with GAE variants, VAPO and
-# --num-critic-epochs). Local, not pushed, not in an image (critic_fork.py).
-from yeto.rl.algos.critic_fork import CRITIC_FORK_PIN, FORK_COMMITS  # noqa: E402
+# Commits of Miles carrying --policy-objective sao_dis and the classification
+# value loss: the k31 lineage from k31/b8 on (critic_fork.py; formerly the local
+# yeto-critic-family fork pin applied through an overlay).
+from yeto.rl.algos.critic_fork import (  # noqa: E402
+    CRITIC_FORK_PIN,  # noqa: F401 - the first commit carrying the family
+    FORK_COMMITS,  # noqa: F401
+    fork_carries_critic_family,
+)
 
 
 # --------------------------------------------------------------------------
@@ -227,11 +230,11 @@ def _reject_sao_dis(s: AlgorithmSpec) -> str | None:
 def _reject_sao_not_at_pin(s: AlgorithmSpec) -> str | None:
     if s.loss.policy_objective != SAO_DIS:
         return None
-    if CRITIC_FORK_PIN in FORK_COMMITS:
+    if fork_carries_critic_family():
         return None
     return (
-        "loss.policy_objective='sao_dis' needs the Miles fork SAO port (yeto-sao), which "
-        "the current Miles pin does not carry"
+        "loss.policy_objective='sao_dis' needs the Miles SAO port (k31/b8 "
+        f"{CRITIC_FORK_PIN[:9]} or later), which the current Miles pin does not carry"
     )
 
 

@@ -305,7 +305,7 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
 
     from yeto.rl.adapters.miles import state_plugin as sp
 
-    losses_mod = types.ModuleType("miles.backends.training_utils.loss_hub.losses")
+    losses_mod = types.ModuleType("miles.backends.training_utils.loss.hub.losses")
     model_mod = types.ModuleType("miles.backends.megatron_utils.model")
 
     def value_loss_function(args, batch, logits, sum_of_sample_mean):
@@ -328,8 +328,9 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
     model_mod.train_one_step = train_one_step
     pkg = {name: types.ModuleType(name) for name in (
         "miles", "miles.backends", "miles.backends.training_utils",
-        "miles.backends.training_utils.loss_hub", "miles.backends.megatron_utils")}
-    pkg["miles.backends.training_utils.loss_hub"].losses = losses_mod
+        "miles.backends.training_utils.loss", "miles.backends.training_utils.loss.hub",
+        "miles.backends.megatron_utils")}
+    pkg["miles.backends.training_utils.loss.hub"].losses = losses_mod
     pkg["miles.backends.megatron_utils"].model = model_mod
     for name, module in {**pkg, losses_mod.__name__: losses_mod,
                          model_mod.__name__: model_mod}.items():

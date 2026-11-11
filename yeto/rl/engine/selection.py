@@ -129,8 +129,15 @@ def ports_rejections(
     extra_argv: Sequence[str] = (),
     placement: str = "colocated",
     island_scheduling: str = "legacy",
+    sample_role: str = "both",
 ) -> list[str]:
-    """Reasons the combination is outside the ports matrix (empty = OK)."""
+    """Reasons the combination is outside the ports matrix (empty = OK).
+
+    ``sample_role`` is the island's :mod:`.sample_roles` role: a ``trainer``
+    island starts no rollout engine (its samples come from the buffer), so the
+    fixed-partition rollout-GPU rule does not apply to it; its sampler islands
+    keep every rule, including the selection-sha gate on the releases.
+    """
 
     reasons: list[str] = []
     sync_preset = canonical_sync_preset(sync_preset)
@@ -168,9 +175,11 @@ def ports_rejections(
     if facts.rollout_gpus_flag:
         reasons.append("fixed partition via --rollout-num-gpus in extra argv (use --rl-placement fixed-partition)")
     if placement == "fixed-partition":
-        # LoRA fixed partition (partitioned-serial driver).
-        if rollout_num_gpus is None or int(rollout_num_gpus) < 1:
-            reasons.append("fixed partition needs --rollout-num-gpus >= 1")
+        # LoRA fixed partition (partitioned-serial driver). A trainer-role
+        # island has no engine and therefore no rollout GPUs to partition.
+        if (rollout_num_gpus is None or int(rollout_num_gpus) < 1) and sample_role != "trainer":
+            reasons.append("fixed partition needs --rollout-num-gpus >= 1 (a trainer-role island "
+                           "starts no engine and takes no partition)")
     elif rollout_num_gpus is not None:
         reasons.append(
             "fixed partition (dedicated rollout GPUs) without --rl-placement fixed-partition"

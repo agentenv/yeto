@@ -151,7 +151,7 @@
   "--global-batch-size",
   "8",
   "--balance-data",
-  "--rollout-max-context-len",
+  "--max-seq-len",
   "2048",
   "--rollout-max-response-len",
   "128",
@@ -195,7 +195,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "bb315aa0c82a03c2821899a3a376db84f09d30f1d32e2f6640833aec455d8634",
+ "miles_argv_sha256": "9c9a04e7ec1baf2dde4bfe792f37e5dff44d5d3879e8a64875f7f54353259301",
  "name": "grpo_default",
  "placement": {
   "allow_cross_node_engine_tp": false,

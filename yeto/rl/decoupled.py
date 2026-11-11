@@ -365,8 +365,9 @@ class DecoupledRlBridge:
             self._steps_at_anchor[update.fragment_id] = optimizer_steps
             self._tokens_at_anchor[update.fragment_id] = action_tokens
             permit = self._pending.get(update.fragment_id)
-            if self.config.island_pool and permit is not None and permit.global_step <= update.version:
-                # The round closed without this island; its PULL can never commit.
+            if permit is not None and permit.global_step <= update.version:
+                # The round closed without this island (an island pool, or a
+                # quorum below the roster); its PULL can never commit.
                 self._pending.pop(update.fragment_id)
 
     def submit_ready(
@@ -619,11 +620,12 @@ class DecoupledRlBridge:
             if key in self._answered:
                 continue
             previous = self._pending.get(permit.fragment_id)
-            if (self.config.island_pool and previous is not None
-                    and previous.global_step != permit.global_step):
-                # Island pool: a round may close without this island; the
-                # syncer permits a fragment's next round only after the
-                # previous one committed, so the newer permit supersedes.
+            if previous is not None and previous.global_step != permit.global_step:
+                # A round may close without this island (an island pool, or a
+                # fixed roster with a quorum below it: the async sync mode's
+                # quorum 1); the syncer permits a fragment's next round only
+                # after the previous one committed, so the newer permit
+                # supersedes. With a full-roster quorum this cannot happen.
                 if permit.global_step > previous.global_step:
                     self._pending[permit.fragment_id] = permit
                 continue

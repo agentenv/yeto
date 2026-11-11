@@ -264,7 +264,7 @@ _NON_RL_LITERALS = frozenset({
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     # task dispenser (syncer flags)
     "--dispense", "--dispense-lease-s", "--dispense-log", "--dispense-max-redo", "--dispense-passes",
-    "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
+    "--entrypoint", "--expected-island-contract", "--expert-selection", "--out", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
     "--grace-arrival-quantile", "--grace-min-ms", "--terminal-grace-ms",
     "--format", "--get", "--global", "--gpus", "--head",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",
@@ -288,6 +288,13 @@ _NON_RL_LITERALS = frozenset({
     "--pid", "--poll-seconds", "--recipe", "--store", "--template", "--frozen-base", "--frozen-pattern",
     # docker run of a runtime: docker SSH trainer node (ssh_trainer_island.py, node_inventory.py example)
     "--device", "--network",
+    # NC agentic node setup: pip, tar, aws s3, the node agent and its own CLI (yeto/launch/agentic_setup.py,
+    # agentic_node_agent.py)
+    "--agentic-env", "--disable-pip-version-check", "--endpoint-url", "--env-file", "--label",
+    "--no-same-owner", "--only-show-errors", "--r2-env-file", "--restart", "--retry", "--strip-components",
+    "--target", "--upgrade", "--version", "--events", "--max-backoff-s", "--retry-s", "--settle-s",
+    # the partial-expert selection tool named in k31_checks.py's hint
+    "--ep-size", "--input", "--num-trainable", "--validate",
 })
 
 

@@ -300,7 +300,7 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
 
 
 def test_load_sample_gateway_workers_fallback_and_diag(caplog):
-    """fnA try27: use_miles_router=False -> sgl-model-gateway, no /worker_inflight.
+    """fnA try27: --router sglang (not miles) -> sgl-model-gateway, no /worker_inflight.
     Fall back to its GET /workers; when nothing works, log a reasoned, rate-limited warning."""
     import logging
 
@@ -309,7 +309,7 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
                             expected_policy=lambda: (0, H),
                             args=SimpleNamespace(sglang_router_ip="10.0.0.1", sglang_router_port=3000,
-                                                 use_miles_router=False))
+                                                 router="sglang"))
 
     def gateway(url):
         if url.endswith("/workers"):
@@ -329,7 +329,7 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     msgs = [r.getMessage() for r in caplog.records if "load_sample unavailable" in r.getMessage()]
     assert len(msgs) == 1
     assert "/worker_inflight failed" in msgs[0] and "/workers failed" in msgs[0]
-    assert "use_miles_router=False" in msgs[0]
+    assert "router='sglang'" in msgs[0]
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="yeto.rl.adapters.miles.rollout"):
         assert MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,

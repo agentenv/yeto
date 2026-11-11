@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "CPU rehearsal of a convertible Kimi-K3.1 island (tests/test_rl_k31_convertible.py): the",
+    "island runs as an engine sampler on the fake engine until the role_switch trigger fires",
+    "(groups written, seconds elapsed, the local marker of YETO_ROLE_SWITCH_MARKER, or the",
+    "store marker convertible/<node>/switch.json), then runs the trainer phase, then comes back",
+    "as a sampler on the released weights. Paths in angle brackets are local scratch",
+    "directories. Run: python -m yeto.rl.engine.role_switch --spec THIS.json"
+  ],
+  "sampler_id": "n-island-0",
+  "platform": "rocm",
+  "rollout_fields": {"routed_experts": true, "top_logprobs_num": 128, "fp32_lm_head": true},
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "fake",
+    "kwargs": {"routed_experts": [896, 3, 16], "routed_experts_pad_rows": 1, "expert_file_update": true,
+               "max_model_len": 4096}
+  },
+  "sampling": {"max_tokens": 64, "temperature": 1.0, "top_p": 1.0, "top_k": -1, "n": 4},
+  "num_rollouts": 64,
+  "max_backlog_groups": 64,
+  "max_prompt_tokens": 512,
+  "store": "<scratch>/store",
+  "prompts": {"path": "<scratch>/prompts.jsonl", "input_key": "prompt", "label_key": "answer",
+              "groups_per_round": 2, "format": "text"},
+  "reward": "yeto.rl.numeric_answer_reward:score",
+  "reward_kind": "miles",
+  "checks": {"require_fixed_answers": false},
+  "incarnation_lease": false,
+  "event_tape": "<scratch>/events.jsonl",
+  "role_switch": {
+    "node": "n-island-0",
+    "after_groups": 4,
+    "after_seconds": 1800,
+    "marker": true,
+    "store_marker": true,
+    "trainer": {"run": "test_rl_k31_convertible:fake_trainer_phase"},
+    "then_sampler": true,
+    "max_cycles": 1,
+    "device_idle": false
+  }
+}

@@ -19,6 +19,12 @@ Verification state of the output formats:
 - ``ppu-smi``: NOT verified. The PPU vendor notes say
   the PPU stack offers NVML-compatible APIs, so the parser accepts the
   NVIDIA CSV form and a ``key: value`` form. A real machine must confirm it.
+- ``amd-smi static --json`` / ``rocm-smi --showproductname --showmeminfo vram
+  --json`` (family ``rocm``, MI300 / MI355X): the JSON shapes are the ROCm
+  6.2-7.0 documented ones, NOT verified on an MI355X. An AMD product name that
+  the card catalog does not list yet keeps its ``MI<nnn>[X]`` token as the
+  record's card (so the count check still works); :func:`check_cards` needs
+  the catalog entry.
 """
 
 from __future__ import annotations
@@ -65,7 +71,11 @@ PREFLIGHT_COMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "npu": (("npu-smi", "info"), ("npu-smi", "info", "-t", "memory")),
     "ppu": (("ppu-smi", "--query-gpu=index,name,memory.total",
              "--format=csv,noheader,nounits"),),
+    "rocm": (("amd-smi", "static", "--json"),),
 }
+# rocm-smi is the fallback when amd-smi is not installed (ROCm < 6.2 images)
+ROCM_SMI_FALLBACK: tuple[tuple[str, ...], ...] = (
+    ("rocm-smi", "--showproductname", "--showmeminfo", "vram", "--json"),)
 
 
 def preflight_commands(family: str) -> tuple[tuple[str, ...], ...]:
@@ -74,7 +84,7 @@ def preflight_commands(family: str) -> tuple[tuple[str, ...], ...]:
         return PREFLIGHT_COMMANDS[family]
     except KeyError:
         raise ValueError(f"unknown device family {family!r} "
-                         f"(known: {DEVICE_FAMILIES})") from None
+                         f"(known: {tuple(PREFLIGHT_COMMANDS)})") from None
 
 
 # --- nvidia-smi / ppu-smi (NVML CSV) ----------------------------------------
@@ -234,7 +244,76 @@ def parse_ppu_smi(text: str) -> list[CardRecord]:
     return records
 
 
-_PARSERS = {"cuda": parse_nvml_csv, "npu": parse_npu_smi, "ppu": parse_ppu_smi}
+# --- amd-smi / rocm-smi -----------------------------------------------------
+
+_AMD_PRODUCT = re.compile(r"\b(MI\d{3}[A-Z]?)\b", re.IGNORECASE)
+
+
+def _amd_card_name(text: str) -> str:
+    """The catalog name of an AMD product string, else its ``MI<nnn>[X]`` token
+    (module doc: the launcher's catalog check still needs the catalog entry)."""
+    try:
+        return _card_from_product_name(text)
+    except UnknownCard:
+        match = _AMD_PRODUCT.search(text)
+        if match is None:
+            raise
+        return match.group(1).upper()
+
+
+def _amd_mib(entry: object) -> float | None:
+    """A memory size in MiB from ``{"value", "unit"}`` (amd-smi) or a byte string (rocm-smi)."""
+    if isinstance(entry, dict):
+        value, unit = entry.get("value"), str(entry.get("unit") or "MB").upper()
+        if value in (None, "N/A"):
+            return None
+        return float(value) * {"B": 1 / 2**20, "KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}.get(unit, 1.0)
+    if entry in (None, "N/A", ""):
+        return None
+    return float(entry) / 2**20
+
+
+def parse_amd_smi(text: str) -> list[CardRecord]:
+    """``amd-smi static --json`` (a list of ``{"gpu", "asic": {"market_name"},
+    "vram": {"size": {"value", "unit"}}}``) or ``rocm-smi --showproductname
+    --showmeminfo vram --json`` (``{"card0": {"Card Series": ..., "VRAM Total
+    Memory (B)": ...}}``) as card records."""
+    import json
+
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        raise CardToolError(f"the rocm card tool printed no JSON: {text.strip()[:200]!r}") from None
+    records: list[CardRecord] = []
+    if isinstance(doc, dict) and any(str(k).startswith("card") for k in doc):
+        for key, card in doc.items():
+            match = re.fullmatch(r"card(\d+)", str(key))
+            if match is None or not isinstance(card, dict):
+                continue
+            name = next((v for k, v in card.items() if "card series" in k.lower() or "card model" in k.lower()
+                         or "product name" in k.lower()), None)
+            if name is None:
+                raise CardToolError(f"rocm-smi card {key} has no product name field")
+            total = next((v for k, v in card.items() if "vram total memory" in k.lower()), None)
+            records.append(CardRecord(index=int(match.group(1)), card=_amd_card_name(str(name)),
+                                      hbm_gib=None if _amd_mib(total) is None else _amd_mib(total) / MIB_PER_GIB))
+        return records
+    if isinstance(doc, dict):
+        doc = doc.get("gpus") or doc.get("gpu_data") or [doc]
+    for card in doc if isinstance(doc, list) else []:
+        if not isinstance(card, dict) or "gpu" not in card:
+            continue
+        asic = card.get("asic") or {}
+        name = asic.get("market_name") or asic.get("product_name") or (card.get("board") or {}).get("product_name")
+        if not name:
+            raise CardToolError(f"amd-smi gpu {card.get('gpu')} has no market_name")
+        size = _amd_mib((card.get("vram") or {}).get("size"))
+        records.append(CardRecord(index=int(card["gpu"]), card=_amd_card_name(str(name)),
+                                  hbm_gib=None if size is None else size / MIB_PER_GIB))
+    return records
+
+
+_PARSERS = {"cuda": parse_nvml_csv, "npu": parse_npu_smi, "ppu": parse_ppu_smi, "rocm": parse_amd_smi}
 
 
 def parse_card_tool(family: str, text: str) -> list[CardRecord]:
@@ -243,7 +322,7 @@ def parse_card_tool(family: str, text: str) -> list[CardRecord]:
         parser = _PARSERS[family]
     except KeyError:
         raise ValueError(f"unknown device family {family!r} "
-                         f"(known: {DEVICE_FAMILIES})") from None
+                         f"(known: {tuple(_PARSERS)})") from None
     records = parser(text)
     if not records:
         raise CardToolError(f"the {family} card tool reported no card; cannot check the "

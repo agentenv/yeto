@@ -85,6 +85,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.rl.engine.ext_attrs import ext_attr, ext_has
+
 logger = logging.getLogger(__name__)
 
 DISPATCHER_PATH = "yeto.rl.algos.reward_pipeline.post_process"
@@ -218,24 +220,23 @@ def stage_plugin_refs():
 
 
 def expected_algorithm_sha256(args: Any) -> str | None:
-    for name in ("yeto_rl_expected_algorithm_sha256", "rl_expected_algorithm_sha256"):
-        value = getattr(args, name, None)
-        if value:
-            return str(value).lower()
-    return None
+    value = ext_attr(args, "rl_expected_algorithm_sha256", None)
+    if not value:  # the launcher's own namespace spells it without the prefix
+        value = getattr(args, "rl_expected_algorithm_sha256", None)
+    return str(value).lower() if value else None
 
 
 def runtime_attrs_delivered(args: Any) -> bool:
     """The ports adapter's runtime attrs reached this Miles namespace (it always
     sets ``yeto_rl_dynamic_sampling_max_replacements``, possibly None)."""
 
-    return hasattr(args, PIPELINE_ATTR) or hasattr(args, "yeto_rl_dynamic_sampling_max_replacements")
+    return ext_has(args, PIPELINE_ATTR) or ext_has(args, "rl_dynamic_sampling_max_replacements")
 
 
 def read_plugins(args: Any, *, required: bool = True) -> dict[str, Any] | None:
     """Read and hash-check ``args.yeto_algo_plugins``; returns its config."""
 
-    payload = getattr(args, PIPELINE_ATTR, None)
+    payload = ext_attr(args, PIPELINE_ATTR, None)
     if payload is None:
         if required:
             raise RewardPipelineError(
@@ -360,8 +361,8 @@ def emit_event(args: Any, event: dict[str, Any]) -> None:
     import time
 
     logger.warning("%s", json.dumps(event, sort_keys=True))
-    learner = getattr(args, "yeto_rl_learner_id", None)
-    if getattr(args, "yeto_rl_event_tape", None) and learner is not None:
+    learner = ext_attr(args, "rl_learner_id", None)
+    if ext_attr(args, "rl_event_tape", None) and learner is not None:
         from yeto.rl.engine.events import write_event
 
         write_event(args, event)  # tape write (core writer, decoupling 4.10); echoed when enabled

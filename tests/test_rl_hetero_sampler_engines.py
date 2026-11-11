@@ -637,9 +637,10 @@ def test_sglang_topology_names_the_real_layout(tmp_path):
     argv = spawned[0]
     assert argv[argv.index("--tp") + 1] == "1" and "--dp" not in argv
     dp = SGLangServerEngine(_config(tmp_path, topology="dp4"), SGLangOptions(tp=4),
+                            help_probe=lambda argv: "--attn-dp-size",  # the K3.1 pin's form
                             spawn=lambda a, e: spawned.append(a) or _Process(), http=http, sleep=lambda s: None)
     dp.start(None, 0)
-    assert spawned[1][spawned[1].index("--dp") + 1] == "4"
+    assert spawned[1][spawned[1].index("--attn-dp-size") + 1] == "4"
     for topology, tp in (("tp8", 1), ("tp1", 8), ("pd8", 8), ("tp", 8)):
         with pytest.raises(SamplerEngineError, match="does not match TP"):
             SGLangServerEngine(_config(tmp_path, topology=topology), SGLangOptions(tp=tp))
@@ -680,3 +681,66 @@ def test_httpx_call_ignores_env_proxies(monkeypatch):
         port = sock.getsockname()[1]
     status, body = httpx_call("GET", f"http://127.0.0.1:{port}/health", None, 2.0)
     assert status == 0 and "ConnectError" in body["error"]
+
+
+def test_vllm_rocm_restart_reload_of_a_partial_release_starts_on_the_base_overlay(tmp_path):
+    """A-card vllm-server (ROCm, amd-article preset, restart reload): a partial-experts
+    release is laid over the K3.1 base before vLLM restarts; the bare partial directory
+    (experts only: no attention / dense / indexer weights) is never ``--model``
+    (GPU-A it11b, fixed for every engine in PortReleaseLoader)."""
+    from types import SimpleNamespace
+
+    from yeto.rl.engine.sampler_checks import PortReleaseLoader, PostLoadChecks
+
+    cfg = _config(tmp_path, device_family="rocm", card_model="MI355X", precision="mxfp4",
+                  quant_scheme="MXFP4_EXPERTS_RTN", topology="tp8", in_place_reload=False)
+    expert = "language_model.model.layers.1.mlp.experts.7.w1.weight_packed"
+    dense = "language_model.model.layers.0.self_attn.q_proj.weight"
+    (cfg.base_dir / "config.json").write_text(json.dumps({"architectures": ["KimiK3ForCausalLM"]}))
+    (cfg.base_dir / "model.safetensors.index.json").write_text(json.dumps(
+        {"weight_map": {expert: "model-1.safetensors", dense: "model-0.safetensors"}}))
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), cache_dir=tmp_path / "release-cache")
+
+    def write(directory):
+        directory = Path(directory)
+        (directory / "model-00001-of-00001.safetensors").write_bytes(b"x")
+        (directory / "model.safetensors.index.json").write_text(json.dumps(
+            {"weight_map": {expert: "model-00001-of-00001.safetensors"}}))
+
+    releases.release(2, "h2", write, manifest={"partial_experts": {"num_trainable": 128}},
+                     derived_from={"scheme": "MXFP4_EXPERTS_RTN", "seq": 1})
+    release = releases.latest()
+    release_dir = Path(releases.resolve(release))
+    spawned = []
+    engine = VllmServerEngine(cfg, VllmOptions(platform="rocm", k31_preset="amd-article", tp=8),
+                              spawn=lambda argv, env: spawned.append(argv) or _Process(),
+                              http=_Http({("GET", "/health"): {}}), sleep=lambda s: None,
+                              run=lambda argv: "")
+    engine.preflight = lambda model_dir: engine.check_format(model_dir)  # no cards here
+    engine.after_ready = lambda: {}
+    loader = PortReleaseLoader(engine, PostLoadChecks(), lambda *a, **k: None)
+    loader.checks = SimpleNamespace(run=lambda *a, **k: [], accept=lambda: None, expected_expert_matrices=None)
+    loader.start(None, 0)
+    loader(release, release_dir)
+    models = [argv[argv.index("serve") + 1] for argv in spawned]  # upstream: `vllm serve <model>`
+    assert models[0] == str(cfg.base_dir)
+    served = Path(models[1])
+    assert served != release_dir and served.name.endswith(".overlay")
+    weight_map = json.loads((served / "model.safetensors.index.json").read_text())["weight_map"]
+    assert weight_map[dense] == "model-0.safetensors"  # the base's non-expert weights
+    assert weight_map[expert] == "release-model-00001-of-00001.safetensors"
+    assert (served / "config.json").resolve() == (cfg.base_dir / "config.json").resolve()
+    assert engine.served_version() == 2
+
+
+def test_policy_loaded_says_why_the_fast_path_fell_back():
+    from types import SimpleNamespace
+
+    loader = PortReleaseLoader(SimpleNamespace(), PostLoadChecks(), lambda *a, **k: None)
+    assert loader.loaded_fields() == {}
+    loader.last_load = {"reload_mode": "in_place", "pause_s": 85.5, "scheme": "MXFP4_EXPERTS_RTN",
+                        "checks": [], "model_dir": "/x", "expert_update_fallback": "overlay_base_mismatch",
+                        "expert_update_fallback_detail": "/x is not laid over /base"}
+    assert loader.loaded_fields() == {"reload_mode": "in_place", "pause_s": 85.5, "scheme": "MXFP4_EXPERTS_RTN",
+                                      "expert_update_fallback": "overlay_base_mismatch",
+                                      "expert_update_fallback_detail": "/x is not laid over /base"}

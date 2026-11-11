@@ -25,7 +25,8 @@ def resolve_default_rl_image(args) -> None:
             return
         from ..rl import default_rl_image
 
-        args.rl_image = default_rl_image()
+        args.rl_image = default_rl_image(recipe=getattr(args, "rl_model_recipe", None),
+                                         tuning=getattr(args, "tuning", None))
 
 
 def _rl_callable(value: str | None, flag: str, *, required: bool) -> None:
@@ -55,13 +56,6 @@ def _rl_backend_image_ok(args) -> bool:
     """A backend may accept its own --rl-image form (verl: ``verl-build:<commit>``)."""
     check = getattr(_rl_backend_module(args, "launch_flags"), "rl_image_ok", None)
     return bool(check and check(getattr(args, "rl_image", None) or ""))
-
-
-def _miles_overlay():
-    """The Miles adapter's overlay module (source patches on the ~/miles checkout)."""
-    from ..rl.engine import backends
-
-    return backends.module("overlay", "miles")
 
 
 def _rl_backend_module(args, role: str):

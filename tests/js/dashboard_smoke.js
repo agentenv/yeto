@@ -37,7 +37,8 @@ global.setTimeout = () => 0;
 eval(appM[1]);
 const out = { title: els.title.innerHTML, kpis: els.kpis.innerHTML, islands: els.islands.innerHTML,
   cost: els.costBox.innerHTML, events: els.evs.innerHTML, folds: els.foldBox.innerHTML,
-  metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: els.islandWall.hidden };
+  metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: els.islandWall.hidden,
+  nodes_note: (els.rNodesNote || {}).textContent };
 // generation-stage utilization panel
 out.util = { empty_hidden: mk("utilEmpty").hidden, body_hidden: mk("utilBody").hidden, ctl: mk("utilCtl").innerHTML,
   cut: mk("uCut").innerHTML, carry_hidden: mk("uCarryBox").hidden, carry: mk("uCarry").innerHTML,
@@ -45,10 +46,10 @@ out.util = { empty_hidden: mk("utilEmpty").hidden, body_hidden: mk("utilBody").h
   cut_lines: svgNodes.filter((n) => n.attrs["class"] === "ucut").length };
 // hover a timeline/duration segment with a mousemove handler -> tooltip
 const hov = svgNodes.find((n) => n.listeners.mousemove && n.attrs["class"] === "tseg");
-if (hov) { hov.listeners.mousemove[0]({ clientX: 10, clientY: 10 }); out.tip = els.tip.innerHTML; }
+if (hov) { hov.listeners.mousemove[0]({ clientX: 10, clientY: 10 }); out.tip = mk("tip").innerHTML; }
 // keyboard: right arrow on the rounds panel
 const kd = (els.rounds.listeners.keydown || [])[0];
-if (kd) { kd({ key: "ArrowRight", preventDefault() {} }); out.tip_key = els.tip.innerHTML; }
+if (kd) { kd({ key: "ArrowRight", preventDefault() {} }); out.tip_key = mk("tip").innerHTML; }
 els.layoutBtn.onclick();
 out.title_after_switch = els.title.innerHTML; out.wall_hidden_after_switch = els.islandWall.hidden; out.wall = els.wall.innerHTML;
 process.stdout.write(JSON.stringify(out));

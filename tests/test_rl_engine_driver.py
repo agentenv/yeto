@@ -128,6 +128,17 @@ def test_serial_colocated_three_rounds_event_order(tmp_path):
         "publish", "eval", "offload", "generate", "onload", "train", "sync", "publish",
     ]
     assert [e["event"] for e in events].count("rl_local_round") == 3
+    # The engine step has no update norm: reported as unmeasured, never a fake 0.0
+    assert all(e["delta_l2_norm"] is None for e in events if e["event"] == "rl_local_round")
+
+
+def test_combined_delta_norm_is_none_unless_every_submission_is_measured():
+    from yeto.rl.engine.bridges import _combined_delta_norm
+
+    sub = lambda n: SimpleNamespace(delta_l2_norm=n)
+    assert _combined_delta_norm([]) is None
+    assert _combined_delta_norm([sub(3.0), sub(None)]) is None
+    assert _combined_delta_norm([sub(3.0), sub(4.0)]) == pytest.approx(5.0)
 
 
 def test_driver_start_records_island_tasks_only_when_set(tmp_path):

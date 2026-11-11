@@ -24,18 +24,22 @@ NODE0_LOCAL_CHECKPOINT_WARNING = (
 
 
 def modal_checkpoint_store(args) -> tuple[str, str] | None:
-    """``(volume name, path in the container)`` for a ``modal-volume://`` store, None
-    without a store. Any other store form on a Modal island is an error: Modal mounts no
-    bucket and a container path does not outlive the container (it used to be dropped
-    silently, rl-resume-from-checkpoint 1.2)."""
+    """``(volume name, path in the container)`` for a ``modal-volume://`` store; None
+    without a store and for an ``s3://`` store (no Volume: the island reaches it by
+    object API, :func:`store_object_envs`). Any other store form on a Modal island is
+    an error: Modal mounts no bucket and a container path does not outlive the
+    container (it used to be dropped silently, rl-resume-from-checkpoint 1.2)."""
     value = getattr(args, "rl_checkpoint_store", None)
     if not value:
+        return None
+    if is_object_store_uri(value):
         return None
     from ..cloud.modal_ckpt_store import MODAL_VOLUME_SCHEME, parse_modal_volume_uri
 
     if not str(value).startswith(MODAL_VOLUME_SCHEME + "://"):
         raise ValueError(f"--rl-checkpoint-store {value!r} on a Modal island: Modal mounts neither "
-                         "buckets nor host paths here; use modal-volume://NAME[/PREFIX] (a v1 Volume)")
+                         "buckets nor host paths here; use modal-volume://NAME[/PREFIX] (a v1 Volume) "
+                         "or s3://BUCKET[/PREFIX] (an S3 or S3-compatible store reached by object API)")
     name, prefix = parse_modal_volume_uri(str(value))
     return name, MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else "")
 
@@ -43,12 +47,44 @@ def modal_checkpoint_store(args) -> tuple[str, str] | None:
 MODAL_CHECKPOINT_STORE_MOUNT = "/root/yeto-checkpoint-store"
 
 
+def modal_store_secret_name(args, spec=None) -> str | None:
+    """``--modal-store-secret NAME``: the Modal Secret that holds the object store
+    credentials (``AWS_ACCESS_KEY_ID``, ``AWS_SECRET_ACCESS_KEY``, and for an
+    S3-compatible store ``AWS_ENDPOINT_URL`` / ``AWS_REGION``), attached to the
+    island function so the values never pass through the launcher. None when
+    unset. Refused for a non-Modal island when ``spec`` is given (a sky island
+    cannot read a Modal Secret)."""
+    name = getattr(args, "modal_store_secret", None)
+    if not name:
+        return None
+    if spec is not None and getattr(spec, "cloud", None) != "modal":
+        raise ValueError(f"--modal-store-secret attaches a Modal Secret to a Modal island; "
+                         f"island cloud {getattr(spec, 'cloud', None)!r} cannot use it")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(name)):
+        raise ValueError(f"--modal-store-secret {name!r} is not a Modal Secret name")
+    return str(name)
+
+
+# --rl-checkpoint-store schemes a Modal island reaches without a mount: the whole store
+# (cuts, LATEST, sample buffer, releases) goes through the object API from a local stage
+# (yeto.cloud.s3_store STAGE_ENV); the credentials come from --modal-store-secret or the
+# launcher's store credential.
+MODAL_OBJECT_STORE_SCHEMES = ("s3",)
+
+
+def is_object_store_uri(value) -> bool:
+    return str(value).partition("://")[0] in MODAL_OBJECT_STORE_SCHEMES and "://" in str(value)
+
+
 def resumes_in_new_container(args) -> bool:
-    """A Modal re-run of the island (preemption) is a resume, not a failure, when the run
-    has a non-elastic modal-volume:// store (rl-resume-from-checkpoint 2.5). A store of
+    """A Modal re-run of the island (preemption, or a whole clustered restart) is a
+    resume, not a failure, when the run has a non-elastic modal-volume:// or s3://
+    store (rl-resume-from-checkpoint 2.5): the store carries LATEST and the new
+    container starts from the newest complete cut. A store of
     ``--rl-checkpoint-store-export-only`` holds no resume state: a re-run is a failure."""
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
-    return (store.startswith("modal-volume://") and not getattr(args, "rl_elastic", False)
+    return ((store.startswith("modal-volume://") or is_object_store_uri(store))
+            and not getattr(args, "rl_elastic", False)
             and bool(getattr(args, "rl_single_island_no_sync", False))
             and not getattr(args, "rl_checkpoint_store_export_only", False))
 
@@ -152,7 +188,16 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
 
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
     if cloud == "modal":
-        return {}
+        if not is_object_store_uri(store):
+            return {}  # a Modal Volume (or no store): nothing goes by object API
+        from ..cloud.s3_store import island_envs
+
+        # No bucket mount on Modal: every node stages the store on its local disk and
+        # moves the whole store by object (one stage per container). The credentials
+        # ride the named Secret when --modal-store-secret is given; else the launcher's
+        # store credential is shipped like on sky.
+        return island_envs(store, store_client_environ(args), stage=True,
+                           credentials=modal_store_secret_name(args) is None)
     if store.startswith("oss://"):
         from ..cloud.oss_store import island_envs as oss_island_envs
 
@@ -163,7 +208,43 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
         return {}
     from ..cloud.s3_store import island_envs
 
-    return island_envs(store, stage=int(num_nodes) == 1)
+    return island_envs(store, store_client_environ(args), stage=int(num_nodes) == 1)
+
+
+def store_client_environ(args, environ=None) -> dict[str, str]:
+    """The environment the S3 store client of the head and the islands reads, with
+    ``--rl-object-store-endpoint`` applied: the endpoint, and ``region=auto`` when an
+    endpoint is set and no region is configured (what Cloudflare R2 expects; AWS S3
+    ignores it). ``environ`` defaults to the process environment."""
+    from ..cloud.s3_store import ENDPOINT_ENV, PROFILE_ENV, REGION_ENV, store_endpoint, store_region
+
+    env = dict(os.environ if environ is None else environ)
+    if getattr(args, "rl_object_store_profile", None):
+        env[PROFILE_ENV] = str(args.rl_object_store_profile)
+    endpoint = getattr(args, "rl_object_store_endpoint", None) or env.get("AWS_ENDPOINT_URL")
+    if not endpoint and not env.get(ENDPOINT_ENV) and env.get(PROFILE_ENV):
+        endpoint = store_endpoint(env)  # the profile's endpoint_url
+        if endpoint and store_region(env):
+            env.setdefault(REGION_ENV, store_region(env))
+    if endpoint and not env.get(ENDPOINT_ENV):
+        env[ENDPOINT_ENV] = str(endpoint)
+        env.setdefault(REGION_ENV, env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "auto")
+    return env
+
+
+def apply_object_store_endpoint(args) -> None:
+    """Export ``--rl-object-store-endpoint`` into the launcher's own environment
+    (:data:`~yeto.cloud.s3_store.ENDPOINT_ENV` and ``AWS_ENDPOINT_URL``), so every
+    launcher-side boto3 client (the head's object API, the code pack store) talks to
+    the same endpoint as the islands. A variable already set wins."""
+    from ..cloud.s3_store import ENDPOINT_ENV, PROFILE_ENV, REGION_ENV
+
+    env = store_client_environ(args)
+    for name in (ENDPOINT_ENV, REGION_ENV, PROFILE_ENV):
+        if env.get(name):
+            os.environ.setdefault(name, env[name])
+    if env.get(ENDPOINT_ENV):
+        os.environ.setdefault("AWS_ENDPOINT_URL", env[ENDPOINT_ENV])
 
 
 # --rl-checkpoint-store schemes the head reads and writes by object or volume API
@@ -180,7 +261,10 @@ def store_unreachable_reason(store: str, cloud: str) -> str | None:
     if scheme == "modal-volume":
         return None if cloud == "modal" else "a Modal Volume is mounted only into Modal containers"
     if cloud == "modal":
-        return "Modal mounts neither buckets nor host paths here; use modal-volume://NAME[/PREFIX]"
+        if scheme in MODAL_OBJECT_STORE_SCHEMES:
+            return None  # reached by object API from a local stage (store_object_envs)
+        return ("Modal mounts neither buckets nor host paths here; use modal-volume://NAME[/PREFIX] "
+                "or s3://BUCKET[/PREFIX]")
     if scheme in ("s3", "oss"):
         return None
     if not scheme:
@@ -189,6 +273,9 @@ def store_unreachable_reason(store: str, cloud: str) -> str | None:
 
 
 RL_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter"
+# the launcher's --rl-expert-selection file, mounted into every island (Kimi K3.1)
+RL_INIT_RELEASE_DIR = "~/yeto-init-release"  # --rl-init-from-release: the prepared model directory
+RL_EXPERT_SELECTION_PATH = "~/yeto-rl-expert-selection.json"  # not under ~/yeto-rl: a Volume mount on Modal
 RL_HEAD_INITIAL_ADAPTER_PATH = "~/yeto-rl-initial-adapter-src"
 
 

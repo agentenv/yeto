@@ -90,11 +90,13 @@ class _Batch:
     # Data cursor AFTER this batch drew its prompts (None =
     # the rollout did not report one). Restart point for the data source.
     data_cursor: dict[str, int] | None = None
+    recorded_at: float | None = None  # wall time of its outer_recorded record
 
 
 class BatchLedger:
     def __init__(self, state_dir: str | Path) -> None:
-        self._journal = Journal(Path(state_dir).expanduser() / LEDGER_DIR)
+        self._root = Path(state_dir).expanduser()
+        self._journal = Journal(self._root / LEDGER_DIR)
         self._batches: dict[int, _Batch] = {}
         self._consumed_groups: dict[str, int] = {}
         self._carried: dict[str, dict[str, Any]] = {}
@@ -126,6 +128,8 @@ class BatchLedger:
                 self._consumed_groups.pop(gid, None)
         elif kind in ("optimizer_applied", "outer_recorded", "discarded"):
             self._batches[rid].state = kind
+            if kind == "outer_recorded":
+                self._batches[rid].recorded_at = r.get("wall_time")
             if kind == "optimizer_applied":
                 for gid in self._batches[rid].group_ids:
                     self._consumed_groups[gid] = rid
@@ -202,6 +206,29 @@ class BatchLedger:
             "last_rollout_id": max(self._batches) if self._batches else None,
             "last_state": self._batches[max(self._batches)].state if self._batches else None,
         }
+
+    def recorded_rollouts(self) -> list[int]:
+        """Rollouts whose round is ``outer_recorded``."""
+        return sorted(r for r, b in self._batches.items() if b.state == "outer_recorded")
+
+    def last_recorded_at(self) -> float | None:
+        """Wall time of the newest ``outer_recorded`` record (None: none, or no time)."""
+        times = [b.recorded_at for b in self._batches.values() if b.state == "outer_recorded"]
+        return None if not times or any(t is None for t in times) else max(float(t) for t in times)
+
+    def set_aside(self, tag: str) -> Path:
+        """A run restarted from its base (rollout 0: no cut, no release to continue from)
+        is a new history: the earlier attempt's ledger moves to ``ledger.before-<tag>`` (kept
+        in the state dir) and this ledger starts empty. Returns where it went."""
+        self._journal.close()
+        dest = self._root / f"{LEDGER_DIR}.before-{tag}"
+        n = 0
+        while dest.exists():
+            n += 1
+            dest = self._root / f"{LEDGER_DIR}.before-{tag}-{n}"
+        (self._root / LEDGER_DIR).rename(dest)
+        self.__init__(self._root)
+        return dest
 
     def unconsumed(self) -> list[int]:
         """Prepared batches whose optimizer step is not recorded (cut: unconsumed)."""

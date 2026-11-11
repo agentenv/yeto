@@ -20,11 +20,11 @@ from argparse import Namespace
 import pytest
 
 torch = pytest.importorskip("torch")
-losses = pytest.importorskip("miles.backends.training_utils.loss_hub.losses")
+losses = pytest.importorskip("miles.backends.training_utils.loss.hub.losses")
 
-from miles.backends.training_utils import cp_utils  # noqa: E402
-from miles.backends.training_utils.loss_hub import corrections  # noqa: E402
-from miles.backends.training_utils.loss_hub.math_utils import compute_opsm_mask  # noqa: E402
+from miles.backends.training_utils.data import context_parallel as cp_utils  # noqa: E402
+from miles.backends.training_utils.loss.hub import corrections  # noqa: E402
+from miles.backends.training_utils.loss.hub.math_utils import compute_opsm_mask  # noqa: E402
 from miles.backends.training_utils.parallel import (  # noqa: E402
     GroupInfo,
     ParallelState,

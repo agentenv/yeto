@@ -104,14 +104,20 @@ def test_rebuild_failure_runs_inside_the_fork_function():
 
 
 def test_cursor_shift_writes_where_miles_load_reads(tmp_path):
-    args = SimpleNamespace(load=str(tmp_path), start_rollout_id=0)
+    args = SimpleNamespace(load=str(tmp_path), start_rollout_id=3)
     cursor = {"sample_offset": 8, "epoch_id": 0, "sample_group_index": 8, "sample_index": 64}
     path = ci.write_shifted_dataset_state(args, cursor, 2)
-    assert path == os.path.join(str(tmp_path), "rollout/global_dataset_state_dict_-1.pt")
-    state = torch.load(path, weights_only=True)
+    # upstream: compute_rollout_checkpoint_dir(load, rollout_id=start_rollout_id - 1)
+    assert path == os.path.join(str(tmp_path), "rollout/2")
+    state = torch.load(os.path.join(path, "data_source/state.pt"), weights_only=True)
     assert state["sample_offset"] == 10 and state["sample_group_index"] == 10
+    # the executor snapshot upstream's load reads next to it: nothing to replay
+    assert torch.load(os.path.join(path, "executor/state.pt"), weights_only=True) == {}
     with pytest.raises(ci.InjectionConfigError, match="already exists"):
         ci.write_shifted_dataset_state(args, cursor, 2)
+    # upstream loads only for a trained step (start_rollout_id > 0): id -1 is never read
+    with pytest.raises(ci.InjectionConfigError, match="never be read"):
+        ci.write_shifted_dataset_state(SimpleNamespace(load=str(tmp_path), start_rollout_id=0), cursor, 1)
     with pytest.raises(ci.InjectionConfigError, match="args.load"):
         ci.write_shifted_dataset_state(SimpleNamespace(load=None), cursor, 1)
 
@@ -138,7 +144,7 @@ def test_cursor_shift_refused_without_a_live_cursor(tmp_path, monkeypatch):
     from yeto.rl.adapters.miles.trainer_rebuild import _inject_cursor_shift
 
     monkeypatch.setenv(ci.CURSOR_SHIFT_ENV, "1")
-    args = SimpleNamespace(load=str(tmp_path), start_rollout_id=0)
+    args = SimpleNamespace(load=str(tmp_path), start_rollout_id=1)
     cursor = {"sample_offset": 8, "epoch_id": 0, "sample_group_index": 8, "sample_index": 64}
     cached_only = SimpleNamespace(live_data_cursor=lambda: (None, None))
     with pytest.raises(ci.InjectionConfigError, match="live"):
@@ -146,4 +152,4 @@ def test_cursor_shift_refused_without_a_live_cursor(tmp_path, monkeypatch):
     with pytest.raises(ci.InjectionConfigError, match="live"):
         _inject_cursor_shift(args, cursor, SimpleNamespace())
     live = SimpleNamespace(live_data_cursor=lambda: (dict(cursor), 0))
-    assert _inject_cursor_shift(args, cursor, live).endswith("global_dataset_state_dict_-1.pt")
+    assert _inject_cursor_shift(args, cursor, live).endswith(os.path.join("rollout", "0"))

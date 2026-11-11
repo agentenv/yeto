@@ -353,3 +353,43 @@ async def test_role_stream_catch_up_jumps_only_with_a_partial_quorum(partial_quo
         return
     await stream.apply_staged_broadcast(0, 5, catch_up=True)
     assert stream._fragment_versions == [5, 0] and stream._pending == {} and stream._staged == {}
+
+
+def test_published_policy_window_follows_the_synced_reader_gate():
+    """A synced trainer's buffer reader gates max_policy_age on the merged version
+    (GateVersionPublisher); the driver's published-policy window keeps the versions
+    that gate still accepts, so a v0 group trained at local v3 (merged v0) keeps
+    its policy hash for the trajectory evidence (SC2 P2e: 'policy v0 ... was not
+    published')."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.sampler_island import GateVersionPublisher
+    from yeto.rl.engine.driver import IslandDriver
+    from yeto.rl.engine.policy_versions import PublishedPolicies
+
+    gates: list[int] = []
+    publisher = GateVersionPublisher(SimpleNamespace(publish=lambda state, **kw: "ok"), gates.append,
+                                     lambda state: 0)  # no merge yet: the release stays at v0
+    driver = IslandDriver.__new__(IslandDriver)
+    driver.published_policies = PublishedPolicies()
+    driver.rollout = SimpleNamespace()
+    driver._max_policy_age = lambda: 2
+    driver.policy_age_basis = lambda: publisher.gate_version
+    for version in range(4):
+        assert publisher.publish(SimpleNamespace(policy_version=version)) == "ok"
+        driver._record_published_policy(version, f"h{version}")
+    assert gates == [0, 0, 0, 0]
+    assert driver.published_policies.hash_of(0) == "h0"  # merged v0 is still trainable
+    # without a gate (unsynced) the window is the local version's, as before
+    plain = IslandDriver.__new__(IslandDriver)
+    plain.published_policies = PublishedPolicies()
+    plain.rollout = SimpleNamespace()
+    plain._max_policy_age = lambda: 2
+    for version in range(4):
+        plain._record_published_policy(version, f"h{version}")
+    assert plain.published_policies.hash_of(0) is None and plain.published_policies.hash_of(1) == "h1"
+    # the gate moving up lets the window drop what the reader now refuses
+    publisher.version_of = lambda state: 3
+    publisher.publish(SimpleNamespace(policy_version=4))
+    driver._record_published_policy(4, "h4")
+    assert driver.published_policies.hash_of(0) is None and driver.published_policies.hash_of(1) == "h1"

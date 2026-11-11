@@ -190,7 +190,7 @@ def test_round_collection_drops_whole_groups_over_a_hard_and_feeds_the_gate():
 VERL_SRC = Path(os.environ.get("YETO_VERL_SRC", "/nonexistent-verl-checkout"))
 MILES_SRC = Path(os.environ.get("YETO_MILES_SRC", "/nonexistent-miles-checkout"))
 VERL_HELPER = VERL_SRC / "verl/trainer/ppo/rollout_corr_helper.py"
-MILES_CORRECTIONS = MILES_SRC / "miles/backends/training_utils/loss_hub/corrections.py"
+MILES_CORRECTIONS = MILES_SRC / "miles/backends/training_utils/loss/hub/corrections.py"
 
 
 def _load(name: str, path: Path):

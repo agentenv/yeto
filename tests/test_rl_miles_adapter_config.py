@@ -21,6 +21,11 @@ from yeto.rl.adapters.miles import config as mc
 from yeto.rl.adapters.miles.placement import PlacementRewriteError
 
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 def make_config(*, colocated: bool = True, with_eval: bool = False, with_moe: bool = False, **top):
     geometry = rc.ModelGeometry(
         num_layers=4, hidden_size=64, num_attention_heads=4, num_query_groups=2,
@@ -329,10 +334,14 @@ def test_dp_replica_gap_follows_the_pinned_lineage(monkeypatch):
     assert run_config_rules.full_parameter_dp_replica_gap() is None
     assert full_parameter_layout_problem(data_parallel=4, actor_num_nodes=1, rollout_gpus=4,
                                          rollout_gpus_per_engine=1) is None
-    # A later fork commit keeps them.
-    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", (*pins.MILES_FORK_LINEAGE, "f" * 40))
+    # A later ports-v1 fork commit keeps them; a commit of another lineage (k31) has none.
+    v1 = pins.MILES_LINEAGES["ports-v1"]
+    extended = v1._replace(commits=(*v1.commits, "f" * 40))
+    monkeypatch.setattr(pins, "MILES_LINEAGES", {**pins.MILES_LINEAGES, "ports-v1": extended})
     monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", "f" * 40)
     assert run_config_rules.full_parameter_dp_replica_gap() is None
+    monkeypatch.setattr(pins, "MILES_NEXT_COMMIT", pins.MILES_K31_F1_COMMIT)
+    assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()
     # An earlier one has none: DP>1 with engines on the island is refused.
     _pin_before_dp_replicas(monkeypatch)
     assert "921cde8c7 or later" in run_config_rules.full_parameter_dp_replica_gap()

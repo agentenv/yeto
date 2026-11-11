@@ -83,7 +83,7 @@ def test_entry_builds_elastic_wiring_from_miles_args(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
-    miles_args = SimpleNamespace(use_miles_router=True, yeto_rl_elastic={
+    miles_args = SimpleNamespace(router="miles", yeto_rl_elastic={
         "resources": "/r.json", "attestation": "/a.json", "state_dir": "/s",
         "initial_config": "c0", "declared_cells": ("x",)})
     assert entry.elastic_wiring_for(miles_args, profile="P", fingerprint="F") == "W"
@@ -130,6 +130,7 @@ def drive_run_ports_island(monkeypatch, *, topology=None, elastic="ELASTIC"):
     def compose(**kw):
         calls.append("compose_island")
         composed.update(kw)
+        composed["_upstream"] = seen
         raise _ComposeReached
 
     monkeypatch.setattr(entry, "compose_island", compose)
@@ -138,11 +139,31 @@ def drive_run_ports_island(monkeypatch, *, topology=None, elastic="ELASTIC"):
         async def run_plugin(self, *a, **kw):
             return None
 
-    async def create_rollout_components(args):
+    seen = {}
+
+    async def create_rollout_components(args, *, capability, trainer_handles):
+        seen["rollout"] = (args, capability, trainer_handles)
         return "CONTROLLER", "EXECUTOR", None
 
-    async def create_training_models(args, executor):
+    async def create_training_models(args, executor, *, handles):
+        seen["training"] = (args, handles)
         return _Actor(), None
+
+    class _StartupInfo:
+        def __init__(self, args):
+            self.args, self.all_args = args, args
+
+        @classmethod
+        def create(cls, all_args):
+            return cls(all_args)
+
+    def init_orchestration_script(startup_info, *, disposer):
+        seen["startup_info"] = startup_info
+        return "CAPABILITY"
+
+    def create_trainer_handles(args, *, trainer_configs, capability):
+        seen["handles"] = (args, trainer_configs, capability)
+        return {"actor": "HANDLE"}
 
     class Disposer:
         def add(self, *items):
@@ -156,13 +177,16 @@ def drive_run_ports_island(monkeypatch, *, topology=None, elastic="ELASTIC"):
 
     modules = {
         "miles.ray.placement_group": dict(create_rollout_components=create_rollout_components,
+                                          create_trainer_handles=create_trainer_handles,
                                           create_training_models=create_training_models),
         "miles.ray.rollout.eval_dispatch": dict(
             EvalDispatcher=lambda *a: SimpleNamespace(drain=lambda: None)),
+        "miles.ray.specs.train": dict(compute_trainer_configs=lambda args: ["actor-config"]),
         "miles.utils.async_utils": dict(Disposer=Disposer),
-        "miles.utils.orchestration_utils": dict(init_orchestration_script=lambda *a, **kw: None),
+        "miles.utils.orchestration_utils": dict(init_orchestration_script=init_orchestration_script,
+                                                ArgvOrchestratorStartupInfo=_StartupInfo),
     }
-    for name in ("miles", "miles.ray", "miles.ray.rollout", "miles.utils"):
+    for name in ("miles", "miles.ray", "miles.ray.rollout", "miles.ray.specs", "miles.utils"):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     for name, attrs in modules.items():
         module = types.ModuleType(name)
@@ -205,6 +229,21 @@ def test_run_ports_island_wires_elastic_before_ray_and_into_compose(monkeypatch)
     assert calls.index("preflight_stage") < calls.index("connect_island_ray")
     assert composed["elastic"] == "ELASTIC"  # the preflight stage's wiring, not rebuilt
     assert calls[-1] == "compose_island"
+
+
+def test_run_ports_island_assembles_upstream_components_in_main_order(monkeypatch):
+    """Upstream train.py order: startup_info -> init_orchestration_script(startup_info)
+    -> create_trainer_handles(orch, capability) -> create_rollout_components(orch,
+    capability=, trainer_handles=) -> create_training_models(orch, executor, handles=);
+    the publisher gets the orchestrator slice."""
+    _, composed = drive_run_ports_island(monkeypatch)
+    seen = composed["_upstream"]
+    orch = seen["startup_info"].args
+    assert seen["handles"] == (orch, ["actor-config"], "CAPABILITY")
+    assert seen["rollout"] == (orch, "CAPABILITY", {"actor": "HANDLE"})
+    assert seen["training"] == (orch, {"actor": "HANDLE"})
+    assert composed["orchestrator_args"] is orch
+    assert composed["rollout_executor"] == "EXECUTOR"
 
 
 def test_learner_applies_infra_switches_before_the_island_runs(monkeypatch):

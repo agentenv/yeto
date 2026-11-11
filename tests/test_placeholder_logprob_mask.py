@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles.proc_state import proc_state
 from yeto.rl.adapters.miles.rollout import handle_from_metadata
 from yeto.rl.engine.driver import IslandDriver
 from yeto.rl.harness import placeholder_logprob_mask as plm
@@ -106,7 +107,7 @@ def test_hook_payload_and_handle(tmp_path, monkeypatch, forced):
     else:
         assert [s.loss_mask for s in kept[0]] == [[1, 1, 1], [1, 1, 1]]
         assert plm.COUNT_KEY not in payload and h.placeholder_logprob_tokens is None
-    assert getattr(args, hook._PLACEHOLDER_ATTR) is None  # reset per rollout
+    assert proc_state(args, hook._PLACEHOLDER_ATTR) is None  # reset per rollout
 
 
 @pytest.mark.parametrize("value", [3, None])

@@ -640,10 +640,19 @@ class MilesValueIsland:
 
         # Runtime-only imports: keep module importable in CPU unit tests.
         from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
-        from miles.backends.megatron_utils.update_weight.common import (
-            _gather_with_stride,
-            named_params_and_buffers,
-        )
+        try:
+            # upstream layout (no update_weight/common.py exists in any Miles version
+            # this repo tracks); the value island keeps its own Miles pin, so the old
+            # path stays as the fallback for that checkout
+            from miles.backends.megatron_utils.named_weights import named_params_and_buffers
+            from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import (
+                _gather_with_stride,
+            )
+        except ImportError:
+            from miles.backends.megatron_utils.update_weight.common import (
+                _gather_with_stride,
+                named_params_and_buffers,
+            )
         from miles.backends.training_utils.parallel import get_parallel_state
 
         self.args = args

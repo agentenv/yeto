@@ -12,6 +12,7 @@ a cached snapshot the test is skipped, or fails when ``YETO_REQUIRE_HF_ASSETS=1`
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,9 @@ HF_ALLOW_PATTERNS: list[str] = [
 REQUIRE_ENV = "YETO_REQUIRE_HF_ASSETS"
 
 
+TOKENIZER_VOCAB_FILES = ("tokenizer.json", "vocab.json", "tokenizer.model", "tiktoken.model", "vocab.txt")
+
+
 def hf_snapshot_dir(repo: str) -> str | None:
     """Local snapshot directory of ``repo`` at its pinned revision, or None."""
     try:
@@ -54,10 +58,15 @@ def hf_snapshot_dir(repo: str) -> str | None:
     except ImportError:
         return None
     try:
-        return snapshot_download(repo, revision=HF_TEST_REPOS[repo], allow_patterns=HF_ALLOW_PATTERNS,
+        path = snapshot_download(repo, revision=HF_TEST_REPOS[repo], allow_patterns=HF_ALLOW_PATTERNS,
                                  local_files_only=True)
     except Exception:
         return None
+    # an interrupted prefetch can leave tokenizer_config.json without the vocabulary; transformers then
+    # builds an empty tokenizer that encodes text to nothing (a silent wrong test, not a skip)
+    if not any((Path(path) / name).exists() for name in TOKENIZER_VOCAB_FILES):
+        return None
+    return path
 
 
 def require_hf_repo(repo: str) -> str:

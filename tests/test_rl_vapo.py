@@ -15,6 +15,11 @@ from yeto.rl.engine.run_config import CriticRunConfig
 
 from test_rl_miles_adapter_config import make_config
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 VAPO_ARGV = [
     "--eps-clip", "0.2", "--eps-clip-high", "0.28", "--calculate-per-token-loss",
     "--gamma", "1.0", "--lambd", "1.0", "--value-clip", "0.2", "--critic-lr", "2e-06",

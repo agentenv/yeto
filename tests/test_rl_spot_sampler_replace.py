@@ -545,3 +545,14 @@ def test_a_failed_marker_write_in_the_signal_handler_does_not_raise(tmp_path, ca
     env = {RECLAIM_MARKER_ENV: str(tmp_path / "missing-dir" / "marker")}
     write_reclaim_marker(env, _signal.SIGINT)  # T-C1 run b: the runner raced the same temp name
     assert "reclaim marker not written" in capsys.readouterr().out
+
+
+def test_a_trainer_that_does_not_merge_refuses_a_buffer_of_unmerged_shards(tmp_path):
+    writer = br.SamplerRoundWriter(br.open_buffer(_shard_env(tmp_path, "island0"), sampler=True),
+                                   "island0", incarnation="a")
+    writer.write_round(0, _round(0, 2), _cursor(2))
+    with pytest.raises(br.SampleBufferRolloutError, match="--rl-buffer-shards island0"):
+        br.open_buffer({br.BUFFER_ROOT_ENV: str(tmp_path)}, reader=True)
+    reader = br.open_buffer(_shard_env(tmp_path), reader=True)  # the named shards merge
+    reader.refresh()
+    assert len(reader) == 2

@@ -39,6 +39,11 @@ from yeto.rl import stage1
 
 
 # ------------------------------------------------------------ gap 3: sampler entry
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 def _sampler_spec(tmp_path: Path, **over) -> dict:
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text("".join(json.dumps({"q": f"question {i}", "a": str(i)}) + "\n" for i in range(3)))

@@ -22,8 +22,8 @@ from types import SimpleNamespace
 import pytest
 
 torch = pytest.importorskip("torch")
-mu = pytest.importorskip("miles.backends.training_utils.loss_hub.math_utils")
-adv_mod = pytest.importorskip("miles.backends.training_utils.loss_hub.advantages")
+mu = pytest.importorskip("miles.backends.training_utils.loss.hub.math_utils")
+adv_mod = pytest.importorskip("miles.backends.training_utils.loss.hub.advantages")
 tdc = pytest.importorskip("miles.ray.rollout.train_data_conversion")
 arguments = pytest.importorskip("miles.utils.arguments")
 from miles.utils.types import Sample  # noqa: E402

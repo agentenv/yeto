@@ -36,7 +36,7 @@ def test_compat_group_values_from_the_catalog():
         assert compat_group(card).startswith(vendor + "-")
 
 
-@pytest.mark.parametrize("card", ["", "h300", "mi300x"])
+@pytest.mark.parametrize("card", ["", "h300", "xpu9000"])
 def test_unknown_card_type_is_an_error(card):
     with pytest.raises(UnknownCardType):
         compat_group(card)

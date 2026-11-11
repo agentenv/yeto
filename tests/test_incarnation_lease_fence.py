@@ -257,3 +257,63 @@ def test_infra_failure_classification(reason, verdict_exc, turns, expected):
     assert infra_failure(SimpleNamespace(trajectory=trajectory, turns=turns)) == expected
     ok = SimpleNamespace(outcome=Outcome.OK, reason="verified", verdict=None)
     assert infra_failure(SimpleNamespace(trajectory=ok, turns=())) is None
+
+
+# --------------------------------------------------------------------------- H5: the Miles reader
+
+def _write_group(buffer, sampler: str, inc: str, rid: int) -> None:
+    from yeto.rl.engine.buffer_payload import GroupWriter
+    from yeto.rl.engine.policy_versions import engine_weight_version
+
+    sample = {"tokens": [1, 2, 3], "response_length": 1, "rollout_log_probs": [-0.1], "loss_mask": [1],
+              "reward": 1.0, "metadata": {"weight_version": engine_weight_version(0)}}
+    GroupWriter(buffer, sampler).write([dict(sample, index=0), dict(sample, index=1)],
+                                       group_key=f"{inc}-r{rid}-p",
+                                       sampler_round={"sampler": sampler, "incarnation": inc,
+                                                      "rollout_id": rid, "last": True})
+
+
+def test_miles_reader_drops_stale_incarnation_groups_of_one_island_only(tmp_path):
+    """Two NC sampler islands write one buffer; the pool fences island s0 and its
+    replacement claims the lease; s0's late groups are passed over, s1's are all read."""
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+
+    store = CheckpointStore(tmp_path)
+    writer = FileSampleBuffer(store, batch_size=1)
+    IncarnationLease(store, "s0", "aaaa").claim()
+    IncarnationLease(store, "s1", "xxxx").claim()
+    _write_group(writer, "s0", "aaaa", 0)  # 0
+    _write_group(writer, "s1", "xxxx", 0)  # 1
+    IncarnationLease(store, "s0", "bbbb", clock=lambda: 0.0).claim(writer.entries())
+    _write_group(writer, "s0", "aaaa", 1)  # 2: the fenced process still writes
+    _write_group(writer, "s1", "xxxx", 1)  # 3
+    _write_group(writer, "s0", "bbbb", 2)  # 4: its replacement (start_on_latest)
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1), max_policy_age=2, prefetch=False,
+                         read_workers=1, wait_s=0.0, poll_s=0.0)
+    assert reader.gate is not None
+    out, report = reader.take(0, 4, current_version=None)
+    assert [position for position, _ in out] == [0, 1, 3, 4]
+    assert report.stale_incarnation_groups == 1
+    assert report.metrics()["sample_buffer/stale_incarnation_groups"] == 1.0
+    assert report.source_groups and sum(report.source_groups.values()) == 4
+
+
+def test_miles_reader_gate_off_and_explicit(tmp_path, monkeypatch):
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+    from yeto.rl.engine.incarnation_lease import INCARNATION_FENCE_ENV
+
+    store = CheckpointStore(tmp_path)
+    writer = FileSampleBuffer(store, batch_size=1)
+    IncarnationLease(store, "s0", "aaaa").claim()
+    IncarnationLease(store, "s0", "bbbb", clock=lambda: 0.0).claim([])
+    _write_group(writer, "s0", "aaaa", 0)
+    monkeypatch.setenv(INCARNATION_FENCE_ENV, "0")
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1), max_policy_age=2, prefetch=False,
+                         read_workers=1, wait_s=0.0)
+    assert reader.gate is None
+    out, report = reader.take(0, 1, current_version=None)
+    assert len(out) == 1 and report.stale_incarnation_groups == 0
+    monkeypatch.delenv(INCARNATION_FENCE_ENV)
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1), max_policy_age=2, prefetch=False,
+                         read_workers=1, wait_s=0.0, incarnation_gate=None)
+    assert reader.gate is None

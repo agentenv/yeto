@@ -10,12 +10,87 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
+import subprocess
+import tempfile
+
+import torch
 
 from yeto.provenance import source_tree_sha256
 from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, owner_affine_minimum_fragments
+from yeto.rl.adapters.miles.ext_args import ext_attr
 from yeto.rl.adapters.miles.revision import miles_execution_source_sha256
 from yeto.rl.adapters.miles.models.chunked_full_parameter import MilesChunkedFullParameterAdapter
-from yeto.rl.adapters.miles.models.full_parameter_probe import _hardware_identity, _write_private_json
+
+
+def _hardware_identity() -> dict[str, object]:
+    completed = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = [
+        tuple(part.strip() for part in line.split(","))
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+    if len(rows) != 2 or any(len(row) != 3 for row in rows) or len(set(rows)) != 1:
+        raise RuntimeError("probe container does not expose exactly two identical GPUs")
+    name, driver, memory_mib = rows[0]
+    if not memory_mib.isdecimal():
+        raise RuntimeError("probe GPU memory field is malformed")
+    return {
+        "gpu_count": 2,
+        "gpu_name": name,
+        "driver_version": driver,
+        "memory_mib_per_gpu": int(memory_mib),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+    }
+
+
+def _write_private_json(path: Path, payload: dict[str, object]) -> None:
+    parent = path.parent
+    if (
+        not path.is_absolute()
+        or path.exists()
+        or path.is_symlink()
+        or not parent.is_dir()
+        or parent.is_symlink()
+    ):
+        raise RuntimeError("full-parameter probe evidence path is not fresh and safe")
+    encoded = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    temporary: Path | None = None
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=parent,
+        )
+        temporary = Path(raw_path)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            written = stream.write(encoded)
+            if written != len(encoded):
+                raise RuntimeError("short write while recording probe evidence")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 _EVIDENCE_ENV = "YETO_FULL_PARAMETER_MANIFEST_PROBE_EVIDENCE"
 _MODEL_REVISION_ENV = "YETO_FULL_PARAMETER_MODEL_REVISION"
@@ -194,7 +269,8 @@ def _require_probe_profile(args) -> int:
         getattr(args, "num_rollout", None) != start + 1
         or getattr(args, "use_critic", False)
         or getattr(args, "lora_rank", 0) > 0
-        or getattr(args, "external_policy_sync_run_until_stop", False)
+        or ext_attr(args, "rl_external_policy_sync_run_until_stop",
+                    default=getattr(args, "external_policy_sync_run_until_stop", False))
         or getattr(args, "eval_interval", None) is not None
     ):
         raise RuntimeError("manifest probe requires the exact metadata-only schedule")

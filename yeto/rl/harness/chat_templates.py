@@ -34,6 +34,7 @@ engine would add if it got the text and tokenized it with special tokens.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import re
@@ -142,6 +143,59 @@ def parse_qwen38(text: str) -> Message:
     return _assistant(content, reasoning, calls)
 
 
+_K3_OPEN, _K3_CLOSE, _K3_SEP = "<|open|>", "<|close|>", "<|sep|>"
+_K3_CALL = re.compile(r'<\|open\|>call tool="([^"]*)" index="(\d+)"<\|sep\|>(.*?)<\|close\|>call<\|sep\|>', re.S)
+_K3_ARG = re.compile(r'<\|open\|>argument key="([^"]*)" type="([^"]*)"<\|sep\|>(.*?)<\|close\|>argument<\|sep\|>', re.S)
+_K3_JSON = re.compile(r'<\|open\|>json type="object"<\|sep\|>(.*?)<\|close\|>json<\|sep\|>', re.S)
+_K3_RESPONSE = re.compile(r"<\|open\|>response<\|sep\|>(.*?)<\|close\|>response<\|sep\|>", re.S)
+
+
+def _k3_attr(value: str) -> str:
+    return value.replace("&quot;", '"').replace("&amp;", "&")
+
+
+def _k3_arguments(body: str) -> str:
+    """The call's arguments as JSON text whose one-level parse (the template's
+    ``normalize_tool_arguments``) gives back each ``(key, type, text)``: string
+    values JSON-quoted, other values their literal text."""
+    block = _K3_JSON.fullmatch(body)
+    if block is not None:
+        return block.group(1)
+    args = _K3_ARG.findall(body)
+    if _K3_ARG.sub("", body) != "":
+        raise TemplateError(f"Kimi K3 tool call body is not <argument> XTML: {body[:80]!r}")
+    parts = []
+    for key, kind, text in args:
+        value = json.dumps(text, ensure_ascii=False) if kind == "string" else text
+        if kind != "string":
+            try:
+                json.loads(text)
+            except ValueError as exc:
+                raise TemplateError(f"Kimi K3 argument {key!r} of type {kind} is not JSON: {text[:80]!r}") from exc
+        parts.append(f"{json.dumps(_k3_attr(key), ensure_ascii=False)}:{value}")
+    return "{" + ",".join(parts) + "}"
+
+
+def parse_kimi_k3(text: str) -> Message:
+    """Kimi K3 XTML output after the ``<message role="assistant"><think>``
+    generation prompt: reasoning, the ``response`` channel and ``tools`` calls.
+    Reasoning and content are kept byte for byte (the template renders them
+    raw), so the next turn's rendering repeats the sampled text."""
+    marker = f"{_K3_CLOSE}think{_K3_SEP}"
+    if marker not in text:
+        return _assistant("", text, [])  # cut inside the think channel
+    reasoning, rest = text.split(marker, 1)
+    response = _K3_RESPONSE.search(rest)
+    content = response.group(1) if response else ""
+    calls = []
+    for index, match in enumerate(_K3_CALL.finditer(rest)):
+        calls.append({"id": _call_id(text, index), "type": "function",
+                      "function": {"name": _k3_attr(match.group(1)), "arguments": _k3_arguments(match.group(3))}})
+    if rest.count(f"{_K3_OPEN}call ") != len(calls):
+        raise TemplateError(f"Kimi K3 tool call is not <call> XTML: {rest[rest.find(_K3_OPEN + 'call '):][:80]!r}")
+    return _assistant(content, reasoning, calls)
+
+
 # ---------------------------------------------------------------------- registry
 @dataclass(frozen=True)
 class TemplateSpec:
@@ -162,6 +216,16 @@ class TemplateSpec:
     keeps_history_reasoning: bool = True
     verified: str = "not verified"
     merge_leading_system: bool = False
+    # the tokenizer is custom code shipped with the checkpoint (Kimi's TikTokenTokenizer): loading it
+    # needs the caller's explicit trust_remote_code opt-in (``ChatTemplate.load``), never a default
+    needs_remote_code: bool = False
+    # tool-call arguments go to the template as the JSON text they were parsed from
+    # (the template reads them itself and keeps each value's literal text)
+    raw_arguments: bool = False
+    # the tokenizer encodes a rendering segment by segment (structural markers as
+    # control tokens, message text as plain BPE even where it spells a marker):
+    # ids come from the rendering's segments, never from re-encoding its text
+    segment_encoding: bool = False
 
 
 TEMPLATES: dict[str, TemplateSpec] = {}
@@ -195,6 +259,13 @@ register_template(TemplateSpec(
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
     template_kwargs={"enable_thinking": True, "preserve_thinking": True},
     verified="Qwen3.8-27B@1d4bf0f2 tokenizer", merge_leading_system=True))
+register_template(TemplateSpec(
+    # Kimi-K3.1 XTML (``encoding_k3.py`` of the checkpoint); ``thinking_effort``
+    # comes from the deployment (agentic.template_kwargs; the tokenizer's default is max)
+    name="kimi_k31", tokenizer="moonshotai/Kimi-K3.1-Pro", parser=parse_kimi_k3,
+    stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True},
+    verified="Kimi-K3.1-Pro@d9e99b07 tokenizer (CPU alignment test)",
+    needs_remote_code=True, raw_arguments=True, segment_encoding=True))
 register_template(TemplateSpec(
     name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
     stop_tokens=("<|im_end|>",),
@@ -250,22 +321,36 @@ class ChatTemplate:
             ids.append(token_ids[0])
         self.stop_token_ids: tuple[int, ...] = tuple(ids)
         self._stop_by_id = dict(zip(ids, spec.stop_tokens))
+        # segment_encoding: rendered text -> (segment end offsets, ids per segment), newest last
+        self._segmented: "collections.OrderedDict[str, tuple[list[int], list[list[int]]]]" = collections.OrderedDict()
 
     @classmethod
-    def load(cls, name: str, *, tokenizer_path: str | None = None, local_files_only: bool = True) -> "ChatTemplate":
+    def load(cls, name: str, *, tokenizer_path: str | None = None, local_files_only: bool = True,
+             trust_remote_code: bool = False) -> "ChatTemplate":
+        """``trust_remote_code``: the caller's opt-in to run the checkpoint's tokenizer code (like
+        ``--trust-remote-code``); required by a template whose tokenizer needs it, ignored otherwise."""
         try:
             spec = TEMPLATES[name]
         except KeyError:
             raise TemplateError(f"unknown chat template {name!r} (known: {sorted(TEMPLATES)})") from None
+        if spec.needs_remote_code and not trust_remote_code:
+            from .gateway.records_env import TRUST_REMOTE_CODE_ENV
+
+            raise TemplateError(f"chat template {name!r}: its tokenizer is custom code shipped with the checkpoint; "
+                                "opt in with trust_remote_code (agentic.trust_remote_code: true, "
+                                f"{TRUST_REMOTE_CODE_ENV}=1 for a records proxy)")
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or spec.tokenizer, local_files_only=local_files_only)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or spec.tokenizer, local_files_only=local_files_only,
+                                                  trust_remote_code=spec.needs_remote_code and trust_remote_code)
         return cls(spec, tokenizer)
 
     def render(self, messages: Sequence[Message], *, tools: Sequence[Message] | None = None,
                add_generation_prompt: bool) -> str:
         import jinja2  # comes with transformers
 
+        if self.spec.segment_encoding:
+            return self._render_segments(messages, tools=tools, add_generation_prompt=add_generation_prompt)
         try:
             return self.tokenizer.apply_chat_template(
                 self._ready(messages), tools=list(tools) if tools else None, tokenize=False,
@@ -274,12 +359,60 @@ class ChatTemplate:
             raise TemplateError(f"{self.spec.name} template refused the conversation: {exc}") from exc
 
     def _ready(self, messages: Sequence[Message]) -> list[Message]:
-        ready = _render_ready(messages)
+        ready = [dict(m) for m in messages] if self.spec.raw_arguments else _render_ready(messages)
         return _merge_leading_system(ready) if self.spec.merge_leading_system else ready
 
     def encode(self, text: str) -> list[int]:
-        """Token ids of rendered text; the template writes its own BOS tokens."""
-        return list(self.tokenizer.encode(text, add_special_tokens=False))
+        """Token ids of rendered text; the template writes its own BOS tokens.
+
+        ``segment_encoding``: ``text`` must be a rendering of this template, a
+        stop token, or a tail of a rendering that starts at a segment boundary
+        (what the records proxy encodes); anything else is refused."""
+        if not self.spec.segment_encoding:
+            return list(self.tokenizer.encode(text, add_special_tokens=False))
+        if text in self.spec.stop_tokens:
+            return [self.stop_token_ids[self.spec.stop_tokens.index(text)]]
+        if text == "":
+            return []
+        for rendered, (ends, pieces) in reversed(self._segmented.items()):
+            if not rendered.endswith(text):
+                continue
+            start = len(rendered) - len(text)
+            if start == 0:
+                return [i for piece in pieces for i in piece]
+            if start in ends:
+                first = ends.index(start) + 1
+                return [i for piece in pieces[first:] for i in piece]
+        raise TemplateError(f"{self.spec.name}: text to encode is not a tail of a rendering at a segment boundary")
+
+    def _render_segments(self, messages: Sequence[Message], *, tools: Sequence[Message] | None,
+                         add_generation_prompt: bool) -> str:
+        """Render through the tokenizer's own segment builder (Kimi ``encoding_k3``)
+        and keep each segment's ids for :meth:`encode`."""
+        import sys
+
+        module = sys.modules[type(self.tokenizer).__module__]
+        kwargs = dict(self.spec.template_kwargs)
+        thinking = bool(kwargs.pop("thinking", True))
+        kwargs.setdefault("thinking_effort", "max")  # as the tokenizer's apply_chat_template
+        try:
+            segments = module.build_chat_segments(self._ready(messages), tools=list(tools) if tools else None,
+                                                  add_generation_prompt=add_generation_prompt, thinking=thinking,
+                                                  **kwargs)
+        except (ValueError, TypeError, KeyError, AssertionError) as exc:
+            raise TemplateError(f"{self.spec.name} template refused the conversation: {exc}") from exc
+        ends, pieces, offset = [], [], 0
+        for segment in segments:
+            offset += len(segment.text)
+            ends.append(offset)
+            pieces.append(list(self.tokenizer._encode_text_piece(segment.text,
+                                                                 allow_special_tokens=segment.allow_special)))
+        text = "".join(segment.text for segment in segments)
+        self._segmented[text] = (ends, pieces)
+        self._segmented.move_to_end(text)
+        while len(self._segmented) > 256:
+            self._segmented.popitem(last=False)
+        return text
 
     def decode(self, ids: Sequence[int]) -> str:
         return self.tokenizer.decode(list(ids), skip_special_tokens=False)

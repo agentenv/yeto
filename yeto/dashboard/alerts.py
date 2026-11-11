@@ -19,6 +19,11 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # FN 2x8 measured 10-15 min). Tasks 8.1.
     "startup_warn_s": 1200.0,
     "startup_severe_s": 1800.0,
+    # the actor init stage of a trainer start (model build + weight load: trainer_start_phase
+    # actor_import_done -> actor_init_done, or rl_startup_step before weights_loaded) writes
+    # no event for its whole length; K3.1 mbridge load measured ~22 min
+    "startup_init_warn_s": 2700.0,
+    "startup_init_severe_s": 3600.0,
     # 8.4: one startup sub-step (Ray up / engines ready / weights loaded) taking
     # longer than this while heartbeats still arrive (process alive, step stuck).
     "startup_step_warn_s": 900.0,
@@ -72,20 +77,26 @@ def _next_startup_step(done: str | None) -> str:
     return STARTUP_STEPS[i + 1] if i + 1 < len(STARTUP_STEPS) else "rl_driver_start"
 
 
+ENDED = ("done", "stopped", "left", "lost", "unknown")
+QUIET_OK = ("done", "stopped", "left", "unknown")  # no heartbeat alert (a lost island keeps its alert)
+
+
 def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     out = []
     for c in cards:
         age = c["last_event_age_s"]
-        if c["status"] in ("done", "stopped") or c.get("finalized") or age is None:
+        if c["status"] in QUIET_OK or c.get("finalized") or age is None:
             continue
         if c.get("starting"):
+            stage = c.get("startup_stage") or {}
+            warn, severe = stage.get("warn_s", th["startup_warn_s"]), stage.get("severe_s", th["startup_severe_s"])
+            step_warn = max(th["startup_step_warn_s"], warn) if stage.get("init") else th["startup_step_warn_s"]
             step_age = c.get("startup_step_age_s")
-            if step_age is not None and step_age > th["startup_step_warn_s"] and age <= th["startup_warn_s"]:
+            if step_age is not None and step_age > step_warn and age <= warn:
                 pending = _next_startup_step(c.get("startup_step"))
                 out.append(_alert(1, "startup_step", f"island {c['id']} startup step slow",
                                   f"waiting for {pending} for {step_age:.0f}s (previous step {c.get('startup_step') or 'start'}; "
-                                  f"threshold {th['startup_step_warn_s']:.0f}s)", island=c["id"]))
-            warn, severe = th["startup_warn_s"], th["startup_severe_s"]
+                                  f"threshold {step_warn:.0f}s)", island=c["id"]))
             if age > severe:
                 sev = 0
             elif age > warn:
@@ -93,19 +104,27 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
             else:
                 continue
             out.append(_alert(sev, "startup", f"island {c['id']} no events during startup",
-                              f"still starting (no rl_driver_start yet), last event {age:.0f}s ago"
-                              f" (startup threshold {warn:.0f}s/{severe:.0f}s)", island=c["id"], metric="reward"))
+                              f"still starting (no rl_driver_start yet; stage: {stage.get('label') or 'n/a'}"
+                              + (f" for {stage['age_s']:.0f}s" if stage.get("age_s") is not None else "")
+                              + f"), last event {age:.0f}s ago (startup threshold {warn:.0f}s/{severe:.0f}s)",
+                              island=c["id"], metric="reward"))
             continue
-        if age > th["heartbeat_severe_s"]:
+        if c.get("waiting_backlog"):
+            continue  # a sampler idle at its backlog cap, by design (its trainers are behind)
+        # without heartbeats an island is quiet for as long as its own cadence says
+        # (rounds / generations / policy loads; the card's stale_after_s)
+        warn = max(th["heartbeat_warn_s"], c.get("stale_after_s") or 0.0)
+        severe = th["heartbeat_severe_s"] if warn <= th["heartbeat_warn_s"] else max(th["heartbeat_severe_s"], 2 * warn)
+        if age > severe:
             sev = 0
-        elif age > th["heartbeat_warn_s"]:
+        elif age > warn:
             sev = 1
         else:
             continue
         what = "heartbeat" if c["heartbeat_seen"] else "event (no heartbeat events, using the last event)"
         out.append(_alert(sev, "heartbeat", f"island {c['id']} heartbeat timeout",
-                          f"last {what} {age:.0f}s ago (threshold {th['heartbeat_warn_s']:.0f}s/"
-                          f"{th['heartbeat_severe_s']:.0f}s)", island=c["id"], round=c["round"],
+                          f"last {what} {age:.0f}s ago (threshold {warn:.0f}s/"
+                          f"{severe:.0f}s)", island=c["id"], round=c["round"],
                           metric="reward"))
     return out
 
@@ -224,17 +243,20 @@ def recovery(reducer) -> list[dict]:
     return out
 
 
-def source_lost(cards: list[dict]) -> list[dict]:
+def source_lost(cards: list[dict], torn_down: bool = False) -> list[dict]:
     return [_alert(1, "source_lost", f"island {c['id']} tape source lost",
                    f"ssh follow disconnected: {(c['source_lost'].get('error') or '')[:120]}", island=c["id"])
-            for c in cards if c["source_lost"] and not c["source_lost"].get("recovered")]
+            for c in cards if c["source_lost"] and not c["source_lost"].get("recovered")
+            and not torn_down and c["status"] not in ("done", "stopped", "left")]
+    # an island that ended (or a run torn down): its tape follow ending is expected
 
 
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict]) -> list[dict]:
     th = reducer.thresholds
     alerts = (recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th) + source_lost(cards))
+              + budget(cost, th)
+              + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):
         a["id"] = i

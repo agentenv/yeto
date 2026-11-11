@@ -268,7 +268,8 @@ def test_a_mirror_uploads_data_then_the_release_record_then_the_pointer(tmp_path
     (root / RELEASE_DIR / LATEST).write_text("{}")
     TreeMirror(root, _objects(Recording()), subtrees=(), pointers=s3_store.POINTER_FILES,
                records=s3_store.RECORD_FILES).push()
-    assert uploads == ["a.bin", "z.bin", RECORD, LATEST]
+    # one tier at a time: the data files (in any order, they move concurrently), the record, the pointer
+    assert sorted(uploads[:2]) == ["a.bin", "z.bin"] and uploads[2:] == [RECORD, LATEST]
 
 
 # ---------------------------------------------------------------- large files
@@ -292,20 +293,28 @@ def test_a_large_sparse_file_goes_up_in_parts_and_comes_back_by_ranges(tmp_path)
     assert objects.read_file("missing", tmp_path / "none") is False
 
 
-def test_a_failed_multipart_upload_is_aborted(tmp_path):
+def test_a_failed_multipart_upload_is_kept_and_the_next_call_resumes_it(tmp_path):
+    failing = [True]
+
     class Failing(FakeOss):
         def upload_part(self, **kw):
-            if kw["PartNumber"] == 2:
+            if kw["PartNumber"] == 2 and failing[0]:
                 raise _error("InternalError", "UploadPart")
             return super().upload_part(**kw)
 
     fake = Failing()
     source = tmp_path / "f"
-    with open(source, "wb") as fh:
-        fh.truncate(3 * MIN_PART_BYTES)
+    source.write_bytes(bytes(range(256)) * (3 * MIN_PART_BYTES // 256))
     with pytest.raises(Exception, match="InternalError"):
         _objects(fake, part_bytes=MIN_PART_BYTES).write_file("k", source)
-    assert "abort_multipart_upload" in fake.calls and fake.uploads == {} and not fake.objects
+    assert "abort_multipart_upload" not in fake.calls and len(fake.uploads) == 1 and not fake.objects
+    assert (tmp_path / ("f" + s3_store.UPLOAD_JOURNAL_SUFFIX)).is_file()
+    failing[0] = False
+    fake.calls.clear()
+    _objects(fake, part_bytes=MIN_PART_BYTES).write_file("k", source)
+    assert fake.calls.count("upload_part") == 1 and "create_multipart_upload" not in fake.calls
+    assert fake.objects[("bkt", "runs/a/k")] == source.read_bytes() and fake.uploads == {}
+    assert not (tmp_path / ("f" + s3_store.UPLOAD_JOURNAL_SUFFIX)).exists()
 
 
 def test_a_download_fails_when_the_object_is_replaced_midway(tmp_path):

@@ -139,6 +139,7 @@ def _metadata_seed(i: int):
 
 def render() -> dict[str, Any]:
     from yeto.rl import filters, gsm8k_reward, length_reward, math_reward
+    from yeto.rl.adapters.miles.proc_state import proc_state
     from yeto.rl.algos import gdpo_reward
 
     out: dict[str, Any] = {}
@@ -176,7 +177,7 @@ def render() -> dict[str, Any]:
         args.yeto_rl_dynamic_sampling_max_replacements = limit
         group = [FakeSample("r", None, index=ix, reward=r) for r, ix in zip(rewards, indices)]
         result = filters.bounded_nonzero_reward_std(args, group)
-        state = args._yeto_bounded_filter_state
+        state = proc_state(args, filters.BOUNDED_FILTER_STATE_ATTR)
         rows.append({"keep": result.keep, "reason": result.reason,
                      "state": {k: state[k] for k in ("rollout_id", "rejections", "forced")},
                      "decisions": len(state["decisions"])})

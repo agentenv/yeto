@@ -1,7 +1,9 @@
 """Per-rank time split of Miles' full-parameter export, materialize and apply.
 
 Each Megatron rank records what its last export, materialize, prepare and
-commit did in ``actor._external_full_parameter_apply_stats`` (fragments read,
+commit did in its full-parameter rank state (``actor.full_parameter.apply_stats``
+on k31/b2 Miles, ``actor._external_full_parameter_apply_stats`` before; read
+through :mod:`.rank_state`) (fragments read,
 copied or skipped, seconds; ``commit`` also has ``copy_seconds``, so
 ``seconds - copy_seconds`` is the commit's whole-model part: master
 propagation, the master-to-model copy, the model/master check and the weights
@@ -26,9 +28,11 @@ RANK_STATS_ENV = "YETO_FULL_PARAMETER_RANK_STATS"
 
 
 def rank_apply_stats(actor: Any) -> dict[str, Any]:
-    """Trainer-rank plugin: this rank's last full-parameter operation stats."""
-    stats = getattr(actor, "_external_full_parameter_apply_stats", None)
-    return {phase: dict(values) for phase, values in stats.items()} if isinstance(stats, dict) else {}
+    """Trainer-rank plugin: this rank's last full-parameter operation stats
+    (``actor.full_parameter.apply_stats`` on k31/b2 Miles; :mod:`.rank_state`)."""
+    from .rank_state import rank_apply_stats as read_stats
+
+    return read_stats(actor)
 
 
 async def report_rank_stats(group: Any, operation: str, role: str) -> None:

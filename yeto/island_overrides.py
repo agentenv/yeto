@@ -166,7 +166,7 @@ def check_island_args(args) -> None:
 
     age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
     module = _rl_backend_module(args, "policy_age")
-    module.SUPPORT.check(age)
+    module.SUPPORT.check(age, buffer_trainer=getattr(args, "rl_sample_role", None) == "trainer")
     task_check = getattr(module, "check_task", None)
     if callable(task_check):
         task_check(age, custom_generate=getattr(args, "custom_generate_function_path", None),

@@ -168,3 +168,38 @@ def test_legacy_refused_island_still_stops_the_run():
     ops2.status_seq["l1"] = [FAILED]
     with pytest.raises(RuntimeError, match="strict RL job l1 failed"):
         _ctl(ops2).run()  # legacy strict failure: unchanged
+
+
+def test_samplers_of_a_synced_group_end_after_their_trainers():
+    """A trainer that ends without its end record (failed after the syncer finished)
+    left its samplers waiting at a full backlog until the platform timeout (Modal,
+    2 h). The controller ends the follower samplers after a grace once every
+    trainer is done; until then they keep running."""
+    ops = FakeOps()
+    finished = {"v": False}
+    ops.status_seq["t0"] = [RUNNING, SUCCEEDED]
+    ops.status_seq["t1"] = [RUNNING, RUNNING, FAILED]
+    ops.status_seq["s2"] = [RUNNING]
+    ctl = FleetController(learners={"t0": ("task-t0", 1), "t1": ("task-t1", 2), "s2": ("task-s2", 3)},
+                          syncer=None, sky_ops=ops, poll_interval=30, recover_timeout=600,
+                          thread_cls=ImmediateThread, syncer_probe=lambda: None,
+                          syncer_restart=lambda: None,
+                          syncer_finished_probe=lambda: finished.__setitem__("v", True) or True,
+                          followers=["s2"], follower_grace_s=90)
+    codes = ctl.run()
+    assert ops.relaunch_calls == []
+    assert codes["s2"].startswith("SUCCEEDED (its trainers ended")
+    assert ctl.learners["s2"]["state"] == "done"
+    assert ops.t >= 90  # the grace ran before the sampler was ended
+
+
+def test_without_followers_a_running_island_keeps_the_run_open():
+    ops = FakeOps()
+    ops.status_seq["t0"] = [RUNNING, SUCCEEDED]
+    ops.status_seq["s2"] = [RUNNING] * 5 + [SUCCEEDED]
+    ctl = FleetController(learners={"t0": ("task-t0", 1), "s2": ("task-s2", 3)},
+                          syncer=None, sky_ops=ops, poll_interval=30, recover_timeout=600,
+                          thread_cls=ImmediateThread, syncer_probe=lambda: None,
+                          syncer_restart=lambda: None)
+    codes = ctl.run()
+    assert "SUCCEEDED" in codes["s2"] and ops.t >= 150

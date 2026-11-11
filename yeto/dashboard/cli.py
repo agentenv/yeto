@@ -19,6 +19,9 @@ def add_parser(sub) -> None:
         p.add_argument("--tapes", nargs="*", default=[], metavar="PATH",
                        help="extra tape files or directories (*.jsonl up to 2 levels deep): learner tapes, "
                        "syncer tape, controller journal.jsonl, fleet.jsonl")
+        p.add_argument("--store", default=None, metavar="URI",
+                       help="run store (s3://bucket/runs/<run> or a directory): read every island's tape "
+                       "uploaded under tapes/ (samplers on leased nodes, replacements included)")
         p.add_argument("--prices", default=None, help="price table JSON (default: built-in example, not a bill)")
         p.add_argument("--budget", type=float, default=None, help="budget cap in $ for the cost bar/alerts")
         p.add_argument("--thresholds", default=None, help="alert threshold overrides JSON")
@@ -61,9 +64,17 @@ def _paths(args) -> list[str]:
     paths = list(args.tapes)
     if args.run:
         paths = run_sources(args.run) + paths
-    if not paths:
-        raise SystemExit("[dashboard] no tapes: pass --run <run> and/or --tapes PATH...")
+    if not paths and not getattr(args, "store", None):
+        raise SystemExit("[dashboard] no tapes: pass --run <run>, --tapes PATH... and/or --store URI")
     return paths
+
+
+def _store(args):
+    if not getattr(args, "store", None):
+        return None
+    from .store_tapes import StoreTapes, open_objects
+
+    return StoreTapes(open_objects(args.store), label="store")
 
 
 def _attach_compare(reducer, args) -> None:
@@ -99,7 +110,7 @@ def main(args) -> int:
 
         try:
             return serve(paths, reducer=reducer, host=args.host, port=args.port,
-                         interval=args.poll, head=args.head)
+                         interval=args.poll, head=args.head, store=_store(args))
         except ValueError as exc:
             print(f"[dashboard] {exc}", file=sys.stderr)
             return 2
@@ -108,6 +119,10 @@ def main(args) -> int:
         from .sources import load_all
 
         sources = load_all(reducer, paths)
+        st = _store(args)
+        if st is not None:
+            st.pump(reducer)
+            sources = list(sources) + sorted(st.sources)
         out = export_html(reducer, args.out)
         print(f"[dashboard] {len(sources)} tape(s), {reducer.event_seq} record(s) -> {out}")
         return 0

@@ -68,7 +68,7 @@ from contextlib import contextmanager
 import math
 import sys
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -94,6 +94,8 @@ from .execution_profile import (
     train_blockers,
 )
 from .engine_outage import EnginesLost
+from .nan_skip import NanSkipPolicy
+from .xhw_guard import XhwGuard, XhwGuardStop
 from .leave_reason import leave_reason_for
 from .offpolicy_correction import OFFPOLICY_GATE_EVENT, gate_from_carry_over
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
@@ -256,6 +258,10 @@ class PolicyIdentityError(DriverError):
     """Generated groups were not sampled from the published policy."""
 
 
+class PolicyAgeExceeded(PolicyIdentityError):
+    """Groups older than max_policy_age reached a rollout that cannot drop them."""
+
+
 class RoundFailedError(DriverError):
     """The trainer reported a failed optimizer step; nothing was committed."""
 
@@ -393,6 +399,24 @@ def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
     }
 
 
+def policy_age_fields(groups: Sequence[Any], basis: int) -> dict[str, Any]:
+    """``rl_round_trained`` policy-age summary of the trained groups: a group's age is
+    ``basis`` (the trainer's gate version) minus its oldest behavior version.
+    ``policy_age_groups``: {age: groups}. Nothing when no group names its versions."""
+    ages = []
+    for group in groups:
+        versions = getattr(group, "policy_versions", None)
+        if versions:
+            ages.append(max(0, int(basis) - min(int(v) for v in versions)))
+    if not ages:
+        return {}
+    buckets: dict[str, int] = {}
+    for age in sorted(ages):
+        buckets[str(age)] = buckets.get(str(age), 0) + 1
+    return {"policy_age_mean": sum(ages) / len(ages), "policy_age_max": max(ages),
+            "policy_age_groups": buckets}
+
+
 def _filtered_samples(batch: RolloutBatchHandle) -> int | None:
     counts = [getattr(g, "filtered_samples", None) for g in batch.groups]
     if all(c is None for c in counts):
@@ -446,6 +470,18 @@ def _sample_ids_sha256(batch: RolloutBatchHandle) -> str:
 
     ids = sorted(f"{g.group_id}/{s}" for g in batch.groups for s in g.sample_ids)
     return hashlib.sha256("\n".join(ids).encode()).hexdigest()
+
+
+BUFFER_FILL_FIELDS = {"buffer_incomplete_groups": "incomplete_groups",
+                      "buffer_dropped_small_groups": "dropped_small_groups",
+                      "buffer_carried_over_groups": "carried_over_groups",
+                      "buffer_padded_samples": "padded_samples"}
+
+
+def _buffer_fill(batch: Any) -> dict[str, int]:
+    """The sample-buffer reader's short-group handling of a round (reported fields only)."""
+    return {name: int(value) for key, name in BUFFER_FILL_FIELDS.items()
+            if (value := getattr(batch, key, None)) is not None}
 
 
 def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
@@ -597,6 +633,13 @@ class IslandDriver:
         self.execution_mode = profile.execution_mode if profile is not None else EXECUTION_MODE
         self.weight_transport: str | None = None
         self.trained_version: int | None = None
+        # opt-in (YETO_RL_NAN_SKIP): a non-finite grad_norm skips the round instead of failing
+        self.nan_skip: NanSkipPolicy | None = NanSkipPolicy.from_env()
+        # opt-in (YETO_RL_XHW_GUARD): per-source train/rollout mismatch guard of a buffer
+        # trainer; ``xhw_actions_sink`` hands its actions to the buffer reader (set by the
+        # Miles trainer wiring; None: the guard only reports)
+        self.xhw_guard: XhwGuard | None = XhwGuard.from_env()
+        self.xhw_actions_sink: Any = None
         self._open_span: tuple[str, float, int | None] | None = None
         self.fault_injection = load_fault_injection()
         self._rounds_in_process = 0  # rounds this process started (fault injection)
@@ -1002,10 +1045,20 @@ class IslandDriver:
         weight hash map is kept here and handed to the rollout side, which
         names every trajectory's policy in its evidence from it."""
         self.published_policies.record(version, policy_hash)
-        self.published_policies.retain_from(version - self._max_policy_age())
+        self.published_policies.retain_from(self._policy_age_basis(version) - self._max_policy_age())
         setter = getattr(self.rollout, "set_published_policies", None)
         if callable(setter):
             setter(self.published_policies)
+
+    def _policy_age_basis(self, version: int) -> int:
+        """The version the published-policy window is kept against: ``version``,
+        or a lower basis the island's buffer reader gates ``max_policy_age`` on
+        (``policy_age_basis``: a synced trainer's merged version). The window must
+        not forget a version the reader still accepts: the trajectory evidence of
+        such a group names its policy from this map (``age_floor``: one basis)."""
+        basis = getattr(self, "policy_age_basis", None)
+        gate = basis() if callable(basis) else None
+        return int(version) if gate is None else min(int(version), int(gate))
 
     def _restore_published_policies(self, start_rollout_id: int) -> None:
         """A restarted island learns the versions published before it
@@ -1297,7 +1350,8 @@ class IslandDriver:
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
                       stale_groups=int(stale), max_policy_age=self._max_policy_age(),
                       # The dispenser positions of those groups (row runs)
-                      **({"stale_positions": positions} if positions else {}))
+                      **({"stale_positions": positions} if positions else {}),
+                      **_buffer_fill(batch))
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             # IR-3 (age 0): a sample generated by a policy other than the
@@ -1321,15 +1375,21 @@ class IslandDriver:
             # agentic-rollout-utilization 2.3: groups (or version segments) up to
             # max_policy_age versions old are accepted; the engine discards older
             # ones (policy_age.split_by_age), so one reaching here is an error.
-            from .policy_age import check_batch_ages
+            # Over-age groups (older than the window, otherwise well-formed) are
+            # discarded and reported (_discard_over_age); identity errors stay fatal.
+            from .policy_age import split_batch_ages
 
-            problems = check_batch_ages(
-                tuple(dict.fromkeys(mismatched + segmented)), version, limit,
+            # the same basis as the reader's gate and the published-policy window
+            # (_policy_age_basis: a synced trainer's merged version)
+            over_age, problems = split_batch_ages(
+                tuple(dict.fromkeys(mismatched + segmented)), self._policy_age_basis(version), limit,
                 {**self.published_policies.hashes(), version: batch.policy_hash})
             if problems:
                 raise PolicyIdentityError(
                     f"rollout {rollout_id}: groups outside the policy-age window "
                     f"(max_policy_age={limit}): " + "; ".join(problems))
+            if over_age:
+                batch = self._discard_over_age(rollout_id, batch, over_age, version, limit)
             mismatched = ()
         if mismatched or policy_token(version, batch.policy_hash) != self.expected_token:
             detail = ", ".join(f"{g.group_id}={g.policy_token}" for g in mismatched)
@@ -1349,6 +1409,40 @@ class IslandDriver:
                 for g in batch.groups])
         return self._finish_accept(rollout_id, batch)
 
+    def _discard_over_age(self, rollout_id: int, batch: RolloutBatchHandle,
+                          over_age: Sequence[Any], basis_version: int, limit: int
+                          ) -> RolloutBatchHandle:
+        """Drop groups older than the policy-age window from ``batch``.
+
+        One ``rl_policy_age_discarded`` event names each group (id, oldest
+        behavior version), the basis version and the limit, with the
+        ``over_age_discarded_*`` counts the carry-over statistics use. The
+        groups leave the trained data only through the rollout port's
+        ``discard_groups(batch, group_ids)``; a rollout without it cannot drop
+        them from its opaque payload, so the round is refused rather than
+        silently trained (PolicyAgeExceeded)."""
+        from .policy_age import oldest_version
+
+        ids = tuple(g.group_id for g in over_age)
+        self.emit("rl_policy_age_discarded", rollout_id=rollout_id,
+                  basis_version=int(basis_version), max_policy_age=int(limit),
+                  groups=[[g.group_id, oldest_version(g)] for g in over_age],
+                  over_age_discarded_groups=len(over_age),
+                  over_age_discarded_trajectories=sum(len(g.sample_ids) for g in over_age),
+                  over_age_discarded_tokens=sum(int(g.token_count) for g in over_age))
+        discard = getattr(self.rollout, "discard_groups", None)
+        if not callable(discard):
+            raise PolicyAgeExceeded(
+                f"rollout {rollout_id}: groups older than max_policy_age={limit} "
+                f"(basis v{basis_version}): {', '.join(ids)}; the rollout cannot drop "
+                "them from its payload (no discard_groups) -- its reader must skip them")
+        kept = discard(batch, ids)
+        left = {g.group_id for g in kept.groups} & set(ids)
+        if left:
+            raise PolicyIdentityError(
+                f"rollout {rollout_id}: discard_groups kept over-age groups {sorted(left)}")
+        return kept
+
     def _accept_external_batch(self, rollout_id: int, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """Relay mode (``yeto.rl.engine.external_policy``): the groups were
         generated by merged cuts the syncer broadcast to spot samplers, not by this
@@ -1367,7 +1461,8 @@ class IslandDriver:
         stale = getattr(batch, "buffer_stale_groups", None)
         if stale is not None:
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
-                      stale_groups=int(stale), max_policy_age=self._max_policy_age())
+                      stale_groups=int(stale), max_policy_age=self._max_policy_age(),
+                      **_buffer_fill(batch))
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             raise PolicyIdentityError(
@@ -1425,9 +1520,19 @@ class IslandDriver:
             raise RoundFailedError(f"rollout {rollout_id}: optimizer step failed")
         grad_norm = float(metrics.grad_norm)
         if not math.isfinite(grad_norm):
-            raise StrictRlInvariantError(
-                "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
-            )
+            if self.nan_skip is None:
+                raise StrictRlInvariantError(
+                    "nonfinite_grad_norm", f"rollout {rollout_id}: grad_norm={grad_norm}"
+                )
+            # Miles dropped the optimizer step (weights unchanged); count it and go on
+            stop = self.nan_skip.skipped_round()
+            self.emit("rl_nan_skip", rollout_id=rollout_id, grad_norm=str(grad_norm),
+                      groups=len(batch.groups), **self.nan_skip.fields())
+            if stop:
+                raise StrictRlInvariantError("nan_skip_breaker", f"rollout {rollout_id}: {stop}")
+            return
+        if self.nan_skip is not None:
+            self.nan_skip.finite_round()
         # Per-algorithm rule (rl-algorithm-capabilities); default GRPO:
         # some group has non-zero reward variance, exactly as in the original driver. A
         # description without the per-algorithm API keeps the original rule.
@@ -1483,13 +1588,16 @@ class IslandDriver:
             mean_kl=metrics.mean_kl,
             ess_ratio=metrics.ess_ratio,
             clip_fraction=metrics.clip_fraction,
-            delta_l2_norm=0.0,
+            # Not measured here: the engine step exposes no update norm. None, never a fake 0.0;
+            # the decoupled bridge fills it from submitted fragment deltas when it has any.
+            delta_l2_norm=None,
             rollout_seconds=rollout_seconds,
             train_seconds=train_seconds,
             train_step=metrics.train_step,
             loss=metrics.loss,
             pg_loss=metrics.pg_loss,
-            grad_norm=metrics.grad_norm,
+            # None for a round YETO_RL_NAN_SKIP skipped (non-finite, no optimizer step)
+            grad_norm=metrics.grad_norm if math.isfinite(float(metrics.grad_norm)) else None,
             lr=metrics.lr,
             applied_lr=None if not metrics.applied_lrs else min(metrics.applied_lrs),
             applied_lrs=metrics.applied_lrs or None,
@@ -1515,7 +1623,47 @@ class IslandDriver:
         by_bucket = getattr(batch, "batch_summary_by_bucket", None)
         if by_bucket:  # rl-eval-difficulty-buckets 4.1; absent = old field set
             fields["batch_summary_by_bucket"] = {str(b): dict(v) for b, v in by_bucket.items()}
+        # A buffer trainer (its batch came from the sample buffer) has no
+        # rollout-side batch summary: add the trained batch's pooled reward and
+        # the step's grad norm, which the dashboard's per-round charts read
+        # (they were empty). Other tapes keep their field set.
+        if getattr(batch, "buffer_stale_groups", None) is None:
+            return fields
+        if batch.groups:
+            mean, std = _pooled_reward(batch)
+            if math.isfinite(mean):
+                fields["reward_mean"] = mean
+                fields["reward_std"] = std if math.isfinite(std) else None
+        grad_norm = getattr(metrics, "grad_norm", None)
+        if isinstance(grad_norm, (int, float)) and math.isfinite(grad_norm):
+            fields["grad_norm"] = float(grad_norm)
+        # The PPO KL of a buffer step is 0 by construction (one optimizer step on
+        # the batch's own old logprobs); its policy drift is the train-vs-rollout
+        # KL, which the dashboard's KL panel reads first as ``mean_kl``.
+        kl = train_metrics.get("train_rollout_kl")
+        if isinstance(kl, (int, float)) and math.isfinite(kl):
+            fields["mean_kl"] = float(kl)
         return fields
+
+    def _guard_sources(self, rollout_id: int, batch, train_metrics: dict[str, Any]) -> None:
+        """YETO_RL_XHW_GUARD: judge each sampler source of this buffer round
+        (``rl_xhw_mismatch``) and hand the actions to the reader for the next takes."""
+        tokens = getattr(batch, "buffer_source_tokens", None)
+        if self.xhw_guard is None or tokens is None:
+            return
+        try:
+            event = self.xhw_guard.observe(rollout_id, tokens, train_metrics)
+        except XhwGuardStop as exc:
+            self.emit("rl_xhw_mismatch", rollout_id=rollout_id, stop=str(exc))
+            raise StrictRlInvariantError("xhw_guard_stop", str(exc)) from exc
+        event["rollout_stats"] = getattr(batch, "buffer_source_stats", None)
+        event["quarantined_groups"] = getattr(batch, "buffer_xhw_quarantined", None)
+        event["downweighted_groups"] = getattr(batch, "buffer_xhw_downweighted", None)
+        event.pop("schema", None)
+        event.pop("rollout_id", None)
+        self.emit("rl_xhw_mismatch", rollout_id=rollout_id, **event)
+        if callable(self.xhw_actions_sink):
+            self.xhw_actions_sink(event["actions"])
 
     def _mismatch_fields(self) -> dict[str, Any]:
         """Mismatch metrics with profile/epoch/transport labels; nothing when absent."""
@@ -2107,6 +2255,7 @@ class IslandDriver:
             )
         # Per-round accounting of this island (rl-algo-grpo-knobs 7.2,
         # rl-algo-seq-and-adv): what was trained, masked and counted.
+        train_fields = self._train_fields(batch, metrics, train_seconds)
         self.emit(
             "rl_round_trained",
             rollout_id=rollout_id,
@@ -2115,6 +2264,8 @@ class IslandDriver:
             trained_sample_ids_sha256=_sample_ids_sha256(batch),
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
+            **(policy_age_fields(batch.groups, self._policy_age_basis(self.published_version))
+               if self.published_version is not None else {}),
             # agentic-rollout-utilization 3.2 (only when reported: default tapes unchanged)
             **({"cross_version_truncated_fraction": metrics.cross_version_truncated_fraction}
                if getattr(metrics, "cross_version_truncated_fraction", None) is not None else {}),
@@ -2140,13 +2291,17 @@ class IslandDriver:
             submitted_groups=getattr(batch, "submitted_groups", None),
             aborted_in_flight_groups=getattr(batch, "aborted_in_flight_groups", None),
             **self._mismatch_fields(),
+            # YETO_RL_NAN_SKIP on: the run's skip tally (only then: default tapes unchanged)
+            **({"nan_skipped": self.nan_skip.skipped, "nan_skip_fraction": self.nan_skip.fields()["nan_skip_fraction"]}
+               if self.nan_skip is not None else {}),
             # fleet-dashboard 1.2/1.3 (optional fields, None when unreported)
-            **self._train_fields(batch, metrics, train_seconds),
+            **train_fields,
             # The rollout data cursor after this batch (only
             # when the rollout reports it, i.e. --rl-elastic metadata; else absent)
             **({"data_cursor": dict(batch.data_cursor)}
                if getattr(batch, "data_cursor", None) else {}),
         )
+        self._guard_sources(rollout_id, batch, train_fields.get("train_metrics") or {})
         self._emit_critic_round(rollout_id)
         self.local_step += (
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
@@ -2550,6 +2705,32 @@ class IslandDriver:
             "sync_preset": getattr(self.sync, "OUTER_SYNC_KIND", None),
         })
 
+    # ``--rl-ledger-set-aside-before T`` (unix seconds; ``yeto run up`` sets it on a trainer
+    # restart): rounds recorded before T belong to an earlier launch
+    ledger_set_aside_before: float | None = None
+
+    def _set_aside_ledger_of_a_base_restart(self, start_rollout_id: int) -> None:
+        """A launch that starts at rollout 0 starts from the base (no cut, no release to
+        continue from). Rounds an earlier launch recorded in the ledger on the island's
+        volume are not this history: ``rebase(0)`` would refuse them (LedgerError) after the
+        whole trainer start-up. With ``ledger_set_aside_before`` and every recorded round
+        older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead. A round
+        recorded by this launch (an in-place restart at 0) is still refused."""
+        cutoff = self.ledger_set_aside_before
+        recorded = self.ledger.recorded_rollouts() if start_rollout_id == 0 and cutoff is not None else []
+        set_aside = getattr(self.ledger, "set_aside", None)
+        if not recorded or not callable(set_aside):
+            return
+        last = self.ledger.last_recorded_at()
+        if last is None or last >= float(cutoff):
+            return  # this launch's own rounds (or no time to tell): rebase refuses them
+        import time as _time
+
+        dest = set_aside(_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()))
+        self.emit("rl_ledger_set_aside", rollout_id=0, recorded_rollouts=recorded[-8:],
+                  recorded_count=len(recorded), moved_to=str(dest),
+                  why="start from the base (rollout 0) over a ledger of an earlier attempt")
+
     def run(self) -> TrainableState:
         with self._telemetry_threads():
             return self._run()
@@ -2566,6 +2747,7 @@ class IslandDriver:
                     start = self.sync.start(self)
                     self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
+                        self._set_aside_ledger_of_a_base_restart(start.rollout_id)
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):

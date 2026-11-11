@@ -110,6 +110,10 @@ class MilesFullParameterRoleStream(FullParameterRoleStream):
 
     async def _report_rank_stats(self, phase: str) -> None:
         await report_rank_stats(self.group, phase, self.config.role)
+        if phase == "apply":  # read-only, off unless YETO_FULL_PARAMETER_MASTER_CHECK
+            from .master_check import report_master_check
+
+            await report_master_check(self.group, self.config.role)
 
     def _supports_deferred_capture(self) -> bool:
         return defer_capture_supported(self.group)

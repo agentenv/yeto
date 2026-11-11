@@ -10,6 +10,7 @@ MODEL_ENV = "YETO_RECORDS_MODEL"                # model name the agent sends
 SAMPLING_ENV = "YETO_RECORDS_SAMPLING"          # JSON signed sampling
 MAX_MODEL_LEN_ENV = "YETO_RECORDS_MAX_MODEL_LEN"  # context length of the rollout engine
 CARD_ENV = "YETO_RECORDS_CARD"                  # GPU name (provenance)
+TRUST_REMOTE_CODE_ENV = "YETO_RECORDS_TRUST_REMOTE_CODE"  # "1": run the checkpoint's tokenizer code (opt-in)
 
 # the proxy's own server names. They live here, not in ``recorder``,
 # so the launch layer can name the tunnelled port without importing aiohttp

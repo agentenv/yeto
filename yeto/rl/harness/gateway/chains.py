@@ -44,8 +44,46 @@ class SessionMismatch(RuntimeError):
     pass
 
 
+def _json_number(text: str) -> int | float:
+    value = float(text)
+    return int(value) if value.is_integer() and abs(value) < 2 ** 53 else value
+
+
+def _arguments_key(arguments: Any) -> Any:
+    """Tool-call arguments as a value: a harness that parses the arguments it
+    received and serializes them again (pi: ``JSON.stringify``) changes spacing,
+    escapes and ``1.0`` -> ``1``, not the call."""
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        return json.loads(arguments, parse_float=_json_number)
+    except ValueError:
+        return arguments
+
+
+def _comparable(message: dict[str, Any]) -> dict[str, Any]:
+    """The message as the chain compares it (module doc of :func:`canonical`)."""
+    out = dict(message)
+    if out.get("role") == "assistant" and not out.get("reasoning_content"):
+        out.pop("reasoning_content", None)  # an empty reasoning is not echoed by every harness
+    if out.get("tool_calls"):
+        calls = []
+        for call in out["tool_calls"]:
+            call = dict(call)
+            if isinstance(call.get("function"), dict):
+                call["function"] = {**call["function"],
+                                    "arguments": _arguments_key(call["function"].get("arguments"))}
+            calls.append(call)
+        out["tool_calls"] = calls
+    return out
+
+
 def canonical(message: dict[str, Any]) -> bytes:
-    return json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    """Hash input of one message.  Two forms of the same message hash alike: an
+    empty ``reasoning_content`` and none, and tool-call arguments that parse to
+    the same JSON value.  The chain keeps the message as it was recorded (the
+    generated form), so the next turn renders what the engine sampled."""
+    return json.dumps(_comparable(message), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def message_hash(previous: str, message: dict[str, Any]) -> str:

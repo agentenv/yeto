@@ -206,7 +206,7 @@ def test_island_store_path_refusals(store, peer, message):
 
 
 def test_modal_islands_refuse_a_snapshot_store_without_the_volume():
-    with pytest.raises(ValueError, match="no Volume is mounted"):
+    with pytest.raises(ValueError, match="no store is reachable"):
         _plan(ASYNC + ("--rl-peer-recovery", "--rl-peer-recovery-store", "~/nfs/snapshots"))
     with pytest.raises(ValueError, match="only through the mount"):
         _plan(ASYNC + ("--rl-peer-recovery", "--rl-checkpoint-store", "modal-volume://yeto-vol/run-a",

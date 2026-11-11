@@ -102,7 +102,7 @@ HL_GAUSS_BINS = 51
 # Execution requirements a single-island GPU smoke may allow with
 # --rl-allow-unverified-mechanism (they are not registered mechanisms).
 EXECUTION_ALLOWANCES = frozenset({"execution:critic"})
-# Estimators whose advantage drops a reward-side KL (Miles loss_hub/advantages.py).
+# Estimators whose advantage drops a reward-side KL (Miles loss/hub/advantages.py).
 REWARD_KL_DROPPING_ESTIMATORS = frozenset({"grpo", "gspo"})
 # Estimators that define a sequence-level ratio: clip range must be explicit.
 SEQUENCE_RATIO_ESTIMATORS = {"gspo"}
@@ -1855,11 +1855,17 @@ def _reject_staleness(s: AlgorithmSpec) -> str | None:
     # agentic-rollout-utilization 2.3: staleness > 0 is the bounded-staleness
     # contract (token-level version segments); cross-version tokens need an
     # importance-sampling correction, so a spec without one is still refused.
-    if s.execution.max_policy_staleness != 0 and s.correction.method not in ("tis", "custom"):
+    # score_centering carries its own importance sampling over the rollout top-K
+    # log-probs (loss.score_centering_is 'tis' / 'mis', yeto.rl.algos.score_centering),
+    # which replaces correction.method for that loss.
+    centered = (s.loss.variant == "score_centering"
+                and getattr(s.loss, "score_centering_is", "none") in ("tis", "mis"))
+    if s.execution.max_policy_staleness != 0 and s.correction.method not in ("tis", "custom") and not centered:
         return (
             f"execution.max_policy_staleness={s.execution.max_policy_staleness} needs a "
             "cross-version importance-sampling correction (correction.method 'tis' or "
-            "'custom'; agentic-rollout-utilization bounded-staleness contract). Use 0 otherwise"
+            "'custom', or loss.score_centering_is 'tis' / 'mis' with loss.variant "
+            "'score_centering'; agentic-rollout-utilization bounded-staleness contract). Use 0 otherwise"
         )
     return None
 

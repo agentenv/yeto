@@ -47,6 +47,30 @@ from .rl_ports import _prepare_ports_algorithm
 DEFAULT_SESSION_SERVER_PORT = 9301
 
 
+class UnsetRLLearningRate(ValueError):
+    """An RL launch without --inner-lr (it trains at the SFT default)."""
+
+
+def refuse_unset_inner_lr(args) -> None:
+    """Refuse an RL launch that leaves --inner-lr at the SFT default (a warning went
+    unread once: a Kimi-K3.1 RL run trained at 3e-4)."""
+    if not inner_lr_unset(args):
+        return
+
+    # 3e-4 is an SFT default: a Kimi-K3.1 full-parameter RL run moved its experts
+    # 2 % per step with it (RL wants about 1e-6)
+    message = (f"RL without --inner-lr would train at the SFT default {float(args.inner_lr):g}; "
+               "pass --inner-lr explicitly (full-parameter RL: about 1e-6)")
+    raise UnsetRLLearningRate(message)
+
+
+def inner_lr_unset(args) -> bool:
+    """True when --inner-lr was not given (its value is the CLI's SFT default)."""
+    from ..cli import _DefaultLR
+
+    return isinstance(getattr(args, "inner_lr", None), _DefaultLR)
+
+
 def _default_session_server_port(args) -> None:
     """Give Miles session servers a fixed base port when none was set.
 
@@ -444,7 +468,11 @@ def rl_sync_mode_off_reasons(args) -> list[str]:
     preset = getattr(args, "rl_sync_preset", "strict-avg")
     if preset not in ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET):
         reasons.append(f"preset {preset}")
-    if (islands := rl_island_count(args)) < 2:
+    from ..rl.engine.sample_roles import synced_full_parameter_trainer
+
+    if (islands := rl_island_count(args)) < 2 and not synced_full_parameter_trainer(args):
+        # One synced full-parameter trainer island (learners 1, quorum 1) runs
+        # the async rounds behind its syncer; the merge is the identity.
         reasons.append(f"{islands} island")
     if getattr(args, "experimental_rl_sync", False):
         reasons.append("--experimental-rl-sync")
@@ -468,7 +496,10 @@ def _apply_rl_sync_mode(args) -> None:
     # An explicit full-parameter sweep is the strict control profile.
     if mode == "async" and rl_sync_mode_applies(args) and not explicit_sweep:
         values = dict(_ASYNC_MODE_VALUES)
-        nesterov = int(getattr(args, "local_rl_rounds_per_sync", 1)) >= ASYNC_NESTEROV_MIN_H
+        # One learner (a synced full-parameter trainer alone behind its syncer):
+        # no outer optimizer, the merge is the identity (lr 1, momentum 0).
+        nesterov = (int(getattr(args, "local_rl_rounds_per_sync", 1)) >= ASYNC_NESTEROV_MIN_H
+                    and rl_island_count(args) >= 2)
         values["rl_sync_outer_lr"] = 0.7 if nesterov else 1.0
         values["rl_sync_outer_momentum"] = 0.9 if nesterov else 0.0
         if args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
@@ -875,6 +906,7 @@ def _prepare_rl_args(
             rollout_num_gpus=getattr(iargs, "rollout_num_gpus", None),
             placement=getattr(iargs, "rl_placement", "colocated"),
             island_scheduling="elastic" if island_pool(args) else "legacy",
+            sample_role=getattr(iargs, "rl_sample_role", None) or "both",
         )
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
@@ -882,13 +914,19 @@ def _prepare_rl_args(
 
     full_tuning = args.tuning == "full"
     if full_tuning and not (sample_roles.buffer_full_parameter(args)
-                            or sample_roles.synced_full_parameter(args)):
+                            or sample_roles.synced_full_parameter(args)
+                            or (sample_roles.is_synced_trainer(args)
+                                and getattr(args, "rl_model_recipe", "generic") == "kimi_k31")):
+        # --tuning full: a no-sync island (buffer trainer, pair, convertible pool); synced
+        # islands on a full-parameter preset (the syncer merges their pseudo-gradients); or a
+        # synced K3.1 trainer (whole-checkpoint releases, checked on the island)
         raise ValueError(
-            "RL --tuning full needs a full-parameter sync preset "
+            "RL v0 requires --tuning lora unless --tuning full has a full-parameter sync preset "
             f"(--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} or {SAO_STREAMING_SYNC_PRESET}; "
             f"--rl-sync-full-parameter-rounds async is the asynchronous multi-fragment "
-            "counterpart of decoupled) or --rl-single-island-no-sync; strict-avg and "
-            "decoupled merge the canonical LoRA layout (requires --tuning lora)")
+            "counterpart of decoupled), --rl-single-island-no-sync, or --rl-model-recipe kimi_k31 "
+            "on a synced trainer; strict-avg and decoupled merge the canonical LoRA layout "
+            "(requires --tuning lora)")
     if full_tuning and int(getattr(args, "expert_full_count", 0) or 0):
         raise ValueError("--expert-full-count is the attention-LoRA hybrid: it needs --tuning lora")
     if args.tuning != "lora" and not full_tuning:
@@ -926,6 +964,7 @@ def _prepare_rl_args(
         )
     if not args.inner_lr > 0:
         raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
+    refuse_unset_inner_lr(args)
     if args.rl_sync_preset == "strict-avg" or (
         args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET and not rl_full_parameter_async(args)
     ):
@@ -943,7 +982,8 @@ def _prepare_rl_args(
 
     max_policy_age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
     policy_age_module = _rl_backend_module(args, "policy_age")
-    policy_age_module.SUPPORT.check(max_policy_age)
+    policy_age_module.SUPPORT.check(
+        max_policy_age, buffer_trainer=getattr(args, "rl_sample_role", None) == "trainer")
     task_check = getattr(policy_age_module, "check_task", None)
     if callable(task_check):  # 4.1: stage 2 is single-turn only (agentic = stage 3)
         task_check(max_policy_age,
@@ -964,6 +1004,11 @@ def _prepare_rl_args(
         _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
     if callable(over_sampling_check):
         over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
+    # Miles k31/b3-b7: --no-rl-host-sync-free needs the typed switch in the pin
+    host_sync_free_check = getattr(
+        _rl_backend_module(args, "run_config_rules"), "check_host_sync_free", None)
+    if callable(host_sync_free_check):
+        host_sync_free_check(bool(getattr(args, "rl_host_sync_free", True)))
     # Island environment options the backend's colocated placement cannot run
     env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_island_env", None)
     if callable(env_check):
@@ -1210,6 +1255,29 @@ def _prepare_rl_args(
         ):
             if not re.fullmatch(r"[0-9a-f]{64}", str(value or "")):
                 raise ValueError(f"{flag} must be 64 lowercase hex characters")
+    if getattr(args, "rl_model_recipe", "generic") == "kimi_k31":
+        from ..rl.engine import kimi_k31_lora
+
+        # --tuning full: the partial-experts form; --tuning lora: an adapter over the frozen MXFP4 base
+        kimi_k31_lora.check_tuning(
+            getattr(args, "tuning", "lora"),
+            expert_selection=getattr(args, "rl_expert_selection", None),
+            routed_expert_qat=getattr(args, "rl_routed_expert_qat", None),
+            lora_targets=getattr(args, "lora_targets", None),
+            # synced LoRA trainer islands (decoupled DiLoCo): attention targets, strict-avg
+            policy_sync=not getattr(args, "rl_single_island_no_sync", False),
+            sync_preset=getattr(args, "rl_sync_preset", None))
+        if getattr(args, "tuning", "lora") == "lora":
+            kimi_k31_lora.check_sampler_engine(
+                getattr(args, "lora_targets", None),
+                sample_role=getattr(args, "rl_sample_role", None),
+                sampler_engine=getattr(args, "rl_sampler_engine", None))
+        if getattr(args, "tuning", "lora") == "full" and not getattr(args, "rl_expert_selection", None):
+            raise ValueError("--rl-model-recipe kimi_k31 needs --rl-expert-selection PATH")
+    elif getattr(args, "rl_expert_selection", None):
+        raise ValueError("--rl-expert-selection belongs to --rl-model-recipe kimi_k31")
+    if getattr(args, "rl_routed_expert_qat", None) and getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
+        raise ValueError("--rl-routed-expert-qat belongs to --rl-model-recipe kimi_k31")
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
         expected_lora_targets = (
             "attention" if expert_full_count else "attention-routed-experts"
@@ -1248,6 +1316,15 @@ def _prepare_rl_args(
         if value is not None and value <= 0:
             raise ValueError(f"RL --{name.replace('_', '-')} must be positive")
 
+    if args.reward_function:
+        from ..provenance import ProvenanceError, python_module_spec_form
+
+        try:  # examples/x.py:f (README form) -> examples.x:f; workers import by module
+            args.reward_function = python_module_spec_form(
+                args.reward_function, base_dir=REPO_ROOT
+            )
+        except ProvenanceError as exc:
+            raise ValueError(f"--reward-function: {exc}") from None
     _rl_callable(args.reward_function, "--reward-function", required=True)
     if not re.fullmatch(
         r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", args.rl_image or ""
@@ -1314,6 +1391,9 @@ def _prepare_rl_args(
     _apply_rl_outer_merge_options(args, num_islands=learners)
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
     _check_island_pool(args, num_islands=learners)
+    from .k31_checks import check_full_form
+
+    args._kimi_k31_full = check_full_form(args, specs)  # selection validity + rough memory
     check_peer_recovery(args, clouds={spec.cloud for spec in specs})
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
@@ -1331,6 +1411,9 @@ def _prepare_rl_args(
                 and source.get("resolved_revision") is None
             ):
                 continue
+            if name == "dataset" and getattr(args, "rl_sample_role", None) == "trainer":
+                # a buffer trainer reads groups from the store, never --data rows
+                continue
             if (
                 name == "model"
                 and allow_remote_model
@@ -1341,8 +1424,14 @@ def _prepare_rl_args(
             if source.get("source") != "huggingface" or not source.get(
                 "resolved_revision"
             ):
+                hint = (
+                    "pass --data-revision <40-character commit> for a Hub dataset, or "
+                    "--rl-allow-local-data for a local prompt file"
+                    if name == "dataset"
+                    else "pass --model-revision <40-character commit>"
+                )
                 raise ValueError(
-                    f"RL v0 requires a revision-pinned Hugging Face {name}"
+                    f"RL v0 requires a revision-pinned Hugging Face {name}: {hint}"
                 )
         from ..provenance import python_spec_path, python_spec_sha256
 

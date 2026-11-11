@@ -113,7 +113,13 @@ class Node:
         return ["-o", f"ProxyJump={self.proxy_jump}"] if self.proxy_jump else []
 
     def preflight_commands(self) -> tuple[tuple[str, ...], ...]:
-        return card_tools.preflight_commands(self.device_family)
+        """The card-tool commands to try in order (the first that answers wins,
+        ssh_trainer_island.preflight); a rocm node falls back to rocm-smi when
+        amd-smi is not installed (card_tools.ROCM_SMI_FALLBACK)."""
+        commands = card_tools.preflight_commands(self.device_family)
+        if self.device_family == "rocm":
+            commands = commands + tuple(getattr(card_tools, "ROCM_SMI_FALLBACK", ()))
+        return commands
 
     def check_cards(self, text: str) -> list[card_tools.CardRecord]:
         """Compare the node's card tool output with this inventory entry."""

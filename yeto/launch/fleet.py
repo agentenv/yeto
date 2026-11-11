@@ -165,6 +165,8 @@ class FleetController:
         wan_reject_probe=None,
         wan_probe_relaunches: int = 0,
         island_relaunch_envs=None,
+        followers=(),
+        follower_grace_s: float = 120.0,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -172,6 +174,15 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # Sampler islands of a synced group that run until their trainers end
+        # (--rl-sampler-until-trainers-end): they stop on the trainers' end
+        # records. A trainer that ends without one (it failed after the syncer
+        # finished, e.g. a relaunched island still booting) would leave them
+        # generating into a full backlog until the platform timeout; once every
+        # other island is done they are ended here after follower_grace_s.
+        self.followers = frozenset(followers or ())
+        self.follower_grace_s = float(follower_grace_s)
+        self._leaders_done_at: float | None = None
         # 0.26: () -> bool, the syncer finished its run (no island is relaunched
         # after that; a late island's failure then counts as a normal end).
         self.syncer_finished_probe = syncer_finished_probe
@@ -303,6 +314,7 @@ class FleetController:
                 self._poll_local_syncer()
             for rec in self.learners.values():
                 self._poll(rec, is_syncer=False)
+            self._end_followers()
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
             if self.stop_flag is not None and os.path.exists(self.stop_flag):
@@ -428,6 +440,30 @@ class FleetController:
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
+
+    def _end_followers(self) -> None:
+        """End the follower islands (``followers``) still running
+        ``follower_grace_s`` after every other island is done."""
+        if not self.followers:
+            return
+        leaders = [r for n, r in self.learners.items() if n not in self.followers]
+        if not leaders or not all(r["state"] in (DONE, ABANDONED) for r in leaders):
+            self._leaders_done_at = None
+            return
+        now = self.ops.now()
+        if self._leaders_done_at is None:
+            self._leaders_done_at = now
+        if now - self._leaders_done_at < self.follower_grace_s:
+            return
+        for name in sorted(self.followers):
+            rec = self.learners.get(name)
+            if rec is None or rec["state"] in (DONE, ABANDONED):
+                continue
+            rec["state"] = DONE
+            rec["exit"] = "SUCCEEDED (its trainers ended; stopped by the launcher)"
+            self._fleet("island_done", name, reason="trainers ended")
+            print(f"[launcher] {name}: every trainer it feeds has ended; stopping the sampler",
+                  file=sys.stderr)
 
     def _syncer_finished(self) -> bool:
         if self.syncer is not None and self.syncer["state"] == DONE \

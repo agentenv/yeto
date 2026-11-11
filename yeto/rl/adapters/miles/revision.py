@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_PINS, MilesRevisionPins
@@ -71,30 +69,6 @@ def miles_execution_source_sha256(root: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _overlay_tree_matches(root: Path, base_commit: str) -> bool:
-    """A dirty checkout is accepted only when the island setup applied the critic
-    overlay (record present, same patch sha256, same base) AND the whole worktree,
-    untracked files included, hashes to the fork result tree."""
-
-    from yeto.rl.adapters.miles.overlay import (CRITIC_C357_BASE_COMMIT, CRITIC_C357_PATCH_SHA256,
-                                CRITIC_C357_RESULT_TREE, read_applied_record)
-
-    record = read_applied_record()
-    if not record or record.get("patch_sha256") != CRITIC_C357_PATCH_SHA256 \
-            or base_commit != CRITIC_C357_BASE_COMMIT:
-        return False
-    with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        try:
-            subprocess.run(["git", "-C", str(root), "read-tree", "HEAD"], env=env, check=True, capture_output=True)
-            subprocess.run(["git", "-C", str(root), "add", "-A"], env=env, check=True, capture_output=True)
-            tree = subprocess.run(["git", "-C", str(root), "write-tree"], env=env, check=True,
-                                  capture_output=True, text=True).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            return False
-    return tree == CRITIC_C357_RESULT_TREE
-
-
 def verify_miles_revision(
     root: str | Path,
     *,
@@ -141,8 +115,7 @@ def verify_miles_revision(
     if branch != "HEAD":
         raise RuntimeError("Miles checkout is not detached")
     if git("status", "--porcelain", "--untracked-files=all"):
-        if not _overlay_tree_matches(root, expected.commit):
-            raise RuntimeError("Miles checkout is not clean")
+        raise RuntimeError("Miles checkout is not clean")
 
     return _require_imported_from(root)
 

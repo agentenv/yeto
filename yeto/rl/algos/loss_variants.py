@@ -1,9 +1,9 @@
 """Token-level policy-loss variants (change ``rl-algo-loss-variants``, route B).
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. The
-computation lives in the Miles fork (``michaellchung/miles`` ``yeto/ports``,
-``--policy-loss-variant``); yeto only describes, translates
-and validates. Through the algorithm registry (never by editing the shared files) it
+computation lives in Miles (ports-v1 ``michaellchung/miles`` ``yeto/ports``
+5c1b49eb+, k31 lineage k31/b8+; ``--policy-loss-variant``, same CLI on both);
+yeto only describes, translates and validates. Through the algorithm registry (never by editing the shared files) it
 adds:
 
 * spec fields in the ``loss`` group
@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from yeto.rl import miles_fork_lineage_from
+from yeto.rl import commits_with
 from yeto.rl.engine.algorithm import (
     SEQUENCE_RATIO_ESTIMATORS,
     AlgorithmSpecError,
@@ -68,9 +68,11 @@ PARAM_FLAGS = {
 FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 
 # Miles commits (full SHA) whose parser/loss implement --policy-loss-variant:
-# yeto/ports 5c1b49eb (the 2b loss variants) and every later fork commit.
-# Derived from the single lineage in adapters/miles/pins.py (0.7).
-FORK_COMMITS: frozenset[str] = miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba")
+# ports-v1 yeto/ports 5c1b49eb (the 2b loss variants) and every later commit of
+# that lineage, and the k31 lineage from k31/b8 on (4ff093a8 ported the variants
+# onto the loss/hub layout). Derived from the lineage feature tables in
+# adapters/miles/pins.py (feature ``loss_variants``).
+FORK_COMMITS: frozenset[str] = commits_with("loss_variants")
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
 

@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 EXAMPLE_PRICES = Path(__file__).with_name("prices.example.json")
+INFERRED_RUNNING_S = 900.0  # an inferred island with an event this recent is still billed
 LOCAL_CLOUDS = ("local", "\u672c\u5730")  # "local" in Chinese, as older tapes wrote it
 
 
@@ -74,13 +75,21 @@ def island_rate(prices: dict, isl: dict) -> dict:
 def island_cost(isl: dict, prices: dict, now: float) -> dict:
     rt = island_rate(prices, isl)
     unit = rt["unit_usd_gpu_h"]
-    if isl.get("ready_ts") is None:
+    running = isl.get("open_ts") is not None
+    if isl.get("ready_ts") is None and isl.get("hw_inferred"):
+        # no fleet.jsonl (store-only run): billed from each launch's first to last event
+        spans = [(v["first_ts"], v["last_ts"]) for v in (isl.get("launches") or {}).values()
+                 if v.get("first_ts") is not None and v.get("last_ts") is not None]
+        if not spans and isl.get("first_ts") is not None and isl.get("last_event_ts") is not None:
+            spans = [(isl["first_ts"], isl["last_event_ts"])]
+        hours = sum(b - a for a, b in spans) / 3600.0 if spans else None
+        running = isl.get("last_event_ts") is not None and now - isl["last_event_ts"] < INFERRED_RUNNING_S
+    elif isl.get("ready_ts") is None:
         hours = None
     else:
         open_s = max(0.0, now - isl["open_ts"]) if isl.get("open_ts") is not None else 0.0
         hours = (isl.get("closed_s", 0.0) + open_s) / 3600.0
     rate = rt["rate_usd_h"]
-    running = isl.get("open_ts") is not None
     return {"id": isl["id"], "unit_usd_gpu_h": unit, "rate_usd_h": rate, "hours": hours,
             "gpu_rate_usd_h": rt["gpu_rate_usd_h"], "host_rate_usd_h": rt["host_rate_usd_h"],
             "gpu_only": rt["gpu_only"], "cpus": isl.get("cpus"), "memory_gib": isl.get("memory_gib"),

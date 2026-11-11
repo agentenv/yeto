@@ -90,7 +90,7 @@ Failures:
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -317,17 +317,24 @@ class LaneCursorLog:
                 continue  # a torn last line (crash during the write)
         return cursor
 
-    def append(self, rollout_id: int, positions: list[int], cursor: int) -> None:
+    def append(self, rollout_id: int, positions: list[int], cursor: int,
+               shards: Mapping[str, int] | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = _record(rollout_id, positions, cursor)
+        line = _record(rollout_id, positions, cursor, shards)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         self.commit()
 
 
-def _record(rollout_id: int, positions: list[int], cursor: int) -> str:
-    return json.dumps({"rollout_id": int(rollout_id), "positions": [int(p) for p in positions],
-                       "cursor": int(cursor)}, sort_keys=True)
+def _record(rollout_id: int, positions: list[int], cursor: int,
+            shards: Mapping[str, int] | None = None) -> str:
+    """``shards``: the read position per sampler shard at ``cursor`` (a merged
+    index), read by the samplers' backlog (:func:`fastest_lane_read`)."""
+    record: dict[str, Any] = {"rollout_id": int(rollout_id), "positions": [int(p) for p in positions],
+                              "cursor": int(cursor)}
+    if shards:
+        record["shards"] = {str(k): int(v) for k, v in shards.items()}
+    return json.dumps(record, sort_keys=True)
 
 
 class ObjectLaneCursorLog:
@@ -358,10 +365,11 @@ class ObjectLaneCursorLog:
                 continue  # an unreadable object (should not happen: a put is atomic)
         return 0
 
-    def append(self, rollout_id: int, positions: list[int], cursor: int) -> None:
+    def append(self, rollout_id: int, positions: list[int], cursor: int,
+               shards: Mapping[str, int] | None = None) -> None:
         keys = self._listed()
         key = f"{self.prefix}{len(keys):010d}.json"
-        self.objects.write(key, _record(rollout_id, positions, cursor).encode())
+        self.objects.write(key, _record(rollout_id, positions, cursor, shards).encode())
         keys.append(key)
 
 
@@ -393,3 +401,63 @@ def lane_cursor_log(buffer: Any, learner_id: int | None = None
         return ObjectLaneCursorLog(objects, BUFFER_DIR, lane)
     return LaneCursorLog(f"{store.root}/{BUFFER_DIR}", lane, commit=store.commit)
 
+
+
+def _lane_read(record: Mapping[str, Any], shard: str | None) -> int | None:
+    if shard is None:
+        return int(record["cursor"])
+    shards = record.get("shards")
+    if not isinstance(shards, Mapping) or shard not in shards:
+        return None
+    return int(shards[shard])
+
+
+def fastest_lane_read(buffer: Any, shard: str | None = None) -> int | None:
+    """The read position of the furthest synced-trainer lane in ``buffer``'s store
+    (in ``shard``'s records when given), from each lane's last cursor record; None
+    when no lane has one.
+
+    A sampler counts its backlog from it as well as from its release: when a
+    trainer is gone, its lane's groups stay unread and, counted from the release's
+    read position, fill the sampler's backlog cap; the sampler then stops while the
+    live trainers wait for groups, and the merged version (hence the next release)
+    never comes (Modal, 2 trainers, one stopped). Counted from the furthest lane,
+    the sampler keeps feeding the live trainers; the dead lane's groups age out
+    (``max_policy_age``) and a returning trainer passes over them."""
+    from .resume import CheckpointStore  # noqa: PLC0415
+    from .sample_buffer import BUFFER_DIR  # noqa: PLC0415
+
+    store = getattr(buffer, "store", None)
+    if store is None:
+        return None
+    objects = store.objects if isinstance(store, CheckpointStore) else store
+    best: int | None = None
+    if isinstance(store, CheckpointStore) and objects is None:
+        lanes = Path(store.root) / BUFFER_DIR / LANES_DIR
+        for path in sorted(lanes.glob("*.jsonl")) if lanes.is_dir() else ():
+            last = None
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    last = json.loads(line)
+                except ValueError:
+                    continue  # a torn line
+            read = None if last is None else _lane_read(last, shard)
+            if read is not None:
+                best = read if best is None else max(best, read)
+        return best
+    if objects is None or not callable(getattr(objects, "list", None)):
+        return None
+    prefix = f"{BUFFER_DIR}/{LANES_DIR}/"
+    newest: dict[str, str] = {}
+    for key in objects.list(prefix):
+        lane = key[len(prefix):].split("/", 1)[0] if key.startswith(prefix) else None
+        if lane and key.endswith(".json") and key > newest.get(lane, ""):
+            newest[lane] = key
+    for key in newest.values():
+        try:
+            read = _lane_read(json.loads(objects.read(key)), shard)
+        except (ValueError, KeyError, TypeError):
+            continue
+        if read is not None:
+            best = read if best is None else max(best, read)
+    return best

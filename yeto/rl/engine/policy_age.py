@@ -59,10 +59,22 @@ class PolicyAgeSupport:
     backend: str
     stage: int
     max_policy_age: int
+    # A trainer that reads a sample buffer (--rl-sample-role trainer): the age is
+    # gated by the buffer reader on whole groups, with no in-island carry-over, so
+    # its bound is the backend's off-policy correction, not the carry-over stage.
+    # None: the same limit as max_policy_age.
+    buffer_trainer_max_policy_age: int | None = None
 
-    def check(self, limit: int) -> None:
-        """Raise before launch when ``limit`` exceeds what this backend runs."""
+    def check(self, limit: int, *, buffer_trainer: bool = False) -> None:
+        """Raise before launch when ``limit`` exceeds what this backend runs
+        (``buffer_trainer``: a trainer island over a sample buffer)."""
         validate_limit(limit)
+        if buffer_trainer and self.buffer_trainer_max_policy_age is not None:
+            if limit > self.buffer_trainer_max_policy_age:
+                raise PolicyAgeError(
+                    f"--rl-max-policy-age {limit}: a {self.backend!r} trainer over a sample "
+                    f"buffer runs a policy-age limit of at most {self.buffer_trainer_max_policy_age}")
+            return
         if limit > self.max_policy_age:
             raise PolicyAgeError(
                 f"--rl-max-policy-age {limit}: backend {self.backend!r} supports up to stage "
@@ -112,6 +124,24 @@ def group_age(group: Any, current_version: int) -> int | None:
     return None if oldest is None else current_version - oldest
 
 
+def age_floor(basis_version: int, limit: int) -> int:
+    """Oldest generating version still trainable against ``basis_version``.
+
+    The ONE window rule the sample-buffer reader (``BatchReader.take``) and the
+    driver (:func:`split_batch_ages`) share: a group is over-age iff its oldest
+    version is below this floor. Both must pass the same basis, the version of
+    the publication the round is accepted against (the driver's
+    ``published_version``, i.e. the version of the policy token it hands the
+    rollout side); a basis one higher on either side drops or refuses a group
+    the other accepts."""
+    return int(basis_version) - validate_limit(limit)
+
+
+def is_over_age(oldest: int, basis_version: int, limit: int) -> bool:
+    """Whether a group whose oldest version is ``oldest`` is past the window."""
+    return int(oldest) < age_floor(basis_version, limit)
+
+
 def split_by_age(groups: Iterable[Any], current_version: int, limit: int) -> tuple[list[Any], list[Any]]:
     """(kept, discarded): a group is kept iff its age is known, >= 0 and <= limit."""
     validate_limit(limit)
@@ -121,6 +151,40 @@ def split_by_age(groups: Iterable[Any], current_version: int, limit: int) -> tup
         age = group_age(g, current_version)
         (kept if age is not None and 0 <= age <= limit else discarded).append(g)
     return kept, discarded
+
+
+def split_batch_ages(groups: Sequence[Any], current_version: int, limit: int,
+                     known_hashes: dict[int, str]) -> tuple[list[Any], list[str]]:
+    """Driver guard: ``(over_age, problems)`` for a batch under ``limit``.
+
+    ``over_age``: well-formed groups that are merely too old (oldest version
+    below :func:`age_floor`, token not newer than ``current_version``); the
+    driver discards them instead of failing the run. Their hash is not
+    checked: the driver forgets hashes outside the window
+    (``PublishedPolicies.retain_from``) and nothing of them trains.
+
+    ``problems``: identity errors that stay fatal -- an unparsable or mixed
+    token, an in-window version the driver never published or published
+    with another hash, or a version newer than ``current_version``."""
+    validate_limit(limit)
+    over_age: list[Any] = []
+    problems: list[str] = []
+    for g in groups:
+        token = getattr(g, "policy_token", "")
+        version = token_version(token)
+        oldest = oldest_version(g)
+        if version is not None and oldest is not None and version <= current_version \
+                and oldest <= version and is_over_age(oldest, current_version, limit):
+            over_age.append(g)
+            continue
+        if version is None or known_hashes.get(version) is None \
+                or token != f"yeto:{version}:{known_hashes[version]}":
+            problems.append(f"{g.group_id}={token} (not a published policy)")
+            continue
+        age = group_age(g, current_version)
+        if age is None or age < 0 or age > limit:
+            problems.append(f"{g.group_id}: policy age {age} exceeds max_policy_age={limit}")
+    return over_age, problems
 
 
 def check_batch_ages(groups: Sequence[Any], current_version: int, limit: int,

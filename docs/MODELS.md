@@ -48,6 +48,7 @@ Supported by the alias table but not yet run end to end.
 | `kimi-k2-thinking` | `moonshotai/Kimi-K2-Thinking` | 2060 |
 | `kimi-k25` | `moonshotai/Kimi-K2.5` | 2060 |
 | `kimi-k26` | `moonshotai/Kimi-K2.6` | 2060 |
+| `kimi-k31-pro` | `moonshotai/Kimi-K3.1-Pro` | (Hub) |
 | `deepseek31` | `deepseek-ai/DeepSeek-V3.1` | 1343 |
 | `deepseek-r1` | `deepseek-ai/DeepSeek-R1` | 1343 |
 | `deepseek4pro` | `deepseek-ai/DeepSeek-V4-Pro` | 3200 |

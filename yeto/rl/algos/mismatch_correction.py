@@ -57,12 +57,12 @@ from yeto.rl.engine.algorithm import (
 )
 
 OBSERVE_PATH = "yeto.rl.algos.mismatch_observe.observe_mismatch"
-ICEPOP_PATH = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+ICEPOP_PATH = "miles.backends.training_utils.loss.hub.corrections.icepop_function"
 MIS_PATH = "yeto.rl.algos.vendor.miles_mis.compute_mis_weights_with_cp"
 # Adaptive TIS (AIS), yeto.rl.algos.adaptive_tis; CPU-tested, not declared on any
 # engine until a GPU run shows it takes effect (declaration policy, entry.MILES_DECLARED).
 ADAPTIVE_TIS_PATH = "yeto.rl.algos.adaptive_tis.ais_tis_function"
-# SHA256 of miles/backends/training_utils/loss_hub/corrections.py at
+# SHA256 of miles/backends/training_utils/loss/hub/corrections.py at
 # MILES_NEXT_COMMIT (checked against the source by
 # tests/test_rl_mismatch_observe.py in miles-next-venv). The Miles module is
 # not importable in the yeto CPU venv, so the IcePop PluginRef is pinned here.

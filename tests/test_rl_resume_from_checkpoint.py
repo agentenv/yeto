@@ -487,7 +487,13 @@ def test_launcher_modal_store_is_a_volume_or_an_error():
     from yeto import launcher
 
     base = ["--training-mode", "rl", "--rl-single-island-no-sync", "--cluster-prefix", "run"]
+    # an s3:// store on Modal is reached by object API (no Volume, no error)...
     args = _args(["--gpu", "modal:1xh100"] + base + ["--rl-checkpoint-store", "s3://b/x"])
+    assert launcher.modal_checkpoint_store(args) is None
+    launcher.check_cloud_prerequisites(_specs(args.gpu), args=args, modal_ok=True)
+    assert launcher.resumes_in_new_container(args)
+    # ...any other non-Volume form still is
+    args = _args(["--gpu", "modal:1xh100"] + base + ["--rl-checkpoint-store", "gs://b/x"])
     with pytest.raises(ValueError, match="modal-volume"):
         launcher.modal_checkpoint_store(args)
     with pytest.raises(ValueError, match="modal-volume"):

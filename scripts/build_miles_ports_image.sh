@@ -33,7 +33,9 @@ BASE_AMD64_DIGEST=sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d2
 # What the base image itself has installed (read from its layers):
 BASE_MILES_COMMIT=9e4260de047a704208535c0e90c531929879ab40   # /root/miles
 BASE_SGLANG_COMMIT=e5bba1f9c433da5352e521a8bb826bab960e7836  # /sgl-workspace/sglang (sglang-miles head at build)
-BASE_SGLANG_VERSION=0.5.21.dev64+ge5bba1f
+# Megatron-Bridge as this base installs it (pip, not editable); its package
+# __init__ is replaced by docker/miles-ports/megatron_bridge_init.py.
+MEGATRON_BRIDGE_COMMIT=8cd3466d14d2337c8492827b3712482c2b3e4866
 
 pins=$(python3 - <<'PY'
 import re
@@ -63,19 +65,33 @@ MS=${MILES_NEXT_COMMIT:0:7}; SS=${SGLANG_NEXT_COMMIT:0:7}
 TAG="$DEST_REPO:$MS-$SS"
 MTIME=$(git -C "$MILES_SRC" log -1 --format=%ct "$MILES_NEXT_COMMIT")
 
-# The base's sglang editable metadata, pulled from the one base layer that
-# wrote it (streamed; only the metadata files are extracted).
+# The base's sglang editable metadata, pulled from the base layer that wrote it.
+# The layer is found by scanning (make_layer.py find-layer orders the candidates
+# by the build history, check-listing recognises the metadata in a listing), so
+# no layer number or version string is written here.
 META="$OUT/base-sglang-meta"
 if [ ! -d "$META" ]; then
-  layer=$("$CRANE" manifest "$BASE_REPO@$BASE_AMD64_DIGEST" | python3 -c '
-import json, sys; print(json.load(sys.stdin)["layers"][104]["digest"])')
+  "$CRANE" manifest "$BASE_REPO@$BASE_AMD64_DIGEST" > "$OUT/base-manifest.json"
+  "$CRANE" config "$BASE_REPO@$BASE_AMD64_DIGEST" > "$OUT/base-config.json"
+  layer=""
+  for digest in $(python3 docker/miles-ports/make_layer.py find-layer \
+      --manifest "$OUT/base-manifest.json" --config "$OUT/base-config.json" \
+      | python3 -c 'import json, sys; print("\n".join(l["digest"] for l in json.load(sys.stdin)))'); do
+    if "$CRANE" blob "$BASE_REPO@$digest" | tar -tzf - 2>/dev/null \
+        | python3 docker/miles-ports/make_layer.py check-listing; then
+      layer=$digest; break
+    fi
+  done
+  [ -n "$layer" ] || { echo "no base layer holds the sglang editable-install metadata" >&2; exit 1; }
   mkdir -p "$OUT/meta-x"
   "$CRANE" blob "$BASE_REPO@$layer" | tar -xzf - -C "$OUT/meta-x" \
-    --wildcards "opt/sglang/lib/python3.12/site-packages/*sglang_0_5_21_dev64*finder.py" \
-    "opt/sglang/lib/python3.12/site-packages/__editable__.sglang-$BASE_SGLANG_VERSION.pth" \
-    "opt/sglang/lib/python3.12/site-packages/sglang-$BASE_SGLANG_VERSION.dist-info/*"
+    --wildcards "opt/sglang/lib/python3.12/site-packages/__editable___sglang_*_finder.py" \
+    "opt/sglang/lib/python3.12/site-packages/__editable__.sglang-*.pth" \
+    "opt/sglang/lib/python3.12/site-packages/sglang-*.dist-info/*"
   mv "$OUT/meta-x/opt/sglang/lib/python3.12/site-packages" "$META"
 fi
+BASE_SGLANG_VERSION=$(ls "$META" | sed -n 's/^sglang-\(.*\)\.dist-info$/\1/p' | head -1)
+[ -n "$BASE_SGLANG_VERSION" ] || { echo "no sglang-*.dist-info in $META" >&2; exit 1; }
 
 # Megatron-LM files patched in the layer (docker/miles-ports/
 # megatron_lm_lazy_modelopt.patch) start from the base's checkout commit.
@@ -120,7 +136,7 @@ json.dump({
            "wheel_sha256": "$PEFT_WHEEL_SHA",
            "install": "wheel unpacked into the base's site-packages (pip install --no-deps equivalent)"},
   "pure_python_overlay": True,
-  "megatron_bridge": {"commit": "8cd3466d14d2337c8492827b3712482c2b3e4866",
+  "megatron_bridge": {"commit": "$MEGATRON_BRIDGE_COMMIT",
                       "patches": ["lazy-modelopt (docker/miles-ports/megatron_bridge_init.py)"]},
   "megatron_lm": {"repository": "$MEGATRON_LM_REPOSITORY", "commit": "$MEGATRON_LM_COMMIT", "path": "/root/Megatron-LM",
                   "patches": ["lazy-modelopt (docker/miles-ports/megatron_lm_lazy_modelopt.patch)"]},
@@ -134,9 +150,10 @@ python3 docker/miles-ports/make_layer.py \
   --miles-base-commit "$BASE_MILES_COMMIT" --miles-origin "$MILES_NEXT_REPOSITORY" \
   --sglang-src "$SGLANG_SRC" --sglang-commit "$SGLANG_NEXT_COMMIT" \
   --sglang-base-commit "$BASE_SGLANG_COMMIT" --sglang-origin "$SGLANG_NEXT_REPOSITORY" \
-  --sglang-base-version "$BASE_SGLANG_VERSION" --sglang-version "$SGLANG_VERSION" \
+  --sglang-version "$SGLANG_VERSION" \
   --sglang-base-metadata "$META" --wheel "$PEFT_WHEEL" \
-  --megatron-lm-src "$MEGATRON_LM_SRC" \
+  --megatron-lm-src "$MEGATRON_LM_SRC" --megatron-lm-commit "$MEGATRON_LM_COMMIT" \
+  --megatron-bridge-commit "$MEGATRON_BRIDGE_COMMIT" \
   --mtime "$MTIME" --out "$OUT/layer.tar"
 LAYER_SHA=$(sha256sum "$OUT/layer.tar" | cut -d' ' -f1)
 echo "layer.tar sha256=$LAYER_SHA"

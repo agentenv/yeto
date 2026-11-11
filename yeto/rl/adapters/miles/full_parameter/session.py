@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.rl.adapters.miles.ext_args import ext_attr
 from yeto.rl.adapters.miles.full_parameter.role_stream import (
     MilesFullParameterRoleStream,
     RoleStreamConfig,
@@ -55,7 +56,7 @@ class FullParameterSyncConfig:
 def read_round_evidence(args: Any, rollout_id: int) -> TrajectoryBatchEvidence:
     """The immutable trajectory evidence Miles persisted for ``rollout_id``."""
 
-    directory = getattr(args, "yeto_rl_trajectory_evidence_dir", None)
+    directory = ext_attr(args, "rl_trajectory_evidence_dir", None)
     if type(directory) is not str:
         raise RuntimeError("Miles trajectory evidence directory is unavailable")
     path = trajectory_batch_evidence_path(directory, rollout_id)

@@ -81,13 +81,14 @@ def check_peer_recovery(args, clouds=None) -> None:
         raise ValueError("--rl-peer-recovery needs --rl-peer-recovery-store or --rl-checkpoint-store "
                          "(a store every island reaches)")
     if clouds and "modal" in clouds and not getattr(args, "rl_checkpoint_store", None):
-        # A Modal island mounts no store without --rl-checkpoint-store
-        # modal-volume://... (the launch refuses any other store form on Modal), so
-        # every path is local to one container. With a Volume store,
-        # island_store_path already keeps the path under its mount.
+        # A Modal island reaches no store without --rl-checkpoint-store
+        # modal-volume://... or s3://... (the launch refuses any other store form on
+        # Modal), so every path is local to one container. With a Volume store,
+        # island_store_path already keeps the path under its mount; with an s3 store
+        # every store path goes through the object API (yeto.cloud.s3_store).
         raise ValueError(f"--rl-peer-recovery snapshot store {store!r} on Modal islands: without "
-                         "--rl-checkpoint-store modal-volume://NAME[/PREFIX] no Volume is mounted and "
-                         "a container path is local to one container")
+                         "--rl-checkpoint-store modal-volume://NAME[/PREFIX] or s3://BUCKET[/PREFIX] "
+                         "no store is reachable and a container path is local to one container")
     for dest, flag in (("rl_recovery_bound_steps", "--rl-recovery-bound-steps"),
                        ("rl_recovery_max_donor_tries", "--rl-recovery-max-donor-tries"),
                        ("rl_recovery_donor_timeout_s", "--rl-recovery-donor-timeout-s")):

@@ -38,7 +38,13 @@ from yeto.rl.engine.policy_age import STAGE_NAMES, PolicyAgeError, PolicyAgeSupp
 # bound (--max-weight-staleness and --agentic-suspend-max-rounds take any int);
 # 4 bounds the rollout compute a dropped group can waste. Sub-agent decision,
 # 2026-10-14; limits above 1 are not yet run on GPU.
-SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4)
+# A buffer trainer (--rl-sample-role trainer): the sample buffer's reader drops
+# groups over the age; no group is carried over in the island. 16 covers a Kimi-K3.1
+# trainer whose 207 GB releases take ~5 steps to upload and ~5 to download; the
+# score-centering TIS/MIS weight corrects the gap (the algorithm spec still has to
+# declare execution.max_policy_staleness >= the limit).
+SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4,
+                           buffer_trainer_max_policy_age=16)
 # --rl-rollout-ahead: whole batches the island generates ahead of its trainer
 # (MilesRolloutPool.start_generate; yeto.rl.engine.rollout_ahead).
 MAX_ROLLOUT_AHEAD = 1

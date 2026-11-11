@@ -32,6 +32,7 @@ from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
     weight_iterator_task_bridge,
     wrap_expert_full_optimizer,
 )
+from yeto.rl.adapters.miles.models.partial_experts.hooks import install_once
 
 ENV_FLAG = "YETO_DSV4_EXPERT_FULL_PORTS"
 CLONE_ONLY_ENV_FLAG = "YETO_DSV4_CLONE_ONLY_LORA_PORTS"
@@ -42,11 +43,7 @@ _WEIGHT_ITERATOR = "miles.backends.megatron_utils.update_weight.hf_weight_iterat
 
 
 def _install_once(module: ModuleType, patch) -> None:
-    marker = f"_yeto_dsv4_ports__{patch.__name__.lstrip('_')}__installed"
-    if getattr(module, marker, False):
-        return
-    patch(module)
-    setattr(module, marker, True)
+    install_once(module, patch, namespace="yeto_dsv4_ports")
 
 
 def _wrap_lora_factory(module: ModuleType, wrap) -> None:

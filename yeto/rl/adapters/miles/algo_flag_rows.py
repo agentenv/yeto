@@ -32,6 +32,7 @@ from yeto.rl.algos.loss_variants import (  # noqa: E402
     variant,
 )
 from yeto.rl.algos.sao import HL_GAUSS_SIGMA_RATIO, SAO_DIS, VALUE_REWARD_RANGE  # noqa: E402
+from yeto.rl.algos import score_centering as _sc  # noqa: E402
 
 # --------------------------------------------------------------------------
 # seq_adv (rl-algo-seq-and-adv)
@@ -293,3 +294,38 @@ register_flag(FlagMapping("--partial-rollout", "execution.max_policy_staleness",
                           lambda raw: True, _refuse_partial_rollout, lambda spec: []))
 register_flag(FlagMapping("--mask-offpolicy-in-partial-rollout", "execution.max_policy_staleness",
                           True, lambda raw: True, _refuse_partial_rollout, lambda spec: []))
+
+
+# --------------------------------------------------------------------------
+# score centering (upstream --loss-type score_centering; Kimi-K3.1 recipe)
+# --------------------------------------------------------------------------
+# --loss-type, --advantage-estimator, --use-rollout-logprobs,
+# --disable-grpo-std-normalization and --calculate-per-token-loss come from
+# their own rows (spec fields the rejection matrix requires); this row emits
+# the rest of the INTERFACES 2.5 fragment once the variant is selected.
+
+
+def score_centering_argv(spec: AlgorithmSpec) -> list[str]:
+    if not _sc.selected(spec):
+        return []
+    loss = spec.loss
+    argv = [_sc.FLAGS["rollout_top_logprobs_num"], str(loss.rollout_top_logprobs_num),
+            _sc.FLAGS["score_centering_is"], loss.score_centering_is]
+    if loss.score_centering_is == "tis":
+        argv += [_sc.FLAGS["score_centering_tis_clip"], _num(loss.score_centering_tis_clip)]
+    elif loss.score_centering_is == "mis":
+        argv += [_sc.FLAGS["score_centering_mis_low"], _num(loss.score_centering_mis_low),
+                 _sc.FLAGS["score_centering_mis_high"], _num(loss.score_centering_mis_high)]
+    return argv + list(_sc.SAMPLING_ARGV)
+
+
+register_flag(FlagMapping(_sc.FLAGS["score_centering_is"], "loss.score_centering_is", False, _str,
+                          lambda v: [("loss.score_centering_is", v)], score_centering_argv))
+register_flag(FlagMapping(_sc.FLAGS["score_centering_tis_clip"], "loss.score_centering_tis_clip", False,
+                          _float, lambda v: [("loss.score_centering_tis_clip", v)], _none))
+register_flag(FlagMapping(_sc.FLAGS["score_centering_mis_low"], "loss.score_centering_mis_low", False,
+                          _float, lambda v: [("loss.score_centering_mis_low", v)], _none))
+register_flag(FlagMapping(_sc.FLAGS["score_centering_mis_high"], "loss.score_centering_mis_high", False,
+                          _float, lambda v: [("loss.score_centering_mis_high", v)], _none))
+register_flag(FlagMapping(_sc.FLAGS["rollout_top_logprobs_num"], "loss.rollout_top_logprobs_num", False,
+                          _int, lambda v: [("loss.rollout_top_logprobs_num", v)], _none))

@@ -38,7 +38,7 @@ import shutil
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -113,29 +113,39 @@ def copy_verified(src: Path, dst: Path) -> tuple[str, int]:
 PUT_COPY_WORKERS = 8  # files CheckpointStore.put_directory copies at once
 
 
-def _copy_renamed(src: Path, dst: Path, rename: bool = True) -> int:
+def _copy_renamed(src: Path, dst: Path, rename: bool = True, link: bool = False) -> int:
     """Copy ``src`` to ``dst`` through the hidden name ``.<name>.tmp`` in the
     directory of ``dst``, then rename it to ``dst`` (``rename=False``: straight
     to ``dst``). Returns the bytes copied. ``_tree_files`` and the release
     readers never take a ``.tmp`` file."""
     tmp = dst.with_name(f".{dst.name}.tmp") if rename else dst
-    shutil.copyfile(src, tmp)
+    linked = False
+    if link:  # same filesystem: a hard link, the bytes are not written a second time
+        tmp.unlink(missing_ok=True)
+        try:
+            os.link(src, tmp)
+            linked = True
+        except OSError:
+            pass
+    if not linked:
+        shutil.copyfile(src, tmp)
     if rename:
         os.replace(tmp, dst)
     return dst.stat().st_size
 
 
-def _copy_files(pairs: list[tuple[Path, Path]], *, rename: bool = True, workers: int | None = None) -> int:
+def _copy_files(pairs: list[tuple[Path, Path]], *, rename: bool = True, workers: int | None = None,
+                link: bool = False) -> int:
     """:func:`_copy_renamed` for every ``(src, dst)``, up to ``workers``
     (:data:`PUT_COPY_WORKERS`) at once; the first error is raised after the
     copies in flight end. Returns the bytes copied."""
     workers = max(1, min(int(workers or PUT_COPY_WORKERS), len(pairs)))
     if workers == 1:
-        return sum(_copy_renamed(src, dst, rename) for src, dst in pairs)
+        return sum(_copy_renamed(src, dst, rename, link) for src, dst in pairs)
     from concurrent.futures import ThreadPoolExecutor
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="yeto-put") as pool:
-        return sum(pool.map(lambda pair: _copy_renamed(*pair, rename), pairs))
+        return sum(pool.map(lambda pair: _copy_renamed(*pair, rename, link), pairs))
 
 
 def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
@@ -152,6 +162,20 @@ def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
 # the store interface + backends: local directory (this class), bucket mount,
 # Modal Volume (``yeto.cloud.modal_ckpt_store``), critic (``yeto.rl.critic_state``)
 # ---------------------------------------------------------------------------
+def commit_paths(store: Any, paths: Sequence[str]) -> float:
+    """``store.commit(paths=paths)`` (commit only what was written under ``paths``),
+    or ``store.commit()`` for a store whose commit takes no paths (it commits every
+    write, which includes these)."""
+    import inspect
+
+    commit = store.commit
+    try:
+        takes = "paths" in inspect.signature(commit).parameters
+    except (TypeError, ValueError):
+        takes = False
+    return commit(paths=list(paths)) if takes else commit()
+
+
 class StoreWriterGuard:
     """A write in progress on a checkpoint store (``CheckpointStore.hold_writer``).
     ``release`` is idempotent; the base guard holds nothing."""
@@ -182,16 +206,31 @@ class CheckpointStore:
     # bucket mount sets False: a rename there is a copy of the object, and the
     # object store shows an object only once its upload is whole anyway.
     put_renames = True
+    # put_directory may hard-link the source files instead of copying them (a local
+    # stage directory that is uploaded from, then dropped: the staged object store)
+    put_links = False
 
     def __init__(self, root: str | os.PathLike[str]) -> None:
         self.root = Path(root).expanduser()
 
-    def commit(self) -> float:
-        """Returns the seconds the commit took."""
+    def commit(self, paths: Sequence[str] | None = None) -> float:
+        """Returns the seconds the commit took. ``paths`` (relative files or
+        directories): commit only what was written there (a store that mirrors the
+        root by object, e.g. a staged ``s3://`` store, then moves just those); None
+        commits every write. A backend that commits everything at once ignores it."""
         return 0.0
 
     def reload(self) -> None:
         return None
+
+    @property
+    def cut_commits_beside_buffer_reads(self) -> bool:
+        """Whether a round cut may commit this store in the background while the
+        trainer reads the sample buffer of the same store. Not on a store whose
+        reload the cut's writer guard holds off (a Modal Volume: the buffer reader
+        would not see new groups until the cut committed); a staged object store
+        reads the buffer by its object API and commits by path, so it may."""
+        return False
 
     def hold_writer(self) -> "StoreWriterGuard":
         """Mark a write in progress until the returned guard is released. A
@@ -244,9 +283,10 @@ class CheckpointStore:
             target.mkdir(parents=True)
             for folder in folders:
                 (target / folder).mkdir(parents=True, exist_ok=True)
-            total = _copy_files([(source / rel, target / rel) for rel in files], rename=self.put_renames)
+            total = _copy_files([(source / rel, target / rel) for rel in files], rename=self.put_renames,
+                                link=self.put_links)
             with commit_budget(self, total):
-                self.commit()
+                commit_paths(self, [relative])
         finally:
             guard.release()
 
@@ -262,9 +302,13 @@ class CheckpointStore:
                 tmp.write_bytes(data)
                 _fsync(tmp)
                 os.replace(tmp, target)
-            self.commit()
+            commit_paths(self, list(files))
         finally:
             guard.release()
+
+    def evict_local(self, relative: str) -> None:
+        """Free the local disk a committed directory takes when the store keeps the
+        files elsewhere (a staged object store); a plain directory keeps them."""
 
     def remove_tree(self, relative: str) -> None:
         """Delete the directory ``relative`` (no error when it is missing) and commit."""
@@ -274,7 +318,7 @@ class CheckpointStore:
         guard = self.hold_writer()
         try:
             shutil.rmtree(target, ignore_errors=True)
-            self.commit()
+            commit_paths(self, [relative])
         finally:
             guard.release()
 
@@ -622,6 +666,10 @@ def fingerprint_diff(saved: Mapping[str, Any] | None, now: Mapping[str, Any]) ->
     return {k: {"cut": saved.get(k), "now": now.get(k)} for k in keys if saved.get(k) != now.get(k)}
 
 
+# run-fingerprint keys --rl-resume-allow-config-change does not waive
+UNWAIVABLE_FINGERPRINT_KEYS = frozenset({"expert_selection_sha256"})
+
+
 def check_fingerprint(saved: Mapping[str, Any] | None, now: Mapping[str, Any], *,
                       allow_change: bool) -> dict[str, Any]:
     """Returns the differences (empty = identical). Raises :class:`ResumeRefused` on a
@@ -630,6 +678,12 @@ def check_fingerprint(saved: Mapping[str, Any] | None, now: Mapping[str, Any], *
         diff = {"run_fingerprint": {"cut": None, "now": "present"}}
     else:
         diff = fingerprint_diff(saved, now)
+    pinned = sorted(set(diff) & UNWAIVABLE_FINGERPRINT_KEYS)
+    if pinned:
+        # the cut's trainable tensors are the slots of one expert selection: another
+        # selection would load them onto other experts, so no flag lets that through
+        raise ResumeRefused(f"the cut was taken with another {', '.join(pinned)}: "
+                            + json.dumps({k: diff[k] for k in pinned}, sort_keys=True, default=str))
     if diff and not allow_change:
         raise ResumeRefused("the run configuration differs from the cut's "
                             f"({', '.join(sorted(diff))}); pass --rl-resume-allow-config-change "
@@ -822,6 +876,13 @@ class ResumeController:
         deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
         if deleted:
             self.store.commit()
+            # a staged store's push deletes what this node uploaded; the shards ranks on
+            # other nodes uploaded themselves (cut.push_shard_from_rank) go by prefix
+            remote = getattr(self.store, "delete_remote_tree", None)
+            if callable(remote):
+                for rel in deleted:
+                    if rel.startswith(ROUND_CUTS + "/"):
+                        remote(rel)
         return deleted
 
     def close(self) -> None:

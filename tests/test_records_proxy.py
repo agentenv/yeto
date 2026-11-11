@@ -458,23 +458,24 @@ def test_http_shell_serves_codex_sse_and_records(qwen):
     proxy = RecordsProxy(engine_for(ScriptedModel(qwen, SCRIPT)), qwen, model="policy", signed_sampling=SIGNED)
 
     async def go():
-        async with TestClient(TestServer(proxy.app())) as client:
+        async with TestClient(TestServer(proxy.app(control=True))) as client:
             created = await (await client.post("/trajectories")).json()
             tid = created["trajectory_id"]
-            assert created["base_url"].endswith(f"/t/{tid}/v1")
-            reply = await client.post(f"/t/{tid}/v1/responses", json=responses_body([user_item("go")], stream=True))
+            t = proxy.path(tid)
+            assert created["base_url"].endswith(f"{t}/v1") and t.startswith(f"/t/{tid}/")
+            reply = await client.post(f"{t}/v1/responses", json=responses_body([user_item("go")], stream=True))
             assert reply.status == 200 and reply.headers["Content-Type"].startswith("text/event-stream")
             text = await reply.text()
             assert "event: response.completed" in text and text.endswith("data: [DONE]\n\n")
-            bad = await client.post(f"/t/{tid}/v1/responses", json=responses_body([user_item("go")], store=True))
+            bad = await client.post(f"{t}/v1/responses", json=responses_body([user_item("go")], store=True))
             assert bad.status == 400
-            override = await client.post(f"/t/{tid}/v1/chat/completions",
+            override = await client.post(f"{t}/v1/chat/completions",
                                          json={"model": "policy", "temperature": 0.1,
                                                "tools": chat_tools("responses", {"tools": TOOLS}),
                                                "messages": [{"role": "user", "content": "x"}]})
             assert override.status == 400
-            records = await (await client.get(f"/t/{tid}/records")).json()
+            records = await (await client.get(f"{t}/records")).json()
             assert records["sessions"][0]["samples"][0]["loss_mask"].count(1) > 0
-            assert (await client.post(f"/t/{tid}/close")).status == 200
+            assert (await client.post(f"{t}/close")).status == 200
 
     asyncio.run(go())

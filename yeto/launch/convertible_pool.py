@@ -10,7 +10,8 @@ and ``T_s`` starts at :data:`DEFAULT_CONVERT_START_SECONDS` until a conversion i
 measured.
 
 The head reaches the islands only through the run's checkpoint store, read and
-written with the Modal Volume SDK (``modal-volume://``); so the islands are Modal
+written with the Modal Volume SDK (``modal-volume://``) or the object API of an
+``s3://`` store; so the islands are Modal
 islands. A sky island would need the head to read its bucket store: not bound yet.
 """
 
@@ -37,7 +38,7 @@ from yeto.rl.engine.trainer_remote import RemoteTrainerLifecycle, StoreCutLog, c
 
 DEFAULT_CONVERT_START_SECONDS = 60.0
 MIRROR_DIR = "buffer-mirror"
-PARAMETER_SOURCE_DOMAIN = "modal"  # the modal-volume:// store holds the cuts
+PARAMETER_SOURCE_DOMAIN = "modal"  # the modal-volume:// or s3:// store holds the cuts
 
 
 def enabled(args: Any) -> bool:
@@ -62,10 +63,13 @@ def check(args: Any) -> None:
     clouds = sorted({s.cloud for s in specs})
     if clouds != ["modal"]:
         raise SystemExit(f"a convertible pool needs Modal islands (got {clouds}): the head drives "
-                         "the nodes through a modal-volume:// checkpoint store; sky is not bound yet")
-    if not str(getattr(args, "rl_checkpoint_store", None) or "").startswith("modal-volume://"):
-        raise SystemExit("a convertible pool needs a modal-volume:// --rl-checkpoint-store: the "
-                         "buffer, the cuts and the node channels live there")
+                         "the nodes through a modal-volume:// or s3:// checkpoint store; sky is not bound yet")
+    from .storage import is_object_store_uri
+
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if not (store.startswith("modal-volume://") or is_object_store_uri(store)):
+        raise SystemExit("a convertible pool needs a modal-volume:// or s3:// --rl-checkpoint-store: "
+                         "the buffer, the cuts and the node channels live there")
 
 
 def node_profiles(args: Any, nodes: Sequence[NodeSpec]) -> list[NodeProfile]:
@@ -150,12 +154,18 @@ def binding(args: Any, *, journal_dir: Path, nodes: Sequence[NodeSpec], precisio
     """The :class:`~.trainer_island.CloudTrainerBinding` of a convertible pool.
     ``nodes``: the declared node classes; ``precision``: the trainer's; ``files``
     replaces the Modal Volume in tests."""
-    from .storage import MODAL_CHECKPOINT_STORE_MOUNT, modal_checkpoint_store
-    from .trainer_island import CloudTrainerBinding, MirrorStore, ModalVolumeFiles
+    from .storage import (
+        MODAL_CHECKPOINT_STORE_MOUNT, is_object_store_uri, modal_checkpoint_store, store_client_environ,
+    )
+    from .trainer_island import CloudTrainerBinding, MirrorStore, ModalVolumeFiles, head_store_objects
 
     if files is None:
-        volume, mount = modal_checkpoint_store(args)
-        files = ModalVolumeFiles(volume, mount[len(MODAL_CHECKPOINT_STORE_MOUNT):])
+        store = str(getattr(args, "rl_checkpoint_store", None) or "")
+        if is_object_store_uri(store):  # s3://: the head reads the store by object key
+            files = head_store_objects(store, store_client_environ(args))
+        else:
+            volume, mount = modal_checkpoint_store(args)
+            files = ModalVolumeFiles(volume, mount[len(MODAL_CHECKPOINT_STORE_MOUNT):])
     poll_s = float(getattr(args, "rl_trainer_command_poll_seconds", None) or 5.0)
     islands = ConvertibleIslands(files, node_profiles(args, nodes), trainer_needs(args, precision),
                                  poll_s=poll_s)

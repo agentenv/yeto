@@ -28,6 +28,14 @@ MILES_BINDINGS_COMMIT = "53a6e92a"
 # Harbor's codex agent drives it unchanged is not verified yet.
 CODEX_VERSION = "0.145.0"
 
+# pi coding agent (badlogic/pi-mono).  Harbor's built-in ``pi`` agent installs
+# ``@mariozechner/pi-coding-agent``, deprecated on npm in favour of this name
+# (its last release 0.73.1); yeto's agent (``pi_agent.YetoPi``) installs this
+# package.  1.5.1: npm release of 2026-11-09, the build the Cherry docker
+# trials ran.
+PI_PACKAGE = "@earendil-works/pi-coding-agent"
+PI_VERSION = "1.5.1"
+
 # The linux-x64 build of that version as npm ships it (a static musl binary
 # plus its bundled rg), for the boat Codex cache.  sha512 = npm
 # ``dist.integrity`` of the tarball, in hex.

@@ -34,6 +34,11 @@ from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
 from yeto.rl.engine.rollout_ahead import PendingBatch, launch_problems
 
+# k31 sync: these tests exercise feature gates / GPU-evidence declarations that
+# hold on the frozen ports-v1 lineage (tests/conftest.py ports_v1_pin).
+pytestmark = pytest.mark.usefixtures("ports_v1_pin")
+
+
 NAME = "base_model.model.layer.lora_A.weight"
 HASH = "a" * 64
 OLDER = "c" * 64

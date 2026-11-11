@@ -28,6 +28,7 @@ from typing import Any
 from yeto.rl.contracts import LocalStepReceipt
 
 from yeto.rl.engine.cut import CutContext  # noqa: F401 - re-exported (moved to the core, decoupling 2.2)
+from yeto.rl.engine.cut import uploaded_shard_checksums, uploaded_shard_sizes
 from yeto.rl.engine.ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
@@ -905,16 +906,19 @@ class MilesTrainerGroup:
             rank_summaries=tuple(
                 {k: s[k] for k in ("path", "scheduler_samples", "has_optimizer_state", "has_rng",
                                    "state_digest", "rng_digest", "components", "train_state_digest",
-                                   "weight_version") if k in s}
+                                   "weight_version", "object_key", "object_bytes", "object_checksum") if k in s}
                 for s in summaries
             ),
         )
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
         root, check_files = context.root, context.shared_filesystem
+        store = getattr(context, "store", None)
 
         def commit() -> str:
-            commit_manifest(root, manifest, check_files=check_files)
+            commit_manifest(root, manifest, check_files=check_files,
+                            remote_sizes=uploaded_shard_sizes(store, summaries),
+                            remote_checksums=uploaded_shard_checksums(store, summaries))
             return cut_id
 
         return commit

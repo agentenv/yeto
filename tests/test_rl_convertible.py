@@ -392,7 +392,7 @@ class ChecksumController(FakeController):
         return types.SimpleNamespace(rollout_engines=self.engines,
                                      snapshot_cell_id_to_hashes={f"c{i}": "h" for i in range(len(self.engines))})
 
-    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+    async def end_update_weights(self, snapshot_cell_id_to_hashes, failed_cell_ids):
         self.log.append("end_update_weights")
 
     async def abort_update_weights(self):

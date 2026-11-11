@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from yeto.rl.engine.proc_state import proc_state, set_proc_state
+
 COUNT_KEY = "placeholder_logprob_tokens"
 # Stop-token names checked in the tokenizer besides eos/pad (Qwen family).
 STOP_TOKEN_NAMES = ("<|endoftext|>", "<|im_end|>")
@@ -110,10 +112,10 @@ def apply_to_groups(data: Iterable[Any], *, tokenizer_loader: Any, args: Any) ->
 
     def ids() -> frozenset[int]:
         # Loaded only when some sample has a candidate (no tokenizer load otherwise).
-        cached = getattr(args, _STOP_IDS_ATTR, None)
+        cached = proc_state(args, _STOP_IDS_ATTR)
         if cached is None:
             cached = stop_token_ids(tokenizer_loader(args))
-            setattr(args, _STOP_IDS_ATTR, cached)
+            set_proc_state(args, _STOP_IDS_ATTR, cached)
         return cached
 
     def walk(items: Iterable[Any]) -> None:

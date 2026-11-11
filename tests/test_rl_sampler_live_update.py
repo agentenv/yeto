@@ -312,3 +312,14 @@ def test_live_update_without_prefix_cache_disables_radix(tmp_path):
         engine = _engine(tmp_path, fake, live=True, spawned=spawned, prefix_cache=False)
         engine.start(None, 0)
     assert "--disable-radix-cache" in spawned[0]
+
+
+def test_a_release_is_served_with_the_tokenizer_of_the_base_checkpoint(tmp_path):
+    """The SGLang side of VllmServerEngine.base_tokenizer_argv: the cold start reads the
+    base itself; a release directory is served with the base checkpoint's tokenizer."""
+    with FakeSGLang() as fake:
+        engine = _engine(tmp_path, fake, live=False)
+        base = engine.config.base_dir
+        assert "--tokenizer-path" not in engine.argv(base)
+        argv = engine.argv(tmp_path / "r1-v1")
+        assert argv[argv.index("--tokenizer-path") + 1] == str(base)

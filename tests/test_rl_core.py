@@ -33,6 +33,8 @@ from yeto.rl.core import (
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.filters import bounded_nonzero_reward_std
+from yeto.rl.filters import BOUNDED_FILTER_STATE_ATTR
+from yeto.rl.adapters.miles.proc_state import proc_state
 from strict_bridge_loop import run_round
 
 
@@ -715,7 +717,7 @@ def test_bounded_variance_filter_forces_progress_after_replacement_budget():
         True,
         True,
     )
-    assert args._yeto_bounded_filter_state["forced"] == 1
+    assert proc_state(args, BOUNDED_FILTER_STATE_ATTR)["forced"] == 1
 
 
 def _round_stats_data_pack(rewards, raw_reward):

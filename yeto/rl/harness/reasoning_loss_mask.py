@@ -37,6 +37,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from yeto.rl.engine.ext_attrs import ext_attr
+from yeto.rl.engine.proc_state import proc_state, set_proc_state
+
 MASKED_COUNT_KEY = "reasoning_tokens_masked"
 IN_LOSS_KEY = "reasoning_in_loss"
 
@@ -127,11 +130,11 @@ def apply_from_args(args: Any, data: Iterable[Any], *, tokenizer_loader: Any = N
     otherwise the number of mask entries changed 1 -> 0 this call.
     Idempotent: a second call over the same samples changes nothing more.
     """
-    if getattr(args, IN_LOSS_ATTR, True) is not False:
+    if ext_attr(args, IN_LOSS_ATTR, True) is not False:
         return None
-    markers = getattr(args, _MARKER_CACHE_ATTR, None)
+    markers = proc_state(args, _MARKER_CACHE_ATTR)
     if markers is None:
-        names = getattr(args, MARKERS_ATTR, None)
+        names = ext_attr(args, MARKERS_ATTR, None)
         if not names or len(names) != 2:
             raise ReasoningMarkerError(
                 f"args.{IN_LOSS_ATTR}=False but args.{MARKERS_ATTR} is missing; refusing to train "
@@ -139,7 +142,7 @@ def apply_from_args(args: Any, data: Iterable[Any], *, tokenizer_loader: Any = N
             )
         tokenizer = (tokenizer_loader or _load_tokenizer)(args)
         markers = ReasoningMarkers.from_tokenizer(tokenizer, names[0], names[1])
-        setattr(args, _MARKER_CACHE_ATTR, markers)
+        set_proc_state(args, _MARKER_CACHE_ATTR, markers)
     total = 0
 
     def walk(items: Iterable[Any]) -> None:

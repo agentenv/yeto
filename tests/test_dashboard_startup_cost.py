@@ -34,7 +34,9 @@ def test_starting_island_uses_wide_startup_threshold():
     card, al = _hb_alerts(r, T0 + 900)  # 13 min of weight loading: no heartbeat alert
     assert card["status"] == "starting" and card["starting"] and not al
     card, al = _hb_alerts(r, T0 + 120 + 1300)
-    assert card["status"] == "stale" and [a["sev"] for a in al] == [1] and al[0]["rule"] == "startup"
+    # still loading: not stale (the startup alert reports the slow start)
+    assert card["status"] == "starting" and card["startup_slow"] and [a["sev"] for a in al] == [1] \
+        and al[0]["rule"] == "startup"
     _, al = _hb_alerts(r, T0 + 120 + 2400)  # 40 min with no event during startup
     assert [a["sev"] for a in al] == [0]
 

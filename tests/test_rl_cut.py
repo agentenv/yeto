@@ -246,3 +246,40 @@ def test_old_cut_keeps_the_whole_hash_rule(tmp_path):
     verify_cut(tmp_path, "cut-1", _expect(algorithm=new))
     with pytest.raises(CutError, match="spec/plugins/runtime attrs/ref model"):
         verify_cut(tmp_path, "cut-1", _expect(algorithm=_semantic_identity(_spec("2" * 64))))
+
+
+def test_megatron_counters_restore_writes_through_the_miles_mutable_window(monkeypatch):
+    """GPU-A it11c: Miles' args namespace refuses writes outside ``mutable()``; the cut
+    restore of consumed_train_samples failed with 'Configuration field ... is immutable'."""
+    import contextlib
+    import sys
+    import types
+
+    from yeto.rl.adapters.miles.cut_plugin import MilesCutBackend
+
+    class Frozen:
+        def __init__(self):
+            object.__setattr__(self, "_open", 0)
+
+        def __setattr__(self, name, value):
+            if not self._open:
+                raise AttributeError(f"Configuration field {name!r} is immutable")
+            object.__setattr__(self, name, value)
+
+        @contextlib.contextmanager
+        def force_all_mutable(self):
+            object.__setattr__(self, "_open", 1)
+            try:
+                yield self
+            finally:
+                object.__setattr__(self, "_open", 0)
+
+    margs = Frozen()
+    gv = types.ModuleType("megatron.training.global_vars")
+    gv.get_args = lambda: margs
+    for name in ("megatron", "megatron.training"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "megatron.training.global_vars", gv)
+    MilesCutBackend.set_megatron_counters(object.__new__(MilesCutBackend), {"consumed_train_samples": 64,
+                                                                                 "iteration": 2})
+    assert margs.consumed_train_samples == 64 and margs.iteration == 2

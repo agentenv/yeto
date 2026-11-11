@@ -64,6 +64,7 @@ MODAL_GPUS: dict[str, str] = {
     "H100": "H100",
     "H200": "H200",
     "B200": "B200",
+    "B300": "B300",
     "A100-80GB": "A100-80GB",
     "L40S": "L40S",
     "L4": "L4",
@@ -80,6 +81,7 @@ MODAL_GPU_NAME_PATTERNS: dict[str, str] = {
     "H100": r"\bH100\b",
     "H200": r"\bH200\b",
     "B200": r"\bB200\b",
+    "B300": r"\bB300\b",
     "A100-80GB": r"\bA100\b.*\b80GB\b",
     "L40S": r"\bL40S\b",
     "L4": r"\bL4\b",
@@ -87,7 +89,13 @@ MODAL_GPU_NAME_PATTERNS: dict[str, str] = {
     "A10G": r"\bA10G?\b",
     "T4": r"\bT4\b",
 }
-MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB": 8}
+MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "B300": 8, "A100-80GB": 8}
+# Container environment every Modal island gets unless the launch sets the
+# variable itself (``--modal-env KEY=VALUE`` wins).  NCCL_RAS_ENABLE=0: with
+# NCCL 2.30.x the RAS thread crashes the process the first time an engine
+# frees its memory (upstream Kimi K3.1 recipe).  NCCL_NVLS_ENABLE is left to
+# the launch (``--modal-env NCCL_NVLS_ENABLE=0`` for VM-passthrough hosts).
+MODAL_ISLAND_DEFAULT_ENVS: dict[str, str] = {"NCCL_RAS_ENABLE": "0"}
 # CPU / memory the runner reserves per GPU (Modal bills max(request,
 # usage)); the shape planner prices the same reservation.
 # Event tape on a Modal Volume: a Modal container's filesystem disappears
@@ -460,6 +468,35 @@ def visible_gpu_names() -> list[str]:
         check=True, capture_output=True, text=True, timeout=60,
     ).stdout
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def clustered_decorator(modal):
+    """``modal.clustered`` (the GA multi-node API) when the installed client has
+    it, else ``modal.experimental.clustered`` (clients before the GA).  Both take
+    ``size`` and ``rdma``.  Raises when neither exists (a client too old for
+    multi-node islands)."""
+    dec = getattr(modal, "clustered", None)
+    if dec is not None:
+        return dec
+    import importlib
+
+    experimental = importlib.import_module("modal.experimental")
+    dec = getattr(experimental, "clustered", None)
+    if dec is None:
+        raise RuntimeError("the installed modal client has neither modal.clustered nor "
+                           "modal.experimental.clustered; upgrade it for multi-node islands")
+    return dec
+
+
+def cluster_info(modal):
+    """The container's cluster info (rank, container ips): ``modal.get_cluster_info``
+    when the client exports it, else ``modal.experimental.get_cluster_info``."""
+    getter = getattr(modal, "get_cluster_info", None)
+    if getter is None:
+        import importlib
+
+        getter = importlib.import_module("modal.experimental").get_cluster_info
+    return getter()
 
 
 def cluster_rank_and_ips(info) -> tuple[int, list[str]]:
@@ -1105,9 +1142,9 @@ def island_main(cfg_json: str) -> int:
     script's exit code (nonzero raises so Modal records the failure)."""
     cfg = ModalIslandConfig.from_json(cfg_json)
     if cfg.num_nodes > 1:
-        import modal.experimental
+        import modal
 
-        info = modal.experimental.get_cluster_info()
+        info = cluster_info(modal)
         rank, ips = cluster_rank_and_ips(info)
         all_ips = {"container_ips": list(getattr(info, "container_ips", []) or []),
                    "container_ipv4_ips": list(getattr(info, "container_ipv4_ips", []) or [])}
@@ -1433,6 +1470,8 @@ class ModalOps:
         self.app_name = app_name
         self._app = None
         self._functions: dict[str, object] = {}
+        # the run's resource ledger (yeto.cost.ledger); None: $YETO_RESOURCE_LEDGER, if set
+        self.ledger = None
 
     # -- building --------------------------------------------------------------
 
@@ -1503,13 +1542,14 @@ class ModalOps:
         cfg.validate()
         if self._app is None:
             self._app = modal.App(self.app_name)
+        gpus = getattr(self, "_ledger_gpus", {})
+        gpus[cfg.function_name] = (cfg.gpu, cfg.gpus_per_node * cfg.num_nodes)
+        self._ledger_gpus = gpus
         if cfg.function_name in self._functions:
             return self._functions[cfg.function_name]
         fn = island_main
         if cfg.num_nodes > 1:
-            import modal.experimental
-
-            fn = modal.experimental.clustered(size=cfg.num_nodes, rdma=cfg.rdma)(fn)
+            fn = clustered_decorator(modal)(size=cfg.num_nodes, rdma=cfg.rdma)(fn)
         kwargs: dict = dict(
             image=self.build_image(cfg),
             gpu=cfg.gpu_request,
@@ -1548,8 +1588,25 @@ class ModalOps:
         modal = self._modal()
         if self._app is None:
             raise RuntimeError("define() at least one island before deploy()")
+        from .cost.ledger import record_safely
+
+        record_safely("intent", "modal_app", self.app_name, ledger=self.ledger)
         with modal.enable_output():
             self._app.deploy(name=self.app_name)
+        app_id = getattr(self._app, "app_id", None)
+        if app_id:
+            from .cost.billing import default_modal_rate
+
+            shapes = list(getattr(self, "_ledger_gpus", {}).values())
+            gpu = shapes[0][0] if shapes else None
+            gpus = sum(n for _, n in shapes) or None
+            extra = {"gpu": gpu, "gpus": gpus} if gpu else {}
+            rate = default_modal_rate(gpu, gpus) if len({g for g, _ in shapes}) == 1 else None
+            if rate is not None:
+                extra["usd_per_hour"] = rate
+            record_safely("created", "modal_app", app_id, self.app_name,
+                          functions=sorted(str(k) for k in self._functions), ledger=self.ledger,
+                          **extra)
 
     # -- running -----------------------------------------------------------------
 
@@ -1559,6 +1616,11 @@ class ModalOps:
         modal = self._modal()
         fn = modal.Function.from_name(self.app_name, cfg.function_name)
         call = fn.spawn(cfg.to_json())
+        from .cost.ledger import record_safely
+
+        record_safely("created", "modal_call", str(call.object_id), cfg.function_name,
+                      app_name=self.app_name, app_id=getattr(self._app, "app_id", None),
+                      learner_id=getattr(cfg, "learner_id", None), ledger=getattr(self, "ledger", None))
         return str(call.object_id)
 
     def status(self, call_id: str) -> str:
@@ -1578,6 +1640,9 @@ class ModalOps:
     def cancel(self, call_id: str) -> None:
         modal = self._modal()
         modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
+        from .cost.ledger import record_safely
+
+        record_safely("released", "modal_call", call_id, ledger=getattr(self, "ledger", None))
 
     def app_status(self) -> tuple[str, int] | None:
         """(state, running tasks) of this run's app from `modal app list`,
@@ -1634,8 +1699,21 @@ class ModalOps:
             text=True,
         )
         output = (proc.stdout + proc.stderr).strip()
-        if proc.returncode != 0 or "Aborted" in output:
+        if proc.returncode != 0 and "No such option: --yes" in output:
+            # modal 1.2.x: `app stop` takes no --yes and asks nothing
+            proc = subprocess.run(
+                [sys.executable, "-m", "modal", "app", "stop", self.app_name],
+                capture_output=True,
+                text=True,
+            )
+            output = (proc.stdout + proc.stderr).strip()
+        if proc.returncode != 0 or "aborted" in output.lower():
             raise RuntimeError(f"modal app stop {self.app_name} failed: {output or proc.returncode}")
+        app_id = getattr(self._app, "app_id", None) if self._app is not None else None
+        if app_id:
+            from .cost.ledger import record_safely
+
+            record_safely("released", "modal_app", app_id, self.app_name, ledger=self.ledger)
 
     def pull_tape(self, volume_name: str, remote: str, local_dir: str) -> None:
         """Download ``<volume>/<remote>`` into ``local_dir`` (`modal volume

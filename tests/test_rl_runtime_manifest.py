@@ -55,16 +55,32 @@ def test_collect_runs_without_miles_and_reports_absent_interfaces():
     assert rm.check_manifest(m, PINS)  # this CPU venv is not the pinned image
 
 
-def test_miles_description_keeps_the_pre_decoupling_tables():
-    """decoupling 2.5: the values moved out of the core unchanged."""
+def test_miles_description_probes_the_upstream_surface_the_adapter_calls():
+    """The probes are the upstream-main calls the adapter makes, the k31/f1
+    additions, the Megatron private surface of the vendored dp_invariant_state
+    and the ports-v1 fork verbs the elastic features still need."""
     assert MILES_RUNTIME.interfaces["run_plugin"] == ("miles.ray.train.group", "TrainerController.run_plugin")
-    assert set(MILES_RUNTIME.interfaces) == {
-        "run_plugin", "fork_m1_placement_map", "fork_m2_start_stop_cells", "fork_m3_router_cordon",
-        "fork_m4_member_publish", "fork_m6_rebuild_trainer"}
+    assert MILES_RUNTIME.interfaces["orchestration_startup_info"] == (
+        "miles.utils.orchestration_utils", "ArgvOrchestratorStartupInfo")
+    assert MILES_RUNTIME.interfaces["trainer_handles"] == ("miles.ray.placement_group", "create_trainer_handles")
+    assert MILES_RUNTIME.interfaces["loss_hub_policy_loss"][0] == "miles.backends.training_utils.loss.hub.losses"
+    assert MILES_RUNTIME.interfaces["fork_b0_yeto_extension"] == (
+        "miles.utils.args.configs.yeto_extension", "YetoExtensionConfig")
+    assert MILES_RUNTIME.interfaces["megatron_hdo"] == ("megatron.core.optimizer.cpu_offloading", "HybridDeviceOptimizer")
+    assert {"fork_m1_placement_map", "fork_m2_start_stop_cells", "fork_m3_router_cordon",
+            "fork_m4_member_publish", "fork_m6_rebuild_trainer"} <= set(MILES_RUNTIME.interfaces)
+    for name, (module, attribute) in MILES_RUNTIME.interfaces.items():
+        assert module and attribute and "loss_hub" not in module and "cp_utils" not in module, name
     assert MILES_RUNTIME.capability_requirements["Placement.reconfigure"] == (
         "fork_m1_placement_map", "fork_m6_rebuild_trainer")
+    for capability in ("ports-colocated-serial", "ports-partitioned-serial"):
+        needed = set(MILES_RUNTIME.capability_requirements[capability])
+        assert {"run_plugin", "orchestration_startup_info", "trainer_handles", "model_companion_weight_version"} <= needed
+    for needed in MILES_RUNTIME.capability_requirements.values():
+        assert set(needed) <= set(MILES_RUNTIME.interfaces)
     assert MILES_RUNTIME.version_modules == ("torch", "megatron.core", "torch_memory_saver", "peft", "sglang", "ray")
-    assert MILES_RUNTIME.checkouts == ("miles", "sglang") and MILES_RUNTIME.overlay_field == "miles_overlay"
+    assert MILES_RUNTIME.checkouts == ("miles", "sglang") and MILES_RUNTIME.overlay_checkout is None
+    assert MILES_RUNTIME.overlay_record() is None  # no source overlay on the k31 lineage
     assert rm.runtime_description() is MILES_RUNTIME
     assert set(rm.expected_pins()) == {"miles", "sglang", "image"}
 
