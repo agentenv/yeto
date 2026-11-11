@@ -400,6 +400,27 @@ def test_run_up_in_process_refuses_no_monitor(tmp_path, monkeypatch):
     assert up.main(args) == 2
 
 
+def test_yeto_launch_rollout_pool_builds_one_controller_for_the_fleet(tmp_path):
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto import launcher  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, nc_path = _two_pools(tmp_path)
+    modal_path = str(pools.resolve(run_cfg, tmp_path / "s")[1].config)
+    args = argparse.Namespace(rollout_pool=[nc_path, modal_path], controller_poll=15)
+    assert launcher._rollout_controller(argparse.Namespace(rollout_pool=[])) is None
+    clock = Clock()
+    names = [json.loads(open(p).read())["shard_base"] for p in (nc_path, modal_path)]
+    ops = {n: ProviderPoolOps(FakeProvider(n, clock), FakeRoute(), FakeFencer()) for n in names}
+    c = launcher._rollout_controller(args, ops=ops, thread_cls=_NoThread)
+    try:
+        assert sorted(c.slots) == sorted(names) and c.interval == 15
+        c.tick()
+        assert all(len(p["members"]) == 1 for p in c.status()["pools"].values())
+    finally:
+        c.stop("test")
+
+
 def test_a_run_level_syncer_reaches_every_syncer_pool(tmp_path):
     base, _ = _cfg(tmp_path)
     run_cfg = {"run": "run-k", "syncer": {"address": "198.51.100.7:7000", "key_env": "K"},

@@ -1147,8 +1147,11 @@ reached over SSH with sky's key, running the Docker sampler route.
 - Machines come from `offers` (`[{"resources": {<sky Resources args>}, "price_usd_h": <usd>}]`),
   or `candidates` (the spot watchdog's Nebius list: on-demand H100 first, then
   spot cheapest first; `prices` names a price file), or one `resources` block
-  with `price_usd_h`. A failed launch moves to the next offer; a successful one
-  moves back to the cheapest.
+  with `price_usd_h`. An order is a (slot, offer) pair. A failed launch, or a
+  cluster that never finishes starting, cools that offer down (10 min, doubling
+  per repeat, at most 80 min) and the next order tries the next offer; a
+  success clears the offer and moves back to the cheapest. The pool's breaker
+  counts a failure only when every offer is cooling down.
 - A cluster still starting after `start_timeout_s` is released and replaced; a
   stopped or missing cluster reads as preempted and is refilled.
 - Only clusters named `<cluster_prefix>-<run>-<n>` that this pool recorded or
@@ -1180,10 +1183,37 @@ island with the island's rendered sampler spec.
 - Calls and the app are written to the run's resource ledger
   (`modal_call`, `modal_app`), so `yeto cleanup --run` finds them.
 
-**Spend caps on both.** The pool's own `elastic.max_run_spend_ucr` counts node
-hours at the National Compute MI355X rate, not at the offer price. Set
-`usd_per_h` on the `samplers` entry (it drives `budget.usd` of `yeto run up`
-and the scale-up check) and a spend limit at the cloud provider.
+**Daytona** sandboxes are written to the run's resource ledger
+(`daytona_sandbox`); set `price_usd_h` in the provider section to price them.
+Like NC leases they belong to the pool: `yeto cleanup --run <run> --include-nc`
+deletes the ones still open.
+
+**Spend caps.** Each provider prices its machines in its own currency (NC in
+ucr, Sky / Modal / Daytona in USD from `price_usd_h`); the pool converts every
+rate to one unit before it adds them up, so a mixed pool's spend is correct.
+`elastic.max_run_spend_ucr` and `elastic.max_run_spend_usd` both cap the
+pool's orders (the USD-to-ucr rate is `YETO_NC_USD_PER_UCR`, default `1e-6`).
+Also set `usd_per_h` on the `samplers` entry (it drives `budget.usd` of
+`yeto run up`) and a spend limit at the cloud provider.
+
+**Syncer data path.** `"data_path": "syncer"` on a `samplers` entry (or the
+pool file) sends weights and samples through the actor syncer instead of the
+run store. Set `syncer: {"address": "host:port", "key_env": "<env var with the
+island HMAC key>"}` on the entry or once at the top of the run config. The
+pool writes `data_path` and `syncer` into each sampler spec, fences and drains
+islands through the syncer's member table, and marks a replacement sampler
+with `predecessor_retired: true` when the pool has already retired the island
+it replaces.
+
+**One controller for every pool.** By default `yeto run up` starts one
+`python -m yeto.launch.nc pool` process per pool. With `"controller":
+"in_process"` in the run config, all pools run in one rollout controller
+inside the `yeto run up` process (state files, scale files, locks and
+`pool-stop` work the same way). That process must stay up, so `--no-monitor`
+is refused in this mode. `yeto launch --rollout-pool <pool.json>` (repeatable)
+does the same inside the launcher's fleet controller. `yeto rollout status`
+reports each pool's controller view (target, members, pending handoffs,
+breaker) read from its saved state, without touching any machine.
 
 ## Planned enhancements
 

@@ -153,6 +153,35 @@ from .launch.manifest import _island_tasks_manifest  # noqa: F401
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "B300": 288, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48, "RTX-PRO-6000": 96, "RTX-6000-Ada": 48}
 
 
+def _rollout_controller(args, *, ops=None, **kw):
+    """The :class:`~yeto.launch.pool.controller.RolloutController` of ``--rollout-pool``
+    (every pool config in one controller, each built like its ``nc pool`` loop), None
+    without the flag. The fleet controller starts, checks and drains it."""
+    paths = [os.path.expanduser(p) for p in (getattr(args, "rollout_pool", None) or [])]
+    if not paths:
+        return None
+    from .launch.nc import cli as nc_cli
+    from .launch.pool.controller import RolloutController, nc_pool
+
+    slots = {}
+    try:
+        for path in paths:
+            with open(path) as fh:
+                cfg = json.load(fh)
+            name = str(cfg.get("shard_base") or path)
+            if name in slots:
+                raise SystemExit(f"--rollout-pool: two pools share shard_base {name!r}")
+            slots[name] = nc_pool(cfg, path, ops=(ops or {}).get(name))
+    except BaseException:
+        for slot in slots.values():
+            if slot.lock is not None:
+                slot.lock.close()
+        raise
+    interval = float(getattr(args, "controller_poll", 30) or 30)
+    nc_cli._log(f"rollout: {len(slots)} pool(s) in the launcher's controller ({', '.join(slots)})")  # noqa: SLF001
+    return RolloutController(slots, interval=interval, **kw)
+
+
 def _follower_islands(args, specs, learner_names) -> list[str]:
     """Cluster names of a synced group's sampler islands that run until their
     trainers end (the fleet controller ends them once the trainers are done)."""
@@ -773,6 +802,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             wan_probe_relaunches=wan_probe_relaunches(args),
             island_relaunch_envs=peer_recovery_relaunch_envs(args),
             followers=_follower_islands(args, specs, learner_names),
+            rollout=_rollout_controller(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:

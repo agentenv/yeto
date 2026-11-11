@@ -782,6 +782,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=30,
         help="fleet-controller health poll interval (seconds)",
     )
+    infra.add_argument(
+        "--rollout-pool",
+        action="append",
+        default=[],
+        metavar="POOL_JSON",
+        help="a sampler pool config (NC, Daytona, Sky or Modal) driven in this launcher's "
+        "fleet controller (repeatable; one RolloutController for all of them)",
+    )
     from .launch import trainer_loop as _trainer_loop
 
     _trainer_loop.add_arguments(infra)
