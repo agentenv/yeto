@@ -183,6 +183,27 @@ def test_a_syncer_pool_fences_and_drains_through_member_retire(tmp_path, monkeyp
     ops.request_drain(member)
     assert ops.drained(member)
     assert [c[2] for c in calls] == ["retire", "drain", "drain"] and calls[0][0] == ("203.0.113.5", 7000)
+    from yeto.launch.pool.island_pool import Member  # noqa: PLC0415
+
+    fresh = nc_cli.render_spec(cfg, Member(account=1, ticket="t2", shard="nc-1"), ["nc-0", "nc-1"])
+    assert fresh["data_path"] == "syncer" and fresh["syncer"] == "203.0.113.5:7000"
+    assert "predecessor_retired" not in fresh
+    heir = Member(account=1, ticket="t3", shard="nc-2", replaces_shard="nc-0", predecessor_retired=True)
+    assert nc_cli.render_spec(cfg, heir, ["nc-1", "nc-2"])["predecessor_retired"] is True
+
+
+def test_the_pool_marks_a_successor_whose_predecessor_it_already_retired():
+    from tests.test_rollout_island_pool import Clock, FakeProvider, make_pool, ticks  # noqa: PLC0415
+
+    clock = Clock()
+    p = FakeProvider("x", clock)
+    pool, *_ = make_pool(p, p.slots() if hasattr(p, "slots") else [1, 2], target=1, clock=clock)
+    ticks(pool, 3, clock, step=60)
+    first = pool.live()[0]
+    p.evict(first.ticket)
+    ticks(pool, 6, clock, step=60)
+    heir = next(m for m in pool.members if m.replaces_shard == first.shard)
+    assert heir.predecessor_retired
 
 
 def test_run_up_reads_both_formats(tmp_path):

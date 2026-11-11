@@ -76,6 +76,7 @@ class Member:
     status_fail_since: float | None = None
     alerted: list[str] = field(default_factory=list)  # one-shot events already sent
     predecessor_lost: bool = False  # the shard it continues has no live sampler to wait for
+    predecessor_retired: bool = False  # at its start the pool had already retired that shard's sampler
     handed_off: bool = False  # a successor that continues this shard started (its sampler stops)
     end_reason: str | None = None
     drain_error: str | None = None
@@ -923,9 +924,12 @@ class IslandPool:
             if status.state == "active":  # a provider without leases (sky) has no lease_until
                 m.state = STARTING
                 m.started = now
+                live = False
                 for p in self.members:  # its sampler asks the one of that shard to stop
                     if m.replaces_shard and p.shard == m.replaces_shard and p.state != GONE:
-                        p.handed_off = True
+                        p.handed_off = live = True
+                # the spec's predecessor_retired: the pool already fenced / retired it
+                m.predecessor_retired = bool(m.replaces_shard) and not live
                 if getattr(self.ops, "start_in_background", False):
                     # node setup + model pull take tens of minutes: the other members
                     # stay watched meanwhile

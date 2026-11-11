@@ -607,6 +607,13 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
                                          **_overrides(cfg.get("sampler") or {}))
     if m.replaces_shard and m.predecessor_lost:
         spec["handoff_wait_s"] = float(cfg.get("elastic", {}).get("lost_handoff_wait_s", 60.0))
+    if m.replaces_shard and getattr(m, "predecessor_retired", False):
+        spec["predecessor_retired"] = True  # the runtime may sweep the predecessor's orphans at once
+    if cfg.get("data_path", "r2") == "syncer":
+        spec["data_path"] = "syncer"  # the one sampler entry picks its data path from the spec
+        section = cfg.get("syncer") or {}
+        if section.get("address"):
+            spec.setdefault("syncer", str(section["address"]))
     backlog = cfg.get("backlog")
     if backlog:
         spec["max_backlog_groups"] = tasks.backlog_groups(
