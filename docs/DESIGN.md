@@ -52,6 +52,12 @@ Moved here from the README; docs/PROTOCOL.md has the wire-level detail.
   generations and quorum at launch. Joins/reconnects apply only to future
   attempts, disconnects do not erase accepted work, and a below-quorum
   timeout discards partial responses before retrying with a new attempt ID.
+  One exception under dynamic membership with a count quorum: a learner that
+  was held by its catch-up when an attempt launched, and none of whose
+  generations is in it, joins that attempt when its catch-up ends (it gets
+  the attempt's pull; quorum size, attempt and deadlines are unchanged), so
+  learners resuming one by one after a restart do not stall a round until
+  its quorum timeout.
 - **Sync-interval sensitivity**: at the design-point sync interval
   (H≈24 inner steps per fragment) DiLoCo matches the synchronous run within
   noise on held-out CE; at H≈2 — what a LAN/localhost fleet produces naturally,
