@@ -17,11 +17,15 @@
 //!
 //! Failure semantics (docs/PROTOCOL.md "Task dispenser"):
 //! - every position is held by at most one live holder at a time;
-//! - a holder that sends nothing for `lease` expires, and a new incarnation
-//!   of the same island supersedes the old one at once: in both cases the
+//! - a holder that sends nothing for `lease` expires, a new incarnation
+//!   of the same island supersedes the old one at once, and the controller
+//!   may retire a holder at once (MEMBER_RETIRE): in every case the
 //!   holder is retired (fenced: its later requests are refused) and the
 //!   positions it did not report go back to the FRONT of the queue, so the
 //!   next claim of any island takes them first;
+//! - an expiry counts toward `max_redo` like a requeue (a row that kills its
+//!   island must not loop): a position past it is settled exhausted. A
+//!   supersede or a retire is not counted;
 //! - a restart from the checkpoint (`restore_persisted`) retires every holder
 //!   of the snapshot and puts their unreported positions back the same way.
 //!
@@ -43,6 +47,11 @@
 //! mix of the positions given out follows the claims. One stream with
 //! weight 1 and no name is exactly the single-stream dispenser (positions are row
 //! sequence numbers).
+//!
+//! This is the syncer implementation of the WorkContract
+//! (`yeto/rl/engine/work_contract.py`, reference: the store ledger of
+//! `yeto/rl/engine/store_dispense.py`); `work_contract.rs` runs the shared
+//! conformance cases against it.
 //!
 //! Pure state machine like `membership.rs`: no sockets, no files; every
 //! clock reading is passed in. Events for the `task-dispense.jsonl` log are
@@ -288,6 +297,8 @@ type DResult<T> = std::result::Result<T, DispenseError>;
 pub enum ReclaimReason {
     Expired,
     Superseded,
+    /// The controller retired the holder (MEMBER_RETIRE).
+    Retired,
 }
 
 impl ReclaimReason {
@@ -295,6 +306,7 @@ impl ReclaimReason {
         match self {
             Self::Expired => "lease_expired",
             Self::Superseded => "superseded",
+            Self::Retired => "retired",
         }
     }
 }
@@ -311,7 +323,8 @@ pub enum DispenseEvent {
     End { holder: Holder },
     Report { holder: Holder, block: u64, kind: ReportKind, ranges: Vec<(u64, u64)>, exhausted: Vec<(u64, u64)> },
     BlockDone { holder: Holder, block: u64 },
-    Reclaim { holder: Holder, reason: ReclaimReason, ranges: Vec<(u64, u64)> },
+    /// `exhausted`: positions of `ranges` an expiry took past `max_redo` (settled).
+    Reclaim { holder: Holder, reason: ReclaimReason, ranges: Vec<(u64, u64)>, exhausted: Vec<(u64, u64)> },
     Fenced { holder: Holder, request: &'static str },
     Restore { next: u64, queued: u64, retired: usize },
     /// The record was captured for a checkpoint (the cut a restart returns to).
@@ -393,12 +406,13 @@ impl DispenseEvent {
             Self::BlockDone { holder, block } => {
                 format!("\"kind\":\"dispense_block_done\",{},\"block\":{block}", h(holder))
             }
-            Self::Reclaim { holder, reason, ranges } => format!(
-                "\"kind\":\"dispense_reclaim\",{},\"reason\":\"{}\",\"positions\":{},\"ranges\":{}",
+            Self::Reclaim { holder, reason, ranges, exhausted } => format!(
+                "\"kind\":\"dispense_reclaim\",{},\"reason\":\"{}\",\"positions\":{},\"ranges\":{},\"redo_exhausted\":{}",
                 h(holder),
                 reason.name(),
                 count(ranges),
-                ranges_json(ranges)
+                ranges_json(ranges),
+                ranges_json(exhausted)
             ),
             Self::Fenced { holder, request } => {
                 format!("\"kind\":\"dispense_fenced\",{},\"request\":\"{request}\"", h(holder))
@@ -592,6 +606,7 @@ impl Dispenser {
         self.retire(holder, match reason {
             ReclaimReason::Expired => Retired::Expired,
             ReclaimReason::Superseded => Retired::Superseded,
+            ReclaimReason::Retired => Retired::Retire,
         });
         let mut spans = Vec::new();
         for id in live.blocks {
@@ -603,7 +618,22 @@ impl Dispenser {
         self.totals.reclaimed += positions;
         let mut ranges: Vec<(u64, u64)> = spans.iter().map(|s| (s.start, s.end)).collect();
         ranges.sort_unstable();
-        self.events.push(DispenseEvent::Reclaim { holder, reason, ranges });
+        let mut exhausted = Vec::new();
+        if reason == ReclaimReason::Expired {
+            // an expiry is a counted failure (module doc), like a requeue
+            let mut front = Vec::new();
+            for span in spans {
+                if span.redo < self.cfg.max_redo {
+                    front.push(Span { redo: span.redo + 1, ..span });
+                } else {
+                    self.totals.exhausted += span.len();
+                    exhausted.push((span.start, span.end));
+                }
+            }
+            spans = front;
+            exhausted.sort_unstable();
+        }
+        self.events.push(DispenseEvent::Reclaim { holder, reason, ranges, exhausted });
         self.push_front(spans);
         positions
     }
@@ -1018,6 +1048,9 @@ impl Dispenser {
                 Some(Retired::Superseded) => {
                     self.reclaim(holder, ReclaimReason::Superseded);
                 }
+                Some(Retired::Retire) => {
+                    self.reclaim(holder, ReclaimReason::Retired);
+                }
                 _ => {
                     self.reclaim(holder, ReclaimReason::Expired);
                     gone.push(holder);
@@ -1025,6 +1058,29 @@ impl Dispenser {
             }
         }
         gone
+    }
+
+    /// The controller retires `learner_id` (incarnation None: its current
+    /// one) now (MEMBER_RETIRE): fenced on every channel of the shared table,
+    /// its unreported positions back to the queue front, not counted.
+    /// Returns the holder, whether this call retired it, and the positions
+    /// returned. Idempotent.
+    pub fn retire_member(&mut self, learner_id: u32, incarnation: Option<u64>) -> (Option<Holder>, bool, u64) {
+        let (holder, retired) = self.members.lock().unwrap().retire_now(learner_id, incarnation);
+        let reclaimed = match holder {
+            Some(holder) if self.live.contains_key(&holder) => self.reclaim(holder, ReclaimReason::Retired),
+            _ => 0,
+        };
+        (holder, retired, reclaimed)
+    }
+
+    /// Whether live `holder` holds `position` unreported (WorkContract `still_holds`).
+    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
+    pub fn holds(&self, holder: Holder, position: u64) -> bool {
+        let Some(live) = self.live.get(&holder) else { return false };
+        live.blocks.iter().filter_map(|id| self.blocks.get(id)).any(|block| {
+            block.open.range(..=position).next_back().is_some_and(|(_, &(end, _))| position < end)
+        })
     }
 
     #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
@@ -1366,7 +1422,7 @@ mod tests {
             .take_events()
             .into_iter()
             .filter_map(|e| match e {
-                DispenseEvent::Reclaim { holder, reason, ranges } => Some((holder, reason, ranges)),
+                DispenseEvent::Reclaim { holder, reason, ranges, .. } => Some((holder, reason, ranges)),
                 _ => None,
             })
             .collect();

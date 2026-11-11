@@ -15,8 +15,14 @@
 //!   incarnation is a random 64-bit value per island process;
 //! - a new incarnation of an id supersedes the current one at once;
 //! - a member that sends nothing on any channel for the lease expires;
-//! - a superseded or expired member is retired: every later request of it is
-//!   refused (fenced) on every channel, and each service returns what it held.
+//! - the controller may retire a member at once (the MEMBER_RETIRE frame,
+//!   scale-down or evict: [`Members::retire_now`]);
+//! - a superseded, expired or retired member is retired: every later request
+//!   of it is refused (fenced) on every channel, and each service returns what
+//!   it held.
+//!
+//! These are the member rules of the WorkContract
+//! (`yeto/rl/engine/work_contract.py`; conformance in `work_contract.rs`).
 //!
 //! Pure state machine: no sockets, no files, clocks passed in. A service
 //! that shares the table learns of a retirement by asking
@@ -44,6 +50,8 @@ pub enum Retired {
     Expired,
     /// Live or retired before the syncer restarted (restored fence list).
     Restart,
+    /// Retired by the controller (MEMBER_RETIRE: scale-down, evict).
+    Retire,
 }
 
 impl Retired {
@@ -52,6 +60,7 @@ impl Retired {
             Retired::Superseded => "superseded",
             Retired::Expired => "lease expired",
             Retired::Restart => "from before a syncer restart",
+            Retired::Retire => "retired by the controller",
         }
     }
 }
@@ -194,6 +203,25 @@ impl Members {
         }
     }
 
+    /// The controller retires `learner_id`'s incarnation `incarnation` (None:
+    /// its current one) now. Returns the holder and whether this call retired
+    /// it (false: already retired, or no current incarnation). An explicit
+    /// incarnation that never joined is fenced in advance.
+    pub fn retire_now(&mut self, learner_id: u32, incarnation: Option<u64>) -> (Option<Holder>, bool) {
+        let holder = match incarnation {
+            Some(incarnation) => Holder { learner_id, incarnation },
+            None => match self.current(learner_id) {
+                Some(holder) => holder,
+                None => return (None, false),
+            },
+        };
+        if self.is_retired(holder) {
+            return (Some(holder), false);
+        }
+        self.retire(holder, Retired::Retire);
+        (Some(holder), true)
+    }
+
     /// Retire every live member silent for the lease; returns them in order.
     pub fn expire(&mut self, now: Instant) -> Vec<Holder> {
         let gone = self.expired(now);
@@ -259,6 +287,23 @@ mod tests {
         assert_eq!(m.retired_reason(h(sampler, 1)), Some(Retired::Superseded));
         assert_eq!(m.retired_reason(h(sampler, 2)), Some(Retired::Expired));
         assert_eq!(m.retirements(), 2);
+    }
+
+    #[test]
+    fn the_controller_retires_a_member_at_once() {
+        let t = Instant::now();
+        let mut m = Members::new(Duration::from_secs(10));
+        let id = SAMPLER_MEMBER_BIT | 3;
+        m.join(h(id, 1), t);
+        assert_eq!(m.retire_now(id, None), (Some(h(id, 1)), true));
+        assert!(m.is_retired(h(id, 1)) && !m.is_live(h(id, 1)) && m.current(id).is_none());
+        assert_eq!(m.retire_now(id, Some(1)), (Some(h(id, 1)), false), "idempotent");
+        assert_eq!(m.retire_now(id, None), (None, false));
+        assert!(m.fenced_text(h(id, 1)).ends_with("(retired by the controller)"));
+        // a replacement process (new incarnation) joins; an announced one is fenced ahead
+        assert_eq!(m.join(h(id, 2), t), Join::Joined { superseded: None });
+        assert_eq!(m.retire_now(id, Some(9)), (Some(h(id, 9)), true));
+        assert!(m.is_retired(h(id, 9)) && m.is_live(h(id, 2)));
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod merge;
 mod par;
 mod dispense;
 mod dispense_service;
+mod member_retire;
 mod members;
 mod downlink;
 mod eval_checkpoint;
@@ -22,6 +23,7 @@ mod sha256;
 mod shutdown;
 mod state;
 mod subscriber;
+mod work_contract;
 
 use clap::Parser;
 

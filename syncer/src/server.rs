@@ -2210,6 +2210,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
     let accept_relay = relay.clone();
+    let accept_members = members.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -2221,9 +2222,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let hello_auth = hello_auth.clone();
                     let dispense = dispense.clone();
                     let relay = accept_relay.clone();
+                    let members = accept_members.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
+                            Some(peer),
+                            members,
                             reg,
                             session,
                             expected_learners,
@@ -2502,6 +2506,8 @@ fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
 
 async fn handle_connection(
     stream: TcpStream,
+    peer: Option<std::net::SocketAddr>,
+    members: crate::members::SharedMembers,
     registry: Registry,
     session: Session,
     expected_learners: u32,
@@ -2520,7 +2526,8 @@ async fn handle_connection(
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE | MSG_SUBSCRIBE => Ok(MAX_HELLO_FRAME),
         MSG_TASK_HELLO => Ok(crate::protocol::MAX_TASK_HELLO),
         crate::sample_relay::MSG_RELAY_HELLO => Ok(1024),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {other}"),
+        crate::member_retire::MSG_MEMBER_RETIRE => Ok(crate::member_retire::MAX_MEMBER_RETIRE),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO/MEMBER_RETIRE, got {other}"),
     })
     .await
     {
@@ -2812,7 +2819,10 @@ async fn handle_connection(
                 bail!(message)
             }
         },
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {t}"),
+        crate::member_retire::MSG_MEMBER_RETIRE => {
+            crate::member_retire::serve(&mut wr, &first.payload, peer, hello_auth.key.as_deref(), &members, dispense).await
+        }
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO/MEMBER_RETIRE, got {t}"),
     }
 }
 

@@ -73,6 +73,13 @@ MSG_TASK_HEARTBEAT = 56
 TASK_PROTOCOL_VERSION = 1
 TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams
 TASK_HELLO_MAC_DOMAIN = b"yeto-task-hello-mac-v1\0"
+# MEMBER_RETIRE (syncer/src/member_retire.rs): the controller retires a member now
+MSG_MEMBER_RETIRE = 57
+MSG_MEMBER_RETIRED = 58
+MEMBER_RETIRE_VERSION = 1
+MEMBER_RETIRE_MAC_DOMAIN = b"yeto-member-retire-mac-v1\0"
+MAX_RETIRE_REASON = 256
+RETIRE_STATUS = {0: "retired", 1: "already_retired", 2: "no_member"}
 
 # streams (syncer/src/dispense.rs)
 STREAM_SHIFT = 40
@@ -579,6 +586,59 @@ def _refusal(text: str) -> Exception:
     if text.startswith(MISMATCH_PREFIX):
         return DispenseMismatch(text)
     return DispenseError(text)
+
+
+def encode_member_retire(learner_id: int, incarnation: int | None, reason: str = "") -> bytes:
+    """The MEMBER_RETIRE body (``syncer/src/member_retire.rs``)."""
+    text = str(reason).encode("utf-8")
+    if len(text) > MAX_RETIRE_REASON:
+        raise ValueError(f"retire reason longer than {MAX_RETIRE_REASON} bytes")
+    return struct.pack("<HIBQH", MEMBER_RETIRE_VERSION, int(learner_id), int(incarnation is not None),
+                       int(incarnation or 0), len(text)) + text
+
+
+def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
+    if key is None:
+        return body
+    return body + hmac.new(key, MEMBER_RETIRE_MAC_DOMAIN + body, hashlib.sha256).digest()
+
+
+def decode_member_retired(payload: bytes) -> dict[str, Any]:
+    status, incarnation, reclaimed = struct.unpack("<BQQ", payload)
+    return {"status": RETIRE_STATUS.get(status, str(status)), "incarnation": incarnation, "reclaimed": reclaimed}
+
+
+def retire_member(address: tuple[str, int], learner_id: int, incarnation: int | None = None, *,
+                  reason: str = "scale_down", key: bytes | None = None, timeout_s: float = 10.0) -> dict[str, Any]:
+    """Retire syncer member ``learner_id`` (``incarnation=None``: its current
+    one) now: the WorkContract's ``retire`` on the syncer data path. The
+    dispenser puts its unreported positions back at the queue front (not
+    counted), the relay refuses its PUTs, its subscriber connection closes.
+    ``key``: the island HMAC key (without one the syncer accepts only its own
+    host). Returns ``{"status", "incarnation", "reclaimed"}``; idempotent."""
+    payload = seal_member_retire(encode_member_retire(learner_id, incarnation, reason), key)
+    with socket.create_connection(address, timeout=timeout_s) as sock:
+        sock.sendall(_HEADER.pack(MAGIC, MSG_MEMBER_RETIRE, len(payload)) + payload)
+        head = b""
+        while len(head) < _HEADER.size:
+            chunk = sock.recv(_HEADER.size - len(head))
+            if not chunk:
+                raise ConnectionError("the syncer closed the retire connection")
+            head += chunk
+        magic, msg_type, length = _HEADER.unpack(head)
+        if magic != MAGIC or length > 4096:
+            raise ConnectionError(f"bad frame from the syncer (magic {magic:#x}, {length} bytes)")
+        body = b""
+        while len(body) < length:
+            chunk = sock.recv(length - len(body))
+            if not chunk:
+                raise ConnectionError("the syncer closed the retire connection")
+            body += chunk
+    if msg_type == MSG_ERROR:
+        raise DispenseError(body.decode("utf-8", "replace"))
+    if msg_type != MSG_MEMBER_RETIRED:
+        raise ConnectionError(f"the syncer answered type {msg_type}, expected {MSG_MEMBER_RETIRED}")
+    return decode_member_retired(body)
 
 
 class DispenseConnection:
