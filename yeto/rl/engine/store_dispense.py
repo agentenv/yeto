@@ -118,6 +118,7 @@ DEFAULT_LEASE_S = 900.0
 DEFAULT_MAX_REDO = 2
 DEFAULT_SCAN_S = 30.0
 DEFAULT_MAX_SCAN_S = 120.0
+CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
 LEASE_KEY = "dispense_lease_s"  # row metadata: this task's lease
 ATTEMPT_KEY = "dispense_attempt"  # item metadata: the attempt this sampler holds
 COUNTED = ("infra", "expired")  # attempt endings that count toward max_redo
@@ -690,6 +691,8 @@ class StoreDispensedPrompts:
         self._drain_seen: str | None = None  # the drain request already reported / answered
         self._drain_answered: str | None = None
         self._held: dict[int, _Held] = {}
+        holder = getattr(ledger, "holder", "")
+        self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
         self._retired = False  # the controller retired this process (a marker in the ledger)
         self._lock = threading.RLock()
         self._next_scan = 0.0
@@ -881,7 +884,10 @@ class StoreDispensedPrompts:
             candidates.sort(key=lambda c: not view.classify(
                 row_task_id(self.rows[self.slots.row(c[0])], self.task_key))[2])
         got: list[int] = []
-        for p, attempt in candidates:
+        queue, staggered, i = candidates, False, 0
+        while i < len(queue):
+            p, attempt = queue[i]
+            i += 1
             if len(got) >= want:
                 break
             row = self.slots.row(p)
@@ -905,6 +911,16 @@ class StoreDispensedPrompts:
                     self._emit("rl_dispense_task_off_host", slot=p, task_id=task_id, host=view.host)
             else:
                 self.stats["claim_lost"] += 1
+                if not staggered:
+                    # Contention: every holder scanned the same order and races for the same
+                    # next slots, losing ~one claim (one conditional PUT) per rival. Go on from a
+                    # holder-specific offset within the next CLAIM_STAGGER_SLOTS candidates
+                    # instead; an uncontended holder keeps the plan order exactly.
+                    staggered = True
+                    rest = queue[i:]
+                    if rest:
+                        k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
+                        queue, i = rest[k:] + rest[:k], 0
         return got, ended
 
     def _answer_drain(self) -> None:

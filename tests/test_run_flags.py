@@ -297,7 +297,7 @@ _NON_RL_LITERALS = frozenset({
     "--ep-size", "--input", "--num-trainable", "--validate",
     # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
     # git rev-parse, curl, and the engine_sampler entry's own CLI
-    "--short", "--cacert", "--spec",
+    "--short", "--cacert", "--retry-connrefused", "--spec",
 })
 
 
