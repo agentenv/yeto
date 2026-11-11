@@ -46,6 +46,7 @@ from typing import Any
 from . import cli, elastic, tunnel
 from .client import LEASE_HOURS, NcTools, hourly_cost_ucr
 from .lease_pool import GONE, LeasePool, Member
+from .provider import is_national_compute
 
 LEASE_WARNING = ("National Compute does NOT end a lease at lease_until: the node stays active and billed "
                  "until its ticket is deleted. Keep this pool running, or release its nodes with "
@@ -268,10 +269,26 @@ def _print_banner(text: str) -> None:
 
 # -- dry run -------------------------------------------------------------------
 
+def daytona_problems(cfg: dict[str, Any]) -> list[str]:
+    """Offline checks of a ``provider.kind: daytona`` pool (no Daytona call)."""
+    from .daytona_provider import from_config  # noqa: PLC0415
+
+    problems = []
+    try:
+        provider = from_config(cfg, cli.run_id(cfg), sdk=object(), client=object())
+    except (ValueError, TypeError) as error:
+        return [str(error)]
+    if not os.environ.get(provider.api_key_env):
+        problems.append(f"{provider.api_key_env} is not set (the Daytona API key)")
+    if importlib.util.find_spec("daytona") is None:
+        problems.append("the 'daytona' Python package is not installed")
+    return problems
+
+
 def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     """Validate the config and print the orders and the spend the pool would make;
     orders nothing and calls no National Compute API."""
-    external = "factory" in (cfg.get("provider") or {})
+    external = not is_national_compute(cfg)
     problems: list[str] = []
     try:
         pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
@@ -301,7 +318,9 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             bucket_env = cfg.get("bucket_env", "R2_BUCKET")
             if bucket_env not in elastic.read_env_file(env_file):
                 problems.append(f"store env file has no {bucket_env} (the bucket key; set 'bucket_env')")
-    if external:
+    if (cfg.get("provider") or {}).get("kind") == "daytona" and "factory" not in cfg["provider"]:
+        problems += daytona_problems(cfg)
+    elif external:
         module = str(cfg["provider"]["factory"]).partition(":")[0]
         if importlib.util.find_spec(module) is None:
             problems.append(f"provider.factory module {module!r} is not importable")
@@ -395,7 +414,7 @@ def _drain_all(pool: LeasePool, why: str, *, sleep=None, wait_s: float = 10.0) -
 def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: LeasePool | None = None,
              signals: _Signals | None = None) -> int:
     """The foreground control loop of a pool (``pool --config F``)."""
-    external = "factory" in (cfg.get("provider") or {})
+    external = not is_national_compute(cfg)
     pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
     for note in cli.pool_config_warnings(cfg):
         _say(f"WARNING: {note}")

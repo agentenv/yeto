@@ -936,7 +936,7 @@ def test_provider_factory_plugs_in_another_supply(tmp_path):
     assert isinstance(ops.provider, OwnProvider) and ops.provider.run == "run-f"
     assert ops.order(1) == "fleet-1" and ops.poll(SimpleNamespace(account=1, ticket="fleet-1")).state == "active"
     assert cli.load_lease("fleet-1").ip == "192.0.2.20"
-    with pytest.raises(ValueError, match="only 'nc'"):
+    with pytest.raises(ValueError, match="'nc' and 'daytona' are built in"):
         cli.pool_ops(dict(cfg, provider={"kind": "k8s"}))
 
 

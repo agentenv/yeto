@@ -32,6 +32,7 @@ repeated here:
 8. [Troubleshooting FAQ](#8-troubleshooting-faq)
 9. [Images](#9-images)
 10. [Full-parameter parallel layout](#10-full-parameter-parallel-layout)
+11. [Daytona sampler sandboxes](#11-daytona-sampler-sandboxes)
 
 ---
 
@@ -810,6 +811,103 @@ at about 1.8x the offloaded-optimizer estimate. For the 128-expert layout,
 size from the measured per-stage figures in
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#7-measured-data-6-x-8-b300),
 and confirm headroom on the first step as described there.
+
+## 11. Daytona sampler sandboxes
+
+The sampler pool can take its nodes from Daytona GPU sandboxes (AMD MI355X,
+spot) instead of National Compute. Only the supply changes: eviction handling,
+shard fencing, claim release, refill, the budget, the breaker and the orphan
+patrol are the same pool code as for National Compute.
+
+Status: the provider is covered by CPU tests against a fake Daytona SDK; it has
+not yet run against a live Daytona account. Starting the sampler inside a
+sandbox (no Docker in a sandbox) is a separate step of the node route.
+
+### Configuration
+
+In `pool.json`, set `provider` to the Daytona kind. `accounts` are slots
+(`[1, 2, ..., max_nodes]`): one sandbox per slot at a time.
+
+```json
+"provider": {
+  "kind": "daytona",
+  "image": "rocm/vllm:<tag>",
+  "gpus": 8,
+  "gpu_type": "MI355X",
+  "spot": true,
+  "cpu": 128,
+  "memory_gib": 1536,
+  "disk_gib": 4096,
+  "name_prefix": "yeto-smp",
+  "ssh_token_minutes": 1440
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `image` / `snapshot` | Exactly one. With `snapshot`, the snapshot's own resources apply (build it with MI355X x 8); `gpus`, `cpu`, `memory_gib` and `disk_gib` apply to `image` only. |
+| `gpus` | 1 to 8. |
+| `gpu_type` | `MI355X` (other Daytona GPU types are accepted). |
+| `spot` | `true` (default) or `false` for on-demand. |
+| `ttl_minutes` | Wall-clock limit per sandbox; `0` (default) is none. |
+| `queue_timeout_min` | Minutes an on-demand create may wait for capacity. |
+| `create_timeout_s`, `delete_timeout_s` | Client-side waits (default 900 s / 300 s). |
+| `env` | Environment variables of the sandbox. |
+| `host_setup` | Commands run over SSH once a sandbox is up. |
+| `target` | Daytona region, if the organization has one. |
+| `api_key_env`, `api_url_env` | Names of the environment variables holding the API key and URL (default `DAYTONA_API_KEY`, `DAYTONA_API_URL`). |
+
+Every sandbox is created with auto-stop off (`auto_stop_interval=0`) and
+auto-delete on stop: Daytona deletes a stopped GPU sandbox, so the default
+15-minute idle stop would end a sampler that waits for the trainer.
+
+`pool --dry-run` checks the section, the API key variable and that the
+`daytona` Python package is installed; it makes no Daytona call.
+
+### Account requirements
+
+- An API key in `DAYTONA_API_KEY` on the pool host (`DAYTONA_API_URL` only for a
+  non-default endpoint). Never put the key in `pool.json`.
+- Spot GPU sandboxes need Daytona Tier 2 or higher and GPU (or spot GPU)
+  credits. Lower tiers restrict outbound network: the sampler must reach the
+  object store, the model source and the trainer, so confirm the tier's network
+  policy before the first run.
+- Check MI355X spot capacity in the Daytona dashboard or with the
+  `gpu-capacity` endpoint; a spot create with no capacity fails at once.
+
+### Spot reclaim semantics
+
+Daytona deletes a spot sandbox without notice when an on-demand user needs the
+capacity (Started, Deleting, Deleted, with `spotEvictedAt` recorded). The pool
+reads that as an eviction, the same as a National Compute eviction:
+
+1. the shard is fenced, so the trainer frees its claims at once and ignores
+   anything the lost sandbox still writes;
+2. the sandbox is confirmed deleted;
+3. a replacement sandbox is created and continues the shard and its data slot.
+
+There is no preemption notice and no lease end, so only eviction-driven
+replacement applies. A sandbox that reads stopped, archived or failed is
+treated as lost the same way.
+
+### Orphans and teardown
+
+Every sandbox carries the labels `yeto-run=<run>` and `yeto-slot=<slot>` and a
+name `<name_prefix>-<run>-<n>`, and is recorded locally before the create call.
+The patrol lists sandboxes by the run label, so a sandbox whose create outlived
+the pool process is adopted (or deleted by `pool-stop`). The provider deletes
+only sandboxes with its name prefix that carry this run's label or record.
+
+### Differences from National Compute
+
+| | National Compute | Daytona |
+|---|---|---|
+| Node | Bare-metal 8 x MI355X, Docker | VFIO GPU VM sandbox, no Docker |
+| Lease | Time-limited lease, replaced before its end | No lease end; optional `ttl_minutes` |
+| Reclaim | Eviction with a ticket end reason | Spot deletion without notice (`spotEvictedAt`) |
+| Access | SSH through the workspace relay | SSH through `ssh.app.daytona.io` with a per-sandbox token (renewed automatically) |
+| Balance guard | Account balance in ucr | None. `elastic.max_run_spend_ucr` still caps node-hours, priced at the National Compute MI355X rate; also set a Daytona spend limit |
+| Accounts | NC accounts in `YETO_NC_ACCOUNTS` | Slots, one sandbox each |
 
 ## Planned enhancements
 

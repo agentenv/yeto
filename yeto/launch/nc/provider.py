@@ -19,7 +19,8 @@ A provider must:
 * ``balance() -> int | None``, ``account_free(account) -> bool``;
 * ``run_tickets() -> [(account, ticket)]``: open tickets of this run it knows of.
 
-Pool config ``provider``: ``{"kind": "nc", ...tool overrides}`` (default), or
+Pool config ``provider``: ``{"kind": "nc", ...tool overrides}`` (default),
+``{"kind": "daytona", ...}`` (:mod:`.daytona_provider`: Daytona GPU sandboxes), or
 ``{"factory": "package.module:function", ...}`` - ``function(cfg, run_id)``
 returns a provider.
 """
@@ -84,6 +85,13 @@ class NcProvider:
                 if int(r["account"]) in accounts]
 
 
+def is_national_compute(cfg: dict[str, Any]) -> bool:
+    """The pool orders National Compute nodes (its accounts are NC accounts, its
+    tools and ledger apply); False for ``provider.factory`` and ``kind: daytona``."""
+    section = cfg.get("provider") or {}
+    return "factory" not in section and section.get("kind", "nc") == "nc"
+
+
 def load_provider(cfg: dict[str, Any], run_id: str, *, nc_factory) -> LeaseProvider:
     """The provider of a pool config. ``nc_factory(cfg, run_id)`` builds the National
     Compute one (the CLI wires its ledger, key and relay)."""
@@ -94,7 +102,12 @@ def load_provider(cfg: dict[str, Any], run_id: str, *, nc_factory) -> LeaseProvi
             raise ValueError("provider.factory must be 'package.module:function'")
         return getattr(importlib.import_module(module), name)(cfg, run_id)
     kind = section.pop("kind", "nc")
+    if kind == "daytona":
+        from .daytona_provider import from_config  # noqa: PLC0415
+
+        return from_config(cfg, run_id)
     if kind != "nc":
-        raise ValueError(f"provider kind {kind!r}: only 'nc' is built in; use provider.factory for others")
+        raise ValueError(f"provider kind {kind!r}: 'nc' and 'daytona' are built in; use provider.factory "
+                         "for others")
     configure_tools(section)
     return nc_factory(cfg, run_id)
