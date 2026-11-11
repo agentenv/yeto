@@ -375,7 +375,7 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
             raise ValueError(f"agentic.setup.tunnel.target_port {target} is not agentic.proxy.port {proxy_port}")
         key = ref(tn["key"], "agentic.setup.tunnel.key") if tn.get("key") else sandbox.key
         if not tn.get("key"):
-            notes.append("tunnel.key is unset: the tunnel uses the docker key; the onboarding checklist wants "
+            notes.append("tunnel.key is unset: the tunnel uses the docker key; the guide (Sandbox host, SSH keys) recommends "
                          "two keys (the tunnel key never enters the sampler container)")
         if "-" in port:  # a port range: one listen port per sampler shard (several islands at once)
             port = _shard_port(port, spec.get("sampler_id"))
@@ -605,11 +605,12 @@ def classify_ssh_failure(text: str, *, who: str, key: str, fingerprint: str, pur
     if "permission denied" in low and "publickey" in low:
         return (f"the sandbox host refused the {key} ({who}): add the public key with fingerprint {fingerprint} "
                 f"to {who.split('@')[0]}'s authorized_keys on the sandbox host ({purpose}; "
-                "see SANDBOX_HOST_ONBOARDING.md section 2)")
+                "see docs/KIMI_K31_ASYNC_RL_GUIDE.md, Sandbox host)")
     if "remote port forwarding failed" in low or "forwarding failed" in low:
         return (f"the sandbox host refused the reverse forward ({who}): the tunnel key's authorized_keys line "
-                "needs permitlisten for this listen address and sshd needs GatewayPorts clientspecified "
-                "(SANDBOX_HOST_ONBOARDING.md sections 2 and 4); or the port is taken by another tunnel")
+                "needs permitlisten for this listen address (one line per key: sshd uses the first that "
+                "matches) and sshd needs GatewayPorts clientspecified (docs/KIMI_K31_ASYNC_RL_GUIDE.md, Sandbox host); or the port is taken by "
+                "another tunnel")
     if "host key verification failed" in low or "remote host identification has changed" in low:
         return (f"the host key of {who} does not match the pinned known_hosts: refresh "
                 "agentic.setup.sandbox.known_hosts from the sandbox host")
@@ -621,7 +622,7 @@ def classify_ssh_failure(text: str, *, who: str, key: str, fingerprint: str, pur
         return f"{who}: the host name does not resolve on the node"
     if "cannot connect to the docker daemon" in low or "docker: command not found" in low:
         return (f"{who} accepted the key but has no docker daemon for this user (rootless docker of the "
-                "sandbox user, SANDBOX_HOST_ONBOARDING.md section 3)")
+                "sandbox user, docs/KIMI_K31_ASYNC_RL_GUIDE.md, Sandbox host)")
     return f"{who}: {text.strip()[-300:] or 'failed without output'}"
 
 
@@ -859,7 +860,7 @@ class Provisioner:
                                                              key="docker key", fingerprint=fpr,
                                                              purpose="the docker dial-only key"))
         server = text.strip().splitlines()[0] if text.strip() else "?"
-        detail = f"daemon {server}" + ("" if "rootless" in text else " (not rootless: see the onboarding checklist)")
+        detail = f"daemon {server}" + ("" if "rootless" in text else " (not rootless: see docs/KIMI_K31_ASYNC_RL_GUIDE.md, Sandbox host)")
         self._done("sandbox", "changed" if changed else "ok", detail)
 
     def records_secret(self) -> None:
