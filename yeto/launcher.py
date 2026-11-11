@@ -1178,6 +1178,9 @@ def dry_run_plan(args) -> dict:
     from .launch_preflight import dry_run_memory
 
     memory = dry_run_memory(args, specs)
+    from .launch.model_check import preflight_trainer_model
+
+    trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
@@ -1254,6 +1257,8 @@ def dry_run_plan(args) -> dict:
         # Kimi-K3.1 full form: the checked selection and a rough per-GPU memory budget
         **({"kimi_k31_full": args._kimi_k31_full}
            if getattr(args, "_kimi_k31_full", None) else {}),
+        # the trainer's model: source, problems, warnings (absent: --preflight-model off)
+        **({"trainer_model": trainer_model} if trainer_model is not None else {}),
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),

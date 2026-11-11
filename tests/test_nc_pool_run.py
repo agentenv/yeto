@@ -100,14 +100,15 @@ def test_dry_run_reports_invalid_configs(tmp_path, capsys):
 
 def test_dry_run_refuses_a_model_pull_whose_model_is_not_in_the_bucket(tmp_path, capsys, monkeypatch):
     seen = []
-    monkeypatch.setattr(pool_run, "model_present", lambda uri, env: seen.append(uri) or False)
+    monkeypatch.setattr(pool_run, "model_problems",
+                        lambda uri, env: seen.append(uri) or [f"no {uri}/config.json"])
     _doc, path = _cfg(tmp_path, model_pull={"src_key": "/models/Qwen3-0.6B/"},
                       elastic={"max_run_spend_ucr": 1})
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
     out = capsys.readouterr().out
     assert seen == ["s3://<bucket>/models/Qwen3-0.6B"]
     assert "no s3://<bucket>/models/Qwen3-0.6B/config.json: upload the model" in out
-    monkeypatch.setattr(pool_run, "model_present", lambda uri, env: True)
+    monkeypatch.setattr(pool_run, "model_problems", lambda uri, env: [])
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 0
 
 
@@ -122,11 +123,11 @@ def test_dry_run_reports_an_unreadable_model_prefix_and_a_dest_the_sampler_does_
     def denied(uri, env):
         raise PermissionError("AccessDenied")
 
-    monkeypatch.setattr(pool_run, "model_present", denied)
+    monkeypatch.setattr(pool_run, "model_problems", denied)
     _doc, path = _cfg(tmp_path, model_pull={"src_key": "models/m", "dest": "/mnt/nvme/models/m"})
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
     out = capsys.readouterr().out
-    assert "cannot read s3://<bucket>/models/m/config.json" in out and "AccessDenied" in out
+    assert "cannot list s3://<bucket>/models/m" in out and "AccessDenied" in out
     assert "model_pull.dest '/mnt/nvme/models/m'" in out and "leave dest unset" in out
 
 

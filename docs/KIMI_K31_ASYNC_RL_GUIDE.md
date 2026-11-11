@@ -159,7 +159,7 @@ Before the first run, put the base checkpoint where each part reads it.
 |---|---|---|
 | Trainer (Modal) | The Hugging Face Hub (`--model <org>/<name>`, `--model-revision <40-hex sha>`), or a Modal volume when `--modal-model-volume <volume>` is set | At every trainer launch, inside the Modal container |
 | Samplers (NC nodes) | The bucket, `s3://<bucket>/<model_pull.src_key>/`, copied onto the node by `model_pull` | Once per new node, before the engine starts |
-| Control host | The Hub config only (`config.json`, for the trainer dry run) | During preflight |
+| Control host | File listings only (Hub, Modal volume or bucket) and the small `config.json` / `*.index.json`, for the preflight model checks | During preflight |
 
 **1. Download the checkpoint once**, on any machine with fast egress (a
 cloud VM is better than a workstation for a large model), pinned to the
@@ -193,10 +193,36 @@ directory at `/models/kimi-k3.1-pro` for any model. So the spec's
 `engine.server.base_dir` and `agentic.tokenizer` must be
 `/models/kimi-k3.1-pro`, even for a model that is not K3.1.
 
-`pool --dry-run` (part of the `yeto run up` preflight) reads
-`s3://<bucket>/<src_key>/config.json` with the store env file, and stops when
-the model is missing or the credentials cannot read it. Without this check a
-missing upload would surface only after a node was ordered and billed.
+`pool --dry-run` (part of the `yeto run up` preflight) lists
+`s3://<bucket>/<src_key>/` once with the store env file (every page of the
+listing, so a checkpoint of more than 1000 files is covered) and stops when:
+
+- `config.json` is missing, or the credentials cannot list the prefix;
+- `model.safetensors.index.json` is present and a shard its `weight_map`
+  names is not in the listing (the message gives the count and the first five
+  missing names, e.g. `2 of 64 weight shards named by
+  model.safetensors.index.json are missing: model-00007-of-00064.safetensors, ...`);
+- there is no index and no single-file `model.safetensors`.
+
+Only the index is read; no weight file is downloaded. Without this check a
+missing or partial upload would surface only after a node was ordered and
+billed.
+
+**Trainer model check.** `yeto launch --dry-run` (step 4 of the `yeto run up`
+preflight) and every real `yeto launch` check the trainer's `--model` the
+same way before any order:
+
+| `--model` | Checked |
+|---|---|
+| Hub id (`<org>/<name>`, with `--model-revision`) | The repository file list at that revision. A missing repository, revision or a gated model without a token stops the launch. A control host that cannot reach the Hub only warns. |
+| Hub id with `--modal-model-volume <volume>` | `hf/<name>/<revision[:8]>/` of the volume, when its `MANIFEST.json` matches. Otherwise a warning (the trainer falls back to the Hub) and the Hub check. |
+| `s3://` / `r2://` URI | One listing with the control host's store credentials. |
+| Local directory | The directory, when it exists on the control host; otherwise a warning (it must exist on the trainer node). |
+
+A problem ends the dry run with `dry run rejected: trainer model: ...`.
+`--preflight-model warn` prints the problems and continues; `off` (or
+`YETO_PREFLIGHT_MODEL=off`) skips the check. The dry-run plan records the
+result under `trainer_model`.
 
 **Permissions.** The store env file's key needs read on the model prefix and
 read/write/delete on `runs/<run_prefix>/` (buffer, dispenser ledger, fences,
@@ -910,7 +936,7 @@ stays high means samplers are not keeping up. Add samplers or raise
 
 | Column | Meaning |
 |---|---|
-| status | `healthy`; `starting`; `waiting: backlog full (trainers behind)`; `waiting: waiting for a policy release`; `stale`; `lost`; `left the run (<reason>)`; `finished`; `stopped`. |
+| status | `healthy`; `starting`; `waiting: backlog full (trainers behind)`; `waiting: waiting for a policy release`; `stale`; `lost: <reason> at <HH:MM>`; `left: <reason> at <HH:MM>[, replaced by <ticket>]`; `finished`; `stopped`. |
 | policy | `v<policy_version>` the sampler currently generates with. |
 | policy age p50 / max, histogram | Trainer version minus the version a round was generated with. |
 | generate s p50 / max | Seconds per generation round. |
@@ -937,8 +963,23 @@ end to end. Above it, one line shows the pool's sampler count: ready nodes,
 nodes draining after a scale down, nodes paused by hand, the target (marked
 "set by hand" after a manual change) and the shards. Manual operations are
 labelled "manual" in the event list. A sampler that
-left by a scale down shows as left (`scaled_down`), not as lost; one still
+left by a scale down shows as left (`scaled down`), not as lost; one still
 draining keeps its normal health.
+
+A sampler card that left names the cause from the pool events, the time it
+happened and the ticket ordered in its place, for example
+`lost: evicted (preempted) at 05:09, replaced by <ticket>`. The cause is the
+first exit event of the node, not the fence and release that follow it:
+
+| Card reason | Pool event |
+|---|---|
+| `evicted (<end reason>)` | `evicted` (preempted, lost, admin) |
+| `lease expired (<end reason>)` | `expired` (lease end, replaced in turn) |
+| `released outside the pool`, `released by hand (console / nc down)` | `released_externally`, `manual_release_detected` |
+| `scaled down (<outcome>)` | `scaled_down` (drained or fenced) |
+| `sampler crash loop after <n> restarts: <detail>` | `sampler_crash_loop` (for example an out-of-memory loop) |
+| `configuration error: <detail>` | `sampler_config_error`; the card returns to healthy after `pool-retry` |
+| `start timeout`, `node lost: <detail>`, `pool stopped: <why>` | `start_timeout`, `node_lost`, `pool_stopped` |
 
 ### Other panels
 
@@ -999,6 +1040,15 @@ Logs are in `~/.yeto/rl-up/<run>/` (`preflight.log`, `sandbox.log`,
 The model is not in the bucket under `model_pull.src_key`, or the store env
 file's key cannot read it. Upload it (section 2, Model weights) and run the
 dry run again. Nothing was ordered.
+
+**Preflight stops with `... weight shards named by model.safetensors.index.json are missing`.**
+The upload is partial. Run the `aws s3 sync` of section 2 again (it copies
+only the missing files) and compare the file count with the local copy.
+
+**`dry run rejected: trainer model: ...`.**
+The trainer's `--model` is missing, unreadable or incomplete where the trainer
+reads it (section 2, Model weights, Trainer model check). Fix the name,
+`--model-revision`, the Hub token or the volume snapshot.
 
 **`sandbox prepare failed: nothing ordered`.**
 Read `sandbox.log`. After a sandbox host reboot the usual causes are an
