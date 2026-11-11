@@ -102,6 +102,27 @@ class FakeFencer:
         self.fenced.append((shard, f"incarnation:{by}"))
 
 
+class DrainingFencer(FakeFencer):
+    """The work contract with drain requests: a shard answers once ``idle`` holds it."""
+
+    def __init__(self):
+        super().__init__()
+        self.requests: dict[str, str] = {}
+        self.idle: set[str] = set()
+        self.cancelled: list[str] = []
+
+    def request_drain(self, shard, seq):
+        self.requests[shard] = seq
+        return seq
+
+    def drain_answered(self, shard, seq):
+        return self.requests.get(shard) == seq and shard in self.idle
+
+    def cancel_drain(self, shard):
+        self.requests.pop(shard, None)
+        self.cancelled.append(shard)
+
+
 def quiet_elastic(**kw) -> ElasticConfig:
     return ElasticConfig(engine_stall_s=None, metrics_port=None, **kw)
 
@@ -211,6 +232,53 @@ def test_scale_one_two_one(tmp_path):
     assert [m.ticket for m in pool.live()] != [second.ticket] and len(pool.live()) == 1
     assert second.state == GONE and (second.shard, second.ticket) in fencer.fenced
     assert "scaled_down" in names(pool) and "target_changed" in names(pool)
+
+
+def test_scale_down_drains_through_the_work_contract_before_release(tmp_path):
+    clock = Clock()
+    a, b, multi = two_providers(clock)
+    fencer = DrainingFencer()
+    pool, route, _ = make_pool(multi, multi.slots(), target=2, clock=clock, fencer=fencer)
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", "r1"
+    ticks(pool, 3, clock)
+    victim = pool.live()[1]
+    write_scale(pool.scale_path, 1, 1, retire=[victim.ticket])
+    ticks(pool, 2, clock)
+    assert victim.shard in fencer.requests and victim.retiring_since is not None
+    assert victim.state != GONE and victim.ticket not in b.released  # trials in flight finish first
+    fencer.idle.add(victim.shard)
+    ticks(pool, 2, clock)
+    assert victim.state == GONE and victim.ticket in b.released and len(pool.live()) == 1
+    assert "scale_draining" in names(pool)
+
+
+def test_a_machine_released_by_a_person_lowers_the_target_and_is_not_refilled(tmp_path):
+    clock = Clock()
+    a, b, multi = two_providers(clock)
+    pool, *_ = make_pool(multi, multi.slots(), target=2, clock=clock)
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", "r1"
+    ticks(pool, 3, clock)
+    gone = pool.live()[1]
+    b.machines[gone.ticket].update(state="ended", end_reason="released")  # the provider console
+    ticks(pool, 3, clock)
+    assert "manual_release_detected" in names(pool)
+    assert pool.config.target == 1 and len(pool.live()) == 1 and b.orders == [1]
+    assert json.loads(pool.scale_path.read_text())["target"] == 1  # outlives a restart
+
+
+def test_a_paused_member_is_not_retired_when_its_sampler_crashes(tmp_path):
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    pool, route, _ = make_pool(nc, [1, 2], target=1, clock=clock)
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", "r1"
+    ticks(pool, 3, clock)
+    m = pool.live()[0]
+    pool.scale_path.write_text(json.dumps({"run": "r1", "target": 1, "seq": 1, "paused": [m.ticket]}))
+    route.joined.discard(m.ticket)
+    route.probe = lambda member: Probe(node="ok", sampler="exited", exit_code=1, joined=False)
+    ticks(pool, 3, clock)
+    assert m.paused and m.state != GONE and nc.orders == [1] and route.restarted == []
+    assert "manual_pause" in names(pool)
 
 
 def test_scale_file_of_another_run_is_ignored(tmp_path):
@@ -464,6 +532,11 @@ def test_nc_pool_of_a_pool_json_runs_in_the_controller_and_shares_the_lock(tmp_p
         clock.t += 120
     assert slot.pool.live() and slot.pool.live()[0].state == READY
     assert json.loads(cli.pool_state_path(cfg).read_text())["members"]
+    assert pool_run.pool_process(cfg)["alive"]  # pool-status / pool-scale see the loop
+    pool_run.stop_path(cfg).write_text("stop")  # what pool-stop writes
+    ctl.tick()
+    assert slot.pool.stopped == "pool-stop requested" and not slot.pool.live()
     left = ctl.stop("test end")
     assert left == {"nc": []}
     assert pool_run.lock_holder(pool_run.lock_path(cfg)) is None
+    assert not pool_run.pid_path(cfg).exists() and not pool_run.stop_path(cfg).exists()

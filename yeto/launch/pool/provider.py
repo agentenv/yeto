@@ -95,9 +95,15 @@ class NodeRoute(Protocol):
 
 
 class Fencer(Protocol):
-    """The work contract's fence: ``fence_shard`` (the node is taken for gone: its
-    sampler stops at its next lease read, its claims go back at once) and
-    ``fence_incarnation`` (lease only: the sampler is restarted in place)."""
+    """The pool's side of the work contract: ``fence_shard`` (the node is taken for
+    gone: its sampler stops at its next lease read, its claims go back at once) and
+    ``fence_incarnation`` (lease only: the sampler is restarted in place).
+
+    Optional, for a "drain" scale down and a ``hold_tasks`` pause:
+    ``request_drain(shard, seq) -> seq`` (the shard's sampler claims no new task and
+    answers ``seq`` once it holds none), ``drain_answered(shard, seq) -> bool`` and
+    ``cancel_drain(shard)`` (claims again). ``yeto.rl.engine.store_dispense`` is the
+    R2 implementation (``request_drain`` / ``drain_answered``)."""
 
     def fence_shard(self, shard: str, by: str) -> Any: ...
     def fence_incarnation(self, shard: str, by: str) -> Any: ...
@@ -199,14 +205,22 @@ class ProviderPoolOps:
 
     start_in_background = False
 
-    def __init__(self, provider: Any, route: Any = None, fencer: Any = None):
+    def __init__(self, provider: Any, route: Any = None, fencer: Any = None, *, clock=None):
+        import time  # noqa: PLC0415
+
         self.provider, self.routes, self.fencer = provider, route, fencer
+        self.clock = clock or time.time
+        self._released: set[str] = set()  # tickets these ops released (not a person's release)
         if route is not None:  # the pool looks these up with getattr: only set with a route
             self.probe = self._probe
             self.restart = self._restart
         if fencer is not None:
             self.fence = self._fence
             self.fence_incarnation = self._fence_incarnation
+            if getattr(fencer, "request_drain", None) is not None:
+                self.request_drain = self._request_drain
+                self.drained = self._drained
+                self.cancel_drain = self._cancel_drain
 
     def route_of(self, member: Any) -> Any:
         if self.routes is None or not isinstance(self.routes, Mapping):
@@ -249,6 +263,22 @@ class ProviderPoolOps:
     def _fence_incarnation(self, member: Any) -> None:
         self.fencer.fence_incarnation(member.shard, by=member.ticket)
 
+    def _request_drain(self, member: Any) -> None:
+        member.drain_seq = self.fencer.request_drain(member.shard, seq=f"{member.ticket}:{self.clock():.3f}")
+
+    def _drained(self, member: Any) -> bool:
+        return member.drain_seq is not None and bool(self.fencer.drain_answered(member.shard, member.drain_seq))
+
+    def _cancel_drain(self, member: Any) -> None:
+        self.fencer.cancel_drain(member.shard)
+        member.drain_seq = None
+
+    def released_by_us(self, ticket: str) -> bool:
+        """An ended-``released`` machine these ops (or the provider's own record) released:
+        not a person's release, so the pool refills it."""
+        own = getattr(self.provider, "released_by_us", None)
+        return ticket in self._released or bool(own is not None and own(ticket))
+
     def drain(self, member: Any) -> None:
         route = self.route_of(member)
         if route is not None and member.shard:
@@ -256,6 +286,7 @@ class ProviderPoolOps:
                 route.stop(member)
             except Exception:  # noqa: BLE001 - best effort: the release below is what stops billing
                 pass
+        self._released.add(member.ticket)
         self.provider.release(member.account, member.ticket)
 
 

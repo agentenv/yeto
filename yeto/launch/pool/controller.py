@@ -44,13 +44,16 @@ _ACTIVE_LOCK = threading.Lock()
 @dataclass
 class PoolSlot:
     """One pool the controller drives: its state file (saved after every tick; None:
-    not saved), the lock it holds while driven (closed at the end) and what to call
+    not saved), the lock it holds while driven (closed at the end), what to run after
+    each of its ticks (``after_tick(pool)`` -> a reason to stop this pool, or None: the
+    subprocess loop's ``pool-stop`` / ``pool-retry`` request files) and what to call
     once it is drained (``on_close(left_members)``, e.g. a billing banner)."""
 
     pool: IslandPool
     state_path: Path | None = None
     lock: Any = None
     on_close: Callable[[list[Member]], None] | None = None
+    after_tick: Callable[[IslandPool], str | None] | None = None
     left: list[Member] = field(default_factory=list)
 
 
@@ -109,6 +112,15 @@ class RolloutController:
                 except Exception as error:  # noqa: BLE001 - one bad tick never ends a pool with billed nodes
                     if pool.events is not None:
                         pool.events("tick_failed", error=repr(error)[:300])
+                why = None
+                if slot.after_tick is not None:
+                    try:
+                        why = slot.after_tick(pool)
+                    except Exception as error:  # noqa: BLE001
+                        self.log(f"rollout: after_tick failed: {error!r}")
+                if why:
+                    self.log(f"rollout: {why}: draining the pool")
+                    slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
                 self._save(slot)
             self.ticks += 1
 
@@ -262,11 +274,20 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
                               events=events)
     pool.scale_path, pool.scale_run = pool_run.scale_path(cfg), cli.run_id(cfg)
     pool.apply_scale()
+    pool_run._write_pid(cfg, config_path)  # noqa: SLF001 - pool-status / pool-scale see a live loop
+    pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
 
-    def banner(left: list[Member]) -> None:
+    def after_tick(p: IslandPool) -> str | None:
+        if pool_run.retry_path(cfg).exists():
+            pool_run._retry_in_loop(p, config_path)  # noqa: SLF001
+        return "pool-stop requested" if pool_run.stop_path(cfg).exists() else None
+
+    def close(left: list[Member]) -> None:
+        pool_run._remove(pool_run.pid_path(cfg))  # noqa: SLF001
+        pool_run._remove(pool_run.stop_path(cfg))  # noqa: SLF001
         if left:
             pool_run._print_banner(pool_run.billing_banner(  # noqa: SLF001
                 config_path, [m.__dict__ for m in left], why="the rollout controller stopped with members left",
                 national=not external))
 
-    return PoolSlot(pool, state_path=state, lock=held, on_close=banner)
+    return PoolSlot(pool, state_path=state, lock=held, on_close=close, after_tick=after_tick)
