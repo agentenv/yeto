@@ -610,6 +610,11 @@ def test_nc_pool_of_a_pool_json_runs_in_the_controller_and_shares_the_lock(tmp_p
     pool_run.stop_path(cfg).write_text("stop")  # what pool-stop writes
     ctl.tick()
     assert slot.pool.stopped == "pool-stop requested" and not slot.pool.live()
+    # the drained pool lets go at once, so a waiting pool-stop returns (it waited for
+    # this process, the yeto run up that waits for pool-stop, until its timeout)
+    assert pool_run.lock_holder(pool_run.lock_path(cfg)) is None
+    assert pool_run.pool_process(cfg) is None
+    assert pool_run.stop_pool(cfg, path, wait_s=5, sleep=lambda _s: None, ops=cloud) == 0
     left = ctl.stop("test end")
     assert left == {"nc": []}
     assert pool_run.lock_holder(pool_run.lock_path(cfg)) is None

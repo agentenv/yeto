@@ -62,6 +62,7 @@ class PoolSlot:
     on_close: Callable[[list[Member]], None] | None = None
     after_tick: Callable[[IslandPool], str | None] | None = None
     left: list[Member] = field(default_factory=list)
+    closed: bool = False
 
 
 class RolloutController:
@@ -112,7 +113,7 @@ class RolloutController:
             if self.stop_flag is not None and self.stop_flag.exists():
                 self._stop_locked(f"STOP flag {self.stop_flag}")
                 return
-            for slot in self.slots.values():
+            for name, slot in self.slots.items():
                 pool = slot.pool
                 if pool.stopped:
                     continue
@@ -131,6 +132,11 @@ class RolloutController:
                     self.log(f"rollout: {why}: draining the pool")
                     slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
                 self._save(slot)
+                if why:
+                    # Like the exit of a pool loop: drop the pid file and the lock, so a
+                    # waiting ``pool-stop`` sees the pool gone (it would otherwise wait for
+                    # this process, the ``yeto run up`` that waits for it, and time out).
+                    self._close_slot(name, slot)
             self.ticks += 1
 
     def _save(self, slot: PoolSlot) -> None:
@@ -200,21 +206,28 @@ class RolloutController:
                 slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
             self._save(slot)
             out[name] = list(slot.left)
-            if slot.on_close is not None:
-                try:
-                    slot.on_close(list(slot.left))
-                except Exception as error:  # noqa: BLE001
-                    self.log(f"rollout: on_close of pool {name} failed: {error!r}")
-            if slot.lock is not None:
-                try:
-                    slot.lock.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                slot.lock = None
+            self._close_slot(name, slot)
         with _ACTIVE_LOCK:
             if self in _ACTIVE:
                 _ACTIVE.remove(self)
         return out
+
+    def _close_slot(self, name: str, slot: PoolSlot) -> None:
+        """``on_close`` once, then release the pool lock (idempotent)."""
+        if slot.closed and not slot.left:
+            return
+        slot.closed = True
+        if slot.on_close is not None:
+            try:
+                slot.on_close(list(slot.left))
+            except Exception as error:  # noqa: BLE001
+                self.log(f"rollout: on_close of pool {name} failed: {error!r}")
+        if slot.lock is not None:
+            try:
+                slot.lock.close()
+            except Exception:  # noqa: BLE001
+                pass
+            slot.lock = None
 
     # -- views
     def progress(self) -> int:
