@@ -293,7 +293,7 @@ def test_no_free_account_is_an_event_not_a_silent_gap(tmp_path, monkeypatch):
     assert pool_run.scale_pool(cfg, path, 2) == 0
     pool.tick()
     pool.tick()
-    refused = [e for e in _events(pool, "order_refused") if "no free National Compute account" in e["why"]]
+    refused = [e for e in _events(pool, "order_refused") if "no free slot" in e["why"]]
     assert len(refused) == 1  # once, not every tick
 
 

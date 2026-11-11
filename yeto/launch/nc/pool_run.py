@@ -285,13 +285,16 @@ def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str 
                    kind: str | None = None) -> str:
     bar = "!" * 78
     w = wording(kind=kind or ("nc" if national else "daytona"))
-    lines = [bar, f"NODES STILL BILLING: {len(members)} {w['units']} of this pool may still be "
+    head = "NODES STILL BILLING" if national else "STILL BILLING"
+    lines = [bar, f"{head}: {len(members)} {w['units']} of this pool may still be "
                   "active" + (f" ({why})" if why else "") + ".", w["billing"]]
     now = time.time()
     for m in members:
         late = m.get("lease_until") is not None and now > float(m["lease_until"])
-        lines.append(f"  account {m.get('account')} ticket {m.get('ticket')} shard {m.get('shard')} "
-                     f"state {m.get('state')} lease_until {_until(m.get('lease_until'))}"
+        until = m.get("lease_until")
+        lines.append(f"  {'account' if national else 'slot'} {m.get('account')} ticket {m.get('ticket')} "
+                     f"shard {m.get('shard')} state {m.get('state')}"
+                     + (f" lease_until {_until(until)}" if national or until is not None else "")
                      + ("  PAST lease_until, STILL BILLED" if late else ""))
     lines += ["Release them with:", f"  {stop_command(config_path)}"]
     if national:  # ``down`` is the National Compute ticket call
@@ -439,8 +442,8 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
             print(f"  slot {pc.accounts[i]}: 1 x {w['unit']}, shard {pc.shard_base}-{i}{slot}")
     if external and cli.pool_price(cfg)[0] is None:
-        notes.append("the provider config sets no price_usd_h: the budget counts each node hour at the National "
-                     "Compute MI355X rate")
+        notes.append(f"the provider config sets no price_usd_h: the budget counts each {w['unit']} hour at the "
+                     "National Compute MI355X rate; set price_usd_h to the provider's price")
     if cli.pool_price(cfg)[0] is None:  # the National Compute rate, in ucr
         print(f"estimated spend: {hourly:.0f} ucr/h per node ({hourly / 1e6:g} credits/h, the 8-GPU MI355X rate); "
               f"steady {pc.target * hourly:.0f} ucr/h ({pc.target * hourly / 1e6:g} credits/h); "

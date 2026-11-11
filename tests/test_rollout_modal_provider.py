@@ -288,6 +288,16 @@ def test_a_retired_modal_island_drains_then_fences_then_stops(tmp_path):
     assert len([m for m in pool.members if m.state != GONE]) == 1
 
 
+def test_the_billing_banner_of_a_modal_pool_uses_no_national_compute_wording():
+    member = {"account": 2, "ticket": "yeto-smp-run-m-1", "shard": "m-0", "state": "ready", "lease_until": None}
+    text = pool_run.billing_banner("pool.json", [member], why="test", national=False, kind="modal")
+    assert "STILL BILLING: 1 Modal island(s)" in text and "NODES" not in text
+    assert "slot 2 ticket yeto-smp-run-m-1" in text and "lease_until" not in text and "account" not in text
+    assert "yeto.launch.nc down --account" not in text
+    nc = pool_run.billing_banner("pool.json", [dict(member, lease_until=1.0)], national=True, kind="nc")
+    assert "NODES STILL BILLING" in nc and "account 2" in nc and "lease_until" in nc
+
+
 def test_kind_modal_routes_to_its_own_pool_ops_and_dry_run_checks(tmp_path, capsys):
     cfg = _cfg(tmp_path)
     assert prov.provider_kind(cfg) == "modal"

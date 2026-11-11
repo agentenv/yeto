@@ -258,8 +258,8 @@ class IslandPool:
         self._refused = None
         account = self._free_account()
         if account is None:
-            refused = (f"no free National Compute account: {len(self.live())} of {len(self.config.accounts)} "
-                       f"accounts hold a node of this pool (one node per account), target {self.config.target}")
+            refused = (f"no free slot: {len(self.live())} of {len(self.config.accounts)} slots (the pool's "
+                       f"'accounts') hold a machine of this pool (one per slot), target {self.config.target}")
             if refused != self._no_account:  # once per change, not every tick
                 self._event("order_refused", why=refused)
             self._no_account = refused

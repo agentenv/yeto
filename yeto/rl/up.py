@@ -658,15 +658,15 @@ class Run:
             time.sleep(10)
         self._cmd(self.yeto("down", self.run), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
-        _log(f"trainer stopped ({why}); the NC pool and the sandboxes are KEPT and still bill. "
-             f"Release them with: yeto run down --config <run.json> "
-             f"(or python -m yeto.launch.nc pool-stop --config {self.pool_config})")
+        stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
+        _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
+             f"Release them with: yeto run down --config <run.json> (or {stops})")
 
     def on_breach(self, why: str) -> None:
         """Budget / wall clock with ``release_nc_on_breach``: the full ``down``; anything
         else (and by default): the trainer only."""
         if self.release_nc_on_breach and why.startswith(("wall clock", "budget")):
-            _log(f"{why}: budget.release_nc_on_breach is set: full down (NC pool included)")
+            _log(f"{why}: budget.release_nc_on_breach is set: full down ({self.pools_phrase()} included)")
             self.down()
             return
         self.trainer_down(why)
@@ -745,12 +745,13 @@ class Run:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
             if billed is not None and not billed:
-                _log("NC pool: no node bills any more; monitor done")
+                _log(f"{self.pools_phrase()}: no machine bills any more; monitor done")
                 return
             spend = self.spend_usd()
             elapsed = time.time() - float(self.state.get("t0", time.time()))
             n = "?" if billed is None else len(billed)
-            _log(f"NC STILL BILLING after '{why}': {n} node(s), spend ${spend:.0f}; release with: "
+            _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.0f}; "
+                 f"release with: "
                  f"yeto run down --config <run.json> (forced at ${usd_cap:.0f} or {wall_cap / 3600:.1f} h)")
             if spend > usd_cap or elapsed > wall_cap:
                 cap = f"spend ${spend:.0f} > ${usd_cap:.0f}" if spend > usd_cap else \
@@ -962,7 +963,7 @@ def add_parser(sub: Any) -> None:
     up.add_argument("--skip-preflight", action="store_true", help="resume: preflight already passed")
     up.add_argument("--no-monitor", action="store_true", help="return after the dashboard starts")
     up.add_argument("--trainer-now", action="store_true",
-                    help="start the trainer without waiting for the first sample group (NC and the "
+                    help="start the trainer without waiting for the first sample group (the samplers and the "
                     "trainer GPUs come up in parallel)")
     for name in ("status", "down"):
         q = rsub.add_parser(name)
@@ -1020,7 +1021,7 @@ def main(args: Any) -> int:
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
     run.pool()
     if getattr(args, "trainer_now", False):
-        _log("--trainer-now: the trainer starts now, in parallel with the NC node setup")
+        _log("--trainer-now: the trainer starts now, in parallel with the sampler setup")
     elif not (run.state.get("steps") or {}).get("first_group"):
         why = run.wait_first_group()
         if why is not None:
