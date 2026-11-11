@@ -156,8 +156,42 @@ class SkyProvider:
     def order(self, account: int) -> str:
         doc = self._doc()
         n = 1 + max([int(r.get("n", 0)) for r in doc["clusters"].values()] or [0])
-        offer = self.offers[int(doc.get("cursor", 0)) % len(self.offers)]
+        offer = self._pick(doc)
         return self.launch_cluster(f"{self.prefix}-{n}", offer, slot=account, n=n)
+
+    # -- the per-offer breaker: an order is a (slot, offer); a failing offer cools down
+    # alone while the others keep ordering (the pool's breaker counts only when none is left)
+    OFFER_COOLDOWN_S = 600.0
+
+    def _cooling(self, doc: dict[str, Any], key: str, now: float) -> bool:
+        return float((doc.get("offers") or {}).get(key, {}).get("open_until", 0)) > now
+
+    def _pick(self, doc: dict[str, Any]) -> Offer:
+        """From the cursor on, the first offer not cooling down; all cooling: the one that reopens first."""
+        now, start = self.clock(), int(doc.get("cursor", 0)) % len(self.offers)
+        ring = self.offers[start:] + self.offers[:start]
+        for offer in ring:
+            if not self._cooling(doc, offer.key, now):
+                return offer
+        return min(ring, key=lambda o: float(doc["offers"][o.key]["open_until"]))
+
+    def _offer_failed(self, doc: dict[str, Any], key: str) -> None:
+        row = doc.setdefault("offers", {}).setdefault(key, {"fails": 0})
+        row["fails"] = int(row.get("fails", 0)) + 1
+        row["open_until"] = self.clock() + min(self.OFFER_COOLDOWN_S * 2 ** (row["fails"] - 1),
+                                               8 * self.OFFER_COOLDOWN_S)
+
+    def has_fallback_offer(self) -> bool:
+        """True while some offer is not cooling down: an order failure is that offer's, not the pool's."""
+        doc, now = self._doc(), self.clock()
+        return len(self.offers) > 1 and any(not self._cooling(doc, o.key, now) for o in self.offers)
+
+    def offer_of(self, ticket: str) -> str | None:
+        """The offer key cluster ``ticket`` was ordered with (None: not ours)."""
+        return ((self._rows().get(ticket) or {}).get("offer") or {}).get("key")
+
+    def offer_breakers(self) -> dict[str, dict[str, Any]]:
+        return dict(self._doc().get("offers") or {})
 
     def launch_cluster(self, name: str, offer: Offer, *, slot: int, n: int = 0) -> str:
         """Record, then launch cluster ``name`` (``<prefix>-...``) with ``offer``. A raise
@@ -180,11 +214,13 @@ class SkyProvider:
                 left = True
             doc = self._doc()
             doc["cursor"] = (cursor + 1) % len(self.offers)  # the next order tries the next offer
+            self._offer_failed(doc, offer.key)
             doc["clusters"][name].update(launch_failed=True, open=left)
             self._save_doc(doc)
             raise
         doc = self._doc()
         doc["cursor"] = 0  # back to the cheapest offer for the next order
+        (doc.get("offers") or {}).pop(offer.key, None)
         self._save_doc(doc)
         _record_ledger("created", LEDGER_KIND, name, name, offer=offer.key, price_usd_h=offer.price_usd_h,
                        run=self.run_id, slot=slot)
@@ -200,6 +236,14 @@ class SkyProvider:
         if state == INIT:
             ordered = (self._rows().get(ticket) or {}).get("ordered_at")
             if ordered is not None and self.clock() - float(ordered) > self.start_timeout_s:
+                doc = self._doc()
+                row = doc["clusters"].get(ticket) or {}
+                if not row.get("start_timed_out"):  # counted once against its offer
+                    row["start_timed_out"] = True
+                    key = (row.get("offer") or {}).get("key")
+                    if key:
+                        self._offer_failed(doc, key)
+                    self._save_doc(doc)
                 return LeaseStatus("ended", end_reason="lost")  # stuck starting: released, next offer
             return LeaseStatus("waiting")
         return LeaseStatus("ended", end_reason="preempted" if state == STOPPED else state.lower())

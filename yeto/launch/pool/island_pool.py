@@ -269,6 +269,10 @@ class IslandPool:
             ticket = self.ops.order(account)
         except Exception as error:  # noqa: BLE001 - an order failure is counted, never fatal
             self._event("order_failed", account=account, error=repr(error)[:300])
+            fallback = getattr(self.ops, "has_fallback_offer", None)
+            if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
+                self._event("offer_failed", account=account)
+                return None
             self._fail(now, f"order on account {account}")
             return None
         self.next_shard += 1
@@ -868,7 +872,10 @@ class IslandPool:
                          el.RELEASED: "released_by_earlier_pool" if ours else "released_externally",
                          el.BALANCE: "ended_for_balance"}[kind], ticket=m.ticket, account=m.account,
                         shard=m.shard, end_reason=status.end_reason, state_was=m.state)
-            if m.state == PROVISIONING:  # never granted (e.g. lost in provisioning)
+            fallback = getattr(self.ops, "has_fallback_offer", None)
+            if m.state == PROVISIONING and fallback is not None and fallback():
+                self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
+            elif m.state == PROVISIONING:  # never granted (e.g. lost in provisioning)
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
             self._retire(m, kind, lost=True)
             if kind == el.BALANCE:

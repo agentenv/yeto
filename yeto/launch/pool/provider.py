@@ -260,6 +260,14 @@ class ProviderPoolOps:
         except TypeError:
             return rate()
 
+    def has_fallback_offer(self) -> bool:
+        """True when the provider (any provider of a :class:`MultiProvider`) still has
+        an offer that is not cooling down: an order failure is then that offer's, and
+        the pool's breaker does not count it."""
+        provider = self.provider
+        members = provider.providers.values() if isinstance(provider, MultiProvider) else [provider]
+        return any(getattr(p, "has_fallback_offer", lambda: False)() for p in members)
+
     def ready(self, member: Any) -> bool:  # noqa: ARG002 - without a route, active is ready
         return True
 

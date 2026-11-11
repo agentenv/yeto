@@ -230,3 +230,30 @@ def test_the_watchdog_runs_its_loop_over_the_sky_provider(tmp_path):
     assert w.cluster is None and any(e["event"] == "preempted" for e in w.history)
     with pytest.raises(AssertionError):
         ops.down("prod-trainer")  # the own-name guard stays
+
+
+def test_a_failing_offer_cools_down_alone_and_the_pool_breaker_counts_only_without_a_fallback():
+    from yeto.launch.pool.provider import ProviderPoolOps
+
+    t = [1000.0]
+    sky = FakeSky()
+    two = [{"resources": {"infra": "nebius/eu-north1"}, "price_usd_h": 6.32},
+           {"resources": {"infra": "nebius/eu-west1"}, "price_usd_h": 11.2}]
+    p = SkyProvider("run-k", slots=[1, 2], offers=offers.offers_from_config({"offers": two}), sky=sky,
+                    clock=lambda: t[0])
+    sky.fail_launch.add("nebius/eu-north1")
+    with pytest.raises(RuntimeError):
+        p.order(1)
+    assert p.has_fallback_offer() and ProviderPoolOps(p).has_fallback_offer()
+    a = p.order(1)
+    b = p.order(2)  # the cursor is back at the cheapest, but it is cooling: the next offer again
+    assert p.offer_of(a) == p.offer_of(b) == p.offers[1].key
+    assert p.offer_breakers()[p.offers[0].key]["fails"] == 1
+    sky.fail_launch.add("nebius/eu-west1")
+    with pytest.raises(RuntimeError):
+        p.order(1)
+    assert not p.has_fallback_offer()  # every offer cools down: now the pool's breaker counts
+    t[0] += 601
+    sky.fail_launch.clear()
+    c = p.order(1)
+    assert p.offer_of(c) == p.offers[0].key and p.offers[0].key not in p.offer_breakers()
