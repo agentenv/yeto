@@ -141,6 +141,11 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
         raise ValueError(f"samplers[{i}]: data_path {data_path!r} is not one of {DATA_PATHS}")
     if data_path != "r2":
         doc["data_path"] = data_path
+    if data_path == "syncer":
+        if "syncer" not in doc and cfg.get("syncer"):
+            doc["syncer"] = dict(cfg["syncer"])  # the run's syncer (address, key_env) for every pool
+        if not (doc.get("syncer") or {}).get("address"):
+            raise ValueError(f"samplers[{i}]: data_path syncer needs syncer.address (on the pool or the run)")
     if doc == base and path:
         target = path
     else:

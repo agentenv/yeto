@@ -147,7 +147,8 @@ def test_samplers_declarations_are_checked(tmp_path):
     with pytest.raises(ValueError, match="data_path"):
         pools.resolve({"samplers": [{"config": nc_path, "data_path": "s3"}]}, tmp_path)
     with pytest.raises(ValueError, match="one data path per run"):
-        pools.resolve({"samplers": [{"config": nc_path}, {"name": "b", "config": nc_path, "shard_base": "x",
+        pools.resolve({"syncer": {"address": "198.51.100.7:7000"},
+                       "samplers": [{"config": nc_path}, {"name": "b", "config": nc_path, "shard_base": "x",
                                                           "data_path": "syncer"}]}, tmp_path)
     with pytest.raises(ValueError, match="pool config's provider is 'nc'"):
         pools.resolve({"samplers": [{"provider": "sky", "config": nc_path}]}, tmp_path)
@@ -348,3 +349,62 @@ def test_pool_scale_argv_carries_every_flag():
                                  "--drain", "--force-static", "--dry-run", "--source", "auto"])
     assert entry.pool_scale_argv("p", args) == ["pool-scale", "--config", "p", "--remove", "a", "--remove", "b",
                                                 "--drain", "--force-static", "--dry-run", "--source", "auto"]
+
+
+class _NoThread:
+    def __init__(self, target, name=None, daemon=None):
+        self.target = target
+
+    def start(self):
+        pass
+
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return False
+
+
+def test_run_up_in_process_drives_every_pool_in_one_controller(tmp_path, monkeypatch):
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool import controller as ctl  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    run = up.Run(dict(run_cfg, controller="in_process"))
+    assert run.in_process and not up.Run(run_cfg).in_process
+    clock = Clock()
+    ops = {name: ProviderPoolOps(FakeProvider(name, clock), FakeRoute(), FakeFencer()) for name in ("nc", "modal")}
+    c = run.start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert set(c.slots) == {"nc", "modal"} and c in ctl.active()
+        c.tick()
+        st = c.status()["pools"]
+        assert st["nc"]["target"] == 1 and len(st["nc"]["members"]) == 1 and len(st["modal"]["members"]) == 1
+        assert run.breach() is None or "controller" not in run.breach()
+        c.error = RuntimeError("boom")
+        assert "controller thread died" in run.breach()
+        c.error = None
+    finally:
+        c.stop("test")
+    assert c not in ctl.active()
+    with pytest.raises(ValueError, match="controller"):
+        _ = up.Run(dict(run_cfg, controller="threads")).in_process
+
+
+def test_run_up_in_process_refuses_no_monitor(tmp_path, monkeypatch):
+    run_cfg, _, _ = _two_pools(tmp_path)
+    path = tmp_path / "run-ip.json"
+    path.write_text(json.dumps(dict(run_cfg, controller="in_process")))
+    args = _parser().parse_args(["run", "up", "--config", str(path), "--no-monitor"])
+    assert up.main(args) == 2
+
+
+def test_a_run_level_syncer_reaches_every_syncer_pool(tmp_path):
+    base, _ = _cfg(tmp_path)
+    run_cfg = {"run": "run-k", "syncer": {"address": "198.51.100.7:7000", "key_env": "K"},
+               "samplers": [{**base, "provider": "sky", "data_path": "syncer"}]}
+    cfg = pools.resolve(run_cfg, tmp_path / "s")[0].load()
+    assert cfg["syncer"] == {"address": "198.51.100.7:7000", "key_env": "K"}
+    with pytest.raises(ValueError, match="syncer.address"):
+        pools.resolve({"samplers": [{**base, "provider": "sky", "data_path": "syncer"}]}, tmp_path / "t")

@@ -95,7 +95,7 @@ def load_config(path: str) -> dict[str, Any]:
     if "pool" not in cfg and "samplers" not in cfg:
         raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
     known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
-             "dashboard", "budget", "comment"}
+             "dashboard", "budget", "comment", "syncer", "controller"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
@@ -117,6 +117,7 @@ class Run:
         from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
 
         self.pools = resolve(cfg, self.dir)  # the rollout pools (samplers list, or the one pool)
+        self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
 
     # -- state
     def save(self) -> None:
@@ -245,6 +246,11 @@ class Run:
         from yeto.launch.nc import pool_run  # noqa: PLC0415
 
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("YETO_NC_", "NC_"))})
+        if self.in_process:
+            self.start_controller()
+            self.state.setdefault("t0", time.time())
+            self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
+            return
         for i, ref in enumerate(self.pools):
             proc = pool_run.pool_process(ref.load())
             if proc and proc.get("alive"):
@@ -254,6 +260,36 @@ class Run:
                                                         "--interval", str(int(ref.interval_s))))
         self.state.setdefault("t0", time.time())
         self.mark("pool")
+
+    @property
+    def in_process(self) -> bool:
+        """``controller: "in_process"``: every pool in one RolloutController in this
+        process (default ``"subprocess"``: one ``nc pool`` loop per pool)."""
+        mode = str(self.cfg.get("controller") or "subprocess")
+        if mode not in ("subprocess", "in_process"):
+            raise ValueError(f"run config: controller {mode!r} is not 'subprocess' or 'in_process'")
+        return mode == "in_process"
+
+    def start_controller(self, *, ops: dict[str, Any] | None = None, **kw: Any) -> Any:
+        """One :class:`~yeto.launch.pool.controller.RolloutController` over every pool
+        (each built like its ``nc pool`` loop: state, events, scale file, lock), started
+        in a thread of this process. ``ops``: per pool name, for tests."""
+        from yeto.launch.pool.controller import RolloutController, nc_pool  # noqa: PLC0415
+
+        slots = {}
+        try:
+            for ref in self.pools:
+                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name))
+        except BaseException:
+            for slot in slots.values():
+                if slot.lock is not None:
+                    slot.lock.close()
+            raise
+        interval = min(r.interval_s for r in self.pools)
+        self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
+        self.controller.start()
+        _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
+        return self.controller
 
     def _objects(self):
         from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
@@ -423,6 +459,9 @@ class Run:
         the log of the previous, stopped launcher, whose failure is already handled."""
         b = self.cfg.get("budget") or {}
         why = None
+        controller = getattr(self, "controller", None)
+        if controller is not None and controller.check():  # the in-process pools stopped being driven
+            return controller.check()
         if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
             why = "wall clock"
         elif self.spend_usd() > float(b.get("usd", 1e9)):
@@ -848,6 +887,10 @@ def main(args: Any) -> int:
     if args.rl_command in ("pause", "resume"):
         return pause_resume(run, args.rl_command, args.ticket, hold_tasks=getattr(args, "hold_tasks", False),
                             pool=getattr(args, "pool", None), provider=getattr(args, "provider", None))
+    if run.in_process and args.no_monitor:
+        _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
+             "(or set controller: subprocess)")
+        return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
         return 2
