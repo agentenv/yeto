@@ -598,3 +598,77 @@ def test_a_drained_sampler_claims_nothing_new_writes_its_groups_and_answers(path
     mine = sorted(s for s, t in tasks.items() if t["holder"] == "nc-0")
     assert mine == ([0, 1, 4, 5] if lift else [0, 1])
     assert len(path.groups()) == len(mine)  # every group it held reached its sink, nothing else
+
+
+# ------------------------------------------------ WorkContract on both paths
+
+def test_a_group_the_dispenser_no_longer_holds_is_not_written(path):
+    """``still_holds`` is read before every group write (WorkContract)."""
+    class Held:
+        def __call__(self, rollout_id):
+            return [PromptItem(f"row{s}", f"question {s}", metadata={DISPENSE_POSITION_KEY: s}) for s in (0, 1)]
+
+        def still_holds(self, slot):
+            return slot != 1  # slot 1 was given out again (expired / retired)
+
+        def written(self, rollout_id, positions, **kw):
+            self.reported = list(positions)
+            return {}
+
+    prompts = Held()
+    island, _ = _island(path, prompts, num_rollouts=1)
+    island.run()
+    assert [k.rsplit("-", 1)[-1] for k in path.groups()] == ["row0"] and prompts.reported == [0]
+    assert island.round.dropped_groups == 1
+
+
+@pytest.mark.parametrize("why", ["retired", "superseded", "store"])
+def test_a_dispenser_fence_ends_the_incarnation_fenced_without_a_restart(entry_path, tmp_path, monkeypatch, why):
+    """A member retired by the controller or superseded stops for good: the island
+    leaves FENCED and ``run`` returns (a crash would make a supervisor restart it
+    under a new incarnation, which the contract forbids)."""
+    from yeto.rl.engine import task_dispense as td
+
+    path, _ = entry_path
+    error = {"retired": td.DispenseFenced(f"fenced {td.RETIRED_MARK}"),
+             "superseded": td.DispenseFenced(f"fenced {td.SUPERSEDED_MARK}"),
+             "store": td.DispenseFencedEnd("fenced: this incarnation takes no more tasks")}[why]
+    real = entry.build_prompts
+
+    def build_prompts(spec, environ=None):
+        rows = real(spec, environ)
+
+        def prompts(rollout_id):
+            if rollout_id >= 1:
+                raise error
+            return rows(rollout_id)
+
+        prompts.cursor = rows.cursor
+        return prompts
+
+    monkeypatch.setattr(entry, "build_prompts", build_prompts)
+    rounds = entry.run(_spec(tmp_path, path.kind, num_rollouts=5), resource_sampler=lambda emit: None,
+                       incarnation="aaaa0001")
+    assert rounds == 1
+    tape = _tape(tmp_path)
+    (leave,) = [e for e in tape if e["event"] == "rl_sampler_leave"]
+    assert leave["reason"] == "FENCED" and leave["fenced"] == {"store": "dispenser"}.get(why, why)
+    assert "rl_sampler_dispense_fenced" in [e["event"] for e in tape]
+
+
+def test_another_dispenser_error_still_fails_the_island(entry_path, tmp_path, monkeypatch):
+    from yeto.rl.engine import task_dispense as td
+
+    path, _ = entry_path
+
+    def build_prompts(spec, environ=None):
+        def prompts(rollout_id):
+            raise td.DispenseFenced("lease expired")  # not final: the task source rejoins
+
+        return prompts
+
+    monkeypatch.setattr(entry, "build_prompts", build_prompts)
+    with pytest.raises(td.DispenseFenced):
+        entry.run(_spec(tmp_path, path.kind), resource_sampler=lambda emit: None, incarnation="aaaa0001")
+    (leave,) = [e for e in _tape(tmp_path) if e["event"] == "rl_sampler_leave"]
+    assert leave["reason"] == "INFRA_FAILED"

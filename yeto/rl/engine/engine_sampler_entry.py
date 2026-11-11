@@ -607,6 +607,27 @@ def sweep_predecessor(prompts: Any, member_store: Any, predecessor: str, left: b
     return removed
 
 
+def dispense_fence_detail(error: BaseException) -> dict[str, Any] | None:
+    """The FENCED leave detail of a task-dispenser fence that ends this incarnation
+    for good (WorkContract: superseded or retired by the controller; the store
+    ledger's ``DispenseFencedEnd``); None for any other error."""
+    from .task_dispense import (  # noqa: PLC0415
+        DispenseFenced,
+        DispenseFencedEnd,
+        is_retired_by_controller,
+        is_superseded,
+    )
+
+    if isinstance(error, DispenseFencedEnd):
+        return {"fenced": "dispenser", "error": str(error)[:200]}
+    if isinstance(error, DispenseFenced):
+        if is_retired_by_controller(error):
+            return {"fenced": "retired", "error": str(error)[:200]}
+        if is_superseded(error):
+            return {"fenced": "superseded", "error": str(error)[:200]}
+    return None
+
+
 def predecessor_entries_of(buffer: Any, predecessor: str) -> list[Any]:
     """The predecessor shard's index entries (the data path's ``shard_entries``; an
     older sink: its store's shard index)."""
@@ -809,13 +830,26 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         if predecessor and not resume.resumed:  # a fresh replacement: continue the predecessor's prompts
             start = continue_predecessor(data_path, spec, prompts, str(predecessor), config.sampler_id, emit,
                                          environ=env)
-        rounds = 0 if buffer.data_ended else island.run(start)
+        dispense_fence = None
+        try:
+            rounds = 0 if buffer.data_ended else island.run(start)
+        except BaseException as error:
+            dispense_fence = dispense_fence_detail(error)
+            if dispense_fence is None:
+                raise
+            # WorkContract: a member fenced as superseded or retired by the controller
+            # stops for good (it leaves FENCED and the process ends cleanly, so no
+            # supervisor restarts it into a new incarnation)
+            print(f"[engine-sampler] the task dispenser fenced this incarnation: {error}", flush=True)
+            emit("rl_sampler_dispense_fenced", **dispense_fence)
+            rounds = int(getattr(island.loop, "rounds_done", 0))
         if handed_off() and not buffer.data_ended and not reclaimed():
             # a successor continues the prompts in its own shard: this shard gets no more
             # groups, so it ends (the trainer's merged index ends once every shard has)
             buffer.mark_data_end()
         preempted = reclaimed()
         fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
+            else (LeaveReason.FENCED, dispense_fence) if dispense_fence is not None \
             else None if stop_reason is None else stop_reason()
         if fence is not None:  # E.g. FENCED, fenced="other run"
             reason, detail = fence
