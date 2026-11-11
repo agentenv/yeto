@@ -578,7 +578,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
                 _retry_in_loop(pool, config_path)
             pool.save(state)
             if signals.name is None and not stop_path(cfg).exists():
-                signals.wake.wait(interval)
+                pool.wait(signals.wake, interval)  # a pause / resume / scale ends it at once
             if signals.name is not None or stop_path(cfg).exists():
                 why = f"signal {signals.name}" if signals.name else "pool-stop requested"
                 _say(f"pool: {why}: draining every node")
@@ -842,7 +842,7 @@ MANUAL_KEYS = ("paused", "hold_tasks", "manual_released", "manual_at")
 def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, resume: bool = False,
                hold_tasks: bool = False) -> int:
     """``pool-pause --ticket T [--hold-tasks]`` / ``pool-resume --ticket T``: recorded in the
-    control file; the loop applies it at its next tick (and after a restart). A paused
+    control file; the running loop applies it within about a second (and after a restart). A paused
     member gets no automatic action and counts toward the target."""
     name = "pool-resume" if resume else "pool-pause"
     state = cli.pool_state_path(cfg)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 
 import pytest
 
@@ -310,3 +311,57 @@ def test_a_paused_node_that_the_platform_reclaims_is_replaced(tmp_path):
     assert node.state == GONE and not node.paused and len(cloud.kinds("order")) == orders + 1
     assert _events(pool, "manual_pause_ended")
     assert any(m.state in (READY, STARTING) and m.ticket != node.ticket for m in pool.members)
+
+
+# -- pause / resume take effect at once and are not crashes -------------------------
+
+def test_a_pause_written_during_a_tick_holds_before_any_restart(tmp_path):
+    cfg, path, clock, cloud, pool = _elastic(tmp_path, target=2)
+    node = _ready(pool)[0]
+    restarts = len(cloud.kinds("restart"))
+    cloud.tickets[node.ticket].update(sampler="exited", exit=137)  # a person stops its container
+    balance = pool.ops.balance
+
+    def pause_mid_tick():  # the control file read at the tick start missed the pause
+        assert pool_run.pause_pool(cfg, path, [node.ticket]) == 0
+        return balance()
+
+    pool.ops.balance = pause_mid_tick
+    pool.tick()
+    pool.ops.balance = balance
+    assert node.paused and len(cloud.kinds("restart")) == restarts
+    _run(pool, clock, clock.t + 600)
+    assert len(cloud.kinds("restart")) == restarts
+
+
+def test_the_wait_between_ticks_ends_when_the_control_file_changes(tmp_path):
+    cfg, path, _clock, _cloud, pool = _elastic(tmp_path, target=1)
+    node = _ready(pool)[0]
+    pool.tick()
+    timer = threading.Timer(0.1, lambda: pool_run.pause_pool(cfg, path, [node.ticket]))
+    timer.start()
+    began = time.monotonic()
+    woken = pool.wait(threading.Event(), 30.0, poll_s=0.02)
+    timer.join()
+    assert not woken and time.monotonic() - began < 5
+    pool.tick()
+    assert node.paused
+    assert pool.wait(threading.Event(), 0.05, poll_s=0.01) is False  # nothing changed: the full wait
+
+
+def test_pause_resume_restarts_are_not_a_crash_loop(tmp_path):
+    cfg, path, clock, cloud, pool = _elastic(tmp_path, target=1)
+    node = _ready(pool)[0]
+    for _ in range(pool.ecfg.max_sampler_restarts + 2):
+        assert pool_run.pause_pool(cfg, path, [node.ticket]) == 0
+        pool.tick()
+        cloud.tickets[node.ticket].update(sampler="exited", exit=137)  # docker stop during the pause
+        _run(pool, clock, clock.t + 300)
+        assert pool_run.pause_pool(cfg, path, [node.ticket], resume=True) == 0
+        _run(pool, clock, clock.t + 1800)
+        assert node.state == READY and node.restarts == 0
+    assert not _events(pool, "sampler_crash_loop")
+    assert all(m.ticket == node.ticket for m in pool.live())  # no replacement node
+    cloud.tickets[node.ticket].update(sampler="exited", exit=1)  # a real crash still counts
+    _run(pool, clock, clock.t + 60)
+    assert node.restarts == 1
