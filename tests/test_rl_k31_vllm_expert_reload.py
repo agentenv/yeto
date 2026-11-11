@@ -135,3 +135,20 @@ def test_a_release_that_is_not_an_overlay_restarts_and_resumes_after_a_failed_rp
     with pytest.raises(Exception, match="collective_rpc"):
         engine.load(overlay, 2)
     assert [p for m, p, b in http.calls if m == "POST"][-1] == "/resume"
+
+
+def test_reload_hands_freed_staging_blocks_back_to_the_device():
+    calls = []
+
+    class _Cuda:
+        def synchronize(self):
+            calls.append("synchronize")
+
+        def empty_cache(self):
+            calls.append("empty_cache")
+
+    class _Torch:
+        cuda = _Cuda()
+
+    ver.release_cached_memory(_Torch())
+    assert calls == ["synchronize", "empty_cache"]

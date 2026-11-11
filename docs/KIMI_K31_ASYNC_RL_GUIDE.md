@@ -506,7 +506,7 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `engine.server.base_dir` | Local path of the MXFP4 checkpoint on the node. |
 | `engine.server.max_model_len` | Engine context length. |
 | `engine.server.extra_args` | Extra engine flags. They come after the preset's flags and take precedence. |
-| `engine.options.k31_preset` | Serving preset (`amd-article`, `rl-precision`, `vllm-recipe`, `rl-precision-cuda`). The ROCm presets set `--gpu-memory-utilization 0.88`. |
+| `engine.options.k31_preset` | Serving preset (`amd-article`, `rl-precision`, `vllm-recipe`, `rl-precision-cuda`). The ROCm presets set `--gpu-memory-utilization 0.84` and refuse a value above 0.86 (`engine.options.allow_high_gpu_memory` overrides). |
 | `engine.options.tp`, `max_num_seqs` | Tensor parallel degree and concurrent sequences per engine. |
 | `sampling.n` | Samples per prompt (group size). |
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
@@ -518,10 +518,15 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 
 **GPU memory utilization.** To change it, add the flag to
 `engine.server.extra_args`, for example
-`["--gpu-memory-utilization", "0.85"]`.
-Recommended practice: keep the preset's 0.88 on MI355X TP8. The collectives'
-scratch memory lives outside vLLM's budget, and the preset keeps that
-headroom free.
+`["--gpu-memory-utilization", "0.82"]`.
+Recommended practice: keep the preset's 0.84 on MI355X TP8. Measured on an
+agentic CyberGym sampler (TP8, R3, top-128 log-probs, 20 trials in flight):
+at 0.88 each GPU started at 256 GiB and grew to 275 GiB of 288 (95.5%)
+within 30 minutes, outside vLLM's budget, at both `max_model_len` 262144 and
+1048576; an in-place expert reload stages experts on top of that. The
+sampler refuses a value above 0.86 unless
+`engine.options.allow_high_gpu_memory` is set. At 0.84 the KV cache still
+holds about 2.5M tokens, far more than 20 agentic trials of 32K tokens use.
 
 ## 4. Launch
 

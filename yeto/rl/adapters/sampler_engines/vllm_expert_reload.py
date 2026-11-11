@@ -270,6 +270,15 @@ def fingerprint(tensor: Any) -> str:
     return f"{int(acc_sum) & (2**64 - 1):016x}{int(acc_xor) & (2**64 - 1):016x}:{data.numel()}"
 
 
+def release_cached_memory(torch: Any) -> None:
+    """Hand the reload's freed staging / conversion blocks back to the device: they
+    stay in the caching allocator otherwise, outside vLLM's budget, and the serving
+    path then has that much less room to grow (a TP8 MI355X sampler serves at ~95%
+    of HBM at --gpu-memory-utilization 0.88)."""
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
+
 class K31ExpertReloadExtension:
     """Mixed into vLLM's GPU worker (``--worker-extension-cls``); methods are
     called on every rank by ``collective_rpc``. Only str arguments arrive over
@@ -310,7 +319,7 @@ class K31ExpertReloadExtension:
                     experts += len(entry["experts"])
         finally:
             handles.clear()
-        torch.cuda.synchronize()
+            release_cached_memory(torch)
         for reset in ("reset_encoder_cache", "reset_mm_cache"):
             hook = getattr(self.model_runner, reset, None)
             if callable(hook):

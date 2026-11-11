@@ -160,10 +160,19 @@ R3_CP_RULE = ("vLLM refuses --enable-return-routed-experts with context parallel
 #   (image vllm/vllm-openai:kimi-k31): plain TP8, text only, fastsafetensors load;
 # * ``rl-precision-cuda`` (cuda): that baseline with the FP32 KDA recurrent state.
 #
-# --gpu-memory-utilization 0.88 (was 0.92): at 0.92 an MI355X TP8 sampler ran its GPUs at
-# 99% and an RCCL kernel launch then failed (HSA_STATUS_ERROR_OUT_OF_RESOURCES, "Available
-# Free mem : 0 MB"), hanging the engine with its container still up; the collectives'
-# scratch lives outside vLLM's budget, so the presets keep that headroom free.
+# --gpu-memory-utilization 0.84 (was 0.88, before that 0.92): at 0.92 an MI355X TP8 sampler ran
+# its GPUs at 99% and an RCCL kernel launch then failed (HSA_STATUS_ERROR_OUT_OF_RESOURCES,
+# "Available Free mem : 0 MB"), hanging the engine with its container still up. At 0.88
+# (253 of 288 GiB) a K3.1 agentic sampler (TP8, R3, top-128 log-probs, max_model_len 262144
+# and 1048576) started at 256 GiB per GPU and grew in ~3.5 GiB steps to 275 GiB (95.5%) within
+# 30 minutes of serving, outside vLLM's budget (allocator growth of the serving path, the
+# collectives' scratch); an in-place expert reload then stages each layer's released experts
+# and their kernel-format copy on the same GPUs, the margin a 0.88 run lost (99.8% and a
+# killed sampler). 0.84 keeps ~11 GiB more free and still leaves a 2.4M+ token KV cache.
+# A --gpu-memory-utilization above K31_ROCM_MAX_GPU_MEMORY_UTILIZATION is refused on the
+# ROCm presets (VllmOptions.allow_high_gpu_memory overrides it).
+K31_ROCM_GPU_MEMORY_UTILIZATION = "0.84"
+K31_ROCM_MAX_GPU_MEMORY_UTILIZATION = 0.86
 #
 # VLLM_USE_BREAKABLE_CUDAGRAPH (prefill graphs) is left out with the capture list: its
 # graph memory comes out of the KV cache (the recipe's 2..576 list did not start).
@@ -172,7 +181,7 @@ _K31_ROCM_LAYOUT = ("--language-model-only", "--dcp-comm-backend", "a2a", "--cp-
                     "--kv-cache-dtype", "fp8", "--enable-prefix-caching", "--prefix-match-unit", "64",
                     "--attention-config", '{"indexer_kv_dtype":"mxfp4","mla_prefill_backend":"ROCM_AITER_FA"}',
                     "--additional-config", '{"kda_prefill_backend":"fused"}',
-                    "--max-num-batched-tokens", "10240", "--gpu-memory-utilization", "0.88")
+                    "--max-num-batched-tokens", "10240", "--gpu-memory-utilization", K31_ROCM_GPU_MEMORY_UTILIZATION)
 _K31_ROCM_ENV = {"VLLM_ROCM_DCP_AITER_ALLGATHER": "1", "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": "1",
                  "AITER_FLYDSL_SPARSE_MLA": "1"}
 K31_PRESETS: dict[str, dict[str, Any]] = {
@@ -213,6 +222,18 @@ def flag_values(args: Sequence[str], flags: Sequence[str]) -> list[tuple[int, in
             i += 1 if has_value else 0
         i += 1
     return out
+
+
+def gpu_memory_utilization(args: Sequence[str]) -> float | None:
+    """The ``--gpu-memory-utilization`` vLLM's argparse takes from ``args`` (the last one)."""
+    found = flag_values(args, ("--gpu-memory-utilization",))
+    if not found:
+        return None
+    value = found[-1][3]
+    try:
+        return float(value)
+    except ValueError:
+        raise SamplerEngineError(f"vllm-server: --gpu-memory-utilization {value!r} is not a number") from None
 
 
 def _size(value: str, flag: str) -> int:
@@ -256,6 +277,8 @@ class VllmOptions:
     max_num_seqs: int | None = None  # measured with 8 / 32 / 64
     served_model_name: str = "yeto-policy"
     allow_eager: bool = False
+    # refuse nothing for a --gpu-memory-utilization above the ROCm presets' ceiling
+    allow_high_gpu_memory: bool = False
     # score_centering: K top candidates per response token (``logprobs: K``; 0: the
     # sampled token only). On the upstream line the server's --max-logprobs follows K.
     top_logprobs_num: int = 0
@@ -410,6 +433,15 @@ class VllmServerEngine(ServerEngine):
         if upstream and "--hf-overrides" in config.extra_args:
             raise SamplerEngineError("vllm-server: give --hf-overrides as VllmOptions.hf_overrides (merged with "
                                      "the fp32 head into one flag), not in extra_args")
+        if self.preset.get("platform") == "rocm" and not options.allow_high_gpu_memory:
+            gmu = gpu_memory_utilization([*(self.preset.get("args") or ()), *config.extra_args])
+            if gmu is not None and gmu > K31_ROCM_MAX_GPU_MEMORY_UTILIZATION:
+                raise SamplerEngineError(
+                    f"vllm-server: --gpu-memory-utilization {gmu} on the ROCm K3.1 preset "
+                    f"{options.k31_preset!r} is above {K31_ROCM_MAX_GPU_MEMORY_UTILIZATION}: a TP8 MI355X sampler "
+                    f"grows ~20 GiB per GPU past vLLM's budget while it serves and an in-place reload stages "
+                    f"experts on top of that (0.88 reached 95.5% before any reload); use the preset's "
+                    f"{K31_ROCM_GPU_MEMORY_UTILIZATION} or set engine.options.allow_high_gpu_memory")
         self.cp_overrides: list[dict[str, Any]] = self._r3_cp_overrides() if upstream else []
         if upstream and options.return_routed_experts:
             self._check_r3_layout()
