@@ -319,6 +319,16 @@ class IslandPool:
         elif outcome == "tripped":
             self._event("breaker_tripped", after=what, trips=self.breaker.trips)
 
+    def _usd_per_h(self, m: Member) -> float | None:
+        """One machine hour of ``m`` in USD from its provider's ``hourly_cost`` (the
+        dashboard prices the node with it; None: the provider states no rate)."""
+        rate = getattr(self.ops, "hourly_cost", None)
+        try:
+            value = rate(m) if rate is not None else None
+            return None if value is None else round(money.to_usd(float(value), money.currency_of(self.ops, m)), 6)
+        except Exception:  # noqa: BLE001 - the dashboard falls back to its price table
+            return None
+
     def _charge(self, m: Member, now: float) -> None:
         if m.granted is None:
             return
@@ -965,7 +975,8 @@ class IslandPool:
                 self._event("member_ready", ticket=m.ticket, account=m.account, shard=m.shard,
                             order_to_ready_s=round(now - m.created),
                             grant_to_ready_s=None if m.granted is None else round(now - m.granted),
-                            restarts=m.restarts, continues_shard=m.replaces_shard)
+                            restarts=m.restarts, continues_shard=m.replaces_shard,
+                            usd_per_h=self._usd_per_h(m))
             elif m.started is not None and now - m.created > cfg.start_timeout_s:
                 self._event("start_timeout", ticket=m.ticket, shard=m.shard, waited_s=round(now - m.created))
                 self._fail(now, f"sampler on {m.ticket} not up")

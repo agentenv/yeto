@@ -50,7 +50,7 @@ POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
 POOL_KEYS = ("ticket", "account", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
-             "by")
+             "by", "usd_per_h")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
@@ -193,6 +193,13 @@ class AsyncState:
                                "resolve_s": _f(ft.get("resolve_s")), "load_s": _f(ft.get("load_s")),
                                "pause_s": _f(r.get("pause_s")), "buffer_selected": r.get("buffer_selected"),
                                "load_wall_s": round(ts - seen, 3) if ts is not None and seen is not None else None})
+        elif ev == "rl_sampler_start_on_latest" and r.get("base_version") is not None:
+            # a new or replacement island starts on the newest release: a load of that
+            # version (at start, not a hot reload), so the release row shows the island
+            self.loads.append({"sampler": iid, "policy_version": _int(r.get("base_version")), "seq": None,
+                               "released_at": None, "seen_at": None, "loaded_at": ts, "resolve_s": None,
+                               "load_s": None, "pause_s": None, "buffer_selected": None, "load_wall_s": None,
+                               "at_start": True})
         elif ev in ("rl_sampler_backlog_full", "rl_sampler_admitted"):
             b = _f(r.get("backlog_groups"))
             if ts is not None and b is not None:
@@ -485,8 +492,9 @@ class AsyncState:
             rel = row.get("released_at")
             row["loads"][ld["sampler"]] = {
                 "loaded_at": ld["loaded_at"], "seen_at": ld["seen_at"], "load_wall_s": ld["load_wall_s"],
-                "resolve_s": ld["resolve_s"], "load_s": ld["load_s"],
-                "latency_s": round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None else None}
+                "resolve_s": ld["resolve_s"], "load_s": ld["load_s"], "at_start": bool(ld.get("at_start")),
+                "latency_s": (round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None
+                              and not ld.get("at_start") else None)}
         return [by_v[k] for k in sorted(by_v, key=lambda v: (v is None, v if isinstance(v, int) else 0))]
 
 

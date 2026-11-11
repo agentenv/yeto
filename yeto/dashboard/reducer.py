@@ -1163,8 +1163,12 @@ class Reducer:
             if self.async_.role(iid) == "sampler":
                 prov = (self.async_.sampler.get(iid) or {}).get("provenance") or {}
                 m = re.search(r"tp(\d+)", str(prov.get("topology") or ""))
-                hw = {"cloud": "nc" if iid in pool_shards else None, "gpu": prov.get("card_model"),
-                      "gpus": int(m.group(1)) if m else None}
+                gpus = int(m.group(1)) if m else None
+                nc = iid in pool_shards
+                if nc:  # an NC node is billed whole, whatever the engine's TP uses of it
+                    seen = len((isl.get("resource") or {}).get("gpus") or ())
+                    gpus = max(gpus or 0, seen or NC_NODE_GPUS)
+                hw = {"cloud": "nc" if nc else None, "gpu": prov.get("card_model"), "gpus": gpus}
             elif isl["launch"] is not None or isl.get("gpu_mem_total_mb"):
                 per_node, mem = isl.get("gpus_per_node"), isl.get("gpu_mem_total_mb")
                 hw = {"cloud": "modal" if "-modal-" in f"-{isl['launch'] or ''}" else None,
@@ -1425,6 +1429,7 @@ def _recovered_after(isl: dict) -> bool:
 
 
 # per-GPU memory (NVML mem_total_mb) -> accelerator model, largest first
+NC_NODE_GPUS = 8  # a National Compute sampler node (yeto.launch.nc.client.hourly_cost_ucr)
 _GPU_BY_MEM = ((250_000, "B300"), (170_000, "B200"), (130_000, "H200"), (75_000, "H100"))
 
 
