@@ -16,7 +16,7 @@ from yeto.protocol import (
     FinalManifest,
     PullRequest,
 )
-from yeto.tensor_io import pack_tensor
+from yeto.tensor_io import fragment_flat, pack_tensor
 
 
 class _TerminalClient:
@@ -81,10 +81,11 @@ class _TerminalClient:
             },
             "must fit the protocol c_steps u32",
         ),
-        ({"tuning": "full"}, "requires --tuning lora"),
+        ({"tuning": "full", "shard": "fsdp"}, "requires --shard ddp"),
+        ({"tuning": "qlora"}, "unknown --tuning"),
     ],
 )
-def test_budget_mode_is_limited_to_replicated_adapter_benchmarks(
+def test_budget_mode_is_limited_to_replicated_trainable_state(
     overrides, message
 ):
     values = {
@@ -101,6 +102,15 @@ def test_budget_mode_is_limited_to_replicated_adapter_benchmarks(
 
 
 def test_budget_mode_accepts_only_the_explicit_supported_shape():
+    validate_learner_budget_args(
+        SimpleNamespace(
+            learner_budget_steps=4,
+            max_local_steps=4,
+            syncer="host:29400",
+            tuning="full",
+            shard="ddp",
+        )
+    )
     for shard in ("ddp", "fsdp"):
         validate_learner_budget_args(
             SimpleNamespace(
@@ -173,3 +183,53 @@ def test_terminal_tape_requires_every_budgeted_learner_and_fragment(tmp_path):
         validate_consolidation_tape(
             tape, cutoff_step=8, fragments=2, learners=2, budget_steps=4
         )
+
+
+class _FullParameterClient(_TerminalClient):
+    """One fragment carrying every parameter of a full-tuning learner."""
+
+    def __init__(self, params, base, final):
+        self.params = params
+        self.report = None
+        self.push = None
+        self.ack = None
+        self._final = final
+        self._updates = [BcastFragment(0, 7, pack_tensor(base, DTYPE_F32))]
+        self._pulls = [PullRequest(0, 11, 1)]
+
+    def push_fragment(self, *args):
+        self.push = args
+
+    def wait_for_final_fragments(self):
+        return FinalManifest(11, (11,)), [
+            FinalFragment(0, 11, pack_tensor(self._final, DTYPE_F32))
+        ]
+
+
+def test_budget_helper_consolidates_every_parameter_of_a_full_tuning_learner():
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.LayerNorm(4))
+    params = {name: p for name, p in model.named_parameters()}
+    layout = build_layout([(n, p.numel()) for n, p in params.items()], 1)
+    frozen = fragment_flat(layout.fragments[0], params).detach().clone()
+    base = torch.linspace(-1.0, 1.0, frozen.numel())
+    final = torch.arange(frozen.numel(), dtype=torch.float32)
+    client = _FullParameterClient(params, base, final)
+
+    with torch.no_grad():
+        finalize_learner_budget(
+            client,
+            layout,
+            params,
+            rank=0,
+            world=1,
+            device=torch.device("cpu"),
+            target_steps=4,
+            units=64,
+        )
+
+    payload = client.push[-1]
+    delta = torch.frombuffer(bytearray(payload), dtype=torch.float32)
+    assert torch.allclose(delta, frozen - base)
+    assert torch.equal(fragment_flat(layout.fragments[0], params), final)
+    assert {name for name, _ in layout.fragments[0].tensors} == set(params)

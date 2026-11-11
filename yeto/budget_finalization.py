@@ -1,4 +1,5 @@
-"""Exact learner-budget consolidation for replicated torch trainable state."""
+"""Exact learner-budget consolidation for replicated torch trainable state
+(LoRA adapters, or every parameter of a DDP full-tuning learner)."""
 
 from __future__ import annotations
 
@@ -62,8 +63,12 @@ def validate_learner_budget_args(args) -> None:
         raise ValueError("--learner-budget-steps must equal --max-local-steps")
     if target > 0xFFFF_FFFF:
         raise ValueError("--learner-budget-steps must fit the protocol c_steps u32")
-    if args.tuning != "lora":
-        raise ValueError("--learner-budget-steps requires --tuning lora")
+    if args.tuning not in ("lora", "full"):
+        raise ValueError(f"unknown --tuning {args.tuning!r}")
+    if args.tuning == "full" and getattr(args, "shard", "ddp") == "fsdp":
+        # The consolidation reads and writes every synced tensor on each rank;
+        # fsdp+full holds parameter shards (and has no full-parameter sync).
+        raise ValueError("--learner-budget-steps with --tuning full requires --shard ddp")
 
 
 def finalize_learner_budget(

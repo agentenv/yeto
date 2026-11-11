@@ -270,7 +270,7 @@ def test_a_trainer_may_sync_a_sampler_may_not():
 
 @pytest.mark.parametrize("kw,islands,message", [
     ({}, 1, "at least two islands"),
-    ({"tuning": "full"}, 2, "--tuning lora"),
+    ({"tuning": "full"}, 2, "--tuning full needs --rl-sync-preset full-parameter"),
 ])
 def test_synced_trainer_refusals(kw, islands, message):
     with pytest.raises(ValueError, match=message):
