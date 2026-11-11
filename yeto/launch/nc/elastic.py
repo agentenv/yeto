@@ -185,7 +185,8 @@ class ElasticConfig:
     is (None: off). A stalled engine is fenced and restarted in place; after
     ``max_stall_restart_failures`` restarts in a row with no token progress
     between them the node is retired. Recovery: ``max_sampler_restarts`` in-place restarts of a
-    crashed sampler on a reachable node before the node is replaced;
+    crashed sampler on a reachable node before the node is replaced (the count restarts at the
+    node's first join, at a ``pool-retry``, and after ``sampler_restart_reset_s`` healthy);
     ``start_timeout_s`` from the order to a joined sampler (model pull + engine
     start); ``overdue_grace_s`` past ``lease_until`` before the patrol deletes a
     ticket still ``active``; ``lost_handoff_wait_s``: how long a replacement of a
@@ -202,6 +203,10 @@ class ElasticConfig:
     metrics_port: int | str | None = "spec"
     max_stall_restart_failures: int = 3
     max_sampler_restarts: int = 2
+    # a sampler that ran this long since it joined starts a fresh restart count when it
+    # crashes (None: the count never resets); restarts before the node's first join and
+    # before a pool-retry never count
+    sampler_restart_reset_s: float | None = 1800.0
     start_timeout_s: float = 3600.0
     overdue_grace_s: float = 0.0
     lost_handoff_wait_s: float = 60.0
@@ -226,6 +231,8 @@ class ElasticConfig:
                      "lost_handoff_wait_s", "breaker_cooldown_s", "breaker_max_cooldown_s"):
             if float(getattr(cfg, name)) < 0:
                 raise ValueError(f"elastic config: {name} must be >= 0")
+        if cfg.sampler_restart_reset_s is not None and float(cfg.sampler_restart_reset_s) < 0:
+            raise ValueError("elastic config: sampler_restart_reset_s must be >= 0 (or null: never reset)")
         if cfg.engine_stall_s is not None and float(cfg.engine_stall_s) <= 0:
             raise ValueError("elastic config: engine_stall_s must be > 0 (or null: off)")
         if isinstance(cfg.metrics_port, str) and cfg.metrics_port != "spec":
