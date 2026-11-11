@@ -272,6 +272,11 @@ class Run:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
                 return False
+            problem = self.rollout_fields_problem(i)
+            if problem is not None:
+                _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
+                self.mark("preflight", ok=False)
+                return False
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
@@ -658,6 +663,41 @@ class Run:
                     f"{' ...' if len(missing) > 5 else ''}: those nodes' groups would never be trained on")
         return None
 
+    def _trainer_flag(self, name: str) -> str | None:
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        value = None
+        for i, a in enumerate(argv):
+            if a == name and i + 1 < len(argv):
+                value = argv[i + 1]
+            elif a.startswith(name + "="):
+                value = a.split("=", 1)[1]
+        return value
+
+    def rollout_fields_problem(self, pool: int = 0) -> str | None:
+        """A trainer with ``--rl-loss score_centering`` trains on the rollout top-K
+        log-probs, which the sampler records only with ``rollout_fields.top_logprobs_num``
+        (K, ``--rl-rollout-top-logprobs-num``, default 128) in its spec. Without it the
+        dry-runs pass and the trainer dies on its first group (Miles: "Rollout top-k
+        logprobs collection requires rollout_topk_token_ids") after the islands bill."""
+        if self._trainer_flag("--rl-loss") != "score_centering":
+            return None
+        from yeto.rl.algos.score_centering import DEFAULT_TOP_LOGPROBS  # noqa: PLC0415
+
+        want = int(self._trainer_flag("--rl-rollout-top-logprobs-num") or DEFAULT_TOP_LOGPROBS)
+        pool_cfg = self.pools[pool].load()
+        if not pool_cfg.get("spec"):
+            return None
+        try:
+            spec = json.loads(Path(os.path.expanduser(str(pool_cfg["spec"]))).read_text())
+        except (OSError, ValueError):
+            return None  # the pool dry-run reports an unreadable spec
+        have = int(((spec.get("rollout_fields") or {}) if isinstance(spec, dict) else {}).get("top_logprobs_num") or 0)
+        if have != want:
+            return (f"the trainer's --rl-loss score_centering trains on the rollout top-{want} log-probs but the "
+                    f"sampler spec {pool_cfg['spec']} has rollout_fields.top_logprobs_num {have or 'unset'}: "
+                    f"set it to {want} (the trainer would fail on its first group)")
+        return None
+
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
         template value) with a price set, so the first estimated dollar is a breach."""
@@ -984,6 +1024,18 @@ def _worker_alive(run: str) -> bool:
 
 
 def _alive(pid: Any) -> bool:
+    """``pid`` runs. A child of this process that exited is reaped here first: ``run up``
+    starts the trainer with Popen and never waits on it, so the finished launcher stays
+    a zombie, which ``kill(pid, 0)`` reports alive (the trainer's end was never seen:
+    no ``release_nc_on_finish`` down, the sampler islands kept billing)."""
+    try:
+        done, _status = os.waitpid(int(pid), os.WNOHANG)
+        if done:
+            return False
+    except ChildProcessError:
+        pass  # not a child of this process (an adopted run): kill 0 below
+    except (ValueError, TypeError, OverflowError):
+        return False
     try:
         os.kill(int(pid), 0)
     except (ProcessLookupError, ValueError, TypeError):

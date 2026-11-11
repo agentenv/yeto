@@ -1,5 +1,5 @@
 """Daytona lease provider: sampler nodes as Daytona GPU sandboxes (AMD MI355X,
-spot), behind the same :class:`~.provider.LeaseProvider` contract as National
+spot), behind the same :class:`~yeto.launch.pool.provider.IslandProvider` contract as National
 Compute. The pool policy (eviction handling, fencing, claim release, refill,
 budget, breaker, patrol) is unchanged; only the supply differs.
 
@@ -103,8 +103,8 @@ from pathlib import Path
 from typing import Any
 
 from ..pool.provider import ProviderCaps
+from ..pool.status import LeaseStatus
 from .client import NodeLease
-from .elastic import LeaseStatus
 from .tunnel import state_dir
 
 SSH_HOST = "ssh.app.daytona.io"
@@ -283,7 +283,7 @@ class DaytonaProvider:
                                   gpu_type=[sdk.GpuType(self.gpu_type)])
         return sdk.CreateSandboxFromImageParams(image=self.image, resources=resources, **common)
 
-    # -- LeaseProvider
+    # -- IslandProvider
     def order(self, account: int) -> str:
         client = self.client  # a missing key fails here, before anything is recorded
         with self._lock:

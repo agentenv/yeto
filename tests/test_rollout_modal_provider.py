@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.launch.nc import cli, elastic as el, pool_run, provider as prov
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc import cli, pool_run, provider as prov
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 from yeto.launch.nc.modal_provider import (FAILED, RUNNING, SUCCEEDED, ModalPoolOps, ModalProvider, ModalSdkClient,
                                            from_config, offline_problems, store_env)
 
@@ -190,9 +192,9 @@ def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
     ops2, client2, _ = _ops(tmp_path / "b")
     client2.report_ready = None
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
-    pool = LeasePool(PoolConfig(target=1, accounts=[1], shard_base="m", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=1, start_timeout_s=600)),
-                     ops2, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=1, start_timeout_s=600)),
+                      ops2, clock=clock, log=lambda m: None, events=events)
     ops2.start_in_background = False
     for _ in range(14):
         pool.tick()
@@ -270,9 +272,9 @@ def test_a_sampler_that_finished_ends_the_pool_without_a_refill(tmp_path):
     clock = lambda: t[0]  # noqa: E731
     ops, client, _ = _ops(tmp_path)
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
-    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
+                      ops, clock=clock, log=lambda m: None, events=events)
     ops.start_in_background = False
     for _ in range(3):
         pool.tick()
@@ -325,9 +327,9 @@ def test_pool_over_modal_refills_a_lost_island_and_scales_down(tmp_path):
     clock = lambda: t[0]  # noqa: E731
     ops, client, store = _ops(tmp_path)
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
-    pool = LeasePool(PoolConfig(target=2, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=5)),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=2, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=5)),
+                      ops, clock=clock, log=lambda m: None, events=events)
     ops.start_in_background = False  # deterministic: start inside the tick
     for _ in range(6):
         pool.tick()
@@ -366,9 +368,9 @@ def test_a_retired_modal_island_drains_then_fences_then_stops(tmp_path):
     ops._store = store
     ops.start_in_background = False
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
-    pool = LeasePool(PoolConfig(target=2, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(scale_drain_timeout_s=3600)),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=2, accounts=[1, 2, 3], shard_base="m", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0, elastic=el.ElasticConfig(scale_drain_timeout_s=3600)),
+                      ops, clock=clock, log=lambda m: None, events=events)
     for _ in range(4):
         pool.tick()
         t[0] += 60

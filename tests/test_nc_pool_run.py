@@ -14,7 +14,7 @@ import pytest
 
 from tests.test_nc_elastic import Clock, Cloud, _pool, _ready_member
 from yeto.launch.nc import cli, pool_run
-from yeto.launch.nc.lease_pool import GONE
+from yeto.launch.pool.island_pool import GONE
 
 
 @pytest.fixture(autouse=True)

@@ -317,7 +317,7 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
     """The pool ``python -m yeto.launch.nc pool --config <pool.json>`` runs, built the
     same way (state file restored, event log, scale control file, the pool lock) for a
     :class:`RolloutController`. Raises ``SystemExit`` when another loop holds the lock."""
-    from ..nc import cli, elastic, pool_run  # noqa: PLC0415
+    from ..nc import cli, pool_run  # noqa: PLC0415
 
     external = not pool_run.is_national_compute(cfg)
     pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
@@ -329,8 +329,7 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         if held is None:
             raise SystemExit(f"pool {cfg['shard_base']}: another instance holds {pool_run.lock_path(cfg)}; "
                              f"stop it with: {pool_run.stop_command(config_path)}")
-    hook = elastic.command_hook(cfg["event_command"]) if cfg.get("event_command") else None
-    events = elastic.EventLog(path=cli.pool_events_path(cfg), run=cli.run_id(cfg), log=cli._log, hook=hook)  # noqa: SLF001
+    events = pool_run.event_log(cfg)
     state = cli.pool_state_path(cfg)
     pool = IslandPool.restore(state, pc, ops if ops is not None else cli.pool_ops(cfg), log=cli._log,  # noqa: SLF001
                               events=events)

@@ -2,8 +2,7 @@
 
 :class:`IslandPool` keeps ``target`` samplers ("islands") writing one buffer, on
 machines a provider (:mod:`yeto.launch.pool.provider`) supplies. It was written as
-the National Compute lease pool and keeps every behaviour of it
-(``yeto.launch.nc.lease_pool.LeasePool`` is this class):
+the National Compute lease pool and keeps every behaviour of it:
 
 * lease-bounded providers (National Compute): a member whose lease ends within
   ``replace_lead_s`` gets a replacement ordered on a free slot (make before

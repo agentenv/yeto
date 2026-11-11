@@ -5,7 +5,7 @@ claim release, budget, breaker, events).
 A Modal island has no node to order and log into: the "lease" is the function
 call itself. So the provider splits like this:
 
-* :class:`ModalProvider` (the :class:`~.provider.LeaseProvider` contract):
+* :class:`ModalProvider` (the :class:`~yeto.launch.pool.provider.IslandProvider` contract):
   ``order(slot)`` reserves a ticket ``<prefix>-<run>-<n>`` in a local record and
   calls nothing (nothing bills before the call is spawned); ``status``: a ticket
   without a call reads ``active`` (ready to start), a call that runs reads
@@ -55,10 +55,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..pool import status as island_status
 from ..pool.provider import ProviderCaps
+from ..pool.status import LeaseStatus
 from . import elastic
 from .client import NodeLease
-from .elastic import LeaseStatus
 from .tunnel import state_dir
 
 KIND, LEDGER_KIND = "modal", "modal_call"
@@ -134,7 +135,7 @@ class ModalProvider:
         """The ready marker of the island's current call (None: not spawned)."""
         return (self._rows().get(ticket) or {}).get("ready_key")
 
-    # -- LeaseProvider
+    # -- IslandProvider
     def order(self, account: int) -> str:
         rows = self._rows()
         n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
@@ -295,16 +296,16 @@ class ModalPoolOps:
             self._ready_seen.add(key)
         return seen
 
-    def probe(self, m) -> elastic.Probe:
+    def probe(self, m) -> island_status.Probe:
         try:
             state = self.provider.call_state(m.ticket)
         except Exception:  # noqa: BLE001 - Modal did not answer: the island is unreachable this tick
-            return elastic.Probe(node=elastic.PROBE_UNREACHABLE)
+            return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
         if state is None:
-            return elastic.Probe(node="ok", sampler="absent")
+            return island_status.Probe(node="ok", sampler="absent")
         if state == RUNNING:
-            return elastic.Probe(node="ok", sampler="running", joined=self._reported_ready(m))
-        return elastic.Probe(node="ok", sampler="exited", exit_code=0 if state == SUCCEEDED else 1)
+            return island_status.Probe(node="ok", sampler="running", joined=self._reported_ready(m))
+        return island_status.Probe(node="ok", sampler="exited", exit_code=0 if state == SUCCEEDED else 1)
 
     def _fence_store(self) -> Any:
         if self._store is None:

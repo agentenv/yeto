@@ -18,8 +18,9 @@ from test_nc_daytona_provider import (  # noqa: F401
     _state,  # noqa: F401 - the state-dir fixture (autouse)
 )
 
-from yeto.launch.nc import elastic as el
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 N = 16
 
@@ -54,10 +55,10 @@ def _pool16(dt, t, *, parallel=16, rtt_s=0.15):
     clock = lambda: t[0]  # noqa: E731
     ops = SlowOps(_provider(dt, slots=range(1, 2 * N + 1)), dt, clock, rtt_s=rtt_s)
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-d")
-    pool = LeasePool(PoolConfig(target=N, accounts=list(range(1, 2 * N + 1)), shard_base="s", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0,
-                                elastic=el.ElasticConfig(max_orders=64, breaker_failures=4)),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=N, accounts=list(range(1, 2 * N + 1)), shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=64, breaker_failures=4)),
+                      ops, clock=clock, log=lambda m: None, events=events)
     pool.watch_parallel = parallel
     return pool, ops, events
 

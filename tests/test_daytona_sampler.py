@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.launch import daytona_sampler as ds
-from yeto.launch.nc import elastic, lease_pool
+from yeto.launch.nc import elastic
+from yeto.launch.pool import island_pool
+from yeto.launch.pool import status as island_status
 
 GOOD_FACTS = {
     "kfd": "rw", "dri": "8", "driver": "6.16.0 6.8.0", "rocm_image": "10.0.0", "shm_kib": str(800 << 20),
@@ -85,8 +87,8 @@ def test_preflight_names_the_failed_check_and_its_remedy(facts, py, failed):
     assert names == [failed]
     assert ds.REMEDY[failed.split(":")[0]] in str(err.value)
     # a snapshot / size / network failure repeats on every sandbox: the pool halts for pool-retry
-    # (lease_pool.is_config_error) instead of ordering more; a host failure replaces the sandbox
-    assert lease_pool.is_config_error(err.value) == (failed not in ("kfd", "dri", "rocm", "gpus", "arch"))
+    # (island_pool.is_config_error) instead of ordering more; a host failure replaces the sandbox
+    assert island_pool.is_config_error(err.value) == (failed not in ("kfd", "dri", "rocm", "gpus", "arch"))
 
 
 def test_preflight_warns_only_on_vllm_memlock_and_arch_without_hot_reload():
@@ -246,7 +248,7 @@ def test_probe_script_parses_like_the_container_probe(tmp_path, monkeypatch):
     (tmp_path / "k31-0.log").write_text("rl_sampler_join\n")
     script = ds.probe_script("k31-0", f"{tmp_path}/events-k31-0*.jsonl")
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
-    probe = elastic.Probe.parse(out.stdout, out.returncode)
+    probe = island_status.Probe.parse(out.stdout, out.returncode)
     assert (probe.node, probe.sampler, probe.exit_code, probe.joined) == ("ok", "exited", 75, True)
     # the container route is unchanged
     assert "sudo docker inspect" in elastic.probe_script("yeto-sampler-k31-0", "/x*.jsonl")

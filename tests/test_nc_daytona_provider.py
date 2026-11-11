@@ -9,9 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.launch.nc import cli, elastic as el, pool_run
+from yeto.launch.nc import cli, elastic, pool_run
 from yeto.launch.nc.daytona_provider import LABEL_RUN, LABEL_SLOT, SSH_HOST, DaytonaProvider, from_config
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 from yeto.launch.nc.provider import is_national_compute
 
 
@@ -307,7 +309,7 @@ class DaytonaOps:
         raise AssertionError
 
     def fence(self, m):
-        el.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
+        elastic.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
 
     def drain(self, m):
         self.p.release(m.account, m.ticket)
@@ -337,10 +339,10 @@ def _pool(dt, t, **pc):
     clock = lambda: t[0]  # noqa: E731
     ops = DaytonaOps(_provider(dt), dt, clock)
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-d")
-    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0,
-                                elastic=el.ElasticConfig(max_orders=4, breaker_failures=2), **pc),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=4, breaker_failures=2), **pc),
+                      ops, clock=clock, log=lambda m: None, events=events)
     return pool, ops, events
 
 
