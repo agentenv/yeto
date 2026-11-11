@@ -601,6 +601,23 @@ class IslandPool:
                     with_linked=[x.ticket for x in partners])
         return True
 
+    def _reassert_drains(self) -> None:
+        """Re-send every drain the pool still wants (a retiring member, a task hold)
+        to an ops whose data path forgets drains on a restart (the syncer keeps its
+        drain set in memory): idempotent, one call per member per tick."""
+        again = getattr(self.ops, "reassert_drain", None)
+        if again is None:
+            return
+        for m in self.live():
+            if m.drain_seq is None or m.state != READY:
+                continue
+            if m.retiring_since is None and not (m.paused and m.ticket in self.hold_req):
+                continue
+            try:
+                again(m)
+            except Exception as error:  # noqa: BLE001 - sent again next tick
+                self.log(f"pool: drain re-send of {m.ticket} failed: {error!r}"[:300])
+
     def _drained(self, m: Member) -> bool:
         if m.state != READY:  # restarting / starting: nothing of it is in flight
             return True
@@ -671,6 +688,7 @@ class IslandPool:
 
         for m in [m for m in self.members if m.state == DRAINING]:
             self._drain(m, "retry")
+        self._reassert_drains()
 
         for m in self.live():
             if m.paused and self._watch_paused(m, now):

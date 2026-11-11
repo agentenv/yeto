@@ -223,6 +223,8 @@ class ProviderPoolOps:
                 self.request_drain = self._request_drain
                 self.drained = self._drained
                 self.cancel_drain = self._cancel_drain
+            if getattr(fencer, "reassert_drain", None) is not None:
+                self.reassert_drain = self._reassert_drain
 
     def route_of(self, member: Any) -> Any:
         if self.routes is None or not isinstance(self.routes, Mapping):
@@ -297,6 +299,9 @@ class ProviderPoolOps:
     def _cancel_drain(self, member: Any) -> None:
         self.fencer.cancel_drain(member.shard)
         member.drain_seq = None
+
+    def _reassert_drain(self, member: Any) -> None:
+        self.fencer.reassert_drain(member.shard)
 
     def released_by_us(self, ticket: str) -> bool:
         """An ended-``released`` machine these ops (or the provider's own record) released:

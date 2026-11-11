@@ -129,3 +129,9 @@ class SyncerDataPath:
 
     def cancel_drain(self, shard: str) -> None:
         self._call(shard, "undrain", "scale_up")
+
+    def reassert_drain(self, shard: str) -> None:
+        """Send the drain again (idempotent on the syncer). The syncer keeps its drain
+        set in memory only: a restarted syncer forgets it, so the control plane re-sends
+        every drain it still wants on each pool tick instead of the syncer persisting it."""
+        self._call(shard, "drain", "scale_down")

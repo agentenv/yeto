@@ -590,6 +590,50 @@ def test_syncer_data_path_drains_then_retires_in_the_island_pool(tmp_path):
     assert calls.index(("retire", hash(victim.shard))) > calls.index(("drain", hash(victim.shard)))
 
 
+def test_a_restarted_syncer_gets_every_open_drain_again(tmp_path):
+    """The syncer keeps its drain set in memory: after a syncer restart the pool
+    re-sends (idempotently, every tick) the drains it still wants -- a scale-down
+    victim and a task hold -- and nothing for a member it does not drain."""
+    from yeto.launch.pool.data_path import SyncerDataPath
+
+    draining: set[int] = set()  # the syncer's in-memory drain set
+    calls = []
+
+    def retire_member(address, holder, incarnation, *, reason, key, timeout_s, mode):
+        calls.append((mode, holder))
+        if mode == "drain":
+            draining.add(holder)
+        elif mode == "undrain":
+            draining.discard(holder)
+        return {"status": "draining" if mode == "drain" else mode}
+
+    path = SyncerDataPath(("syncer.invalid", 1), retire_member=retire_member, holder_id=lambda shard: hash(shard))
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    pool, *_ = make_pool(nc, [1, 2, 3], target=3, clock=clock, fencer=path,
+                         elastic=quiet_elastic(scale_drain_timeout_s=86400))
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", "r1"
+    ticks(pool, 3, clock)
+    victim, held, free = pool.live()
+    write_scale(pool.scale_path, 2, 1, retire=[victim.ticket])
+    ticks(pool, 2, clock)
+    doc = {"run": "r1", "target": 2, "seq": 1, "retire": [victim.ticket]}
+    pool.scale_path.write_text(json.dumps({**doc, "paused": [held.ticket], "hold_tasks": [held.ticket]}))
+    ticks(pool, 1, clock)  # pool-pause --hold-tasks
+    assert draining == {hash(victim.shard), hash(held.shard)}
+    draining.clear()  # the syncer restarted: its drain set is gone
+    calls.clear()
+    ticks(pool, 1, clock)
+    assert draining == {hash(victim.shard), hash(held.shard)} and victim.state != GONE
+    assert ("drain", hash(free.shard)) not in calls
+    pool.scale_path.write_text(json.dumps(doc))  # pool-resume: the hold is cancelled and no longer re-sent
+    draining.discard(hash(victim.shard))
+    calls.clear()
+    ticks(pool, 1, clock)
+    assert hash(held.shard) not in draining and ("drain", hash(held.shard)) not in calls
+    assert hash(victim.shard) in draining
+
+
 def test_registered_pool_ops_replace_the_ssh_route_and_provider_rates_charge_the_budget():
     from yeto.launch.nc import cli
 

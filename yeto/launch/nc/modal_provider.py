@@ -326,6 +326,11 @@ class ModalPoolOps:
         self.data_path().cancel_drain(m.shard)
         m.drain_seq = None
 
+    def reassert_drain(self, m) -> None:
+        again = getattr(self.data_path(), "reassert_drain", None)
+        if again is not None:  # a data path whose drain state lives only in its server (syncer)
+            again(m.shard)
+
     def hourly_cost(self, m) -> float | None:
         return self.provider.hourly_cost(m.ticket)
 
