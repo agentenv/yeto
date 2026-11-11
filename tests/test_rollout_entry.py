@@ -429,3 +429,20 @@ def test_a_run_level_syncer_reaches_every_syncer_pool(tmp_path):
     assert cfg["syncer"] == {"address": "198.51.100.7:7000", "key_env": "K"}
     with pytest.raises(ValueError, match="syncer.address"):
         pools.resolve({"samplers": [{**base, "provider": "sky", "data_path": "syncer"}]}, tmp_path / "t")
+
+
+def test_a_finished_trainer_names_and_releases_every_pool(tmp_path, monkeypatch, capsys):
+    """SUCCEEDED with two pools: the banner names each pool with its provider, and
+    release_nc_on_finish stops every pool."""
+    run_cfg, _, _ = _two_pools(tmp_path)
+    run = up.Run(run_cfg)
+    run.save = lambda: None
+    assert run.on_trainer_finished() is False
+    out = capsys.readouterr().out
+    assert "the sampler pools nc (nc), modal (modal) and the sandboxes still bill" in out
+    run = up.Run(dict(run_cfg, budget={"release_nc_on_finish": True}))
+    calls = []
+    run._cmd = lambda argv, *, log, timeout=None: calls.append(argv) or 0
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    assert run.on_trainer_finished() is True
+    assert [a[a.index("--config") + 1] for a in calls if "pool-stop" in a] == run.pool_configs
