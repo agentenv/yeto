@@ -163,11 +163,25 @@ class RolloutController:
         try:
             while not self.stopped and not self.all_stopped():
                 self.tick()
-                if self._wake.wait(self.interval):
+                if self._wait():
                     self._wake.clear()
         except BaseException as error:  # noqa: BLE001 - kept for check(); the pools stay drainable
             self.error = error
             self.log(f"rollout: controller thread died: {error!r}")
+
+    def _wait(self) -> bool:
+        """Wait for the next tick; a control file change of any pool (pause, resume,
+        scale) ends the wait within a second. True: woken by :attr:`_wake`."""
+        left = self.interval
+        while left > 0:
+            step = min(1.0, left)
+            if self._wake.wait(step):
+                return True
+            if any(getattr(s.pool, "control_changed", lambda: False)()
+                   for s in self.slots.values() if not s.pool.stopped):
+                return False
+            left -= step
+        return self._wake.is_set()
 
     def all_stopped(self) -> bool:
         return all(s.pool.stopped for s in self.slots.values())

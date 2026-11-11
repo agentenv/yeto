@@ -882,6 +882,14 @@ lifts the hold. If the platform ends the ticket during a pause, the pause ends
 and the node is handled as usual. `pool-status` lists the paused nodes
 (`manual.paused`, and `paused: true` per billed node).
 
+A pause, resume or scale takes effect within about a second: the loop's wait
+between ticks ends as soon as the control file changes, and a tick re-reads the
+file right before it would restart a sampler, so a sampler you stop after
+`pause` returns is never restarted behind your back. On resume, a sampler that
+is not running (e.g. a container you stopped during the pause) is restarted in
+place once; that restart does not count toward `max_sampler_restarts`, so
+repeated pause/resume cycles never trigger a crash-loop replacement.
+
 **Manual before automatic scaling.** A scale request carries its source:
 `--source manual` (the default for every command a person types) or
 `--source auto` (for an automatic scaler you run yourself). An automatic

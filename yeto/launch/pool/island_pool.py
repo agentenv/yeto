@@ -92,6 +92,9 @@ class Member:
     retiring_since: float | None = None
     drain_seq: str | None = None  # the drain request its sampler answers (set by ops.request_drain)
     paused: bool = False  # pool-pause: no automatic action on it until pool-resume (manual)
+    # pool-resume: the next sampler exit (e.g. a container a person stopped during the
+    # pause) is restarted without counting toward max_sampler_restarts
+    resumed: bool = False
     # sampler progress, from the probe (the tape grew: a group or a heartbeat; the engine
     # generated tokens): when it last moved (None: no signal read yet, e.g. a Modal call),
     # how many probes saw it move, and whether its newest tape line is a trainer wait
@@ -151,6 +154,7 @@ def is_config_error(error: BaseException) -> bool:
 
 
 SLOW_TICK_S = 60.0  # a tick longer than this is logged
+CONTROL_POLL_S = 1.0  # the loop's wait between ticks checks the control file this often
 
 
 @dataclass
@@ -196,6 +200,41 @@ class IslandPool:
     _probed: dict[str, Any] = field(default_factory=dict)
     _watch_pool: Any = None
     last_tick_s: float | None = None  # wall time of the last tick (status, dashboard)
+    _scale_stamp: Any = None  # (mtime_ns, size) of the control file at its last read
+
+    def _control_stamp(self) -> Any:
+        if self.scale_path is None:
+            return None
+        try:
+            st = self.scale_path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def control_changed(self) -> bool:
+        """The control file (pause / resume / scale) changed since it was last read."""
+        return self._control_stamp() != self._scale_stamp
+
+    def wait(self, event: Any, interval: float, *, poll_s: float = CONTROL_POLL_S) -> bool:
+        """Wait up to ``interval`` for the next tick: ``event`` set (True) or a control
+        file change (False) ends the wait at once, so a pause, resume or scale takes
+        effect within ``poll_s`` instead of a whole tick interval."""
+        left = float(interval)
+        while left > 0:  # counted in slices, not by the clock (an injected event's wait may not block)
+            step = min(poll_s, left)
+            if event.wait(step):
+                return True
+            if self.control_changed():
+                return False
+            left -= step
+        return bool(event.is_set())
+
+    def _paused_now(self, m: Member) -> bool:
+        """Read the control file again (when it changed) right before an automatic action
+        on ``m``: a pause written while this tick ran holds already."""
+        if self.control_changed():
+            self.apply_scale()
+        return m.paused
 
     def __post_init__(self) -> None:
         if self.events is None:
@@ -430,7 +469,9 @@ class IslandPool:
         """Read the ``pool-scale`` control file: its target replaces the config's (it
         persists across restarts); its ``retire`` tickets are applied once (by ``seq``)."""
         if self.scale_path is None or not self.scale_path.exists():
+            self._scale_stamp = None
             return
+        self._scale_stamp = self._control_stamp()
         try:
             doc = json.loads(self.scale_path.read_text())
             target = int(doc["target"])
@@ -490,6 +531,7 @@ class IslandPool:
                 m.paused = False
                 m.unreachable_since = m.status_fail_since = None
                 m.tokens_moved_at = None  # no stall verdict from the paused time
+                m.resumed = True  # its sampler may have been stopped by hand: not a crash
                 self._event("manual_resume", ticket=m.ticket, account=m.account, shard=m.shard)
                 if m.drain_seq is not None and m.retiring_since is None \
                         and getattr(self.ops, "cancel_drain", None) is not None:
@@ -923,6 +965,8 @@ class IslandPool:
 
     def _watch(self, m: Member, now: float) -> None:
         cfg = self.ecfg
+        if self._paused_now(m):  # paused while this tick ran: no action on it
+            return
         if m.ticket in self._recheck:  # restored mid-start: keep it when its sampler runs
             self._recheck.discard(m.ticket)
             probe = self._probe(m)
@@ -949,6 +993,8 @@ class IslandPool:
         probe = self._probe(m) if status.state == "active" else None
         if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
             self._note_progress(m, probe, now)
+            if m.state == READY:
+                m.resumed = False  # its sampler outlived the pause: a later exit is a crash
         if probe is not None:
             if probe.node == el.PROBE_UNREACHABLE:
                 m.unreachable_since = m.unreachable_since if m.unreachable_since is not None else now
@@ -1130,7 +1176,24 @@ class IslandPool:
         if m.retiring_since is not None:  # scaled down: not restarted
             self._finish_retire(m, now, outcome="sampler exited")
             return
+        if self._paused_now(m):  # a pause holds: never restarted
+            return
         restart = getattr(self.ops, "restart", None)
+        if restart is not None and m.resumed:  # stopped during a pause: not a crash
+            m.resumed = False
+            m.ready_since = None
+            self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts, detail=detail,
+                        after_resume=True)
+            try:
+                restart(m, self.shards())
+            except Exception as error:  # noqa: BLE001
+                self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+                if is_config_error(error):
+                    self._config_error(m, repr(error)[:300])
+                    return
+            m.state, m.started, m.joined = STARTING, now, False
+            m.created = now
+            return
         reset = self.ecfg.sampler_restart_reset_s
         if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
             m.restarts = 0  # healthy long enough since the last restart: a new crash, not a loop
@@ -1212,7 +1275,7 @@ class IslandPool:
             self._retire(m, "engine stall loop", lost=False)
             return True
         restart = getattr(self.ops, "restart", None)
-        if restart is None:
+        if restart is None or self._paused_now(m):
             return False
         fence = getattr(self.ops, "fence_incarnation", None)  # lease only: the shard keeps sampling
         if fence is not None:  # the stuck incarnation's claims go back at once
