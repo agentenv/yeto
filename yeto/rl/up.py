@@ -1008,6 +1008,18 @@ def _worker_alive(run: str) -> bool:
 
 
 def _alive(pid: Any) -> bool:
+    """``pid`` runs. A child of this process that exited is reaped here first: ``run up``
+    starts the trainer with Popen and never waits on it, so the finished launcher stays
+    a zombie, which ``kill(pid, 0)`` reports alive (the trainer's end was never seen:
+    no ``release_nc_on_finish`` down, the sampler islands kept billing)."""
+    try:
+        done, _status = os.waitpid(int(pid), os.WNOHANG)
+        if done:
+            return False
+    except ChildProcessError:
+        pass  # not a child of this process (an adopted run): kill 0 below
+    except (ValueError, TypeError, OverflowError):
+        return False
     try:
         os.kill(int(pid), 0)
     except (ProcessLookupError, ValueError, TypeError):

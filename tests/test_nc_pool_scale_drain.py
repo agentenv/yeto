@@ -557,3 +557,30 @@ def test_run_up_preflight_refuses_score_centering_without_the_samplers_top_logpr
     run.cfg["trainer"]["argv"] = ["--rl-loss=score_centering", "--rl-rollout-top-logprobs-num", "64"]
     assert "top-64" in run.rollout_fields_problem()
     assert run.preflight() is False
+
+
+def test_run_up_sees_its_finished_trainer_child_as_exited():
+    """run up starts the trainer with Popen and never waits on it: the finished launcher
+    is a zombie child, which kill(pid, 0) alone reports alive (the trainer's end was
+    never seen and release_nc_on_finish never ran)."""
+    import os
+    import sys
+    import time
+
+    from yeto.rl import up
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    pid = proc.pid
+    deadline = time.time() + 30
+    while time.time() < deadline:  # exited but not reaped: a zombie
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        if up._alive(pid) is False:
+            break
+        time.sleep(0.05)
+    assert up._alive(pid) is False
+    assert up._alive(os.getppid()) is True  # not a child: kill 0 decides
+    assert up._alive(None) is False
+    proc.returncode = 0  # reaped above; keep Popen.__del__ quiet
