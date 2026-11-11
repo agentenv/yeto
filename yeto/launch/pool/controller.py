@@ -283,7 +283,8 @@ class RolloutController:
                 "target": pool.config.target, "stopped": pool.stopped, "halted": pool.halted,
                 "finished": pool.finished, "pending": list(pool.pending),
                 "breaker": {"tripped": pool.breaker.tripped, "trips": pool.breaker.trips},
-                "members": [{"slot": m.account, "ticket": m.ticket, "shard": m.shard, "state": m.state,
+                "slot_name": pool.config.slot_name,
+                "members": [{pool.config.slot_name: m.account, "ticket": m.ticket, "shard": m.shard, "state": m.state,
                              "lease_until": m.lease_until, "continues_shard": m.replaces_shard}
                             for m in pool.live()],
             }

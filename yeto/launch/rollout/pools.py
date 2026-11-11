@@ -9,12 +9,12 @@ or as a list, one entry per pool (any number of providers)::
     "samplers": [
       {"name": "nc", "provider": "nc", "config": "<pool.json>", "target": 2},
       {"name": "modal", "provider": {"kind": "modal", "image": "...", "secret": "...", "bucket": "..."},
-       "data_path": "r2", "target": 1, "accounts": [1, 2], "shard_base": "k31-modal",
+       "data_path": "r2", "target": 1, "slots": [1, 2], "shard_base": "k31-modal",
        "spec": "<sampler-spec.json>", "run_prefix": "<run prefix>", "r2_env_file": "<store env>"}
     ]
 
 An entry names a pool config file (``config``) and/or carries pool config keys
-inline (``target``, ``spec``, ``accounts``, ``shard_base``, ``elastic``, ...: the
+inline (``target``, ``spec``, ``slots``, ``shard_base``, ``elastic``, ...: the
 ``pool.json`` format of docs/NC_POOL.md, unchanged); inline keys override the
 file's. ``provider`` is a kind (``nc`` | ``daytona`` | ``sky`` | ``modal``) or a full
 provider section. Entry-only keys: ``name`` (default: the provider kind),

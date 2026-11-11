@@ -524,7 +524,9 @@ def from_config(cfg: dict[str, Any], run_id: str, *, sdk: Any = None, client: An
     if unknown:
         raise ValueError(f"daytona provider: unknown keys {sorted(unknown)}")
     section.pop("kind", None)
-    return DaytonaProvider(run_id, slots=[int(a) for a in cfg["accounts"]], sdk=sdk, client=client, **section)
+    from . import cli  # noqa: PLC0415
+
+    return DaytonaProvider(run_id, slots=cli.slot_list(cfg), sdk=sdk, client=client, **section)
 
 
 def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) -> DaytonaProvider:  # noqa: ARG001

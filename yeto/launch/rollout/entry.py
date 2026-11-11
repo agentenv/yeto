@@ -103,7 +103,8 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
     alive = bool(proc and proc.get("alive"))
     out.update(target=target, islands=len(billed), ready=sum(1 for m in billed if m.get("state") == "ready"),
                loop_alive=alive, stopped=doc.get("stopped"),
-               billed=[{"ticket": m.get("ticket"), "shard": m.get("shard"), "state": m.get("state"),
+               slot_name=cli.slot_name(cfg),
+               billed=[{cli.slot_name(cfg): m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"), "state": m.get("state"),
                         "retiring": m.get("retiring_since") is not None} for m in billed])
     if billed and not alive:
         out["warning"] = (f"{len(billed)} island(s) bill with no pool loop alive: "

@@ -381,7 +381,7 @@ list, one entry per pool (set one of the two keys, not both):
   {"name": "modal", "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>",
                                  "bucket": "<bucket>", "gpu": "B300", "gpus": 8,
                                  "model_volume": "<volume>", "price_usd_h": 0},
-   "data_path": "r2", "usd_per_h": 0, "target": 1, "accounts": [1, 2],
+   "data_path": "r2", "usd_per_h": 0, "target": 1, "slots": [1, 2],
    "shard_base": "<run>-modal", "spec": "<sampler-spec.json>", "run_prefix": "<run>",
    "r2_env_file": "<store.env>", "sampler": {"dispense": {"backend": "store", "namespace": "<run>/dispense"}}}
 ]
@@ -392,7 +392,7 @@ list, one entry per pool (set one of the two keys, not both):
 | `name` | Pool name for `--pool` (default: the provider kind). Unique in the run. |
 | `config` | A `pool.json` file. Keys given inline in the entry override the file's; the file itself is not changed (the merged config is written to `~/.yeto/rl-up/<run>/pools/<name>.json`). |
 | `provider` | A kind (`nc`, `daytona`, `sky`, `modal`) or a full provider section. A kind must match the provider of `config`. |
-| any `pool.json` key | `target`, `accounts`, `shard_base`, `spec`, `sampler`, `elastic`, ... (section 3.3). |
+| any `pool.json` key | `target`, `accounts` (NC) or `slots` (other providers), `shard_base`, `spec`, `sampler`, `elastic`, ... (section 3.3). |
 | `data_path` | `r2` (default: buffer shards and policy releases in the run store) or `syncer` (the sampler spec takes weights from the syncer and returns samples through the relay; the pool then fences nothing in the store, the syncer retires a stopped member). All pools of a run use one data path. |
 | `interval_s` | Seconds between the pool's control ticks (default 30). |
 | `usd_per_h` | Price of one island hour of this pool, for the spend estimate and the scale-up budget check (default `budget.nc_usd_per_h`). |
@@ -1345,8 +1345,9 @@ sandbox (no Docker in a sandbox) is a separate step of the node route.
 
 ### Configuration
 
-In `pool.json`, set `provider` to the Daytona kind. `accounts` are slots
-(`[1, 2, ..., max_nodes]`): one sandbox per slot at a time.
+In `pool.json`, set `provider` to the Daytona kind. `slots` (`accounts` is
+accepted as an alias) are plain indexes (`[1, 2, ..., max_nodes]`), not accounts:
+one sandbox per slot at a time. Logs, pool events, `yeto rollout status` and the dashboard name these `slot` (for example `slot=2`); only National Compute pools say `account`, because there the slot is an NC account. Event JSON also keeps an `account` field with the same value for older readers.
 
 ```json
 "provider": {
@@ -1427,7 +1428,7 @@ only sandboxes with its name prefix that carry this run's label or record.
 | Reclaim | Eviction with a ticket end reason | Spot deletion without notice (`spotEvictedAt`) |
 | Access | SSH through the workspace relay | SSH through `ssh.app.daytona.io` with a per-sandbox token (renewed automatically) |
 | Balance guard | Account balance in ucr | None. `elastic.max_run_spend_ucr` still caps node-hours, priced at the National Compute MI355X rate; also set a Daytona spend limit |
-| Accounts | NC accounts in `YETO_NC_ACCOUNTS` | Slots, one sandbox each |
+| Accounts | NC accounts in `YETO_NC_ACCOUNTS` (`accounts`) | Slots, one sandbox each (`slots`; shown as `slot=`) |
 
 ## 12. Sky and Modal rollout pools
 
@@ -1458,7 +1459,8 @@ reached over SSH with sky's key, running the Docker sampler route.
 - Only clusters named `<cluster_prefix>-<run>-<n>` that this pool recorded or
   sky lists under that prefix are ever taken down.
 - Orders and releases are written to the run's resource ledger (`sky_cluster`).
-- `accounts` are slots `1..N` (one cluster each).
+- `slots` (alias `accounts`) are plain indexes `1..N` (one cluster or Modal
+  island each), not accounts; logs and status show them as `slot=`.
 - `python -m yeto.rl.spot.watchdog` still works; `--via-provider` sends its
   machine calls through this provider. For new runs, prefer a sky pool.
 

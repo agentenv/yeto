@@ -696,7 +696,7 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
     elif target > len(pc.accounts):
         w = wording(cfg)
         return (f"target {target} > {len(pc.accounts)} slots (one {w['unit']} per slot: the pool config's "
-                f"'accounts'; add slots and restart the pool)")
+                f"'slots'; add slots and restart the pool)")
     before = current_target(cfg, doc)
     if target != before and not cli.pool_has_dispenser(cfg):
         if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
@@ -1025,7 +1025,8 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
     proc = pool_process(cfg)
     left = billed_members(doc)
     now = time.time()
-    billed = [{"account": m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"),
+    label = cli.slot_name(cfg)  # "account" on National Compute, else "slot"
+    billed = [{label: m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"),
                "state": m.get("state"), "lease_until": _until(m.get("lease_until")),
                "past_lease_until": m.get("lease_until") is not None and now > float(m["lease_until"])}
               for m in left]

@@ -312,7 +312,7 @@ class NcSkyOps:
         down(m.account, m.ticket)
 
     def balance(self) -> int | None:
-        return client(self.cfg["accounts"][0]).balance()
+        return client(slot_list(self.cfg)[0]).balance()
 
     def account_free(self, account: int) -> bool:
         return NcClient.own_ticket(client(account).status()) is None
@@ -662,14 +662,38 @@ def run_id(cfg: dict[str, Any]) -> str:
     return value
 
 
-POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
+POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
                        "stop_below_ucr", "min_balance_to_order_ucr", "data_slots", "elastic", "event_command",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
                        "workdir", "comment", "sampler_route", "data_path", "syncer"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
-REQUIRED_KEYS = ("target", "accounts", "shard_base")
+REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
+
+
+def slot_list(cfg: dict[str, Any]) -> list[int]:
+    """The pool's provider slots: ``accounts`` (National Compute accounts), or for
+    Modal / Daytona / sky ``slots`` (``accounts`` stays an alias there)."""
+    from yeto.launch.pool.provider import is_national  # noqa: PLC0415
+
+    if "slots" in cfg and "accounts" in cfg:
+        raise ValueError("pool config: set 'slots' or 'accounts', not both")
+    if "slots" in cfg:
+        if is_national(cfg):
+            raise ValueError("pool config: National Compute pools list NC accounts in 'accounts', not 'slots'")
+        return [int(a) for a in cfg["slots"]]
+    if "accounts" not in cfg:
+        raise ValueError("pool config: missing required keys ['accounts']"
+                         + ("" if is_national(cfg) else " (or 'slots')"))
+    return [int(a) for a in cfg["accounts"]]
+
+
+def slot_name(cfg: dict[str, Any]) -> str:
+    """``account`` for a National Compute pool, else ``slot``."""
+    from yeto.launch.pool.provider import is_national  # noqa: PLC0415
+
+    return "account" if is_national(cfg) else "slot"
 # the SSH route renders the sampler spec and starts it with the store credentials
 REQUIRED_SSH_KEYS = ("spec", "run_prefix", "r2_env_file")
 MODEL_PULL_KEYS = frozenset({"src_key", "dest", "include", "max_mb_s", "timeout_s", "poll_s"})
@@ -753,6 +777,8 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if unknown:
         raise ValueError(f"pool config: unknown keys {sorted(unknown)} (known: {sorted(POOL_KEYS)})")
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
+    if "accounts" not in cfg and "slots" not in cfg:
+        missing.insert(1, "accounts")
     if cfg.get("route", "ssh") == "ssh":
         missing += [k for k in REQUIRED_SSH_KEYS if not cfg.get(k)]
     if missing:
@@ -763,17 +789,22 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         raise ValueError(f"pool config: machine type {machine_type(cfg)!r} looks like a Hugging Face model name; "
                          f"'machine_type' (formerly 'model') is the National Compute machine type, e.g. "
                          f"{DEFAULT_MACHINE_TYPE!r} (the served model is in the sampler spec)")
-    accounts = [int(a) for a in cfg["accounts"]]
+    accounts = slot_list(cfg)
+    label = slot_name(cfg)
     if not accounts or len(set(accounts)) != len(accounts):
-        raise ValueError("pool config: accounts must be a non-empty list without repeats")
+        raise ValueError(f"pool config: {label}s must be a non-empty list without repeats")
     if allowed is not None and not set(accounts) <= allowed:
         raise ValueError(f"pool config: accounts {sorted(set(accounts) - allowed)} are not in YETO_NC_ACCOUNTS")
     target = int(cfg["target"])
     if target < 1:
         raise ValueError("pool config: target must be >= 1")
     if target > len(accounts):
-        raise ValueError(f"pool config: target {target} > {len(accounts)} accounts; a National Compute account "
-                         f"holds one node at a time, so the pool can run at most {len(accounts)} samplers")
+        if label == "account":
+            raise ValueError(f"pool config: target {target} > {len(accounts)} accounts; a National Compute "
+                             f"account holds one node at a time, so the pool can run at most "
+                             f"{len(accounts)} samplers")
+        raise ValueError(f"pool config: target {target} > {len(accounts)} slots; a slot holds one machine "
+                         f"at a time, so the pool can run at most {len(accounts)} samplers")
     slots = cfg.get("data_slots")
     if slots is not None and int(slots) < target:
         raise ValueError(f"pool config: data_slots {slots} < target {target} (each member holds one slot)")
@@ -806,7 +837,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
                       data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")),
-                      hourly_cost=pool_hourly_ucr(cfg))
+                      hourly_cost=pool_hourly_ucr(cfg), slot_name=label)
 
 
 def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:

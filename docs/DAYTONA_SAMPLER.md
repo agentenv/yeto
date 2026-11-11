@@ -126,15 +126,15 @@ sandboxes. Run the checks in "Scaling up step by step" on your account before yo
 Pool configuration for 16:
 
 ```json
-{"target": 16, "accounts": [1, 2, 3, "...", 24], "shard_base": "<run>",
+{"target": 16, "slots": [1, 2, 3, "...", 24], "shard_base": "<run>",
  "provider": {"kind": "daytona", "image": "<sampler image>", "gpus": 8, "spot": true,
               "disk_gib": 2400, "memory_gib": 1536, "price_usd_h": <your spot price>,
               "create_wait_s": 5, "api_attempts": 6}}
 ```
 
-`accounts` are slots: give at least `target` + the number of replacements you allow in
+`slots` (`accounts` is accepted as an alias) are plain indexes, not accounts: give at least `target` + the number of replacements you allow in
 flight (24 for 16 samplers). Each replacement takes the next shard number, so the trainer's
-`--rl-buffer-shards` and the tunnel port range must cover every shard you expect over the run.
+`--rl-buffer-shards` and the tunnel port range must cover every shard you expect over the run. Logs, pool events, `yeto rollout status` and the dashboard name these `slot` (for example `slot=2`); only National Compute pools say `account`, because there the slot is an NC account. Event JSON also keeps an `account` field with the same value for older readers.
 
 ### What the pool does at 16
 

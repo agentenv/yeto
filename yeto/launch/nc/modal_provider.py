@@ -524,7 +524,9 @@ def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> Moda
     unknown = set(section) - CONFIG_KEYS
     if unknown:
         raise ValueError(f"modal provider: unknown keys {sorted(unknown)}")
-    return ModalProvider(run_id, slots=[int(a) for a in cfg["accounts"]], client=client,
+    from . import cli  # noqa: PLC0415
+
+    return ModalProvider(run_id, slots=cli.slot_list(cfg), client=client,
                          name_prefix=str(section.get("name_prefix", "yeto-smp")),
                          price_usd_h=section.get("price_usd_h"), config=section)
 

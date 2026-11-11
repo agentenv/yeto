@@ -399,7 +399,7 @@ function asyncPanel(){
   var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
   $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
-    esc(["ticket","account","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return e[k]!=null}).map(function(k){return k+"="+String(e[k]).slice(0,80)}).join(" "))+'</span></div>'}).join("");
+    esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)})}
 function aBacklog(A){

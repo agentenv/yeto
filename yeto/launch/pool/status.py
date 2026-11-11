@@ -387,7 +387,7 @@ class EventLog:
         doc = {"t": self.clock(), "event": f"{self.prefix}{event}", **({"run": self.run} if self.run else {}),
                **detail}
         self.events.append(doc)
-        self.log(f"pool event {doc['event']} " + " ".join(f"{k}={v}" for k, v in detail.items()))
+        self.log(f"pool event {doc['event']} " + " ".join(f"{k}={v}" for k, v in _shown(detail).items()))
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.path, "a", encoding="utf-8") as f:
@@ -403,6 +403,21 @@ class EventLog:
             except Exception as error:  # noqa: BLE001
                 self.log(f"pool event sink failed: {error!r}")
         return doc
+
+
+def _shown(detail: dict[str, Any]) -> dict[str, Any]:
+    """The event fields of the human log line: a member slot is named by its provider's
+    ``slot_name`` (``account=`` only for National Compute accounts, ``slot=`` elsewhere)."""
+    name = detail.get("slot_name")
+    if not name or "slot" not in detail:
+        return detail
+    out: dict[str, Any] = {}
+    for k, v in detail.items():
+        if k == "account":
+            out[str(name)] = detail["slot"]
+        elif k not in ("slot", "slot_name"):
+            out[k] = v
+    return out
 
 
 def command_hook(command: str, *, run: Callable[..., Any] | None = None) -> Callable[[dict[str, Any]], None]:

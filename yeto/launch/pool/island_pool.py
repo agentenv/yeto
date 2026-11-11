@@ -136,6 +136,9 @@ class PoolConfig:
     # one node hour in the provider's cost unit, when the provider reports no rate
     # (budget gate, order floor); the National Compute config uses the MI355X rate
     hourly_cost: float = 0
+    # what logs, events and status call a slot: "account" (National Compute: the slot is an
+    # NC account) or "slot" (Modal / Daytona / sky: a plain index, not an account)
+    slot_name: str = "account"
 
     def hourly(self) -> float:
         return self.hourly_cost
@@ -246,6 +249,8 @@ class IslandPool:
 
     def _event(self, name: str, **detail: Any) -> None:
         assert self.events is not None
+        if "account" in detail:  # ``account`` kept for old readers; ``slot`` + ``slot_name`` name it
+            detail = dict(detail, slot=detail["account"], slot_name=self.config.slot_name)
         self.events(name, **detail)
 
     # -- helpers -------------------------------------------------------------
@@ -308,7 +313,7 @@ class IslandPool:
         account = self._free_account()
         if account is None:
             refused = (f"no free slot: {len(self.live())} of {len(self.config.accounts)} slots (the pool's "
-                       f"'accounts') hold a machine of this pool (one per slot), target {self.config.target}")
+                       f"'{self.config.slot_name}s') hold a machine of this pool (one per slot), target {self.config.target}")
             if refused != self._no_account:  # once per change, not every tick
                 self._event("order_refused", why=refused)
             self._no_account = refused
@@ -332,7 +337,7 @@ class IslandPool:
             if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
                 self._event("offer_failed", account=account)
                 return None
-            self._fail(now, f"order on account {account}")
+            self._fail(now, f"order on {self.config.slot_name} {account}")
             return None
         self.next_shard += 1
         self.budget.orders += 1
@@ -350,7 +355,7 @@ class IslandPool:
             replaces.replaced_by = ticket
         self.members.append(member)
         self._save_now()
-        self.log(f"pool: ordered {ticket} on account {account} shard {shard}"
+        self.log(f"pool: ordered {ticket} on {self.config.slot_name} {account} shard {shard}"
                  + (f" (replaces {replaces.ticket})" if replaces else "")
                  + (f" (continues {continues})" if continues and not replaces else ""))
         self._event("ordered", ticket=ticket, account=account, shard=shard, data_slot=slot,
@@ -1348,7 +1353,7 @@ class IslandPool:
             except RuntimeError:
                 why = f"every one of the {self.config.data_slots} data slots is held"
         if why is not None:
-            self.log(f"pool: WARNING: open ticket {ticket} of this run on account {account} not adopted: "
+            self.log(f"pool: WARNING: open ticket {ticket} of this run on {self.config.slot_name} {account} not adopted: "
                      f"{why}; draining it")
             self._event("adopt_refused", ticket=ticket, account=account, why=why)
             extra = Member(account, ticket, shard="", state=DRAINING, created=now, end_reason=why)
@@ -1360,7 +1365,7 @@ class IslandPool:
         self.next_shard += 1
         member = Member(account, ticket, shard, created=now, data_slot=slot)
         self.members.append(member)
-        self.log(f"pool: adopted {ticket} on account {account} as shard {shard} (a ticket of this run "
+        self.log(f"pool: adopted {ticket} on {self.config.slot_name} {account} as shard {shard} (a ticket of this run "
                  "no member owned; it is never deleted as an orphan)")
         self._event("adopted", ticket=ticket, account=account, shard=shard, data_slot=slot)
         self._save_now()

@@ -341,7 +341,9 @@ def from_config(cfg: dict[str, Any], run_id: str, *, sky: Any = None) -> SkyProv
     offers = offers_from_config(section)
     for key in ("kind", "factory", "resources", "price_usd_h", "offers", "candidates"):
         section.pop(key, None)
-    return SkyProvider(run_id, slots=[int(a) for a in cfg["accounts"]], offers=offers, sky=sky, **section)
+    from . import cli  # noqa: PLC0415
+
+    return SkyProvider(run_id, slots=cli.slot_list(cfg), offers=offers, sky=sky, **section)
 
 
 def offline_problems(cfg: dict[str, Any]) -> list[str]:

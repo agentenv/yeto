@@ -52,7 +52,7 @@ POOL_TARGET = "nc_elastic_target_changed"
 # a scale-down victim finishing its trials in flight: still sampling, not left
 POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
-POOL_KEYS = ("ticket", "account", "shard", "why", "reason", "detail", "error", "state", "after_s",
+POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
              "by", "usd_per_h", "end_reason", "replaces", "continues_shard")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
