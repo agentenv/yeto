@@ -416,6 +416,12 @@ def build_reward(spec: Mapping[str, Any]) -> Reward:
     if kind not in REWARD_KINDS:
         raise SamplerSpecError(f"reward_kind {kind!r} is not one of {REWARD_KINDS}")
     function = _import(_require(spec, "reward"))
+    if kind != "miles" and inspect.iscoroutinefunction(function):
+        # A plain reward is called as ``reward(item, completion)`` and must return a
+        # number; an async Miles ``score(args, sample)`` would return a coroutine and
+        # crash the sampler at its first group, after the node is billed.
+        raise SamplerSpecError(f"reward {spec['reward']!r} is an async Miles score function: "
+                               f"set \"reward_kind\": \"miles\" (reward_kind is {kind!r})")
     return miles_reward(function) if kind == "miles" else function
 
 
