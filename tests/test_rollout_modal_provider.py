@@ -116,9 +116,28 @@ def test_release_cancels_a_running_call_and_confirms(tmp_path):
     t2 = p2.order(1)
     c2 = p2.spawn(t2, {"shard": "n-0"})
     client2.cancel = lambda call: None  # Modal took the cancel but the call still runs
+    p2.sleep, p2.cancel_wait_s = (lambda s: None), 0.0
     with pytest.raises(RuntimeError, match="still runs"):
         p2.release(1, t2)
     assert p2.run_tickets() == [(1, t2)] and client2.states[c2] == RUNNING
+
+
+def test_release_waits_for_the_asynchronous_cancel():
+    """Modal takes a cancel at once but the call reads RUNNING for a few seconds: the
+    release polls instead of failing (a real Modal L4 call read RUNNING right after
+    cancel and the pool logged nc_elastic_drain_failed, then retried)."""
+    now = [0.0]
+    client = FakeClient()
+    p = ModalProvider("run-m", slots=[1], client=client, clock=lambda: now[0],
+                      sleep=lambda s: now.__setitem__(0, now[0] + s), cancel_wait_s=30.0)
+    ticket = p.order(1)
+    call = p.spawn(ticket, {"shard": "m-0"})
+    ends_at = 6.0
+    client.cancel = lambda c: client.log.append(("cancel", c))
+    status = client.status
+    client.status = lambda c: FAILED if now[0] >= ends_at else status(c)
+    assert p.release(1, ticket)["state"] == "ended" and ("cancel", call) in client.log
+    assert now[0] >= ends_at and p.run_tickets() == []
 
 
 def test_a_restart_cancels_the_running_call_first(tmp_path):

@@ -90,7 +90,7 @@ class ModalProvider:
 
     def __init__(self, run_id: str, *, slots: list[int], client: Any = None, name_prefix: str = "yeto-smp",
                  price_usd_h: float | None = None, record: Path | None = None, clock=time.time,
-                 config: dict[str, Any] | None = None):
+                 config: dict[str, Any] | None = None, sleep=time.sleep, cancel_wait_s: float = 60.0):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name_prefix):
             raise ValueError("name_prefix: lower-case letters, digits and '-'")
         self.run_id, self.slots = run_id, list(slots)
@@ -98,6 +98,8 @@ class ModalProvider:
         self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.config = dict(config or {})
         self._client, self.clock = client, clock
+        # a cancel is asynchronous: the call reads RUNNING for some seconds after it
+        self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
         self.record = record or state_dir() / f"modal-calls-{self.prefix}.json"
 
     @property
@@ -183,13 +185,24 @@ class ModalProvider:
         if call:
             if self.client.status(call) == RUNNING:
                 self.client.cancel(call)
-            if self.client.status(call) == RUNNING:
-                raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs")
+            if not self._ended_after_cancel(call):
+                raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs "
+                                   f"after {self.cancel_wait_s:g} s")
             _record_ledger("released", LEDGER_KIND, call, FUNCTION)
         rows = self._rows()
         rows[ticket].update(open=False, cancelled=call)
         self._save(rows)
         return {"ticket": ticket, "call": call, "state": "ended"}
+
+    def _ended_after_cancel(self, call: str) -> bool:
+        """The call no longer runs, polled for up to ``cancel_wait_s`` (Modal stops the
+        container a few seconds after it took the cancel)."""
+        deadline = self.clock() + self.cancel_wait_s
+        while self.client.status(call) == RUNNING:
+            if self.clock() >= deadline:
+                return False
+            self.sleep(2.0)
+        return True
 
     def node(self, account: int, ticket: str) -> NodeLease:
         return NodeLease(account, ticket, "", "", "", None, None, None, None)  # no host to reach
