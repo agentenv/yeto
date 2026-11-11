@@ -44,7 +44,7 @@ from .causal_kernels import (
     validate_lora_production_envelope,
 )
 from .data import StreamingPackedBlocks, build_packed_dataset
-from .diloco_sync import DiLoCoSyncState, sync_diloco_boundary
+from .diloco_sync import DiLoCoSyncState, connect_syncer, sync_diloco_boundary, wire_dtype_code
 from .finalization import finalize_torch_island
 from .fragments import build_layout
 from .chunked_ce import (
@@ -56,8 +56,7 @@ from .chunked_ce import (
 from .losses import load_custom_loss, load_pickled_loss, sft_loss
 from .wandb_logger import TELEMETRY_EVERY
 from .models import MODEL_ALIASES as MODEL_ALIASES
-from .protocol import DTYPE_BF16, DTYPE_F32, DTYPE_Q4, SyncerClient, bulk_dtype
-from .syncer_shards import ShardedSyncerClient, parse_syncer_addrs
+from .protocol import bulk_dtype
 from .tensor_io import (
     apply_fragment,
     pack_fragment,
@@ -1164,21 +1163,10 @@ def main(argv=None) -> None:
         )
         log.info("dataset ready: %d blocks of %d tokens", len(dataset), args.seq_len)
 
-    wire_dtype = {"bf16": DTYPE_BF16, "f32": DTYPE_F32, "q4": DTYPE_Q4}[args.wire_dtype]
+    wire_dtype = wire_dtype_code(args.wire_dtype)
     client = None
     if rank == 0 and args.syncer != "none":
-        addrs = parse_syncer_addrs(args.syncer)
-        if len(addrs) > 1:
-            # Fragment-sharded head: one connection per shard, every
-            # fragment routed to its owner (yeto/syncer_shards.py).
-            client = ShardedSyncerClient(
-                addrs, args.learner_id, layout, wire_dtype, args.wan_streams
-            )
-        else:
-            client = SyncerClient(
-                addrs[0], args.learner_id, layout, wire_dtype, args.wan_streams
-            )
-        client.start()
+        client = connect_syncer(args.syncer, args.learner_id, layout, wire_dtype, args.wan_streams)
         log.info("connected to syncer at %s", args.syncer)
         if args.learner_id == 0:
             for fid, frag in enumerate(layout.fragments):
