@@ -151,6 +151,9 @@ def test_megatron_args_and_env_entry(tiny, monkeypatch):
     cfg, _, base = tiny
     args = cut_to_hf.megatron_args(json.loads((base / "config.json").read_text()))
     assert (args.num_query_groups, args.kv_channels, args.vocab_size) == (2, 8, 64)
+    # Miles c351a33c's _convert_to_hf_core reads args.backend.<field> (a spot sampler on the
+    # pinned image failed every release with "SimpleNamespace has no attribute 'backend'")
+    assert vars(args.backend) == {k: v for k, v in vars(args).items() if k != "backend"}
     monkeypatch.delenv("YETO_EVAL_BASE_MODEL", raising=False)
     with pytest.raises(MaterializeError, match="YETO_EVAL_BASE_MODEL"):
         cut_to_hf.materialize(SimpleNamespace(path="x"))
