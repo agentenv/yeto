@@ -485,3 +485,31 @@ def test_gate_from_spec_finds_the_host(tmp_path):
                        docker_factory=lambda h: FixedRoom(60), limits=SandboxLimits({"remote-docker": 32}))
     assert g.host_name == "h1" and g.free_groups() == 0  # (64 - 60) // 8
     assert gate_from_spec({"agentic": {}}, store) is None
+
+
+def test_prepare_lists_the_task_images_and_checks_the_disk_first(world):
+    report = _prepare(world)
+    images = report["host_facts"]["h1"]["images"]
+    # the task images and the prefetch image are all missing before the first prepare
+    assert images["missing"] == images["images"] >= 5 and "runner:cg-1-vul" in images["missing_refs"]
+    assert "warning" not in images  # 600 GB free on the fake disk
+    again = _prepare(world)["host_facts"]["h1"]["images"]
+    assert again["missing"] == 0  # every image pulled or built once; a second prepare pulls nothing
+    st = ops.status(world["cfg"], world["store"], factory=world["factory"])["hosts"]["h1"]
+    assert st["images_missing"] == []
+
+
+def test_a_task_image_pull_is_retried(world):
+    d = world["daemon"]
+    fails = {"left": 2}
+
+    def flaky(argv, env, stdin):
+        if list(argv)[1:3] == ["pull", "hub/tb:b"] and fails["left"]:
+            fails["left"] -= 1
+            return 1, "", "toomanyrequests: rate limit"
+        return d(argv, env, stdin)
+
+    world["factory"] = lambda h: DockerHost(h.docker_host, ssh=h.ssh, runner=flaky)
+    _prepare(world)
+    doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
+    assert doc["tasks"]["tb_b"]["hosts"]["h1"]["prepared"] and fails["left"] == 0

@@ -72,6 +72,7 @@ class HostConfig:
     port_range: tuple[int, int] = DEFAULT_PORT_RANGE
     sync_to: str | None = None
     tunnel_listen_host: str | None = None  # the sampler's reverse-tunnel address on this host
+    trial_memory_gib: float | None = None  # --memory of one trial container (the task p95), for the room check
 
 
 @dataclass(frozen=True)
@@ -176,7 +177,9 @@ def parse_envs(section: Mapping[str, Any], *, base_dir: str | os.PathLike[str] |
                                     ssh=h.get("ssh"), max_sandboxes=None if h.get("max_sandboxes") is None
                                     else int(h["max_sandboxes"]),
                                     port_range=(int(pr[0]), int(pr[1])), sync_to=h.get("sync_to"),
-                                    tunnel_listen_host=h.get("tunnel_listen_host")))
+                                    tunnel_listen_host=h.get("tunnel_listen_host"),
+                                    trial_memory_gib=None if h.get("trial_memory_gib") is None
+                                    else float(h["trial_memory_gib"])))
         except (KeyError, TypeError, ValueError, IndexError) as exc:
             raise EnvsError(f"agentic.envs.hosts: bad entry {h!r}: {exc}") from exc
     if len({h.name for h in hosts}) != len(hosts):
@@ -382,3 +385,32 @@ def assignment_report(cfg: EnvsConfig, sampler_ids: Sequence[str], *, per_sample
         if not row["samplers"]:
             warnings.append(f"{name}: no sampler is assigned to it")
     return {"hosts": rows, "warnings": warnings}
+
+
+def host_room(host: HostConfig, *, bridge_subnets: Sequence[str], mem_total_bytes: int | None) -> dict[str, Any]:
+    """How many trial containers the host can really hold: the free addresses of the
+    default bridge (a /24 holds about 250 containers, then the daemon refuses with "no
+    available IPv4 addresses") and its memory over ``trial_memory_gib``. ``effective`` is
+    the smallest of those and ``max_sandboxes``; ``warnings`` name what limits it."""
+    import ipaddress  # noqa: PLC0415
+
+    addresses = None
+    if bridge_subnets:
+        addresses = sum(max(0, ipaddress.ip_network(s, strict=False).num_addresses - 3) for s in bridge_subnets)
+    memory = None
+    if mem_total_bytes and host.trial_memory_gib:
+        memory = int(mem_total_bytes / (host.trial_memory_gib * 2**30))
+    limits = {"max_sandboxes": host.max_sandboxes, "bridge_addresses": addresses, "memory": memory}
+    known = [v for v in limits.values() if v is not None]
+    warnings = []
+    if addresses is not None and host.max_sandboxes and addresses < host.max_sandboxes:
+        warnings.append(f"{host.name}: the bridge network {' '.join(bridge_subnets)} has {addresses} addresses < "
+                        f"max_sandboxes {host.max_sandboxes}; widen it (default-address-pools or bip in the "
+                        "daemon config, e.g. a /20) or lower max_sandboxes")
+    if memory is not None and host.max_sandboxes and memory < host.max_sandboxes:
+        warnings.append(f"{host.name}: memory holds {memory} trials at {host.trial_memory_gib:g} GiB each < "
+                        f"max_sandboxes {host.max_sandboxes}; lower max_sandboxes or the trial --memory")
+    if host.trial_memory_gib is None:
+        warnings.append(f"{host.name}: no trial_memory_gib; set it to the --memory of a trial (the task p95) "
+                        "to check memory over-commit")
+    return {"limits": limits, "effective": min(known) if known else None, "warnings": warnings}

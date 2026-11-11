@@ -120,3 +120,15 @@ def test_assignment_report_warns_on_an_overfull_host_and_the_cli(tmp_path, capsy
     args = parser.parse_args(["sandbox", "assign", "--envs", str(envs), "--islands", "16", "--per-sampler", "20"])
     assert sandbox_cli.main(args) == 0
     assert "h3: 4 samplers, containers 80/96" in capsys.readouterr().out
+
+
+def test_host_room_is_the_smallest_of_cap_bridge_addresses_and_memory():
+    from yeto.sandbox.envs import HostConfig, host_room
+
+    h = HostConfig(name="h0", docker_host="ssh://u@h0", max_sandboxes=320, trial_memory_gib=4)
+    room = host_room(h, bridge_subnets=["172.17.0.0/24"], mem_total_bytes=754 * 2**30)
+    assert room["limits"] == {"max_sandboxes": 320, "bridge_addresses": 253, "memory": 188}
+    assert room["effective"] == 188 and len(room["warnings"]) == 2
+    wide = host_room(HostConfig(name="h0", docker_host="x", max_sandboxes=160, trial_memory_gib=4),
+                     bridge_subnets=["172.17.0.0/20"], mem_total_bytes=754 * 2**30)
+    assert wide["effective"] == 160 and wide["warnings"] == []

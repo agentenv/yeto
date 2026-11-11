@@ -900,6 +900,9 @@ class StoreDispensedPrompts:
                 got.append(p)
                 self._emit(CLAIM_EVENT, slot=p, attempt=attempt, row=row, task_id=task_id,
                            stream=self.slots.stream(p))
+                if view is not None and view.host is not None and not view.classify(task_id)[2]:
+                    # affinity "prefer": prepared on another host only; its image may be pulled at trial start
+                    self._emit("rl_dispense_task_off_host", slot=p, task_id=task_id, host=view.host)
             else:
                 self.stats["claim_lost"] += 1
         return got, ended

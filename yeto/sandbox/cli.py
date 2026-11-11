@@ -107,6 +107,13 @@ def _brief(cmd: str, report: dict[str, Any]) -> str:
     if cmd == "prepare":
         for h, c in report["hosts"].items():
             facts = report["host_facts"].get(h, {})
+            lines += [f"  WARNING {w}" for w in (facts.get("room") or {}).get("warnings") or []]
+            images = facts.get("images") or {}
+            if images:
+                lines.append(f"  images: {images['images']} needed, {images['missing']} were missing "
+                             f"(about {images['missing_gib_est']} GiB)")
+                if images.get("warning"):
+                    lines.append(f"  WARNING {images['warning']}")
             lines.append(f"{h}: prepared {c['prepared']} failed {c['failed']} bridge={facts.get('bridge_ip')} "
                          f"data_root={facts.get('data_root')}" + (f" ERROR {facts['error']}" if facts.get("error") else ""))
         lines += [f"  FAILED {f['host']}/{f['task_id']}: {f['error']}" for f in report["failed"]]
@@ -122,6 +129,13 @@ def _brief(cmd: str, report: dict[str, Any]) -> str:
             if isinstance(running, int) and cap and running >= 0.9 * cap:
                 lines.append(f"  WARNING {h} is at {running}/{cap} trial containers: samplers on it wait for room "
                              "(add a host to agentic.envs.hosts for new samplers, or lower HARBOR_MAX_SANDBOXES)")
+            if r.get("images_missing"):
+                lines.append(f"  missing images ({len(r['images_missing'])}): {' '.join(r['images_missing'][:5])}"
+                             " -> yeto sandbox prepare pulls them")
+            room = r.get("room") or {}
+            lines += [f"  WARNING {w}" for w in room.get("warnings") or []]
+            if room.get("effective") is not None:
+                lines.append(f"  room {room['effective']} trial containers ({room.get('limits')})")
             lines += [f"  unhealthy {k}" for k in r.get("sidecars_unhealthy") or []]
     elif cmd == "validate":
         for r in report["results"]:

@@ -106,13 +106,17 @@ class _HostPrep:
                 return got
             pull_error = None
             if mode in ("auto", "pull") and dockerfile is None:
-                try:
-                    self.dk.pull(ref)
-                    got = self.dk.image_id(ref)
-                    if got:
-                        return got
-                except DockerError as exc:
-                    pull_error = exc
+                for attempt in range(PULL_ATTEMPTS):  # a registry blip or rate limit: back off, try again
+                    try:
+                        self.dk.pull(ref)
+                        got = self.dk.image_id(ref)
+                        if got:
+                            return got
+                        break
+                    except DockerError as exc:
+                        pull_error = exc
+                        if attempt + 1 < PULL_ATTEMPTS:
+                            self.sleep(PULL_BACKOFF_S * 2 ** attempt)
                 if mode == "pull" or context is None:
                     raise DockerError(f"pull {ref} failed: {pull_error}")
             if context is None and dockerfile is None:
@@ -252,6 +256,38 @@ def _modes(cfg: EnvsConfig) -> dict[str, str]:
     return {ts.name: ts.image_source for ts in cfg.tasksets}
 
 
+PULL_ATTEMPTS = 3
+PULL_BACKOFF_S = 10.0
+DEFAULT_IMAGE_GIB = 5.0  # the size guess of a missing image when none of the task images is present yet
+
+
+def image_plan(tasks: Sequence[TaskEnv], dk: Any, free_kb: int | None) -> dict[str, Any]:
+    """The distinct images the tasks need on one host (task images and prefetch images), which
+    are missing, their estimated size (the mean of the present ones, else DEFAULT_IMAGE_GIB)
+    against the free disk, and a warning when they would not fit with 10 % to spare."""
+    refs = sorted({t.source_image or t.image for t in tasks} | {t.image for t in tasks}
+                  | {r for t in tasks for r in t.prefetch})
+    missing = [r for r in refs if not dk.image_id(r)]
+    present = [s for s in (dk.image_size(r) for r in refs if r not in missing) if s is not None]
+    each = (sum(present) / len(present)) if present else DEFAULT_IMAGE_GIB * 2**30
+    need = int(each * len(missing))
+    out: dict[str, Any] = {"images": len(refs), "missing": len(missing), "missing_refs": missing[:20],
+                           "present_gib": round(sum(present) / 2**30, 1), "missing_gib_est": round(need / 2**30, 1)}
+    if free_kb is not None and need * 1.1 > free_kb * 1024:
+        out["warning"] = (f"{len(missing)} missing images need about {need / 2**30:.0f} GiB, the docker disk has "
+                          f"{free_kb / 2**20:.0f} GiB free: free space or prepare fewer tasks")
+    return out
+
+
+def _room(host: HostConfig, dk: Any) -> dict[str, Any]:
+    """:func:`.envs.host_room` from the host's bridge subnets and memory."""
+    from .envs import host_room  # noqa: PLC0415
+
+    subnets = dk.bridge_subnets() if hasattr(dk, "bridge_subnets") else []
+    mem = (dk.info() or {}).get("MemTotal") if hasattr(dk, "info") else None
+    return host_room(host, bridge_subnets=subnets, mem_total_bytes=int(mem) if mem else None)
+
+
 def _hosts(cfg: EnvsConfig, names: Sequence[str] | None) -> list[HostConfig]:
     return [cfg.host(n) for n in names] if names else list(cfg.hosts)
 
@@ -280,6 +316,15 @@ def prepare(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = None
                 for t in tasks:
                     results[t.task_id]["hosts"][host.name] = {"prepared": False, "error": err}
             return
+        try:
+            facts["room"] = _room(host, dk)
+            root = facts.get("data_root") or (dk.info() or {}).get("DockerRootDir")
+            disk = dk.disk(root) if root else None
+            facts["images"] = image_plan(tasks, dk, (disk or {}).get("free_kb"))
+            if facts["images"].get("warning"):
+                logger.warning("sandbox prepare %s: %s", host.name, facts["images"]["warning"])
+        except Exception as exc:  # noqa: BLE001 - informational
+            facts.setdefault("room", {"error": f"{type(exc).__name__}: {exc}"[:300]})
         prep = _HostPrep(cfg, host, dk, previous, stage, sleep)
         try:
             prep.base()
@@ -337,13 +382,15 @@ def status(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = None,
         row: dict[str, Any] = {"docker_host": host.docker_host, "max_sandboxes": host.max_sandboxes}
         try:
             row["containers_running"] = dk.count_running()
+            row["room"] = _room(host, dk)
             row["containers_ours"] = len(dk.containers(f"label={LABEL_RUN}={cfg.run}"))
             facts = doc["hosts"].get(host.name) or {}
             root = facts.get("data_root") or dk.info().get("DockerRootDir")
             row["data_root"] = root
             row["disk"] = dk.disk(root) if root else None
-            present = sum(1 for t in tasks if dk.image_id(t.image))
-            row["images_ready"] = f"{present}/{len(tasks)}"
+            absent = sorted({t.image for t in tasks if not dk.image_id(t.image)})
+            row["images_ready"] = f"{len({t.image for t in tasks}) - len(absent)}/{len({t.image for t in tasks})}"
+            row["images_missing"] = absent[:20]
             sidecars = {}
             for t in tasks:
                 entry = ((doc["tasks"].get(t.task_id) or {}).get("hosts") or {}).get(host.name) or {}
