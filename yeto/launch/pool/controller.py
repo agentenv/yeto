@@ -288,6 +288,6 @@ def nc_pool(cfg: dict[str, Any], config_path: str, *, ops: Any = None, lock: boo
         if left:
             pool_run._print_banner(pool_run.billing_banner(  # noqa: SLF001
                 config_path, [m.__dict__ for m in left], why="the rollout controller stopped with members left",
-                national=not external))
+                national=not external, kind=pool_run.provider_kind(cfg)))
 
     return PoolSlot(pool, state_path=state, lock=held, on_close=close, after_tick=after_tick)

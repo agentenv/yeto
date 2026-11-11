@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cli, elastic, tunnel
-from .client import LEASE_HOURS, NcTools, hourly_cost_ucr
+from .client import LEASE_HOURS, NcTools
 from .lease_pool import GONE, LeasePool, Member
 from .provider import is_national_compute, provider_kind
 
@@ -261,13 +261,32 @@ def stop_command(config_path: str) -> str:
     return f"python -m yeto.launch.nc pool-stop --config {config_path}"
 
 
-def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "", national: bool = True) -> str:
+WORDING = {  # provider kind -> how messages name its machines and their billing
+    "nc": {"unit": "National Compute node", "units": "National Compute node(s)",
+           "billing": "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."},
+    "daytona": {"unit": "sandbox", "units": "sandbox(es)",
+                "billing": "A sandbox stays billed until it is deleted (auto-stop is off)."},
+    "sky": {"unit": "sky cluster", "units": "sky cluster(s)",
+            "billing": "A cluster stays billed until it is taken down (sky down)."},
+    "modal": {"unit": "Modal island", "units": "Modal island(s)",
+              "billing": "A Modal function call bills until it is cancelled or reaches its timeout."},
+}
+GENERIC_WORDING = {"unit": "node", "units": "node(s)", "billing": "A node stays billed until it is released."}
+
+
+def wording(cfg: dict[str, Any] | None = None, *, kind: str | None = None) -> dict[str, str]:
+    """The names a message uses for the machines of a pool's provider."""
+    if kind is None:
+        kind = provider_kind(cfg or {})
+    return WORDING.get(kind, GENERIC_WORDING)
+
+
+def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "", national: bool = True,
+                   kind: str | None = None) -> str:
     bar = "!" * 78
-    kind = "National Compute node(s)" if national else "sandbox(es)"
-    lines = [bar, f"NODES STILL BILLING: {len(members)} {kind} of this pool may still be "
-                  "active" + (f" ({why})" if why else "") + ".",
-             "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."
-             if national else "A sandbox stays billed until it is deleted (auto-stop is off)."]
+    w = wording(kind=kind or ("nc" if national else "daytona"))
+    lines = [bar, f"NODES STILL BILLING: {len(members)} {w['units']} of this pool may still be "
+                  "active" + (f" ({why})" if why else "") + ".", w["billing"]]
     now = time.time()
     for m in members:
         late = m.get("lease_until") is not None and now > float(m["lease_until"])
@@ -361,27 +380,51 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         except ValueError as error:
             problems.append(str(error))
     ecfg = pc.elastic
-    hourly = hourly_cost_ucr()
+    hourly = pc.hourly()
+    w = wording(cfg)
     peak = min(len(pc.accounts), ecfg.max_nodes if ecfg.max_nodes is not None else 2 * pc.target)
-    print(f"pool {cli.run_id(cfg)}: route {cfg.get('route', 'ssh')}, machine type {cli.machine_type(cfg)}, "
-          f"target {pc.target} sampler(s) on {len(pc.accounts)} account(s) (one node per account)")
-    print("orders at start:")
-    for i in range(pc.target):
-        slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
-        print(f"  account {pc.accounts[i]}: 1 x {cli.machine_type(cfg)} node, shard {pc.shard_base}-{i}{slot}")
-    spare = pc.accounts[pc.target:]
-    print(f"replacement accounts (a lease is granted for up to {LEASE_HOURS:g} h and must be released; "
-          f"a replacement is ordered "
-          f"{pc.replace_lead_s:.0f} s before its end): {spare if spare else 'none (gaps at every lease end)'}")
-    print(f"estimated spend: {hourly} ucr/h per node ({hourly / 1e6:g} credits/h, the 8-GPU MI355X rate); "
-          f"steady {pc.target * hourly} ucr/h ({pc.target * hourly / 1e6:g} credits/h); "
-          f"up to {peak * hourly} ucr/h ({peak * hourly / 1e6:g} credits/h) while replacements overlap")
-    if ecfg.max_run_spend_ucr is None:
-        notes.append("elastic.max_run_spend_ucr is unset: the run's spend has no cap")
+    if not external:
+        print(f"pool {cli.run_id(cfg)}: route {cfg.get('route', 'ssh')}, machine type {cli.machine_type(cfg)}, "
+              f"target {pc.target} sampler(s) on {len(pc.accounts)} account(s) (one node per account)")
+        print("orders at start:")
+        for i in range(pc.target):
+            slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
+            print(f"  account {pc.accounts[i]}: 1 x {cli.machine_type(cfg)} node, shard {pc.shard_base}-{i}{slot}")
+        spare = pc.accounts[pc.target:]
+        print(f"replacement accounts (a lease is granted for up to {LEASE_HOURS:g} h and must be released; "
+              f"a replacement is ordered "
+              f"{pc.replace_lead_s:.0f} s before its end): {spare if spare else 'none (gaps at every lease end)'}")
     else:
+        print(f"pool {cli.run_id(cfg)}: provider {provider_kind(cfg)}, data path {cfg.get('data_path', 'r2')}, "
+              f"target {pc.target} sampler(s) on {len(pc.accounts)} slot(s) (one {w['unit']} per slot)")
+        print("orders at start:")
+        for i in range(pc.target):
+            slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
+            print(f"  slot {pc.accounts[i]}: 1 x {w['unit']}, shard {pc.shard_base}-{i}{slot}")
+    if external and cli.pool_price(cfg)[0] is None:
+        notes.append("the provider config sets no price_usd_h: the budget counts each node hour at the National "
+                     "Compute MI355X rate")
+    if cli.pool_price(cfg)[0] is None:  # the National Compute rate, in ucr
+        print(f"estimated spend: {hourly:.0f} ucr/h per node ({hourly / 1e6:g} credits/h, the 8-GPU MI355X rate); "
+              f"steady {pc.target * hourly:.0f} ucr/h ({pc.target * hourly / 1e6:g} credits/h); "
+              f"up to {peak * hourly:.0f} ucr/h ({peak * hourly / 1e6:g} credits/h) while replacements overlap")
+    else:
+        print(f"estimated spend: {cli.pool_hourly_text(cfg, hourly)} per node hour; steady "
+              f"{cli.pool_hourly_text(cfg, pc.target * hourly)}/h; up to "
+              f"{cli.pool_hourly_text(cfg, peak * hourly)}/h while replacements overlap")
+    if ecfg.max_run_spend_ucr is None and ecfg.max_run_spend_usd is None:
+        notes.append("elastic.max_run_spend_ucr is unset (and max_run_spend_usd): the run's spend has no cap")
+    if ecfg.max_run_spend_ucr is not None:
         print(f"run spend cap: {ecfg.max_run_spend_ucr} ucr ({ecfg.max_run_spend_ucr / hourly / pc.target:.1f} h "
               f"at the steady rate)")
-    print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
+    if ecfg.max_run_spend_usd is not None:
+        from ..pool.money import to_ucr  # noqa: PLC0415
+
+        cap = to_ucr(float(ecfg.max_run_spend_usd), "usd")
+        print(f"run spend cap: ${float(ecfg.max_run_spend_usd):.2f} ({cap / hourly / pc.target:.1f} h at the steady "
+              "rate)")
+    if not external:
+        print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
     print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
@@ -471,7 +514,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         left = [m.__dict__ for m in pool.live()]
         if left:
             _print_banner(billing_banner(config_path, left, why="stopped pool with members left",
-                                         national=is_national_compute(cfg)))
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
             return 1
         return 0
     signals = signals or _Signals()
@@ -514,7 +557,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         if left:
             _print_banner(billing_banner(config_path, left,
                                          why="the pool loop exited" + ("" if clean else " on an error"),
-                                         national=is_national_compute(cfg)))
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
     return 0 if not pool.live() else 1
 
 
@@ -597,12 +640,17 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
     ecfg = pc.elastic
     if target < 0:
         return f"target {target} < 0"
-    allowed = cli.allowed_accounts()
-    usable = [a for a in pc.accounts if a in allowed]
-    if target > len(usable):
-        return (f"target {target} > {len(usable)} usable accounts {usable} (a National Compute account holds "
-                f"one node; the pool's accounts {pc.accounts} inside YETO_NC_ACCOUNTS {sorted(allowed)}; "
-                f"add accounts to the pool config and restart the pool)")
+    if is_national_compute(cfg):
+        allowed = cli.allowed_accounts()
+        usable = [a for a in pc.accounts if a in allowed]
+        if target > len(usable):
+            return (f"target {target} > {len(usable)} usable accounts {usable} (a National Compute account "
+                    f"holds one node; the pool's accounts {pc.accounts} inside YETO_NC_ACCOUNTS "
+                    f"{sorted(allowed)}; add accounts to the pool config and restart the pool)")
+    elif target > len(pc.accounts):
+        w = wording(cfg)
+        return (f"target {target} > {len(pc.accounts)} slots (one {w['unit']} per slot: the pool config's "
+                f"'accounts'; add slots and restart the pool)")
     before = current_target(cfg, doc)
     if target != before and cli.pool_dispense(cfg) is None:
         if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
@@ -627,10 +675,17 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
         if ecfg.max_orders is not None and orders + new > ecfg.max_orders:
             return f"{orders} orders placed + {new} new > elastic.max_orders {ecfg.max_orders}"
         spent = float(budget.get("spent_ucr", 0.0))
-        hourly = hourly_cost_ucr()
+        hourly = pc.hourly()  # ucr-equivalents (a USD provider price converted)
         if ecfg.max_run_spend_ucr is not None and spent + new * hourly > ecfg.max_run_spend_ucr:
-            return (f"spend {spent:.0f} + {new} new node hour(s) x {hourly} > elastic.max_run_spend_ucr "
+            return (f"spend {spent:.0f} + {new} new node hour(s) x {hourly:.0f} > elastic.max_run_spend_ucr "
                     f"{ecfg.max_run_spend_ucr}")
+        if ecfg.max_run_spend_usd is not None:
+            from ..pool.money import to_usd  # noqa: PLC0415
+
+            usd, hour = to_usd(spent, "ucr"), to_usd(hourly, "ucr")
+            if usd + new * hour > float(ecfg.max_run_spend_usd):
+                return (f"spend ${usd:.2f} + {new} new node hour(s) x ${hour:.2f} > elastic.max_run_spend_usd "
+                        f"${float(ecfg.max_run_spend_usd):.2f}")
         next_shard = int(doc.get("next_shard", 0))
         if pc.shard_limit is not None and next_shard + new > pc.shard_limit:
             return (f"{new} new node(s) need shards {pc.shard_base}-{next_shard}..{pc.shard_base}-"
@@ -874,7 +929,7 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
             doc = json.loads(state.read_text()) if state.exists() else {}
             _print_banner(billing_banner(config_path, billed_members(doc),
                                          why=f"the running pool did not stop in {wait_s:.0f} s",
-                                         national=is_national_compute(cfg)))
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
             return 1
         if proc is None:  # the loop exited and removed its files: read what it left
             doc = json.loads(state.read_text()) if state.exists() else {}
@@ -907,7 +962,7 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
     _remove(stop_path(cfg))
     if left:
         _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed",
-                                     national=is_national_compute(cfg)))
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
         return 1
     _remove(scale_path(cfg))
     _say("pool-stop: every node of the pool is released")
@@ -945,7 +1000,7 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     if left and (proc is None or not proc.get("alive")):
         _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
-                                     national=is_national_compute(cfg)))
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
         return 1
     if left:
         print(f"note: {lease_warning(cfg, config_path)}", file=sys.stderr)

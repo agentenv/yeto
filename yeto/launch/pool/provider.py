@@ -247,8 +247,12 @@ class ProviderPoolOps:
         return run_tickets()
 
     def hourly_cost(self, member: Any) -> float | None:
-        """One machine hour of ``member`` from the provider (None: unknown)."""
-        rate = getattr(self.provider, "hourly_cost", None)
+        """One machine hour of ``member`` from the provider, in its ``caps.currency``
+        (a :class:`MultiProvider` asks the member's own provider; None: unknown)."""
+        provider = self.provider
+        if isinstance(provider, MultiProvider):
+            provider = provider.provider_of(member.account)
+        rate = getattr(provider, "hourly_cost", None)
         if rate is None:
             return None
         try:

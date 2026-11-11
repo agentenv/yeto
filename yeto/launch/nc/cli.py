@@ -755,7 +755,47 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
                       end_margin_s=float(cfg.get("end_margin_s", 600)),
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
-                      data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")))
+                      data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")),
+                      hourly_cost=pool_hourly_ucr(cfg))
+
+
+def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
+    """One node hour of a pool as its provider config states it, and the currency:
+    sky ``price_usd_h`` (or the first offer's), modal / daytona ``price_usd_h`` in USD;
+    None for National Compute (the MI355X rate in ucr applies)."""
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    kind = providers.kind_of(cfg) or "factory"
+    entry = providers.registered(kind)
+    currency = entry.caps.currency if entry is not None else "ucr"
+    section = cfg.get("provider") or {}
+    price = section.get("price_usd_h")
+    if price is None and kind == "sky":
+        from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+
+        try:
+            price = offers_from_config(section)[0].price_usd_h
+        except ValueError:
+            price = None
+    return (None if price is None else float(price)), currency
+
+
+def pool_hourly_ucr(cfg: dict[str, Any]) -> float:
+    """One node hour of a pool in ucr-equivalents (the pool budget's unit; 0: the
+    National Compute MI355X rate). A USD price converts at ``YETO_NC_USD_PER_UCR``."""
+    from ..pool.money import to_ucr  # noqa: PLC0415
+
+    price, currency = pool_price(cfg)
+    return 0 if price is None else to_ucr(price, "usd" if currency == "ucr" else currency)
+
+
+def pool_hourly_text(cfg: dict[str, Any], hourly_ucr: float) -> str:
+    """One node hour for a message: credits for National Compute, USD otherwise."""
+    from ..pool.money import to_usd  # noqa: PLC0415
+
+    if pool_price(cfg)[0] is None:
+        return f"{hourly_ucr:.0f} ucr ({hourly_ucr / 1e6:g} credits)"
+    return f"${to_usd(hourly_ucr, 'ucr'):.2f}"
 
 
 def pool_shard_limit(cfg: dict[str, Any]) -> int | None:

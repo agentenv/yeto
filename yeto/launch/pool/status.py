@@ -162,6 +162,8 @@ class ElasticConfig:
     breaker_max_cooldown_s: float = 3600.0
     breaker_max_trips: int = 3
     max_run_spend_ucr: int | None = None
+    # the same cap in USD (every provider's rate converted: yeto.launch.pool.money); both may be set
+    max_run_spend_usd: float | None = None
     max_nodes: int | None = None  # billed nodes at once (default: 2 x target)
     max_orders: int | None = None  # orders over the run
     stop_on_finish: bool = True  # a sampler that exits 0 ends the pool (the run is over)
@@ -340,7 +342,21 @@ class Budget:
         if cfg.max_run_spend_ucr is not None and self.spent_ucr + hourly_ucr > cfg.max_run_spend_ucr:
             return (f"spend {self.spent_ucr:.0f} + one node hour {hourly_ucr} > "
                     f"max_run_spend_ucr {cfg.max_run_spend_ucr}")
+        if cfg.max_run_spend_usd is not None:
+            from .money import to_usd  # noqa: PLC0415
+
+            spent, hour = to_usd(self.spent_ucr, "ucr"), to_usd(hourly_ucr, "ucr")
+            if spent + hour > float(cfg.max_run_spend_usd):
+                return (f"spend ${spent:.2f} + one node hour ${hour:.2f} > max_run_spend_usd "
+                        f"${float(cfg.max_run_spend_usd):.2f}")
         return None
+
+    @property
+    def spent_usd(self) -> float:
+        """The spend in USD (every rate was converted to ucr-equivalents when charged)."""
+        from .money import to_usd  # noqa: PLC0415
+
+        return to_usd(self.spent_ucr, "ucr")
 
 
 # -- events -------------------------------------------------------------------

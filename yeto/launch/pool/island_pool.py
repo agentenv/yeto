@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import money
 from . import status as el
 
 LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compute)
@@ -316,9 +317,10 @@ class IslandPool:
             return
         start = m.charged_to if m.charged_to is not None else m.granted
         if m.hourly_ucr is None and getattr(self.ops, "hourly_cost", None) is not None:
-            try:  # the provider's own rate (in its cost unit), once
+            try:  # the provider's own rate (in its currency, converted to ucr-equivalents), once
                 rate = self.ops.hourly_cost(m)
-                m.hourly_ucr = None if rate is None else int(round(float(rate)))
+                if rate is not None:
+                    m.hourly_ucr = int(round(money.to_ucr(float(rate), money.currency_of(self.ops, m))))
             except Exception:  # noqa: BLE001 - fall back to the config's node hour
                 pass
         self.budget.charge(now - start, m.hourly_ucr or self.config.hourly())
