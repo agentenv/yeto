@@ -351,12 +351,53 @@ def test_a_failed_release_download_resumes_without_fetching_whole_files_again(tm
 # -- 16 dispenser holders on one ledger --------------------------------------------------------
 
 
+def _counting_store():
+    """FakeObjects counting each request kind under a lock (the threads race on ``+= 1``)."""
+    from collections import Counter
+
+    from test_store_dispense import FakeObjects
+
+    class Counting(FakeObjects):
+        def __init__(self):
+            super().__init__()
+            self.ops: Counter[str] = Counter()
+            self.ops_lock = threading.Lock()
+            self.frozen = None  # a listing every scan returns: N holders that scanned at once
+
+        def _count(self, kind):
+            with self.ops_lock:
+                self.ops[kind] += 1
+
+        def read(self, key):
+            self._count("read")
+            return super().read(key)
+
+        def write(self, key, data):
+            self._count("write")
+            return super().write(key, data)
+
+        def exists(self, key):
+            self._count("exists")
+            return super().exists(key)
+
+        def create(self, key, data):
+            won = super().create(key, data)
+            self._count("create" if won else "create_412")
+            return won
+
+        def list_meta(self, prefix):
+            self._count("list")
+            return self.frozen if self.frozen is not None else super().list_meta(prefix)
+
+    return Counting()
+
+
 def test_sixteen_holders_claim_and_settle_each_task_once(tmp_path):
-    from test_store_dispense import FakeObjects, _open, _rows, _slots, _status, _write
+    from test_store_dispense import _open, _rows, _slots, _status, _write
 
     from yeto.rl.engine.task_dispense import DispenseEnded
 
-    store = FakeObjects()
+    store = _counting_store()
     tasks = 640
     path = _write(tmp_path, _rows(tasks))
     samplers = [_open(path, store, holder=f"s{k}", inc="i", groups=4, config={"lease_s": 10**7}) for k in range(N)]
@@ -374,13 +415,42 @@ def test_sixteen_holders_claim_and_settle_each_task_once(tmp_path):
             pass
 
     threads = [threading.Thread(target=run, args=(k,)) for k in range(N)]
-    before = store.requests
+    store.ops.clear()
     [th.start() for th in threads]
     [th.join(60) for th in threads]
+    ops = dict(store.ops)  # before the status read below
     every = [p for spots in got.values() for p in spots]
     assert sorted(every) == list(range(tasks))
     assert _status(store)["totals"]["trained"] == tasks
+    # The request budget, by kind (the listings of idle holders polling a fake clock depend on
+    # thread scheduling and are not bounded here; production waits scan_s between them):
     lost = sum(s.stats["claim_lost"] for s in samplers)
-    per_task = (store.requests - before) / tasks
-    # each task: one claim and one settle, plus the listings and the claims lost to a race
-    assert per_task < 12, (per_task, lost)
+    assert ops.get("create") == 2 * tasks, ops  # exactly one claim and one settle per task
+    assert ops.get("create_412", 0) == lost, ops  # the only conflicts are claims lost to a race
+    assert lost <= tasks * (N - 1), ops  # a holder loses a slot's attempt at most once
+    assert not ops.get("read") and not ops.get("write") and not ops.get("exists"), ops  # no re-reads
+    assert ops.get("list") == sum(s.stats["scans"] for s in samplers), ops  # one listing per scan
+
+
+def test_holders_that_scanned_the_same_listing_spread_their_claims(tmp_path):
+    """The herd, deterministically: N holders claim in turn from one listing taken before
+    any claim. In plan order holder k loses the k*want slots its predecessors took (want*N*(N-1)/2
+    lost claims); after its first loss a holder goes on from its own offset."""
+    from test_store_dispense import _open, _rows, _write
+
+    store = _counting_store()
+    want, tasks = 4, 640
+    path = _write(tmp_path, _rows(tasks))
+    samplers = [_open(path, store, holder=f"s{k}", inc="i", groups=want, config={"lease_s": 10**7})
+                for k in range(N)]
+    store.frozen = store.list_meta("")
+    store.ops.clear()
+    claimed = [samplers[k]._claim(want)[0] for k in range(N)]
+    assert all(len(c) == want for c in claimed)
+    assert len({p for c in claimed for p in c}) == want * N  # no slot twice
+    lost = store.ops["create_412"]
+    assert lost == sum(s.stats["claim_lost"] for s in samplers)
+    herd = want * N * (N - 1) // 2
+    assert lost <= herd // 4, (lost, herd)
+    # an uncontended holder keeps the plan order: the first one takes the first want slots
+    assert claimed[0] == list(range(want))
