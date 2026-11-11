@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import types
 
 import pytest
@@ -14,7 +15,11 @@ from yeto.rl import up
 @pytest.fixture
 def make_run(tmp_path, monkeypatch):
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
-    monkeypatch.setattr(up.time, "sleep", lambda s: None)
+    # up.py's own view of the time module: patching the real time.time / time.sleep
+    # leaks the fake clock into every thread of the test process (a background
+    # thread's sleep then advances it, which made the 1.2x breaker test flaky)
+    monkeypatch.setattr(up, "time", types.SimpleNamespace(
+        time=time.time, sleep=lambda s: None, gmtime=time.gmtime, strftime=time.strftime))
     pool_cfg = tmp_path / "pool.json"
     pool_cfg.write_text(json.dumps({"shard_base": "s"}))
 
