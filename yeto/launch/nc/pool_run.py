@@ -24,7 +24,7 @@ process dies, whatever the host name says), ``pool-<shard_base>.pid`` (the loop'
 pid and host, for display), ``pool-<shard_base>.stop`` (a stop request) and
 ``pool-<shard_base>.scale.json`` (``pool-scale``'s target; it records the run id, a file of
 another run is ignored, and ``pool-stop`` removes it once the pool is released).
-``pool-stop`` releasing from the state file and ``yeto cleanup --include-nc``
+``pool-stop`` releasing from the state file and ``yeto cleanup --include-pools``
 take the same lock: neither releases a node while a pool loop runs.
 """
 
@@ -44,13 +44,29 @@ from pathlib import Path
 from typing import Any
 
 from . import cli, elastic, ssh_sampler, tunnel
-from .client import LEASE_HOURS, NcTools, hourly_cost_ucr
+from .client import LEASE_HOURS, NcTools
 from .lease_pool import GONE, LeasePool, Member
+from .provider import is_national_compute, provider_kind
 
 LEASE_WARNING = ("National Compute does NOT end a lease at lease_until: the node stays active and billed "
                  "until its ticket is deleted. Keep this pool running, or release its nodes with "
                  "`python -m yeto.launch.nc pool-stop --config <file>`.")
+SANDBOX_WARNING = ("Daytona sandboxes are created with auto-stop off: a sandbox stays billed until it is "
+                   "deleted. Keep this pool running, or delete its sandboxes with "
+                   "`python -m yeto.launch.nc pool-stop --config <file>`.")
 DRAIN_ATTEMPTS = 3
+
+
+CLOUD_WARNING = ("Cloud rollout islands ({kind}) bill until they are released: keep this pool running, "
+                 "or release them with `python -m yeto.launch.nc pool-stop --config <file>`.")
+
+
+def lease_warning(cfg: dict[str, Any], config_path: str) -> str:
+    """The billing warning of the pool's provider (a National Compute lease, a sandbox, a cloud island)."""
+    kind = provider_kind(cfg)
+    text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING if kind == "daytona" else \
+        CLOUD_WARNING.format(kind=kind)
+    return text.replace("<file>", config_path)
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
 
 
@@ -170,6 +186,7 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         build_reward,
         island_config,
     )
+    from yeto.rl.engine.rollout_data_path import normalize_spec  # noqa: PLC0415
 
     pc = pc or cli.pool_config(cfg, allowed=None)
     member = Member(pc.accounts[0], "<ticket>", f"{pc.shard_base}-0",
@@ -178,7 +195,9 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         spec = cli.render_spec(cfg, member, [f"{pc.shard_base}-{i}" for i in range(pc.target)])
         from yeto.launch.agentic_setup import strip  # noqa: PLC0415
 
-        checked = apply_rollout_quant(strip(spec))
+        # the data path's defaults first, as the sampler applies them at start (syncer:
+        # no round limit, a member store under work_dir)
+        checked = apply_rollout_quant(normalize_spec(strip(spec)))
         island_config(checked)  # required keys, sampling parameters
         build_engine(checked)  # engine section, server + options dataclasses, rollout_fields (no process)
         build_reward(checked)  # reward_kind and the reward function import
@@ -245,19 +264,45 @@ def stop_command(config_path: str) -> str:
     return f"python -m yeto.launch.nc pool-stop --config {config_path}"
 
 
-def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "") -> str:
+WORDING = {  # provider kind -> how messages name its machines and their billing
+    "nc": {"unit": "National Compute node", "units": "National Compute node(s)",
+           "billing": "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."},
+    "daytona": {"unit": "sandbox", "units": "sandbox(es)",
+                "billing": "A sandbox stays billed until it is deleted (auto-stop is off)."},
+    "sky": {"unit": "sky cluster", "units": "sky cluster(s)",
+            "billing": "A cluster stays billed until it is taken down (sky down)."},
+    "modal": {"unit": "Modal island", "units": "Modal island(s)",
+              "billing": "A Modal function call bills until it is cancelled or reaches its timeout."},
+}
+GENERIC_WORDING = {"unit": "node", "units": "node(s)", "billing": "A node stays billed until it is released."}
+
+
+def wording(cfg: dict[str, Any] | None = None, *, kind: str | None = None) -> dict[str, str]:
+    """The names a message uses for the machines of a pool's provider."""
+    if kind is None:
+        kind = provider_kind(cfg or {})
+    return WORDING.get(kind, GENERIC_WORDING)
+
+
+def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "", national: bool = True,
+                   kind: str | None = None) -> str:
     bar = "!" * 78
-    lines = [bar, f"NODES STILL BILLING: {len(members)} National Compute node(s) of this pool may still be "
-                  "active" + (f" ({why})" if why else "") + ".",
-             "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."]
+    w = wording(kind=kind or ("nc" if national else "daytona"))
+    head = "NODES STILL BILLING" if national else "STILL BILLING"
+    lines = [bar, f"{head}: {len(members)} {w['units']} of this pool may still be "
+                  "active" + (f" ({why})" if why else "") + ".", w["billing"]]
     now = time.time()
     for m in members:
         late = m.get("lease_until") is not None and now > float(m["lease_until"])
-        lines.append(f"  account {m.get('account')} ticket {m.get('ticket')} shard {m.get('shard')} "
-                     f"state {m.get('state')} lease_until {_until(m.get('lease_until'))}"
+        until = m.get("lease_until")
+        lines.append(f"  {'account' if national else 'slot'} {m.get('account')} ticket {m.get('ticket')} "
+                     f"shard {m.get('shard')} state {m.get('state')}"
+                     + (f" lease_until {_until(until)}" if national or until is not None else "")
                      + ("  PAST lease_until, STILL BILLED" if late else ""))
-    lines += ["Release them with:", f"  {stop_command(config_path)}",
-              "or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>", bar]
+    lines += ["Release them with:", f"  {stop_command(config_path)}"]
+    if national:  # ``down`` is the National Compute ticket call
+        lines.append("or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>")
+    lines.append(bar)
     return "\n".join(lines)
 
 
@@ -268,10 +313,30 @@ def _print_banner(text: str) -> None:
 
 # -- dry run -------------------------------------------------------------------
 
-def model_present(uri: str, env_file: str | os.PathLike[str]) -> bool:
-    """``config.json`` exists under ``uri`` (the model directory in the bucket), read
-    with the nodes' credentials from the store env file."""
-    return bool(elastic.s3_fence_store(uri, env_file).objects.exists("config.json"))
+def daytona_problems(cfg: dict[str, Any]) -> list[str]:
+    """Offline checks of a ``provider.kind: daytona`` pool (no Daytona call)."""
+    from .daytona_provider import from_config  # noqa: PLC0415
+
+    problems = []
+    try:
+        provider = from_config(cfg, cli.run_id(cfg), sdk=object(), client=object())
+    except (ValueError, TypeError) as error:
+        return [str(error)]
+    if not os.environ.get(provider.api_key_env):
+        problems.append(f"{provider.api_key_env} is not set (the Daytona API key)")
+    if importlib.util.find_spec("daytona") is None:
+        problems.append("the 'daytona' Python package is not installed")
+    return problems
+
+
+def model_problems(uri: str, env_file: str | os.PathLike[str]) -> list[str]:
+    """What is missing of the model directory ``uri`` in the bucket, read with the
+    nodes' credentials from the store env file: ``config.json`` and every weight
+    shard ``model.safetensors.index.json`` names (or ``model.safetensors``). One
+    paginated LIST of the prefix plus the index; no weight file is read."""
+    from yeto.launch import model_check  # noqa: PLC0415
+
+    return model_check.store_problems(elastic.s3_fence_store(uri, env_file).objects, uri)
 
 
 def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str], bucket: str) -> list[str]:
@@ -293,20 +358,19 @@ def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str],
                         f"(at {ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST]}); leave dest unset")
     uri = f"s3://{bucket}/{str(pull['src_key']).strip('/')}"
     try:
-        present = model_present(uri, env_file)
+        missing = model_problems(uri, env_file)
     except Exception as error:  # noqa: BLE001 - reported, the operator decides
-        problems.append(f"model_pull: cannot read {uri}/config.json with the store env file: {error!r}"[:400])
+        problems.append(f"model_pull: cannot list {uri} with the store env file: {error!r}"[:400])
     else:
-        if not present:
-            problems.append(f"model_pull: no {uri}/config.json: upload the model to the bucket first "
-                            "(docs/KIMI_K31_ASYNC_RL_GUIDE.md, Model weights)")
+        problems += [f"model_pull: {m}: upload the model to the bucket first "
+                     "(docs/KIMI_K31_ASYNC_RL_GUIDE.md, Model weights)" for m in missing]
     return problems
 
 
 def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     """Validate the config and print the orders and the spend the pool would make;
     orders nothing and calls no National Compute API."""
-    external = "factory" in (cfg.get("provider") or {})
+    external = not is_national_compute(cfg)
     problems: list[str] = []
     try:
         pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
@@ -338,7 +402,13 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                 problems.append(f"store env file has no {bucket_env} (the bucket key; set 'bucket_env')")
             else:
                 problems += store_layout_problems(cfg, env_file, elastic.read_env_file(env_file)[bucket_env])
-    if external:
+    from ..pool import provider as registry  # noqa: PLC0415
+
+    entry = registry.registered(provider_kind(cfg))
+    check = registry.resolve(entry.offline_problems) if entry is not None else None
+    if check is not None:  # the provider kind's own offline checks (registered)
+        problems += list(check(cfg))
+    elif external:
         module = str(cfg["provider"]["factory"]).partition(":")[0]
         if importlib.util.find_spec(module) is None:
             problems.append(f"provider.factory module {module!r} is not importable")
@@ -356,28 +426,52 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         except ValueError as error:
             problems.append(str(error))
     ecfg = pc.elastic
-    hourly = hourly_cost_ucr()
+    hourly = pc.hourly()
+    w = wording(cfg)
     peak = min(len(pc.accounts), ecfg.max_nodes if ecfg.max_nodes is not None else 2 * pc.target)
-    print(f"pool {cli.run_id(cfg)}: route {cfg.get('route', 'ssh')}, machine type {cli.machine_type(cfg)}, "
-          f"target {pc.target} sampler(s) on {len(pc.accounts)} account(s) (one node per account)")
-    print("orders at start:")
-    for i in range(pc.target):
-        slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
-        print(f"  account {pc.accounts[i]}: 1 x {cli.machine_type(cfg)} node, shard {pc.shard_base}-{i}{slot}")
-    spare = pc.accounts[pc.target:]
-    print(f"replacement accounts (a lease is granted for up to {LEASE_HOURS:g} h and must be released; "
-          f"a replacement is ordered "
-          f"{pc.replace_lead_s:.0f} s before its end): {spare if spare else 'none (gaps at every lease end)'}")
-    print(f"estimated spend: {hourly} ucr/h per node ({hourly / 1e6:g} credits/h, the 8-GPU MI355X rate); "
-          f"steady {pc.target * hourly} ucr/h ({pc.target * hourly / 1e6:g} credits/h); "
-          f"up to {peak * hourly} ucr/h ({peak * hourly / 1e6:g} credits/h) while replacements overlap")
-    if ecfg.max_run_spend_ucr is None:
-        notes.append("elastic.max_run_spend_ucr is unset: the run's spend has no cap")
+    if not external:
+        print(f"pool {cli.run_id(cfg)}: route {cfg.get('route', 'ssh')}, machine type {cli.machine_type(cfg)}, "
+              f"target {pc.target} sampler(s) on {len(pc.accounts)} account(s) (one node per account)")
+        print("orders at start:")
+        for i in range(pc.target):
+            slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
+            print(f"  account {pc.accounts[i]}: 1 x {cli.machine_type(cfg)} node, shard {pc.shard_base}-{i}{slot}")
+        spare = pc.accounts[pc.target:]
+        print(f"replacement accounts (a lease is granted for up to {LEASE_HOURS:g} h and must be released; "
+              f"a replacement is ordered "
+              f"{pc.replace_lead_s:.0f} s before its end): {spare if spare else 'none (gaps at every lease end)'}")
     else:
+        print(f"pool {cli.run_id(cfg)}: provider {provider_kind(cfg)}, data path {cfg.get('data_path', 'r2')}, "
+              f"target {pc.target} sampler(s) on {len(pc.accounts)} slot(s) (one {w['unit']} per slot)")
+        print("orders at start:")
+        for i in range(pc.target):
+            slot = f" data_slot {i}/{pc.data_slots}" if pc.data_slots else ""
+            print(f"  slot {pc.accounts[i]}: 1 x {w['unit']}, shard {pc.shard_base}-{i}{slot}")
+    if external and cli.pool_price(cfg)[0] is None:
+        notes.append(f"the provider config sets no price_usd_h: the budget counts each {w['unit']} hour at the "
+                     "National Compute MI355X rate; set price_usd_h to the provider's price")
+    if cli.pool_price(cfg)[0] is None:  # the National Compute rate, in ucr
+        print(f"estimated spend: {hourly:.0f} ucr/h per node ({hourly / 1e6:g} credits/h, the 8-GPU MI355X rate); "
+              f"steady {pc.target * hourly:.0f} ucr/h ({pc.target * hourly / 1e6:g} credits/h); "
+              f"up to {peak * hourly:.0f} ucr/h ({peak * hourly / 1e6:g} credits/h) while replacements overlap")
+    else:
+        print(f"estimated spend: {cli.pool_hourly_text(cfg, hourly)} per node hour; steady "
+              f"{cli.pool_hourly_text(cfg, pc.target * hourly)}/h; up to "
+              f"{cli.pool_hourly_text(cfg, peak * hourly)}/h while replacements overlap")
+    if ecfg.max_run_spend_ucr is None and ecfg.max_run_spend_usd is None:
+        notes.append("elastic.max_run_spend_ucr is unset (and max_run_spend_usd): the run's spend has no cap")
+    if ecfg.max_run_spend_ucr is not None:
         print(f"run spend cap: {ecfg.max_run_spend_ucr} ucr ({ecfg.max_run_spend_ucr / hourly / pc.target:.1f} h "
               f"at the steady rate)")
-    print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
-    print(f"WARNING: {LEASE_WARNING.replace('<file>', config_path)}")
+    if ecfg.max_run_spend_usd is not None:
+        from ..pool.money import to_ucr  # noqa: PLC0415
+
+        cap = to_ucr(float(ecfg.max_run_spend_usd), "usd")
+        print(f"run spend cap: ${float(ecfg.max_run_spend_usd):.2f} ({cap / hourly / pc.target:.1f} h at the steady "
+              "rate)")
+    if not external:
+        print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
+    print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
     for note in notes:
@@ -416,23 +510,13 @@ class _Signals:
 
 def _drain_all(pool: LeasePool, why: str, *, sleep=None, wait_s: float = 10.0) -> list[Member]:
     """Stop the pool and retry failed drains a few times; returns the members left."""
-    sleep = sleep or time.sleep
-    pool.stop(why)
-    for _ in range(DRAIN_ATTEMPTS - 1):
-        left = pool.live()
-        if not left:
-            break
-        sleep(wait_s)
-        for m in left:
-            pool._drain(m, "stop retry")
-    pool._patrol(pool.clock())
-    return pool.live()
+    return pool.drain_all(why, attempts=DRAIN_ATTEMPTS, wait_s=wait_s, sleep=sleep or time.sleep)
 
 
 def run_pool(cfg: dict[str, Any], config_path: str, *, interval: float, pool: LeasePool | None = None,
              signals: _Signals | None = None) -> int:
     """The foreground control loop of a pool (``pool --config F``)."""
-    external = "factory" in (cfg.get("provider") or {})
+    external = not is_national_compute(cfg)
     pc = cli.pool_config(cfg, allowed=None if external else cli.allowed_accounts())
     for note in cli.pool_config_warnings(cfg):
         _say(f"WARNING: {note}")
@@ -475,13 +559,14 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         _say(f"pool state {state} says stopped ({pool.stopped}); move it away to start a new pool")
         left = [m.__dict__ for m in pool.live()]
         if left:
-            _print_banner(billing_banner(config_path, left, why="stopped pool with members left"))
+            _print_banner(billing_banner(config_path, left, why="stopped pool with members left",
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
             return 1
         return 0
     signals = signals or _Signals()
     _write_pid(cfg, config_path)
     _remove(stop_path(cfg))
-    _say(f"WARNING: {LEASE_WARNING.replace('<file>', config_path)}")
+    _say(f"WARNING: {lease_warning(cfg, config_path)}")
     _say("the control loop must stay up for the whole run (an always-on host, tmux or systemd); "
          "SIGTERM / Ctrl-C drains every node before it exits")
     signals.install()
@@ -496,7 +581,7 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
                 _retry_in_loop(pool, config_path)
             pool.save(state)
             if signals.name is None and not stop_path(cfg).exists():
-                signals.wake.wait(interval)
+                pool.wait(signals.wake, interval)  # a pause / resume / scale ends it at once
             if signals.name is not None or stop_path(cfg).exists():
                 why = f"signal {signals.name}" if signals.name else "pool-stop requested"
                 _say(f"pool: {why}: draining every node")
@@ -517,7 +602,8 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         left = [m.__dict__ for m in pool.live()]
         if left:
             _print_banner(billing_banner(config_path, left,
-                                         why="the pool loop exited" + ("" if clean else " on an error")))
+                                         why="the pool loop exited" + ("" if clean else " on an error"),
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
     return 0 if not pool.live() else 1
 
 
@@ -575,36 +661,77 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
 
 # -- scale ---------------------------------------------------------------------
 
-def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire: list[str]) -> str | None:
+def _counted(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """State-file members that count against the target (LeasePool.counted)."""
+    return [m for m in billed_members(doc) if m.get("state") != "draining" and m.get("retiring_since") is None
+            and not (m.get("replaced_by") and m.get("state") == "ready")]
+
+
+def current_target(cfg: dict[str, Any], doc: dict[str, Any]) -> int:
+    scale = read_scale(cfg)
+    if scale is not None:
+        return int(scale["target"])
+    return int(doc.get("target", cfg["target"]))
+
+
+def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire: list[str], *,
+                  force_static: bool = False) -> str | None:
     """Why ``pool-scale --target`` is refused before anything is ordered (None: allowed).
-    ``doc`` is the pool's state file. Checked: accounts (one node each), data_slots,
-    max_nodes, max_orders, max_run_spend_ucr (one node hour per new node), shard_limit
-    (the trainer's buffer shards / the tunnel ports) and the --retire tickets."""
+    ``doc`` is the pool's state file. Checked: the task source (a store dispenser, or
+    static data slots only with ``force_static``), accounts (one node each, inside
+    ``YETO_NC_ACCOUNTS``), data_slots, max_nodes, max_orders, a tripped breaker,
+    max_run_spend_ucr (one node hour per new node), shard_limit (the trainer's buffer
+    shards / the tunnel ports) and the --retire tickets."""
     pc = cli.pool_config(cfg, allowed=None)
     ecfg = pc.elastic
     if target < 0:
         return f"target {target} < 0"
-    if target > len(pc.accounts):
-        return (f"target {target} > {len(pc.accounts)} accounts (a National Compute account holds one node; "
-                f"add accounts to the pool config and restart the pool)")
+    if is_national_compute(cfg):
+        allowed = cli.allowed_accounts()
+        usable = [a for a in pc.accounts if a in allowed]
+        if target > len(usable):
+            return (f"target {target} > {len(usable)} usable accounts {usable} (a National Compute account "
+                    f"holds one node; the pool's accounts {pc.accounts} inside YETO_NC_ACCOUNTS "
+                    f"{sorted(allowed)}; add accounts to the pool config and restart the pool)")
+    elif target > len(pc.accounts):
+        w = wording(cfg)
+        return (f"target {target} > {len(pc.accounts)} slots (one {w['unit']} per slot: the pool config's "
+                f"'slots'; add slots and restart the pool)")
+    before = current_target(cfg, doc)
+    if target != before and not cli.pool_has_dispenser(cfg):
+        if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
+            return ("the samplers have no dispenser (prompts.dispense.backend store, or the syncer's "
+                    "dispenser on data_path syncer): every sampler reads every prompt, so another node "
+                    "repeats every task; set sampler.dispense in the pool config (an elastic run needs it)")
+        if pc.data_slots is not None and not force_static:
+            return (f"static data_slots {pc.data_slots}: a removed node's slot pauses (its prompts wait "
+                    f"until a scale up continues the slot) and no scale up goes past {pc.data_slots} nodes; "
+                    f"use a store dispenser (sampler.dispense) for an elastic run, or pass --force-static")
     if pc.data_slots is not None and target > int(pc.data_slots):
         return f"target {target} > data_slots {pc.data_slots} (each member holds one slot)"
     if ecfg.max_nodes is not None and target > ecfg.max_nodes:
         return f"target {target} > elastic.max_nodes {ecfg.max_nodes}"
-    members = billed_members(doc)
-    counted = [m for m in members if m.get("state") != "draining"
-               and not (m.get("replaced_by") and m.get("state") == "ready")]
+    counted = _counted(doc)
     new = max(0, target - len(counted))
     if new:
+        if (doc.get("breaker") or {}).get("tripped"):
+            return "the pool's order breaker is tripped (provisioning failed repeatedly): no new node is ordered"
         budget = doc.get("budget") or {}
         orders = int(budget.get("orders", 0))
         if ecfg.max_orders is not None and orders + new > ecfg.max_orders:
             return f"{orders} orders placed + {new} new > elastic.max_orders {ecfg.max_orders}"
         spent = float(budget.get("spent_ucr", 0.0))
-        hourly = hourly_cost_ucr()
+        hourly = pc.hourly()  # ucr-equivalents (a USD provider price converted)
         if ecfg.max_run_spend_ucr is not None and spent + new * hourly > ecfg.max_run_spend_ucr:
-            return (f"spend {spent:.0f} + {new} new node hour(s) x {hourly} > elastic.max_run_spend_ucr "
+            return (f"spend {spent:.0f} + {new} new node hour(s) x {hourly:.0f} > elastic.max_run_spend_ucr "
                     f"{ecfg.max_run_spend_ucr}")
+        if ecfg.max_run_spend_usd is not None:
+            from ..pool.money import to_usd  # noqa: PLC0415
+
+            usd, hour = to_usd(spent, "ucr"), to_usd(hourly, "ucr")
+            if usd + new * hour > float(ecfg.max_run_spend_usd):
+                return (f"spend ${usd:.2f} + {new} new node hour(s) x ${hour:.2f} > elastic.max_run_spend_usd "
+                        f"${float(ecfg.max_run_spend_usd):.2f}")
         next_shard = int(doc.get("next_shard", 0))
         if pc.shard_limit is not None and next_shard + new > pc.shard_limit:
             return (f"{new} new node(s) need shards {pc.shard_base}-{next_shard}..{pc.shard_base}-"
@@ -621,33 +748,65 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
     return None
 
 
-def scale_pool(cfg: dict[str, Any], config_path: str, target: int, *, retire: list[str] | None = None) -> int:
-    """``pool-scale --config F --target N [--retire T]``: record the wanted target in the
-    state dir. A running loop applies it at its next tick (it keeps the pool lock: this
-    command never takes it); a loop started later reads it at start."""
-    retire = list(retire or [])
+def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None, *,
+               retire: list[str] | None = None, add: int = 0, remove: list[str] | None = None,
+               mode: str | None = None, force_static: bool = False, dry_run: bool = False,
+               source: str = "manual", extra: dict[str, Any] | None = None) -> int:
+    """``pool-scale --config F (--target N | --add K | --remove T) [--retire T] [--drain|--fence]``:
+    record the wanted target in the state dir. ``--add`` / ``--remove`` are relative to the
+    target recorded when this command holds the scale lock (two concurrent ``--add 1``
+    make +2); ``--remove T`` retires ticket T and lowers the target by one. A running loop
+    applies it at its next tick (it keeps the pool lock: this command never takes it); a
+    loop started later reads it at start. ``mode``: the scale-down mode of this request
+    ("drain": the victims finish their trials in flight first; "fence": at once; None:
+    the pool config's ``elastic.scale_down``). ``source``: "manual" (a person, the
+    default) or "auto" (an automatic scaler); an automatic request is refused for
+    ``elastic.manual_hold_s`` after a manual one (manual operations take priority).
+    The control file keeps the manual entries (paused tickets, released tickets) and
+    the tickets of an earlier request the loop has not applied yet."""
+    retire = list(retire or []) + list(remove or [])
+    if mode is not None and mode not in elastic.SCALE_DOWN_MODES:
+        print(f"pool-scale: refused: mode {mode!r} is not one of {list(elastic.SCALE_DOWN_MODES)}")
+        return 2
     state = cli.pool_state_path(cfg)
-    try:
-        doc = json.loads(state.read_text()) if state.exists() else {}
-    except ValueError:
-        doc = {}
-    if doc.get("stopped"):
-        print(f"pool-scale: refused: the pool is stopped ({doc['stopped']})")
-        return 2
-    why = scale_refusal(cfg, doc, target, retire)
-    if why is not None:
-        print(f"pool-scale: refused, nothing changed: {why}")
-        return 2
     path = scale_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = open(scale_lock_path(cfg), "a+")  # noqa: SIM115 - held for the read-modify-write below
+    lock = open(scale_lock_path(cfg), "a+")  # noqa: SIM115 - held for the check and the read-modify-write
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(state.read_text()) if state.exists() else {}
+        except ValueError:
+            doc = {}
+        if doc.get("stopped"):
+            print(f"pool-scale: refused: the pool is stopped ({doc['stopped']})")
+            return 2
         old = read_scale(cfg) or {}
-        before = int(old.get("target", doc.get("target", cfg["target"])))
+        before = current_target(cfg, doc)
+        wanted = target if target is not None else before + int(add) - len(remove or [])
+        hold = cli.pool_config(cfg, allowed=None).elastic.manual_hold_s
+        last_manual = old.get("manual_at")
+        if source != "manual" and last_manual is not None and time.time() - float(last_manual) < hold:
+            print(f"pool-scale: refused, nothing changed: a manual change {time.time() - float(last_manual):.0f} s "
+                  f"ago takes priority over automatic scaling for elastic.manual_hold_s {hold:.0f} s")
+            return 2
+        if int(old.get("seq", 0)) > int(doc.get("scale_seq", 0)):  # not applied yet: keep its tickets
+            live = {m.get("ticket") for m in _counted(doc)}
+            retire += [t for t in old.get("retire") or () if t not in retire and t in live]
+        why = scale_refusal(cfg, doc, wanted, retire, force_static=force_static)
+        if why is not None:
+            print(f"pool-scale: refused, nothing changed: {why}")
+            return 2
+        change = "scale up" if wanted > before else "scale down" if wanted < before else "no change"
+        if dry_run:
+            print(f"pool-scale: dry run: target {before} -> {wanted} ({change}) would be accepted; nothing changed")
+            return 0
         seq = int(old.get("seq", 0)) + 1
-        new = {"run": cli.run_id(cfg), "target": target, "seq": seq, "retire": retire,
-               "requested": time.time(), "previous": before}
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS},
+               "run": cli.run_id(cfg), "target": wanted, "seq": seq, "retire": retire, "mode": mode,
+               "requested": time.time(), "previous": before, "source": source, **(extra or {})}
+        if source == "manual":
+            new["manual_at"] = new["requested"]
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(new, indent=1))
         tmp.replace(path)
@@ -656,15 +815,140 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int, *, retire: li
     actual = len(billed_members(doc))
     proc = pool_process(cfg)
     alive = proc is not None and proc.get("alive")
-    change = "scale up" if target > before else "scale down" if target < before else "no change"
-    print(f"pool-scale: target {before} -> {target} ({change}); {actual} node(s) billed now"
+    pc = cli.pool_config(cfg, allowed=None)
+    how = mode or pc.elastic.scale_down
+    print(f"pool-scale: target {before} -> {wanted} ({change}); {actual} node(s) billed now"
           + (f"; retire {', '.join(retire)}" if retire else ""))
+    if wanted < before:
+        if pc.data_slots is not None:
+            print("pool-scale: static data slots: the removed node's slot pauses until a scale up continues it")
+        elif how == "drain":
+            print(f"pool-scale: scale down by drain: the removed node(s) claim no new task, finish their "
+                  f"trials in flight (at most {pc.elastic.scale_drain_timeout_s:.0f} s), then are fenced and "
+                  f"released; they bill until then")
+        else:
+            print("pool-scale: scale down by fence: the removed node(s) are fenced now (their tasks go back to "
+                  "the other nodes, their trials in flight are lost) and released")
     if alive:
         print(f"pool-scale: the running pool (pid {proc.get('pid')}) applies it at its next tick")
     else:
         print(f"pool-scale: no pool loop is alive; it applies when the pool starts (python -m yeto.launch.nc "
               f"pool --config {config_path})")
     return 0
+
+
+# -- manual operations ---------------------------------------------------------
+
+MANUAL_KEYS = ("paused", "hold_tasks", "manual_released", "manual_at")
+
+
+def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, resume: bool = False,
+               hold_tasks: bool = False) -> int:
+    """``pool-pause --ticket T [--hold-tasks]`` / ``pool-resume --ticket T``: recorded in the
+    control file; the running loop applies it within about a second (and after a restart). A paused
+    member gets no automatic action and counts toward the target."""
+    name = "pool-resume" if resume else "pool-pause"
+    state = cli.pool_state_path(cfg)
+    path = scale_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(scale_lock_path(cfg), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(state.read_text()) if state.exists() else {}
+        except ValueError:
+            doc = {}
+        live = {m.get("ticket") for m in billed_members(doc)}
+        unknown = [t for t in tickets if t not in live]
+        if unknown and not resume:
+            print(f"{name}: refused, nothing changed: {unknown} not a live member of this pool "
+                  f"(live: {sorted(t for t in live if t)})")
+            return 2
+        old = read_scale(cfg) or {}
+        paused = [t for t in old.get("paused") or () if t in live or resume]
+        hold = [t for t in old.get("hold_tasks") or () if t in paused]
+        if resume:
+            paused = [t for t in paused if t not in tickets]
+            hold = [t for t in hold if t not in tickets]
+        else:
+            paused += [t for t in tickets if t not in paused]
+            if hold_tasks:
+                hold += [t for t in tickets if t not in hold]
+        target = current_target(cfg, doc)
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
+               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
+               "previous": target, "source": "manual", "manual_at": time.time(), "paused": paused,
+               "hold_tasks": hold}
+        if int(old.get("seq", 0)) > int(doc.get("scale_seq", 0)):  # an unapplied request's tickets
+            new["retire"] = [t for t in old.get("retire") or () if t in live]
+            new["mode"] = old.get("mode")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(path)
+    proc = pool_process(cfg)
+    verb = "resumed" if resume else "paused" + (" (no new tasks)" if hold_tasks else "")
+    print(f"{name}: {', '.join(tickets)} {verb}; paused now: {paused or 'none'}")
+    if not resume:
+        print(f"{name}: the pool takes no automatic action on it (no restart, retire, replacement or lease-end "
+              f"drain) and does not replace it; it keeps billing. Resume: python -m yeto.launch.nc pool-resume "
+              f"--config {config_path} --ticket <ticket>")
+    if not (proc is not None and proc.get("alive")):
+        print(f"{name}: no pool loop is alive; it applies when the pool starts")
+    return 0
+
+
+def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
+    """The pool (config, config path, member) whose state holds ``ticket`` as a live
+    member, from the pid files of the state dir (they name the pool config)."""
+    for pid in sorted(tunnel.state_dir().glob("pool-*.pid")):
+        try:
+            config_path = json.loads(pid.read_text())["config"]
+            cfg = json.loads(Path(config_path).read_text())
+            doc = json.loads(cli.pool_state_path(cfg).read_text())
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for m in billed_members(doc):
+            if m.get("ticket") == ticket:
+                return cfg, config_path, m
+    return None
+
+
+def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
+    """``nc down --ticket T`` for a member of a pool: a manual removal through the pool's
+    control file (target - 1, retire T), so the pool does not order a node in its place.
+    None: ``T`` is no pool member (the caller deletes it itself)."""
+    found = pool_of_ticket(ticket)
+    if found is None:
+        return None
+    cfg, config_path, member = found
+    proc = pool_process(cfg)
+    if proc is not None and proc.get("alive"):
+        print(f"down: ticket {ticket} is shard {member.get('shard')} of the running pool {config_path}: asking the "
+              f"pool to remove it (pool-scale --remove {ticket}) instead of deleting it behind the pool's back, "
+              f"which it would replace; the pool releases it and confirms the ticket ended")
+        return scale_pool(cfg, config_path, remove=[ticket], mode=mode, force_static=True)
+    # no loop: delete here, and record it so a later start keeps the lowered target
+    with open(scale_lock_path(cfg), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(cli.pool_state_path(cfg).read_text())
+        except (OSError, ValueError):
+            doc = {}
+        old = read_scale(cfg) or {}
+        target = max(0, current_target(cfg, doc) - 1)
+        released = dict(old.get("manual_released") or {})
+        released[ticket] = {"target_lowered": True, "at": time.time()}
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
+               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
+               "previous": current_target(cfg, doc), "source": "manual", "manual_at": time.time(),
+               "manual_released": released}
+        path = scale_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(path)
+    print(f"down: ticket {ticket} belongs to pool {config_path}, whose loop is not running: deleting it here; "
+          f"the pool target is lowered to {target}, so a restarted pool does not order a node in its place")
+    return None
 
 
 # -- stop ----------------------------------------------------------------------
@@ -690,7 +974,8 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
         else:
             doc = json.loads(state.read_text()) if state.exists() else {}
             _print_banner(billing_banner(config_path, billed_members(doc),
-                                         why=f"the running pool did not stop in {wait_s:.0f} s"))
+                                         why=f"the running pool did not stop in {wait_s:.0f} s",
+                                         national=is_national_compute(cfg), kind=provider_kind(cfg)))
             return 1
         if proc is None:  # the loop exited and removed its files: read what it left
             doc = json.loads(state.read_text()) if state.exists() else {}
@@ -722,7 +1007,8 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
     _remove(pid_path(cfg))
     _remove(stop_path(cfg))
     if left:
-        _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed"))
+        _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed",
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
         return 1
     _remove(scale_path(cfg))
     _say("pool-stop: every node of the pool is released")
@@ -739,18 +1025,30 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
     proc = pool_process(cfg)
     left = billed_members(doc)
     now = time.time()
-    billed = [{"account": m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"),
+    label = cli.slot_name(cfg)  # "account" on National Compute, else "slot"
+    billed = [{label: m.get("account"), "ticket": m.get("ticket"), "shard": m.get("shard"),
                "state": m.get("state"), "lease_until": _until(m.get("lease_until")),
                "past_lease_until": m.get("lease_until") is not None and now > float(m["lease_until"])}
               for m in left]
     scale = read_scale(cfg)
     target = int(scale["target"]) if scale else int(doc.get("target", cfg["target"]))
+    for row, m in zip(billed, left):
+        row["paused"] = bool(m.get("paused"))
+        row["retiring"] = m.get("retiring_since") is not None
+    manual = {"target_source": (scale or {}).get("source", "config") if scale else "config",
+              "target_set_manually": bool(scale) and (scale or {}).get("source", "manual") != "auto",
+              "manual_at": _until((scale or {}).get("manual_at")),
+              "paused": list((scale or {}).get("paused") or []),
+              "hold_tasks": list((scale or {}).get("hold_tasks") or []),
+              "released_by_hand": sorted((scale or {}).get("manual_released") or {})}
     print(json.dumps({"process": proc, "target": target, "nodes": len(left),
-                      "samplers": f"{len(left)}/{target}", "scale": scale, "billed": billed, "state": doc,
+                      "samplers": f"{len(left)}/{target}", "manual": manual, "scale": scale, "billed": billed,
+                      "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     if left and (proc is None or not proc.get("alive")):
-        _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them"))
+        _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
+                                     national=is_national_compute(cfg), kind=provider_kind(cfg)))
         return 1
     if left:
-        print(f"note: {LEASE_WARNING.replace('<file>', config_path)}", file=sys.stderr)
+        print(f"note: {lease_warning(cfg, config_path)}", file=sys.stderr)
     return 0

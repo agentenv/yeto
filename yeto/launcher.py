@@ -153,6 +153,35 @@ from .launch.manifest import _island_tasks_manifest  # noqa: F401
 GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180, "B300": 288, "L4": 24, "A10G": 24, "T4": 16, "V100": 16, "L40S": 48, "RTX-PRO-6000": 96, "RTX-6000-Ada": 48}
 
 
+def _rollout_controller(args, *, ops=None, **kw):
+    """The :class:`~yeto.launch.pool.controller.RolloutController` of ``--rollout-pool``
+    (every pool config in one controller, each built like its ``nc pool`` loop), None
+    without the flag. The fleet controller starts, checks and drains it."""
+    paths = [os.path.expanduser(p) for p in (getattr(args, "rollout_pool", None) or [])]
+    if not paths:
+        return None
+    from .launch.nc import cli as nc_cli
+    from .launch.pool.controller import RolloutController, nc_pool
+
+    slots = {}
+    try:
+        for path in paths:
+            with open(path) as fh:
+                cfg = json.load(fh)
+            name = str(cfg.get("shard_base") or path)
+            if name in slots:
+                raise SystemExit(f"--rollout-pool: two pools share shard_base {name!r}")
+            slots[name] = nc_pool(cfg, path, ops=(ops or {}).get(name))
+    except BaseException:
+        for slot in slots.values():
+            if slot.lock is not None:
+                slot.lock.close()
+        raise
+    interval = float(getattr(args, "controller_poll", 30) or 30)
+    nc_cli._log(f"rollout: {len(slots)} pool(s) in the launcher's controller ({', '.join(slots)})")  # noqa: SLF001
+    return RolloutController(slots, interval=interval, **kw)
+
+
 def _follower_islands(args, specs, learner_names) -> list[str]:
     """Cluster names of a synced group's sampler islands that run until their
     trainers end (the fleet controller ends them once the trainers are done)."""
@@ -773,6 +802,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             wan_probe_relaunches=wan_probe_relaunches(args),
             island_relaunch_envs=peer_recovery_relaunch_envs(args),
             followers=_follower_islands(args, specs, learner_names),
+            rollout=_rollout_controller(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -1148,6 +1178,9 @@ def dry_run_plan(args) -> dict:
     from .launch_preflight import dry_run_memory
 
     memory = dry_run_memory(args, specs)
+    from .launch.model_check import preflight_trainer_model
+
+    trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
     task_plan = island_task_plan(args) if rl else None
     split_plan = data_split_plan(args) if rl else None
     placements = rl_island_placement_records(args) if rl else []
@@ -1224,6 +1257,8 @@ def dry_run_plan(args) -> dict:
         # Kimi-K3.1 full form: the checked selection and a rough per-GPU memory budget
         **({"kimi_k31_full": args._kimi_k31_full}
            if getattr(args, "_kimi_k31_full", None) else {}),
+        # the trainer's model: source, problems, warnings (absent: --preflight-model off)
+        **({"trainer_model": trainer_model} if trainer_model is not None else {}),
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),

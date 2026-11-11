@@ -105,31 +105,54 @@ PUBLISH_ENV = "YETO_SPOT_PUBLISH_LAYOUT"  # "1": training island 0 publishes its
 
 def maybe_publish(addr: tuple[str, int], learner_id: int, layout: FragmentLayout,
                   meta: Mapping[str, Any] | None = None, *, environ: Mapping[str, str] | None = None,
-                  attempts: int = 30, retry_s: float = 10.0) -> threading.Thread | None:
+                  attempts: int = 30, retry_s: float = 10.0, watch_s: float = 30.0,
+                  board_factory: Any = None, sleep: Any = time.sleep,
+                  stop: threading.Event | None = None) -> threading.Thread | None:
     """Island 0 of a run with spot subscribers (:data:`PUBLISH_ENV`): set the
     layout board on a daemon thread (retrying while the relay is not
-    reachable); never blocks or fails the training island. None: nothing to do."""
+    reachable); never blocks or fails the training island. None: nothing to do.
+
+    The board lives in the syncer's memory only: a restarted syncer (``--resume``)
+    comes back with an empty board, and a sampler that starts after it waits for the
+    layout forever while the trainer waits for its groups. So after the first set
+    the thread reads the board every ``watch_s`` and sets it again when it is empty
+    (``attempts`` bounds the consecutive failures, not the run)."""
     env = os.environ if environ is None else environ
     if env.get(PUBLISH_ENV) != "1" or int(learner_id) != 0:
         return None
     data = encode(layout, meta)
+    stop = stop or threading.Event()
+
+    def make_board() -> Any:
+        if board_factory is not None:
+            return board_factory()
+        from .relay import RelayBoard
+
+        return RelayBoard(addr, LAYOUT_BOARD, int(learner_id))
 
     def run() -> None:
-        from .relay import RelayBoard, RelayError, RelayRefused
+        from .relay import RelayError, RelayRefused
 
-        for attempt in range(1, int(attempts) + 1):
-            board = RelayBoard(addr, LAYOUT_BOARD, int(learner_id))
+        failures, published = 0, False
+        while not stop.is_set() and failures < int(attempts):
+            board = make_board()
             try:
+                if published and board.get() is not None:
+                    failures = 0
+                    sleep(float(watch_s))
+                    continue
                 item = board.set(data)
-                print(f"[yeto-spot] layout board set (id {item}, {layout.num_fragments} fragments, "
-                      f"{len(data)} bytes)", flush=True)
-                return
+                print(f"[yeto-spot] layout board {'set again (it was empty: a restarted syncer)' if published else 'set'} "
+                      f"(id {item}, {layout.num_fragments} fragments, {len(data)} bytes)", flush=True)
+                published, failures = True, 0
+                sleep(float(watch_s))
             except RelayRefused as error:
                 print(f"[yeto-spot] layout board refused: {error}", flush=True)
                 return
             except (RelayError, OSError) as error:
-                print(f"[yeto-spot] layout board attempt {attempt} failed: {error}", flush=True)
-                time.sleep(float(retry_s))
+                failures += 1
+                print(f"[yeto-spot] layout board attempt {failures} failed: {error}", flush=True)
+                sleep(float(retry_s))
             finally:
                 board.close()
 

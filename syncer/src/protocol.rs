@@ -66,6 +66,15 @@ pub const MSG_TASK_REPORT: u8 = 54;
 pub const MSG_TASK_ACK: u8 = 55;
 /// Island -> syncer: empty; renews the lease.
 pub const MSG_TASK_HEARTBEAT: u8 = 56;
+/// Island -> syncer: `u32 n | n x u64 position`: does this incarnation still
+/// hold these positions (WorkContract `still_holds`, checked before a group
+/// is written)? Read-only, no `seq`, and not a lease renewal. A
+/// retired incarnation gets the `fenced: dispense` refusal.
+pub const MSG_TASK_HOLDS: u8 = 68;
+/// Syncer -> island answer to TASK_HOLDS: `u32 n | n x u8` (1 held, 0 not).
+pub const MSG_TASK_HELD: u8 = 69;
+/// Positions one TASK_HOLDS may ask about.
+pub const MAX_TASK_HOLDS: u32 = 4096;
 pub const TASK_PROTOCOL_VERSION: u16 = 1;
 /// TASK_HELLO / TASK_WELCOME version of an island with streams.
 pub const TASK_PROTOCOL_VERSION_STREAMS: u16 = 2;

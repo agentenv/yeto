@@ -31,6 +31,7 @@ this tool may order on, e.g. ``1``; required for ``up``/``pool``), ``YETO_SKY_BI
 from __future__ import annotations
 
 import argparse
+import threading
 import json
 import os
 import shutil
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import agentic_setup
-from . import elastic, node_pool, ssh_sampler, tasks, tunnel
+from . import elastic, node_pool, scale_args, ssh_sampler, tasks, tunnel
 from .client import Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time
 from .lease_pool import Member, PoolConfig
 from .provider import NcProvider, load_provider
@@ -68,10 +69,19 @@ def leases_path() -> Path:
     return tunnel.state_dir() / "leases.json"
 
 
+_LEASES_LOCK = threading.Lock()  # the pool reads tickets and starts members from several threads
+
+
 def save_lease(lease: NodeLease) -> None:
-    doc = json.loads(leases_path().read_text()) if leases_path().exists() else {}
-    doc[lease.ticket] = lease.to_json()
-    leases_path().write_text(json.dumps(doc, indent=1))
+    """Add a lease to the lease file: read-modify-write under a lock, then an atomic rename
+    (a concurrent reader never sees a half-written file, no writer drops another's lease)."""
+    with _LEASES_LOCK:
+        path = leases_path()
+        doc = json.loads(path.read_text()) if path.exists() else {}
+        doc[lease.ticket] = lease.to_json()
+        tmp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(doc, indent=1))
+        tmp.replace(path)
 
 
 def load_lease(ticket: str) -> NodeLease:
@@ -302,7 +312,7 @@ class NcSkyOps:
         down(m.account, m.ticket)
 
     def balance(self) -> int | None:
-        return client(self.cfg["accounts"][0]).balance()
+        return client(slot_list(self.cfg)[0]).balance()
 
     def account_free(self, account: int) -> bool:
         return NcClient.own_ticket(client(account).status()) is None
@@ -393,10 +403,31 @@ class NcSshOps:
     def reads_metrics(self) -> bool:
         return self.metrics_port is not None
 
+    @property
+    def sampler_route(self) -> Any:
+        """A sampler route without docker (``start`` / ``probe_script`` / ``stop_command`` /
+        ``pull``): the provider's ``sampler_route``, or pool config ``"sampler_route":
+        "process"`` (:class:`yeto.launch.daytona_sampler.DaytonaSamplerRoute`); None: the
+        docker route of :mod:`.ssh_sampler`."""
+        if not hasattr(self, "_route"):
+            route = getattr(self.provider, "sampler_route", None)
+            kind = self.cfg.get("sampler_route")
+            if route is None and kind == "process":
+                from ..daytona_sampler import DaytonaSamplerRoute  # noqa: PLC0415
+
+                route = DaytonaSamplerRoute(gpus=int(getattr(self.provider, "gpus", 8) or 8))
+            elif route is None and kind not in (None, "docker"):
+                raise NcError(f"sampler_route {kind!r}: 'docker' (default) or 'process'")
+            self._route = route
+        return self._route
+
     def probe(self, m: Member) -> elastic.Probe:
         alias = node_pool.host_alias(m.ticket)
-        script = elastic.probe_script(ssh_sampler.container_name(m.shard), self._tape_glob(m.shard),
-                                      metrics_port=self.metrics_port)
+        if self.sampler_route is not None:
+            script = self.sampler_route.probe_script(m.shard, self._tape_glob(m.shard), self.metrics_port)
+        else:
+            script = elastic.probe_script(ssh_sampler.container_name(m.shard), self._tape_glob(m.shard),
+                                          metrics_port=self.metrics_port)
         try:
             out = self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o",
                              f"ConnectTimeout={int(self.cfg.get('probe_connect_timeout_s', 20))}", alias, script],
@@ -407,10 +438,15 @@ class NcSshOps:
         return elastic.Probe.parse(out.stdout or "", out.returncode)
 
     def fence(self, m: Member) -> None:
-        elastic.fence_shard(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_shard(m.shard, by=m.ticket)
 
     def fence_incarnation(self, m: Member) -> None:
-        elastic.fence_incarnation(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_incarnation(m.shard, by=m.ticket)
+
+    def data_path(self) -> Any:
+        """The work contract's data path of this pool (:func:`pool_data_path`)."""
+        return pool_data_path(self.cfg, self._fence_store,
+                              lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
 
     def _fence_store(self) -> Any:
         env = elastic.read_env_file(self.cfg["r2_env_file"])
@@ -420,17 +456,50 @@ class NcSshOps:
         uri = f"s3://{bucket}/runs/{self.cfg['run_prefix'].strip('/')}"
         return elastic.s3_fence_store(uri, self.cfg["r2_env_file"])
 
+    # -- scale down in "drain" mode (the store dispenser's drain request, store_dispense)
+    def _dispense_ledger(self) -> tuple[Any, str]:
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        dispense = pool_dispense(self.cfg)
+        if dispense is None:
+            raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
+        if dispense.get("store"):
+            store = elastic.s3_fence_store(str(dispense["store"]), self.cfg["r2_env_file"])
+        else:
+            store = self._fence_store()
+        return store.objects, str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
+
+    def request_drain(self, m: Member) -> None:
+        if self.cfg.get("data_path", "r2") == "r2" and pool_dispense(self.cfg) is None:
+            raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
+        m.drain_seq = self.data_path().request_drain(m.shard, seq=f"{m.ticket}:{time.time():.3f}")
+
+    def drained(self, m: Member) -> bool:
+        if m.drain_seq is None:
+            return False
+        return bool(self.data_path().drain_answered(m.shard, m.drain_seq))
+
+    def cancel_drain(self, m: Member) -> None:
+        self.data_path().cancel_drain(m.shard)
+        m.drain_seq = None
+
+    def reassert_drain(self, m) -> None:
+        again = getattr(self.data_path(), "reassert_drain", None)
+        if again is not None:  # a data path whose drain state lives only in its server (syncer)
+            again(m.shard)
+
     def drain(self, m: Member) -> None:
         """Best-effort sampler stop (a lost node does not answer), alias removed,
         then the guarded delete of the ticket and its ``ended`` confirmation."""
         if m.shard and leases_path().exists() and m.ticket in json.loads(leases_path().read_text()):
             name = ssh_sampler.container_name(m.shard)
+            stop = (self.sampler_route.stop_command(m.shard, grace_s=30) if self.sampler_route is not None else
+                    f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
+                    f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
+                    ">/dev/null 2>&1; echo stopped")
             try:
                 self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                           node_pool.host_alias(m.ticket),
-                           f"sudo docker stop -t 30 {name} >/dev/null 2>&1; sudo docker logs --tail 500 {name} "
-                           f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
-                           ">/dev/null 2>&1; echo stopped"],
+                           node_pool.host_alias(m.ticket), stop],
                           capture_output=True, text=True, timeout=120, check=False)
             except subprocess.TimeoutExpired:
                 _log(f"drain {m.ticket}: sampler stop timed out (node unreachable); deleting the ticket")
@@ -440,12 +509,19 @@ class NcSshOps:
 
     # -- pieces
     def _pull(self, lease: NodeLease, pull: dict[str, Any]) -> None:
-        ssh_sampler.pull_model(lease, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
-                               dest=pull.get("dest", ssh_sampler.MODEL_HOST), include=pull.get("include"),
-                               max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
+        route, alias = self.sampler_route, node_pool.host_alias(lease.ticket)
+        if route is not None:  # dest: the sandbox path (default the spec's /models/kimi-k3.1-pro)
+            route.pull(alias, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
+                       **({"dest": pull["dest"]} if pull.get("dest") else {}), include=pull.get("include"),
+                       max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
+        else:
+            ssh_sampler.pull_model(lease, r2_env_file=self.cfg["r2_env_file"], src_key=pull["src_key"],
+                                   dest=pull.get("dest", ssh_sampler.MODEL_HOST), include=pull.get("include"),
+                                   max_mb_s=int(pull.get("max_mb_s", 2500)), run=self._run)
         deadline = time.monotonic() + float(pull.get("timeout_s", 3600))
         while time.monotonic() < deadline:
-            status = ssh_sampler.pull_status(lease, run=self._run)
+            status = (route.pull_status(alias, run=self._run) if route is not None
+                      else ssh_sampler.pull_status(lease, run=self._run))
             if "YETO_NC_PULL done" in status:
                 return
             if "YETO_NC_PULL fail" in status or status.startswith("exited 1"):
@@ -476,6 +552,13 @@ class NcSshOps:
         return render_spec(self.cfg, m, shards)
 
     def _start_sampler(self, lease: NodeLease, m: Member, shards: list[str]) -> None:
+        if self.sampler_route is not None:
+            self.sampler_route.start(node_pool.host_alias(lease.ticket), spec=self._spec(m, shards), shard=m.shard,
+                                     run_prefix=self.cfg["run_prefix"], r2_env_file=self.cfg["r2_env_file"],
+                                     protected=frozenset(self.cfg.get("protected_prefixes", ())),
+                                     agentic_env_file=self.cfg.get("agentic_env_file"),
+                                     spec_dir=Path(self.cfg["spec"]).expanduser().parent, run=self._run)
+            return
         ssh_sampler.start_sampler(lease, spec=self._spec(m, shards), shard=m.shard, run_prefix=self.cfg["run_prefix"],
                                   r2_env_file=self.cfg["r2_env_file"], image=self.cfg.get("image", ssh_sampler.IMAGE),
                                   protected=frozenset(self.cfg.get("protected_prefixes", ())),
@@ -489,12 +572,46 @@ class NcSshOps:
             tape = json.loads(Path(self.cfg["spec"]).read_text()).get("event_tape")
         except (OSError, ValueError, KeyError):
             tape = None
+        root = "" if self.sampler_route is not None else ssh_sampler.NVME  # a process sees /work itself
         if not tape:
-            return f"{ssh_sampler.NVME}/work/sampler/events-{shard}*.jsonl"
+            return f"{root}/work/sampler/events-{shard}*.jsonl"
         tape = str(tape).replace("__RUN_PREFIX__", self.cfg["run_prefix"].strip("/"))
-        host = tape.replace("/work/", f"{ssh_sampler.NVME}/work/", 1) if tape.startswith("/work/") else tape
+        host = tape.replace("/work/", f"{root}/work/", 1) if tape.startswith("/work/") else tape
         stem = host[:-len(".jsonl")] if host.endswith(".jsonl") else host
         return f"{stem}*.jsonl"
+
+
+SYNCER_KEYS = frozenset({"address", "key_env", "timeout_s"})
+
+
+def syncer_address(value: Any) -> tuple[str, int]:
+    """``"host:port"`` or ``[host, port]`` -> ``(host, port)``."""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return str(value[0]), int(value[1])
+    host, sep, port = str(value or "").rpartition(":")
+    if not sep or not host or not port.isdigit():
+        raise ValueError(f"pool config: syncer.address {value!r} must be 'host:port'")
+    return host, int(port)
+
+
+def pool_data_path(cfg: dict[str, Any], records: Any, dispense: Any) -> Any:
+    """The work contract's data path of a pool (``yeto.launch.pool.data_path``).
+
+    ``data_path: r2`` (default): :class:`R2DataPath` over the run store (``records``,
+    ``dispense``: values or callables). ``data_path: syncer``: :class:`SyncerDataPath`
+    on the pool config's ``syncer`` section (``address`` ``"host:port"``, ``key_env``
+    the environment variable holding the island HMAC key, default
+    ``YETO_ISLAND_HMAC_KEY``; unset: the syncer accepts only its own host)."""
+    from ..pool.data_path import R2DataPath, SyncerDataPath  # noqa: PLC0415
+
+    if cfg.get("data_path", "r2") == "r2":
+        return R2DataPath(records, dispense)
+    section = dict(cfg.get("syncer") or {})
+    if "address" not in section:
+        raise NcError("pool config: data_path syncer needs syncer.address (the syncer's host:port)")
+    key = os.environ.get(str(section.get("key_env") or "YETO_ISLAND_HMAC_KEY"), "")
+    return SyncerDataPath(syncer_address(section["address"]), key=key.encode() if key else None,
+                          timeout_s=float(section.get("timeout_s", 10.0)))
 
 
 def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, Any]:
@@ -505,6 +622,24 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
                                          **_overrides(cfg.get("sampler") or {}))
     if m.replaces_shard and m.predecessor_lost:
         spec["handoff_wait_s"] = float(cfg.get("elastic", {}).get("lost_handoff_wait_s", 60.0))
+    if m.replaces_shard and getattr(m, "predecessor_retired", False):
+        spec["predecessor_retired"] = True  # the runtime may sweep the predecessor's orphans at once
+    if cfg.get("data_path", "r2") == "syncer":
+        spec["data_path"] = "syncer"  # the one sampler entry picks its data path from the spec
+        section = cfg.get("syncer") or {}
+        if section.get("address"):
+            spec.setdefault("syncer", str(section["address"]))
+        dispense = (spec.get("prompts") or {}).get("dispense")
+        if isinstance(dispense, dict) and str(dispense.get("backend") or "tcp") == "tcp":
+            # the syncer's task dispenser: each pool member claims as its own island, the
+            # holder id the pool retires / drains it by (SyncerDataPath); one id for every
+            # member of the base spec would make each new member supersede the others
+            from yeto.rl.engine.task_dispense import sampler_holder_id  # noqa: PLC0415
+
+            dispense = dict(dispense, learner_id=sampler_holder_id(m.shard))
+            if spec.get("syncer"):
+                dispense.setdefault("address", str(spec["syncer"]))
+            spec["prompts"] = dict(spec["prompts"], dispense=dispense)
     backlog = cfg.get("backlog")
     if backlog:
         spec["max_backlog_groups"] = tasks.backlog_groups(
@@ -527,13 +662,38 @@ def run_id(cfg: dict[str, Any]) -> str:
     return value
 
 
-POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
+POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
                        "stop_below_ucr", "min_balance_to_order_ucr", "data_slots", "elastic", "event_command",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment"})
-REQUIRED_KEYS = ("target", "accounts", "shard_base")
+                       "workdir", "comment", "sampler_route", "data_path", "syncer"})
+DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
+REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
+
+
+def slot_list(cfg: dict[str, Any]) -> list[int]:
+    """The pool's provider slots: ``accounts`` (National Compute accounts), or for
+    Modal / Daytona / sky ``slots`` (``accounts`` stays an alias there)."""
+    from yeto.launch.pool.provider import is_national  # noqa: PLC0415
+
+    if "slots" in cfg and "accounts" in cfg:
+        raise ValueError("pool config: set 'slots' or 'accounts', not both")
+    if "slots" in cfg:
+        if is_national(cfg):
+            raise ValueError("pool config: National Compute pools list NC accounts in 'accounts', not 'slots'")
+        return [int(a) for a in cfg["slots"]]
+    if "accounts" not in cfg:
+        raise ValueError("pool config: missing required keys ['accounts']"
+                         + ("" if is_national(cfg) else " (or 'slots')"))
+    return [int(a) for a in cfg["accounts"]]
+
+
+def slot_name(cfg: dict[str, Any]) -> str:
+    """``account`` for a National Compute pool, else ``slot``."""
+    from yeto.launch.pool.provider import is_national  # noqa: PLC0415
+
+    return "account" if is_national(cfg) else "slot"
 # the SSH route renders the sampler spec and starts it with the store credentials
 REQUIRED_SSH_KEYS = ("spec", "run_prefix", "r2_env_file")
 MODEL_PULL_KEYS = frozenset({"src_key", "dest", "include", "max_mb_s", "timeout_s", "poll_s"})
@@ -565,6 +725,40 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
     return notes
 
 
+def pool_has_dispenser(cfg: dict[str, Any]) -> bool:
+    """The pool's samplers take their tasks from a dispenser (no task goes to two
+    of them, so the pool may add or remove samplers): the store dispenser
+    (:func:`pool_dispense`), or on ``data_path: syncer`` the syncer's task
+    dispenser (``prompts.dispense`` of the spec with the default ``tcp`` backend)."""
+    if pool_dispense(cfg) is not None:
+        return True
+    if cfg.get("data_path", "r2") != "syncer":
+        return False
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return False
+    found = (spec.get("prompts") or {}).get("dispense") if isinstance(spec, dict) else None
+    return isinstance(found, dict) and str(found.get("backend") or "tcp") == "tcp"
+
+
+def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The store dispenser config of a pool's samplers (``sampler.dispense`` of the pool
+    config, else ``prompts.dispense`` of the spec with ``backend: store``); None: none
+    (each sampler reads its data slot, or every prompt)."""
+    own = (cfg.get("sampler") or {}).get("dispense")
+    if isinstance(own, dict) and own:
+        return dict(own)
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return None
+    found = (spec.get("prompts") or {}).get("dispense") if isinstance(spec, dict) else None
+    if isinstance(found, dict) and found.get("backend", "store") == "store" and found.get("backend"):
+        return dict(found)
+    return None
+
+
 def _unknown(section: str, doc: Any, known: frozenset[str]) -> None:
     if not isinstance(doc, dict):
         raise TypeError(f"pool config: {section} must be an object")
@@ -583,6 +777,8 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if unknown:
         raise ValueError(f"pool config: unknown keys {sorted(unknown)} (known: {sorted(POOL_KEYS)})")
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
+    if "accounts" not in cfg and "slots" not in cfg:
+        missing.insert(1, "accounts")
     if cfg.get("route", "ssh") == "ssh":
         missing += [k for k in REQUIRED_SSH_KEYS if not cfg.get(k)]
     if missing:
@@ -593,17 +789,22 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         raise ValueError(f"pool config: machine type {machine_type(cfg)!r} looks like a Hugging Face model name; "
                          f"'machine_type' (formerly 'model') is the National Compute machine type, e.g. "
                          f"{DEFAULT_MACHINE_TYPE!r} (the served model is in the sampler spec)")
-    accounts = [int(a) for a in cfg["accounts"]]
+    accounts = slot_list(cfg)
+    label = slot_name(cfg)
     if not accounts or len(set(accounts)) != len(accounts):
-        raise ValueError("pool config: accounts must be a non-empty list without repeats")
+        raise ValueError(f"pool config: {label}s must be a non-empty list without repeats")
     if allowed is not None and not set(accounts) <= allowed:
         raise ValueError(f"pool config: accounts {sorted(set(accounts) - allowed)} are not in YETO_NC_ACCOUNTS")
     target = int(cfg["target"])
     if target < 1:
         raise ValueError("pool config: target must be >= 1")
     if target > len(accounts):
-        raise ValueError(f"pool config: target {target} > {len(accounts)} accounts; a National Compute account "
-                         f"holds one node at a time, so the pool can run at most {len(accounts)} samplers")
+        if label == "account":
+            raise ValueError(f"pool config: target {target} > {len(accounts)} accounts; a National Compute "
+                             f"account holds one node at a time, so the pool can run at most "
+                             f"{len(accounts)} samplers")
+        raise ValueError(f"pool config: target {target} > {len(accounts)} slots; a slot holds one machine "
+                         f"at a time, so the pool can run at most {len(accounts)} samplers")
     slots = cfg.get("data_slots")
     if slots is not None and int(slots) < target:
         raise ValueError(f"pool config: data_slots {slots} < target {target} (each member holds one slot)")
@@ -620,6 +821,12 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
             raise ValueError(f"pool config: node_hooks[{i}].where must be node or local")
     if cfg.get("backlog"):
         _unknown("backlog", cfg["backlog"], BACKLOG_KEYS)
+    if cfg.get("data_path", "r2") not in DATA_PATHS:
+        raise ValueError(f"pool config: data_path {cfg.get('data_path')!r} is not one of {DATA_PATHS}")
+    if cfg.get("syncer") is not None:
+        _unknown("syncer", cfg["syncer"], SYNCER_KEYS)
+    if cfg.get("data_path", "r2") == "syncer":
+        syncer_address((cfg.get("syncer") or {}).get("address"))
     if cfg.get("route", "ssh") not in ("ssh", "sky"):
         raise ValueError(f"pool config: route {cfg.get('route')!r} is not ssh or sky")
     run_id(cfg)
@@ -629,7 +836,47 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
                       end_margin_s=float(cfg.get("end_margin_s", 600)),
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
-                      data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")))
+                      data_slots=slots, elastic=elastic.ElasticConfig.from_dict(cfg.get("elastic")),
+                      hourly_cost=pool_hourly_ucr(cfg), slot_name=label)
+
+
+def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
+    """One node hour of a pool as its provider config states it, and the currency:
+    sky ``price_usd_h`` (or the first offer's), modal / daytona ``price_usd_h`` in USD;
+    None for National Compute (the MI355X rate in ucr applies)."""
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    kind = providers.kind_of(cfg) or "factory"
+    entry = providers.registered(kind)
+    currency = entry.caps.currency if entry is not None else "ucr"
+    section = cfg.get("provider") or {}
+    price = section.get("price_usd_h")
+    if price is None and kind == "sky":
+        from yeto.launch.rollout.offers import offers_from_config  # noqa: PLC0415
+
+        try:
+            price = offers_from_config(section)[0].price_usd_h
+        except ValueError:
+            price = None
+    return (None if price is None else float(price)), currency
+
+
+def pool_hourly_ucr(cfg: dict[str, Any]) -> float:
+    """One node hour of a pool in ucr-equivalents (the pool budget's unit; 0: the
+    National Compute MI355X rate). A USD price converts at ``YETO_NC_USD_PER_UCR``."""
+    from ..pool.money import to_ucr  # noqa: PLC0415
+
+    price, currency = pool_price(cfg)
+    return 0 if price is None else to_ucr(price, "usd" if currency == "ucr" else currency)
+
+
+def pool_hourly_text(cfg: dict[str, Any], hourly_ucr: float) -> str:
+    """One node hour for a message: credits for National Compute, USD otherwise."""
+    from ..pool.money import to_usd  # noqa: PLC0415
+
+    if pool_price(cfg)[0] is None:
+        return f"{hourly_ucr:.0f} ucr ({hourly_ucr / 1e6:g} credits)"
+    return f"${to_usd(hourly_ucr, 'ucr'):.2f}"
 
 
 def pool_shard_limit(cfg: dict[str, Any]) -> int | None:
@@ -659,6 +906,15 @@ def pool_events_path(cfg: dict[str, Any]) -> Path:
 
 
 def pool_ops(cfg: dict[str, Any]):
+    """The pool ops of a pool config: a registered provider kind's own ``pool_ops``
+    (a machine that is not an SSH node, e.g. a Modal FunctionCall), else the SSH +
+    docker route (``route: ssh``) or the sky route."""
+    from ..pool import provider as providers  # noqa: PLC0415
+
+    kind = providers.kind_of(cfg)
+    entry = providers.registered(kind) if kind is not None else None
+    if entry is not None and entry.pool_ops is not None:
+        return providers.resolve(entry.pool_ops)(cfg)
     route = cfg.get("route", "ssh")
     if route == "ssh":
         return NcSshOps(cfg)
@@ -782,6 +1038,11 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("down", help="release one node this tool created (by ticket id, confirmed ended)")
     d.add_argument("--account", type=int, required=True)
     d.add_argument("--ticket", required=True)
+    d.add_argument("--drain", dest="mode", action="store_const", const="drain", default="fence",
+                   help="a pool member: let its trials in flight finish first (default: fence it now)")
+    d.add_argument("--direct", action="store_true",
+                   help="delete the ticket here even when a running pool owns it (the pool then sees a manual "
+                   "release: it lowers its target and orders no replacement)")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",
                         description="Run the lease-aware sampler pool in the foreground. Keep it up for the "
                         "whole run: National Compute does not end a lease at lease_until (it stays billed).")
@@ -805,10 +1066,16 @@ def main(argv: list[str] | None = None) -> int:
                          "The target outlives a pool restart. Refused before any order when it exceeds the "
                          "accounts, max_nodes, max_orders, max_run_spend_ucr or shard_limit.")
     psc.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
-    psc.add_argument("--target", type=int, required=True, help="samplers wanted (0 or more)")
-    psc.add_argument("--retire", action="append", default=[], metavar="TICKET",
-                     help="on scale down, the member ticket to release (repeatable; default: the newest, "
-                     "cheapest, shortest lease)")
+    scale_args.add_scale_args(psc, target_flag="--target")
+    for name, what in (("pool-pause", "stop every automatic action of the pool on these nodes (manual "
+                                      "maintenance); they keep billing and count toward the target"),
+                       ("pool-resume", "end a pool-pause: the pool watches these nodes again")):
+        pp = sub.add_parser(name, help=what)
+        pp.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
+        pp.add_argument("--ticket", action="append", required=True, help="the node ticket (repeatable)")
+        if name == "pool-pause":
+            pp.add_argument("--hold-tasks", action="store_true",
+                            help="also stop its sampler from claiming new tasks (store dispenser) while paused")
     ps = sub.add_parser("pool-status", help="the pool's state, billed nodes and last events (read-only)")
     ps.add_argument("--config", required=True, help="the pool config JSON")
     ps.add_argument("--events", type=int, default=20, help="last events to print (default 20)")
@@ -901,15 +1168,29 @@ def main(argv: list[str] | None = None) -> int:
                                                     workdir=args.workdir), args.r2_env_file)
         return launch(doc, cluster_name("sampler", args.ticket), down=False)
     if args.cmd == "down":
+        if not args.direct:
+            from . import pool_run  # noqa: PLC0415
+
+            rc = pool_run.down_member(args.ticket, mode=args.mode)
+            if rc is not None:
+                return rc
         down(args.account, args.ticket)
         return 0
+    if args.cmd in ("pool-pause", "pool-resume"):
+        from . import pool_run  # noqa: PLC0415
+
+        cfg = json.loads(Path(args.config).read_text())
+        return pool_run.pause_pool(cfg, args.config, args.ticket, resume=args.cmd == "pool-resume",
+                                   hold_tasks=getattr(args, "hold_tasks", False))
     if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale"):
         from . import pool_run  # noqa: PLC0415
 
         cfg = json.loads(Path(args.config).read_text())
         if args.cmd == "pool-scale":
             try:
-                return pool_run.scale_pool(cfg, args.config, args.target, retire=args.retire)
+                return pool_run.scale_pool(cfg, args.config, args.target, retire=args.retire, add=args.add,
+                                           remove=args.remove, mode=args.mode, force_static=args.force_static,
+                                           dry_run=args.dry_run, source=args.source)
             except ValueError as error:
                 print(f"pool-scale: refused, nothing changed: {error}")
                 return 2
@@ -923,10 +1204,6 @@ def main(argv: list[str] | None = None) -> int:
             return pool_run.dry_run(cfg, args.config)
         return pool_run.run_pool(cfg, args.config, interval=args.interval)
     return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 
 
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
@@ -974,3 +1251,7 @@ def _overrides(cfg) -> dict:
     if unknown:
         raise ValueError(f"pool sampler config: unknown keys {sorted(unknown)}")
     return {k: cfg.get(k) for k in _POOL_KEYS}
+
+
+if __name__ == "__main__":
+    sys.exit(main())

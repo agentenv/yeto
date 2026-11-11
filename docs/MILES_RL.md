@@ -384,7 +384,7 @@ waits for a slow one; rows a relaunched, preempted or silent island did not
 finish go first to the next claim. A row counts as trained only after its
 round passed the sync boundary (`rl_dispense_commit`). Position `p` is row
 `pass_order(rows, --seed, p // rows)[p % rows]`. A row whose group is too
-stale can be given out again (`--rl-dispense-max-redo`, default 1).
+stale can be given out again (`--rl-dispense-max-redo`, default 2; a lease expiry counts too).
 `--rl-data-passes N` ends the data after N passes; an island that cannot fill
 a batch any more ends FINISHED (`rl_data_ended`); this needs islands that may
 end on their own (asynchronous rounds or an island pool). The syncer logs

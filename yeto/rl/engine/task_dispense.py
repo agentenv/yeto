@@ -70,9 +70,20 @@ MSG_TASK_GRANT = 53
 MSG_TASK_REPORT = 54
 MSG_TASK_ACK = 55
 MSG_TASK_HEARTBEAT = 56
+MSG_TASK_HOLDS = 68  # still_holds: which positions this incarnation still holds
+MSG_TASK_HELD = 69
+MAX_TASK_HOLDS = 4096
 TASK_PROTOCOL_VERSION = 1
 TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams
 TASK_HELLO_MAC_DOMAIN = b"yeto-task-hello-mac-v1\0"
+# MEMBER_RETIRE (syncer/src/member_retire.rs): the controller retires a member now
+MSG_MEMBER_RETIRE = 57
+MSG_MEMBER_RETIRED = 58
+MEMBER_RETIRE_VERSION = 1
+MEMBER_RETIRE_MAC_DOMAIN = b"yeto-member-retire-mac-v1\0"
+MAX_RETIRE_REASON = 256
+RETIRE_STATUS = {0: "retired", 1: "already_retired", 2: "no_member", 3: "draining", 4: "drained", 5: "resumed"}
+RETIRE_MODES = {"retire": 0, "drain": 1, "undrain": 2}
 
 # streams (syncer/src/dispense.rs)
 STREAM_SHIFT = 40
@@ -125,11 +136,19 @@ class DispenseFenced(ConnectionError):
 # island on the head: it must not come back under a new incarnation (that
 # would supersede the newer process on every channel), so it stops.
 SUPERSEDED_MARK = "(superseded)"
+# The controller retired this process (MEMBER_RETIRE: scale-down, evict): it
+# must not come back under a new incarnation either (WorkContract ``retire``).
+RETIRED_MARK = "(retired by the controller)"
 
 
 def is_superseded(error: BaseException) -> bool:
     """The fence names a newer incarnation of this island (not a lease expiry)."""
     return str(error).endswith(SUPERSEDED_MARK)
+
+
+def is_retired_by_controller(error: BaseException) -> bool:
+    """The fence says the controller retired this process."""
+    return str(error).endswith(RETIRED_MARK)
 
 
 class DispenseEnded(RuntimeError):
@@ -581,6 +600,78 @@ def _refusal(text: str) -> Exception:
     return DispenseError(text)
 
 
+def encode_member_retire(learner_id: int, incarnation: int | None, reason: str = "", *,
+                         mode: str = "retire") -> bytes:
+    """The MEMBER_RETIRE body (``syncer/src/member_retire.rs``)."""
+    text = str(reason).encode("utf-8")
+    if len(text) > MAX_RETIRE_REASON:
+        raise ValueError(f"retire reason longer than {MAX_RETIRE_REASON} bytes")
+    return struct.pack("<HIBBQH", MEMBER_RETIRE_VERSION, int(learner_id), RETIRE_MODES[mode],
+                       int(incarnation is not None), int(incarnation or 0), len(text)) + text
+
+
+def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
+    if key is None:
+        return body
+    return body + hmac.new(key, MEMBER_RETIRE_MAC_DOMAIN + body, hashlib.sha256).digest()
+
+
+def decode_member_retired(payload: bytes) -> dict[str, Any]:
+    status, incarnation, reclaimed, held = struct.unpack("<BQQQ", payload)
+    return {"status": RETIRE_STATUS.get(status, str(status)), "incarnation": incarnation, "reclaimed": reclaimed,
+            "held": held}
+
+
+def retire_member(address: tuple[str, int], learner_id: int, incarnation: int | None = None, *,
+                  reason: str = "scale_down", key: bytes | None = None, timeout_s: float = 10.0,
+                  mode: str = "retire") -> dict[str, Any]:
+    """Retire syncer member ``learner_id`` (``incarnation=None``: its current
+    one) now: the WorkContract's ``retire`` on the syncer data path. The
+    dispenser puts its unreported positions back at the queue front (not
+    counted), the relay refuses its PUTs, its subscriber connection closes.
+    ``key``: the island HMAC key (without one the syncer accepts only its own
+    host). ``mode="drain"``: claim nothing new, finish what it holds (status
+    ``draining`` with ``held`` > 0, then ``drained``: repeat until drained, then
+    retire); ``"undrain"``: claim again. Returns ``{"status", "incarnation",
+    "reclaimed", "held"}``; idempotent."""
+    payload = seal_member_retire(encode_member_retire(learner_id, incarnation, reason, mode=mode), key)
+    with socket.create_connection(address, timeout=timeout_s) as sock:
+        sock.sendall(_HEADER.pack(MAGIC, MSG_MEMBER_RETIRE, len(payload)) + payload)
+        head = b""
+        while len(head) < _HEADER.size:
+            chunk = sock.recv(_HEADER.size - len(head))
+            if not chunk:
+                raise ConnectionError("the syncer closed the retire connection")
+            head += chunk
+        magic, msg_type, length = _HEADER.unpack(head)
+        if magic != MAGIC or length > 4096:
+            raise ConnectionError(f"bad frame from the syncer (magic {magic:#x}, {length} bytes)")
+        body = b""
+        while len(body) < length:
+            chunk = sock.recv(length - len(body))
+            if not chunk:
+                raise ConnectionError("the syncer closed the retire connection")
+            body += chunk
+    if msg_type == MSG_ERROR:
+        raise DispenseError(body.decode("utf-8", "replace"))
+    if msg_type != MSG_MEMBER_RETIRED:
+        raise ConnectionError(f"the syncer answered type {msg_type}, expected {MSG_MEMBER_RETIRED}")
+    return decode_member_retired(body)
+
+
+def encode_holds(positions: Sequence[int]) -> bytes:
+    if len(positions) > MAX_TASK_HOLDS:
+        raise ValueError(f"TASK_HOLDS of {len(positions)} positions (at most {MAX_TASK_HOLDS})")
+    return struct.pack(f"<I{len(positions)}Q", len(positions), *[int(p) for p in positions])
+
+
+def decode_held(payload: bytes) -> list[bool]:
+    (n,) = struct.unpack_from("<I", payload)
+    if len(payload) != 4 + n:
+        raise DispenseError(f"TASK_HELD of {len(payload)} bytes for {n} positions")
+    return [b == 1 for b in payload[4:]]
+
+
 class DispenseConnection:
     """One TCP connection to the dispenser; one answer per request, in order."""
 
@@ -642,6 +733,12 @@ class DispenseConnection:
         self._send(MSG_TASK_HEARTBEAT, b"")
         decode_ack(self._answer(MSG_TASK_ACK))
 
+    def holds(self, positions: Sequence[int]) -> list[bool]:
+        """TASK_HOLDS: which of ``positions`` this incarnation still holds (a
+        query, not a lease renewal; a retired incarnation is refused fenced)."""
+        self._send(MSG_TASK_HOLDS, encode_holds(positions))
+        return decode_held(self._answer(MSG_TASK_HELD))
+
     def close(self) -> None:
         try:
             self.sock.close()
@@ -691,6 +788,8 @@ class TaskSource:
         self._stopped = False
         self._closing = False  # no more claims
         self._conn: DispenseConnection | None = None
+        # still_holds queries for the worker: {"positions", "answer"} (answer None: open)
+        self._queries: list[dict[str, Any]] = []
         self.incarnation = self._new_incarnation()
         self.lease_s: float | None = None
         self._contact: float | None = None  # last answer from the dispenser
@@ -764,6 +863,33 @@ class TaskSource:
                 for block, items in by_block.items():
                     self._pending.append((block, kind, items))
             self._cv.notify_all()
+
+    def still_holds(self, position: int, *, timeout_s: float = 10.0) -> bool:
+        """This incarnation still holds ``position`` on the dispenser (the
+        WorkContract's ``still_holds``, checked before a group is written): taken
+        here, not reported, and the syncer answers TASK_HOLDS yes. False once the
+        incarnation was fenced, retired or superseded (the dispenser gave the
+        row to another island). Head unreachable for ``timeout_s``: True while
+        this island's lease is still valid on its own clock."""
+        position = int(position)
+        query: dict[str, Any] = {"positions": [position], "answer": None}
+        with self._cv:
+            if self._fatal is not None or position not in self._owner:
+                return False
+            incarnation = self.incarnation
+            self._queries.append(query)
+            self._cv.notify_all()
+            deadline = self._clock() + float(timeout_s)
+            while query["answer"] is None:
+                if self._fatal is not None or self.incarnation != incarnation:
+                    return False
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    if query in self._queries:
+                        self._queries.remove(query)
+                    return position in self._owner and self._lease_valid()
+                self._cv.wait(timeout=min(0.1, remaining))
+            return bool(query["answer"][0]) and position in self._owner
 
     def taken(self) -> set[int]:
         """Positions taken and not reported yet."""
@@ -857,6 +983,9 @@ class TaskSource:
             self._owner.clear()
             self._pending.clear()
             self._inflight = None
+            for query in self._queries:  # nothing is held any more
+                query["answer"] = [False] * len(query["positions"])
+            self._queries.clear()
             self.stats["fenced"] += 1
             old = self.incarnation
             self.incarnation = self._new_incarnation()
@@ -876,6 +1005,24 @@ class TaskSource:
             conn = self._conn
             if conn is None:
                 raise ConnectionError("no dispenser connection")
+            query = self._queries.pop(0) if self._queries and self._inflight is None else None
+        if query is not None:
+            try:
+                held = conn.holds(query["positions"])
+            except DispenseFenced:
+                with self._cv:
+                    query["answer"] = [False] * len(query["positions"])
+                    self._cv.notify_all()
+                raise
+            except BaseException:
+                with self._cv:
+                    self._queries.insert(0, query)  # asked again after the reconnect
+                raise
+            with self._cv:
+                query["answer"] = held
+                self._cv.notify_all()
+            return True
+        with self._cv:
             if self._inflight is None:
                 if self._pending:
                     self._seq += 1
@@ -938,16 +1085,22 @@ class TaskSource:
                 if self._conn is not None:
                     self._conn.close()
                 self._conn = None
-                if is_superseded(error):
+                if is_superseded(error) or is_retired_by_controller(error):
                     # A newer process of this island joined (on any channel
-                    # of the head's member table); this one stops for good.
+                    # of the head's member table), or the controller retired
+                    # this one; it stops for good.
                     # emit before waking takers so the event is recorded by the
                     # time take() raises the fence
-                    logger.error("task dispenser: a newer incarnation superseded this island: %s", error)
-                    self._emit("rl_dispense_superseded", incarnation=f"{self.incarnation:016x}",
-                               error=str(error))
+                    retired = is_retired_by_controller(error)
+                    logger.error("task dispenser: %s: %s", "the controller retired this island" if retired
+                                 else "a newer incarnation superseded this island", error)
+                    self._emit("rl_dispense_retired" if retired else "rl_dispense_superseded",
+                               incarnation=f"{self.incarnation:016x}", error=str(error))
                     with self._cv:
                         self._fatal = error
+                        for query in self._queries:
+                            query["answer"] = [False] * len(query["positions"])
+                        self._queries.clear()
                         self._cv.notify_all()
                     return
                 self._reset_after_fence(error)
@@ -1013,6 +1166,11 @@ class DispensedRows:
     def held_back(self) -> set[int]:
         """Positions whose group the backend put back into its own buffer."""
         return set()
+
+    def still_holds(self, position: int) -> bool:
+        """The syncer still gives this island ``position`` (WorkContract
+        ``still_holds``; the sampler checks it before it writes a group)."""
+        return self.tasks.still_holds(int(position))
 
     def _hook_round(self) -> int:
         """The round of a filter call (default: filter calls in this process)."""

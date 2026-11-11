@@ -445,7 +445,7 @@ function rlm(V){
   var vm=[];sps.forEach(function(c){((S[c.id]||{}).restarts||[]).forEach(function(x){vm.push({t:x.ts,color:c.color,short:"↻"+shN(c.id),label:c.label+" restarted (incarnation "+x.incarnation+")"})})});
   trs.forEach(function(c){(c.launches||[]).slice(1).forEach(function(x){vm.push({t:x.first_ts,color:c.color,short:"↻trainer",label:c.label+" relaunched ("+x.launch+")"})})});
   var PMK={member_ready:["+","ready"],sampler_restart:["−","restart"],released:["−","released"],released_externally:["−","released"],shard_fenced:["−","fenced"],
-    evicted:["−","evicted"],expired:["−","expired"],node_lost:["−","node lost"],sampler_crash_loop:["−","crash loop"],start_failed:["−","start failed"],node_reachable_again:["+","reachable"]};
+    evicted:["−","evicted"],expired:["−","expired"],node_lost:["−","node lost"],sampler_crash_loop:["−","crash loop"],scaled_down:["−","scaled down"],manual_release_detected:["−","released by hand"],manual_pause:["−","paused by hand"],manual_resume:["+","resumed by hand"],scale_draining:["−","draining (scale down)"],start_failed:["−","start failed"],node_reachable_again:["+","reachable"]};
   (A.pool||[]).forEach(function(p){var e=String(p.event||"").replace("nc_elastic_",""),m=PMK[e];if(!m)return;var why=p.detail||p.why||p.reason||p.error||"";
     var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,short:m[0]+shN(p.shard)+" "+m[1]+(e==="member_ready"&&fin(p.restarts)&&p.restarts>0?" #"+p.restarts:""),
       label:"NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});

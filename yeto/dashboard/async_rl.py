@@ -40,11 +40,23 @@ SAMPLER_STAT_KEYS = ("reward_mean", "reward_std", "reward_p10", "reward_p50", "r
 POOL_LEFT = {"nc_elastic_released": "left", "nc_elastic_released_externally": "left",
              "nc_elastic_shard_fenced": "left", "nc_elastic_sampler_finished": "done",
              "nc_elastic_sampler_crash_loop": "left", "nc_elastic_drain_failed": "left",
+             "nc_elastic_scaled_down": "left", "nc_elastic_released_by_earlier_pool": "left",
+             "nc_elastic_manual_release_detected": "left", "nc_elastic_sampler_config_error": "left",
+             "nc_elastic_start_timeout": "left", "nc_elastic_ended_for_balance": "lost",
              "nc_elastic_evicted": "lost", "nc_elastic_expired": "lost", "nc_elastic_node_lost": "lost"}
-POOL_UP = {"nc_elastic_member_ready", "nc_elastic_node_reachable_again", "nc_elastic_control_plane_recovered"}
+POOL_UP = {"nc_elastic_member_ready", "nc_elastic_node_reachable_again", "nc_elastic_control_plane_recovered",
+           "nc_elastic_scale_drain_cancelled", "nc_elastic_sampler_retry"}
+# the follow-up events of a retirement (fence, release, drain): they never hide the cause before them
+POOL_FOLLOW_UP = frozenset({"nc_elastic_shard_fenced", "nc_elastic_released", "nc_elastic_drain_failed"})
+POOL_TARGET = "nc_elastic_target_changed"
+# a scale-down victim finishing its trials in flight: still sampling, not left
+POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
-POOL_KEYS = ("ticket", "account", "shard", "why", "reason", "detail", "error", "state", "after_s",
-             "waited_s", "restarts", "attempt", "data_slot")
+POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
+             "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
+             "by", "usd_per_h", "end_reason", "replaces", "continues_shard")
+# a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
+POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
 
 def _f(v: Any) -> float | None:
@@ -284,23 +296,41 @@ class AsyncState:
         """The NC pool's word on sampler ``iid`` (its shard): the last exit event of
         the shard, or of a ticket that served it, with no member_ready after it; a
         pool_stopped ends every shard. None when the pool has not ended it (or the
-        exit is older than ``after``, the sampler's last event: a restart since)."""
+        exit is older than ``after``, the sampler's last event: a restart since).
+
+        ``reason`` names the cause: the first exit event of the ticket (evicted,
+        crash loop, scale down, ...), not the fence / release that follow it;
+        ``replaced_by`` is the ticket ordered to replace the one that left."""
         tickets = {p.get("ticket") for p in self.pool if p.get("shard") is not None
                    and str(p.get("shard")) == str(iid) and p.get("ticket")}
         state = None
-        for p in sorted(self.pool, key=lambda x: x.get("ts") or 0):
+        events = sorted(self.pool, key=lambda x: x.get("ts") or 0)
+        for p in events:
             ev = p.get("event")
             mine = (p.get("shard") is not None and str(p.get("shard")) == str(iid)) or (
                 p.get("shard") is None and p.get("ticket") in tickets)
             if ev == POOL_STOPPED:
-                state = {"status": "left", "event": ev, "ts": p.get("ts"), "why": p.get("why")}
+                cause = state if state and state["ticket"] is not None else None
+                state = {"status": "left", "event": ev, "ts": p.get("ts"), "why": p.get("why"), "ticket": None,
+                         "reason": cause["reason"] if cause else exit_reason(p),
+                         "cause": cause["cause"] if cause else ev,
+                         "cause_ts": cause["cause_ts"] if cause else p.get("ts")}
             elif mine and ev in POOL_LEFT:
+                keep = (state is not None and ev in POOL_FOLLOW_UP and state["ticket"] == p.get("ticket")
+                        and state["cause"] not in POOL_FOLLOW_UP)
                 state = {"status": POOL_LEFT[ev], "event": ev, "ts": p.get("ts"),
-                         "why": p.get("why") or p.get("detail"), "ticket": p.get("ticket")}
+                         "why": p.get("why") or p.get("detail"), "ticket": p.get("ticket"),
+                         "reason": state["reason"] if keep else exit_reason(p),
+                         "cause": state["cause"] if keep else ev,
+                         "cause_ts": state.get("cause_ts") if keep else p.get("ts")}
             elif mine and ev in POOL_UP:
                 state = None
         if state and after is not None and state["ts"] is not None and state["ts"] < after - 5:
             return None
+        if state and state.get("ticket"):
+            state["replaced_by"] = next(
+                (p.get("ticket") for p in events if p.get("event") == "nc_elastic_ordered"
+                 and p.get("replaces") == state["ticket"]), None)
         return state
 
     def trainer_left(self, iid: str) -> dict | None:
@@ -379,8 +409,52 @@ class AsyncState:
                              "trained_groups": tot("trained_groups"), "left": t["left"],
                              **{k: tot(k) for k in FILL_KEYS}}
         return {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
-                "releases": self.release_rows(), "pool": self.pool[-500:],
+                "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
                 "roles": dict(self.roles)}
+
+    def pool_scale(self) -> dict | None:
+        """The NC pool's sampler count over time: the target (``target_changed``, the
+        scale commands) and the shards it runs (ready, not yet left): one point per
+        pool event that changes either. None without pool events."""
+        if not self.pool:
+            return None
+        live: set[str] = set()
+        draining: set[str] = set()
+        paused: set[str] = set()
+        target = source = None
+        points = []
+        manual = []
+        for p in sorted(self.pool, key=lambda x: x.get("ts") or 0):
+            ev, shard = p.get("event"), p.get("shard")
+            before = (target, len(live), len(draining))
+            if str(ev).startswith(POOL_MANUAL_PREFIX):
+                manual.append(p)
+            if ev in (POOL_TARGET, "nc_elastic_manual_release_detected") and _int(p.get("new")) is not None:
+                target = p["new"]
+                source = p.get("source") or ("manual_release" if ev != POOL_TARGET else "manual")
+            elif ev == POOL_STOPPED:
+                live.clear()
+                draining.clear()
+                paused.clear()
+            elif shard is not None and ev == "nc_elastic_manual_pause":
+                paused.add(str(shard))
+            elif shard is not None and ev in ("nc_elastic_manual_resume", "nc_elastic_manual_pause_ended"):
+                paused.discard(str(shard))
+            elif shard is not None and ev in POOL_UP:
+                live.add(str(shard))
+                draining.discard(str(shard))
+            elif shard is not None and ev == POOL_DRAINING:
+                draining.add(str(shard))
+            elif shard is not None and ev in POOL_LEFT:
+                live.discard(str(shard))
+                draining.discard(str(shard))
+                paused.discard(str(shard))
+            if (target, len(live), len(draining)) != before:
+                points.append({"ts": p.get("ts"), "target": target, "ready": len(live), "draining": len(draining),
+                               "source": source})
+        return {"target": target, "target_source": source, "manual": source in ("manual", "manual_release"),
+                "ready": sorted(live), "draining": sorted(draining), "paused": sorted(paused),
+                "manual_events": manual[-50:], "points": points[-500:]}
 
     def backlog_series(self) -> dict | None:
         """Groups in the buffer not yet read by the trainers: groups written by all
@@ -444,6 +518,34 @@ class AsyncState:
                 "latency_s": (round(ld["loaded_at"] - rel, 3) if ld["loaded_at"] is not None and rel is not None
                               and not ld.get("at_start") else None)}
         return [by_v[k] for k in sorted(by_v, key=lambda v: (v is None, v if isinstance(v, int) else 0))]
+
+
+def exit_reason(p: dict) -> str:
+    """One line naming why the pool ended a sampler, from its pool event."""
+    ev = str(p.get("event") or "").removeprefix(POOL_PREFIX)
+    end = p.get("end_reason")
+    detail = str(p.get("detail") or p.get("why") or p.get("error") or "")[:160]
+    if ev == "evicted":
+        return "evicted" + (f" ({end})" if end else "")
+    if ev == "expired":
+        return "lease expired" + (f" ({end})" if end else "")
+    if ev == "released_externally":
+        return "released outside the pool" + (f" ({end})" if end else "")
+    if ev == "released_by_earlier_pool":
+        return "released by an earlier pool process"
+    if ev == "manual_release_detected":
+        return "released by hand" + (f" ({p['by']})" if p.get("by") else "")
+    if ev == "scaled_down":
+        return "scaled down" + (f" ({p['outcome']})" if p.get("outcome") else "")
+    if ev == "sampler_crash_loop":
+        n = p.get("restarts")
+        return "sampler crash loop" + (f" after {n} restarts" if n is not None else "") + (
+            f": {detail}" if detail else "")
+    if ev == "sampler_config_error":
+        return "configuration error" + (f": {detail}" if detail else "")
+    if ev == "ended_for_balance":
+        return "ended for the account balance"
+    return ev.replace("_", " ") + (f": {detail}" if detail else "")
 
 
 def _row_order(r: dict) -> tuple:

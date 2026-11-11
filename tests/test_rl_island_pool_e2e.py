@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,6 +55,14 @@ class Syncer:
         self.log = (tmp_path / "syncer.log").open("w")
         self.proc = subprocess.Popen(argv, stdout=self.log, stderr=subprocess.STDOUT,
                                      env={**os.environ, "YETO_ISLAND_HMAC_KEY": KEY})
+        # Islands dial only once the syncer listens: with --quorum 1 an island
+        # whose first dial is refused backs off ~2 s, and the other island can
+        # run every round (and the final cut) alone in that window.
+        deadline = time.monotonic() + 30
+        while "syncer listening" not in (tmp_path / "syncer.log").read_text():
+            assert self.proc.poll() is None, "syncer exited before listening"
+            assert time.monotonic() < deadline, "syncer did not start listening"
+            time.sleep(0.05)
 
     def wait(self, timeout=60.0) -> int:
         try:

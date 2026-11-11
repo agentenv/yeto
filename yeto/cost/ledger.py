@@ -46,6 +46,13 @@ LEDGER_FILE = "resources.jsonl"
 KINDS = ("modal_app", "modal_call", "nc_lease", "sky_cluster")
 
 
+def kinds() -> tuple[str, ...]:
+    """The built-in kinds plus every registered island provider's ledger kind."""
+    from yeto.launch.pool import provider as providers  # noqa: PLC0415
+
+    return KINDS + tuple(sorted(set(providers.ledger_kinds()) - set(KINDS)))
+
+
 @dataclass
 class Resource:
     kind: str
@@ -99,8 +106,9 @@ class ResourceLedger:
                 os.close(fd)
 
     def _rec(self, op: str, kind: str, rid: str | None, name: str | None, attrs: dict) -> None:
-        if kind not in KINDS:
-            raise ValueError(f"unknown resource kind {kind!r}; one of {KINDS}")
+        known = kinds()
+        if kind not in known:
+            raise ValueError(f"unknown resource kind {kind!r}; one of {known}")
         self._append({"op": op, "kind": kind, "id": rid, "name": name, "ts": self.clock(),
                       "attrs": attrs})
 
@@ -125,13 +133,13 @@ class ResourceLedger:
             text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return []
-        out = []
+        out, known = [], kinds()
         for line in text.splitlines():
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue  # a torn last line after a crash
-            if isinstance(rec, dict) and rec.get("kind") in KINDS:
+            if isinstance(rec, dict) and rec.get("kind") in known:
                 out.append(rec)
         return out
 

@@ -27,6 +27,10 @@ A store without it (a FUSE bucket mount, an S3 endpoint answering
     beats/<i>/<a>              the holder's lease renewal (rewritten; its time is the server's)
     fail/<i>/<a>.<kind>        why attempt a ended without a trained group (infra / expired / release)
     done/<i>.<kind>            the slot is settled (trained / exhausted / dropped)
+    drain/<holder>             scale down (the NC pool): {"drain": true, "seq"}: that sampler
+                               claims no new task; {"drain": false}: it claims again
+    drained/<holder>           its answer: {"seq"} once it holds no claim under that request
+    retired/<holder>/<inc>     the controller retired this sampler process (:func:`retire`)
 
 Rules:
 
@@ -52,11 +56,27 @@ Rules:
   lease to run out. A restarted sampler (same id, new incarnation) first settles
   ``trained`` the slots its earlier incarnations wrote to the buffer, then
   releases the rest of their claims;
+* retire (:func:`retire`, the controller's scale-down / evict): a marker
+  ``retired/<holder>/<incarnation>`` plus an immediate ``release`` (reason
+  ``retired``) of every open claim of that process. The retired process sees
+  the marker in its next listing and takes nothing more (fenced); its
+  in-flight groups are refused by :meth:`StoreDispensedPrompts.still_holds`;
+  any scanning sampler releases a claim of a retired process it still finds;
 * hold-out: every row's task id is checked against the hold-out ids before the
   first claim (a leak refuses the sampler), and the plan records the list's
   digest so every sampler runs with the same one;
+* drain (a scale down that keeps the trials in flight): a sampler whose
+  ``drain/<holder>`` request is on claims nothing more; its claims in flight
+  finish and are written as usual, and once it holds none it writes
+  ``drained/<holder>`` with the request's ``seq`` (the pool then fences and
+  releases it, so nothing is lost and nothing is given out twice). The request
+  key shows up in the scan's listing: no extra request while none is set;
 * request budget: one listing per scan, at most one scan per ``scan_s`` while
   nothing could be claimed (backing off to ``max_scan_s``).
+
+This is the reference implementation of the WorkContract
+(:mod:`yeto.rl.engine.work_contract`; conformance cases in
+``tests/fixtures/work_contract_cases.json``).
 
 Everything is in the store: a restarted sampler resumes from it, nothing is
 given out twice and nothing is lost. ``python -m yeto.rl.engine.store_dispense
@@ -98,6 +118,7 @@ DEFAULT_LEASE_S = 900.0
 DEFAULT_MAX_REDO = 2
 DEFAULT_SCAN_S = 30.0
 DEFAULT_MAX_SCAN_S = 120.0
+CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
 LEASE_KEY = "dispense_lease_s"  # row metadata: this task's lease
 ATTEMPT_KEY = "dispense_attempt"  # item metadata: the attempt this sampler holds
 COUNTED = ("infra", "expired")  # attempt endings that count toward max_redo
@@ -112,6 +133,33 @@ EXPIRED_EVENT = "rl_dispense_expired"
 LOST_EVENT = "rl_dispense_lost"
 RELEASE_EVENT = "rl_dispense_release"
 RECOVER_EVENT = "rl_dispense_recover"
+DRAIN_EVENT = "rl_dispense_drain"
+DRAIN_DIR, DRAINED_DIR = "drain", "drained"
+
+
+def drain_key(namespace: str, holder: str) -> str:
+    return f"{namespace.strip('/')}/{DRAIN_DIR}/{holder}"
+
+
+def drained_key(namespace: str, holder: str) -> str:
+    return f"{namespace.strip('/')}/{DRAINED_DIR}/{holder}"
+
+
+def request_drain(objects: Any, namespace: str, holder: str, *, on: bool = True, seq: str | None = None) -> str:
+    """Ask sampler ``holder`` to claim no new task (``on``) or to claim again; returns
+    the request's ``seq`` (its ``drained`` answer names it)."""
+    seq = str(seq if seq is not None else f"{time.time():.6f}")
+    objects.write(drain_key(namespace, holder), json.dumps({"drain": bool(on), "seq": seq}).encode())
+    return seq
+
+
+def drain_answered(objects: Any, namespace: str, holder: str, seq: str) -> bool:
+    """Sampler ``holder`` holds no claim under drain request ``seq``."""
+    data = objects.read(drained_key(namespace, holder))
+    try:
+        return bool(data) and str(json.loads(data).get("seq")) == str(seq)
+    except ValueError:
+        return False
 
 
 # ------------------------------------------------------------------ objects
@@ -291,6 +339,26 @@ class TaskState:
         return None if a is None or self.done is not None or a in self.fails else a
 
 
+def _member_part(text: str) -> str:
+    from urllib.parse import quote  # noqa: PLC0415
+
+    return quote(str(text), safe="")
+
+
+def parse_retired(keys: Iterable[tuple[str, float]], namespace: str) -> set[tuple[str, str]]:
+    """The ``(holder, incarnation)`` pairs of the ledger's retire markers."""
+    from urllib.parse import unquote  # noqa: PLC0415
+
+    head = namespace.strip("/") + "/retired/"
+    out = set()
+    for key, _stamp in keys:
+        if key.startswith(head):
+            parts = key[len(head):].split("/")
+            if len(parts) == 2:
+                out.add((unquote(parts[0]), unquote(parts[1])))
+    return out
+
+
 def parse_ledger(keys: Iterable[tuple[str, float]], namespace: str) -> dict[int, TaskState]:
     states: dict[int, TaskState] = {}
     head = namespace.strip("/") + "/"
@@ -386,6 +454,8 @@ class StoreLedger:
         # sampler id -> the incarnation its incarnation lease names (None: no lease)
         self.lease_of_holder = lease_of_holder
         self._bodies: dict[tuple[int, int], dict[str, Any]] = {}  # claim bodies (immutable)
+        self.drain_seq: str | None = None  # an open drain request for this holder (last scan)
+        self.retired: set[tuple[str, str]] = set()  # retire markers seen by the latest scan
 
     def key(self, *parts: str) -> str:
         return "/".join((self.ns, *parts))
@@ -425,7 +495,25 @@ class StoreLedger:
 
     def scan(self) -> tuple[dict[int, TaskState], float]:
         keys, now = self.objects.list_meta(self.ns + "/")
+        keys = list(keys)
+        mine = drain_key(self.ns, self.holder)
+        self.drain_seq = None
+        if any(k == mine for k, _ in keys):
+            try:
+                body = json.loads(self.objects.read(mine) or b"{}")
+            except ValueError:
+                body = {}
+            if body.get("drain"):
+                self.drain_seq = str(body.get("seq"))
+        self.retired = parse_retired(keys, self.ns)
         return parse_ledger(keys, self.ns), now
+
+    def is_retired(self) -> bool:
+        """This process was retired (as of the latest scan)."""
+        return (self.holder, self.incarnation) in self.retired
+
+    def answer_drain(self, seq: str) -> None:
+        self.objects.write(drained_key(self.ns, self.holder), self._body(seq=seq))
 
     def _body(self, **fields: Any) -> bytes:
         return json.dumps({"holder": self.holder, "incarnation": self.incarnation, **fields},
@@ -469,12 +557,17 @@ class StoreLedger:
     # -- the claim pass -----------------------------------------------------
     def _fenced_claim(self, slot: int, attempt: int, leases: dict[str, str | None]) -> str | None:
         """The incarnation now holding the claim holder's incarnation lease, when
-        it is not the claim's (the holder was fenced or restarted)."""
-        if self.lease_of_holder is None:
+        it is not the claim's (the holder was fenced or restarted); ``"retired"``
+        when the controller retired the claim's process."""
+        if self.lease_of_holder is None and not self.retired:
             return None
         body = self.claim_body(slot, attempt)
         holder, inc = body.get("holder"), body.get("incarnation")
         if not holder or inc is None:
+            return None
+        if (str(holder), str(inc)) in self.retired:
+            return "retired"
+        if self.lease_of_holder is None:
             return None
         if holder not in leases:
             try:
@@ -512,6 +605,7 @@ class StoreLedger:
                     continue
                 kind = "expired" if not alive else "release"
                 detail = ({"seen": state.last_seen(a), "now": now} if not alive
+                          else {"reason": "retired"} if by == "retired"
                           else {"reason": "fenced", "superseded_by": by})
                 if self.fail(p, a, kind, **detail):
                     logger.warning("store dispenser: slot %d attempt %d %s", p, a,
@@ -594,7 +688,12 @@ class StoreDispensedPrompts:
         self._gate_dropped: set[int] = set()
         self._task_slots: dict[str, list[int]] | None = None
         self._waiting_capacity = False
+        self._drain_seen: str | None = None  # the drain request already reported / answered
+        self._drain_answered: str | None = None
         self._held: dict[int, _Held] = {}
+        holder = getattr(ledger, "holder", "")
+        self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
+        self._retired = False  # the controller retired this process (a marker in the ledger)
         self._lock = threading.RLock()
         self._next_scan = 0.0
         self._idle = self.scan_s
@@ -615,6 +714,8 @@ class StoreDispensedPrompts:
                 logger.warning("store dispenser: emit %s failed: %r", event, error)
 
     def _is_fenced(self) -> bool:
+        if self._retired:
+            return True
         try:
             return bool(self.fenced is not None and self.fenced())
         except Exception:  # noqa: BLE001 - an unreadable lease is not a fence
@@ -745,6 +846,23 @@ class StoreDispensedPrompts:
     def _claim(self, want: int) -> tuple[list[int], bool]:
         states, now = self.ledger.scan()
         self.stats["scans"] += 1
+        if self.ledger.is_retired():
+            self._retired = True
+            with self._lock:
+                held = [(p, h) for p, h in self._held.items() if not h.lost]
+            for p, h in held:
+                self._mark_lost(p, h, "retired")
+            return [], False
+        seq = self.ledger.drain_seq
+        if seq is not None:  # scale down: no new task; the claims in flight finish
+            if self._drain_seen != seq:
+                self._drain_seen = seq
+                self._emit(DRAIN_EVENT, state="draining", seq=seq, holding=self.holding())
+            self._answer_drain()
+            return [], False
+        if self._drain_seen is not None:
+            self._emit(DRAIN_EVENT, state="resumed", seq=self._drain_seen)
+            self._drain_seen = self._drain_answered = None
         accept = self.accept
         view = None
         if self.gate is not None:
@@ -766,7 +884,10 @@ class StoreDispensedPrompts:
             candidates.sort(key=lambda c: not view.classify(
                 row_task_id(self.rows[self.slots.row(c[0])], self.task_key))[2])
         got: list[int] = []
-        for p, attempt in candidates:
+        queue, staggered, i = candidates, False, 0
+        while i < len(queue):
+            p, attempt = queue[i]
+            i += 1
             if len(got) >= want:
                 break
             row = self.slots.row(p)
@@ -785,9 +906,51 @@ class StoreDispensedPrompts:
                 got.append(p)
                 self._emit(CLAIM_EVENT, slot=p, attempt=attempt, row=row, task_id=task_id,
                            stream=self.slots.stream(p))
+                if view is not None and view.host is not None and not view.classify(task_id)[2]:
+                    # affinity "prefer": prepared on another host only; its image may be pulled at trial start
+                    self._emit("rl_dispense_task_off_host", slot=p, task_id=task_id, host=view.host)
             else:
                 self.stats["claim_lost"] += 1
+                if not staggered:
+                    # Contention: every holder scanned the same order and races for the same
+                    # next slots, losing ~one claim (one conditional PUT) per rival. Go on from a
+                    # holder-specific offset within the next CLAIM_STAGGER_SLOTS candidates
+                    # instead; an uncontended holder keeps the plan order exactly.
+                    staggered = True
+                    rest = queue[i:]
+                    if rest:
+                        k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
+                        queue, i = rest[k:] + rest[:k], 0
         return got, ended
+
+    def _answer_drain(self) -> None:
+        seq = self.ledger.drain_seq
+        if seq is None or self.holding() or self._drain_answered == seq:
+            return
+        try:
+            self.ledger.answer_drain(seq)
+        except Exception as error:  # noqa: BLE001 - the pool's drain timeout bounds it
+            logger.warning("store dispenser: drain answer failed: %r", error)
+            return
+        self._drain_answered = seq
+        self._emit(DRAIN_EVENT, state="drained", seq=seq)
+
+    def draining(self) -> bool:
+        return self.ledger.drain_seq is not None
+
+    def poll(self, want: int) -> tuple[str, list[int]]:
+        """One claim attempt, never waiting, without the scan rate limit:
+        ``("items", slots)``, ``("wait", [])``, ``("end", [])`` (every slot
+        settled, none held here) or ``("fenced", [])`` (the WorkContract's
+        ``claim``)."""
+        if self._is_fenced():
+            return "fenced", []
+        got, ended = self._claim(want)
+        if self._retired:
+            return "fenced", []
+        if got:
+            return "items", got
+        return ("end" if ended and not self.holding() else "wait"), []
 
     def take(self, want: int) -> list[int]:
         """Up to ``want`` slots. Holding groups in flight: one scan at most
@@ -979,6 +1142,43 @@ class StoreDispensedPrompts:
         return {"released": len(held), "backend": BACKEND, **self.stats}
 
 
+# ------------------------------------------------------------------- retire
+
+
+def retire(objects: Any, namespace: str, holder: str, incarnation: str | None = None, *,
+           reason: str = "scale_down") -> dict[str, Any]:
+    """Retire sampler ``holder`` now (the WorkContract's ``retire``; the
+    controller's scale-down / evict): write its retire marker and release every
+    open claim of it at once (``release``, reason ``retired``; not counted
+    toward ``max_redo``), so the next claim of any sampler takes them.
+    ``incarnation=None`` retires every incarnation of ``holder`` that holds an
+    open claim. Idempotent: a second call releases nothing."""
+    ns = namespace.strip("/")
+    keys, _now = objects.list_meta(ns + "/")
+    states = parse_ledger(keys, ns)
+    body = json.dumps({"holder": "controller", "reason": str(reason)}, sort_keys=True).encode()
+    open_claims = []
+    for p, state in sorted(states.items()):
+        a = state.open_attempt()
+        if a is None:
+            continue
+        claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
+        if claim.get("holder") == holder and (incarnation is None or str(claim.get("incarnation")) == str(incarnation)):
+            open_claims.append((p, a, str(claim.get("incarnation"))))
+    incarnations = {str(incarnation)} if incarnation is not None else {inc for _p, _a, inc in open_claims}
+    for inc in sorted(incarnations):
+        objects.create(f"{ns}/retired/{_member_part(holder)}/{_member_part(inc)}", body)
+    released = []
+    for p, a, inc in open_claims:
+        detail = json.dumps({"holder": "controller", "attempt": a, "reason": "retired", "retire_reason": str(reason),
+                             "retired_holder": holder, "retired_incarnation": inc}, sort_keys=True).encode()
+        if objects.create(f"{ns}/fail/{_pkey(p)}/{_akey(a)}.release", detail):
+            released.append(p)
+    if released:
+        logger.info("store dispenser: retired %s (%s): released slots %s", holder, reason, released)
+    return {"holder": holder, "incarnations": sorted(incarnations), "released": len(released), "slots": released}
+
+
 # ------------------------------------------------------------------- status
 
 
@@ -1064,11 +1264,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     st.add_argument("--json", action="store_true")
     st.add_argument("--brief", action="store_true", help="one listing plus each task's latest claim (task id, holder); no settlement or "
                     "failure reads (elapsed_s and failure_reasons are not shown)")
+    rt = sub.add_parser("retire", help="retire one sampler process now: release its claims, fence it")
+    rt.add_argument("--store", required=True, help="store directory or s3:// URI (the samplers' store)")
+    rt.add_argument("--namespace", default=DEFAULT_NAMESPACE)
+    rt.add_argument("--holder", required=True, help="the sampler id")
+    rt.add_argument("--incarnation", help="only this incarnation (default: every one holding a claim)")
+    rt.add_argument("--reason", default="operator")
     from yeto.cloud.s3_store import add_store_client_arguments, apply_store_client_arguments, describe_store_error
 
     add_store_client_arguments(st)
+    add_store_client_arguments(rt)
     args = parser.parse_args(argv)
     apply_store_client_arguments(args)
+    if args.command == "retire":
+        print(json.dumps(retire(_objects_for(args.store), args.namespace, args.holder, args.incarnation,
+                                reason=args.reason), sort_keys=True))
+        return 0
     try:
         report = status(_objects_for(args.store), args.namespace, details=not args.brief)
     except Exception as error:  # noqa: BLE001 - a store credential / endpoint error gets its hint

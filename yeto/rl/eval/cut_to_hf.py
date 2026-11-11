@@ -53,13 +53,18 @@ class MaterializeError(RuntimeError):
 
 
 def megatron_args(config: Mapping[str, Any]) -> SimpleNamespace:
-    """The Megatron-side fields Miles' converters read, from an HF ``config.json``."""
+    """The Megatron-side fields Miles' converters read, from an HF ``config.json``.
+
+    Miles' newer ``_convert_to_hf_core`` reads them from ``args.backend`` (the
+    Megatron section of its split arguments), older ones from ``args``: the
+    namespace carries both (``backend`` is the same fields)."""
     heads = int(config["num_attention_heads"])
-    return SimpleNamespace(
+    fields = dict(
         hidden_size=int(config["hidden_size"]), num_attention_heads=heads,
         num_query_groups=int(config.get("num_key_value_heads") or heads),
         kv_channels=config.get("head_dim"), vocab_size=int(config["vocab_size"]),
         num_layers=int(config["num_hidden_layers"]))
+    return SimpleNamespace(**fields, backend=SimpleNamespace(**fields))
 
 
 def miles_converter(model_name: str) -> Converter:

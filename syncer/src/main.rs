@@ -12,6 +12,7 @@ mod merge;
 mod par;
 mod dispense;
 mod dispense_service;
+mod member_retire;
 mod members;
 mod downlink;
 mod eval_checkpoint;
@@ -22,6 +23,7 @@ mod sha256;
 mod shutdown;
 mod state;
 mod subscriber;
+mod work_contract;
 
 use clap::Parser;
 
@@ -328,7 +330,9 @@ struct Args {
     #[arg(long)]
     dispense_passes: Option<u64>,
     /// How often one row may be requeued after its group was too stale to train.
-    #[arg(long, default_value_t = 1)]
+    /// Lease expiries count too (a holder that dies twice must not exhaust a row);
+    /// the default matches the store ledger's (`store_dispense.DEFAULT_MAX_REDO`).
+    #[arg(long, default_value_t = dispense::DEFAULT_MAX_REDO)]
     dispense_max_redo: u32,
     /// Largest block one claim may ask for.
     #[arg(long, default_value_t = 65536)]

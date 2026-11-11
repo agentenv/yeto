@@ -15,7 +15,7 @@ The launcher runs one :class:`CostGuard` thread per run. Every ``poll_s`` it
 6. an NC lease still open ``nc_overdue_grace_s`` after its ``lease_until`` is
    reported (``nc_lease_overdue``, once): it keeps billing past its end, but the
    NC sampler pool owns its leases (its own lease-end drain, ``pool-stop``,
-   ``yeto cleanup --include-nc``); a trainer-side guard never releases one
+   ``yeto cleanup --include-pools``); a trainer-side guard never releases one
    unless ``release_overdue_nc`` is set.
 
 Every event goes to ``<run dir>/cost-events.jsonl`` and to stdout
@@ -249,7 +249,7 @@ class CostGuard:
                 self.emit("nc_lease_overdue", resource=r.key, lease_until=r.attrs.get("lease_until"),
                           overdue_min=round((now - until) / 60, 1), action="release" if release else "alert",
                           detail=None if release else "kept: the NC pool owns it (pool-stop / "
-                          f"yeto cleanup --run {self.run} --include-nc)")
+                          f"yeto cleanup --run {self.run} --include-pools)")
                 if not release:
                     continue
                 try:

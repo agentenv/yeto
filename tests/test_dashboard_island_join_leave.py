@@ -141,3 +141,61 @@ def test_sft_style_join_and_leave_mid_run():
     cards = _cards(r, T0 + 175)
     assert {i for i, c in cards.items() if c["status"] in ACTIVE} == {"b", "c"}
     assert cards["a"]["status"] == "left"
+
+
+def _sampling(r, shard="s1", ticket="tk"):
+    r.feed({"t": T0, "event": "nc_elastic_member_ready", "shard": shard, "ticket": ticket})
+    r.feed({"event": "rl_sampler_round", "sampler_id": shard, "rollout_id": 0, "groups": 4, "generate_s": 30.0,
+            "time_unix": T0 + 30})
+
+
+@pytest.mark.parametrize("records,status,reason", [
+    ([{"event": "nc_elastic_evicted", "end_reason": "preempted"}], "lost", "evicted (preempted)"),
+    ([{"event": "nc_elastic_expired", "end_reason": "lease_end"}], "lost", "lease expired (lease_end)"),
+    ([{"event": "nc_elastic_released_externally"}], "left", "released outside the pool"),
+    ([{"event": "nc_elastic_manual_release_detected", "by": "console"}], "left", "released by hand (console)"),
+    ([{"event": "nc_elastic_scaled_down", "outcome": "drained"}], "left", "scaled down (drained)"),
+    ([{"event": "nc_elastic_sampler_crash_loop", "restarts": 3, "detail": "CUDA out of memory"}], "left",
+     "sampler crash loop after 3 restarts: CUDA out of memory"),
+    ([{"event": "nc_elastic_sampler_config_error", "detail": "bad spec"}], "left", "configuration error: bad spec"),
+    # the fence and release that follow a retirement keep its cause
+    ([{"event": "nc_elastic_sampler_crash_loop", "restarts": 3, "detail": "OOM"},
+      {"event": "nc_elastic_shard_fenced", "why": "sampler crash loop"},
+      {"event": "nc_elastic_released", "why": "sampler crash loop"}], "left", "sampler crash loop after 3 restarts: OOM"),
+    ([{"event": "nc_elastic_released", "why": "drain"}], "left", "released: drain"),
+])
+def test_left_card_names_the_pool_cause(records, status, reason):
+    r = Reducer()
+    _sampling(r)
+    for k, rec in enumerate(records):
+        r.feed({"t": T0 + 40 + k, "shard": "s1", "ticket": "tk", **rec})
+    card = _cards(r, T0 + 60)["s1"]
+    assert card["status"] == status
+    assert card["left"]["reason"] == reason and card["left"]["ts"] == T0 + 40
+    assert card["left"]["replaced_by"] is None
+
+
+def test_left_card_names_the_replacement_ticket():
+    r = Reducer()
+    _sampling(r, ticket="old")
+    r.feed({"t": T0 + 40, "event": "nc_elastic_evicted", "shard": "s1", "ticket": "old", "end_reason": "preempted"})
+    r.feed({"t": T0 + 41, "event": "nc_elastic_ordered", "shard": "s2", "ticket": "new", "replaces": "old",
+            "continues_shard": "s1"})
+    left = _cards(r, T0 + 60)["s1"]["left"]
+    assert left["reason"] == "evicted (preempted)" and left["replaced_by"] == "new" and left["ticket"] == "old"
+
+
+def test_config_error_then_retry_is_alive_again():
+    r = Reducer()
+    _sampling(r)
+    r.feed({"t": T0 + 40, "event": "nc_elastic_sampler_config_error", "shard": "s1", "ticket": "tk", "detail": "x"})
+    assert _cards(r, T0 + 50)["s1"]["status"] == "left"
+    r.feed({"t": T0 + 60, "event": "nc_elastic_sampler_retry", "shard": "s1", "ticket": "tk"})
+    r.feed({"event": "rl_sampler_round", "sampler_id": "s1", "rollout_id": 1, "groups": 4, "generate_s": 30.0,
+            "time_unix": T0 + 90})
+    assert _cards(r, T0 + 100)["s1"]["status"] == "ok"
+
+
+def test_badge_script_formats_the_exit_line():
+    js = (Path(__file__).parents[1] / "yeto" / "dashboard" / "static" / "app.js").read_text()
+    assert "function leftText(s,l)" in js and '", replaced by "' in js and '" at "+clock(l.ts)' in js

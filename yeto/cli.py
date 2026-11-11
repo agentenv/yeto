@@ -782,6 +782,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=30,
         help="fleet-controller health poll interval (seconds)",
     )
+    infra.add_argument(
+        "--rollout-pool",
+        action="append",
+        default=[],
+        metavar="POOL_JSON",
+        help="a sampler pool config (NC, Daytona, Sky or Modal) driven in this launcher's "
+        "fleet controller (repeatable; one RolloutController for all of them)",
+    )
     from .launch import trainer_loop as _trainer_loop
 
     _trainer_loop.add_arguments(infra)
@@ -1092,6 +1100,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .rl.up import add_parser as _add_rl_up_parser
 
     _add_rl_up_parser(sub)
+
+    from .launch.rollout.entry import add_parser as _add_rollout_parser
+
+    _add_rollout_parser(sub)
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -2528,6 +2540,10 @@ def main(argv=None) -> int:
         from .rl.up import main as rl_up_main
 
         return rl_up_main(args)
+    if args.command == "rollout":
+        from .launch.rollout.entry import main as rollout_main
+
+        return rollout_main(args)
     if args.command == "sandbox":
         from .sandbox.cli import main as sandbox_main
 

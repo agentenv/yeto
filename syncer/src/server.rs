@@ -841,6 +841,12 @@ struct SubscriberHub {
     /// Groups of SUBSCRIBE connections still waiting for the session (their
     /// data streams may already attach).
     waiting: Mutex<HashMap<Member, Arc<Group>>>,
+    /// The newest published version of every fragment (cheap `Arc` copies of
+    /// the scheduler's masters), offered to a subscriber at SUBSCRIBE. Without
+    /// it a new subscriber waited for the next merge, and a run whose merges
+    /// wait on that subscriber's groups (a replacement sampler on a stale base
+    /// under the trainer's policy-age gate) never merged again.
+    latest: Mutex<Option<(Vec<u64>, Vec<Arc<Vec<f32>>>)>>,
 }
 
 impl SubscriberHub {
@@ -850,6 +856,36 @@ impl SubscriberHub {
             members,
             conns: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
+            latest: Mutex::new(None),
+        }
+    }
+
+    /// Keep the state's fragment versions for the next SUBSCRIBE.
+    fn remember(&self, st: &GlobalState) {
+        *self.latest.lock().unwrap() = Some((st.versions.clone(), st.params.clone()));
+    }
+
+    /// Offer the newest published version of every fragment to a just
+    /// registered subscriber (the snapshot a publish would otherwise send).
+    /// Nothing before the first publish or resume: the subscriber then serves
+    /// its base and the next publish sends the snapshot.
+    fn offer_latest(&self, conn: &Arc<SubscriberConn>) {
+        let latest = self.latest.lock().unwrap();
+        let Some((versions, params)) = latest.as_ref() else {
+            return;
+        };
+        let mut queued = false;
+        {
+            let mut pending = conn.pending.lock().unwrap();
+            for q in 0..params.len() {
+                if conn.group.layout.fragments.get(q).and_then(|f| f.numel().ok()) == Some(params[q].len()) {
+                    queued |= pending.offer(q, versions[q], params[q].clone());
+                }
+            }
+            conn.needs_snapshot.store(false, Ordering::Release);
+        }
+        if queued {
+            conn.notify.notify_one();
         }
     }
 
@@ -906,6 +942,7 @@ impl SubscriberHub {
     /// scheduler never waits for a subscriber link). New subscribers also get
     /// every other fragment at its current version.
     fn publish(&self, st: &GlobalState, p: usize) {
+        self.remember(st);
         for conn in self.live() {
             if conn.is_closed() {
                 continue;
@@ -2210,6 +2247,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
     let accept_relay = relay.clone();
+    let accept_members = members.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -2221,9 +2259,12 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let hello_auth = hello_auth.clone();
                     let dispense = dispense.clone();
                     let relay = accept_relay.clone();
+                    let members = accept_members.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
+                            Some(peer),
+                            members,
                             reg,
                             session,
                             expected_learners,
@@ -2502,6 +2543,8 @@ fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
 
 async fn handle_connection(
     stream: TcpStream,
+    peer: Option<std::net::SocketAddr>,
+    members: crate::members::SharedMembers,
     registry: Registry,
     session: Session,
     expected_learners: u32,
@@ -2520,7 +2563,8 @@ async fn handle_connection(
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE | MSG_SUBSCRIBE => Ok(MAX_HELLO_FRAME),
         MSG_TASK_HELLO => Ok(crate::protocol::MAX_TASK_HELLO),
         crate::sample_relay::MSG_RELAY_HELLO => Ok(1024),
-        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {other}"),
+        crate::member_retire::MSG_MEMBER_RETIRE => Ok(crate::member_retire::MAX_MEMBER_RETIRE),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO/MEMBER_RETIRE, got {other}"),
     })
     .await
     {
@@ -2812,7 +2856,10 @@ async fn handle_connection(
                 bail!(message)
             }
         },
-        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO, got {t}"),
+        crate::member_retire::MSG_MEMBER_RETIRE => {
+            crate::member_retire::serve(&mut wr, &first.payload, peer, hello_auth.key.as_deref(), &members, dispense).await
+        }
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO/MEMBER_RETIRE, got {t}"),
     }
 }
 
@@ -2939,6 +2986,7 @@ async fn serve_subscriber(
     });
     tokio::spawn(writer_task(wr, rx, conn.group.wire.clone()));
     hub.register(conn.clone());
+    hub.offer_latest(&conn);
     info!(
         subscriber = subscriber_id,
         generation = member.generation,
@@ -3961,6 +4009,11 @@ async fn scheduler(
                             }
                             info!(step = st.global_step, "resumed from checkpoint");
                             resumed = true;
+                            // A subscriber that joins before the next merge gets the resumed cut.
+                            let hub = registry.lock().unwrap().subscribers.clone();
+                            if let Some(hub) = hub {
+                                hub.remember(&st);
+                            }
                         }
                     }
                     local_init = Some(LocalInit::new(

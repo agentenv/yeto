@@ -126,6 +126,13 @@ def _no_real_nebius_sg_cleanup(request, monkeypatch):
 
 
 @_pytest.fixture(autouse=True)
+def _no_real_model_preflight(monkeypatch):
+    """The launch's model preflight asks the Hub / Modal / the bucket; unit tests
+    never reach them. Tests of the check set --preflight-model and fake the probes."""
+    monkeypatch.setenv("YETO_PREFLIGHT_MODEL", "off")
+
+
+@_pytest.fixture(autouse=True)
 def _fixed_thread_reading(monkeypatch):
     """launch-preflight-guards: launch() reads this user's thread count from
     /proc; unit tests must not depend on (or wait for) the host's threads.
@@ -266,3 +273,11 @@ from syncer_reaper import (  # noqa: E402,F401
 import yeto.cli as _yeto_cli  # noqa: E402
 
 _yeto_cli.DEFAULT_INNER_LR = 3e-4
+
+
+@_pytest.fixture(autouse=True)
+def _no_release_download_spread(monkeypatch):
+    """Background release downloads start at once in tests (production spreads them 0..5 s)."""
+    from yeto.rl.engine import policy_release as _pr
+
+    monkeypatch.setattr(_pr, "DOWNLOAD_SPREAD_S", 0.0)

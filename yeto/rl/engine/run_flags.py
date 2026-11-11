@@ -1048,9 +1048,10 @@ _SCHEDULING = (
              help="--rl-data-split dispense: the data ends after N passes over the rows "
              "(the islands stop with a clear error); default: unlimited, every pass after the "
              "first reshuffled"),
-    cli_flag("--rl-dispense-max-redo", type=int, default=1, metavar="N",
+    cli_flag("--rl-dispense-max-redo", type=int, default=2, metavar="N",
              help="--rl-data-split dispense: how often one row may be given out again after "
-             "its group was too stale to train (default 1)"),
+             "its group was too stale to train or its holder's lease expired (default 2, as "
+             "the store ledger)"),
     cli_flag("--rl-dispense-lease-s", type=float, default=300.0, metavar="S",
              help="--rl-data-split dispense: an island process silent this long loses its "
              "unreported rows to the other islands (default 300; a relaunched process "

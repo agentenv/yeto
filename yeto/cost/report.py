@@ -127,7 +127,8 @@ def cmd_cost(args) -> int:
 def cmd_cleanup(args) -> int:
     from .cleanup import cleanup_run
 
-    return 0 if cleanup_run(args.run, dry_run=args.dry_run, include_nc=getattr(args, "include_nc", False)) else 1
+    return 0 if cleanup_run(args.run, dry_run=args.dry_run, include_pools=getattr(args, "include_pools", False)) \
+        else 1
 
 
 def add_parsers(sub) -> None:
@@ -145,8 +146,11 @@ def add_parsers(sub) -> None:
                            "(by id; never by name pattern, never --all)")
     clean.add_argument("--run", required=True, help="run name (its --cluster-prefix)")
     clean.add_argument("--dry-run", action="store_true", help="list what would be released")
-    clean.add_argument("--include-nc", action="store_true",
-                       help="also release the NC pool's leases (normally pool-stop's job)")
+    clean.add_argument("--include-pools", action="store_true", dest="include_pools",
+                       help="also release the sampler pools' machines of the run (NC leases, Daytona "
+                       "sandboxes, Modal sampler calls, Sky sampler clusters; normally pool-stop's job)")
+    clean.add_argument("--include-nc", action="store_true", dest="include_pools",
+                       help="deprecated: the earlier name of --include-pools (every pool provider)")
 
 
 def add_launch_arguments(p) -> None:

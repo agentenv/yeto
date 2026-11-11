@@ -34,8 +34,14 @@ Run config (JSON; paths may use ``~``)::
     {"run": "<run>", "store": "s3://<bucket>/runs/<run>",
      "env": {"AWS_PROFILE": "...", "YETO_NC_ACCOUNTS": "5", ...},
      "preflight": {"commands": [["python", "check.py"]]},
-     "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40},
+     "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40,
+                 "max_containers_per_sampler": 20},  # the alert line: the larger of the two
+     # several sandbox hosts: "docker_host": ["ssh://h1", "ssh://h2"], or "envs" (every host
+     # of the envs file); the containers of the run are counted and removed on each
      "pool": {"config": "<pool.json>", "interval_s": 30},
+     # or several rollout pools (any provider; yeto.launch.rollout.pools):
+     # "samplers": [{"name": "nc", "provider": "nc", "config": "<pool.json>"},
+     #              {"name": "modal", "provider": {"kind": "modal", ...}, "target": 1, ...}],
      "trainer": {"argv": ["--training-mode", "rl", ...], "usd_per_h": 136},
      "first_group": {"timeout_s": 5400, "poll_s": 60},
      "dashboard": {"port": 8795},
@@ -44,10 +50,19 @@ Run config (JSON; paths may use ``~``)::
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
 whose process is alive is not started again.
+
+``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
+changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
+trainer is not touched). Before the pool's own checks it refuses a scale up when the run's
+breaker has fired or one more node hour per new node passes ``budget.usd``. The budget,
+the breakers and ``status`` count the nodes the pool state bills, never the target.
+With several pools, ``--pool NAME`` / ``--provider KIND`` picks the one to scale (``--remove T``
+finds the pool holding T); ``yeto rollout scale`` is the same command.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -77,15 +92,40 @@ def _log(msg: str) -> None:
 
 def load_config(path: str) -> dict[str, Any]:
     cfg = json.loads(Path(path).expanduser().read_text())
-    for key in ("run", "store", "pool", "trainer"):
+    for key in ("run", "store", "trainer"):
         if key not in cfg:
             raise ValueError(f"run config: missing {key!r}")
-    known = {"run", "store", "env", "preflight", "sandbox", "pool", "trainer", "first_group", "dashboard",
-             "budget", "comment"}
+    if "pool" not in cfg and "samplers" not in cfg:
+        raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
+    known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
+             "dashboard", "budget", "comment", "syncer", "controller", "rollout"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
+    rollout_section(cfg)
     return cfg
+
+
+ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
+
+
+def rollout_section(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The run config's ``rollout`` section (the in-process controller's knobs):
+    ``stall_alert_s`` (default 1800; 0: off): every ready sampler silent that long --
+    no group, no trainer-wait heartbeat -- is logged as a rollout stall (an alert only);
+    ``drain_on_exit`` (default true): when this process exits (also on SIGTERM), the
+    in-process controller drains every pool; false: the machines keep running, nothing
+    drives them, and the next ``yeto run up`` of this config adopts them from the pool
+    state files (for a supervised host: tmux, systemd ``Restart=on-failure``)."""
+    section = cfg.get("rollout") or {}
+    if not isinstance(section, dict):
+        raise ValueError("run config: rollout must be an object")
+    unknown = set(section) - ROLLOUT_KEYS
+    if unknown:
+        raise ValueError(f"run config: unknown rollout keys {sorted(unknown)} (known: {sorted(ROLLOUT_KEYS)})")
+    if "drain_on_exit" in section and not isinstance(section["drain_on_exit"], bool):
+        raise ValueError("run config: rollout.drain_on_exit must be true or false")
+    return dict(section)
 
 
 def _pythonpath_without_start_dir(env: dict[str, str]) -> dict[str, str]:
@@ -128,6 +168,10 @@ class Run:
         self.env.setdefault("PYTHONSAFEPATH", "1")
         self.env.update(_pythonpath_without_start_dir(self.env))
         self.py = sys.executable
+        from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
+
+        self.pools = resolve(cfg, self.dir)  # the rollout pools (samplers list, or the one pool)
+        self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
 
     # -- state
     def save(self) -> None:
@@ -173,7 +217,30 @@ class Run:
 
     @property
     def pool_config(self) -> str:
-        return os.path.expanduser(self.cfg["pool"]["config"])
+        """The first pool's config file (the only one of a run config with ``pool``)."""
+        return self.pools[0].config
+
+    @property
+    def pool_configs(self) -> list[str]:
+        return [p.config for p in self.pools]
+
+    def _proc_name(self, i: int) -> str:
+        return "pool" if i == 0 else f"pool-{self.pools[i].name}"
+
+    def pool_index(self, *, pool: str | None = None, provider: str | None = None,
+                   ticket: str | None = None) -> int | None:
+        """The pool a command is for: by name / provider kind (exactly one match), else the
+        pool whose state holds ``ticket``, else the only pool (None: ambiguous or none)."""
+        if pool is not None or provider is not None:
+            from yeto.launch.rollout.pools import select  # noqa: PLC0415
+
+            chosen = select(self.pools, pool=pool, provider=provider)
+            return self.pools.index(chosen[0]) if len(chosen) == 1 else None
+        if ticket is not None:
+            for i in range(len(self.pools)):
+                if any(m.get("ticket") == ticket for m in (self.pool_doc(i) or {}).get("members") or ()):
+                    return i
+        return 0 if len(self.pools) == 1 else None
 
     @property
     def envs(self) -> str | None:
@@ -199,7 +266,15 @@ class Run:
                  "(the monitor's silence backstop is 4x this timeout)")
             self.mark("preflight", ok=False)
             return False
-        ok = self._cmd(self.nc("pool", "--config", self.pool_config, "--dry-run"), log="preflight.log") == 0
+        for i in range(len(self.pools)):
+            problem = self.shard_problem(i)
+            if problem is not None:
+                _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
+                self.mark("preflight", ok=False)
+                return False
+        ok = True
+        for path in self.pool_configs:
+            ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "status", "--envs", self.envs, "--store", self.cfg["store"]),
                             log="preflight.log") == 0
@@ -224,16 +299,69 @@ class Run:
     def pool(self) -> None:
         from yeto.launch.nc import pool_run  # noqa: PLC0415
 
-        cfg = json.loads(Path(self.pool_config).read_text())
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("YETO_NC_", "NC_"))})
-        proc = pool_run.pool_process(cfg)
-        if proc and proc.get("alive"):
-            _log(f"pool: loop already running (PID {proc.get('pid')})")
-        else:
-            self._spawn("pool", self.nc("pool", "--config", self.pool_config,
-                                        "--interval", str(int(self.cfg["pool"].get("interval_s", 30)))))
+        if self.in_process:
+            self.start_controller()
+            self.state.setdefault("t0", time.time())
+            self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
+            return
+        for i, ref in enumerate(self.pools):
+            proc = pool_run.pool_process(ref.load())
+            if proc and proc.get("alive"):
+                _log(f"pool {ref.name}: loop already running (PID {proc.get('pid')})")
+            else:
+                self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
+                                                        "--interval", str(int(ref.interval_s))))
         self.state.setdefault("t0", time.time())
         self.mark("pool")
+
+    @property
+    def in_process(self) -> bool:
+        """``controller: "in_process"``: every pool in one RolloutController in this
+        process (default ``"subprocess"``: one ``nc pool`` loop per pool)."""
+        mode = str(self.cfg.get("controller") or "subprocess")
+        if mode not in ("subprocess", "in_process"):
+            raise ValueError(f"run config: controller {mode!r} is not 'subprocess' or 'in_process'")
+        return mode == "in_process"
+
+    def start_controller(self, *, ops: dict[str, Any] | None = None, **kw: Any) -> Any:
+        """One :class:`~yeto.launch.pool.controller.RolloutController` over every pool
+        (each built like its ``nc pool`` loop: state, events, scale file, lock), started
+        in a thread of this process. ``ops``: per pool name, for tests."""
+        from yeto.launch.pool.controller import DEFAULT_STALL_S, RolloutController, nc_pool  # noqa: PLC0415
+
+        slots = {}
+        try:
+            for ref in self.pools:
+                slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name))
+        except BaseException:
+            for slot in slots.values():
+                if slot.lock is not None:
+                    slot.lock.close()
+            raise
+        interval = min(r.interval_s for r in self.pools)
+        section = rollout_section(self.cfg)
+        kw.setdefault("stall_s", float(section.get("stall_alert_s", DEFAULT_STALL_S)))
+        kw.setdefault("drain_on_exit", bool(section.get("drain_on_exit", True)))
+        self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
+        self.controller.start()
+        if not self.controller.drain_on_exit:
+            _log("rollout.drain_on_exit is false: if this process exits, the sampler machines keep running "
+                 "(and billing) undriven until `yeto run up` of this config adopts them, or `yeto run down`")
+            atexit.register(self._undriven_banner)
+        _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
+        return self.controller
+
+    def _undriven_banner(self) -> None:
+        """At exit with ``rollout.drain_on_exit`` false: what is left running, undriven."""
+        controller = self.controller
+        if controller is None or controller.stopped:
+            return
+        live = {name: [m.ticket for m in pool.live()] for name, pool in controller.pools.items()}
+        live = {name: tickets for name, tickets in live.items() if tickets}
+        if live:
+            _log(f"exit without a drain (rollout.drain_on_exit false): STILL BILLING, undriven: {live}; "
+                 "adopt them with `yeto run up --config <run.json>` or release them with `yeto run down`")
 
     def _objects(self):
         from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
@@ -304,23 +432,32 @@ class Run:
 
     # -- guards
     def spend_usd(self) -> float:
-        b = self.cfg.get("budget") or {}
         now = time.time()
-        nc = self.nc_node_hours(now) * float(b.get("nc_usd_per_h", 24))
-        tr = (now - self.state.get("trainer_t0", now)) / 3600 * float(self.cfg["trainer"].get("usd_per_h", 0))
+        nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
+        rate = float((self.cfg.get("trainer") or {}).get("usd_per_h", 0))
+        tr = (now - self.state.get("trainer_t0", now)) / 3600 * rate
         return nc + tr
 
+    def node_usd_per_h(self, i: int = 0) -> float:
+        """One node hour of pool ``i``: its ``usd_per_h``, else ``budget.nc_usd_per_h``."""
+        price = self.pools[i].usd_per_h
+        return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
+
     def nc_node_hours(self, now: float | None = None) -> float:
-        """Billed NC node hours of this run: each pool state member from its grant (a ticket
+        """Billed rollout node hours of this run, every pool (see :meth:`node_hours`)."""
+        return sum(self.node_hours(i, now) for i in range(len(self.pools)))
+
+    def node_hours(self, i: int = 0, now: float | None = None) -> float:
+        """Billed node hours of pool ``i``: each pool state member from its grant (a ticket
         never granted bills nothing) to its release (``charged_to`` of a gone member) or now,
         counted from this run's ``t0``. Without a readable pool state: the wall time since
-        ``t0`` times the pool target (every node assumed billed)."""
+        ``t0`` times the pool target (the scaled one; every node assumed billed)."""
         now = time.time() if now is None else now
         t0 = float(self.state.get("t0", now))
-        members = self.pool_members()
+        members = self._members(i)
         if members is None:  # no state yet / unreadable: the conservative estimate
             try:
-                nodes = max(1, int(json.loads(Path(self.pool_config).read_text()).get("target", 1)))
+                nodes = max(1, self.pool_target({}, i))
             except Exception:  # noqa: BLE001
                 nodes = 1
             return max(0.0, now - t0) / 3600 * nodes
@@ -333,28 +470,99 @@ class Run:
             hours += max(0.0, end - start) / 3600
         return hours
 
-    def pool_members(self) -> list[dict[str, Any]] | None:
-        """The members of the pool state file (None: no readable state)."""
+    def _nc_dir(self) -> Path:
+        return Path(self.env.get("YETO_NC_STATE_DIR", "~/.yeto/nc")).expanduser()  # tunnel.state_dir()
+
+    def pool_doc(self, i: int = 0) -> dict[str, Any] | None:
+        """The state file of pool ``i`` (None: no readable state)."""
         try:
-            pool_cfg = json.loads(Path(self.pool_config).read_text())
-            nc_dir = Path(self.env.get("YETO_NC_STATE_DIR", "~/.yeto/nc")).expanduser()  # tunnel.state_dir()
-            doc = json.loads((nc_dir / f"pool-{pool_cfg['shard_base']}.json").read_text())
-            return list(doc["members"])
+            pool_cfg = self.pools[i].load()
+            return json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json").read_text())
         except Exception:  # noqa: BLE001
             return None
 
-    def run_containers(self) -> int | None:
-        sb = self.cfg.get("sandbox") or {}
-        if not sb.get("docker_host"):
+    def _members(self, i: int) -> list[dict[str, Any]] | None:
+        doc = self.pool_doc(i)
+        try:
+            return list(doc["members"]) if doc is not None else None
+        except (KeyError, TypeError):
             return None
+
+    def pool_members(self) -> list[dict[str, Any]] | None:
+        """The members of every pool's state file (None: no pool state readable)."""
+        found = [self._members(i) for i in range(len(self.pools))]
+        if all(m is None for m in found):
+            return None
+        return [m for members in found if members for m in members]
+
+    def billed_nodes(self) -> int | None:
+        """Pool members billed now (granted, not gone), every pool; None without a pool state."""
+        members = self.pool_members()
+        if members is None:
+            return None
+        return sum(1 for m in members if m.get("state") != "gone" and m.get("granted") is not None)
+
+    def pool_target(self, doc: dict[str, Any] | None, i: int = 0) -> int:
+        """Pool ``i``'s wanted sampler count: its scale file (this run's), else the state, else the config."""
+        pool_cfg = self.pools[i].load()
+        try:
+            scale = json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.scale.json").read_text())
+            if isinstance(scale, dict) and scale.get("run") == pool_cfg.get("run") and "target" in scale:
+                return int(scale["target"])
+        except (OSError, ValueError):
+            pass
+        return int((doc or {}).get("target", pool_cfg.get("target", 1)))
+
+    def container_limit(self) -> int | None:
+        """The sandbox container alert line: ``max_run_containers``, raised to
+        ``max_containers_per_sampler`` x the pool's billed nodes (it follows a scale)."""
+        sb = self.cfg.get("sandbox") or {}
+        fixed = int(sb["max_run_containers"]) if sb.get("max_run_containers") else None
+        per = int(sb["max_containers_per_sampler"]) if sb.get("max_containers_per_sampler") else None
+        if per is None:
+            return fixed
+        nodes = self.billed_nodes()
+        if nodes is None:
+            nodes = sum(self.pool_target(None, i) for i in range(len(self.pools)))
+        scaled = per * max(1, nodes)
+        return max(fixed or 0, scaled)
+
+    def sandbox_hosts(self) -> list[str]:
+        """The docker endpoints of the sandbox hosts (``sandbox.docker_host``: one, a list,
+        or ``"envs"`` for every host of ``sandbox.envs``)."""
+        value = (self.cfg.get("sandbox") or {}).get("docker_host")
+        if not value:
+            return []
+        if value == "envs":
+            if not self.envs:
+                raise ValueError('sandbox.docker_host "envs" needs sandbox.envs')
+            from yeto.sandbox.envs import load_envs  # noqa: PLC0415
+
+            return [h.docker_host for h in load_envs(self.envs, run=self.run).hosts]
+        return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+    def _host_containers(self, host: str, *, every: bool = False) -> list[str] | None:
         try:  # an ssh hang to the sandbox host must not end the monitor (and its guards)
-            out = subprocess.run(["docker", "-H", sb["docker_host"], "ps", "-q", "--filter",
+            out = subprocess.run(["docker", "-H", host, "ps", "-aq" if every else "-q", "--filter",
                                   f"label=ai.yeto.run={self.run}"],
                                  env=self.env, capture_output=True, text=True, timeout=60, check=False)
         except (subprocess.TimeoutExpired, OSError) as error:
-            _log(f"sandbox: docker ps failed: {type(error).__name__}")
+            _log(f"sandbox: docker ps on {host} failed: {type(error).__name__}")
             return None
-        return len(out.stdout.split()) if out.returncode == 0 else None
+        return out.stdout.split() if out.returncode == 0 else None
+
+    def run_containers(self) -> int | None:
+        """This run's running trial containers on every sandbox host (asked at once);
+        None when no host answered."""
+        hosts = self.sandbox_hosts()
+        if not hosts:
+            return None
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        with ThreadPoolExecutor(max_workers=min(16, len(hosts))) as pool:
+            counts = list(pool.map(self._host_containers, hosts))
+        known = [len(c) for c in counts if c is not None]
+        return sum(known) if known else None
 
     def breach(self, *, trainer: bool = True) -> str | None:
         """Why the run must stop, else None. ``trainer=False`` (the first-group wait, before
@@ -362,6 +570,9 @@ class Run:
         the log of the previous, stopped launcher, whose failure is already handled."""
         b = self.cfg.get("budget") or {}
         why = None
+        controller = getattr(self, "controller", None)
+        if controller is not None and controller.check():  # the in-process pools stopped being driven
+            return controller.check()
         if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
             why = "wall clock"
         elif self.spend_usd() > float(b.get("usd", 1e9)):
@@ -383,7 +594,7 @@ class Run:
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
         if why is None and tr and _alive(tr["pid"]):
             why = self.silence(time.time())
-        limit = (self.cfg.get("sandbox") or {}).get("max_run_containers")
+        limit = self.container_limit() if why is None else None
         if why is None and limit:
             n = self.run_containers()
             # an alert, not a breach: the containers belong to the NC samplers, so stopping the
@@ -398,6 +609,36 @@ class Run:
             self.state["breaker"] = {"at": _now(), "why": why}
             self.save()
         return why
+
+    def shard_problem(self, pool: int = 0) -> str | None:
+        """The trainer reads only the shards of its ``--rl-buffer-shards`` (a shard outside
+        it is never trained on), so the pool may only order shards the trainer names: with
+        that flag set, the pool needs a ``shard_limit`` and every ``<shard_base>-<i>`` below
+        it in the trainer's list (each node and each lease-end replacement takes a new
+        shard; plan the list for the largest scale plus the replacements)."""
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        named = None
+        for i, a in enumerate(argv):
+            if a == "--rl-buffer-shards" and i + 1 < len(argv):
+                named = argv[i + 1]
+            elif a.startswith("--rl-buffer-shards="):
+                named = a.split("=", 1)[1]
+        if named is None:
+            return None
+        shards = {x for x in named.split(",") if x}
+        from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+
+        pool_cfg = self.pools[pool].load()
+        limit = nc_cli.pool_shard_limit(pool_cfg)
+        if limit is None:
+            return (f"the trainer reads --rl-buffer-shards ({len(shards)} shards) but the pool config has no "
+                    f"shard_limit: a scale up or a replacement past them writes groups nobody trains on")
+        missing = [f"{pool_cfg['shard_base']}-{i}" for i in range(limit)
+                   if f"{pool_cfg['shard_base']}-{i}" not in shards]
+        if missing:
+            return (f"pool shard_limit {limit} but the trainer's --rl-buffer-shards lacks {missing[:5]}"
+                    f"{' ...' if len(missing) > 5 else ''}: those nodes' groups would never be trained on")
+        return None
 
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
@@ -467,21 +708,41 @@ class Run:
             time.sleep(10)
         self._cmd(self.yeto("down", self.run), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
-        _log(f"trainer stopped ({why}); the NC pool and the sandboxes are KEPT and still bill. "
-             f"Release them with: yeto run down --config <run.json> "
-             f"(or python -m yeto.launch.nc pool-stop --config {self.pool_config})")
+        stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
+        _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
+             f"Release them with: yeto run down --config <run.json> (or {stops})")
 
     def on_breach(self, why: str) -> None:
         """Budget / wall clock with ``release_nc_on_breach``: the full ``down``; anything
         else (and by default): the trainer only."""
         if self.release_nc_on_breach and why.startswith(("wall clock", "budget")):
-            _log(f"{why}: budget.release_nc_on_breach is set: full down (NC pool included)")
+            _log(f"{why}: budget.release_nc_on_breach is set: full down ({self.pools_phrase()} included)")
             self.down()
             return
         self.trainer_down(why)
 
+    def rollout_stall_alert(self) -> str | None:
+        """The in-process controller's rollout stall view, logged once per silent stretch
+        (an alert: nothing is stopped; a sampler waiting for the trainer is not stalled)."""
+        controller = getattr(self, "controller", None)
+        stalled = getattr(controller, "stalled", None)
+        if stalled is None:
+            return None
+        try:
+            why = stalled()
+        except Exception:  # noqa: BLE001 - a view only
+            return None
+        warned = getattr(self, "_rollout_stall_warned", False)
+        if why and not warned:
+            _log(f"WARNING: rollout stalled: {why}; see yeto run status and the pool events")
+        elif not why and warned:
+            _log("rollout: sampler progress resumed")
+        self._rollout_stall_warned = bool(why)
+        return why
+
     def monitor(self, poll_s: float = 60.0) -> None:
         while True:
+            self.rollout_stall_alert()
             why = self.breach()
             if why:
                 self.on_breach(why)
@@ -497,17 +758,25 @@ class Run:
                 return
             time.sleep(poll_s)
 
+    def pools_phrase(self) -> str:
+        """The sampler pools as a banner names them: "the NC pool" for the one NC pool,
+        else every pool with its provider ("the sampler pools nc (nc), modal (modal)")."""
+        kinds = [ref.kind() for ref in self.pools]
+        if len(kinds) == 1:
+            return "the NC pool" if kinds[0] == "nc" else f"the {kinds[0]} sampler pool"
+        return "the sampler pools " + ", ".join(f"{r.name} ({k})" for r, k in zip(self.pools, kinds))
+
     def on_trainer_finished(self) -> bool:
         """The trainer finished its rounds (``SUCCEEDED``). The samplers have nothing left
-        to feed, but their nodes and the sandboxes bill until released: with
-        ``budget.release_nc_on_finish`` the full ``down`` runs now (returns True: the
-        monitor ends); otherwise a banner says so (once), and the wall-clock guard stays."""
+        to feed, but their nodes (every pool, every provider) and the sandboxes bill until
+        released: with ``budget.release_nc_on_finish`` the full ``down`` runs now (returns
+        True: the monitor ends); otherwise a banner says so (once), and the wall-clock guard stays."""
         if (self.cfg.get("budget") or {}).get("release_nc_on_finish"):
-            _log("trainer finished: budget.release_nc_on_finish is set: full down (NC pool included)")
+            _log("trainer finished: budget.release_nc_on_finish is set: full down (every sampler pool included)")
             self.down()
             return True
         if not self.state.get("finished_banner"):
-            _log("trainer finished (SUCCEEDED); the NC pool and the sandboxes still bill. "
+            _log(f"trainer finished (SUCCEEDED); {self.pools_phrase()} and the sandboxes still bill. "
                  "Release them with: yeto run down --config <run.json> "
                  "(or set budget.release_nc_on_finish: true)")
             self.state["finished_banner"] = _now()
@@ -526,18 +795,20 @@ class Run:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
             if billed is not None and not billed:
-                _log("NC pool: no node bills any more; monitor done")
+                _log(f"{self.pools_phrase()}: no machine bills any more; monitor done")
                 return
             spend = self.spend_usd()
             elapsed = time.time() - float(self.state.get("t0", time.time()))
             n = "?" if billed is None else len(billed)
-            _log(f"NC STILL BILLING after '{why}': {n} node(s), spend ${spend:.0f}; release with: "
+            _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.0f}; "
+                 f"release with: "
                  f"yeto run down --config <run.json> (forced at ${usd_cap:.0f} or {wall_cap / 3600:.1f} h)")
             if spend > usd_cap or elapsed > wall_cap:
                 cap = f"spend ${spend:.0f} > ${usd_cap:.0f}" if spend > usd_cap else \
                     f"wall {elapsed / 3600:.1f} h > {wall_cap / 3600:.1f} h"
                 _log(f"BREAKER: {cap} ({FORCE_FACTOR}x the budget): forcing pool-stop")
-                rc = self._cmd(self.nc("pool-stop", "--config", self.pool_config), log="down.log", timeout=1800)
+                rc = max(self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800)
+                         for path in self.pool_configs)
                 self.mark("nc_forced_stop", why=cap, rc=rc)
                 return
             time.sleep(poll_s)
@@ -555,21 +826,22 @@ class Run:
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
         ok &= self._cmd(self.yeto("down", self.run), log="down.log", timeout=900) == 0
-        ok &= self._cmd(self.nc("pool-stop", "--config", self.pool_config), log="down.log", timeout=1800) == 0
+        for path in self.pool_configs:
+            ok &= self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) == 0
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
                             log="down.log", timeout=600) == 0
-        sb = self.cfg.get("sandbox") or {}
-        if sb.get("docker_host"):  # Harbor trial containers of this run (ai.yeto.run label) and their networks
-            host = sb["docker_host"]
-            ids = subprocess.run(["docker", "-H", host, "ps", "-aq", "--filter", f"label=ai.yeto.run={self.run}"],
-                                 env=self.env, capture_output=True, text=True, timeout=120, check=False).stdout.split()
-            if ids:
-                self._cmd(["docker", "-H", host, "rm", "-f", *ids], log="down.log", timeout=600)
+        hosts = self.sandbox_hosts()
+        if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
+            for host in hosts:
+                ids = self._host_containers(host, every=True) or []
+                if ids:
+                    self._cmd(["docker", "-H", host, "rm", "-f", *ids], log="down.log", timeout=600)
             left = self.run_containers()
             _log(f"sandbox: {left} container(s) of this run left")
             ok &= left == 0
-        ok &= self._cmd(self.nc("pool-status", "--config", self.pool_config), log="down.log", timeout=300) == 0
+        for path in self.pool_configs:
+            ok &= self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) == 0
         self.mark("down", ok=bool(ok))
         _log("down: " + ("verified" if ok else "NOT verified, see down.log"))
         return bool(ok)
@@ -580,28 +852,108 @@ class Run:
                                "procs": {k: dict(v, alive=_alive(v["pid"])) for k, v in
                                          (self.state.get("procs") or {}).items()}}
         out["sandbox_run_containers"] = self.run_containers()
-        for name, argv in (("pool", self.nc("pool-status", "--config", self.pool_config)),
-                           ("dispense", [self.py, "-m", "yeto.rl.engine.store_dispense", "status", "--store",
-                                         self.cfg["store"], "--namespace", self._namespace(), "--brief"])):
-            p = subprocess.run(argv, env=self.env, capture_output=True, text=True, timeout=300, check=False)
-            out[name] = (p.stdout or p.stderr)[-3000:]
-            if name == "pool":
-                try:
-                    doc = json.JSONDecoder().raw_decode((p.stdout or "").lstrip())[0]
-                    out["samplers"] = {"target": doc.get("target"), "nodes": doc.get("nodes")}
-                except (ValueError, TypeError, AttributeError):
-                    pass
+        pools: list[dict[str, Any]] = []
+        for ref in self.pools:
+            p = subprocess.run(self.nc("pool-status", "--config", ref.config), env=self.env, capture_output=True,
+                               text=True, timeout=300, check=False)
+            row: dict[str, Any] = {"pool": ref.name, "provider": ref.kind(), "data_path": ref.data_path,
+                                   "status": (p.stdout or p.stderr)[-3000:]}
+            try:
+                doc = json.JSONDecoder().raw_decode((p.stdout or "").lstrip())[0]
+                st = doc.get("state") or {}
+                row["samplers"] = {"target": doc.get("target"), "nodes": doc.get("nodes"),
+                                   "members": [{k: m.get(k) for k in ("ticket", "account", "shard", "state")}
+                                               | {"retiring": m.get("retiring_since") is not None}
+                                               for m in st.get("members") or () if m.get("state") != "gone"]}
+            except (ValueError, TypeError, AttributeError):
+                pass
+            pools.append(row)
+        out["pool"] = pools[0]["status"]  # the first (or only) pool, as before
+        if "samplers" in pools[0]:
+            out["samplers"] = pools[0]["samplers"] if len(pools) == 1 else {
+                "target": sum(int((r.get("samplers") or {}).get("target") or 0) for r in pools),
+                "nodes": sum(int((r.get("samplers") or {}).get("nodes") or 0) for r in pools),
+                "members": [m for r in pools for m in (r.get("samplers") or {}).get("members") or ()]}
+        if len(pools) > 1:
+            out["pools"] = pools
+        p = subprocess.run([self.py, "-m", "yeto.rl.engine.store_dispense", "status", "--store", self.cfg["store"],
+                            "--namespace", self._namespace(), "--brief"],
+                           env=self.env, capture_output=True, text=True, timeout=300, check=False)
+        out["dispense"] = (p.stdout or p.stderr)[-3000:]
         return out
 
-    def scale(self, samplers: int, retire: list[str] | None = None) -> int:
-        """``yeto run scale --samplers N``: ``pool-scale`` on the run's pool."""
-        argv = self.nc("pool-scale", "--config", self.pool_config, "--target", str(int(samplers)))
+    def scale_refusal(self, wanted: int, i: int = 0) -> str | None:
+        """Why ``run scale`` refuses a scale up of pool ``i`` to ``wanted`` before the pool's checks."""
+        doc = self.pool_doc(i) or {}
+        members = [m for m in doc.get("members") or () if m.get("state") not in ("gone", "draining")
+                   and m.get("retiring_since") is None]
+        new = max(0, wanted - len(members))
+        if not new:
+            return None
+        breaker = self.state.get("breaker")
+        resumed = ((self.state.get("steps") or {}).get("trainer") or {}).get("at")
+        if breaker and not (resumed and str(resumed) > str(breaker.get("at"))):  # a later run up resumed it
+            return (f"the run's breaker fired ({breaker.get('why')} at {breaker.get('at')}): no node is added "
+                    f"to a stopped run")
+        b = self.cfg.get("budget") or {}
+        cap = float(b.get("usd", 1e9))
+        spent = self.spend_usd()
+        add = new * self.node_usd_per_h(i)
+        if spent + add > cap:
+            return (f"spend ${spent:.0f} + {new} new node hour(s) ${add:.0f} > budget.usd ${cap:.0f}")
+        return None
+
+    def scale(self, samplers: int | None = None, retire: list[str] | None = None, *, add: int = 0,
+              remove: list[str] | None = None, mode: str | None = None, force_static: bool = False,
+              dry_run: bool = False, source: str = "manual", pool: str | None = None,
+              provider: str | None = None) -> int:
+        """``yeto run scale`` / ``yeto rollout scale``: ``pool-scale`` on one pool of the run
+        (``pool`` / ``provider``, else the pool holding a ``remove`` ticket, else the only
+        pool), after the run's own budget and breaker check of a scale up."""
+        i = self.pool_index(pool=pool, provider=provider, ticket=(remove or [None])[0])
+        if i is None:
+            listing = ", ".join(f"{r.name} ({r.kind()})" for r in self.pools)
+            _log(f"scale: refused, nothing changed: name one pool with --pool (pools: {listing})")
+            return 2
+        if samplers is None and add:
+            wanted = self.pool_target(self.pool_doc(i), i) + int(add)
+        elif samplers is None:
+            wanted = self.pool_target(self.pool_doc(i), i) - len(remove or [])
+        else:
+            wanted = int(samplers)
+        why = self.scale_refusal(wanted, i)
+        if why is not None:
+            _log(f"scale: refused, nothing changed: {why}")
+            return 2
+        if len(self.pools) > 1:
+            _log(f"scale: pool {self.pools[i].name} ({self.pools[i].kind()})")
+        argv = self.nc("pool-scale", "--config", self.pools[i].config)
+        if samplers is not None:
+            argv += ["--target", str(int(samplers))]
+        elif add:
+            argv += ["--add", str(int(add))]
+        for ticket in remove or ():
+            argv += ["--remove", ticket]
         for ticket in retire or ():
             argv += ["--retire", ticket]
-        return subprocess.run(argv, env=self.env, check=False, timeout=300).returncode
+        if mode:
+            argv.append(f"--{mode}")
+        if force_static:
+            argv.append("--force-static")
+        if dry_run:
+            argv.append("--dry-run")
+        if source != "manual":
+            argv += ["--source", source]
+        rc = subprocess.run(argv, env=self.env, check=False, timeout=300).returncode
+        if rc == 0 and not dry_run:
+            self.state.setdefault("scales", []).append({"at": _now(), "samplers": samplers, "add": add or None,
+                                                        "remove": list(remove or []) or None, "mode": mode,
+                                                        "pool": self.pools[i].name})
+            self.save()
+        return rc
 
     def _namespace(self) -> str:
-        cfg = json.loads(Path(self.pool_config).read_text())
+        cfg = self.pools[0].load()
         return str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
 
 
@@ -625,10 +977,34 @@ def _alive(pid: Any) -> bool:
     return True
 
 
+POOL_KINDS = ("nc", "daytona", "sky", "modal")
+
+
+def add_pool_args(p: Any) -> None:
+    """``--pool`` / ``--provider``: which pool of a run config's ``samplers`` list."""
+    p.add_argument("--pool", help="the pool's name in the run config's samplers list (several pools)")
+    p.add_argument("--provider", choices=POOL_KINDS, help="pick the pool by provider kind")
+
+
+def pause_resume(run: Run, command: str, tickets: list[str], *, hold_tasks: bool = False,
+                 pool: str | None = None, provider: str | None = None) -> int:
+    """``pool-pause`` / ``pool-resume`` on the pool of the tickets (or the named one)."""
+    i = run.pool_index(pool=pool, provider=provider, ticket=tickets[0] if tickets else None)
+    if i is None:
+        _log(f"{command}: name the pool with --pool (pools: {', '.join(r.name for r in run.pools)})")
+        return 2
+    argv = run.nc(f"pool-{command}", "--config", run.pools[i].config)
+    for ticket in tickets:
+        argv += ["--ticket", ticket]
+    if hold_tasks:
+        argv.append("--hold-tasks")
+    return subprocess.run(argv, env=run.env, check=False, timeout=300).returncode
+
+
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("run", help="one run config, one command: up / status / down of an async GRPO run "
                        "(yeto rl is the single-process CyberGym PPO path)")
-    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,scale}")
+    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,scale,pause,resume}")
     rsub.required = True
     up = rsub.add_parser("up", help="preflight, sandbox, pool, first group, trainer, dashboard, monitor")
     up.add_argument("--config", required=True)
@@ -636,16 +1012,29 @@ def add_parser(sub: Any) -> None:
     up.add_argument("--skip-preflight", action="store_true", help="resume: preflight already passed")
     up.add_argument("--no-monitor", action="store_true", help="return after the dashboard starts")
     up.add_argument("--trainer-now", action="store_true",
-                    help="start the trainer without waiting for the first sample group (NC and the "
+                    help="start the trainer without waiting for the first sample group (the samplers and the "
                     "trainer GPUs come up in parallel)")
     for name in ("status", "down"):
         q = rsub.add_parser(name)
         q.add_argument("--config", required=True)
-    sc = rsub.add_parser("scale", help="add or remove NC sampler nodes while the run trains")
+    from yeto.launch.nc.scale_args import add_scale_args  # noqa: PLC0415 - no imports of its own
+
+    sc = rsub.add_parser("scale", help="add or remove sampler nodes while the run trains (= yeto rollout scale)")
     sc.add_argument("--config", required=True)
-    sc.add_argument("--samplers", type=int, required=True, help="sampler nodes wanted (0 or more)")
-    sc.add_argument("--retire", action="append", default=[], metavar="TICKET",
-                    help="on scale down, the node ticket to release (repeatable)")
+    add_scale_args(sc, target_flag="--samplers")
+    add_pool_args(sc)
+    for name, what in (("pause", "manual maintenance: the pool takes no automatic action on these nodes"),
+                       ("resume", "end a pause: the pool watches these nodes again")):
+        q = rsub.add_parser(name, help=what)
+        q.add_argument("--config", required=True)
+        q.add_argument("--ticket", action="append", required=True, help="the node ticket (repeatable)")
+        add_pool_args(q)
+        if name == "pause":
+            q.add_argument("--hold-tasks", action="store_true", help="its sampler claims no new task meanwhile")
+
+
+def _exit_on_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
+    raise SystemExit(128 + int(signum))
 
 
 def main(args: Any) -> int:
@@ -656,7 +1045,16 @@ def main(args: Any) -> int:
     if args.rl_command == "down":
         return 0 if run.down() else 1
     if args.rl_command == "scale":
-        return run.scale(args.samplers, args.retire)
+        return run.scale(args.target, args.retire, add=args.add, remove=args.remove, mode=args.mode,
+                         force_static=args.force_static, dry_run=args.dry_run, source=args.source,
+                         pool=getattr(args, "pool", None), provider=getattr(args, "provider", None))
+    if args.rl_command in ("pause", "resume"):
+        return pause_resume(run, args.rl_command, args.ticket, hold_tasks=getattr(args, "hold_tasks", False),
+                            pool=getattr(args, "pool", None), provider=getattr(args, "provider", None))
+    if run.in_process and args.no_monitor:
+        _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
+             "(or set controller: subprocess)")
+        return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
         return 2
@@ -666,9 +1064,13 @@ def main(args: Any) -> int:
     if not run.sandbox_prepare():
         _log("sandbox prepare failed: nothing ordered")
         return 2
+    if run.in_process:
+        # SIGTERM (systemd stop, kill) ends the process through SystemExit, so the exit
+        # path (the drain, or with drain_on_exit false the undriven banner) runs
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
     run.pool()
     if getattr(args, "trainer_now", False):
-        _log("--trainer-now: the trainer starts now, in parallel with the NC node setup")
+        _log("--trainer-now: the trainer starts now, in parallel with the sampler setup")
     elif not (run.state.get("steps") or {}).get("first_group"):
         why = run.wait_first_group()
         if why is not None:

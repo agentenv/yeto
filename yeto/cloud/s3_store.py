@@ -37,6 +37,7 @@ import os
 import pickle
 import subprocess
 import sys
+import random
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -44,7 +45,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror, check_key
+from yeto.rl.engine.object_store import DOWNLOAD_SUFFIX, ObjectStoreError, TreeMirror, check_key
 from yeto.rl.engine.resume import STORE_IMPL_ENV, BucketMountStore
 
 # The retryable failures of one streamed range read: the whole class of transfer
@@ -63,6 +64,11 @@ try:  # botocore ships with boto3
 except ImportError:  # pragma: no cover - a store without boto3 never reads
     pass
 RANGE_READ_ATTEMPTS = 5
+# botocore's retries of one request (throttling 429 / 503 SlowDown included):
+# "standard" mode backs off exponentially with jitter, so 16 samplers refused at
+# once by the store do not come back in lock step; AWS_RETRY_MODE /
+# AWS_MAX_ATTEMPTS in the environment win
+RETRIES = {"mode": "standard", "max_attempts": 8}
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
@@ -441,8 +447,9 @@ def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
         raise ObjectStoreError(missing_credentials_message())
     else:
         session = boto3.session.Session()
+    retries = {} if (environ.get("AWS_RETRY_MODE") or environ.get("AWS_MAX_ATTEMPTS")) else {"retries": dict(RETRIES)}
     return session.client("s3", endpoint_url=store_endpoint(environ), region_name=store_region(environ),
-                          config=Config(max_pool_connections=client_pool_size(environ)))
+                          config=Config(max_pool_connections=client_pool_size(environ), **retries))
 
 
 class S3ObjectStore:
@@ -737,7 +744,8 @@ class S3ObjectStore:
             Path(target).write_bytes(data)
             return True
         pin = {"IfMatch": etag} if etag else {}
-        with open(target, "wb") as fh:
+        partial = f"{target}{DOWNLOAD_SUFFIX}"  # renamed onto target once whole (a resumed download keeps it)
+        with open(partial, "wb") as fh:
             fh.truncate(size)
 
             def fetch(offset: int) -> None:
@@ -751,7 +759,7 @@ class S3ObjectStore:
                         # body read of one part would otherwise fail the whole download
                         if attempt + 1 == RANGE_READ_ATTEMPTS:
                             raise
-                        time.sleep(min(30.0, 2.0 ** attempt))
+                        time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))  # jitter: no lock step
                         continue
                     break
                 if len(body) != end - offset + 1:
@@ -760,6 +768,7 @@ class S3ObjectStore:
 
             with ThreadPoolExecutor(self.transfer.concurrency) as pool:
                 list(pool.map(fetch, range(0, size, part)))
+        os.replace(partial, target)
         return True
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:

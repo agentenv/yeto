@@ -199,12 +199,18 @@ def check(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 else:
                     problems.append(f"line {n}: unknown report kind {report!r}")
         elif kind == "dispense_reclaim":
+            # an expiry is a counted redo: positions past --dispense-max-redo are settled exhausted
+            exhausted = set(_positions(record.get("redo_exhausted") or []))
             for p in _positions(record.get("ranges") or []):
                 if st.holder.get(p) != who:
                     problems.append(f"line {n}: reclaim of position {p} that island {island} does not hold")
                     continue
                 del st.holder[p]
-                st.queued.add(p)
+                if p in exhausted:
+                    st.settled[p] = "exhausted"
+                    per_stream[p >> STREAM_SHIFT]["redo_exhausted"] += 1
+                else:
+                    st.queued.add(p)
                 per_island[island]["reclaimed"] += 1
                 per_stream[p >> STREAM_SHIFT]["reclaimed"] += 1
         elif kind == "dispense_checkpoint":

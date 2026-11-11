@@ -373,6 +373,11 @@ def add_cli_args(p) -> None:
                    "when above the margin, warn prints and continues, off skips it (recorded)")
     g.add_argument("--preflight-memory-margin", type=float, default=DEFAULT_MEMORY_MARGIN,
                    metavar="F", help="allowed peak as a fraction of GPU memory (default 0.9)")
+    g.add_argument("--preflight-model", choices=("check", "warn", "off"), default=None,
+                   help="check that the trainer's --model (Hub repository, Modal volume snapshot, "
+                   "object-store URI or local directory) exists, is readable and lists every weight "
+                   "shard its index names (one LIST, no download): check (default; env "
+                   "YETO_PREFLIGHT_MODEL) stops before any order, warn prints and continues, off skips it")
     g.add_argument("--rl-island-override", action="append", default=None,
                    metavar="ISLAND:KEY=VALUE",
                    help="NEGATIVE TEST ONLY: give one island another value of rl_lr_schedule, "
@@ -438,6 +443,9 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
     if threads:
         preflight["threads"] = thread_preflight(args, counter=counter, sleep=sleep, clock=clock, out=out)
     preflight["memory"] = memory_preflight(args, specs, out=out)
+    from .launch.model_check import preflight_trainer_model
+
+    preflight["model"] = preflight_trainer_model(args, out=out)  # before any order
     check_policy_age_spec(args)  # global flag (island copies: island_overrides.check_island_args)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))

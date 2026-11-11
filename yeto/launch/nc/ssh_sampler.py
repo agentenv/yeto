@@ -316,6 +316,30 @@ PULL_CONTAINER = "yeto-nc-pull"
 PULL_JOBS = 16  # aws-cli processes; one classic-client process tops out near 275 MB/s on R2
 
 
+def pull_body(src_key: str, dest: str, *, max_mb_s: int = 2500, include: str | None = None,
+              jobs: int = PULL_JOBS) -> str:
+    """Shell of a capped, resumable parallel ``aws s3 cp`` of ``s3://$R2_BUCKET/<src_key>``
+    into ``dest``: a path where the shell runs (``/models/...`` in the aws-cli container,
+    or the sandbox path of a no-docker sampler). Credentials come from the environment."""
+    if max_mb_s > 3000:
+        raise ValueError(f"pull cap {max_mb_s} MB/s exceeds the node limit 3000 MB/s")
+    jobs = max(1, int(jobs))
+    src = src_key.strip("/")
+    one = ('rel=${1#' + src + '/}; case "$rel" in $YETO_PULL_INCLUDE) ;; *) exit 0;; esac; '
+           f'f={shlex.quote(dest)}/$rel; '
+           '[ -f "$f" ] && [ "$(wc -c < "$f" | tr -d " ")" = "$2" ] && exit 0; mkdir -p "$(dirname "$f")"; '
+           'aws s3 cp --only-show-errors "s3://$R2_BUCKET/$1" "$f" --endpoint-url "$AWS_ENDPOINT_URL" '
+           '|| { echo "YETO_NC_PULL fail $1"; exit 255; }')
+    return (f"export YETO_PULL_INCLUDE={shlex.quote(include or '*')} && "
+            "aws configure set default.s3.max_concurrent_requests 16 && "
+            f"aws configure set default.s3.max_bandwidth {max(1, int(max_mb_s) // jobs)}MB/s && "
+            f'echo "YETO_NC_PULL start $(date -u +%FT%TZ) jobs={jobs}" && '
+            f'aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL" '
+            "| awk '{print $4, $3}' | sort -k2 -n -r "
+            f"| xargs -r -P {jobs} -L1 sh -c {shlex.quote(one)} pull "
+            '&& echo "YETO_NC_PULL done $(date -u +%FT%TZ)"')
+
+
 def pull_model_command(src_key: str, dest: str, *, max_mb_s: int = 2500, include: str | None = None,
                        jobs: int = PULL_JOBS) -> str:
     """Node shell: a detached aws-cli container copying ``s3://$R2_BUCKET/<src_key>`` to
@@ -327,26 +351,10 @@ def pull_model_command(src_key: str, dest: str, *, max_mb_s: int = 2500, include
     ``jobs`` ``aws s3 cp`` processes share the object list, each capped at
     ``max_mb_s / jobs``. An object already at ``dest`` with the listed size is skipped
     (resume); ``include`` is a shell glob on the key below ``src_key``."""
-    if max_mb_s > 3000:
-        raise ValueError(f"pull cap {max_mb_s} MB/s exceeds the node limit 3000 MB/s")
     if not dest.startswith(f"{NVME}/models/"):
         raise ValueError(f"dest must be under {NVME}/models")
-    jobs = max(1, int(jobs))
-    inner = dest.replace(f"{NVME}/models", "/models", 1)
-    src = src_key.strip("/")
-    one = ('rel=${1#' + src + '/}; case "$rel" in $YETO_PULL_INCLUDE) ;; *) exit 0;; esac; '
-           f'f={shlex.quote(inner)}/$rel; '
-           '[ -f "$f" ] && [ "$(wc -c < "$f" | tr -d " ")" = "$2" ] && exit 0; mkdir -p "$(dirname "$f")"; '
-           'aws s3 cp --only-show-errors "s3://$R2_BUCKET/$1" "$f" --endpoint-url "$AWS_ENDPOINT_URL" '
-           '|| { echo "YETO_NC_PULL fail $1"; exit 255; }')
-    body = (f"export YETO_PULL_INCLUDE={shlex.quote(include or '*')} && "
-            "aws configure set default.s3.max_concurrent_requests 16 && "
-            f"aws configure set default.s3.max_bandwidth {max(1, int(max_mb_s) // jobs)}MB/s && "
-            f'echo "YETO_NC_PULL start $(date -u +%FT%TZ) jobs={jobs}" && '
-            f'aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL" '
-            "| awk '{print $4, $3}' | sort -k2 -n -r "
-            f"| xargs -r -P {jobs} -L1 sh -c {shlex.quote(one)} pull "
-            '&& echo "YETO_NC_PULL done $(date -u +%FT%TZ)"')
+    body = pull_body(src_key, dest.replace(f"{NVME}/models", "/models", 1), max_mb_s=max_mb_s, include=include,
+                     jobs=jobs)
     return (f"sudo docker rm -f {PULL_CONTAINER} >/dev/null 2>&1; sudo docker run -d --name {PULL_CONTAINER} "
             f"--network host --env-file \"$HOME/.yeto-nc-r2.env\" -v {NVME}/models:/models "
             f"--entrypoint sh {PULL_IMAGE} -c {shlex.quote(body)}")

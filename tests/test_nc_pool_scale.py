@@ -26,7 +26,12 @@ def _env(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", no_subprocess)
 
 
+DISPENSE = {"backend": "store", "namespace": "run-a/dispense"}
+
+
 def _scaled_pool(tmp_path, *, target=2, accounts=(1, 2, 3, 4), **extra):
+    if "data_slots" not in extra:  # an elastic pool takes its tasks from the store dispenser
+        extra.setdefault("sampler", {"dispense": DISPENSE})
     cfg, path = _cfg(tmp_path, target=target, accounts=list(accounts), **extra)
     clock = Clock()
     cloud = Cloud(clock)
@@ -111,6 +116,26 @@ def test_scale_up_past_a_limit_is_refused_before_any_order(tmp_path, capsys, ext
     assert not pool_run.scale_path(cfg).exists()
     pool.tick()
     assert len(cloud.kinds("order")) == orders and pool.config.target == 2
+
+
+def test_a_syncer_path_pool_scales_up_on_the_syncers_dispenser(tmp_path):
+    """data_path syncer: the samplers claim from the syncer's task dispenser
+    (prompts.dispense, tcp), so a scale up repeats no task and is accepted; without
+    a dispenser it is refused as on the r2 path."""
+    from tests.test_nc_pool_run import SPEC  # noqa: PLC0415
+
+    syncer = {"data_path": "syncer", "syncer": {"address": "203.0.113.5:7000"}}
+    doc = {"run": "run-a", "target": 1, "members": []}
+    spec = dict(SPEC, prompts=dict(SPEC["prompts"], dispense={"seed": 1}))
+    cfg, _ = _cfg(tmp_path, spec_doc=spec, accounts=[1, 2, 3], **syncer)
+    assert cli.pool_has_dispenser(cfg)
+    assert pool_run.scale_refusal(cfg, doc, 2, []) is None
+    cfg, _ = _cfg(tmp_path, spec_doc=SPEC, accounts=[1, 2, 3], **syncer)
+    assert not cli.pool_has_dispenser(cfg)
+    assert "dispenser" in pool_run.scale_refusal(cfg, doc, 2, [])
+    store = dict(SPEC, prompts=dict(SPEC["prompts"], dispense={"seed": 1}))
+    cfg, _ = _cfg(tmp_path, spec_doc=store, accounts=[1, 2, 3])  # r2: a tcp section is no store ledger
+    assert not cli.pool_has_dispenser(cfg)
 
 
 def test_retire_of_an_unknown_ticket_or_without_a_lower_target_is_refused(tmp_path, capsys):

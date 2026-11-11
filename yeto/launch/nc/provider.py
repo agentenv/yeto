@@ -1,50 +1,40 @@
-"""Lease providers: where the pool's nodes come from.
+"""The National Compute island provider (:class:`NCProvider`) and the old names
+of the provider contract.
 
-The elastic pool (:mod:`.lease_pool`) is policy over :class:`~.lease_pool.PoolOps`.
-Its National Compute + SSH implementation (:class:`~.cli.NcSshOps`) splits in
-two: the *provider* (order a node, read its lease, release it, balance, run
-tickets) and the *node route* (SSH + docker on the node: setup, sampler,
-probe, fence). This module is the provider contract and its registry, so a
-deployment can bring its own supply (a fixed SSH fleet, a k8s node pool, another
-cloud) and keep the node route and the whole eviction policy.
+The contract, :class:`~yeto.launch.pool.provider.MultiProvider` and the provider
+registry live in :mod:`yeto.launch.pool.provider` (``LeaseProvider`` here is
+:class:`~yeto.launch.pool.provider.IslandProvider`). The pool's National Compute +
+SSH ops (:class:`~.cli.NcSshOps`) compose this provider with the SSH + docker node
+route and the shard fence.
 
-A provider must:
-
-* ``order(account) -> ticket``: place one order, recorded with the run tag;
-* ``status(account, ticket) -> LeaseStatus``: raise on a failed call (the pool
-  treats that as a control-plane blip, never as an end);
-* ``release(account, ticket)``: end only a ticket it created for this run, by id,
-  and return once it reads ended (raise otherwise; the pool retries);
-* ``node(account, ticket) -> NodeLease``: address + login of an active ticket;
-* ``balance() -> int | None``, ``account_free(account) -> bool``;
-* ``run_tickets() -> [(account, ticket)]``: open tickets of this run it knows of.
-
-Pool config ``provider``: ``{"kind": "nc", ...tool overrides}`` (default), or
+Pool config ``provider``: ``{"kind": "nc", ...tool overrides}`` (default),
+``{"kind": "daytona", ...}`` (:mod:`.daytona_provider`: Daytona GPU sandboxes), or
 ``{"factory": "package.module:function", ...}`` - ``function(cfg, run_id)``
 returns a provider.
+
+The resource-ledger kind ``nc_lease`` is registered to this provider:
+:func:`cleanup_release` and :func:`ledger_cost` are what ``yeto cleanup`` and
+``yeto cost`` run for it.
 """
 
 from __future__ import annotations
 
-import importlib
-from typing import Any, Protocol
+from typing import Any
 
-from .client import Ledger, NcClient, NodeLease, configure_tools
+from ..pool import provider as registry
+from ..pool.provider import IslandProvider, ProviderCaps
+from .client import Ledger, NcClient, NodeLease, configure_tools, hourly_cost_ucr
 from .elastic import LeaseStatus
 
-
-class LeaseProvider(Protocol):
-    def order(self, account: int) -> str: ...
-    def status(self, account: int, ticket: str) -> LeaseStatus: ...
-    def release(self, account: int, ticket: str) -> dict[str, Any]: ...
-    def node(self, account: int, ticket: str) -> NodeLease: ...
-    def balance(self) -> int | None: ...
-    def account_free(self, account: int) -> bool: ...
-    def run_tickets(self) -> list[tuple[int, str]]: ...
+# the pool's provider contract (``yeto.launch.pool.provider.IslandProvider``), by its old name
+LeaseProvider = IslandProvider
 
 
-class NcProvider:
+class NCProvider:
     """National Compute through its order tools (guarded :class:`NcClient`)."""
+
+    kind = "nc"
+    caps = ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)
 
     def __init__(self, accounts: list[int], run_id: str, *, ledger: Ledger, allowed: set[int],
                  model: str = "mi355x", pubkey=None, before_order=None, run=None):
@@ -83,18 +73,74 @@ class NcProvider:
         return [(int(r["account"]), str(r["ticket"])) for r in self.ledger.run_rows(self.run_id)
                 if int(r["account"]) in accounts]
 
+    def hourly_cost(self) -> int:
+        return hourly_cost_ucr()
+
+
+NcProvider = NCProvider  # the old name
+
+
+def is_national_compute(cfg: dict[str, Any]) -> bool:
+    """The pool orders National Compute nodes (its accounts are NC accounts, its
+    tools and ledger apply); False for ``provider.factory`` and ``kind: daytona``."""
+    return registry.is_national(cfg)
+
+
+def provider_kind(cfg: dict[str, Any]) -> str:
+    """The provider kind of a pool config: a registered kind (``nc`` by default), or
+    ``factory`` for a ``provider.factory`` (the sky factory reads as ``sky``)."""
+    kind = registry.kind_of(cfg)
+    if kind is not None:
+        return kind
+    factory = str((cfg.get("provider") or {}).get("factory", ""))
+    return "sky" if factory.startswith("yeto.launch.nc.sky_provider:") else "factory"
+
+
+def _with_tools(nc_factory):
+    def factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]):
+        configure_tools(section)
+        return nc_factory(cfg, run_id)
+
+    return factory
+
+
+def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) -> NCProvider:
+    """The registered ``nc`` factory: the CLI's provider (its ledger, lease key, relay)."""
+    from .cli import nc_provider  # noqa: PLC0415 - the CLI imports this module
+
+    return _with_tools(nc_provider)(cfg, run_id, section)
+
 
 def load_provider(cfg: dict[str, Any], run_id: str, *, nc_factory) -> LeaseProvider:
-    """The provider of a pool config. ``nc_factory(cfg, run_id)`` builds the National
-    Compute one (the CLI wires its ledger, key and relay)."""
-    section = dict(cfg.get("provider") or {"kind": "nc"})
-    if "factory" in section:
-        module, _, name = str(section.pop("factory")).partition(":")
-        if not name:
-            raise ValueError("provider.factory must be 'package.module:function'")
-        return getattr(importlib.import_module(module), name)(cfg, run_id)
-    kind = section.pop("kind", "nc")
-    if kind != "nc":
-        raise ValueError(f"provider kind {kind!r}: only 'nc' is built in; use provider.factory for others")
-    configure_tools(section)
-    return nc_factory(cfg, run_id)
+    """The provider of a pool config (:func:`yeto.launch.pool.provider.load`).
+    ``nc_factory(cfg, run_id)`` builds the National Compute one."""
+    return registry.load(cfg, run_id, factories={"nc": _with_tools(nc_factory)})
+
+
+# -- the resource ledger (``yeto cleanup`` / ``yeto cost`` dispatch on kind nc_lease) ---
+
+def cleanup_release(r: Any, ops: Any, dry_run: bool) -> tuple[bool, str, Any]:
+    """Release one ``nc_lease`` ledger entry through ``ops.nc_release`` (the NC lease
+    manager's guarded down: it refuses tickets it did not create). Returns ``(ok,
+    action, result)``; ``result`` None when nothing was released."""
+    account = r.attrs.get("account")
+    if account is None:
+        return False, "NC lease without account in the ledger: not released", None
+    if dry_run:
+        return True, f"would release NC ticket {r.id} (account {account})", None
+    res = ops.nc_release(int(account), r.id)
+    return True, f"released NC ticket {r.id}: {res}", res
+
+
+def ledger_cost(r: Any, now: float, rates: Any) -> Any:
+    """The cost of one ``nc_lease`` ledger entry: granted to released (or now) at the
+    ticket's rate; notes the minutes past ``lease_until``."""
+    from yeto.cost import billing  # noqa: PLC0415
+
+    start = billing._ts(r.attrs.get("granted_at")) or r.created_at  # noqa: SLF001
+    note = ""
+    until = billing._ts(r.attrs.get("lease_until"))  # noqa: SLF001
+    end = r.released_at if r.released_at is not None else now
+    if until is not None and end > until:
+        note = f"{(end - until) / 60:.0f} min past lease_until"
+    return billing._span_cost(r, start, now, billing._nc_rate(r, rates), note)  # noqa: SLF001

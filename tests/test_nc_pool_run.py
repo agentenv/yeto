@@ -100,14 +100,15 @@ def test_dry_run_reports_invalid_configs(tmp_path, capsys):
 
 def test_dry_run_refuses_a_model_pull_whose_model_is_not_in_the_bucket(tmp_path, capsys, monkeypatch):
     seen = []
-    monkeypatch.setattr(pool_run, "model_present", lambda uri, env: seen.append(uri) or False)
+    monkeypatch.setattr(pool_run, "model_problems",
+                        lambda uri, env: seen.append(uri) or [f"no {uri}/config.json"])
     _doc, path = _cfg(tmp_path, model_pull={"src_key": "/models/Qwen3-0.6B/"},
                       elastic={"max_run_spend_ucr": 1})
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
     out = capsys.readouterr().out
     assert seen == ["s3://<bucket>/models/Qwen3-0.6B"]
     assert "no s3://<bucket>/models/Qwen3-0.6B/config.json: upload the model" in out
-    monkeypatch.setattr(pool_run, "model_present", lambda uri, env: True)
+    monkeypatch.setattr(pool_run, "model_problems", lambda uri, env: [])
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 0
 
 
@@ -122,11 +123,11 @@ def test_dry_run_reports_an_unreadable_model_prefix_and_a_dest_the_sampler_does_
     def denied(uri, env):
         raise PermissionError("AccessDenied")
 
-    monkeypatch.setattr(pool_run, "model_present", denied)
+    monkeypatch.setattr(pool_run, "model_problems", denied)
     _doc, path = _cfg(tmp_path, model_pull={"src_key": "models/m", "dest": "/mnt/nvme/models/m"})
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
     out = capsys.readouterr().out
-    assert "cannot read s3://<bucket>/models/m/config.json" in out and "AccessDenied" in out
+    assert "cannot list s3://<bucket>/models/m" in out and "AccessDenied" in out
     assert "model_pull.dest '/mnt/nvme/models/m'" in out and "leave dest unset" in out
 
 
@@ -314,6 +315,7 @@ def test_a_halted_node_still_goes_at_its_lease_end(tmp_path):
     (lambda d: d["rollout_fields"].update(no_such_field=1), "rollout_fields"),
     (lambda d: d.update(reward="yeto.rl.no_such_reward:score"), "no_such_reward"),
     (lambda d: d.update(reward_kind="other"), "reward_kind"),
+    (lambda d: d.pop("reward_kind"), "async Miles score"),
 ])
 def test_the_full_local_build_refuses_what_the_node_would_refuse(tmp_path, capsys, break_it, match):
     doc = json.loads(EXAMPLE_SPEC.read_text())
@@ -326,6 +328,21 @@ def test_the_full_local_build_refuses_what_the_node_would_refuse(tmp_path, capsy
         pool_run.check_sampler_spec(cfg)
     assert cli.main(["pool", "--config", path, "--dry-run"]) == 1
     assert "refused by the sampler" in capsys.readouterr().out
+
+
+def test_the_local_build_applies_the_data_path_defaults(tmp_path):
+    """A syncer-path spec without num_rollouts passes: the sampler fills in the
+    syncer path's defaults (no round limit) before it checks the island config."""
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    doc.pop("num_rollouts", None)
+    doc.update(data_path="syncer", syncer="203.0.113.5:7000", channel=0, work_dir=str(tmp_path / "w"))
+    cfg, _path = _cfg(tmp_path, spec_doc=doc)
+    pool_run.check_sampler_spec(cfg)
+    doc["data_path"] = "r2"
+    cfg, _path = _cfg(tmp_path, spec_doc=doc)
+    with pytest.raises(ValueError, match="num_rollouts"):
+        pool_run.check_sampler_spec(cfg)
 
 
 # -- H2: one pool instance (flock), shared with pool-stop and yeto cleanup --include-nc --------

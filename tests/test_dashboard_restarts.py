@@ -216,3 +216,19 @@ def test_cleanly_stopped_trainer_ends_samplers(tmp_path):
     _put(tmp_path, sid, "a963a865", 0, _sampler("a", 0, T0 + 50, reward=0.5))
     r = _pump(tmp_path)
     assert _card(r, sid, T0 + 200)["status"] == "done"
+
+
+def test_an_nc_node_is_priced_at_its_providers_hourly_cost(tmp_path):
+    """member_ready carries the provider's machine-hour rate (usd_per_h): it prices the
+    node over its lease instead of the price table."""
+    sid = f"{RUN}-0"
+    _put(tmp_path, sid, "5ce0ed95", 0, [
+        {"event": "rl_sampler_start", "sampler_id": sid, "provenance": {"card_model": "MI355X", "topology": "tp1"},
+         "time_unix": T0 + 1200}] + _sampler("x", 0, T0 + 1800, groups=5, reward=0.5))
+    _put(tmp_path, "pool", "controller", 0, [
+        {"event": "nc_elastic_ordered", "ticket": "t1", "account": 4, "shard": sid, "t": T0},
+        {"event": "nc_elastic_member_ready", "ticket": "t1", "shard": sid, "usd_per_h": 30.0, "t": T0 + 1100},
+        {"event": "nc_elastic_released", "ticket": "t1", "account": 4, "why": "released", "t": T0 + 3600}])
+    row = {x["id"]: x for x in _pump(tmp_path).overview(now=T0 + 7200)["cost"]["islands"]}[sid]
+    assert row["rate_usd_h"] == 30.0 and abs(row["cost_usd"] - 30.0) < 1e-6
+    assert row["rate_source"] == "provider hourly_cost"

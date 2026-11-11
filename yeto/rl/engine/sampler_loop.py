@@ -287,7 +287,7 @@ class SamplerLoop:
     def run(self, start: int = 0) -> int:
         """Generate rounds ``start .. num_rollouts - 1`` (no end for None: until
         ``should_stop``); returns the rounds generated."""
-        done = 0
+        done = self.rounds_done = 0
         rollout_ids = (itertools.count(int(start)) if self.num_rollouts is None
                        else range(int(start), self.num_rollouts))
         for rollout_id in rollout_ids:
@@ -314,6 +314,7 @@ class SamplerLoop:
                       groups=len(self.buffer) - before, buffer_end=len(self.buffer),
                       generate_s=round(generate_s, 3))
             done += 1
+            self.rounds_done = done
             self._throttle(started, last=rollout_id == (self.num_rollouts or 0) - 1)
         flush = getattr(self.generate, "flush", None)
         if callable(flush):  # groups of a streaming round still in flight

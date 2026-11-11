@@ -1062,8 +1062,9 @@ class Reducer:
         left = self._trainer_left(isl)
         pool = self.async_.pool_exit(isl["id"], after=isl["last_event_ts"]) if role == "sampler" else None
         if left is None and pool is not None and pool["status"] != "done":
-            left = {"ts": pool["ts"], "reason": pool["event"].replace("nc_elastic_", "") + (
-                f": {pool['why']}" if pool.get("why") else ""), "source": "nc pool", "lost": pool["status"] == "lost"}
+            left = {"ts": pool.get("cause_ts") or pool["ts"], "reason": pool["reason"], "event": pool["event"],
+                    "ticket": pool.get("ticket"), "replaced_by": pool.get("replaced_by"),
+                    "source": "nc pool", "lost": pool["status"] == "lost"}
         sl = isl["source_lost"]
         if left is None and sl and not sl.get("recovered") and sl.get("ts") is not None \
                 and (isl["last_event_ts"] or 0) <= sl["ts"] + STOP_SLACK_S and not isl["finalized"]:

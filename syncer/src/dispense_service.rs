@@ -27,7 +27,7 @@ use crate::dispense::{
 };
 use crate::protocol::{
     read_frame_limited, Reader, MAGIC, MAX_TASK_REPORT, MSG_ERROR, MSG_TASK_ACK, MSG_TASK_CLAIM, MSG_TASK_GRANT,
-    MSG_TASK_HEARTBEAT, MSG_TASK_REPORT, MSG_TASK_WELCOME, TASK_HELLO_MAC_DOMAIN, TASK_PROTOCOL_VERSION,
+    MSG_TASK_HEARTBEAT, MSG_TASK_HELD, MSG_TASK_HOLDS, MSG_TASK_REPORT, MSG_TASK_WELCOME, MAX_TASK_HOLDS, TASK_HELLO_MAC_DOMAIN, TASK_PROTOCOL_VERSION,
     TASK_PROTOCOL_VERSION_STREAMS,
 };
 
@@ -257,6 +257,33 @@ pub fn encode_ack(t: &ReportTotals) -> Vec<u8> {
 }
 
 /// The record path next to the checkpoint.
+/// TASK_HOLDS body: `u32 n | n x u64 position`.
+pub fn encode_holds(positions: &[u64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + 8 * positions.len());
+    out.extend_from_slice(&(positions.len() as u32).to_le_bytes());
+    for p in positions {
+        out.extend_from_slice(&p.to_le_bytes());
+    }
+    out
+}
+
+pub fn decode_holds(payload: &[u8]) -> Result<Vec<u64>> {
+    let mut r = Reader(payload);
+    let n = r.u32()?;
+    ensure!(n <= MAX_TASK_HOLDS, "TASK_HOLDS of {n} positions (at most {MAX_TASK_HOLDS})");
+    let out = (0..n).map(|_| r.u64()).collect::<Result<Vec<_>>>()?;
+    ensure!(r.remaining() == 0, "trailing bytes in TASK_HOLDS");
+    Ok(out)
+}
+
+/// TASK_HELD body: `u32 n | n x u8`.
+pub fn encode_held(held: &[bool]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + held.len());
+    out.extend_from_slice(&(held.len() as u32).to_le_bytes());
+    out.extend(held.iter().map(|&h| u8::from(h)));
+    out
+}
+
 pub fn record_path(checkpoint: &Path) -> PathBuf {
     let mut name = checkpoint.as_os_str().to_owned();
     name.push(RECORD_SUFFIX);
@@ -403,6 +430,7 @@ pub async fn serve(mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf, first: &[u8], 
             MSG_TASK_CLAIM => Ok(12),
             MSG_TASK_REPORT => Ok(MAX_TASK_REPORT),
             MSG_TASK_HEARTBEAT => Ok(0),
+            MSG_TASK_HOLDS => Ok(4 + 8 * u64::from(MAX_TASK_HOLDS)),
             other => bail!("dispense connection: unexpected message type {other}"),
         })
         .await
@@ -429,6 +457,12 @@ pub async fn serve(mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf, first: &[u8], 
                 Ok((seq, entries)) => service
                     .with(|d, now| d.report(holder, seq, &entries, now))
                     .map(|t| (MSG_TASK_ACK, encode_ack(&t))),
+                Err(error) => Err(DispenseError::Refused(format!("{error:#}"))),
+            },
+            MSG_TASK_HOLDS => match decode_holds(&frame.payload) {
+                Ok(positions) => service
+                    .with(|d, now| d.holds_request(holder, &positions, now))
+                    .map(|held| (MSG_TASK_HELD, encode_held(&held))),
                 Err(error) => Err(DispenseError::Refused(format!("{error:#}"))),
             },
             _ => service
@@ -504,6 +538,17 @@ mod tests {
             hex(&encode_ack(&ReportTotals { settled: 2, requeued: 1, exhausted: 0 })),
             "020000000000000001000000000000000000000000000000"
         );
+    }
+
+    /// TASK_HOLDS / TASK_HELD; shared with `tests/test_still_holds_syncer.py`.
+    #[test]
+    fn holds_golden_vectors() {
+        let body = encode_holds(&[3, 1 << 40]);
+        assert_eq!(hex(&body), "0200000003000000000000000000000000010000");
+        assert_eq!(decode_holds(&body).unwrap(), vec![3, 1 << 40]);
+        assert!(decode_holds(&body[..body.len() - 1]).is_err());
+        assert!(decode_holds(&[0xff, 0xff, 0xff, 0xff]).is_err(), "a huge count is refused before reading");
+        assert_eq!(hex(&encode_held(&[true, false])), "020000000100");
     }
 
     /// TASK_HELLO version 2 (streams); shared with `tests/test_dispense_data_mix_samplers.py`.

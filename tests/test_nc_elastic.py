@@ -981,7 +981,7 @@ def test_provider_factory_plugs_in_another_supply(tmp_path):
     assert isinstance(ops.provider, OwnProvider) and ops.provider.run == "run-f"
     assert ops.order(1) == "fleet-1" and ops.poll(SimpleNamespace(account=1, ticket="fleet-1")).state == "active"
     assert cli.load_lease("fleet-1").ip == "192.0.2.20"
-    with pytest.raises(ValueError, match="only 'nc'"):
+    with pytest.raises(ValueError, match="'nc', 'daytona', 'sky' and 'modal' are built in"):
         cli.pool_ops(dict(cfg, provider={"kind": "k8s"}))
 
 
@@ -1106,3 +1106,15 @@ def test_three_probes_without_engine_metrics_send_one_event():
     cloud.probe = lambda mem: el.Probe(**{**real(mem).__dict__, "gen_tokens": 5.0, "running": 0, "queued": 0})
     pool.tick()
     assert m.metrics_misses == 0 and "engine_metrics_recovered" in _names(pool)
+
+
+def test_member_ready_carries_the_providers_machine_hour_in_usd():
+    """The dashboard prices a node from member_ready's usd_per_h: the provider's
+    hourly_cost converted from its currency (NC: ucr)."""
+    from yeto.launch.pool.island_pool import IslandPool, Member
+
+    pool = IslandPool.__new__(IslandPool)
+    pool.ops = type("Ops", (), {"hourly_cost": lambda self, m: 24_000_000, "currency": lambda self, m: "ucr"})()
+    assert pool._usd_per_h(Member(ticket="t", account=1, shard="s")) == 24.0
+    pool.ops = object()
+    assert pool._usd_per_h(Member(ticket="t", account=1, shard="s")) is None

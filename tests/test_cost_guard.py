@@ -448,6 +448,38 @@ def test_cleanup_releases_exactly_the_ledger_resources_of_this_run(runs_dir):
     assert cleanup_mod.cleanup_run("run-a", ops2, include_nc=True, log=lambda m: None) and ops2.calls == []
 
 
+def test_cleanup_keeps_every_pool_providers_machines_unless_include_pools(runs_dir):
+    """Modal sampler calls and Sky sampler clusters share their kind with the trainer's;
+    the pool's rows (marked, or with a pool ticket / slot) are kept like NC leases and
+    Daytona sandboxes until --include-pools (--include-nc: the same, deprecated)."""
+    led = ResourceLedger.for_run("rp")
+    led.created("modal_call", "fc-trainer", "trainer", app_id="ap-t")
+    led.created("modal_call", "fc-pool", "rollout_sampler", ticket="yeto-smp-rp-1", run="rp", pool=True)
+    led.created("modal_call", "fc-old", "rollout_sampler", ticket="yeto-smp-rp-2", run="rp")  # before the mark
+    led.created("sky_cluster", "rp-syncer", "rp-syncer", role="syncer")
+    led.created("sky_cluster", "yeto-smp-rp-3", "yeto-smp-rp-3", slot=1, run="rp")
+    led.created("daytona_sandbox", "sb-1", "yeto-smp-rp-4")
+    led.created("nc_lease", "t-1", "nc", account=4)
+    ops = FakeOps()
+    logs = []
+    assert cleanup_mod.cleanup_run("rp", ops, log=logs.append)  # nothing it may release is left
+    assert ops.calls == [("cancel", "fc-trainer"), ("sky_down", "rp-syncer")]
+    assert sum("a sampler pool machine" in m and "--include-pools" in m for m in logs) == 5
+    assert sorted(r.key for r in led.open_resources()) == [
+        "daytona_sandbox:sb-1", "modal_call:fc-old", "modal_call:fc-pool", "nc_lease:t-1",
+        "sky_cluster:yeto-smp-rp-3"]
+    from yeto.cost import report  # noqa: PLC0415
+    import argparse  # noqa: PLC0415
+
+    sub = argparse.ArgumentParser().add_subparsers(dest="cmd")
+    report.add_parsers(sub)
+    parser = sub.choices["cleanup"]
+    assert parser.parse_args(["--run", "rp", "--include-nc"]).include_pools
+    assert parser.parse_args(["--run", "rp", "--include-pools"]).include_pools
+    assert not parser.parse_args(["--run", "rp"]).include_pools
+    assert "deprecated" in parser.format_help()
+
+
 def test_cleanup_failure_is_recorded_retried_and_does_not_block_the_rest(runs_dir):
     led = ResourceLedger.for_run("r")
     led.created("modal_call", "fc-1", "i")

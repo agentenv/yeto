@@ -426,8 +426,16 @@ class RolePairing:
             }
             now = time.monotonic()
             self._note_final_rounds(by_role)
+            # A retained pair replays its own operands and needs only the
+            # newer PULL of its round, not a fragment of the newest cut. With
+            # deferred/lazy capture the newest cut materializes only fragments
+            # planned for a new pair, so a retained round's re-sent PULL (after
+            # a redial, e.g. to a restarted syncer) would never be observed.
+            replay_by_role = self._replay_permits(by_role) if self.inflight else by_role
             for key, pair in tuple(self.inflight.items()):
-                observed = {role: by_role[role].pop(key, None) for role in self.streams}
+                observed = {role: replay_by_role[role].get(key) for role in self.streams}
+                for role in self.streams:
+                    by_role[role].pop(key, None)
                 if pair.job is not None:
                     # A worker is pushing it: the PULL stays pending until the
                     # push is harvested, and is no replay.
@@ -459,6 +467,20 @@ class RolePairing:
             self.fail_stop(error)
             raise
         return {role: RoleProgress(submissions=tuple(values)) for role, values in produced.items()}
+
+    def _replay_permits(
+        self, by_role: Mapping[str, Mapping[LogicalKey, Any]]
+    ) -> dict[str, Mapping[LogicalKey, Any]]:
+        """Per role, the candidates whose PULL a retained pair may replay
+        under: also fragments of the newest cut that are deferred or not
+        materialized (only their permit is used)."""
+        out: dict[str, Mapping[LogicalKey, Any]] = {}
+        for role, stream in self.streams.items():
+            if callable(getattr(stream, "materialize_submission", None)):
+                out[role] = _candidate_map(stream.ready_submission_candidates(include_deferred=True), role=role)
+            else:
+                out[role] = by_role[role]
+        return out
 
     async def prepare_submissions(self) -> None:
         """Materialize the deferred fragments the next :meth:`submit_ready`

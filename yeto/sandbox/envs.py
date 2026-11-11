@@ -16,8 +16,15 @@
                     "image_repo": "yeto-sbx-set",    # tag of images built from environment/
                     "agent_base": {"image": "yeto-sbx-pi-base:1", "context": "./pi-base"},
                     "bake_runtime": "pi",            # bake an agent runtime into every task image
-                    "sidecars_file": "./sidecars.json"}]
+                    "sidecars_file": "./sidecars.json"}],
+      "assign": {"<sampler id>": "h1"}   # optional pins; see below
     }
+
+Several hosts: with ``agentic.setup.sandbox.docker_host`` set to ``"envs"`` each
+sampler drives one host of ``hosts``, picked by its shard index (:func:`assign_host`:
+weighted round robin, ``max_sandboxes`` the weight, a replacement keeps its shard's
+host). ``max_sandboxes`` caps the trial containers of every sampler on that host
+together (the dispenser gate counts them all).
 
 Tasks are Harbor task directories (``task.toml``, ``environment/Dockerfile``
 and/or ``[environment] docker_image``, ``tests/``, ``solution/``). Sidecars
@@ -64,6 +71,8 @@ class HostConfig:
     max_sandboxes: int | None = None
     port_range: tuple[int, int] = DEFAULT_PORT_RANGE
     sync_to: str | None = None
+    tunnel_listen_host: str | None = None  # the sampler's reverse-tunnel address on this host
+    trial_memory_gib: float | None = None  # --memory of one trial container (the task p95), for the room check
 
 
 @dataclass(frozen=True)
@@ -156,7 +165,7 @@ def parse_envs(section: Mapping[str, Any], *, base_dir: str | os.PathLike[str] |
         raise EnvsError("agentic.envs must be an object")
     base = Path(base_dir) if base_dir is not None else None
     known = {"run", "ready_key", "require_validation", "affinity", "pull_parallel", "build_parallel",
-             "validate_parallel", "hosts", "tasksets"}
+             "validate_parallel", "hosts", "tasksets", "assign"}
     unknown = sorted(set(section) - known)
     if unknown:
         raise EnvsError(f"agentic.envs: unknown keys {unknown}")
@@ -167,7 +176,10 @@ def parse_envs(section: Mapping[str, Any], *, base_dir: str | os.PathLike[str] |
             hosts.append(HostConfig(name=str(h["name"]), docker_host=str(h["docker_host"]),
                                     ssh=h.get("ssh"), max_sandboxes=None if h.get("max_sandboxes") is None
                                     else int(h["max_sandboxes"]),
-                                    port_range=(int(pr[0]), int(pr[1])), sync_to=h.get("sync_to")))
+                                    port_range=(int(pr[0]), int(pr[1])), sync_to=h.get("sync_to"),
+                                    tunnel_listen_host=h.get("tunnel_listen_host"),
+                                    trial_memory_gib=None if h.get("trial_memory_gib") is None
+                                    else float(h["trial_memory_gib"])))
         except (KeyError, TypeError, ValueError, IndexError) as exc:
             raise EnvsError(f"agentic.envs.hosts: bad entry {h!r}: {exc}") from exc
     if len({h.name for h in hosts}) != len(hosts):
@@ -187,6 +199,9 @@ def parse_envs(section: Mapping[str, Any], *, base_dir: str | os.PathLike[str] |
         except (KeyError, TypeError) as exc:
             raise EnvsError(f"agentic.envs.tasksets: bad entry {t!r}: {exc}") from exc
     affinity = str(section.get("affinity", "strict"))
+    assign = section.get("assign") or {}
+    if not isinstance(assign, Mapping) or any(str(v) not in {h.name for h in hosts} for v in assign.values()):
+        raise EnvsError("agentic.envs.assign must map sampler ids to host names of agentic.envs.hosts")
     if affinity not in AFFINITIES:
         raise EnvsError(f"agentic.envs.affinity must be one of {AFFINITIES}")
     label = str(run or section.get("run") or "").strip()
@@ -297,3 +312,105 @@ def all_tasks(cfg: EnvsConfig, ids: Sequence[str] | None = None) -> list[TaskEnv
         want = set(ids)
         tasks = [t for t in tasks if t.task_id in want]
     return tasks
+
+
+# -- sampler -> sandbox host assignment ------------------------------------------------
+
+ENVS_DOCKER_HOST = "envs"  # agentic.setup.sandbox.docker_host value: pick from agentic.envs.hosts
+
+
+def shard_index(sampler_id: Any) -> int:
+    """The trailing ``-<k>`` of a sampler id (``<run>-<k>``), the pool's shard number."""
+    tail = str(sampler_id or "").rpartition("-")[2]
+    if not tail.isdigit():
+        raise EnvsError(f"sampler_id {sampler_id!r} does not end in -<shard index>: a sandbox host "
+                        "cannot be assigned from agentic.envs.hosts")
+    return int(tail)
+
+
+def host_sequence(hosts: Sequence[HostConfig], n: int) -> list[HostConfig]:
+    """The host of shards ``0 .. n-1``: smooth weighted round robin over ``hosts`` with
+    ``max_sandboxes`` as the weight (equal weights when any host has none). Shard ``k``
+    always gets the same host for the same host list, so a replacement sampler of a
+    shard keeps its predecessor's host (its staged tasks and sidecars), and
+    ``yeto run scale --add`` continues the sequence. Over any window of shards the
+    share of each host follows its capacity."""
+    if not hosts:
+        raise EnvsError("agentic.envs.hosts is empty: no sandbox host to assign")
+    weights = [h.max_sandboxes for h in hosts]
+    if any(w is None or w <= 0 for w in weights):
+        weights = [1] * len(hosts)
+    total = sum(weights)
+    current = [0] * len(hosts)
+    out: list[HostConfig] = []
+    for _ in range(max(0, int(n))):
+        for i, w in enumerate(weights):
+            current[i] += w
+        best = max(range(len(hosts)), key=lambda i: (current[i], -i))
+        current[best] -= total
+        out.append(hosts[best])
+    return out
+
+
+def assign_host(cfg: EnvsConfig, sampler_id: Any) -> HostConfig:
+    """The sandbox host of sampler ``sampler_id`` (:func:`host_sequence`); a pin in
+    ``agentic.envs.assign`` (``{"<sampler id>": "<host name>"}``) wins."""
+    pins = cfg.raw.get("assign") or {}
+    if str(sampler_id) in pins:
+        return cfg.host(str(pins[str(sampler_id)]))
+    k = shard_index(sampler_id)
+    return host_sequence(cfg.hosts, k + 1)[k]
+
+
+def assignment_report(cfg: EnvsConfig, sampler_ids: Sequence[str], *, per_sampler: int | None) -> dict[str, Any]:
+    """Which samplers drive which host and whether each host has room for them:
+    ``per_sampler`` trial containers at once per sampler (its ``HARBOR_MAX_SANDBOXES``)
+    against the host's ``max_sandboxes``. ``warnings``: hosts over capacity, without
+    ``max_sandboxes`` (the gate then cannot hold claims back) or without a sampler."""
+    rows: dict[str, dict[str, Any]] = {h.name: {"samplers": [], "max_sandboxes": h.max_sandboxes,
+                                                 "docker_host": h.docker_host} for h in cfg.hosts}
+    for sid in sampler_ids:
+        rows[assign_host(cfg, sid).name]["samplers"].append(str(sid))
+    warnings = []
+    for name, row in rows.items():
+        need = None if per_sampler is None else len(row["samplers"]) * int(per_sampler)
+        row["containers_needed"] = need
+        cap = row["max_sandboxes"]
+        if cap is None:
+            warnings.append(f"{name}: no max_sandboxes; the dispenser cannot hold claims back when the host is full")
+        elif need is not None and need > cap:
+            warnings.append(f"{name}: {len(row['samplers'])} samplers x {per_sampler} trials = {need} containers "
+                            f"> max_sandboxes {cap}; add a host or lower HARBOR_MAX_SANDBOXES "
+                            "(the samplers would wait for room: rl_dispense_wait_capacity)")
+        if not row["samplers"]:
+            warnings.append(f"{name}: no sampler is assigned to it")
+    return {"hosts": rows, "warnings": warnings}
+
+
+def host_room(host: HostConfig, *, bridge_subnets: Sequence[str], mem_total_bytes: int | None) -> dict[str, Any]:
+    """How many trial containers the host can really hold: the free addresses of the
+    default bridge (a /24 holds about 250 containers, then the daemon refuses with "no
+    available IPv4 addresses") and its memory over ``trial_memory_gib``. ``effective`` is
+    the smallest of those and ``max_sandboxes``; ``warnings`` name what limits it."""
+    import ipaddress  # noqa: PLC0415
+
+    addresses = None
+    if bridge_subnets:
+        addresses = sum(max(0, ipaddress.ip_network(s, strict=False).num_addresses - 3) for s in bridge_subnets)
+    memory = None
+    if mem_total_bytes and host.trial_memory_gib:
+        memory = int(mem_total_bytes / (host.trial_memory_gib * 2**30))
+    limits = {"max_sandboxes": host.max_sandboxes, "bridge_addresses": addresses, "memory": memory}
+    known = [v for v in limits.values() if v is not None]
+    warnings = []
+    if addresses is not None and host.max_sandboxes and addresses < host.max_sandboxes:
+        warnings.append(f"{host.name}: the bridge network {' '.join(bridge_subnets)} has {addresses} addresses < "
+                        f"max_sandboxes {host.max_sandboxes}; widen it (default-address-pools or bip in the "
+                        "daemon config, e.g. a /20) or lower max_sandboxes")
+    if memory is not None and host.max_sandboxes and memory < host.max_sandboxes:
+        warnings.append(f"{host.name}: memory holds {memory} trials at {host.trial_memory_gib:g} GiB each < "
+                        f"max_sandboxes {host.max_sandboxes}; lower max_sandboxes or the trial --memory")
+    if host.trial_memory_gib is None:
+        warnings.append(f"{host.name}: no trial_memory_gib; set it to the --memory of a trial (the task p95) "
+                        "to check memory over-commit")
+    return {"limits": limits, "effective": min(known) if known else None, "warnings": warnings}

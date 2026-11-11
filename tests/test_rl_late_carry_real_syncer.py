@@ -39,8 +39,11 @@ def _tape(rig):
     path = Path(rig.command.split("--event-tape ")[1].split()[0])
     if not path.exists():
         return []
+    # The syncer appends while this polls: a line without its newline is still
+    # being written (an O_APPEND write is not atomic for readers) and is read
+    # complete on the next poll.
     with path.open() as tape:
-        return [json.loads(line) for line in tape if line.strip()]
+        return [json.loads(line) for line in tape if line.endswith("\n") and line.strip()]
 
 
 def _merge_records(rig):

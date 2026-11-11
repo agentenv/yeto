@@ -110,6 +110,50 @@ def test_layout_publication_is_off_by_default_and_for_other_islands():
     assert maybe_publish(("127.0.0.1", 1), 1, layout(), environ={PUBLISH_ENV: "1"}) is None
 
 
+def test_the_layout_board_is_set_again_after_a_syncer_restart():
+    """The board lives in the syncer's memory: island 0 keeps watching it and sets it
+    again once it reads empty (a syncer restarted with --resume), and rides out the
+    refused connections while the syncer is down. A real Modal run: the replacement
+    sampler waited for the layout after the restart while the trainer waited for it."""
+    import threading
+
+    from yeto.rl.spot_rollout.layout_manifest import PUBLISH_ENV, maybe_publish
+    from yeto.rl.spot_rollout.relay import RelayError
+
+    from test_spot_rollout_syncer import layout
+
+    value, sets, script = [None], [], ["ok", "ok", "down", "restarted", "ok"]
+    stop = threading.Event()
+
+    class Board:
+        def get(self):
+            if script[0] == "down":
+                raise RelayError("connection refused")
+            if script[0] == "restarted":
+                value[0] = None  # the new syncer process has no board
+            return value[0]
+
+        def set(self, data):
+            if script[0] == "down":
+                raise RelayError("connection refused")
+            value[0] = data
+            sets.append(script[0])
+            return len(sets)
+
+        def close(self):
+            pass
+
+    def sleep(_s):
+        script.pop(0)
+        if not script:
+            stop.set()
+
+    thread = maybe_publish(("127.0.0.1", 1), 0, layout(), environ={PUBLISH_ENV: "1"}, board_factory=Board,
+                           sleep=sleep, stop=stop)
+    thread.join(timeout=10)
+    assert not thread.is_alive() and sets == ["ok", "restarted"] and value[0] is not None
+
+
 def test_layout_record_round_trip_and_fingerprint_check():
     from yeto.rl.spot_rollout import layout_manifest
 

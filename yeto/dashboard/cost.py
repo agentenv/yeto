@@ -98,6 +98,17 @@ def island_cost(isl: dict, prices: dict, now: float) -> dict:
             "priced": unit is not None}
 
 
+def nc_node_rates(pool_events) -> dict[str, float]:
+    """USD per machine hour of each pool shard, as the pool's provider stated it
+    (``hourly_cost``, on ``nc_elastic_member_ready``): the whole node, whatever its
+    engine uses of it. The latest rate of a shard wins."""
+    rates: dict[str, float] = {}
+    for e in pool_events or ():
+        if e.get("event") == "nc_elastic_member_ready" and e.get("shard") and e.get("usd_per_h") is not None:
+            rates[str(e["shard"])] = float(e["usd_per_h"])
+    return rates
+
+
 def nc_lease_spans(pool_events) -> dict[str, tuple[float, float | None]]:
     """Billed span of each NC shard from the pool's events: its ticket's order to the
     ticket's release (None: still billed). A node bills from the order, long before
@@ -121,11 +132,16 @@ def cost_view(reducer, now: float) -> dict:
     rows = []
     async_ = getattr(reducer, "async_", None)
     leases = nc_lease_spans(getattr(async_, "pool", None))
+    node_rates = nc_node_rates(getattr(async_, "pool", None))
     for iid in reducer.island_ids():
         isl = reducer.islands[iid]
         if isl.get("ready_ts") is None and isl.get("cloud") is None:
             continue  # no fleet data at all for this island
         row = island_cost(isl, reducer.prices, now)
+        if iid in node_rates:  # the provider's own machine-hour rate beats the price table
+            row.update(rate_usd_h=node_rates[iid], priced=True, gpu_only=False, rate_source="provider hourly_cost")
+            if row["hours"] is not None:
+                row["cost_usd"] = row["rate_usd_h"] * row["hours"]
         if (isl.get("cloud") or "").lower() == "nc" and iid in leases:
             start, end = leases[iid]
             row["hours"] = max(0.0, (end if end is not None else now) - start) / 3600.0

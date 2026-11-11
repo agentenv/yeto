@@ -200,6 +200,29 @@ def test_a_hung_docker_ps_does_not_end_the_monitor(make_run, monkeypatch):
     assert run.run_containers() is None
 
 
+def test_run_containers_are_counted_on_every_sandbox_host(make_run, monkeypatch, tmp_path):
+    import json
+
+    run = make_run()
+    envs = tmp_path / "envs.json"
+    envs.write_text(json.dumps({"run": "r1", "hosts": [{"name": f"h{i}", "docker_host": f"ssh://u@h{i}"}
+                                                      for i in range(4)]}))
+    run.cfg["sandbox"] = {"envs": str(envs), "docker_host": "envs"}
+    asked = []
+
+    def ps(argv, **k):
+        asked.append(argv[2])
+        if argv[2] == "ssh://u@h3":
+            raise up.subprocess.TimeoutExpired("docker", 60)
+        return up.subprocess.CompletedProcess(argv, 0, "a\nb\n" if argv[2] == "ssh://u@h0" else "c\n", "")
+
+    monkeypatch.setattr(up.subprocess, "run", ps)
+    assert run.sandbox_hosts() == [f"ssh://u@h{i}" for i in range(4)]
+    assert run.run_containers() == 4 and sorted(asked) == sorted(run.sandbox_hosts())  # h3 did not answer
+    run.cfg["sandbox"] = {"docker_host": ["ssh://u@h0", "ssh://u@h1"]}
+    assert run.run_containers() == 3
+
+
 def test_the_first_group_wait_ignores_the_previous_launchers_log(make_run, tmp_path):
     run = make_run()
     log = tmp_path / "old-trainer.log"

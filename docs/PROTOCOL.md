@@ -881,18 +881,31 @@ rule.
   (`--dispense-lease-s`, also when the dispenser is off) expires. What
   renews the lease: every TASK_* request, a subscriber's HEARTBEAT (the
   client sends one every 10 s), every relay request of a producer.
-- A superseded or expired member is retired: its later requests on any
+- The controller may retire a member at once (scale-down, evict): a
+  connection whose first frame is MEMBER_RETIRE (57), `u16 version (=1) |
+  u32 learner_id | u8 mode | u8 has_incarnation | u64 incarnation |
+  u16 reason_len | reason` (mode 0 retire, 1 drain, 2 undrain), sealed with the domain `yeto-member-retire-mac-v1\0` when the
+  syncer has an island HMAC key (without a key only a loopback peer is
+  accepted). `has_incarnation = 0` retires the id's current incarnation; an
+  explicit incarnation that never joined is fenced ahead. The answer
+  MEMBER_RETIRED (58) is `u8 status (0 retired, 1 already retired, 2 no
+  current incarnation, 3 draining, 4 drained, 5 resumed) | u64 incarnation |
+  u64 reclaimed | u64 held` (`reclaimed`: positions put back at the queue
+  front; `held`: what a draining id still holds). Drain: the id's claims get
+  WAIT while its reports go on; the controller repeats the drain until
+  `drained`, then retires. Idempotent. Client: `task_dispense.retire_member`.
+- A superseded, expired or retired member is retired: its later requests on any
   channel are refused with an ERROR that starts with `fenced: dispense`,
   `fenced: subscriber` or `fenced: relay` and ends with the reason in
-  brackets (`(superseded)`, `(lease expired)`, `(from before a syncer
-  restart)`). The syncer also closes the member's idle subscriber and relay
+  brackets (`(superseded)`, `(lease expired)`, `(retired by the controller)`,
+  `(from before a syncer restart)`). The syncer also closes the member's idle subscriber and relay
   connections within 0.2 s with that ERROR. Each service returns what the
   member held: the dispenser its unreported positions, to the front of the
   queue (with subscribers or relay on, within 0.25 s of the retirement;
   otherwise at the next dispense request); items it stored in the relay stay.
 - A process fenced as `(superseded)` stops: a newer process of the same
   island holds the id (its task source, subscriber and relay producer all
-  end). A process fenced for another reason opens again with a new
+  end). So does a process fenced as `(retired by the controller)`. A process fenced for another reason opens again with a new
   incarnation (the task source does; a fenced subscriber or relay producer
   ends its process, whose relaunch has a new incarnation).
 
@@ -913,11 +926,17 @@ and opens a new incarnation), `dispense mismatch: ...` (other data: fatal),
 Semantics:
 
 - A holder is one island process (`learner_id`, random `incarnation`). A new
-  incarnation of an island supersedes the old one at once. A holder silent
-  for `--dispense-lease-s` (default 300) expires. In both cases the holder is
-  retired and every position it did not report goes to the front of the
-  queue; the next claim of any island takes them first. Expiry is checked at
-  every request, so no timer is needed.
+  incarnation of an island supersedes the old one at once, a MEMBER_RETIRE
+  retires it at once, and a holder silent for `--dispense-lease-s` (default
+  300) expires. In every case the holder is retired and every position it did
+  not report goes to the front of the queue; the next claim of any island
+  takes them first. An expiry counts as a redo (a row that kills its island
+  must not loop): a position already requeued `--dispense-max-redo` times is
+  settled exhausted instead. A supersede or a retire is not counted. Expiry is
+  checked at every request, so no timer is needed.
+- These are the WorkContract rules (`yeto/rl/engine/work_contract.py`);
+  the store-ledger dispenser of the R2 data path follows the same ones, and
+  both run the cases of `tests/fixtures/work_contract_cases.json`.
 - A claim gets queued positions first, then fresh ones. With
   `--dispense-passes N` a claim that finds nothing gets WAIT while some island
   still holds positions, END once everything is reported. Without it the
@@ -939,8 +958,9 @@ Semantics:
   with the stream table, `dispense_open` with the accepted streams (`accept`,
   null: every stream), `_grant` with the first and last pass, `_pass_start`
   with its stream, `_wait`, `_end`,
-  `_report`, `_block_done`, `_reclaim` with the reason `lease_expired` or
-  `superseded`, `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
+  `_report`, `_block_done`, `_reclaim` with the reason `lease_expired`,
+  `superseded` or `retired` (and `redo_exhausted`: the ranges an expiry
+  settled exhausted), `_fenced`, `_checkpoint`, `_restore`; a restart reclaims
   every holder of the record inside `_restore`).
   `python -m yeto.launch.checks.dispense_check` replays it.
 ## Receive-only subscribers (`--max-subscribers N`)
