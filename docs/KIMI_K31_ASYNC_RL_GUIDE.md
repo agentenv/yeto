@@ -33,6 +33,7 @@ repeated here:
 9. [Images](#9-images)
 10. [Full-parameter parallel layout](#10-full-parameter-parallel-layout)
 11. [Daytona sampler sandboxes](#11-daytona-sampler-sandboxes)
+12. [Sky and Modal rollout pools](#12-sky-and-modal-rollout-pools)
 
 ---
 
@@ -197,6 +198,36 @@ A run uses three files:
 
 Fill the `0` prices with your contracted rates; they drive the spend estimate.
 
+**Several sampler pools.** Instead of `pool`, a run can declare a `samplers`
+list, one entry per pool (set one of the two keys, not both):
+
+```json
+"samplers": [
+  {"name": "nc", "provider": "nc", "config": "<pool.json>", "interval_s": 30},
+  {"name": "modal", "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>",
+                                 "bucket": "<bucket>", "gpu": "B300", "gpus": 8,
+                                 "model_volume": "<volume>", "price_usd_h": 0},
+   "data_path": "r2", "usd_per_h": 0, "target": 1, "accounts": [1, 2],
+   "shard_base": "<run>-modal", "spec": "<sampler-spec.json>", "run_prefix": "<run>",
+   "r2_env_file": "<store.env>", "sampler": {"dispense": {"backend": "store", "namespace": "<run>/dispense"}}}
+]
+```
+
+| Entry key | Meaning |
+|---|---|
+| `name` | Pool name for `--pool` (default: the provider kind). Unique in the run. |
+| `config` | A `pool.json` file. Keys given inline in the entry override the file's; the file itself is not changed (the merged config is written to `~/.yeto/rl-up/<run>/pools/<name>.json`). |
+| `provider` | A kind (`nc`, `daytona`, `sky`, `modal`) or a full provider section. A kind must match the provider of `config`. |
+| any `pool.json` key | `target`, `accounts`, `shard_base`, `spec`, `sampler`, `elastic`, ... (section 3.3). |
+| `data_path` | `r2` (default: buffer shards and policy releases in the run store) or `syncer` (the sampler spec takes weights from the syncer and returns samples through the relay; the pool then fences nothing in the store, the syncer retires a stopped member). All pools of a run use one data path. |
+| `interval_s` | Seconds between the pool's control ticks (default 30). |
+| `usd_per_h` | Price of one island hour of this pool, for the spend estimate and the scale-up budget check (default `budget.nc_usd_per_h`). |
+
+Each pool keeps its own state under its `shard_base`, so `shard_base` must
+differ between pools, and the trainer's `--rl-buffer-shards` must name the
+shards of every pool (preflight checks each pool). `yeto run up` dry-runs,
+starts, reports and stops every pool; `yeto run down` releases all of them.
+
 | Field | Meaning |
 |---|---|
 | `run` | Run name. Also the state directory `~/.yeto/rl-up/<run>/` (pids, logs, step times) and the `ai.yeto.run` label of sandbox containers. Required. |
@@ -207,7 +238,7 @@ Fill the `0` prices with your contracted rates; they drive the spend estimate.
 | `sandbox.docker_host` | Docker endpoint used to count and remove this run's trial containers. |
 | `sandbox.max_run_containers` | Warning threshold for this run's container count (a warning, not a breaker). |
 | `sandbox.max_containers_per_sampler` | Optional. Raises the warning threshold to this many containers per billed NC node, so it follows `yeto run scale`. |
-| `pool.config` | Path of `pool.json`. Required. |
+| `pool.config` | Path of `pool.json`. Required unless `samplers` is set (see below). |
 | `pool.interval_s` | Seconds between pool control ticks (default 30). |
 | `trainer.argv` | The `yeto launch` arguments of the trainer. Required. |
 | `trainer.usd_per_h` | Trainer price per hour for the spend estimate. |
@@ -464,6 +495,36 @@ Concurrent scale requests are serialized: two `--add 1` from two shells make
 +2. To remove a node, use `--remove` (or `nc down`), never the NC console; see
 section 5.6 for manual operations and pauses. Details of the control file:
 [NC_POOL.md, pool-scale](NC_POOL.md#change-the-number-of-samplers-while-the-run-trains-pool-scale).
+
+**`yeto rollout`: one entry for every provider.** `yeto rollout scale` takes
+the same flags and runs the same checks as `yeto run scale` (the target is a
+positional argument); `yeto rollout status` lists every pool of the run:
+
+```
+yeto rollout status --config <run.json>                        # every pool: provider, target, billed islands
+yeto rollout status --config <run.json> --detail               # plus each pool's full pool-status
+yeto rollout scale <N> --config <run.json>                     # the run's only pool
+yeto rollout scale --add 1 --config <run.json> --pool <name>   # one pool of a samplers list
+yeto rollout scale <N> --config <run.json> --provider modal    # the pool of that provider
+yeto rollout scale --remove <ticket> --config <run.json>       # the pool holding the ticket
+yeto rollout scale <N> --pool-config <pool.json>               # a pool file directly (pool-scale only)
+```
+
+With several pools (section 3.1, `samplers`), name the pool with `--pool`, or
+with a `--provider` that matches exactly one pool; `--remove` finds the pool
+that holds the ticket. Otherwise the request is refused with the list of
+pools. `yeto run scale`, `yeto run pause` and `yeto run resume` take the same
+`--pool` / `--provider`. `status` exits 1 when an island bills with no pool
+loop alive and prints the `pool-stop` command that releases it.
+
+Provider support:
+
+| Provider (`provider.kind`) | Island | Scale / status | Eviction refill | Data path | Verified on real machines |
+|---|---|---|---|---|---|
+| `nc` (default) | 8 x MI355X node, Docker over SSH | yes | yes (lease end and eviction) | `r2` | yes |
+| `daytona` | GPU sandbox, process over SSH | yes | yes (spot deletion) | `r2` | no (simulated end to end) |
+| `sky` | One-node SkyPilot cluster, Docker over SSH, offer rotation | yes | yes (preemption, stuck start) | `r2`; `syncer` with a syncer sampler spec | no (CPU tests with a fake sky) |
+| `modal` | Modal GPU function call, no SSH | yes | yes (call exited or failed) | `r2` | no (CPU tests with a fake client) |
 
 ### 5.2 Automatic node replacement
 
@@ -1066,6 +1127,63 @@ only sandboxes with its name prefix that carry this run's label or record.
 | Access | SSH through the workspace relay | SSH through `ssh.app.daytona.io` with a per-sandbox token (renewed automatically) |
 | Balance guard | Account balance in ucr | None. `elastic.max_run_spend_ucr` still caps node-hours, priced at the National Compute MI355X rate; also set a Daytona spend limit |
 | Accounts | NC accounts in `YETO_NC_ACCOUNTS` | Slots, one sandbox each |
+
+## 12. Sky and Modal rollout pools
+
+Two more providers run under the same pool policy (scale, eviction ->
+fence -> refill, breaker, budget) and the same `yeto rollout` entry
+(section 5.1). Neither has run on real machines yet; treat them as preview.
+
+**Sky** (`"provider": {"kind": "sky", ...}`): one SkyPilot cluster per island,
+reached over SSH with sky's key, running the Docker sampler route.
+
+```json
+"provider": {"kind": "sky",
+             "candidates": {"gpus": ["H100", "H200"], "spot_only": true, "infra": "nebius"},
+             "cluster_prefix": "yeto-smp", "ssh_key": "<sky-ssh-key>",
+             "start_timeout_s": 1800, "host_setup": ["sudo docker info"]}
+```
+
+- Machines come from `offers` (`[{"resources": {<sky Resources args>}, "price_usd_h": <usd>}]`),
+  or `candidates` (the spot watchdog's Nebius list: on-demand H100 first, then
+  spot cheapest first; `prices` names a price file), or one `resources` block
+  with `price_usd_h`. A failed launch moves to the next offer; a successful one
+  moves back to the cheapest.
+- A cluster still starting after `start_timeout_s` is released and replaced; a
+  stopped or missing cluster reads as preempted and is refilled.
+- Only clusters named `<cluster_prefix>-<run>-<n>` that this pool recorded or
+  sky lists under that prefix are ever taken down.
+- Orders and releases are written to the run's resource ledger (`sky_cluster`).
+- `accounts` are slots `1..N` (one cluster each).
+- `python -m yeto.rl.spot.watchdog` still works; `--via-provider` sends its
+  machine calls through this provider. For new runs, prefer a sky pool.
+
+**Modal** (`"provider": {"kind": "modal", ...}`): one Modal GPU function call
+per island, no SSH. The pool deploys one app (`app_name`, default
+`yeto-rollout-<run>`) with a `rollout_sampler` function and spawns one call per
+island with the island's rendered sampler spec.
+
+| Key | Meaning |
+|---|---|
+| `image` | Sampler image (required). |
+| `secret` | Modal Secret with the store credentials (required). |
+| `bucket` | Bucket of the run store (required). |
+| `gpu`, `gpus` | GPU type and count of the function (default `B300`, 8). |
+| `model_volume`, `model_mount` | Modal volume with the weights, mounted read-only (default mount `/mnt/yeto-models`). |
+| `timeout_h` | Function timeout; a call that reaches it is refilled as a lost island (default 24). |
+| `cpu`, `memory_gib`, `env`, `python` | Function resources, extra environment, sampler Python. |
+| `price_usd_h` | Price of one island hour (resource ledger). |
+
+- An order bills nothing; an island bills from its spawn until its cancel.
+- `model_pull` and `node_hooks` are not available (no node); put the weights
+  in a Modal volume.
+- Calls and the app are written to the run's resource ledger
+  (`modal_call`, `modal_app`), so `yeto cleanup --run` finds them.
+
+**Spend caps on both.** The pool's own `elastic.max_run_spend_ucr` counts node
+hours at the National Compute MI355X rate, not at the offer price. Set
+`usd_per_h` on the `samplers` entry (it drives `budget.usd` of `yeto run up`
+and the scale-up check) and a spend limit at the cloud provider.
 
 ## Planned enhancements
 
