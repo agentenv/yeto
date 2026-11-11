@@ -43,7 +43,7 @@ The same object is read from the sampler spec (`agentic.envs`) or from a standal
 
 | Key | Meaning | Default |
 |---|---|---|
-| `run` | Label put on every container and image yeto starts or builds (`yeto.sandbox.run`). `teardown` removes only these. | required |
+| `run` | Label put on every container and image yeto starts or builds (`yeto.sandbox.run`). `teardown` removes these and the run's Harbor trial containers (`ai.yeto.run=<run>`) with their compose networks; nothing else. | required |
 | `ready_key` | Manifest path in the run store. | `sandbox/ready.json` |
 | `require_validation` | Dispense a task only after oracle and nop passed. | `true` |
 | `affinity` | `strict`: a sampler takes only tasks ready on its own host. `prefer`: its own host first, then sidecar-free tasks ready on another host. | `strict` |

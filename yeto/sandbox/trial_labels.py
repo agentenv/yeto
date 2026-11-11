@@ -109,6 +109,30 @@ def sweep_shard(docker: Any, run: str, shard: str) -> int:
     return n
 
 
+def run_trial_containers(docker: Any, run: str) -> list[dict[str, Any]]:
+    """Every trial container of ``run`` (any shard and incarnation, stopped ones
+    too), each label checked again after the filter."""
+    run = str(run or "").strip()
+    if not run:
+        return []
+    rows = docker.labelled_containers(OWNER_KEYS, f"label={RUN_KEY}={run}", all_=True)
+    return [r for r in rows if r["labels"].get(RUN_KEY) == run]
+
+
+def sweep_run(docker: Any, run: str, *, dry_run: bool = False) -> dict[str, Any]:
+    """Remove every trial container of ``run`` and the compose networks of their
+    trials (``yeto sandbox teardown`` / ``yeto rl down``): a pool stop kills the
+    samplers, which run no teardown, so their trial containers and networks stay.
+    Containers of another run or without the run label are never touched.
+    Returns ``{"containers": ids, "networks": compose projects}``."""
+    rows = run_trial_containers(docker, run)
+    projects = sorted({r["labels"].get(PROJECT_KEY) for r in rows} - {None, ""})
+    if rows and not dry_run:
+        _remove(docker, rows)
+        logger.warning("sandbox: removed %d trial container(s) of run %s", len(rows), run)
+    return {"containers": [r["id"] for r in rows], "networks": projects}
+
+
 def sweep_stale(docker: Any, owner: Owner | None) -> int:
     """Remove ``owner``'s shard's containers of other incarnations and their
     compose networks; the number of containers removed."""

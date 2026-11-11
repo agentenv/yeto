@@ -186,3 +186,79 @@ def test_replacement_sweeps_predecessor_only_when_left_or_fenced(monkeypatch):
     assert e.sweep_predecessor(p, None, "s0", True, emit) == 4  # predecessor left (handoff)
     assert events[-1][1]["why"] == "predecessor_left"
     assert e.sweep_predecessor(object(), None, "s0", True, emit) == 0  # no gate
+
+
+# -- yeto sandbox teardown / run down: this run's trial containers and their networks ----
+
+class JsonDaemon(Daemon):
+    """``Daemon`` that also answers the ``{{json .}}`` listing and inspect of the sidecar teardown."""
+
+    def __call__(self, argv, env, stdin):
+        args = list(argv[1:])
+        if args[0] == "ps" and args[args.index("--format") + 1] == "{{json .}}":
+            filters = [args[i + 1] for i, a in enumerate(args) if a == "--filter"]
+            rows = [cid for cid, labels in self.containers.items()
+                    if all(labels.get(f[6:].split("=", 1)[0]) == f[6:].split("=", 1)[1] for f in filters)]
+            return 0, "".join(json.dumps({"ID": cid}) + "\n" for cid in rows), ""
+        if args[:2] == ["container", "inspect"]:
+            labels = self.containers.get(args[2])
+            return (0, json.dumps([{"Config": {"Labels": labels}}]), "") if labels is not None else (1, "[]", "no")
+        if args[0] == "images":
+            return 0, "", ""
+        return super().__call__(argv, env, stdin)
+
+
+def _teardown_world(tmp_path):
+    from yeto.sandbox.docker import LABEL_RUN
+
+    daemon = JsonDaemon({
+        "side": {LABEL_RUN: "r1"},
+        "t1": _c("r1", "s0", "i1", "p1"),
+        "t2": _c("r1", "s1", "i2", "p2"),
+        "other": _c("r2", "s0", "i1", "p9"),
+        "foreign": {},
+    })
+    cfg = parse_envs({"run": "r1", "hosts": [{"name": "h1", "docker_host": "ssh://u@h1"}], "tasksets": []},
+                     base_dir=tmp_path)
+    return daemon, cfg
+
+
+def test_teardown_removes_this_runs_trial_containers_and_their_networks(tmp_path):
+    """Report: after pool-stop 20 trial containers and 20 compose networks of the run
+    (``ai.yeto.run``) stayed on the sandbox host; teardown removed only the sidecars."""
+    from yeto.sandbox import ops
+
+    daemon, cfg = _teardown_world(tmp_path)
+
+    class Store:
+        def read(self, key):
+            return None
+
+        def write(self, key, data):
+            pass
+
+    out = ops.teardown(cfg, Store(), factory=lambda host: DockerHost(host.docker_host, runner=daemon))
+    assert set(out["h1"]["trial_containers"]) == {"t1", "t2"} and out["h1"]["trial_networks"] == ["p1", "p2"]
+    assert set(daemon.containers) == {"other", "foreign"}  # another run's and an unlabelled one stay
+    assert sorted(daemon.net_rm) == ["net-p1", "net-p2"]
+
+
+def test_teardown_dry_run_names_the_trial_containers_and_removes_nothing(tmp_path):
+    from yeto.sandbox import ops
+
+    daemon, cfg = _teardown_world(tmp_path)
+    out = ops.teardown(cfg, None, factory=lambda host: DockerHost(host.docker_host, runner=daemon), dry_run=True)
+    assert set(out["h1"]["trial_containers"]) == {"t1", "t2"} and len(daemon.containers) == 5 and not daemon.net_rm
+
+
+def test_run_down_sweeps_trial_networks_too(monkeypatch):
+    """``yeto rl down`` with ``sandbox.docker_host``: the trial containers and their networks."""
+    from yeto.rl import up
+    from yeto.sandbox import docker as docker_mod
+
+    daemon = Daemon({"t1": _c("r1", "s0", "i1", "p1"), "other": _c("r2", "s0", "i1", "p9")})
+    monkeypatch.setattr(docker_mod, "subprocess_runner", lambda timeout_s=0: daemon)
+    run = up.Run.__new__(up.Run)
+    run.run, run.env = "r1", {"DOCKER_CONTEXT": "x"}
+    run._sweep_trials("ssh://u@h1")
+    assert set(daemon.containers) == {"other"} and daemon.net_rm == ["net-p1"]

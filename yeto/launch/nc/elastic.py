@@ -77,8 +77,12 @@ def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler
             f"n=$(ls -t {tape_glob} 2>/dev/null | head -1); "
             "a=-; [ -n \"$n\" ] && a=$(( $(date +%s) - $(stat -c %Y \"$n\") )); "
             "tw=0; [ -n \"$n\" ] && tail -n 1 \"$n\" | grep -qs rl_sampler_waiting && tw=1; "
+            # high-VRAM alerts of the newest tape (vram_guard.VramWatch): count, last max_frac
+            "vh=0 vm=-; [ -n \"$n\" ] && vh=$(grep -cs rl_sampler_vram_high \"$n\") && "
+            "vm=$(grep -s rl_sampler_vram_high \"$n\" | tail -n 1 | grep -o '\"max_frac\": *[0-9.]*' "
+            "| grep -o '[0-9.]*$'); vh=${vh:-0} vm=${vm:--}; "
             "st=$1 ex=$2; " + metrics +
-            "echo \"YETO_NC_PROBE status=$st exit=$ex joined=$j age=$a tw=$tw tok=$t run=$r wq=$w\"")
+            "echo \"YETO_NC_PROBE status=$st exit=$ex joined=$j age=$a tw=$tw tok=$t run=$r wq=$w vh=$vh vm=$vm\"")
 
 
 # -- fencing ------------------------------------------------------------------

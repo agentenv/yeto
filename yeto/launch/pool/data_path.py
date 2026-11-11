@@ -68,6 +68,13 @@ class R2DataPath:
 
         return elastic.fence_incarnation(self.records, shard, by=by, **self._kw())
 
+    def clear_stale_handoff(self, shard: str, keep: Any = ()) -> dict[str, Any] | None:
+        """Set aside a stop request for ``shard`` whose successor is not in ``keep``
+        (``sampler_resume.set_aside_handoff``: this run's store only); the record or None."""
+        from yeto.rl.engine.sampler_resume import set_aside_handoff  # noqa: PLC0415
+
+        return set_aside_handoff(self.records, shard, keep=keep, reason="new pool member on this shard name")
+
     def request_drain(self, shard: str, seq: str) -> str:
         from yeto.rl.engine import store_dispense  # noqa: PLC0415
 

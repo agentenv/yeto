@@ -506,7 +506,7 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `engine.server.base_dir` | Local path of the MXFP4 checkpoint on the node. |
 | `engine.server.max_model_len` | Engine context length. |
 | `engine.server.extra_args` | Extra engine flags. They come after the preset's flags and take precedence. |
-| `engine.options.k31_preset` | Serving preset (`amd-article`, `rl-precision`, `vllm-recipe`, `rl-precision-cuda`). The ROCm presets set `--gpu-memory-utilization 0.88`. |
+| `engine.options.k31_preset` | Serving preset (`amd-article`, `rl-precision`, `vllm-recipe`, `rl-precision-cuda`). The ROCm presets set `--gpu-memory-utilization 0.84` and refuse a value above 0.86 (`engine.options.allow_high_gpu_memory` overrides). |
 | `engine.options.tp`, `max_num_seqs` | Tensor parallel degree and concurrent sequences per engine. |
 | `sampling.n` | Samples per prompt (group size). |
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
@@ -518,10 +518,34 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 
 **GPU memory utilization.** To change it, add the flag to
 `engine.server.extra_args`, for example
-`["--gpu-memory-utilization", "0.85"]`.
-Recommended practice: keep the preset's 0.88 on MI355X TP8. The collectives'
-scratch memory lives outside vLLM's budget, and the preset keeps that
-headroom free.
+`["--gpu-memory-utilization", "0.82"]`.
+Recommended practice: keep the preset's 0.84 on MI355X TP8. Measured on an
+agentic CyberGym sampler (TP8, R3, top-128 log-probs, 20 trials in flight):
+at 0.88 each GPU started at 256 GiB and grew to 275 GiB of 288 (95.5%)
+within 30 minutes, outside vLLM's budget, at both `max_model_len` 262144 and
+1048576; an in-place expert reload stages experts on top of that. The
+sampler refuses a value above 0.86 unless
+`engine.options.allow_high_gpu_memory` is set. At 0.84 the KV cache still
+holds about 2.5M tokens, far more than 20 agentic trials of 32K tokens use.
+
+**GPU memory guard.** The sampler samples every GPU's memory once a minute.
+When a GPU is above 97% it writes `rl_sampler_vram_high` to its event tape.
+While the GPU stays high it writes the event again every 10 minutes. When every
+GPU is back under the threshold it writes `rl_sampler_vram_ok`. The pool
+reports the alert as the pool event `sampler_vram_high`, and the dashboard
+shows it on the sampler row. You can change the threshold and intervals with
+the spec section `vram_guard`: `{"high_frac": 0.97, "realert_s": 600,
+"interval_s": 60}`.
+
+Before an in-place expert reload, the sampler estimates the staging memory it
+needs: the largest layer of released experts, narrowed over TP, times two (the
+staging copy plus the kernel-format copy), plus `engine.options.reload_reserve_gib`
+(default 2). It compares this with the free memory of the fullest GPU. If
+there is not enough room, the sampler first empties the engine's allocator
+cache on every rank and measures again. If there is still not enough room, it
+reloads each layer in smaller chunks of experts. If not even one expert fits,
+it reloads by restarting the server. `memory_guard` in the
+`rl_sampler_policy_loaded` event records which path was taken.
 
 ## 4. Launch
 
@@ -809,7 +833,8 @@ yeto run down --config <run.json>
 2. stops the dashboard and the trainer (`yeto down <run>`);
 3. releases the NC pool (`pool-stop`);
 4. tears down the sandboxes (`yeto sandbox teardown`) and removes this run's
-   trial containers;
+   trial containers (label `ai.yeto.run=<run>`) and their compose networks;
+   containers of other runs are not touched;
 5. verifies with `pool-status` and reports `down: verified` or
    `down: NOT verified, see down.log`.
 

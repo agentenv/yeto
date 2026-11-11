@@ -20,6 +20,7 @@ from yeto.rl.adapters.sampler_engines.vllm_server import (
     CUDA_ENV_PRESET,
     DEV_MODE_ENV,
     K31_PRESETS,
+    K31_ROCM_GPU_MEMORY_UTILIZATION,
     ROCM_ENV_PRESET,
     VllmOptions,
     VllmServerEngine,
@@ -168,6 +169,22 @@ def test_rocm_env_preset_card_check_and_k31_presets(tmp_path):
     assert late_argv[-2:] == ["--gpu-memory-utilization", "0.85"]
     with pytest.raises(SamplerEngineError, match="rocm preset"):
         _engine(tmp_path, "cuda", k31_preset="amd-article")
+    # the ROCm presets' HBM ceiling: the preset value, a lower one, a refused higher one
+    assert argv[argv.index("--gpu-memory-utilization") + 1] == K31_ROCM_GPU_MEMORY_UTILIZATION
+    for value in ("0.88", "0.92"):
+        with pytest.raises(SamplerEngineError, match="gpu-memory-utilization .* above 0.86"):
+            _engine(tmp_path, "rocm", config=_config(tmp_path, extra_args=("--gpu-memory-utilization", value)),
+                    k31_preset="rl-precision")
+    high, _ = _engine(tmp_path, "rocm", config=_config(tmp_path, extra_args=("--gpu-memory-utilization=0.88",)),
+                      k31_preset="rl-precision", allow_high_gpu_memory=True)
+    assert high.argv(config.base_dir)[-1] == "--gpu-memory-utilization=0.88"
+    # a later, lower value wins (vLLM's argparse takes the last one)
+    _engine(tmp_path, "rocm", config=_config(tmp_path, extra_args=("--gpu-memory-utilization", "0.9",
+                                                                    "--gpu-memory-utilization", "0.8")),
+            k31_preset="rl-precision")
+    with pytest.raises(SamplerEngineError, match="not a number"):
+        _engine(tmp_path, "rocm", config=_config(tmp_path, extra_args=("--gpu-memory-utilization", "x")),
+                k31_preset="rl-precision")
     with pytest.raises(SamplerEngineError, match="k31_preset must be one of"):
         _engine(tmp_path, "rocm", k31_preset="fast")
     assert {p["platform"] for p in K31_PRESETS.values()} == {"cuda", "rocm"}

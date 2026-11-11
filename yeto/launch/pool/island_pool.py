@@ -100,6 +100,11 @@ class Member:
     progress_at: float | None = None
     progress_ticks: int = 0
     trainer_wait: bool = False
+    # a start that failed for a transient reason (an ssh exit 255, a relay timeout) runs
+    # again on the same node: retries spent, and not before this time
+    start_retries: int = 0
+    start_retry_at: float | None = None
+    vram_alerts_seen: int = 0  # the sampler's high-VRAM alerts already reported (probe)
 
 
 class PoolOps(Protocol):
@@ -155,6 +160,23 @@ def is_config_error(error: BaseException) -> bool:
     return type(error).__name__ == "SetupError" or bool(getattr(error, "config_error", False))
 
 
+def is_transient_start_error(error: BaseException) -> bool:
+    """A start failure worth running the (idempotent) start again on the same node:
+    anything but a configuration error or a refusal of the spec / arguments
+    (``ValueError`` / ``TypeError`` / ``LookupError``: the same on every attempt). An
+    ssh exit 255 or a relay read timeout raises ``CalledProcessError`` /
+    ``TimeoutExpired`` / ``OSError`` or a provider ``RuntimeError``."""
+    if is_config_error(error):
+        return False
+    return not isinstance(error, (ValueError, TypeError, LookupError))
+
+
+START_RETRIES = 3  # transient start failures retried in place before the node is retired
+START_RETRY_S = 30.0  # first retry delay; doubled for every further retry
+
+
+FENCE_SUCCESSOR_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: a pool fence's handoff
+
 SLOW_TICK_S = 60.0  # a tick longer than this is logged
 CONTROL_POLL_S = 1.0  # the loop's wait between ticks checks the control file this often
 
@@ -202,6 +224,8 @@ class IslandPool:
     _probed: dict[str, Any] = field(default_factory=dict)
     _watch_pool: Any = None
     last_tick_s: float | None = None  # wall time of the last tick (status, dashboard)
+    start_retries: int = START_RETRIES
+    start_retry_s: float = START_RETRY_S
     _scale_stamp: Any = None  # (mtime_ns, size) of the control file at its last read
 
     def _control_stamp(self) -> Any:
@@ -1011,6 +1035,7 @@ class IslandPool:
             if probe.joined and not m.joined:
                 m.joined = True
             self._metrics_seen(m, probe)
+            self._vram_seen(m, probe)
         verdict = el.classify(status, probe, now=now, unreachable_since=m.unreachable_since, cfg=cfg,
                               joined=m.joined if probe is None else (m.joined or probe.joined))
         kind = verdict.kind
@@ -1080,7 +1105,11 @@ class IslandPool:
             return
 
         if m.state == PROVISIONING:
+            if status.state == "active" and m.start_retry_at is not None and now < m.start_retry_at:
+                return  # a transient start failure: the retry waits out its backoff
             if status.state == "active":  # a provider without leases (sky) has no lease_until
+                m.start_retry_at = None
+                self._clear_stale_handoff(m)
                 m.state = STARTING
                 m.started = now
                 live = False
@@ -1152,6 +1181,7 @@ class IslandPool:
                 continue
             if restart is None:
                 raise RuntimeError("these pool ops cannot restart a sampler in place")
+            self._clear_stale_handoff(m)
             restart(m, self.shards())
             now = self.clock()
             m.config_error = None
@@ -1167,9 +1197,40 @@ class IslandPool:
             self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300], kept=True)
             self._config_error(m, repr(error)[:300])
             return
-        self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+        if is_transient_start_error(error) and m.start_retries < self.start_retries:
+            # every start step is idempotent: one ssh exit 255 / relay timeout does not cost the node
+            m.start_retries += 1
+            delay = self.start_retry_s * 2 ** (m.start_retries - 1)
+            m.start_retry_at = now + delay
+            m.state = PROVISIONING
+            self._event("start_retry", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                        attempt=m.start_retries, of=self.start_retries, retry_in_s=delay)
+            return
+        self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                    retries=m.start_retries)
         self._fail(now, f"start on {m.ticket}")
         self._retire(m, "start failed", lost=False)
+
+    def _clear_stale_handoff(self, m: Member) -> None:
+        """Before a sampler starts on ``m.shard``: a stop request (handoff record) for
+        that shard that no member of this pool wrote is left from an earlier run
+        attempt that used the same shard name (a fenced shard of a failed pool); it
+        would stop the new sampler at once. Such a record is set aside by the ops
+        (``clear_stale_handoff``, the run's store only); one naming a live shard or a
+        fence of a ticket of this pool stays."""
+        clear = getattr(self.ops, "clear_stale_handoff", None)
+        if clear is None or not m.shard:
+            return
+        keep = {s.shard for s in self.members if s.state != GONE and s.shard and s.shard != m.shard}
+        keep |= {f"{FENCE_SUCCESSOR_PREFIX}{s.ticket}" for s in self.members}
+        try:
+            record = clear(m, keep)
+        except Exception as error:  # noqa: BLE001 - the sampler then reports the handoff itself
+            self._event("stale_handoff_check_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            return
+        if record:
+            self._event("stale_handoff_set_aside", ticket=m.ticket, shard=m.shard,
+                        successor=record.get("successor"), requested_at=record.get("requested_at"))
 
     def _starting(self, m: Member) -> bool:
         """A background start of ``m`` still runs (its node is not probed for a sampler yet)."""
@@ -1218,6 +1279,19 @@ class IslandPool:
         self._event("sampler_crash_loop", ticket=m.ticket, shard=m.shard, restarts=m.restarts, detail=detail)
         self._fail(now, f"sampler on {m.ticket} crash loop")
         self._retire(m, "sampler crash loop", lost=False)
+
+    def _vram_seen(self, m: Member, probe: el.Probe) -> None:
+        """A new high-VRAM alert on the sampler's tape (``rl_sampler_vram_high``)
+        becomes the pool event ``sampler_vram_high`` (once per alert)."""
+        alerts = getattr(probe, "vram_alerts", None)
+        if alerts is None:
+            return
+        if alerts < m.vram_alerts_seen:  # a new incarnation writes a new tape
+            m.vram_alerts_seen = 0
+        if alerts > m.vram_alerts_seen:
+            m.vram_alerts_seen = alerts
+            self._event("sampler_vram_high", ticket=m.ticket, account=m.account, shard=m.shard,
+                        max_frac=getattr(probe, "vram_max_frac", None), alerts=alerts)
 
     def _metrics_seen(self, m: Member, probe: el.Probe) -> None:
         """Count probes in a row of a running sampler with no engine ``/metrics`` (wrong port,

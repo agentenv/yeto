@@ -64,6 +64,10 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``{"store", "poll_s", "write_check_s"}`` (:mod:`.incarnation_lease`):
   the incarnation claims the island's lease at join and leaves FENCED, writing no
   more groups, once another incarnation holds it;
+* ``vram_guard``: optional ``{"high_frac", "realert_s", "interval_s"}`` of the
+  card sampler's high-VRAM alert (``vram_guard.VramWatch``; default 0.97, every
+  600 s while high, a sample every 60 s): ``rl_sampler_vram_high`` /
+  ``rl_sampler_vram_ok`` on the tape;
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -773,8 +777,16 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     if resource_sampler is None:
         from .telemetry import ResourceSampler  # noqa: PLC0415
 
+        from .vram_guard import DEFAULT_HIGH_FRAC, DEFAULT_REALERT_S, VramWatch  # noqa: PLC0415
+
+        guard = spec.get("vram_guard") if isinstance(spec.get("vram_guard"), Mapping) else {}
+
         def resource_sampler(sink: Callable[..., None]) -> Any:
-            return ResourceSampler(lambda event, **fields: sink(event, **fields)).start()
+            emit_ = lambda event, **fields: sink(event, **fields)  # noqa: E731
+            watch = VramWatch(emit_, high_frac=float(guard.get("high_frac", DEFAULT_HIGH_FRAC)),
+                              realert_s=float(guard.get("realert_s", DEFAULT_REALERT_S)))
+            kw = {"interval_s": float(guard["interval_s"])} if guard.get("interval_s") else {}
+            return ResourceSampler(emit_, vram_watch=watch, **kw).start()
 
     telemetry = resource_sampler(emit)
     def on_reclaim() -> None:

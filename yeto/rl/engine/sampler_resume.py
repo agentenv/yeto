@@ -414,6 +414,36 @@ def handoff_requested(store: Any, sampler: str) -> bool:
     return _read_record(store, f"{HANDOFF_DIR}/{sampler}.json") is not None
 
 
+HANDOFF_ASIDE_DIR = "sample-buffer/handoffs-aside"
+
+
+def _delete_record(store: Any, key: str) -> None:
+    objects = _objects(store)
+    if objects is not None:
+        objects.delete(key)
+    else:
+        (Path(store.root) / key).unlink(missing_ok=True)
+
+
+def set_aside_handoff(store: Any, sampler: str, *, keep: Iterable[str] = (), reason: str = "",
+                      clock: Callable[[], float] = time.time) -> dict[str, Any] | None:
+    """Move the stop request of ``sampler`` (``handoffs/<sampler>.json``) to
+    ``handoffs-aside/`` unless its successor is in ``keep``; returns the record set
+    aside (None: no record, or one that stays). A fenced shard of an earlier attempt
+    of the run leaves its request behind; a new sampler started on the same shard
+    name would obey it and stop. The record is copied before it is removed, so
+    nothing is lost; only ``store`` (one run's store) is touched."""
+    key = f"{HANDOFF_DIR}/{sampler}.json"
+    record = _read_record(store, key)
+    if record is None or str(record.get("successor")) in {str(k) for k in keep}:
+        return None
+    stamp = int(float(record.get("requested_at") or 0) * 1000)
+    _put_record(store, f"{HANDOFF_ASIDE_DIR}/{sampler}-{stamp}.json",
+                {**record, "set_aside_at": clock(), "set_aside_reason": reason})
+    _delete_record(store, key)
+    return record
+
+
 def sampler_left(store: Any, sampler: str) -> bool:
     """Whether every incarnation record of ``sampler`` has its LEAVE (True: none is running)."""
     records = [_read_record(store, key) for key in _list_records(store, f"{MEMBERS_DIR}/{sampler}")]
