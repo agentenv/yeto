@@ -252,33 +252,63 @@ was given, else `pool.json`), `nodes` (members that may hold a ticket) and
 ### Change the number of samplers while the run trains: `pool-scale`
 
 ```
-python -m yeto.launch.nc pool-scale --config pool.json --target N [--retire <ticket> ...]
-yeto run scale --config run.json --samplers N [--retire <ticket>]   # the same, from the run config
+python -m yeto.launch.nc pool-scale --config pool.json (--target N | --add K | --remove <ticket>) \
+    [--retire <ticket> ...] [--drain | --fence] [--force-static] [--dry-run]
+yeto run scale --config run.json (--samplers N | --add K | --remove <ticket>) ...   # from the run config
 ```
+
+`--add` and `--remove` are relative to the target recorded when the command
+runs (`--remove T` releases T and lowers the target by one). A scale needs the
+store task dispenser (`sampler.dispense` or the spec's `prompts.dispense`);
+with static `data_slots` it needs `--force-static` (a removed node's slot then
+waits in the pool's pending list until a scale up continues it).
 
 `pool-scale` writes the wanted target to `pool-<shard_base>.scale.json` in the
 state dir. It never takes the pool lock: a running loop keeps it and reads the
 file at its next tick (within `--interval` seconds). A loop started later reads
 it at start, so the target outlives a restart; it takes precedence over
 `target` in `pool.json`. Concurrent `pool-scale` commands serialize on
-`pool-<shard_base>.scale.lock`; the last one wins.
+`pool-<shard_base>.scale.lock` (checks included); relative requests add up.
 
 - **Scale up.** The loop orders the missing nodes like any fill. `pool-scale`
   refuses (exit 2, nothing changed) before anything is ordered when the new
-  target is above the number of `accounts` (one node per account), `data_slots`
-  or `elastic.max_nodes`, or when the new nodes would pass `elastic.max_orders`,
+  target is above the usable accounts (`accounts` inside `YETO_NC_ACCOUNTS`; one
+  node per account), `data_slots` or `elastic.max_nodes`, when the order breaker
+  is tripped, or when the new nodes would pass `elastic.max_orders`,
   `elastic.max_run_spend_ucr` (one node hour each) or `shard_limit` (the
   trainer's `--rl-buffer-shards` / the tunnel port range; shard indexes are
   never reused). The loop's own order gates still apply.
 - **Scale down.** The loop picks the members to release: the `--retire`
   tickets first, then members not yet ready, then the newest, cheapest and
-  shortest-lease ones. For each it fences the shard (its dispense claims go
-  back at once), stops the sampler, releases and deletes the ticket, checks it
-  reads `ended` and emits `nc_elastic_scaled_down`. A replacement in flight for
+  shortest-lease ones. In `drain` mode (`elastic.scale_down`, default, or
+  `--drain`) a ready member is asked through the dispenser ledger
+  (`<namespace>/drain/<shard>`) to claim no new task (`nc_elastic_scale_draining`);
+  it keeps counting as billed but not toward the target, and goes on once its
+  sampler answers that it holds no claim (`<namespace>/drained/<shard>`) or
+  after `elastic.scale_drain_timeout_s`. A raised target meanwhile keeps a
+  draining member instead of ordering (`nc_elastic_scale_drain_cancelled`). In
+  `fence` mode (`--fence`), and for a member not ready, it goes at once. Going
+  means: fence the shard (its dispense claims go back at once), stop the
+  sampler, release and delete the ticket, check it reads `ended` and emit
+  `nc_elastic_scaled_down` with the `outcome`. A replacement in flight for
   that member goes with it. Nothing is handed on and nothing is ordered for
   it; the other members are not touched. `--target 0` releases every node and
   keeps the loop running; a negative target is refused. `--retire` needs a
   target below the current member count.
+
+Manual operations take priority over the loop's automation. `nc down --ticket T`
+on a member of a running pool becomes `pool-scale --remove T --fence` (with no
+loop alive it deletes the ticket and lowers the recorded target). A member
+whose ticket ends `released` without this tool deleting it (the NC console)
+lowers the target by one and is not replaced (`nc_elastic_manual_release_detected`;
+`elastic.external_release: "replace"` restores replacing it); evictions
+(`preempted`, `lost`, `admin`) are replaced as before. `pool-pause --config F
+--ticket T [--hold-tasks]` / `pool-resume` stop and restart every automatic
+action on a member (it keeps counting toward the target). A request with
+`--source auto` is refused for `elastic.manual_hold_s` after a manual one.
+All of it is kept in the same control file and logged as `nc_elastic_manual_*`;
+`pool-status` prints it under `manual`. The customer guide describes it:
+[KIMI_K31_ASYNC_RL_GUIDE.md, section 5.6](KIMI_K31_ASYNC_RL_GUIDE.md#56-manual-operations-take-priority).
 
 The pool process must run code that has `pool-scale` (restart an older loop
 once; H1 adopts its nodes). After that, no restart is needed to scale.

@@ -485,3 +485,41 @@ def test_brief_status_table_shows_task_id_and_holder(tmp_path):
     for line in lines:
         cells = line.split()
         assert cells[3] == f"t{cells[0]}" and cells[4] == "sampler-a"
+
+
+def test_a_draining_sampler_claims_nothing_new_finishes_its_claims_and_answers(tmp_path):
+    """Scale down in "drain" mode (the NC pool's ``request_drain``): the drained sampler
+    claims no new task, its claims in flight are written and trained, and it answers
+    ``drained`` once it holds none; the other sampler takes every other task, so no task
+    is given out twice and none is lost. A lifted request lets it claim again."""
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(6))
+    clock = Clock(store)
+    old = _open(path, store, holder="nc-0", groups=2, clock=clock)
+    other = _open(path, store, holder="nc-1", groups=2)
+    assert _slots(old(0)) == [0, 1]
+    seq = sd.request_drain(store, "run/dispense", "nc-0")
+    assert old(0) == []  # holding: nothing new
+    assert not sd.drain_answered(store, "run/dispense", "nc-0", seq)
+    taken = []
+    while len(taken) < 4:
+        spots = _slots(other(0))
+        taken += spots
+        other.written(0, spots)
+    assert sorted(taken) == [2, 3, 4, 5]
+    assert old.written(0, [0, 1])["trained"] == 2  # its trials in flight still count
+    answered = {}
+
+    def sleep(s):  # the pool reads the answer, then lifts the request (a scale up again)
+        answered["v"] = sd.drain_answered(store, "run/dispense", "nc-0", seq)
+        sd.request_drain(store, "run/dispense", "nc-0", on=False)
+        clock.sleep(s)
+
+    old._sleep = sleep
+    with pytest.raises(DispenseEnded):
+        old(0)
+    assert answered["v"] is True
+    tasks = {t["slot"]: t for t in _status(store)["tasks"]}
+    assert len(tasks) == 6 and all(t["state"] == "trained" for t in tasks.values())
+    assert tasks[0]["holder"] == tasks[1]["holder"] == "nc-0"
+    assert {tasks[i]["holder"] for i in range(2, 6)} == {"nc-1"}

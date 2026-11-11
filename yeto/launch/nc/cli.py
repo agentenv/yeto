@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import agentic_setup
-from . import elastic, node_pool, ssh_sampler, tasks, tunnel
+from . import elastic, node_pool, scale_args, ssh_sampler, tasks, tunnel
 from .client import Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time
 from .lease_pool import Member, PoolConfig
 from .provider import NcProvider, load_provider
@@ -441,6 +441,40 @@ class NcSshOps:
         uri = f"s3://{bucket}/runs/{self.cfg['run_prefix'].strip('/')}"
         return elastic.s3_fence_store(uri, self.cfg["r2_env_file"])
 
+    # -- scale down in "drain" mode (the store dispenser's drain request, store_dispense)
+    def _dispense_ledger(self) -> tuple[Any, str]:
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        dispense = pool_dispense(self.cfg)
+        if dispense is None:
+            raise NcError("no store dispenser (prompts.dispense.backend store) in this pool: nothing to drain")
+        if dispense.get("store"):
+            store = elastic.s3_fence_store(str(dispense["store"]), self.cfg["r2_env_file"])
+        else:
+            store = self._fence_store()
+        return store.objects, str(dispense.get("namespace") or store_dispense.DEFAULT_NAMESPACE)
+
+    def request_drain(self, m: Member) -> None:
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        objects, namespace = self._dispense_ledger()
+        m.drain_seq = store_dispense.request_drain(objects, namespace, m.shard, seq=f"{m.ticket}:{time.time():.3f}")
+
+    def drained(self, m: Member) -> bool:
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        if m.drain_seq is None:
+            return False
+        objects, namespace = self._dispense_ledger()
+        return store_dispense.drain_answered(objects, namespace, m.shard, m.drain_seq)
+
+    def cancel_drain(self, m: Member) -> None:
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        objects, namespace = self._dispense_ledger()
+        store_dispense.request_drain(objects, namespace, m.shard, on=False)
+        m.drain_seq = None
+
     def drain(self, m: Member) -> None:
         """Best-effort sampler stop (a lost node does not answer), alias removed,
         then the guarded delete of the ticket and its ``ended`` confirmation."""
@@ -600,6 +634,23 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
                      "not released at once (the other samplers wait out the dispense lease, lease_s) and its "
                      "sampler is not fenced; remove the key (default on) for an elastic pool")
     return notes
+
+
+def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The store dispenser config of a pool's samplers (``sampler.dispense`` of the pool
+    config, else ``prompts.dispense`` of the spec with ``backend: store``); None: none
+    (each sampler reads its data slot, or every prompt)."""
+    own = (cfg.get("sampler") or {}).get("dispense")
+    if isinstance(own, dict) and own:
+        return dict(own)
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return None
+    found = (spec.get("prompts") or {}).get("dispense") if isinstance(spec, dict) else None
+    if isinstance(found, dict) and found.get("backend", "store") == "store" and found.get("backend"):
+        return dict(found)
+    return None
 
 
 def _unknown(section: str, doc: Any, known: frozenset[str]) -> None:
@@ -819,6 +870,11 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("down", help="release one node this tool created (by ticket id, confirmed ended)")
     d.add_argument("--account", type=int, required=True)
     d.add_argument("--ticket", required=True)
+    d.add_argument("--drain", dest="mode", action="store_const", const="drain", default="fence",
+                   help="a pool member: let its trials in flight finish first (default: fence it now)")
+    d.add_argument("--direct", action="store_true",
+                   help="delete the ticket here even when a running pool owns it (the pool then sees a manual "
+                   "release: it lowers its target and orders no replacement)")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",
                         description="Run the lease-aware sampler pool in the foreground. Keep it up for the "
                         "whole run: National Compute does not end a lease at lease_until (it stays billed).")
@@ -842,10 +898,16 @@ def main(argv: list[str] | None = None) -> int:
                          "The target outlives a pool restart. Refused before any order when it exceeds the "
                          "accounts, max_nodes, max_orders, max_run_spend_ucr or shard_limit.")
     psc.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
-    psc.add_argument("--target", type=int, required=True, help="samplers wanted (0 or more)")
-    psc.add_argument("--retire", action="append", default=[], metavar="TICKET",
-                     help="on scale down, the member ticket to release (repeatable; default: the newest, "
-                     "cheapest, shortest lease)")
+    scale_args.add_scale_args(psc, target_flag="--target")
+    for name, what in (("pool-pause", "stop every automatic action of the pool on these nodes (manual "
+                                      "maintenance); they keep billing and count toward the target"),
+                       ("pool-resume", "end a pool-pause: the pool watches these nodes again")):
+        pp = sub.add_parser(name, help=what)
+        pp.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
+        pp.add_argument("--ticket", action="append", required=True, help="the node ticket (repeatable)")
+        if name == "pool-pause":
+            pp.add_argument("--hold-tasks", action="store_true",
+                            help="also stop its sampler from claiming new tasks (store dispenser) while paused")
     ps = sub.add_parser("pool-status", help="the pool's state, billed nodes and last events (read-only)")
     ps.add_argument("--config", required=True, help="the pool config JSON")
     ps.add_argument("--events", type=int, default=20, help="last events to print (default 20)")
@@ -938,15 +1000,29 @@ def main(argv: list[str] | None = None) -> int:
                                                     workdir=args.workdir), args.r2_env_file)
         return launch(doc, cluster_name("sampler", args.ticket), down=False)
     if args.cmd == "down":
+        if not args.direct:
+            from . import pool_run  # noqa: PLC0415
+
+            rc = pool_run.down_member(args.ticket, mode=args.mode)
+            if rc is not None:
+                return rc
         down(args.account, args.ticket)
         return 0
+    if args.cmd in ("pool-pause", "pool-resume"):
+        from . import pool_run  # noqa: PLC0415
+
+        cfg = json.loads(Path(args.config).read_text())
+        return pool_run.pause_pool(cfg, args.config, args.ticket, resume=args.cmd == "pool-resume",
+                                   hold_tasks=getattr(args, "hold_tasks", False))
     if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale"):
         from . import pool_run  # noqa: PLC0415
 
         cfg = json.loads(Path(args.config).read_text())
         if args.cmd == "pool-scale":
             try:
-                return pool_run.scale_pool(cfg, args.config, args.target, retire=args.retire)
+                return pool_run.scale_pool(cfg, args.config, args.target, retire=args.retire, add=args.add,
+                                           remove=args.remove, mode=args.mode, force_static=args.force_static,
+                                           dry_run=args.dry_run, source=args.source)
             except ValueError as error:
                 print(f"pool-scale: refused, nothing changed: {error}")
                 return 2

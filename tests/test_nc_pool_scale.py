@@ -26,7 +26,12 @@ def _env(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", no_subprocess)
 
 
+DISPENSE = {"backend": "store", "namespace": "run-a/dispense"}
+
+
 def _scaled_pool(tmp_path, *, target=2, accounts=(1, 2, 3, 4), **extra):
+    if "data_slots" not in extra:  # an elastic pool takes its tasks from the store dispenser
+        extra.setdefault("sampler", {"dispense": DISPENSE})
     cfg, path = _cfg(tmp_path, target=target, accounts=list(accounts), **extra)
     clock = Clock()
     cloud = Cloud(clock)

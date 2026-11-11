@@ -572,27 +572,56 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
 
 # -- scale ---------------------------------------------------------------------
 
-def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire: list[str]) -> str | None:
+def _counted(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """State-file members that count against the target (LeasePool.counted)."""
+    return [m for m in billed_members(doc) if m.get("state") != "draining" and m.get("retiring_since") is None
+            and not (m.get("replaced_by") and m.get("state") == "ready")]
+
+
+def current_target(cfg: dict[str, Any], doc: dict[str, Any]) -> int:
+    scale = read_scale(cfg)
+    if scale is not None:
+        return int(scale["target"])
+    return int(doc.get("target", cfg["target"]))
+
+
+def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire: list[str], *,
+                  force_static: bool = False) -> str | None:
     """Why ``pool-scale --target`` is refused before anything is ordered (None: allowed).
-    ``doc`` is the pool's state file. Checked: accounts (one node each), data_slots,
-    max_nodes, max_orders, max_run_spend_ucr (one node hour per new node), shard_limit
-    (the trainer's buffer shards / the tunnel ports) and the --retire tickets."""
+    ``doc`` is the pool's state file. Checked: the task source (a store dispenser, or
+    static data slots only with ``force_static``), accounts (one node each, inside
+    ``YETO_NC_ACCOUNTS``), data_slots, max_nodes, max_orders, a tripped breaker,
+    max_run_spend_ucr (one node hour per new node), shard_limit (the trainer's buffer
+    shards / the tunnel ports) and the --retire tickets."""
     pc = cli.pool_config(cfg, allowed=None)
     ecfg = pc.elastic
     if target < 0:
         return f"target {target} < 0"
-    if target > len(pc.accounts):
-        return (f"target {target} > {len(pc.accounts)} accounts (a National Compute account holds one node; "
+    allowed = cli.allowed_accounts()
+    usable = [a for a in pc.accounts if a in allowed]
+    if target > len(usable):
+        return (f"target {target} > {len(usable)} usable accounts {usable} (a National Compute account holds "
+                f"one node; the pool's accounts {pc.accounts} inside YETO_NC_ACCOUNTS {sorted(allowed)}; "
                 f"add accounts to the pool config and restart the pool)")
+    before = current_target(cfg, doc)
+    if target != before and cli.pool_dispense(cfg) is None:
+        if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
+            return ("the samplers have no store dispenser (prompts.dispense.backend store): every sampler "
+                    "reads every prompt, so another node repeats every task; set sampler.dispense in the "
+                    "pool config (an elastic run needs it)")
+        if pc.data_slots is not None and not force_static:
+            return (f"static data_slots {pc.data_slots}: a removed node's slot pauses (its prompts wait "
+                    f"until a scale up continues the slot) and no scale up goes past {pc.data_slots} nodes; "
+                    f"use a store dispenser (sampler.dispense) for an elastic run, or pass --force-static")
     if pc.data_slots is not None and target > int(pc.data_slots):
         return f"target {target} > data_slots {pc.data_slots} (each member holds one slot)"
     if ecfg.max_nodes is not None and target > ecfg.max_nodes:
         return f"target {target} > elastic.max_nodes {ecfg.max_nodes}"
-    members = billed_members(doc)
-    counted = [m for m in members if m.get("state") != "draining"
-               and not (m.get("replaced_by") and m.get("state") == "ready")]
+    counted = _counted(doc)
     new = max(0, target - len(counted))
     if new:
+        if (doc.get("breaker") or {}).get("tripped"):
+            return "the pool's order breaker is tripped (provisioning failed repeatedly): no new node is ordered"
         budget = doc.get("budget") or {}
         orders = int(budget.get("orders", 0))
         if ecfg.max_orders is not None and orders + new > ecfg.max_orders:
@@ -618,33 +647,65 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
     return None
 
 
-def scale_pool(cfg: dict[str, Any], config_path: str, target: int, *, retire: list[str] | None = None) -> int:
-    """``pool-scale --config F --target N [--retire T]``: record the wanted target in the
-    state dir. A running loop applies it at its next tick (it keeps the pool lock: this
-    command never takes it); a loop started later reads it at start."""
-    retire = list(retire or [])
+def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None, *,
+               retire: list[str] | None = None, add: int = 0, remove: list[str] | None = None,
+               mode: str | None = None, force_static: bool = False, dry_run: bool = False,
+               source: str = "manual", extra: dict[str, Any] | None = None) -> int:
+    """``pool-scale --config F (--target N | --add K | --remove T) [--retire T] [--drain|--fence]``:
+    record the wanted target in the state dir. ``--add`` / ``--remove`` are relative to the
+    target recorded when this command holds the scale lock (two concurrent ``--add 1``
+    make +2); ``--remove T`` retires ticket T and lowers the target by one. A running loop
+    applies it at its next tick (it keeps the pool lock: this command never takes it); a
+    loop started later reads it at start. ``mode``: the scale-down mode of this request
+    ("drain": the victims finish their trials in flight first; "fence": at once; None:
+    the pool config's ``elastic.scale_down``). ``source``: "manual" (a person, the
+    default) or "auto" (an automatic scaler); an automatic request is refused for
+    ``elastic.manual_hold_s`` after a manual one (manual operations take priority).
+    The control file keeps the manual entries (paused tickets, released tickets) and
+    the tickets of an earlier request the loop has not applied yet."""
+    retire = list(retire or []) + list(remove or [])
+    if mode is not None and mode not in elastic.SCALE_DOWN_MODES:
+        print(f"pool-scale: refused: mode {mode!r} is not one of {list(elastic.SCALE_DOWN_MODES)}")
+        return 2
     state = cli.pool_state_path(cfg)
-    try:
-        doc = json.loads(state.read_text()) if state.exists() else {}
-    except ValueError:
-        doc = {}
-    if doc.get("stopped"):
-        print(f"pool-scale: refused: the pool is stopped ({doc['stopped']})")
-        return 2
-    why = scale_refusal(cfg, doc, target, retire)
-    if why is not None:
-        print(f"pool-scale: refused, nothing changed: {why}")
-        return 2
     path = scale_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = open(scale_lock_path(cfg), "a+")  # noqa: SIM115 - held for the read-modify-write below
+    lock = open(scale_lock_path(cfg), "a+")  # noqa: SIM115 - held for the check and the read-modify-write
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(state.read_text()) if state.exists() else {}
+        except ValueError:
+            doc = {}
+        if doc.get("stopped"):
+            print(f"pool-scale: refused: the pool is stopped ({doc['stopped']})")
+            return 2
         old = read_scale(cfg) or {}
-        before = int(old.get("target", doc.get("target", cfg["target"])))
+        before = current_target(cfg, doc)
+        wanted = target if target is not None else before + int(add) - len(remove or [])
+        hold = cli.pool_config(cfg, allowed=None).elastic.manual_hold_s
+        last_manual = old.get("manual_at")
+        if source != "manual" and last_manual is not None and time.time() - float(last_manual) < hold:
+            print(f"pool-scale: refused, nothing changed: a manual change {time.time() - float(last_manual):.0f} s "
+                  f"ago takes priority over automatic scaling for elastic.manual_hold_s {hold:.0f} s")
+            return 2
+        if int(old.get("seq", 0)) > int(doc.get("scale_seq", 0)):  # not applied yet: keep its tickets
+            live = {m.get("ticket") for m in _counted(doc)}
+            retire += [t for t in old.get("retire") or () if t not in retire and t in live]
+        why = scale_refusal(cfg, doc, wanted, retire, force_static=force_static)
+        if why is not None:
+            print(f"pool-scale: refused, nothing changed: {why}")
+            return 2
+        change = "scale up" if wanted > before else "scale down" if wanted < before else "no change"
+        if dry_run:
+            print(f"pool-scale: dry run: target {before} -> {wanted} ({change}) would be accepted; nothing changed")
+            return 0
         seq = int(old.get("seq", 0)) + 1
-        new = {"run": cli.run_id(cfg), "target": target, "seq": seq, "retire": retire,
-               "requested": time.time(), "previous": before}
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS},
+               "run": cli.run_id(cfg), "target": wanted, "seq": seq, "retire": retire, "mode": mode,
+               "requested": time.time(), "previous": before, "source": source, **(extra or {})}
+        if source == "manual":
+            new["manual_at"] = new["requested"]
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(new, indent=1))
         tmp.replace(path)
@@ -653,15 +714,140 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int, *, retire: li
     actual = len(billed_members(doc))
     proc = pool_process(cfg)
     alive = proc is not None and proc.get("alive")
-    change = "scale up" if target > before else "scale down" if target < before else "no change"
-    print(f"pool-scale: target {before} -> {target} ({change}); {actual} node(s) billed now"
+    pc = cli.pool_config(cfg, allowed=None)
+    how = mode or pc.elastic.scale_down
+    print(f"pool-scale: target {before} -> {wanted} ({change}); {actual} node(s) billed now"
           + (f"; retire {', '.join(retire)}" if retire else ""))
+    if wanted < before:
+        if pc.data_slots is not None:
+            print("pool-scale: static data slots: the removed node's slot pauses until a scale up continues it")
+        elif how == "drain":
+            print(f"pool-scale: scale down by drain: the removed node(s) claim no new task, finish their "
+                  f"trials in flight (at most {pc.elastic.scale_drain_timeout_s:.0f} s), then are fenced and "
+                  f"released; they bill until then")
+        else:
+            print("pool-scale: scale down by fence: the removed node(s) are fenced now (their tasks go back to "
+                  "the other nodes, their trials in flight are lost) and released")
     if alive:
         print(f"pool-scale: the running pool (pid {proc.get('pid')}) applies it at its next tick")
     else:
         print(f"pool-scale: no pool loop is alive; it applies when the pool starts (python -m yeto.launch.nc "
               f"pool --config {config_path})")
     return 0
+
+
+# -- manual operations ---------------------------------------------------------
+
+MANUAL_KEYS = ("paused", "hold_tasks", "manual_released", "manual_at")
+
+
+def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, resume: bool = False,
+               hold_tasks: bool = False) -> int:
+    """``pool-pause --ticket T [--hold-tasks]`` / ``pool-resume --ticket T``: recorded in the
+    control file; the loop applies it at its next tick (and after a restart). A paused
+    member gets no automatic action and counts toward the target."""
+    name = "pool-resume" if resume else "pool-pause"
+    state = cli.pool_state_path(cfg)
+    path = scale_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(scale_lock_path(cfg), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(state.read_text()) if state.exists() else {}
+        except ValueError:
+            doc = {}
+        live = {m.get("ticket") for m in billed_members(doc)}
+        unknown = [t for t in tickets if t not in live]
+        if unknown and not resume:
+            print(f"{name}: refused, nothing changed: {unknown} not a live member of this pool "
+                  f"(live: {sorted(t for t in live if t)})")
+            return 2
+        old = read_scale(cfg) or {}
+        paused = [t for t in old.get("paused") or () if t in live or resume]
+        hold = [t for t in old.get("hold_tasks") or () if t in paused]
+        if resume:
+            paused = [t for t in paused if t not in tickets]
+            hold = [t for t in hold if t not in tickets]
+        else:
+            paused += [t for t in tickets if t not in paused]
+            if hold_tasks:
+                hold += [t for t in tickets if t not in hold]
+        target = current_target(cfg, doc)
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
+               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
+               "previous": target, "source": "manual", "manual_at": time.time(), "paused": paused,
+               "hold_tasks": hold}
+        if int(old.get("seq", 0)) > int(doc.get("scale_seq", 0)):  # an unapplied request's tickets
+            new["retire"] = [t for t in old.get("retire") or () if t in live]
+            new["mode"] = old.get("mode")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(path)
+    proc = pool_process(cfg)
+    verb = "resumed" if resume else "paused" + (" (no new tasks)" if hold_tasks else "")
+    print(f"{name}: {', '.join(tickets)} {verb}; paused now: {paused or 'none'}")
+    if not resume:
+        print(f"{name}: the pool takes no automatic action on it (no restart, retire, replacement or lease-end "
+              f"drain) and does not replace it; it keeps billing. Resume: python -m yeto.launch.nc pool-resume "
+              f"--config {config_path} --ticket <ticket>")
+    if not (proc is not None and proc.get("alive")):
+        print(f"{name}: no pool loop is alive; it applies when the pool starts")
+    return 0
+
+
+def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
+    """The pool (config, config path, member) whose state holds ``ticket`` as a live
+    member, from the pid files of the state dir (they name the pool config)."""
+    for pid in sorted(tunnel.state_dir().glob("pool-*.pid")):
+        try:
+            config_path = json.loads(pid.read_text())["config"]
+            cfg = json.loads(Path(config_path).read_text())
+            doc = json.loads(cli.pool_state_path(cfg).read_text())
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for m in billed_members(doc):
+            if m.get("ticket") == ticket:
+                return cfg, config_path, m
+    return None
+
+
+def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
+    """``nc down --ticket T`` for a member of a pool: a manual removal through the pool's
+    control file (target - 1, retire T), so the pool does not order a node in its place.
+    None: ``T`` is no pool member (the caller deletes it itself)."""
+    found = pool_of_ticket(ticket)
+    if found is None:
+        return None
+    cfg, config_path, member = found
+    proc = pool_process(cfg)
+    if proc is not None and proc.get("alive"):
+        print(f"down: ticket {ticket} is shard {member.get('shard')} of the running pool {config_path}: asking the "
+              f"pool to remove it (pool-scale --remove {ticket}) instead of deleting it behind the pool's back, "
+              f"which it would replace; the pool releases it and confirms the ticket ended")
+        return scale_pool(cfg, config_path, remove=[ticket], mode=mode, force_static=True)
+    # no loop: delete here, and record it so a later start keeps the lowered target
+    with open(scale_lock_path(cfg), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(cli.pool_state_path(cfg).read_text())
+        except (OSError, ValueError):
+            doc = {}
+        old = read_scale(cfg) or {}
+        target = max(0, current_target(cfg, doc) - 1)
+        released = dict(old.get("manual_released") or {})
+        released[ticket] = {"target_lowered": True, "at": time.time()}
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
+               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
+               "previous": current_target(cfg, doc), "source": "manual", "manual_at": time.time(),
+               "manual_released": released}
+        path = scale_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(path)
+    print(f"down: ticket {ticket} belongs to pool {config_path}, whose loop is not running: deleting it here; "
+          f"the pool target is lowered to {target}, so a restarted pool does not order a node in its place")
+    return None
 
 
 # -- stop ----------------------------------------------------------------------
@@ -744,8 +930,18 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
               for m in left]
     scale = read_scale(cfg)
     target = int(scale["target"]) if scale else int(doc.get("target", cfg["target"]))
+    for row, m in zip(billed, left):
+        row["paused"] = bool(m.get("paused"))
+        row["retiring"] = m.get("retiring_since") is not None
+    manual = {"target_source": (scale or {}).get("source", "config") if scale else "config",
+              "target_set_manually": bool(scale) and (scale or {}).get("source", "manual") != "auto",
+              "manual_at": _until((scale or {}).get("manual_at")),
+              "paused": list((scale or {}).get("paused") or []),
+              "hold_tasks": list((scale or {}).get("hold_tasks") or []),
+              "released_by_hand": sorted((scale or {}).get("manual_released") or {})}
     print(json.dumps({"process": proc, "target": target, "nodes": len(left),
-                      "samplers": f"{len(left)}/{target}", "scale": scale, "billed": billed, "state": doc,
+                      "samplers": f"{len(left)}/{target}", "manual": manual, "scale": scale, "billed": billed,
+                      "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     if left and (proc is None or not proc.get("alive")):
         _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",

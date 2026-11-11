@@ -174,7 +174,8 @@ A run uses three files:
   "sandbox": {
     "envs": "<envs.json>",
     "docker_host": "ssh://<sandbox-host>",
-    "max_run_containers": 40
+    "max_run_containers": 40,
+    "max_containers_per_sampler": 20
   },
   "pool": {"config": "<pool.json>", "interval_s": 30},
   "trainer": {
@@ -205,6 +206,7 @@ Fill the `0` prices with your contracted rates; they drive the spend estimate.
 | `sandbox.envs` | The `agentic.envs` file for `yeto sandbox status / prepare / teardown`. Optional. |
 | `sandbox.docker_host` | Docker endpoint used to count and remove this run's trial containers. |
 | `sandbox.max_run_containers` | Warning threshold for this run's container count (a warning, not a breaker). |
+| `sandbox.max_containers_per_sampler` | Optional. Raises the warning threshold to this many containers per billed NC node, so it follows `yeto run scale`. |
 | `pool.config` | Path of `pool.json`. Required. |
 | `pool.interval_s` | Seconds between pool control ticks (default 30). |
 | `trainer.argv` | The `yeto launch` arguments of the trainer. Required. |
@@ -212,7 +214,7 @@ Fill the `0` prices with your contracted rates; they drive the spend estimate.
 | `trainer.progress_paths` | Extra files whose growth counts as trainer progress for the silence backstop. |
 | `first_group.timeout_s`, `poll_s` | How long `up` waits for the first buffer object before starting the trainer (default 5400 s, polled every 60 s). |
 | `dashboard.port` | Loopback port of the dashboard (default 8795). |
-| `budget.usd` | Spend cap (trainer plus NC estimate). |
+| `budget.usd` | Spend cap (trainer plus NC estimate). The NC part counts the nodes actually billed (grant to release), so it follows `yeto run scale`. |
 | `budget.wall_h` | Wall-clock cap from the pool start (default 3). |
 | `budget.nc_usd_per_h` | Price of one NC node hour for the estimate. |
 | `budget.silence_min` | Minimum silence window of the backstop; the effective window is `max(4 x --rl-stall-timeout, silence_min)`. |
@@ -265,7 +267,7 @@ Key fields (the complete list is in
 
 | Field | Meaning |
 |---|---|
-| `target` | Samplers to keep running. At most the number of `accounts`. Change it at run time with `yeto run scale`. |
+| `target` | Samplers at the start. At most the number of `accounts`. Change it at run time with `yeto run scale` (section 5.1); the scaled value then takes precedence. |
 | `accounts` | NC accounts the pool may order on; each must also be in `YETO_NC_ACCOUNTS`. Accounts beyond `target` are used for replacements. |
 | `shard_base` | Shard prefix: nodes write `<shard_base>-0`, `<shard_base>-1`, ... Also names the pool state file `pool-<shard_base>.json`. |
 | `shard_limit` | How many shard indexes the run may take; set it to the number of shards in the trainer's `--rl-buffer-shards`. The usable range is also bounded by the port range of `agentic.setup.tunnel.listen` (one port per shard). Shard indexes are not reused, so replacements consume new indexes. |
@@ -273,6 +275,10 @@ Key fields (the complete list is in
 | `elastic.max_orders` | Most orders over the whole run. |
 | `elastic.engine_stall_s` | Seconds without generated tokens while requests are pending before an engine counts as stalled (default 600). |
 | `elastic.max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced (default 2). |
+| `elastic.scale_down` | `drain` (default) or `fence`: how a scale down removes a node (section 5.1). |
+| `elastic.scale_drain_timeout_s` | Longest drain of a removed node before it is fenced (default 1800). |
+| `elastic.external_release` | `respect` (default): a node deleted in the NC console lowers the target and is not replaced. `replace`: it is replaced like an eviction (section 5.6). |
+| `elastic.manual_hold_s` | Seconds after a manual operation during which an automatic scale request is refused (default 3600). |
 | `sampler.dispense` | Task dispenser settings ([DISPENSER.md](DISPENSER.md)). |
 | `model_pull` | Model download from the bucket onto each new node. |
 
@@ -367,20 +373,96 @@ estimate, `pool-status`, the dispenser status, and the sampler target/nodes.
 
 ### 5.1 Scaling sampler islands
 
+Add or remove NC sampler nodes while the run trains, with one command. The
+trainer keeps training; nothing is restarted.
+
 ```
-yeto run scale --config <run.json> --samplers <N>
+yeto run scale --config <run.json> --add 1                  # one more sampler node
+yeto run scale --config <run.json> --remove <ticket>        # release this node (target - 1)
+yeto run scale --config <run.json> --samplers <N>           # an absolute count (0 or more)
 yeto run scale --config <run.json> --samplers <N> --retire <ticket>   # pick which node leaves
+yeto run scale --config <run.json> --remove <ticket> --fence          # leave now, see below
+yeto run scale --config <run.json> --add 2 --dry-run        # check only; nothing changes
 ```
 
-This runs `python -m yeto.launch.nc pool-scale --config <pool.json> --target <N>`
-on the running pool. You can also call `pool-scale` directly.
+`yeto run scale` checks the run's own guards, then runs
+`python -m yeto.launch.nc pool-scale --config <pool.json> ...` (same flags,
+with `--target` for `--samplers`). The running pool applies the request at its
+next tick (within `pool.interval_s`). The new target outlives a pool restart.
+`yeto run status` shows the target, the billed nodes and each node's state
+(`retiring: true` while it drains); the dashboard shows the same (section 6).
 
-A scale request is checked before anything is ordered. It is refused (and
-nothing changes) when the target exceeds the number of `accounts`,
-`data_slots`, `elastic.max_nodes`, `elastic.max_orders`,
-`elastic.max_run_spend_ucr`, or the shard range (`shard_limit` /
-tunnel ports). On scale down the pool fences the leaving node's shard first,
-so its claims return to the dispenser. Details:
+**Requirements.** Scaling needs the store task dispenser
+(`sampler.dispense` in `pool.json`, or `prompts.dispense.backend: "store"` in
+the sampler spec). With it, every node takes its tasks from one shared ledger,
+so a new node never repeats a task and a removed node's tasks go back to the
+others. Without a dispenser every sampler reads every prompt, so a scale is
+refused. With static `data_slots` a scale is refused unless you pass
+`--force-static`: a removed node's slot then pauses (its prompts wait) until a
+later scale up continues it, and the count can never pass `data_slots`.
+
+**Scale up.** The pool orders the missing nodes like any replacement. Each new
+node takes a new buffer shard (`<shard_base>-<n>`), sets up, loads the newest
+released policy and starts claiming tasks. Its groups are trained on as soon
+as they are written. If a node is still draining from an earlier scale down,
+the pool keeps that node instead of ordering a new one.
+
+**Scale down.** The pool picks the node to remove: the `--remove` /
+`--retire` ticket, else a node not ready yet, else the newest, cheapest and
+shortest-lease one. Two modes, set per run by `elastic.scale_down` in
+`pool.json` and per request by `--drain` / `--fence`:
+
+| Mode | What happens to the removed node |
+|---|---|
+| `drain` (default) | Its sampler claims no new task. Its trials in flight finish and their groups are written and trained on. Once it holds no task (or after `elastic.scale_drain_timeout_s`, default 1800 s), the pool fences its shard, stops the sampler, deletes the ticket and checks that it reads `ended`. |
+| `fence` | Fenced at once: its task claims go back to the dispenser and the other nodes take them at their next claim, without waiting for the claim lease. Its trials in flight are lost (the tasks are redone elsewhere). Then the same release as above. |
+
+In both modes the groups the node wrote before the fence stay in its shard and
+the trainer reads them as usual; a group written after the fence is dropped by
+the trainer's incarnation gate. No task is given out twice and none is lost.
+No replacement is ordered for a removed node, and the other nodes are not
+touched. A removed node that is evicted, crashes or reaches its lease end
+while it drains is released at once, again with no replacement. The events
+are `nc_elastic_scale_draining`, `nc_elastic_scaled_down` (with `outcome`:
+`drained`, `drain timeout`, `fenced`, `evicted`, `lease end`, ...) and
+`nc_elastic_scale_drain_cancelled`.
+
+**Cost.** A node bills from its grant to its release, whatever the target
+says. The budget estimate, the `budget.usd` breaker and the forced release
+count the nodes the pool state bills, never the target. A draining node bills
+until it is released, so `drain` costs up to `scale_drain_timeout_s` of one
+node per removed node; use `--fence` when that matters more than the trials in
+flight. A scale up is refused when the run's spend plus one node hour per new
+node would pass `budget.usd`, or when the run's breaker has fired. A scale
+down is never refused for cost. The sandbox container warning line follows the
+billed nodes when you set `sandbox.max_containers_per_sampler`.
+
+**Limits.** A scale is refused (exit 2, nothing changed) before anything is
+ordered when:
+
+- the target is above the usable accounts: the pool's `accounts` that are also
+  in `YETO_NC_ACCOUNTS` (one node per account). Adding accounts needs a pool
+  config change and a pool restart;
+- the target is above `data_slots` or `elastic.max_nodes`;
+- the new nodes would pass `elastic.max_orders`, `elastic.max_run_spend_ucr`
+  (one node hour each) or the shard range;
+- the pool's order breaker is tripped (scale up only);
+- a `--remove` / `--retire` ticket is not a live node of the pool.
+
+The shard range is the limit to plan for. The trainer reads only the shards
+listed in `--rl-buffer-shards`, so `shard_limit` must equal that list and every
+`<shard_base>-<i>` below `shard_limit` must be in it; `yeto run up` preflight
+refuses a pool that could order a shard the trainer does not read. Shard
+indexes are never reused: every new node and every lease-end replacement takes
+one. For a long run that scales, list enough shards up front (largest node
+count x number of 4 h leases, plus headroom). A target above the free accounts
+at a given moment (for example while a replacement holds one) is not an
+error: the pool reports `nc_elastic_order_refused` ("no free National Compute
+account") once and orders when an account frees.
+
+Concurrent scale requests are serialized: two `--add 1` from two shells make
++2. To remove a node, use `--remove` (or `nc down`), never the NC console; see
+section 5.6 for manual operations and pauses. Details of the control file:
 [NC_POOL.md, pool-scale](NC_POOL.md#change-the-number-of-samplers-while-the-run-trains-pool-scale).
 
 ### 5.2 Automatic node replacement
@@ -457,6 +539,68 @@ Recommended practice: run `down` when you finish. NC leases bill until their
 tickets are deleted. `pool-stop` alone releases only the NC nodes
 ([NC_POOL.md, Stopping a pool](NC_POOL.md#stopping-a-pool)).
 
+### 5.6 Manual operations take priority
+
+The NC pool keeps the sampler count at its target and replaces lost nodes on
+its own. A person's decision always wins over that automation: every manual
+operation goes through the pool's control file (it outlives a pool restart),
+is logged as an `nc_elastic_manual_*` event and is marked "manual" on the
+dashboard.
+
+**To remove one node, use one of these commands. Do not delete it in the NC
+console.**
+
+```
+yeto run scale --config <run.json> --remove <ticket>          # drain it, then release it
+yeto run scale --config <run.json> --remove <ticket> --fence  # release it now
+python -m yeto.launch.nc down --account <id> --ticket <ticket>   # the same as --remove --fence
+```
+
+`nc down --ticket T` on a node of a running pool does not delete the ticket
+behind the pool's back: it becomes the pool request `pool-scale --remove T
+--fence` (target minus one), and the pool releases the node and confirms the
+ticket ended. With no pool loop running, `nc down` deletes the ticket itself
+and lowers the pool's recorded target, so a later pool start does not order a
+node in its place. `--direct` deletes the ticket even when a pool runs.
+
+**A node deleted in the NC console anyway** (a ticket that ends `released`
+without this tool deleting it) is taken as a manual removal: the pool lowers
+its target by one, orders no replacement, hands nothing on and emits
+`nc_elastic_manual_release_detected` (shown in red on the dashboard). If that
+node had a replacement in flight, the replacement takes its place and the
+target is unchanged. A node the platform takes back (ticket ended
+`preempted`, `lost` or `admin`) is still replaced automatically. To get the
+old behaviour (a console deletion is replaced too), set
+`"elastic": {"external_release": "replace"}` in `pool.json`.
+
+**Pause a node for maintenance.**
+
+```
+yeto run pause --config <run.json> --ticket <ticket> [--hold-tasks]
+yeto run resume --config <run.json> --ticket <ticket>
+```
+
+(or `python -m yeto.launch.nc pool-pause / pool-resume --config <pool.json>
+--ticket <ticket>`). While a node is paused the pool takes no automatic action
+on it: no probe verdict, no sampler restart, no retire, no fence, no
+lease-end drain, no replacement order, and it is never picked by an automatic
+scale down (naming it in `--remove` ends the pause). It keeps counting toward
+the target, so its absence is not filled, and it keeps billing. Past its lease
+end the pool only warns (`nc_elastic_manual_paused_past_lease_end`): resume or
+remove it. `--hold-tasks` also stops its sampler from claiming new tasks (its
+trials in flight finish), so you can inspect it without losing work; resume
+lifts the hold. If the platform ends the ticket during a pause, the pause ends
+and the node is handled as usual. `pool-status` lists the paused nodes
+(`manual.paused`, and `paused: true` per billed node).
+
+**Manual before automatic scaling.** A scale request carries its source:
+`--source manual` (the default for every command a person types) or
+`--source auto` (for an automatic scaler you run yourself). An automatic
+request is refused for `elastic.manual_hold_s` (default 3600 s) after the last
+manual operation. `pool-status` shows who set the target (`manual.target_source`:
+`manual`, `auto`, `manual_release` or `config`) and when
+(`manual.manual_at`).
+
 ## 6. Dashboard
 
 `yeto run up` starts `yeto dashboard serve --store <store> --port <port>` on
@@ -520,8 +664,14 @@ means samplers are the bottleneck.
 loading it. NC pool events appear as dashed lines.
 
 **NC pool events.** The `nc_elastic_*` stream (ordered, member_ready,
-shard_fenced, evicted, node_lost, engine_stalled, released, ...). Use it to
-follow a replacement end to end.
+shard_fenced, evicted, node_lost, engine_stalled, released, target_changed,
+scale_draining, scaled_down, ...). Use it to follow a replacement or a scale
+end to end. Above it, one line shows the pool's sampler count: ready nodes,
+nodes draining after a scale down, nodes paused by hand, the target (marked
+"set by hand" after a manual change) and the shards. Manual operations are
+labelled "manual" in the event list. A sampler that
+left by a scale down shows as left (`scaled_down`), not as lost; one still
+draining keeps its normal health.
 
 ### Other panels
 
@@ -543,7 +693,8 @@ The monitor in `yeto run up` checks the run every minute:
 | Trainer exit | launcher finished `FAILED` or non-zero | Stop the trainer path cleanly. |
 | Silence backstop | trainer log and `progress_paths` unchanged for `max(4 x --rl-stall-timeout, silence_min)` | Stop the trainer. |
 | First group | no buffer object within `first_group.timeout_s` | Stop before the trainer starts. |
-| Sandbox containers | count > `sandbox.max_run_containers` | Warning only. |
+| Sandbox containers | count > `sandbox.max_run_containers` (or `max_containers_per_sampler` x billed nodes, if larger) | Warning only. |
+| Scale up | spend + one node hour per new node > `budget.usd`, or a breaker fired | `yeto run scale` refuses; nothing changes. |
 
 **Trainer first, NC kept.** By design, a breach stops only the trainer
 (`yeto down <run>`). The NC pool, its nodes and the sandboxes stay up, so a
@@ -621,10 +772,17 @@ sampler on the same node(s)
 ([NC_POOL.md, pool-retry](NC_POOL.md#retry-after-a-configuration-error-pool-retry)).
 
 **`yeto run scale` is refused.**
-The message names the limit (accounts, `max_nodes`, `max_orders`, spend, or
-the shard range). Shard indexes are not reused. For a long run with many
+The message names the limit (usable accounts, `max_nodes`, `max_orders`,
+spend, the run budget, a breaker, the shard range, or a missing task
+dispenser). Shard indexes are not reused. For a long run with many
 replacements, set a generous `--rl-buffer-shards` list and `shard_limit` up
-front.
+front. Try a request first with `--dry-run`.
+
+**A removed node is still billed.**
+In `drain` mode it bills until its trials in flight finish (at most
+`elastic.scale_drain_timeout_s`). `yeto run status` shows it with
+`retiring: true`. To release it now, repeat the request with `--fence`, for
+example `yeto run scale --config <run.json> --samplers <N> --fence`.
 
 **`up` stops at the first group.**
 No buffer object appeared within `first_group.timeout_s`. Check `pool.log`
@@ -914,6 +1072,8 @@ only sandboxes with its name prefix that carry this run's label or record.
 - The padded-sample fraction as a dashboard column next to the padded sample
   count.
 - Pool configuration changes (accounts, limits) without a pool restart. Today,
-  adding accounts takes a pool restart; the target can change at run time.
+  adding accounts takes a pool restart; the sampler count can change at run
+  time (`yeto run scale`).
+- Automatic scaling from the buffer backlog and the trainer's wait time.
 - Release-mode images on the K3.1 full-parameter base.
 - A measured first step of the 262k layout (split 32/29/32) under production conditions.

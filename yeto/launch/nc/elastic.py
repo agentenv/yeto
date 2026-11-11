@@ -172,6 +172,10 @@ def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler
 
 # -- config -------------------------------------------------------------------
 
+SCALE_DOWN_MODES = ("drain", "fence")
+EXTERNAL_RELEASE_MODES = ("respect", "replace")
+
+
 @dataclass
 class ElasticConfig:
     """The eviction-handling knobs (customer guide: ``nc-elastic`` section).
@@ -217,6 +221,18 @@ class ElasticConfig:
     max_nodes: int | None = None  # billed nodes at once (default: 2 x target)
     max_orders: int | None = None  # orders over the run
     stop_on_finish: bool = True  # a sampler that exits 0 ends the pool (the run is over)
+    # scale down (pool-scale / yeto run scale): "drain" asks the chosen node's sampler to claim
+    # no new task and waits up to scale_drain_timeout_s for its trials in flight to finish
+    # (their groups are written and trained on); "fence" fences it at once (its task claims go
+    # back to the dispenser for the other nodes, its trials in flight are lost)
+    scale_down: str = "drain"
+    scale_drain_timeout_s: float = 1800.0
+    # a ticket ended "released" that this tool did not delete (a person in the NC console):
+    # "respect" takes it as a manual removal (target - 1, no replacement, manual_release_detected);
+    # "replace" orders a replacement as for an eviction (the behaviour before manual priority)
+    external_release: str = "respect"
+    # an automatic scale request (source "auto") is refused this long after a manual one
+    manual_hold_s: float = 3600.0
 
     @classmethod
     def from_dict(cls, doc: Mapping[str, Any] | None) -> ElasticConfig:
@@ -236,6 +252,14 @@ class ElasticConfig:
             raise ValueError('elastic config: metrics_port must be a port, "spec" or null')
         if cfg.max_stall_restart_failures < 1:
             raise ValueError("elastic config: max_stall_restart_failures must be >= 1")
+        if cfg.scale_down not in SCALE_DOWN_MODES:
+            raise ValueError(f"elastic config: scale_down must be one of {list(SCALE_DOWN_MODES)}")
+        if cfg.external_release not in EXTERNAL_RELEASE_MODES:
+            raise ValueError(f"elastic config: external_release must be one of {list(EXTERNAL_RELEASE_MODES)}")
+        if float(cfg.manual_hold_s) < 0:
+            raise ValueError("elastic config: manual_hold_s must be >= 0")
+        if float(cfg.scale_drain_timeout_s) < 0:
+            raise ValueError("elastic config: scale_drain_timeout_s must be >= 0")
         if cfg.breaker_failures < 1 or cfg.breaker_max_trips < 1:
             raise ValueError("elastic config: breaker_failures and breaker_max_trips must be >= 1")
         return cfg

@@ -107,6 +107,10 @@ class Member:
     tokens_moved_at: float | None = None  # last probe it moved, or the engine was idle
     stall_failures: int = 0  # stall restarts in a row with no token progress between them
     metrics_misses: int = 0  # probes in a row of a running sampler whose engine /metrics did not read
+    # scale down in "drain" mode: since when its sampler claims no new task (None: not retiring)
+    retiring_since: float | None = None
+    drain_seq: str | None = None  # the drain request its sampler answers (set by ops.request_drain)
+    paused: bool = False  # pool-pause: no automatic action on it until pool-resume (manual)
 
 
 class PoolOps(Protocol):
@@ -119,7 +123,9 @@ class PoolOps(Protocol):
     def account_free(self, account: int) -> bool: ...
     # optional (``getattr``): probe(member) -> el.Probe; restart(member, shards); fence(member);
     # fence_incarnation(member) (lease only, no handoff: a stalled engine restarted in place);
-    # run_tickets() -> [(account, ticket)] open tickets of this run in the ledger
+    # run_tickets() -> [(account, ticket)] open tickets of this run in the ledger;
+    # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
+    # drained(member) -> bool (it holds no task claim any more), cancel_drain(member)
 
 
 @dataclass
@@ -177,6 +183,13 @@ class LeasePool:
     scale_seq: int = 0  # the last scale request whose ``retire`` list was applied
     shrink: int = 0  # members a lowered target still has to release
     _retire_req: list[str] = field(default_factory=list)
+    scale_mode: str | None = None  # the last scale request's scale-down mode (None: elastic.scale_down)
+    _no_account: str | None = None  # the last "no free account" refusal reported
+    # the control file's manual entries: tickets a person released (``nc down``) and whether
+    # the target was lowered for them already; paused tickets and those holding no tasks
+    manual_released: dict[str, Any] = field(default_factory=dict)
+    paused_req: set[str] = field(default_factory=set)
+    hold_req: set[str] = field(default_factory=set)
     _warned: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
@@ -223,7 +236,10 @@ class LeasePool:
             return "breaker tripped"
         if not self.breaker.allows(now):
             return f"breaker open for {self.breaker.open_until - now:.0f}s"
-        return self.budget.refusal(self.ecfg, billed_nodes=len(self.live()), target=self.config.target,
+        billed = len(self.live())
+        if self.ecfg.max_nodes is None:  # the default cap (2 x target) leaves out nodes a scale down drains
+            billed -= len(self.retiring())
+        return self.budget.refusal(self.ecfg, billed_nodes=billed, target=self.config.target,
                                    hourly_ucr=hourly_cost_ucr())
 
     def _order(self, replaces: Member | None = None) -> Member | None:
@@ -241,7 +257,13 @@ class LeasePool:
         self._refused = None
         account = self._free_account()
         if account is None:
+            refused = (f"no free National Compute account: {len(self.live())} of {len(self.config.accounts)} "
+                       f"accounts hold a node of this pool (one node per account), target {self.config.target}")
+            if refused != self._no_account:  # once per change, not every tick
+                self._event("order_refused", why=refused)
+            self._no_account = refused
             return None
+        self._no_account = None
         handoff = self.pending[0] if replaces is None and self.pending else None
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
@@ -344,6 +366,9 @@ class LeasePool:
 
     def _retire(self, m: Member, why: str, *, lost: bool) -> None:
         """A member that will not sample again: fence, release, hand its slot on."""
+        if m.retiring_since is not None:  # a scale-down victim: nothing is handed on
+            self._finish_retire(m, self.clock(), outcome=why)
+            return
         self._fence(m, why)
         successor = next((s for s in self.members if s.state != GONE and s.replaces == m.ticket), None)
         if successor is not None:  # its replacement is on the way: it continues m's shard
@@ -378,6 +403,7 @@ class LeasePool:
             doc = json.loads(self.scale_path.read_text())
             target = int(doc["target"])
             seq = int(doc.get("seq", 0))
+            mode = doc.get("mode")
         except (OSError, ValueError, KeyError, TypeError) as error:
             self.log(f"pool: unreadable scale file {self.scale_path}: {error!r}; target unchanged")
             return
@@ -389,25 +415,94 @@ class LeasePool:
             return
         if target < 0:
             return
+        source = str(doc.get("source") or "manual")
         if target != self.config.target:
             if target < self.config.target:
                 self.shrink = max(self.shrink, len(self.counted()) - target)
-            self._event("target_changed", old=self.config.target, new=target, seq=seq)
-            self.log(f"pool: target {self.config.target} -> {target} (pool-scale)")
+            self._event("target_changed", old=self.config.target, new=target, seq=seq, source=source)
+            if source == "manual":
+                self._event("manual_scale", old=self.config.target, new=target, seq=seq,
+                            retire=list(doc.get("retire") or ()))
+            self.log(f"pool: target {self.config.target} -> {target} (pool-scale, {source})")
             self.config.target = target
         if seq > self.scale_seq:
             self.scale_seq = seq
             self._retire_req = [str(t) for t in doc.get("retire") or ()]
+            self.scale_mode = str(mode) if mode in el.SCALE_DOWN_MODES else None
+        self.manual_released = dict(doc.get("manual_released") or {})
+        self._apply_pause({str(t) for t in doc.get("paused") or ()}, {str(t) for t in doc.get("hold_tasks") or ()})
+
+    def _apply_pause(self, paused: set[str], hold: set[str]) -> None:
+        """``pool-pause`` / ``pool-resume``: a paused member gets no automatic action (no
+        probe verdict, restart, retire, lease-end drain, replacement or scale-down pick)
+        and keeps counting toward the target; ``hold`` ones also claim no new task."""
+        self.paused_req, self.hold_req = paused, hold
+        for m in self.live():
+            if m.ticket in paused and not m.paused:
+                m.paused = True
+                self._event("manual_pause", ticket=m.ticket, account=m.account, shard=m.shard,
+                            hold_tasks=m.ticket in hold)
+                if m.ticket in hold and getattr(self.ops, "request_drain", None) is not None:
+                    try:
+                        self.ops.request_drain(m)
+                    except Exception as error:  # noqa: BLE001 - the pause holds anyway
+                        self.log(f"pool: task hold of {m.ticket} failed: {error!r}"[:300])
+            elif m.paused and m.ticket not in paused:
+                m.paused = False
+                m.unreachable_since = m.status_fail_since = None
+                m.tokens_moved_at = None  # no stall verdict from the paused time
+                self._event("manual_resume", ticket=m.ticket, account=m.account, shard=m.shard)
+                if m.drain_seq is not None and m.retiring_since is None \
+                        and getattr(self.ops, "cancel_drain", None) is not None:
+                    try:
+                        self.ops.cancel_drain(m)
+                    except Exception as error:  # noqa: BLE001
+                        self.log(f"pool: task hold release of {m.ticket} failed: {error!r}"[:300])
+
+    def record_target(self, target: int, *, source: str, **extra: Any) -> None:
+        """The pool lowers its own target (a manual release it detected): written to the
+        control file under the scale lock, so the target outlives a restart and a later
+        ``pool-scale`` starts from it."""
+        if self.scale_path is None:
+            return
+        import fcntl  # noqa: PLC0415
+
+        self.scale_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.scale_path.with_suffix(".lock"), "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                old = json.loads(self.scale_path.read_text()) if self.scale_path.exists() else {}
+            except (OSError, ValueError):
+                old = {}
+            if self.scale_run is not None and old.get("run") not in (None, self.scale_run):
+                old = {}
+            seq = max(int(old.get("seq", 0)), self.scale_seq) + 1
+            new = {**{k: v for k, v in old.items() if k in ("paused", "hold_tasks", "manual_released")},
+                   "run": self.scale_run if self.scale_run is not None else old.get("run"), "target": int(target),
+                   "seq": seq, "retire": [], "mode": None, "source": source, "requested": self.clock(),
+                   "previous": self.config.target, **extra}
+            tmp = self.scale_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(new, indent=1))
+            tmp.replace(self.scale_path)
+        self.scale_seq = seq
+        self.config.target = int(target)
 
     def counted(self) -> list[Member]:
         """The members that count against the target, as the fill step counts them (a
         member whose replacement is ready does not; one draining does not)."""
-        return [m for m in self.live() if m.state != DRAINING and not (m.replaced_by and m.state == READY)]
+        return [m for m in self.live() if m.state != DRAINING and m.retiring_since is None
+                and not (m.replaced_by and m.state == READY)]
+
+    def retiring(self) -> list[Member]:
+        """Scale-down victims still finishing their trials in flight ("drain" mode)."""
+        return [m for m in self.live() if m.retiring_since is not None and m.state != DRAINING]
 
     def _scale_victims(self, excess: int) -> list[Member]:
         counted = self.counted()
         chosen = [m for t in self._retire_req for m in counted if m.ticket == t][:excess]
-        rest = sorted((m for m in counted if m not in chosen),
+        for m in chosen:  # a person named it: the pause ends with it
+            m.paused = False
+        rest = sorted((m for m in counted if m not in chosen and not m.paused),
                       key=lambda m: (m.state == READY, -(m.created or 0.0), m.hourly_ucr or hourly_cost_ucr(),
                                      m.lease_until if m.lease_until is not None else float("inf")))
         return chosen + rest[:excess - len(chosen)]
@@ -421,37 +516,132 @@ class LeasePool:
                 out.append(x)
         return out
 
-    def _scale_down(self, now: float) -> None:  # noqa: ARG002
-        """Above target: fence the chosen members (their dispense claims go back at
-        once), drain them (sampler stop, release, delete, ended) and hand nothing on:
-        no replacement is ordered for them."""
+    def _scale_down(self, now: float) -> None:
+        """Above target: choose the victims. "drain" mode (``elastic.scale_down``, or the
+        request's ``--fence`` / ``--drain``): a ready victim's sampler is asked to claim no
+        new task; it stays billed until its trials in flight are written (``drained``) or
+        ``scale_drain_timeout_s`` passes, then goes as in "fence" mode. "fence" mode: fence
+        at once (its dispense claims go back at once), drain (sampler stop, release, delete,
+        ended). No replacement is ordered for a victim, nothing is handed on (with static
+        ``data_slots`` its slot waits in ``pending`` for the next scale up)."""
+        self._revive()
         excess = min(self.shrink, len(self.counted()) - self.config.target)
         if excess <= 0:
             self.shrink = 0
             if self._retire_req:
                 self._event("retire_ignored", tickets=self._retire_req, why="not above target")
             self._retire_req = []
+        else:
+            victims = self._scale_victims(excess)
+            self._retire_req = []
+            self.shrink -= len(victims)
+            mode = self.scale_mode or self.ecfg.scale_down
+            for m in victims:
+                if m.state in (GONE, DRAINING):
+                    continue
+                if mode == "drain" and m.state != READY:
+                    # a replacement not ready yet: it goes now, the ready node it replaces drains
+                    ready = [x for x in self._linked(m)[1:] if x.state == READY]
+                    if ready and self._request_drain(ready[0], now):
+                        if m.state not in (GONE, DRAINING):
+                            self._finish_retire(m, now, outcome="linked to a draining node", alone=True)
+                        continue
+                if mode == "drain" and self._request_drain(m, now):
+                    continue
+                self._finish_retire(m, now, outcome="fenced" if mode == "fence" else "fenced (not draining)")
+        for m in self.retiring():
+            if m.state == GONE or m.retiring_since is None:
+                continue
+            if now - m.retiring_since >= float(self.ecfg.scale_drain_timeout_s):
+                self._finish_retire(m, now, outcome="drain timeout")
+            elif self._drained(m):
+                self._finish_retire(m, now, outcome="drained")
+
+    def _request_drain(self, m: Member, now: float) -> bool:
+        """Start the "drain" scale down of ``m``: False when it cannot drain (not ready:
+        nothing in flight; static data slots; no ``request_drain``; the request failed)."""
+        request = getattr(self.ops, "request_drain", None)
+        if m.state != READY or request is None or self.config.data_slots is not None:
+            return False
+        try:
+            request(m)
+        except Exception as error:  # noqa: BLE001 - fall back to a fence
+            self._event("scale_drain_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            return False
+        partners = self._linked(m)[1:]
+        m.retiring_since = now
+        m.replaced_by = None
+        for x in partners:  # its make-before-break partner goes with it
+            x.replaced_by = None
+            if x.state != READY:  # nothing in flight yet: it goes now, alone
+                self._finish_retire(x, now, outcome="linked to a draining node", alone=True)
+                continue
+            x.retiring_since = now
+            try:
+                request(x)
+            except Exception:  # noqa: BLE001 - it times out and is fenced then
+                pass
+        self._event("scale_draining", ticket=m.ticket, account=m.account, shard=m.shard,
+                    timeout_s=float(self.ecfg.scale_drain_timeout_s), target=self.config.target,
+                    with_linked=[x.ticket for x in partners])
+        return True
+
+    def _drained(self, m: Member) -> bool:
+        if m.state != READY:  # restarting / starting: nothing of it is in flight
+            return True
+        drained = getattr(self.ops, "drained", None)
+        if drained is None:
+            return False
+        try:
+            return bool(drained(m))
+        except Exception as error:  # noqa: BLE001 - read again next tick; the timeout bounds it
+            self.log(f"pool: drain check of {m.ticket} failed: {error!r}"[:300])
+            return False
+
+    def _revive(self) -> None:
+        """A raised target while victims still drain: keep them instead of ordering."""
+        cancel = getattr(self.ops, "cancel_drain", None)
+        if cancel is None:
             return
-        victims = self._scale_victims(excess)
-        self._retire_req = []
-        self.shrink -= len(victims)
-        for m in victims:
-            group = self._linked(m)
-            for x in group:
-                self._fence(x, "scale down")
-                x.replaced_by = None
-                x.end_reason = "scaled down"
-                self._drain(x, "scale down")
-            ended = None
-            if m.state == GONE:
-                try:
-                    status = self.ops.poll(m)
-                    ended = (status.state if hasattr(status, "state") else status[0]) == "ended"
-                except Exception:  # noqa: BLE001 - the drain already confirmed the delete
-                    ended = None
-            self._event("scaled_down", ticket=m.ticket, account=m.account, shard=m.shard,
-                        target=self.config.target, released=m.state == GONE, ended=ended,
-                        with_linked=[x.ticket for x in group[1:]])
+        for m in sorted(self.retiring(), key=lambda x: -(x.retiring_since or 0.0)):
+            if len(self.counted()) >= self.config.target:
+                return
+            if m.state != READY:
+                continue
+            try:
+                cancel(m)
+            except Exception as error:  # noqa: BLE001 - it finishes its drain; a new node is ordered
+                self.log(f"pool: cancel drain of {m.ticket} failed: {error!r}"[:300])
+                continue
+            m.retiring_since = None
+            self._event("scale_drain_cancelled", ticket=m.ticket, shard=m.shard, target=self.config.target)
+
+    def _finish_retire(self, m: Member, now: float, *, outcome: str, alone: bool = False) -> None:
+        """Fence and drain (release, delete, ended) ``m`` and its linked members that are not
+        draining on their own (``alone``: ``m`` only); event ``scaled_down``."""
+        waited = None if m.retiring_since is None else round(now - m.retiring_since)
+        group = [m] if alone else [m] + [x for x in self._linked(m)[1:] if x.retiring_since is None]
+        if self.config.data_slots is not None and (m.data_slot is not None or m.joined):
+            # static slots: no dispenser takes the slot's prompts; it waits for the next scale up
+            self.pending.append({"data_slot": m.data_slot, "shard": m.shard if m.joined else m.replaces_shard,
+                                 "lost": False, "from": m.ticket, "paused": True})
+            self._event("slot_paused", ticket=m.ticket, shard=m.shard, data_slot=m.data_slot)
+        for x in group:
+            x.retiring_since = None
+            self._fence(x, "scale down")
+            x.replaced_by = None
+            x.end_reason = "scaled down"
+            self._drain(x, "scale down")
+        ended = None
+        if m.state == GONE:
+            try:
+                status = self.ops.poll(m)
+                ended = (status.state if hasattr(status, "state") else status[0]) == "ended"
+            except Exception:  # noqa: BLE001 - the drain already confirmed the delete
+                ended = None
+        self._event("scaled_down", ticket=m.ticket, account=m.account, shard=m.shard,
+                    target=self.config.target, released=m.state == GONE, ended=ended, outcome=outcome,
+                    waited_s=waited, with_linked=[x.ticket for x in group[1:]])
 
     # -- one control step ----------------------------------------------------
     def tick(self) -> None:
@@ -468,6 +658,8 @@ class LeasePool:
             self._drain(m, "retry")
 
         for m in self.live():
+            if m.paused and self._watch_paused(m, now):
+                continue
             if m.config_error is not None:  # kept for pool-retry: only its ticket is read
                 self._watch_kept(m, now)
             elif m.state in (PROVISIONING, STARTING, READY):
@@ -483,8 +675,11 @@ class LeasePool:
                 self._drain(by_ticket[m.replaces], f"replacement {m.ticket} ready")
                 m.replaces = None
         for m in self.live():
-            if m.state != DRAINING and m.lease_until is not None \
+            if m.state != DRAINING and not m.paused and m.lease_until is not None \
                     and now >= m.lease_until - self.config.end_margin_s:
+                if m.retiring_since is not None:
+                    self._finish_retire(m, now, outcome="lease end")
+                    continue
                 if m.replaced_by is None or by_ticket.get(m.replaced_by) is None \
                         or by_ticket[m.replaced_by].state != READY:
                     self._handoff_slot(m)
@@ -506,16 +701,63 @@ class LeasePool:
 
         # replacements for members close to their lease end
         for m in self.live():
-            if (m.state == READY and not m.replaced_by and m.lease_until is not None
-                    and now >= m.lease_until - self.config.replace_lead_s):
+            if (m.state == READY and not m.replaced_by and m.retiring_since is None and not m.paused
+                    and m.lease_until is not None and now >= m.lease_until - self.config.replace_lead_s):
                 self._order(replaces=m)
 
         # fill up to target (members waiting for a replacement count until they go)
-        while len([m for m in self.live() if not (m.replaced_by and m.state == READY)]) < self.config.target:
+        while len([m for m in self.live() if m.retiring_since is None
+                   and not (m.replaced_by and m.state == READY)]) < self.config.target:
             if self._order() is None:
                 break
         if self.breaker.tripped and not self.live():
             self.stop("breaker tripped and no member left")
+
+    def _watch_paused(self, m: Member, now: float) -> bool:
+        """A paused member: only its ticket is read (spend, lease end). True: nothing else
+        is done this tick; False: its ticket ended, so the pause is over and the member is
+        watched as usual (an eviction is replaced, a release by a person is respected)."""
+        status = self._status(m, now)
+        if status.state == "active":
+            if m.granted is None:
+                m.granted = now
+            self._charge(m, now)
+            end = el.effective_end(status)
+            if end is not None:
+                m.lease_until = end
+            if m.lease_until is not None and now >= m.lease_until - self.config.end_margin_s:
+                self._once(m, "paused_lease_end", "manual_paused_past_lease_end", lease_until=m.lease_until)
+            return True
+        if status.state == "ended":
+            m.paused = False
+            self._event("manual_pause_ended", ticket=m.ticket, shard=m.shard, end_reason=status.end_reason)
+            return False
+        return True
+
+    def _manual_release(self, m: Member, now: float, *, by_console: bool) -> None:
+        """A person released ``m`` (``nc down`` or the NC console): lower the target by one
+        (unless ``nc down`` did already, or a replacement in flight takes its place), order
+        no replacement, hand nothing on."""
+        entry = self.manual_released.get(m.ticket) or {}
+        successor = next((s for s in self.members if s.state != GONE and s.replaces == m.ticket), None)
+        old = self.config.target
+        new = old
+        if successor is None and not entry.get("target_lowered"):
+            new = max(0, old - 1)
+        self._event("manual_release_detected", ticket=m.ticket, account=m.account, shard=m.shard,
+                    old=old, new=new, by="console" if by_console else "nc down",
+                    detail=("a person released this node: the pool lowers its target and orders no replacement "
+                            "(elastic.external_release replace: order one as before)"))
+        if new != old:
+            self.record_target(new, source="manual_release",
+                               manual_released={**self.manual_released, m.ticket: {"target_lowered": True}})
+            self.manual_released[m.ticket] = {"target_lowered": True}
+        if m.replaces:  # it was a replacement: its predecessor is not replaced again by it
+            for p in self.members:
+                if p.ticket == m.replaces and p.state != GONE:
+                    p.replaced_by = None
+        m.retiring_since = m.retiring_since or now
+        self._finish_retire(m, now, outcome="released by a person", alone=True)
 
     def _watch_kept(self, m: Member, now: float) -> None:
         """A member kept after a configuration error: its lease end and its ticket's
@@ -620,6 +862,10 @@ class LeasePool:
             m.end_reason = status.end_reason
             self._charge(m, now)
             ours = kind == el.RELEASED and bool(getattr(self.ops, "released_by_us", lambda t: False)(m.ticket))
+            if kind == el.RELEASED and (not ours or m.ticket in self.manual_released) \
+                    and self.ecfg.external_release == "respect":
+                self._manual_release(m, now, by_console=not ours)
+                return
             self._event({el.EVICTED: "evicted", el.EXPIRED: "expired",
                          el.RELEASED: "released_by_earlier_pool" if ours else "released_externally",
                          el.BALANCE: "ended_for_balance"}[kind], ticket=m.ticket, account=m.account,
@@ -758,6 +1004,9 @@ class LeasePool:
         return future is not None and not future.done()
 
     def _crashed(self, m: Member, now: float, detail: str) -> None:
+        if m.retiring_since is not None:  # scaled down: not restarted
+            self._finish_retire(m, now, outcome="sampler exited")
+            return
         restart = getattr(self.ops, "restart", None)
         if restart is not None and m.restarts < self.ecfg.max_sampler_restarts:
             m.restarts += 1

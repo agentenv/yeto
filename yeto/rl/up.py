@@ -34,7 +34,8 @@ Run config (JSON; paths may use ``~``)::
     {"run": "<run>", "store": "s3://<bucket>/runs/<run>",
      "env": {"AWS_PROFILE": "...", "YETO_NC_ACCOUNTS": "5", ...},
      "preflight": {"commands": [["python", "check.py"]]},
-     "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40},
+     "sandbox": {"envs": "<envs.json>", "docker_host": "ssh://<sandbox host>", "max_run_containers": 40,
+                 "max_containers_per_sampler": 20},  # the alert line: the larger of the two
      "pool": {"config": "<pool.json>", "interval_s": 30},
      "trainer": {"argv": ["--training-mode", "rl", ...], "usd_per_h": 136},
      "first_group": {"timeout_s": 5400, "poll_s": 60},
@@ -44,6 +45,12 @@ Run config (JSON; paths may use ``~``)::
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
 whose process is alive is not started again.
+
+``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
+changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
+trainer is not touched). Before the pool's own checks it refuses a scale up when the run's
+breaker has fired or one more node hour per new node passes ``budget.usd``. The budget,
+the breakers and ``status`` count the nodes the pool state bills, never the target.
 """
 
 from __future__ import annotations
@@ -171,6 +178,11 @@ class Run:
                  "(the monitor's silence backstop is 4x this timeout)")
             self.mark("preflight", ok=False)
             return False
+        problem = self.shard_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         ok = self._cmd(self.nc("pool", "--config", self.pool_config, "--dry-run"), log="preflight.log") == 0
         if self.envs:
             ok &= self._cmd(self.yeto("sandbox", "status", "--envs", self.envs, "--store", self.cfg["store"]),
@@ -264,20 +276,21 @@ class Run:
         b = self.cfg.get("budget") or {}
         now = time.time()
         nc = self.nc_node_hours(now) * float(b.get("nc_usd_per_h", 24))
-        tr = (now - self.state.get("trainer_t0", now)) / 3600 * float(self.cfg["trainer"].get("usd_per_h", 0))
+        rate = float((self.cfg.get("trainer") or {}).get("usd_per_h", 0))
+        tr = (now - self.state.get("trainer_t0", now)) / 3600 * rate
         return nc + tr
 
     def nc_node_hours(self, now: float | None = None) -> float:
         """Billed NC node hours of this run: each pool state member from its grant (a ticket
         never granted bills nothing) to its release (``charged_to`` of a gone member) or now,
         counted from this run's ``t0``. Without a readable pool state: the wall time since
-        ``t0`` times the pool target (every node assumed billed)."""
+        ``t0`` times the pool target (the scaled one; every node assumed billed)."""
         now = time.time() if now is None else now
         t0 = float(self.state.get("t0", now))
         members = self.pool_members()
         if members is None:  # no state yet / unreadable: the conservative estimate
             try:
-                nodes = max(1, int(json.loads(Path(self.pool_config).read_text()).get("target", 1)))
+                nodes = max(1, self.pool_target({}))
             except Exception:  # noqa: BLE001
                 nodes = 1
             return max(0.0, now - t0) / 3600 * nodes
@@ -290,15 +303,54 @@ class Run:
             hours += max(0.0, end - start) / 3600
         return hours
 
-    def pool_members(self) -> list[dict[str, Any]] | None:
-        """The members of the pool state file (None: no readable state)."""
+    def _nc_dir(self) -> Path:
+        return Path(self.env.get("YETO_NC_STATE_DIR", "~/.yeto/nc")).expanduser()  # tunnel.state_dir()
+
+    def pool_doc(self) -> dict[str, Any] | None:
+        """The pool state file (None: no readable state)."""
         try:
             pool_cfg = json.loads(Path(self.pool_config).read_text())
-            nc_dir = Path(self.env.get("YETO_NC_STATE_DIR", "~/.yeto/nc")).expanduser()  # tunnel.state_dir()
-            doc = json.loads((nc_dir / f"pool-{pool_cfg['shard_base']}.json").read_text())
-            return list(doc["members"])
+            return json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json").read_text())
         except Exception:  # noqa: BLE001
             return None
+
+    def pool_members(self) -> list[dict[str, Any]] | None:
+        """The members of the pool state file (None: no readable state)."""
+        doc = self.pool_doc()
+        try:
+            return list(doc["members"]) if doc is not None else None
+        except (KeyError, TypeError):
+            return None
+
+    def billed_nodes(self) -> int | None:
+        """Pool members billed now (granted, not gone); None without a pool state."""
+        members = self.pool_members()
+        if members is None:
+            return None
+        return sum(1 for m in members if m.get("state") != "gone" and m.get("granted") is not None)
+
+    def pool_target(self, doc: dict[str, Any] | None) -> int:
+        """The pool's wanted sampler count: its scale file (this run's), else the state, else the config."""
+        pool_cfg = json.loads(Path(self.pool_config).read_text())
+        try:
+            scale = json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.scale.json").read_text())
+            if isinstance(scale, dict) and scale.get("run") == pool_cfg.get("run") and "target" in scale:
+                return int(scale["target"])
+        except (OSError, ValueError):
+            pass
+        return int((doc or {}).get("target", pool_cfg.get("target", 1)))
+
+    def container_limit(self) -> int | None:
+        """The sandbox container alert line: ``max_run_containers``, raised to
+        ``max_containers_per_sampler`` x the pool's billed nodes (it follows a scale)."""
+        sb = self.cfg.get("sandbox") or {}
+        fixed = int(sb["max_run_containers"]) if sb.get("max_run_containers") else None
+        per = int(sb["max_containers_per_sampler"]) if sb.get("max_containers_per_sampler") else None
+        if per is None:
+            return fixed
+        nodes = self.billed_nodes()
+        scaled = per * max(1, nodes if nodes is not None else self.pool_target(None))
+        return max(fixed or 0, scaled)
 
     def run_containers(self) -> int | None:
         sb = self.cfg.get("sandbox") or {}
@@ -338,7 +390,7 @@ class Run:
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
         if why is None and tr and _alive(tr["pid"]):
             why = self.silence(time.time())
-        limit = (self.cfg.get("sandbox") or {}).get("max_run_containers")
+        limit = self.container_limit() if why is None else None
         if why is None and limit:
             n = self.run_containers()
             # an alert, not a breach: the containers belong to the NC samplers, so stopping the
@@ -353,6 +405,36 @@ class Run:
             self.state["breaker"] = {"at": _now(), "why": why}
             self.save()
         return why
+
+    def shard_problem(self) -> str | None:
+        """The trainer reads only the shards of its ``--rl-buffer-shards`` (a shard outside
+        it is never trained on), so the pool may only order shards the trainer names: with
+        that flag set, the pool needs a ``shard_limit`` and every ``<shard_base>-<i>`` below
+        it in the trainer's list (each node and each lease-end replacement takes a new
+        shard; plan the list for the largest scale plus the replacements)."""
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        named = None
+        for i, a in enumerate(argv):
+            if a == "--rl-buffer-shards" and i + 1 < len(argv):
+                named = argv[i + 1]
+            elif a.startswith("--rl-buffer-shards="):
+                named = a.split("=", 1)[1]
+        if named is None:
+            return None
+        shards = {x for x in named.split(",") if x}
+        from yeto.launch.nc import cli as nc_cli  # noqa: PLC0415
+
+        pool_cfg = json.loads(Path(self.pool_config).read_text())
+        limit = nc_cli.pool_shard_limit(pool_cfg)
+        if limit is None:
+            return (f"the trainer reads --rl-buffer-shards ({len(shards)} shards) but the pool config has no "
+                    f"shard_limit: a scale up or a replacement past them writes groups nobody trains on")
+        missing = [f"{pool_cfg['shard_base']}-{i}" for i in range(limit)
+                   if f"{pool_cfg['shard_base']}-{i}" not in shards]
+        if missing:
+            return (f"pool shard_limit {limit} but the trainer's --rl-buffer-shards lacks {missing[:5]}"
+                    f"{' ...' if len(missing) > 5 else ''}: those nodes' groups would never be trained on")
+        return None
 
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
@@ -524,17 +606,74 @@ class Run:
             if name == "pool":
                 try:
                     doc = json.JSONDecoder().raw_decode((p.stdout or "").lstrip())[0]
-                    out["samplers"] = {"target": doc.get("target"), "nodes": doc.get("nodes")}
+                    st = doc.get("state") or {}
+                    out["samplers"] = {"target": doc.get("target"), "nodes": doc.get("nodes"),
+                                       "members": [{k: m.get(k) for k in ("ticket", "account", "shard", "state")}
+                                                   | {"retiring": m.get("retiring_since") is not None}
+                                                   for m in st.get("members") or () if m.get("state") != "gone"]}
                 except (ValueError, TypeError, AttributeError):
                     pass
         return out
 
-    def scale(self, samplers: int, retire: list[str] | None = None) -> int:
-        """``yeto run scale --samplers N``: ``pool-scale`` on the run's pool."""
-        argv = self.nc("pool-scale", "--config", self.pool_config, "--target", str(int(samplers)))
+    def scale_refusal(self, wanted: int) -> str | None:
+        """Why ``run scale`` refuses a scale up to ``wanted`` before the pool's checks."""
+        doc = self.pool_doc() or {}
+        members = [m for m in doc.get("members") or () if m.get("state") not in ("gone", "draining")
+                   and m.get("retiring_since") is None]
+        new = max(0, wanted - len(members))
+        if not new:
+            return None
+        breaker = self.state.get("breaker")
+        resumed = ((self.state.get("steps") or {}).get("trainer") or {}).get("at")
+        if breaker and not (resumed and str(resumed) > str(breaker.get("at"))):  # a later run up resumed it
+            return (f"the run's breaker fired ({breaker.get('why')} at {breaker.get('at')}): no node is added "
+                    f"to a stopped run")
+        b = self.cfg.get("budget") or {}
+        cap = float(b.get("usd", 1e9))
+        spent = self.spend_usd()
+        add = new * float(b.get("nc_usd_per_h", 24))
+        if spent + add > cap:
+            return (f"spend ${spent:.0f} + {new} new node hour(s) ${add:.0f} > budget.usd ${cap:.0f}")
+        return None
+
+    def scale(self, samplers: int | None = None, retire: list[str] | None = None, *, add: int = 0,
+              remove: list[str] | None = None, mode: str | None = None, force_static: bool = False,
+              dry_run: bool = False, source: str = "manual") -> int:
+        """``yeto run scale``: ``pool-scale`` on the run's pool, after the run's own budget
+        and breaker check of a scale up."""
+        if samplers is None and add:
+            wanted = self.pool_target(self.pool_doc()) + int(add)
+        elif samplers is None:
+            wanted = self.pool_target(self.pool_doc()) - len(remove or [])
+        else:
+            wanted = int(samplers)
+        why = self.scale_refusal(wanted)
+        if why is not None:
+            _log(f"scale: refused, nothing changed: {why}")
+            return 2
+        argv = self.nc("pool-scale", "--config", self.pool_config)
+        if samplers is not None:
+            argv += ["--target", str(int(samplers))]
+        elif add:
+            argv += ["--add", str(int(add))]
+        for ticket in remove or ():
+            argv += ["--remove", ticket]
         for ticket in retire or ():
             argv += ["--retire", ticket]
-        return subprocess.run(argv, env=self.env, check=False, timeout=300).returncode
+        if mode:
+            argv.append(f"--{mode}")
+        if force_static:
+            argv.append("--force-static")
+        if dry_run:
+            argv.append("--dry-run")
+        if source != "manual":
+            argv += ["--source", source]
+        rc = subprocess.run(argv, env=self.env, check=False, timeout=300).returncode
+        if rc == 0 and not dry_run:
+            self.state.setdefault("scales", []).append({"at": _now(), "samplers": samplers, "add": add or None,
+                                                        "remove": list(remove or []) or None, "mode": mode})
+            self.save()
+        return rc
 
     def _namespace(self) -> str:
         cfg = json.loads(Path(self.pool_config).read_text())
@@ -564,7 +703,7 @@ def _alive(pid: Any) -> bool:
 def add_parser(sub: Any) -> None:
     p = sub.add_parser("run", help="one run config, one command: up / status / down of an async GRPO run "
                        "(yeto rl is the single-process CyberGym PPO path)")
-    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,scale}")
+    rsub = p.add_subparsers(dest="rl_command", metavar="{up,status,down,scale,pause,resume}")
     rsub.required = True
     up = rsub.add_parser("up", help="preflight, sandbox, pool, first group, trainer, dashboard, monitor")
     up.add_argument("--config", required=True)
@@ -577,11 +716,18 @@ def add_parser(sub: Any) -> None:
     for name in ("status", "down"):
         q = rsub.add_parser(name)
         q.add_argument("--config", required=True)
+    from yeto.launch.nc.scale_args import add_scale_args  # noqa: PLC0415 - no imports of its own
+
     sc = rsub.add_parser("scale", help="add or remove NC sampler nodes while the run trains")
     sc.add_argument("--config", required=True)
-    sc.add_argument("--samplers", type=int, required=True, help="sampler nodes wanted (0 or more)")
-    sc.add_argument("--retire", action="append", default=[], metavar="TICKET",
-                    help="on scale down, the node ticket to release (repeatable)")
+    add_scale_args(sc, target_flag="--samplers")
+    for name, what in (("pause", "manual maintenance: the NC pool takes no automatic action on these nodes"),
+                       ("resume", "end a pause: the NC pool watches these nodes again")):
+        q = rsub.add_parser(name, help=what)
+        q.add_argument("--config", required=True)
+        q.add_argument("--ticket", action="append", required=True, help="the node ticket (repeatable)")
+        if name == "pause":
+            q.add_argument("--hold-tasks", action="store_true", help="its sampler claims no new task meanwhile")
 
 
 def main(args: Any) -> int:
@@ -592,7 +738,15 @@ def main(args: Any) -> int:
     if args.rl_command == "down":
         return 0 if run.down() else 1
     if args.rl_command == "scale":
-        return run.scale(args.samplers, args.retire)
+        return run.scale(args.target, args.retire, add=args.add, remove=args.remove, mode=args.mode,
+                         force_static=args.force_static, dry_run=args.dry_run, source=args.source)
+    if args.rl_command in ("pause", "resume"):
+        argv = run.nc(f"pool-{args.rl_command}", "--config", run.pool_config)
+        for ticket in args.ticket:
+            argv += ["--ticket", ticket]
+        if getattr(args, "hold_tasks", False):
+            argv.append("--hold-tasks")
+        return subprocess.run(argv, env=run.env, check=False, timeout=300).returncode
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
         return 2

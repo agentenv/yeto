@@ -27,6 +27,9 @@ A store without it (a FUSE bucket mount, an S3 endpoint answering
     beats/<i>/<a>              the holder's lease renewal (rewritten; its time is the server's)
     fail/<i>/<a>.<kind>        why attempt a ended without a trained group (infra / expired / release)
     done/<i>.<kind>            the slot is settled (trained / exhausted / dropped)
+    drain/<holder>             scale down (the NC pool): {"drain": true, "seq"}: that sampler
+                               claims no new task; {"drain": false}: it claims again
+    drained/<holder>           its answer: {"seq"} once it holds no claim under that request
 
 Rules:
 
@@ -55,6 +58,12 @@ Rules:
 * hold-out: every row's task id is checked against the hold-out ids before the
   first claim (a leak refuses the sampler), and the plan records the list's
   digest so every sampler runs with the same one;
+* drain (a scale down that keeps the trials in flight): a sampler whose
+  ``drain/<holder>`` request is on claims nothing more; its claims in flight
+  finish and are written as usual, and once it holds none it writes
+  ``drained/<holder>`` with the request's ``seq`` (the pool then fences and
+  releases it, so nothing is lost and nothing is given out twice). The request
+  key shows up in the scan's listing: no extra request while none is set;
 * request budget: one listing per scan, at most one scan per ``scan_s`` while
   nothing could be claimed (backing off to ``max_scan_s``).
 
@@ -112,6 +121,33 @@ EXPIRED_EVENT = "rl_dispense_expired"
 LOST_EVENT = "rl_dispense_lost"
 RELEASE_EVENT = "rl_dispense_release"
 RECOVER_EVENT = "rl_dispense_recover"
+DRAIN_EVENT = "rl_dispense_drain"
+DRAIN_DIR, DRAINED_DIR = "drain", "drained"
+
+
+def drain_key(namespace: str, holder: str) -> str:
+    return f"{namespace.strip('/')}/{DRAIN_DIR}/{holder}"
+
+
+def drained_key(namespace: str, holder: str) -> str:
+    return f"{namespace.strip('/')}/{DRAINED_DIR}/{holder}"
+
+
+def request_drain(objects: Any, namespace: str, holder: str, *, on: bool = True, seq: str | None = None) -> str:
+    """Ask sampler ``holder`` to claim no new task (``on``) or to claim again; returns
+    the request's ``seq`` (its ``drained`` answer names it)."""
+    seq = str(seq if seq is not None else f"{time.time():.6f}")
+    objects.write(drain_key(namespace, holder), json.dumps({"drain": bool(on), "seq": seq}).encode())
+    return seq
+
+
+def drain_answered(objects: Any, namespace: str, holder: str, seq: str) -> bool:
+    """Sampler ``holder`` holds no claim under drain request ``seq``."""
+    data = objects.read(drained_key(namespace, holder))
+    try:
+        return bool(data) and str(json.loads(data).get("seq")) == str(seq)
+    except ValueError:
+        return False
 
 
 # ------------------------------------------------------------------ objects
@@ -386,6 +422,7 @@ class StoreLedger:
         # sampler id -> the incarnation its incarnation lease names (None: no lease)
         self.lease_of_holder = lease_of_holder
         self._bodies: dict[tuple[int, int], dict[str, Any]] = {}  # claim bodies (immutable)
+        self.drain_seq: str | None = None  # an open drain request for this holder (last scan)
 
     def key(self, *parts: str) -> str:
         return "/".join((self.ns, *parts))
@@ -425,7 +462,20 @@ class StoreLedger:
 
     def scan(self) -> tuple[dict[int, TaskState], float]:
         keys, now = self.objects.list_meta(self.ns + "/")
+        keys = list(keys)
+        mine = drain_key(self.ns, self.holder)
+        self.drain_seq = None
+        if any(k == mine for k, _ in keys):
+            try:
+                body = json.loads(self.objects.read(mine) or b"{}")
+            except ValueError:
+                body = {}
+            if body.get("drain"):
+                self.drain_seq = str(body.get("seq"))
         return parse_ledger(keys, self.ns), now
+
+    def answer_drain(self, seq: str) -> None:
+        self.objects.write(drained_key(self.ns, self.holder), self._body(seq=seq))
 
     def _body(self, **fields: Any) -> bytes:
         return json.dumps({"holder": self.holder, "incarnation": self.incarnation, **fields},
@@ -594,6 +644,8 @@ class StoreDispensedPrompts:
         self._gate_dropped: set[int] = set()
         self._task_slots: dict[str, list[int]] | None = None
         self._waiting_capacity = False
+        self._drain_seen: str | None = None  # the drain request already reported / answered
+        self._drain_answered: str | None = None
         self._held: dict[int, _Held] = {}
         self._lock = threading.RLock()
         self._next_scan = 0.0
@@ -745,6 +797,16 @@ class StoreDispensedPrompts:
     def _claim(self, want: int) -> tuple[list[int], bool]:
         states, now = self.ledger.scan()
         self.stats["scans"] += 1
+        seq = self.ledger.drain_seq
+        if seq is not None:  # scale down: no new task; the claims in flight finish
+            if self._drain_seen != seq:
+                self._drain_seen = seq
+                self._emit(DRAIN_EVENT, state="draining", seq=seq, holding=self.holding())
+            self._answer_drain()
+            return [], False
+        if self._drain_seen is not None:
+            self._emit(DRAIN_EVENT, state="resumed", seq=self._drain_seen)
+            self._drain_seen = self._drain_answered = None
         accept = self.accept
         view = None
         if self.gate is not None:
@@ -788,6 +850,21 @@ class StoreDispensedPrompts:
             else:
                 self.stats["claim_lost"] += 1
         return got, ended
+
+    def _answer_drain(self) -> None:
+        seq = self.ledger.drain_seq
+        if seq is None or self.holding() or self._drain_answered == seq:
+            return
+        try:
+            self.ledger.answer_drain(seq)
+        except Exception as error:  # noqa: BLE001 - the pool's drain timeout bounds it
+            logger.warning("store dispenser: drain answer failed: %r", error)
+            return
+        self._drain_answered = seq
+        self._emit(DRAIN_EVENT, state="drained", seq=seq)
+
+    def draining(self) -> bool:
+        return self.ledger.drain_seq is not None
 
     def take(self, want: int) -> list[int]:
         """Up to ``want`` slots. Holding groups in flight: one scan at most

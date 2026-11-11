@@ -40,11 +40,19 @@ SAMPLER_STAT_KEYS = ("reward_mean", "reward_std", "reward_p10", "reward_p50", "r
 POOL_LEFT = {"nc_elastic_released": "left", "nc_elastic_released_externally": "left",
              "nc_elastic_shard_fenced": "left", "nc_elastic_sampler_finished": "done",
              "nc_elastic_sampler_crash_loop": "left", "nc_elastic_drain_failed": "left",
+             "nc_elastic_scaled_down": "left",
              "nc_elastic_evicted": "lost", "nc_elastic_expired": "lost", "nc_elastic_node_lost": "lost"}
-POOL_UP = {"nc_elastic_member_ready", "nc_elastic_node_reachable_again", "nc_elastic_control_plane_recovered"}
+POOL_UP = {"nc_elastic_member_ready", "nc_elastic_node_reachable_again", "nc_elastic_control_plane_recovered",
+           "nc_elastic_scale_drain_cancelled"}
+POOL_TARGET = "nc_elastic_target_changed"
+# a scale-down victim finishing its trials in flight: still sampling, not left
+POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
 POOL_KEYS = ("ticket", "account", "shard", "why", "reason", "detail", "error", "state", "after_s",
-             "waited_s", "restarts", "attempt", "data_slot")
+             "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
+             "by")
+# a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
+POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
 
 def _f(v: Any) -> float | None:
@@ -372,8 +380,52 @@ class AsyncState:
                              "trained_groups": tot("trained_groups"), "left": t["left"],
                              **{k: tot(k) for k in FILL_KEYS}}
         return {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
-                "releases": self.release_rows(), "pool": self.pool[-500:],
+                "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
                 "roles": dict(self.roles)}
+
+    def pool_scale(self) -> dict | None:
+        """The NC pool's sampler count over time: the target (``target_changed``, the
+        scale commands) and the shards it runs (ready, not yet left): one point per
+        pool event that changes either. None without pool events."""
+        if not self.pool:
+            return None
+        live: set[str] = set()
+        draining: set[str] = set()
+        paused: set[str] = set()
+        target = source = None
+        points = []
+        manual = []
+        for p in sorted(self.pool, key=lambda x: x.get("ts") or 0):
+            ev, shard = p.get("event"), p.get("shard")
+            before = (target, len(live), len(draining))
+            if str(ev).startswith(POOL_MANUAL_PREFIX):
+                manual.append(p)
+            if ev in (POOL_TARGET, "nc_elastic_manual_release_detected") and _int(p.get("new")) is not None:
+                target = p["new"]
+                source = p.get("source") or ("manual_release" if ev != POOL_TARGET else "manual")
+            elif ev == POOL_STOPPED:
+                live.clear()
+                draining.clear()
+                paused.clear()
+            elif shard is not None and ev == "nc_elastic_manual_pause":
+                paused.add(str(shard))
+            elif shard is not None and ev in ("nc_elastic_manual_resume", "nc_elastic_manual_pause_ended"):
+                paused.discard(str(shard))
+            elif shard is not None and ev in POOL_UP:
+                live.add(str(shard))
+                draining.discard(str(shard))
+            elif shard is not None and ev == POOL_DRAINING:
+                draining.add(str(shard))
+            elif shard is not None and ev in POOL_LEFT:
+                live.discard(str(shard))
+                draining.discard(str(shard))
+                paused.discard(str(shard))
+            if (target, len(live), len(draining)) != before:
+                points.append({"ts": p.get("ts"), "target": target, "ready": len(live), "draining": len(draining),
+                               "source": source})
+        return {"target": target, "target_source": source, "manual": source in ("manual", "manual_release"),
+                "ready": sorted(live), "draining": sorted(draining), "paused": sorted(paused),
+                "manual_events": manual[-50:], "points": points[-500:]}
 
     def backlog_series(self) -> dict | None:
         """Groups in the buffer not yet read by the trainers: groups written by all
