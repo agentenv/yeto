@@ -321,13 +321,33 @@ class FleetController:
                       file=sys.stderr)
 
     def _poll_rollout(self) -> None:
-        if getattr(self, "rollout", None) is None or self._rollout_warned:
+        if getattr(self, "rollout", None) is None:
             return
-        problem = self.rollout.check()
-        if problem is not None:
-            self._rollout_warned = True
-            print(f"[launcher] ERROR: {problem}; its machines are drained when the run ends",
-                  file=sys.stderr)
+        if not self._rollout_warned:
+            problem = self.rollout.check()
+            if problem is not None:
+                self._rollout_warned = True
+                print(f"[launcher] ERROR: {problem}; its machines are drained when the run ends",
+                      file=sys.stderr)
+        self._check_rollout_stall()
+
+    def _check_rollout_stall(self) -> None:
+        """The rollout side's stall view (``RolloutController.stalled``): an alert once per
+        silent stretch, never a kill (a sampler waiting for the trainer is not stalled)."""
+        stalled = getattr(self.rollout, "stalled", None)
+        if stalled is None:
+            return
+        try:
+            why = stalled()
+        except Exception:  # noqa: BLE001 - a view, never the end of supervision
+            return
+        if why and not getattr(self, "_rollout_stall_warned", False):
+            self._rollout_stall_warned = True
+            print(f"[launcher] WARNING: rollout stalled: {why}", file=sys.stderr)
+            self._fleet("rollout_stalled", None, detail=why)
+        elif not why and getattr(self, "_rollout_stall_warned", False):
+            self._rollout_stall_warned = False
+            self._fleet("rollout_progress_resumed", None)
 
     def _run_fleet(self) -> dict:
         """Poll until every learner is done or abandoned.

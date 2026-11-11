@@ -392,6 +392,20 @@ def test_run_up_in_process_drives_every_pool_in_one_controller(tmp_path, monkeyp
         _ = up.Run(dict(run_cfg, controller="threads")).in_process
 
 
+def test_run_up_in_process_logs_a_rollout_stall_once(tmp_path, monkeypatch, capsys):
+    run_cfg, _, _ = _two_pools(tmp_path)
+    run = up.Run(dict(run_cfg, controller="in_process", rollout={"stall_alert_s": 600}))
+    views = iter(["no sampler wrote a group or a heartbeat for 700s", "same", None])
+    run.controller = type("C", (), {"stalled": lambda self: next(views)})()
+    assert run.rollout_stall_alert() and run.rollout_stall_alert() and run.rollout_stall_alert() is None
+    out = capsys.readouterr().out
+    assert out.count("rollout stalled") == 1 and "progress resumed" in out
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(dict(run_cfg, rollout={"stall_s": 1})))
+    with pytest.raises(ValueError, match="unknown rollout keys"):
+        up.load_config(str(path))
+
+
 def test_run_up_in_process_refuses_no_monitor(tmp_path, monkeypatch):
     run_cfg, _, _ = _two_pools(tmp_path)
     path = tmp_path / "run-ip.json"

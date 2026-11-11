@@ -14,6 +14,11 @@ trainer fleet's poll loop. What it shares with the trainer's ``FleetController``
   gates every order of every pool, next to each pool's own budget;
 * the event tape: every pool event is also written to the run's ``fleet.jsonl``
   (``FleetLog.event("rollout_event", <pool>, pool_event=..., ...)``);
+* the stall view: :meth:`progress` counts pool events and sampler progress (a probe
+  that saw a sampler's tape grow -- a group or a trainer-wait heartbeat -- or its
+  engine generate), and :meth:`stalled` says when every ready sampler with a progress
+  signal has been silent for ``stall_s`` while none waits for the trainer: an alert
+  (the fleet prints it and writes ``rollout_stalled``), never a kill;
 * the cleanup: a started controller is registered (:func:`active`) until it is
   closed; :func:`drain_active` drains every registered one (the launcher's
   teardown and the reaper), and a process exit drains what is still running.
@@ -35,7 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .island_pool import IslandPool, Member
+from .island_pool import READY, IslandPool, Member
+
+DEFAULT_STALL_S = 1800.0  # every ready sampler silent this long: the rollout stall alert
 
 _ACTIVE: list[RolloutController] = []
 _ACTIVE_LOCK = threading.Lock()
@@ -61,11 +68,13 @@ class RolloutController:
     def __init__(self, pools: Mapping[str, IslandPool | PoolSlot], *, stop_flag: str | os.PathLike[str] | None = None,
                  fleet_log: Any = None, budget: Callable[[], str | None] | None = None, interval: float = 60.0,
                  log: Callable[[str], None] = print, thread_cls=threading.Thread, drain_on_exit: bool = True,
-                 drain_wait_s: float = 10.0, sleep: Callable[[float], None] = time.sleep):
+                 drain_wait_s: float = 10.0, sleep: Callable[[float], None] = time.sleep,
+                 stall_s: float = DEFAULT_STALL_S):
         self.slots = {name: p if isinstance(p, PoolSlot) else PoolSlot(p) for name, p in pools.items()}
         self.stop_flag = None if stop_flag is None else Path(stop_flag)
         self.fleet_log, self.budget, self.interval, self.log = fleet_log, budget, float(interval), log
         self.thread_cls, self.drain_on_exit, self.drain_wait_s, self.sleep = thread_cls, drain_on_exit, drain_wait_s, sleep
+        self.stall_s = float(stall_s)
         self.stopped: str | None = None
         self.error: BaseException | None = None
         self.ticks = 0
@@ -209,8 +218,33 @@ class RolloutController:
 
     # -- views
     def progress(self) -> int:
-        """Pool events so far (all pools): a progress counter for the run's stall check."""
-        return sum(len(s.pool.events.events) for s in self.slots.values() if s.pool.events is not None)
+        """Pool events plus sampler progress so far (all pools): a counter that moves while
+        the rollout side works (a group written, a trainer-wait heartbeat, tokens)."""
+        events = sum(len(s.pool.events.events) for s in self.slots.values() if s.pool.events is not None)
+        return events + self.sampler_progress()
+
+    def sampler_progress(self) -> int:
+        """Probes, over every member of every pool, that saw its sampler move."""
+        return sum(int(m.progress_ticks) for s in self.slots.values() for m in s.pool.members)
+
+    def stalled(self, now: float | None = None) -> str | None:
+        """Why the rollout side looks stuck, None otherwise: every ready, unpaused sampler
+        with a progress signal has been silent for ``stall_s``, and none of them waits for
+        the trainer (a sampler blocked on the trainer heartbeats; its newest tape line is
+        the wait). Samplers without a signal (e.g. Modal calls) give no verdict."""
+        if self.stall_s <= 0 or self.stopped:
+            return None
+        watched = [m for s in self.slots.values() if not s.pool.stopped for m in s.pool.live()
+                   if m.state == READY and not m.paused and m.progress_at is not None]
+        if not watched or any(m.trainer_wait for m in watched):
+            return None
+        if now is None:
+            now = next(iter(self.slots.values())).pool.clock()
+        quiet = now - max(float(m.progress_at) for m in watched)
+        if quiet < self.stall_s:
+            return None
+        return (f"no sampler wrote a group or a heartbeat for {quiet:.0f}s ({len(watched)} ready, "
+                f"rollout stall alert {self.stall_s:.0f}s)")
 
     def status(self) -> dict[str, Any]:
         """Per pool: target, live / ready members, pending handoffs, why it is stopped,

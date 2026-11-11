@@ -50,6 +50,7 @@ from . import status as el
 LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compute)
 
 METRICS_MISS_ALERT = 3  # probes in a row without engine /metrics before an event
+PROGRESS_SLACK_S = 5.0  # tape age jitter (probe latency, whole seconds) that is not growth
 PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "ready", "draining", "gone"
 
 
@@ -91,6 +92,12 @@ class Member:
     retiring_since: float | None = None
     drain_seq: str | None = None  # the drain request its sampler answers (set by ops.request_drain)
     paused: bool = False  # pool-pause: no automatic action on it until pool-resume (manual)
+    # sampler progress, from the probe (the tape grew: a group or a heartbeat; the engine
+    # generated tokens): when it last moved (None: no signal read yet, e.g. a Modal call),
+    # how many probes saw it move, and whether its newest tape line is a trainer wait
+    progress_at: float | None = None
+    progress_ticks: int = 0
+    trainer_wait: bool = False
 
 
 class PoolOps(Protocol):
@@ -870,6 +877,8 @@ class IslandPool:
             if end is not None:
                 m.lease_until = end
         probe = self._probe(m) if status.state == "active" else None
+        if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
+            self._note_progress(m, probe, now)
         if probe is not None:
             if probe.node == el.PROBE_UNREACHABLE:
                 m.unreachable_since = m.unreachable_since if m.unreachable_since is not None else now
@@ -1088,6 +1097,21 @@ class IslandPool:
         if m.metrics_misses == METRICS_MISS_ALERT:
             self._event("engine_metrics_unreadable", ticket=m.ticket, account=m.account, shard=m.shard,
                         misses=m.metrics_misses, port=getattr(self.ops, "metrics_port", None))
+
+    def _note_progress(self, m: Member, probe: el.Probe, now: float) -> None:
+        """The sampler's progress for the controller's rollout stall view: its tape grew
+        since the last probe (a group or a trainer-wait heartbeat) or its engine's token
+        counter moved. Read only: no verdict here."""
+        m.trainer_wait = bool(probe.trainer_wait)
+        grew_at = None if probe.progress_age_s is None else now - float(probe.progress_age_s)
+        if m.progress_at is None:  # the first read: the clock starts, nothing moved yet
+            m.progress_at = grew_at if grew_at is not None else (now if probe.gen_tokens is not None else None)
+            return
+        tokens = probe.gen_tokens is not None and m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen
+        tape = grew_at is not None and grew_at > m.progress_at + PROGRESS_SLACK_S
+        if tokens or tape:
+            m.progress_at = now if tokens else float(grew_at)
+            m.progress_ticks += 1
 
     def _engine_stalled(self, m: Member, probe: el.Probe, now: float) -> bool:
         """Track the engine's token counter; True when the member was handled as stalled

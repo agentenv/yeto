@@ -95,11 +95,28 @@ def load_config(path: str) -> dict[str, Any]:
     if "pool" not in cfg and "samplers" not in cfg:
         raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
     known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
-             "dashboard", "budget", "comment", "syncer", "controller"}
+             "dashboard", "budget", "comment", "syncer", "controller", "rollout"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
+    rollout_section(cfg)
     return cfg
+
+
+ROLLOUT_KEYS = {"stall_alert_s"}
+
+
+def rollout_section(cfg: dict[str, Any]) -> dict[str, Any]:
+    """The run config's ``rollout`` section (the in-process controller's knobs):
+    ``stall_alert_s`` (default 1800; 0: off): every ready sampler silent that long --
+    no group, no trainer-wait heartbeat -- is logged as a rollout stall (an alert only)."""
+    section = cfg.get("rollout") or {}
+    if not isinstance(section, dict):
+        raise ValueError("run config: rollout must be an object")
+    unknown = set(section) - ROLLOUT_KEYS
+    if unknown:
+        raise ValueError(f"run config: unknown rollout keys {sorted(unknown)} (known: {sorted(ROLLOUT_KEYS)})")
+    return dict(section)
 
 
 class Run:
@@ -278,7 +295,7 @@ class Run:
         """One :class:`~yeto.launch.pool.controller.RolloutController` over every pool
         (each built like its ``nc pool`` loop: state, events, scale file, lock), started
         in a thread of this process. ``ops``: per pool name, for tests."""
-        from yeto.launch.pool.controller import RolloutController, nc_pool  # noqa: PLC0415
+        from yeto.launch.pool.controller import DEFAULT_STALL_S, RolloutController, nc_pool  # noqa: PLC0415
 
         slots = {}
         try:
@@ -290,6 +307,8 @@ class Run:
                     slot.lock.close()
             raise
         interval = min(r.interval_s for r in self.pools)
+        section = rollout_section(self.cfg)
+        kw.setdefault("stall_s", float(section.get("stall_alert_s", DEFAULT_STALL_S)))
         self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
         self.controller.start()
         _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
@@ -629,8 +648,28 @@ class Run:
             return
         self.trainer_down(why)
 
+    def rollout_stall_alert(self) -> str | None:
+        """The in-process controller's rollout stall view, logged once per silent stretch
+        (an alert: nothing is stopped; a sampler waiting for the trainer is not stalled)."""
+        controller = getattr(self, "controller", None)
+        stalled = getattr(controller, "stalled", None)
+        if stalled is None:
+            return None
+        try:
+            why = stalled()
+        except Exception:  # noqa: BLE001 - a view only
+            return None
+        warned = getattr(self, "_rollout_stall_warned", False)
+        if why and not warned:
+            _log(f"WARNING: rollout stalled: {why}; see yeto run status and the pool events")
+        elif not why and warned:
+            _log("rollout: sampler progress resumed")
+        self._rollout_stall_warned = bool(why)
+        return why
+
     def monitor(self, poll_s: float = 60.0) -> None:
         while True:
+            self.rollout_stall_alert()
             why = self.breach()
             if why:
                 self.on_breach(why)

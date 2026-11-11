@@ -403,6 +403,66 @@ def test_controller_budget_gates_every_pool():
     ctl.stop("test")
 
 
+class ProgressRoute(FakeRoute):
+    """Probes with a tape age: ``grew[ticket]`` is when its tape last grew."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self.clock, self.grew, self.waiting = clock, {}, set()
+
+    def probe(self, member):
+        grew = self.grew.setdefault(member.ticket, self.clock())
+        return Probe(node="ok", sampler="running", joined=member.ticket in self.joined,
+                     progress_age_s=round(self.clock() - grew), trainer_wait=member.ticket in self.waiting)
+
+
+def test_controller_progress_counts_sampler_progress_and_stall_alerts_spare_trainer_waits():
+    from types import SimpleNamespace
+
+    from yeto.launch.fleet import FleetController
+
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    route = ProgressRoute(clock)
+    pool, *_ = make_pool(nc, [1, 2], target=2, clock=clock, route=route)
+    ctl = rc.RolloutController({"p": pool}, thread_cls=SyncThread, log=lambda _m: None, stall_s=1800)
+    for _ in range(3):
+        ctl.tick()
+        clock.t += 60
+    a, b = pool.live()
+    assert a.state == b.state == READY
+    before = ctl.progress()
+    for _ in range(3):  # both write groups: every probe sees the tapes grow
+        route.grew = {a.ticket: clock(), b.ticket: clock()}
+        ctl.tick()
+        clock.t += 60
+    assert ctl.sampler_progress() >= 4 and ctl.progress() > before and ctl.stalled() is None
+    for _ in range(40):  # both silent (a hung engine, not a trainer wait)
+        ctl.tick()
+        clock.t += 60
+    flat = ctl.progress()
+    ctl.tick()
+    assert ctl.progress() == flat
+    why = ctl.stalled()
+    assert why and "no sampler wrote a group or a heartbeat" in why
+    route.waiting.add(a.ticket)  # one sampler's newest tape line is the trainer wait
+    ctl.tick()
+    assert ctl.stalled() is None
+
+    fleet_events = []
+    fake = SimpleNamespace(rollout=ctl, _fleet=lambda kind, name, **f: fleet_events.append(kind))
+    route.waiting.clear()
+    ctl.tick()
+    FleetController._check_rollout_stall(fake)
+    FleetController._check_rollout_stall(fake)  # once per silent stretch
+    route.grew[b.ticket] = clock()
+    ctl.tick()
+    FleetController._check_rollout_stall(fake)
+    assert fleet_events == ["rollout_stalled", "rollout_progress_resumed"]
+    assert not nc.released  # an alert, never a kill
+    ctl.stop("test")
+
+
 def test_controller_thread_runs_ticks_and_stops():
     clock = Clock()
     nc = FakeProvider("nc", clock)
