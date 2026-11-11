@@ -186,6 +186,7 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         build_reward,
         island_config,
     )
+    from yeto.rl.engine.rollout_data_path import normalize_spec  # noqa: PLC0415
 
     pc = pc or cli.pool_config(cfg, allowed=None)
     member = Member(pc.accounts[0], "<ticket>", f"{pc.shard_base}-0",
@@ -194,7 +195,9 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         spec = cli.render_spec(cfg, member, [f"{pc.shard_base}-{i}" for i in range(pc.target)])
         from yeto.launch.agentic_setup import strip  # noqa: PLC0415
 
-        checked = apply_rollout_quant(strip(spec))
+        # the data path's defaults first, as the sampler applies them at start (syncer:
+        # no round limit, a member store under work_dir)
+        checked = apply_rollout_quant(normalize_spec(strip(spec)))
         island_config(checked)  # required keys, sampling parameters
         build_engine(checked)  # engine section, server + options dataclasses, rollout_fields (no process)
         build_reward(checked)  # reward_kind and the reward function import

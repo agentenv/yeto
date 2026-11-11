@@ -328,6 +328,21 @@ def test_the_full_local_build_refuses_what_the_node_would_refuse(tmp_path, capsy
     assert "refused by the sampler" in capsys.readouterr().out
 
 
+def test_the_local_build_applies_the_data_path_defaults(tmp_path):
+    """A syncer-path spec without num_rollouts passes: the sampler fills in the
+    syncer path's defaults (no round limit) before it checks the island config."""
+    doc = json.loads(EXAMPLE_SPEC.read_text())
+    doc["reward"], doc["reward_kind"] = "yeto.rl.numeric_answer_reward:score", "miles"
+    doc.pop("num_rollouts", None)
+    doc.update(data_path="syncer", syncer="203.0.113.5:7000", channel=0, work_dir=str(tmp_path / "w"))
+    cfg, _path = _cfg(tmp_path, spec_doc=doc)
+    pool_run.check_sampler_spec(cfg)
+    doc["data_path"] = "r2"
+    cfg, _path = _cfg(tmp_path, spec_doc=doc)
+    with pytest.raises(ValueError, match="num_rollouts"):
+        pool_run.check_sampler_spec(cfg)
+
+
 # -- H2: one pool instance (flock), shared with pool-stop and yeto cleanup --include-nc --------
 
 def test_a_second_instance_is_refused_by_the_pool_lock(tmp_path):

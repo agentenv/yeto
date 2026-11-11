@@ -619,6 +619,17 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
         section = cfg.get("syncer") or {}
         if section.get("address"):
             spec.setdefault("syncer", str(section["address"]))
+        dispense = (spec.get("prompts") or {}).get("dispense")
+        if isinstance(dispense, dict) and str(dispense.get("backend") or "tcp") == "tcp":
+            # the syncer's task dispenser: each pool member claims as its own island, the
+            # holder id the pool retires / drains it by (SyncerDataPath); one id for every
+            # member of the base spec would make each new member supersede the others
+            from yeto.rl.engine.task_dispense import sampler_holder_id  # noqa: PLC0415
+
+            dispense = dict(dispense, learner_id=sampler_holder_id(m.shard))
+            if spec.get("syncer"):
+                dispense.setdefault("address", str(spec["syncer"]))
+            spec["prompts"] = dict(spec["prompts"], dispense=dispense)
     backlog = cfg.get("backlog")
     if backlog:
         spec["max_backlog_groups"] = tasks.backlog_groups(

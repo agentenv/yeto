@@ -193,6 +193,29 @@ def test_a_syncer_pool_fences_and_drains_through_member_retire(tmp_path, monkeyp
     assert nc_cli.render_spec(cfg, heir, ["nc-1", "nc-2"])["predecessor_retired"] is True
 
 
+def test_a_syncer_pool_member_claims_from_the_dispenser_as_its_own_island(tmp_path):
+    """data_path syncer with the syncer's task dispenser (prompts.dispense, tcp): every
+    member's spec names its own holder id, the one the pool retires / drains it by, and
+    the dispenser address defaults to the syncer's."""
+    from yeto.launch.pool.island_pool import Member  # noqa: PLC0415
+    from yeto.rl.engine.task_dispense import sampler_holder_id  # noqa: PLC0415
+
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"sampler_id": "x", "prompts": {
+        "path": "p.jsonl", "input_key": "q", "groups_per_round": 1, "dispense": {"seed": 3, "learner_id": 7}}}))
+    cfg = {"spec": str(spec), "run_prefix": "r", "data_path": "syncer", "syncer": {"address": "203.0.113.5:7000"}}
+    a = nc_cli.render_spec(cfg, Member(account=1, ticket="t1", shard="m-0"), ["m-0", "m-1"])
+    b = nc_cli.render_spec(cfg, Member(account=2, ticket="t2", shard="m-1"), ["m-0", "m-1"])
+    assert a["prompts"]["dispense"] == {"seed": 3, "learner_id": sampler_holder_id("m-0"),
+                                        "address": "203.0.113.5:7000"}
+    assert b["prompts"]["dispense"]["learner_id"] == sampler_holder_id("m-1") != a["prompts"]["dispense"]["learner_id"]
+    store = dict(json.loads(spec.read_text()), prompts={"path": "p", "input_key": "q", "groups_per_round": 1,
+                                                       "dispense": {"backend": "store", "namespace": "d"}})
+    spec.write_text(json.dumps(store))
+    assert nc_cli.render_spec(cfg, Member(account=1, ticket="t1", shard="m-0"), ["m-0"])["prompts"]["dispense"] == {
+        "backend": "store", "namespace": "d"}
+
+
 def test_the_pool_marks_a_successor_whose_predecessor_it_already_retired():
     from tests.test_rollout_island_pool import Clock, FakeProvider, make_pool, ticks  # noqa: PLC0415
 
