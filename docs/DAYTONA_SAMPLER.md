@@ -44,7 +44,8 @@ A CIDR allow list (Tier 3+) must include the sandbox host for the SSH connection
 
 ## Sizing
 
-The release cache holds at most the served release plus the one being downloaded. The
+The release cache (`/work/cache/yeto`, set by `YETO_CACHE_DIR`) holds at most the served release
+plus the one being downloaded. The
 follower prunes every other download first. Overlays are symlinks.
 
 | Item | GiB |
@@ -83,6 +84,10 @@ failed check raises `PreflightError`, which names the check, what was found and 
 | `memlock` | `ulimit -l` unlimited. A mismatch is a warning. |
 | `store` | The object store endpoint answers |
 | `ssh:<host>:<port>` | The sandbox host's SSH port is reachable (agentic specs) |
+
+A failed check that depends on the host (`kfd`, `dri`, `rocm`, `gpus`, `arch`) makes the pool
+replace the sandbox. Any other failed check (snapshot, size or network policy) would fail the
+same way on every new sandbox, so the pool keeps the sandbox and halts until `pool-retry`.
 
 The in-place expert reload (`vllm_expert_reload`) still checks the MXFP4 backend
 (`AITER_MXFP4_BF16`) inside the engine. The preflight can only make sure the cards are gfx950.

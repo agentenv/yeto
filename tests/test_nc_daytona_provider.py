@@ -18,6 +18,7 @@ from yeto.launch.nc.provider import is_national_compute
 @pytest.fixture(autouse=True)
 def _state(tmp_path, monkeypatch):
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(cli.node_pool, "SSH_CONFIG", tmp_path / "home" / ".ssh" / "config")
 
 
 class DaytonaNotFoundError(Exception):
@@ -224,6 +225,8 @@ def test_attach_writes_a_gateway_alias_and_renews_the_token(tmp_path):
     assert alias == f"yeto-nc-{name}" and f"HostName {SSH_HOST}" in text and "User tok1" in text
     assert "ProxyCommand" not in text and conf.stat().st_mode & 0o077 == 0 and ran == [(alias, "rocm-smi")]
     assert dt.boxes[name].tokens == [("tok1", 60)]
+    # ``ssh <alias>`` resolves only when the user's ssh config includes our file
+    assert f"Include {conf}" in (tmp_path / "home" / ".ssh" / "config").read_text().splitlines()
     t[0] += 30 * 60
     p.status(1, name)
     assert "User tok1" in conf.read_text()  # more than a third left
@@ -396,3 +399,13 @@ def test_a_daytona_pool_runs_the_sampler_as_a_process():
 
     provider = DaytonaProvider("run-x", slots=[0], snapshot="yeto-sampler", sdk=object(), client=object())
     assert isinstance(provider.sampler_route, DaytonaSamplerRoute)
+
+
+def test_daytona_pool_warnings_name_sandboxes_not_national_compute_leases():
+    cfg = dict(BASE, provider={"kind": "daytona", "image": "rocm/vllm:test"})
+    warning = pool_run.lease_warning(cfg, "pool.json")
+    assert "National Compute" not in warning and "auto-stop off" in warning and "pool-stop --config pool.json" in warning
+    banner = pool_run.billing_banner("pool.json", [{"account": 1, "ticket": "yeto-smp-run-d-1"}], national=False)
+    assert "sandbox" in banner and "nc down" not in banner and "lease_until" not in banner.split("\n")[2]
+    assert "nc down" in pool_run.billing_banner("pool.json", [], national=True)
+    assert "National Compute" in pool_run.lease_warning(BASE, "pool.json")

@@ -124,12 +124,18 @@ def write_ssh_alias(lease: NodeLease, *, ssh_config: Path = SSH_CONFIG, relay_po
         lines.append(f"{lease.ip} {lease.host_key.strip()}")
         known.write_text("\n".join(lines) + "\n")
         os.chmod(known, 0o600)
+    include_ours(ours, ssh_config=ssh_config)
+    return host_alias(lease.ticket)
+
+
+def include_ours(ours: Path, *, ssh_config: Path | None = None) -> None:
+    """Make ``~/.ssh/config`` include our alias file (``ssh <alias>`` resolves only then)."""
+    ssh_config = SSH_CONFIG if ssh_config is None else ssh_config
     include = f"Include {ours}"
     text = ssh_config.read_text() if ssh_config.exists() else ""
     if include not in text.splitlines():
         ssh_config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         ssh_config.write_text(f"{include}\n{text}")  # Include must precede any Host block
-    return host_alias(lease.ticket)
 
 
 def remove_ssh_alias(ticket: str) -> None:

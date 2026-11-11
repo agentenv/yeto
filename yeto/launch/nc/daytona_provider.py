@@ -326,6 +326,7 @@ class DaytonaProvider:
                                    "  ServerAliveInterval 15", "  ServerAliveCountMax 4", ""])
         ours.write_text("".join(blocks.values()))
         os.chmod(ours, 0o600)
+        node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
         rows = self._rows()
         if ticket in rows:
             rows[ticket]["ssh_expires_at"] = expires

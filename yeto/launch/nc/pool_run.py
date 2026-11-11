@@ -51,7 +51,16 @@ from .provider import is_national_compute
 LEASE_WARNING = ("National Compute does NOT end a lease at lease_until: the node stays active and billed "
                  "until its ticket is deleted. Keep this pool running, or release its nodes with "
                  "`python -m yeto.launch.nc pool-stop --config <file>`.")
+SANDBOX_WARNING = ("Daytona sandboxes are created with auto-stop off: a sandbox stays billed until it is "
+                   "deleted. Keep this pool running, or delete its sandboxes with "
+                   "`python -m yeto.launch.nc pool-stop --config <file>`.")
 DRAIN_ATTEMPTS = 3
+
+
+def lease_warning(cfg: dict[str, Any], config_path: str) -> str:
+    """The billing warning of the pool's provider (a National Compute lease or a sandbox)."""
+    text = LEASE_WARNING if is_national_compute(cfg) else SANDBOX_WARNING
+    return text.replace("<file>", config_path)
 STOP_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
 
 
@@ -246,19 +255,23 @@ def stop_command(config_path: str) -> str:
     return f"python -m yeto.launch.nc pool-stop --config {config_path}"
 
 
-def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "") -> str:
+def billing_banner(config_path: str, members: list[dict[str, Any]], *, why: str = "", national: bool = True) -> str:
     bar = "!" * 78
-    lines = [bar, f"NODES STILL BILLING: {len(members)} National Compute node(s) of this pool may still be "
+    kind = "National Compute node(s)" if national else "sandbox(es)"
+    lines = [bar, f"NODES STILL BILLING: {len(members)} {kind} of this pool may still be "
                   "active" + (f" ({why})" if why else "") + ".",
-             "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."]
+             "A lease is NOT ended at lease_until: the node stays active and billed until it is deleted."
+             if national else "A sandbox stays billed until it is deleted (auto-stop is off)."]
     now = time.time()
     for m in members:
         late = m.get("lease_until") is not None and now > float(m["lease_until"])
         lines.append(f"  account {m.get('account')} ticket {m.get('ticket')} shard {m.get('shard')} "
                      f"state {m.get('state')} lease_until {_until(m.get('lease_until'))}"
                      + ("  PAST lease_until, STILL BILLED" if late else ""))
-    lines += ["Release them with:", f"  {stop_command(config_path)}",
-              "or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>", bar]
+    lines += ["Release them with:", f"  {stop_command(config_path)}"]
+    if national:  # ``down`` is the National Compute ticket call
+        lines.append("or one by one: python -m yeto.launch.nc down --account <account> --ticket <ticket>")
+    lines.append(bar)
     return "\n".join(lines)
 
 
@@ -359,7 +372,7 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
         print(f"run spend cap: {ecfg.max_run_spend_ucr} ucr ({ecfg.max_run_spend_ucr / hourly / pc.target:.1f} h "
               f"at the steady rate)")
     print(f"stops ordering and drains below a balance of {pc.stop_below_ucr} ucr")
-    print(f"WARNING: {LEASE_WARNING.replace('<file>', config_path)}")
+    print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
     for note in notes:
@@ -457,13 +470,14 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         _say(f"pool state {state} says stopped ({pool.stopped}); move it away to start a new pool")
         left = [m.__dict__ for m in pool.live()]
         if left:
-            _print_banner(billing_banner(config_path, left, why="stopped pool with members left"))
+            _print_banner(billing_banner(config_path, left, why="stopped pool with members left",
+                                         national=is_national_compute(cfg)))
             return 1
         return 0
     signals = signals or _Signals()
     _write_pid(cfg, config_path)
     _remove(stop_path(cfg))
-    _say(f"WARNING: {LEASE_WARNING.replace('<file>', config_path)}")
+    _say(f"WARNING: {lease_warning(cfg, config_path)}")
     _say("the control loop must stay up for the whole run (an always-on host, tmux or systemd); "
          "SIGTERM / Ctrl-C drains every node before it exits")
     signals.install()
@@ -499,7 +513,8 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
         left = [m.__dict__ for m in pool.live()]
         if left:
             _print_banner(billing_banner(config_path, left,
-                                         why="the pool loop exited" + ("" if clean else " on an error")))
+                                         why="the pool loop exited" + ("" if clean else " on an error"),
+                                         national=is_national_compute(cfg)))
     return 0 if not pool.live() else 1
 
 
@@ -672,7 +687,8 @@ def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, p
         else:
             doc = json.loads(state.read_text()) if state.exists() else {}
             _print_banner(billing_banner(config_path, billed_members(doc),
-                                         why=f"the running pool did not stop in {wait_s:.0f} s"))
+                                         why=f"the running pool did not stop in {wait_s:.0f} s",
+                                         national=is_national_compute(cfg)))
             return 1
         if proc is None:  # the loop exited and removed its files: read what it left
             doc = json.loads(state.read_text()) if state.exists() else {}
@@ -704,7 +720,8 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
     _remove(pid_path(cfg))
     _remove(stop_path(cfg))
     if left:
-        _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed"))
+        _print_banner(billing_banner(config_path, [m.__dict__ for m in left], why="a release failed",
+                                     national=is_national_compute(cfg)))
         return 1
     _remove(scale_path(cfg))
     _say("pool-stop: every node of the pool is released")
@@ -731,8 +748,9 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
                       "samplers": f"{len(left)}/{target}", "scale": scale, "billed": billed, "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
     if left and (proc is None or not proc.get("alive")):
-        _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them"))
+        _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
+                                     national=is_national_compute(cfg)))
         return 1
     if left:
-        print(f"note: {LEASE_WARNING.replace('<file>', config_path)}", file=sys.stderr)
+        print(f"note: {lease_warning(cfg, config_path)}", file=sys.stderr)
     return 0

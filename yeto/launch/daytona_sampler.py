@@ -294,9 +294,19 @@ class Check:
         return "" if self.ok else REMEDY.get(self.name.split(":")[0], "")
 
 
+# checks that depend on the host the sandbox landed on (another sandbox may pass them);
+# every other check fails the same way on every sandbox of the same snapshot and size
+NODE_CHECKS = frozenset({"exec", "kfd", "dri", "rocm", "gpus", "arch"})
+
+
 class PreflightError(RuntimeError):
+    """``config_error``: every failed check is one of the snapshot / size / network policy
+    (not of the host), so a replacement sandbox would fail the same way: the pool keeps
+    the sandbox and halts until ``pool-retry`` instead of ordering more of them."""
+
     def __init__(self, sandbox: str, failed: Sequence[Check]):
         self.failed = list(failed)
+        self.config_error = bool(self.failed) and not any(c.name.split(":")[0] in NODE_CHECKS for c in self.failed)
         body = "; ".join(f"[{c.name}] {c.detail}: {c.remedy}" for c in self.failed)
         super().__init__(f"Daytona sampler preflight failed on {sandbox}: {body}")
 
@@ -431,7 +441,10 @@ def process_env(run_prefix: str, yeto_dir: str, *, gpus: int = 8) -> dict[str, s
     env.update({"PYTHONPATH": yeto_dir, "HIP_VISIBLE_DEVICES": ",".join(str(i) for i in range(gpus)),
                 "YETO_RL_STORE_S3_STAGE": f"{WORK}/stage", "XDG_CACHE_HOME": CACHE,
                 "VLLM_CACHE_ROOT": f"{CACHE}/vllm", "TRITON_CACHE_DIR": f"{CACHE}/triton",
-                "AITER_JIT_DIR": f"{CACHE}/aiter"})
+                "AITER_JIT_DIR": f"{CACHE}/aiter",
+                # the release cache (served + next release, DiskPlan) on the sized disk under /work,
+                # not ~/.cache on the root file system (the NC container mounts /root/.cache on NVMe)
+                "YETO_CACHE_DIR": f"{CACHE}/yeto"})
     return env
 
 
@@ -481,9 +494,12 @@ def launch_command(shard: str) -> str:
     p = paths(shard)
     # $0 of the session leader is the marker _alive reads in /proc/<pid>/cmdline
     inner = f"bash {shlex.quote(p['script'])} >> {shlex.quote(p['log'])} 2>&1; echo $? > {shlex.quote(p['exit'])}"
+    # the braces matter: ``a && b && setsid ... &`` would background the whole list in a
+    # subshell; ``$!`` would then be that subshell (not the session leader: the group kill
+    # misses the sampler) and the subshell would hold the exec channel's stdout open
     return (f"mkdir -p {LOG_DIR} && rm -f {p['exit']} && "
-            f"setsid bash -c {shlex.quote(inner)} {MARKER} </dev/null >/dev/null 2>&1 & "
-            f"echo $! > {p['pid']}; sleep 1; {_alive(p['pid'])} && echo YETO_DAYTONA_STARTED $(cat {p['pid']}) "
+            f"{{ setsid bash -c {shlex.quote(inner)} {MARKER} </dev/null >/dev/null 2>&1 & "
+            f"echo $! > {p['pid']}; }}; sleep 1; {_alive(p['pid'])} && echo YETO_DAYTONA_STARTED $(cat {p['pid']}) "
             f"|| {{ echo YETO_DAYTONA_START_FAILED; tail -n 40 {p['log']} 2>/dev/null; exit 1; }}")
 
 
@@ -601,8 +617,8 @@ def pull_command(src_key: str, dest: str = MODEL_DIR, *, max_mb_s: int = 2500, i
     body = pull_body(src_key, dest, max_mb_s=max_mb_s, include=include, jobs=jobs)
     inner = (f"set -a; . {STORE_ENV}; set +a; [ -f {CA_BUNDLE} ] && export AWS_CA_BUNDLE={CA_BUNDLE}; "
              f"{body}; echo \"YETO_NC_PULL exit $?\"")
-    return (f"mkdir -p {LOG_DIR} {shlex.quote(dest)} && setsid bash -c {shlex.quote(inner)} "
-            f">> {PULL_LOG} 2>&1 </dev/null & echo $! > {PULL_PID}; echo YETO_DAYTONA_PULL_STARTED")
+    return (f"mkdir -p {LOG_DIR} {shlex.quote(dest)} && {{ setsid bash -c {shlex.quote(inner)} "
+            f">> {PULL_LOG} 2>&1 </dev/null & echo $! > {PULL_PID}; echo YETO_DAYTONA_PULL_STARTED; }}")
 
 
 def pull_status_command() -> str:

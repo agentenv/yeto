@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from yeto.launch import daytona_sampler as ds
-from yeto.launch.nc import elastic
+from yeto.launch.nc import elastic, lease_pool
 
 GOOD_FACTS = {
     "kfd": "rw", "dri": "8", "driver": "6.16.0 6.8.0", "rocm_image": "10.0.0", "shm_kib": str(800 << 20),
@@ -81,6 +84,9 @@ def test_preflight_names_the_failed_check_and_its_remedy(facts, py, failed):
     names = [c.name for c in err.value.failed]
     assert names == [failed]
     assert ds.REMEDY[failed.split(":")[0]] in str(err.value)
+    # a snapshot / size / network failure repeats on every sandbox: the pool halts for pool-retry
+    # (lease_pool.is_config_error) instead of ordering more; a host failure replaces the sandbox
+    assert lease_pool.is_config_error(err.value) == (failed not in ("kfd", "dri", "rocm", "gpus", "arch"))
 
 
 def test_preflight_warns_only_on_vllm_memlock_and_arch_without_hot_reload():
@@ -186,10 +192,48 @@ def test_process_lifecycle_runs_in_a_real_shell(tmp_path, monkeypatch):
     script = work / "sampler" / "s.start.sh"
     script.write_text("#!/bin/bash\necho hello\nsleep 30\n")
     run = lambda c: subprocess.run(["bash", "-c", c], capture_output=True, text=True, timeout=60)  # noqa: E731
+    began = time.monotonic()
+    # returns at once although the sampler keeps running: nothing holds the exec channel's output
     assert "YETO_DAYTONA_STARTED" in run(ds.launch_command("s")).stdout
+    assert time.monotonic() - began < 20
+    pid = int((work / "sampler" / "s.pid").read_text())
+    assert os.getpgid(pid) == pid and os.getsid(pid) == pid  # the pid file names the session leader
     assert run(ds.state_command("s")).stdout.strip() == "running -"
     run(ds.stop_command("s", grace_s=5))
-    assert run(ds.state_command("s")).stdout.split()[0] == "exited"
+    assert run(ds.state_command("s")).stdout.split()[0] in ("absent", "exited")
+    group = [p for p in Path("/proc").iterdir() if p.name.isdigit() and _pgid(int(p.name)) == pid]
+    assert group == []  # the whole process group (script and its children) is gone
+    assert "hello" in (work / "logs" / "s.last.log").read_text()  # the log tail is kept
+
+
+def _pgid(pid):
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
+
+
+def test_detached_pull_returns_at_once(tmp_path, monkeypatch):
+    """The model pull is detached the same way: the start command does not wait for the pull."""
+    if not Path("/proc/self/cmdline").exists():
+        pytest.skip("needs /proc")
+    monkeypatch.setattr(ds, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(ds, "PULL_LOG", str(tmp_path / "logs" / "pull.log"))
+    monkeypatch.setattr(ds, "PULL_PID", str(tmp_path / "pull.pid"))
+    monkeypatch.setattr(ds, "STORE_ENV", str(tmp_path / "store.env"))
+    monkeypatch.setattr(ds, "pull_body", lambda *a, **k: "sleep 30")
+    (tmp_path / "store.env").write_text("")
+    cmd = ds.pull_command("models/k31", "/models/k").replace("/models/k", str(tmp_path / "models"))
+    began = time.monotonic()
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=60)
+    assert "YETO_DAYTONA_PULL_STARTED" in out.stdout and time.monotonic() - began < 20
+    pid = int((tmp_path / "pull.pid").read_text())
+    for _ in range(50):  # setsid() runs just after the fork
+        if os.getsid(pid) == pid:
+            break
+        time.sleep(0.1)
+    assert os.getsid(pid) == pid
+    os.killpg(pid, 9)
 
 
 def test_probe_script_parses_like_the_container_probe(tmp_path, monkeypatch):
@@ -273,3 +317,13 @@ def test_pool_uses_the_process_route(monkeypatch, tmp_path):
     ops4 = cli.NcSshOps.__new__(cli.NcSshOps)
     ops4.cfg, ops4.provider = {}, None
     assert ops4.sampler_route is None
+
+
+def test_process_env_keeps_the_release_cache_on_the_sized_disk():
+    from yeto.rl.engine.policy_release import default_cache_dir
+
+    env = ds.process_env("run-a", "/work/yeto/abc")
+    # the served and the next release (DiskPlan.releases_on_disk) go under /work, the disk the
+    # preflight checks, not ~/.cache on the snapshot's root file system
+    assert str(default_cache_dir(env)).startswith(f"{ds.WORK}/")
+    assert all(env[k].startswith(f"{ds.WORK}/") for k in ("XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "YETO_RL_STORE_S3_STAGE"))

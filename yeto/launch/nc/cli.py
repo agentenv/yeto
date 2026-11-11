@@ -962,10 +962,6 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 _OVERRIDE_KEYS = ("data_slot", "drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens",
                   "continues_shard")
 _POOL_KEYS = ("drop_zero_variance", "thinking_effort", "reload", "n", "max_tokens", "dispense")
@@ -1011,3 +1007,7 @@ def _overrides(cfg) -> dict:
     if unknown:
         raise ValueError(f"pool sampler config: unknown keys {sorted(unknown)}")
     return {k: cfg.get(k) for k in _POOL_KEYS}
+
+
+if __name__ == "__main__":
+    sys.exit(main())
