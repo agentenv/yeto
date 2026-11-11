@@ -428,10 +428,19 @@ class NcSshOps:
         return elastic.Probe.parse(out.stdout or "", out.returncode)
 
     def fence(self, m: Member) -> None:
-        elastic.fence_shard(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_shard(m.shard, by=m.ticket)
 
     def fence_incarnation(self, m: Member) -> None:
-        elastic.fence_incarnation(self._fence_store(), m.shard, by=m.ticket)
+        self.data_path().fence_incarnation(m.shard, by=m.ticket)
+
+    def data_path(self) -> Any:
+        """The R2 data path of the work contract (``yeto.launch.pool.data_path``): a fence
+        claims the shard's incarnation lease and, with a store dispenser, retires the
+        sampler there (its open claims released at once)."""
+        from ..pool.data_path import R2DataPath  # noqa: PLC0415
+
+        return R2DataPath(self._fence_store,
+                          lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
 
     def _fence_store(self) -> Any:
         env = elastic.read_env_file(self.cfg["r2_env_file"])

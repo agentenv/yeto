@@ -540,3 +540,51 @@ def test_nc_pool_of_a_pool_json_runs_in_the_controller_and_shares_the_lock(tmp_p
     assert left == {"nc": []}
     assert pool_run.lock_holder(pool_run.lock_path(cfg)) is None
     assert not pool_run.pid_path(cfg).exists() and not pool_run.stop_path(cfg).exists()
+
+
+# -- data paths ----------------------------------------------------------------------------
+
+
+def test_r2_data_path_fences_the_lease_and_retires_the_sampler(monkeypatch):
+    from yeto.launch.nc import elastic
+    from yeto.launch.pool.data_path import R2DataPath
+    from yeto.rl.engine import store_dispense
+
+    calls = []
+    monkeypatch.setattr(elastic, "fence_shard", lambda store, shard, by: calls.append(("fence", shard, by)))
+    monkeypatch.setattr(store_dispense, "retire",
+                        lambda objects, ns, holder, incarnation=None, reason="": calls.append(("retire", ns, holder)))
+    path = R2DataPath(lambda: "records", lambda: ("objects", "dispense"))
+    path.fence_shard("smp-1", by="t1")
+    assert calls == [("fence", "smp-1", "t1"), ("retire", "dispense", "smp-1")]
+    calls.clear()
+    R2DataPath("records", None).fence_shard("smp-2", by="t2")  # no dispenser: the lease fence only
+    assert calls == [("fence", "smp-2", "t2")]
+
+
+def test_syncer_data_path_drains_then_retires_in_the_island_pool(tmp_path):
+    from yeto.launch.pool.data_path import SyncerDataPath
+
+    status: dict[int, str] = {}
+    calls = []
+
+    def retire_member(address, holder, incarnation, *, reason, key, timeout_s, mode):
+        calls.append((mode, holder))
+        if mode == "drain":
+            status.setdefault(holder, "draining")
+        return {"status": status.get(holder, "retired") if mode == "drain" else mode}
+
+    path = SyncerDataPath(("syncer.invalid", 1), retire_member=retire_member, holder_id=lambda shard: hash(shard))
+    clock = Clock()
+    nc = FakeProvider("nc", clock)
+    pool, *_ = make_pool(nc, [1, 2], target=2, clock=clock, fencer=path)
+    pool.scale_path, pool.scale_run = tmp_path / "scale.json", "r1"
+    ticks(pool, 3, clock)
+    victim = pool.live()[1]
+    write_scale(pool.scale_path, 1, 1, retire=[victim.ticket])
+    ticks(pool, 2, clock)
+    assert ("drain", hash(victim.shard)) in calls and victim.state != GONE
+    status[hash(victim.shard)] = "drained"
+    ticks(pool, 2, clock)
+    assert victim.state == GONE and ("retire", hash(victim.shard)) in calls
+    assert calls.index(("retire", hash(victim.shard))) > calls.index(("drain", hash(victim.shard)))
