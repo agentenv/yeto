@@ -337,6 +337,33 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     assert any("router address unknown" in r.getMessage() for r in caplog.records)
 
 
+def test_buffer_trainer_skips_the_router_probe_without_a_warning(caplog):
+    """--rl-sample-role trainer: no local rollout engine or router (the samplers are
+    remote), so the load probe is unknown (None, never 0) and says so once at info,
+    not as a warning every minute."""
+    import logging
+
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
+
+    def no_http(url):
+        raise AssertionError(f"no probe of {url}")
+
+    trainer = SimpleNamespace(yeto_rl_sample_buffer=SimpleNamespace(role="trainer"))
+    pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                            expected_policy=lambda: (0, H), args=trainer)
+    with caplog.at_level(logging.INFO, logger="yeto.rl.adapters.miles.rollout"):
+        assert pool.load_sample(http_get=no_http) is None
+        assert pool.load_sample(http_get=no_http) is None
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert sum("reported by the remote samplers" in r.getMessage() for r in caplog.records) == 1
+    sampler = SimpleNamespace(yeto_rl_sample_buffer=SimpleNamespace(role="sampler"))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.adapters.miles.rollout"):
+        assert MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
+                                expected_policy=lambda: (0, H), args=sampler).load_sample() is None
+    assert any("router address unknown" in r.getMessage() for r in caplog.records)
+
+
 def test_load_sampler_first_sample_before_interval_and_survives_probe_error():
     """fnA try27: generate ~5 s == 5 s interval -> 0 samples. First sample now at
     min(1 s, interval); a raising probe does not kill the sampler thread."""
