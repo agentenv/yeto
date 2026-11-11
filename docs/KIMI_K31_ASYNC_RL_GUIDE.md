@@ -98,6 +98,28 @@ and releases a new policy; each sampler loads the release and continues.
 
 ## 2. Prerequisites
 
+### Control host software
+
+Install yeto from a clone of this repository into its own virtual
+environment, and run every `yeto` and `python -m yeto...` command of this
+guide with that environment's interpreter:
+
+```
+git clone <yeto-repo> && cd yeto
+uv venv -p 3.12 .venv            # or: python3 -m venv .venv
+uv pip install -p .venv/bin/python -e ".[launcher,modal]"
+.venv/bin/yeto --help
+```
+
+Also needed on the control host: `ssh`, the AWS CLI (`aws`, for the model
+upload below), the Hugging Face CLI (`hf`, part of `huggingface_hub`), the
+Docker CLI (`yeto sandbox` talks to the sandbox host's Docker over
+`ssh://`), and Node.js for the National Compute tool. When `https_proxy` is
+set, Modal connects through the proxy and needs `aiohttp_socks`
+(`uv pip install -p .venv/bin/python aiohttp_socks`); preflight stops with a
+message naming it otherwise. Run the pool's `event_command` (if you set one)
+with the same interpreter.
+
 ### Accounts and credentials
 
 All values below are placeholders. Keep real values in files outside the
@@ -128,16 +150,77 @@ replacement ready, provide at least `N + 1` accounts.
 
 ### Model weights
 
-- **Trainer**: the base checkpoint on a Modal volume
-  (`--model <model-id>`, `--model-revision <revision>`,
-  `--modal-model-volume <volume>`).
-- **Samplers**: the MXFP4 checkpoint in the bucket. The pool pulls it onto
-  each new node through `model_pull` (`src_key: "<models/prefix>"`,
-  `max_mb_s`, `timeout_s`); the spec's `engine.server.base_dir` points at the
-  local copy.
-- **Expert selection**: the trainer's `--rl-expert-selection <file>` and the
-  spec's `expert_selection_sha256` must describe the same file. Format and
-  generation: [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#3-expert-selection-file).
+The bucket starts empty: no step of `yeto run up` downloads the model for you.
+Before the first run, put the base checkpoint where each part reads it.
+
+| Reader | Reads from | When |
+|---|---|---|
+| Trainer (Modal) | The Hugging Face Hub (`--model <org>/<name>`, `--model-revision <40-hex sha>`), or a Modal volume when `--modal-model-volume <volume>` is set | At every trainer launch, inside the Modal container |
+| Samplers (NC nodes) | The bucket, `s3://<bucket>/<model_pull.src_key>/`, copied onto the node by `model_pull` | Once per new node, before the engine starts |
+| Control host | The Hub config only (`config.json`, for the trainer dry run) | During preflight |
+
+**1. Download the checkpoint once**, on any machine with fast egress (a
+cloud VM is better than a workstation for a large model), pinned to the
+revision you pass the trainer:
+
+```
+hf download <org>/<name> --revision <40-hex sha> --local-dir <dir>/<name>
+```
+
+Gated models need `hf auth login` first, and the trainer needs the same Hub
+token in its Modal environment.
+
+**2. Upload it to the bucket** with the credentials of the store env file
+(or an AWS profile for the same bucket). Leave out the Hub's local cache
+directory:
+
+```
+aws s3 sync <dir>/<name> s3://<bucket>/models/<name> --exclude ".cache/*" \
+  --endpoint-url https://<endpoint>
+aws s3 ls --recursive --summarize s3://<bucket>/models/<name>/ --endpoint-url https://<endpoint>
+```
+
+The prefix must hold the files directly (`config.json`, `*.safetensors`,
+tokenizer files), not a nested folder. Any prefix works, but keep it outside
+`runs/<run>/` if several runs share the model.
+
+**3. Point the pool at it**: `"model_pull": {"src_key": "models/<name>"}` in
+`pool.json`. Leave `model_pull.dest` unset. The node copies the model to
+`/mnt/nvme/models/Kimi-K3.1-Pro`, and the sampler container mounts that
+directory at `/models/kimi-k3.1-pro` for any model. So the spec's
+`engine.server.base_dir` and `agentic.tokenizer` must be
+`/models/kimi-k3.1-pro`, even for a model that is not K3.1.
+
+`pool --dry-run` (part of the `yeto run up` preflight) reads
+`s3://<bucket>/<src_key>/config.json` with the store env file, and stops when
+the model is missing or the credentials cannot read it. Without this check a
+missing upload would surface only after a node was ordered and billed.
+
+**Permissions.** The store env file's key needs read on the model prefix and
+read/write/delete on `runs/<run_prefix>/` (buffer, dispenser ledger, fences,
+event tapes). The Modal secret named by `--modal-store-secret` needs
+read/write on `runs/<run>/` (checkpoint store, releases). The control host's
+profile (`env.AWS_PROFILE`) needs read on both, for the dashboard and the
+first-group wait.
+
+**Sizes and times** (measured; your links will differ):
+
+| Model | Size | Hub download | Upload to the bucket | Node pull (`model_pull`) |
+|---|---|---|---|---|
+| Qwen3-0.6B (bf16), 10 files | 1.5 GB | 22 s | 228 s from a workstation link (~7 MB/s) | under 1 min on an MI355X node |
+| Kimi K3.1 Pro (MXFP4) | 1.56 TB | hours; use a cloud VM | hours; use a VM in the bucket's region | ~95 min for a single `aws s3 sync` at ~275 MB/s; the parallel pull at the default 2500 MB/s cap is much faster |
+
+**Trainer from a Modal volume (optional).** With `--modal-model-volume
+<volume>` the trainer mounts the volume read-only at `/mnt/yeto-models` and
+serves the model from `hf/<name>/<revision[:8]>/`. That directory must hold
+the checkpoint files and a `MANIFEST.json` with `"repo": "<org>/<name>"`,
+`"revision": "<40-hex sha>"` and `"all_ok": true`. If the manifest is missing
+or does not match, the trainer logs `[yeto-model-volume] WARNING` and
+downloads from the Hub instead.
+
+**Expert selection** (K3.1): the trainer's `--rl-expert-selection <file>` and the
+spec's `expert_selection_sha256` must describe the same file. Format and
+generation: [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#3-expert-selection-file).
 
 ### Sandbox host
 
@@ -145,6 +228,71 @@ Prepare one or more hosts with Docker reachable over SSH. Task sets and
 readiness are described in [SANDBOX_HOSTS.md](SANDBOX_HOSTS.md). `yeto run up`
 calls `yeto sandbox status` in preflight and `yeto sandbox prepare` before
 ordering any node.
+
+**SSH keys the samplers use.** Every sampler node reaches the sandbox host
+with two keys from the spec, and the host must accept both before the first
+node starts. Nothing in `yeto run up` installs them:
+
+| Spec field | Used for | Host side (`~/.ssh/authorized_keys` of the sandbox user) |
+|---|---|---|
+| `agentic.setup.sandbox.key.path` | `docker -H ssh://...` from the node (only `docker system dial-stdio`) | `restrict,command="<dial-only script>" <public key>` |
+| `agentic.setup.tunnel.key.path` | the reverse tunnel `-R <listen>` from the node back to its records proxy | `restrict,port-forwarding,permitlisten="<ip>:<port>",... ,command="<dial-only script>" <public key>`, with one `permitlisten` for **every** port of `agentic.setup.tunnel.listen` (shard `k` listens on `lo + k`, and replacements take new shard indexes) |
+
+The dial-only script is a forced command that allows only the Docker CLI
+transport and the tunnel's empty command:
+
+```
+#!/bin/sh
+case "$SSH_ORIGINAL_COMMAND" in
+  "docker system dial-stdio") exec docker system dial-stdio ;;
+  "") exec sleep infinity ;;
+  *) echo "refused: $SSH_ORIGINAL_COMMAND" >&2; exit 1 ;;
+esac
+```
+
+Keep exactly one line per key. sshd applies the first line that matches a
+key and ignores later ones, so an older line for the same key (for example
+one that allows only the first port) silently narrows the range: shard 0
+starts, and the first replacement node, on a new shard and port, fails with
+`the sandbox host refused the reverse forward`. Every replacement takes a new
+shard index, so the range must be open before the run, or replacements
+cannot finish unattended.
+
+The sandbox host's sshd also needs `GatewayPorts clientspecified`, so the
+tunnel can listen on the private address. If a key is missing, node setup
+stops with `the sandbox host refused the docker key` (or `the tunnel key`)
+and the key's fingerprint. The pool reports `CONFIGURATION ERROR`, keeps the
+node (it still bills), and orders nothing more. Add the line on the host,
+then run `python -m yeto.launch.nc pool-retry --config <pool.json>`.
+
+**A host that was powered off.** Bare-metal sandbox hosts are often stopped
+between runs to save cost. Power the host on through your provider (for
+Cherry Servers: `cherryctl server start <server-id>`, then wait until
+`ssh <sandbox-host> true` succeeds, usually 2 to 5 minutes), then check it
+before `yeto run up`:
+
+1. **The Docker data disk is mounted.** Run
+   `ssh <sandbox-host> 'docker info | grep -E "Docker Root|Images"; df -h <docker-root>'`.
+   If the data disk did not mount at boot (for example a RAID array that came
+   up under another device name than the one in `/etc/fstab`), Docker starts
+   on an empty root directory: `yeto sandbox status` then shows
+   `images 0/<n>` although the images were pulled before, and
+   `yeto sandbox prepare` tries to pull or build every image again. Stop
+   Docker, mount the disk, start Docker, and fix `/etc/fstab`.
+2. **Sidecars are stopped.** A power cycle stops every container. `yeto
+   sandbox prepare` adopts a sidecar that someone else started only while it
+   is running; a stopped one is refused with
+   `container <name> exists and is not this run's ... free the name or
+   declare another container_name`, and `up` stops with
+   `sandbox prepare failed: nothing ordered`. Either start those containers
+   again (as their owner), or drop `container_name` from the sidecars file so
+   that `prepare` starts run-labelled sidecars of its own, which `down`
+   removes again.
+3. Run `yeto sandbox status --envs <envs.json> --store <store>` and confirm
+   the images and sidecars counts.
+
+Recommended practice: after the run, `yeto run down` and only then power the
+host off.
 
 ## 3. Configuration
 
@@ -211,11 +359,13 @@ Fill the `0` prices with your contracted rates; they drive the spend estimate.
 | `trainer.progress_paths` | Extra files whose growth counts as trainer progress for the silence backstop. |
 | `first_group.timeout_s`, `poll_s` | How long `up` waits for the first buffer object before starting the trainer (default 5400 s, polled every 60 s). |
 | `dashboard.port` | Loopback port of the dashboard (default 8795). |
+| `dashboard.prices` | Price table JSON for the dashboard's cost panel (default: the built-in example table, see section 6). `up` also passes the run name and `budget.usd` to the dashboard. |
 | `budget.usd` | Spend cap (trainer plus NC estimate). |
 | `budget.wall_h` | Wall-clock cap from the pool start (default 3). |
 | `budget.nc_usd_per_h` | Price of one NC node hour for the estimate. |
 | `budget.silence_min` | Minimum silence window of the backstop; the effective window is `max(4 x --rl-stall-timeout, silence_min)`. |
 | `budget.release_nc_on_breach` | `true`: a budget or wall-clock breach performs the full `down` including the NC pool. Default `false` (see section 7). |
+| `budget.release_nc_on_finish` | `true`: the full `down` runs as soon as the trainer finishes (`SUCCEEDED`). Default `false` (see section 5.5). |
 
 ### 3.2 Trainer arguments (`trainer.argv`)
 
@@ -248,7 +398,7 @@ The full trainer command, with comments for every flag, is in
   "shard_limit": 8,
   "machine_type": "mi355x",
   "spec": "<sampler-spec.json>",
-  "run_prefix": "runs/<run>",
+  "run_prefix": "<run>",
   "r2_env_file": "<store-env-file>",
   "agentic_env_file": "<agentic-env-file>",
   "model_pull": {"src_key": "<models/prefix>", "max_mb_s": 2500, "timeout_s": 7200},
@@ -271,7 +421,7 @@ Key fields (the complete list is in
 | `elastic.max_nodes` | Most billed nodes at once (default `2 x target`). |
 | `elastic.max_orders` | Most orders over the whole run. |
 | `elastic.engine_stall_s` | Seconds without generated tokens while requests are pending before an engine counts as stalled (default 600). |
-| `elastic.max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced (default 2). |
+| `elastic.max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced (default 2). Restarts during node setup (before the first join) and before a `pool-retry` do not count, and the count starts again after `elastic.sampler_restart_reset_s` (default 1800) of healthy running. |
 | `sampler.dispense` | Task dispenser settings ([DISPENSER.md](DISPENSER.md)). |
 | `model_pull` | Model download from the bucket onto each new node. |
 
@@ -404,6 +554,44 @@ The whole sequence appears in the dashboard's NC pool events. Event names and
 the per-case behaviour are listed in
 [NC_POOL.md, What the pool does](NC_POOL.md#what-the-pool-does).
 
+Replacement is unattended only when everything a new node needs is in place
+before the run: the model in the bucket, the sandbox host's keys with the full
+tunnel port range (section 2, Sandbox host), and free accounts. A
+`CONFIGURATION ERROR` on a replacement halts the pool until `pool-retry`.
+
+**What you see after a sampler is killed for memory (OOM).** Measured on a
+one-node run (Qwen3-0.6B, one MI355X node):
+
+| Time | Event | Meaning |
+|---|---|---|
+| t | the kernel kills the engine or sampler process (`Memory cgroup out of memory` in the node's `dmesg`) | |
+| t + 7 s | `nc_elastic_sampler_restart` (`attempt` n), or `nc_elastic_sampler_crash_loop` with `detail=sampler exited exit=137` once `elastic.max_sampler_restarts` is used up | in-place restart, or node replacement |
+| t + 8 s | `nc_elastic_shard_fenced why=sampler crash loop` | the shard takes no more groups; its claims return to the dispenser |
+| t + 34 s | `nc_elastic_released` | the ticket is deleted and confirmed ended |
+| t + 70 s | `nc_elastic_ordered ... continues_shard=<old shard>` | a replacement on a new shard index |
+| t + 9 to 12 min | `nc_elastic_member_ready`; on the node `rl_sampler_start_on_latest` (`base_version` = the newest release) | the new island generates with the latest policy; the interrupted tasks are claimed again with the next attempt number, never twice at once |
+
+The trainer keeps training on groups already in the buffer (within
+`--rl-max-policy-age`) and waits otherwise. No action is needed. If OOM
+repeats on every node, lower the engine's memory use (`--max-num-seqs`,
+`--gpu-memory-utilization`, `agentic.max_in_flight`) and resume.
+
+**What you see after a node is reclaimed by the provider.** Measured on the
+same run:
+
+| Time | Event |
+|---|---|
+| t | the ticket ends outside yeto |
+| t + 30 s | `nc_elastic_released_externally ... state_was=ready`, then `nc_elastic_shard_fenced why=released` |
+| t + 60 s | `nc_elastic_released` (the pool confirms the ticket is ended) |
+| t + 100 s | `nc_elastic_ordered ... continues_shard=<old shard>` |
+| t + 10 min | `nc_elastic_member_ready`, `rl_sampler_start_on_latest` with the newest release |
+
+The reclaimed node's claims are released by the first sampler that scans the
+dispenser after the fence (a fenced holder's claim is released at once, not
+after `lease_s`). With a single sampler that is the replacement, so the tasks
+continue when it joins.
+
 ### 5.3 Resuming training
 
 - **From the latest cut.** With `--rl-checkpoint-store`, the trainer keeps
@@ -455,6 +643,15 @@ yeto run down --config <run.json>
 Recommended practice: run `down` when you finish. NC leases bill until their
 tickets are deleted. `pool-stop` alone releases only the NC nodes
 ([NC_POOL.md, Stopping a pool](NC_POOL.md#stopping-a-pool)).
+
+**When the trainer finishes.** A trainer that reaches `--rl-stop-after-rounds`
+ends with `finished: SUCCEEDED`, but the NC nodes and the sandboxes keep
+billing: the samplers wait for releases that no longer come. By default the
+monitor logs `trainer finished (SUCCEEDED); the NC pool and the sandboxes
+still bill` once and keeps its guards (the wall clock eventually stops the
+run). Recommended practice: set `"release_nc_on_finish": true` in `budget` so
+the monitor runs the full `down` as soon as the trainer finishes, or run
+`yeto run down` yourself.
 
 ## 6. Dashboard
 
@@ -516,7 +713,11 @@ position. A growing backlog means trainers are behind. A backlog near zero
 means samplers are the bottleneck.
 
 **Policy releases.** Each trainer release and when each sampler finished
-loading it. NC pool events appear as dashed lines.
+loading it, with the latency from the release. A replacement island that
+started on the newest release shows `(at start)` instead of a latency. A
+release no running sampler loaded shows `not loaded` (with
+`--rl-max-policy-age` above 0 a sampler may skip versions). NC pool events
+appear as dashed lines.
 
 **NC pool events.** The `nc_elastic_*` stream (ordered, member_ready,
 shard_fenced, evicted, node_lost, engine_stalled, released, ...). Use it to
@@ -526,7 +727,12 @@ follow a replacement end to end.
 
 - **Island health**, **Event stream**: per-island state and the raw events.
 - **Cost (estimate, not billing data)**: spend per resource from the resource
-  ledger and the price table (`--prices`). The cost bar uses `--budget`.
+  ledger and the price table (`--prices`, from `dashboard.prices` in
+  `run.json`). The cost bar uses `--budget` (`budget.usd`). An NC sampler is
+  priced as a whole 8-GPU node, whatever TP its engine uses, from the
+  ticket's order to its release (pool events). The trainer is priced from the
+  launcher's record of its GPU type; a GPU type missing from the price table
+  shows as unpriced, never $0.
   Current scope: the figures are estimates; your provider invoices are
   authoritative. `yeto run status` shows the same spend estimate the monitor
   uses (`spend_usd_estimate`).
@@ -540,6 +746,7 @@ The monitor in `yeto run up` checks the run every minute:
 | Budget | spend estimate > `budget.usd` | Stop the trainer. |
 | Wall clock | time since pool start > `budget.wall_h` | Stop the trainer. |
 | Trainer exit | launcher finished `FAILED` or non-zero | Stop the trainer path cleanly. |
+| Trainer finished | launcher finished `SUCCEEDED` (exit code 0) | Banner: the NC pool still bills; with `budget.release_nc_on_finish` the full `down`. |
 | Silence backstop | trainer log and `progress_paths` unchanged for `max(4 x --rl-stall-timeout, silence_min)` | Stop the trainer. |
 | First group | no buffer object within `first_group.timeout_s` | Stop before the trainer starts. |
 | Sandbox containers | count > `sandbox.max_run_containers` | Warning only. |
@@ -567,6 +774,32 @@ The resource ledger, idle shutdown and cleanup are described in
 
 Logs are in `~/.yeto/rl-up/<run>/` (`preflight.log`, `sandbox.log`,
 `pool.log`, `trainer.log`, `dashboard.log`, `down.log`).
+
+**Preflight stops with `model_pull: no s3://<bucket>/<src_key>/config.json`.**
+The model is not in the bucket under `model_pull.src_key`, or the store env
+file's key cannot read it. Upload it (section 2, Model weights) and run the
+dry run again. Nothing was ordered.
+
+**`sandbox prepare failed: nothing ordered`.**
+Read `sandbox.log`. After a sandbox host reboot the usual causes are an
+unmounted Docker data disk and stopped sidecars (section 2, A host that was
+powered off).
+
+**Every trial is lost with `RewardFileNotFoundError` within seconds.**
+Open a trial directory on the node (`/mnt/nvme/work/harbor/trials/<trial>/`,
+`verifier/test-stdout.txt`). `task-server unreachable at http://<ip>:<port>`
+means the task files name a fixed address of the sandbox host's Docker
+bridge, which can change when the host restarts. Write
+`{{yeto.sidecar.<name>.url}}` (or `{{yeto.host.bridge_ip}}`) in the task files
+instead; `yeto sandbox prepare` renders the current address
+([SANDBOX_HOSTS.md](SANDBOX_HOSTS.md)). Run `prepare` again; replacement
+nodes pick up the rendered tasks. The dispenser settles tasks that fail
+`max_redo` times as `exhausted`; later passes dispense them again.
+
+**`the sandbox host refused the docker key` or `refused the reverse forward`.**
+The key line on the sandbox host is missing, or an older line for the same
+key wins (section 2, SSH keys the samplers use). Fix the line, then
+`python -m yeto.launch.nc pool-retry --config <pool.json>`.
 
 **A sampler stays `waiting`.**
 Check the reason shown in its status:
@@ -662,7 +895,10 @@ The image `yeto-miles-k31@sha256:63ad0d2a...` (`MILES_K31_IMAGE`) is for the
 LoRA recipe.
 
 **Registry.** The default registry is `ghcr.io/agentenv`, and no setting is
-needed to use it. Set `YETO_IMAGE_REGISTRY=<registry>/<org>` only when you
+needed to use it when its packages are readable by your Modal workspace. If
+the trainer fails to pull the image (an anonymous pull of a private package
+answers `403`), ask for read access, or use `--rl-image-private` below, or a
+mirror. Set `YETO_IMAGE_REGISTRY=<registry>/<org>` only when you
 pull from a mirror that carries the same digests. Because images are
 referenced by digest, a mirror cannot serve different bytes under the same
 pin. For a private registry, add `--rl-image-private` with

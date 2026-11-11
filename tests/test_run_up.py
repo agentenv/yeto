@@ -338,3 +338,58 @@ def test_preflight_refuses_a_zero_budget_with_prices_set(make_run, monkeypatch):
     run.cfg["trainer"]["usd_per_h"] = 0  # the template as is: nothing priced, nothing to cap
     assert run.preflight() is True
     assert make_run(usd=450).preflight() is True
+
+
+def test_children_do_not_import_from_the_start_directory(make_run, tmp_path, monkeypatch):
+    """A stray module in the directory ``up`` starts from (a ``h2.py`` shadowed the
+    HTTP/2 package of every ``python -m modal`` child) must not reach the children."""
+    import os
+    import subprocess
+    import sys
+
+    (tmp_path / "h2.py").write_text("raise SystemExit('shadowed')\n")
+    monkeypatch.chdir(tmp_path)
+    # CI runs pytest with ``PYTHONPATH=.``: that entry must not re-add the start dir
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([".", "", "rel/lib", "/abs/lib"]))
+    run = make_run()
+    assert run.env["PYTHONSAFEPATH"] == "1"
+    out = subprocess.run([sys.executable, "-c", "import h2"], env=run.env, cwd=tmp_path,
+                         capture_output=True, text=True)
+    assert "shadowed" not in (out.stdout + out.stderr)
+    assert run.env["PYTHONPATH"].split(os.pathsep) == [str((tmp_path / "rel/lib").resolve()), "/abs/lib"]
+
+
+def test_dashboard_gets_the_run_name_budget_and_prices(make_run, tmp_path):
+    """The dashboard of ``up`` names the run, prices the trainer from the launcher's
+    fleet record (``--run``) and draws the cost bar against ``budget.usd``."""
+    run = make_run(usd=60)
+    assert run.dashboard_args() == ["--store", "s3://b/runs/r1", "--run", "r1", "--budget", "60"]
+    run.cfg["dashboard"] = {"port": 1, "prices": str(tmp_path / "prices.json")}
+    assert run.dashboard_args()[-2:] == ["--prices", str(tmp_path / "prices.json")]
+    run.cfg["budget"] = {}
+    assert "--budget" not in run.dashboard_args()
+
+
+def test_a_finished_trainer_says_the_pool_still_bills_or_releases_it(make_run, tmp_path, capsys):
+    """After SUCCEEDED the samplers have nothing to feed: by default a banner names the
+    release command (the monitor keeps its guards); release_nc_on_finish runs down."""
+    ok = "[yeto] run 'r1' finished: SUCCEEDED (exit code 0)\n"
+    run = make_run()
+    _trainer(run, tmp_path, ok)
+    run.state["trainer_exit_seen"] = "earlier"
+    assert run.breach() is None and run.state.get("trainer_finished")
+    assert run.on_trainer_finished() is False and not run.down_called
+    assert run.on_trainer_finished() is False
+    assert capsys.readouterr().out.count("still bill") == 1
+    run = make_run(release_nc_on_finish=True)
+    _trainer(run, tmp_path, ok)
+    run.breach()
+    assert run.on_trainer_finished() is True and run.down_called and _stops_pool(run)
+
+
+def test_a_new_trainer_launch_forgets_the_exit_of_the_previous_one(make_run):
+    run = make_run()
+    run.state.update(trainer_exit_seen="2026-01-01T00:00:00Z", trainer_finished="2026-01-01T00:00:00Z")
+    run._spawn = lambda name, argv: None
+    run.trainer()
+    assert "trainer_exit_seen" not in run.state and "trainer_finished" not in run.state

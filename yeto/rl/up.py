@@ -88,6 +88,29 @@ def load_config(path: str) -> dict[str, Any]:
     return cfg
 
 
+def _pythonpath_without_start_dir(env: dict[str, str]) -> dict[str, str]:
+    """``PYTHONSAFEPATH`` only drops the implicit sys.path[0]; a ``PYTHONPATH`` of
+    ``.`` (or an empty entry) puts the start directory right back. Resolve relative
+    entries now and drop the ones naming the start directory, unless that directory
+    is where this ``yeto`` package lives (children must import the same yeto)."""
+    raw = env.get("PYTHONPATH")
+    if raw is None:
+        return {}
+    start = Path.cwd().resolve()
+    own_root = Path(__file__).resolve().parents[2]
+    kept: list[str] = []
+    for entry in raw.split(os.pathsep):
+        path = Path(entry or ".")
+        if not path.is_absolute():
+            resolved = path.resolve()
+            if resolved == start and resolved != own_root:
+                continue
+            entry = str(resolved)
+        if entry not in kept:
+            kept.append(entry)
+    return {"PYTHONPATH": os.pathsep.join(kept)}
+
+
 class Run:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -99,6 +122,11 @@ class Run:
         self.env = dict(os.environ)
         self.env.update({k: os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
         self.env.setdefault("YETO_RESOURCE_LEDGER", str(Path(f"~/.yeto/runs/{self.run}/resources.jsonl").expanduser()))
+        # Every child is ``python -m ...`` (and spawns more, e.g. ``python -m modal``):
+        # without this the directory ``up`` was started from is sys.path[0] of each,
+        # and a stray ``h2.py`` / ``json.py`` there replaces a real module.
+        self.env.setdefault("PYTHONSAFEPATH", "1")
+        self.env.update(_pythonpath_without_start_dir(self.env))
         self.py = sys.executable
 
     # -- state
@@ -251,12 +279,27 @@ class Run:
 
     def trainer(self) -> None:
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))
+        for key in ("trainer_exit_seen", "trainer_finished"):  # of an earlier launcher of this run
+            self.state.pop(key, None)
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
+    def dashboard_args(self) -> list[str]:
+        """``--store`` plus the run's local records (``--run``: the launcher's fleet record
+        names the trainer's GPU, so its cost is priced), the cost bar's cap
+        (``budget.usd``) and an optional price table (``dashboard.prices``)."""
+        dash = self.cfg.get("dashboard") or {}
+        argv = ["--store", self.cfg["store"], "--run", self.run]
+        usd = (self.cfg.get("budget") or {}).get("usd")
+        if usd:
+            argv += ["--budget", str(usd)]
+        if dash.get("prices"):
+            argv += ["--prices", os.path.expanduser(str(dash["prices"]))]
+        return argv
+
     def dashboard(self) -> None:
         port = str((self.cfg.get("dashboard") or {}).get("port", 8795))
-        self._spawn("dashboard", self.yeto("dashboard", "serve", "--store", self.cfg["store"], "--port", port))
+        self._spawn("dashboard", self.yeto("dashboard", "serve", *self.dashboard_args(), "--port", port))
         self.mark("dashboard", url=f"http://127.0.0.1:{port}/")
 
     # -- guards
@@ -332,6 +375,8 @@ class Run:
             except OSError:
                 tail = ""
             done = FINISHED.findall(tail)
+            if done and done[-1][0] == "SUCCEEDED" and done[-1][1] == "0":
+                self.state["trainer_finished"] = self.state.get("trainer_finished") or _now()
             if not done and not _worker_alive(self.run):  # a killed log streamer: the worker may still run
                 why = "trainer: launcher exited without a result"
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
@@ -448,7 +493,26 @@ class Run:
                 _log(f"trainer launcher PID {tr['pid']} exited")
                 self.state["trainer_exit_seen"] = _now()
                 self.save()
+            if self.state.get("trainer_finished") and self.on_trainer_finished():
+                return
             time.sleep(poll_s)
+
+    def on_trainer_finished(self) -> bool:
+        """The trainer finished its rounds (``SUCCEEDED``). The samplers have nothing left
+        to feed, but their nodes and the sandboxes bill until released: with
+        ``budget.release_nc_on_finish`` the full ``down`` runs now (returns True: the
+        monitor ends); otherwise a banner says so (once), and the wall-clock guard stays."""
+        if (self.cfg.get("budget") or {}).get("release_nc_on_finish"):
+            _log("trainer finished: budget.release_nc_on_finish is set: full down (NC pool included)")
+            self.down()
+            return True
+        if not self.state.get("finished_banner"):
+            _log("trainer finished (SUCCEEDED); the NC pool and the sandboxes still bill. "
+                 "Release them with: yeto run down --config <run.json> "
+                 "(or set budget.release_nc_on_finish: true)")
+            self.state["finished_banner"] = _now()
+            self.save()
+        return False
 
     def watch_nc_after_breach(self, why: str, poll_s: float = 60.0) -> None:
         """After a budget / wall-clock breach that stopped the trainer only, the NC pool
@@ -481,7 +545,7 @@ class Run:
     # -- down
     def down(self) -> bool:
         ok = True
-        self._cmd(self.yeto("dashboard", "export", "--store", self.cfg["store"], "-o",
+        self._cmd(self.yeto("dashboard", "export", *self.dashboard_args(), "-o",
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy
         dash = (self.state.get("procs") or {}).get("dashboard")
         if dash and _alive(dash["pid"]):

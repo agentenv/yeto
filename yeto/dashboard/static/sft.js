@@ -463,7 +463,7 @@ function rlm(V){
   chart("rfResp",{series:ser(trs,"resp_mean").concat(sser("resp_len_mean")),yfmt:k});
   chart("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),legend:true}})),yfmt:k,
     refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
-  chart("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
+  chart("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
   var tb=function(key){var o=[];trs.forEach(function(c){((TR[c.id]||{}).rounds||[]).forEach(function(r){if(fin(r.ts)&&r[key]>0)o.push([r.ts,r[key]])})});return o};
   var sb=function(key){var o=[];sps.forEach(function(c){SR(c).forEach(function(r){if(r[key]>0)o.push([r.ts,r[key]])})});return o};
   chart("rfDrop",{kind:"bars",series:[{name:"stale",color:PAL[3],pts:tb("stale_groups")},{name:"zero-variance",color:PAL[5],pts:sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen")},

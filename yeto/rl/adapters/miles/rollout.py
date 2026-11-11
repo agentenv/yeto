@@ -1079,6 +1079,21 @@ class MilesRolloutPool:
         self._load_diag_last = (reason, now)
         logger.warning("yeto load_sample unavailable: %s", reason)
 
+    def _remote_rollout(self) -> bool:
+        """A buffer trainer (``--rl-sample-role trainer``) has no local rollout engine or
+        router: its load is reported by the remote samplers. The probe is skipped
+        (unknown, never 0) and that is said once instead of a warning every minute."""
+        from yeto.rl.engine.sample_roles import TRAINER
+
+        config = getattr(self._args, "yeto_rl_sample_buffer", None)
+        if getattr(config, "role", None) != TRAINER:
+            return False
+        if not getattr(self, "_remote_rollout_noted", False):
+            self._remote_rollout_noted = True
+            logger.info("yeto load_sample: buffer trainer without local rollout engines; "
+                        "rollout load is reported by the remote samplers")
+        return True
+
     def _router_inflight(self, http_get: Callable[[str], Any]) -> dict[str, Any] | None:
         """Per-engine in-flight counts from the router.
 
@@ -1089,6 +1104,8 @@ class MilesRolloutPool:
         "load", ...}]}``, ``load`` = router-side in-flight). No cordon there: 0.
         """
         args = self._args
+        if self._remote_rollout():
+            return None
         ip = getattr(args, "sglang_router_ip", None)
         port = getattr(args, "sglang_router_port", None)
         if not ip or not port:

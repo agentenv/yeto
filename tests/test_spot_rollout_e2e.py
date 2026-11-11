@@ -157,7 +157,14 @@ def test_spot_sampler_feeds_the_trainer_and_survives_a_reclaim(syncer_binary, tm
                     taken.append((rollout, versions.pop(), current))
                 rollout += 1
 
+        # Before its first merged cut arrives the sampler serves the base weights
+        # (version 0, not stale while the run is at most 2 merges in), and with the
+        # fake engine a backlog of them is written in milliseconds: read on until a
+        # group of merged weights comes, not a fixed number of rounds.
         take(4)
+        deadline = time.monotonic() + 60
+        while max(v for _, v, _ in taken) < 1 and time.monotonic() < deadline:
+            take(1)
         assert max(v for _, v, _ in taken) >= 1, "the sampler never served merged weights"
         # Reclaim without notice: SIGKILL. The learner keeps merging.
         first.send_signal(signal.SIGKILL)

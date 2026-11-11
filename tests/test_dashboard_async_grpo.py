@@ -365,3 +365,15 @@ def test_islands_now_note_with_events(tmp_path):
     r = Reducer(run="one")
     r.feed({"event": "rl_driver_start", "island_id": 0, "time_unix": T0})
     assert _smoke(r, tmp_path, T0)["nodes_note"].startswith("last event ")
+
+
+def test_a_replacement_that_starts_on_the_latest_release_shows_in_its_row():
+    """A replacement island starts on the newest release (rl_sampler_start_on_latest)
+    instead of hot-loading it: the release row lists it as a load at start."""
+    extra = [{"event": "rl_sampler_start_on_latest", "sampler_id": "nc-b1", "base_version": 2,
+              "base_dir": "/x/r2-v2", "time_unix": T0 + 900}]
+    rel = {r["policy_version"]: r for r in export_view(run_reducer(extra), generated_at=T0 + 1000)
+           ["page"]["async"]["releases"]}
+    load = rel[2]["loads"]["nc-b1"]
+    assert load["at_start"] is True and load["loaded_at"] == T0 + 900 and load["latency_s"] is None
+    assert rel[2]["loads"]["nc-a1"]["at_start"] is False

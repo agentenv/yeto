@@ -191,7 +191,8 @@ idempotent and exit 0; a non-zero exit fails the node start.
 | `unreachable_grace_s` | How long probes must fail before a node counts as lost. Shorter failures count as network blips. | `300` |
 | `control_plane_alert_s` | How long NC status calls must fail before an alert. The pool never acts on a failed status call alone. | `600` |
 | `stall_s` | A joined sampler whose event tape has not grown for this long counts as crashed. Set it above your longest round. | none (off) |
-| `max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced. | `2` |
+| `max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced. Restarts before the node's first join and before a `pool-retry` do not count. | `2` |
+| `sampler_restart_reset_s` | A sampler that ran this long since it joined starts a fresh restart count when it crashes; `null`: the count never resets. | `1800` |
 | `start_timeout_s` | Time allowed from the order to a joined sampler. | `3600` |
 | `overdue_grace_s` | How long a ticket may read `active` past `lease_until` before the pool deletes it. | `0` |
 | `lost_handoff_wait_s` | How long the replacement of a lost node waits for its predecessor's handoff. | `60` |

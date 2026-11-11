@@ -98,13 +98,40 @@ def island_cost(isl: dict, prices: dict, now: float) -> dict:
             "priced": unit is not None}
 
 
+def nc_lease_spans(pool_events) -> dict[str, tuple[float, float | None]]:
+    """Billed span of each NC shard from the pool's events: its ticket's order to the
+    ticket's release (None: still billed). A node bills from the order, long before
+    and after its sampler writes events, so the sampler tape alone undercounts."""
+    shard_of: dict[str, str] = {}
+    spans: dict[str, list] = {}
+    for e in pool_events or ():
+        name, ts, ticket = e.get("event"), e.get("ts"), e.get("ticket")
+        if ts is None or not ticket:
+            continue
+        if name == "nc_elastic_ordered" and e.get("shard"):
+            shard_of[str(ticket)] = str(e["shard"])
+            spans.setdefault(str(e["shard"]), [float(ts), None])
+        elif name == "nc_elastic_released" and str(ticket) in shard_of:
+            span = spans[shard_of[str(ticket)]]
+            span[1] = float(ts) if span[1] is None else max(span[1], float(ts))
+    return {k: (v[0], v[1]) for k, v in spans.items()}
+
+
 def cost_view(reducer, now: float) -> dict:
     rows = []
+    async_ = getattr(reducer, "async_", None)
+    leases = nc_lease_spans(getattr(async_, "pool", None))
     for iid in reducer.island_ids():
         isl = reducer.islands[iid]
         if isl.get("ready_ts") is None and isl.get("cloud") is None:
             continue  # no fleet data at all for this island
         row = island_cost(isl, reducer.prices, now)
+        if (isl.get("cloud") or "").lower() == "nc" and iid in leases:
+            start, end = leases[iid]
+            row["hours"] = max(0.0, (end if end is not None else now) - start) / 3600.0
+            row["running"] = end is None
+            row["cost_usd"] = row["rate_usd_h"] * row["hours"] if row["rate_usd_h"] is not None else None
+            row["billed_from"] = "nc pool events (order to release)"
         pts = isl["points"]
         rewards = [pts[x]["reward"] for x in sorted(pts) if pts[x].get("reward") is not None]
         toks = [pts[x]["tok_s"] for x in sorted(pts) if pts[x].get("tok_s") is not None]

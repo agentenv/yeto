@@ -435,7 +435,7 @@ function aRel(A){
   $("legRel").innerHTML='<span><i class="sw" style="background:var(--P)"></i>release → load done</span>'+(pool.length?'<span><i class="sw" style="background:var(--warn)"></i>NC pool event</span><span><i class="sw" style="background:var(--bad)"></i>NC pool failure (evicted / lost / crash loop)</span>':"");
   if(rows.length)box2.innerHTML='<table class="c"><tr><th>policy</th><th>trainer</th><th>released at</th><th>upload s</th>'+sids.map(function(k){return '<th>sampler '+esc(k)+' loaded (latency)</th>'}).join("")+'</tr>'+
     rows.slice(-30).reverse().map(function(r){return '<tr><td class="num">v'+esc(r.policy_version)+'</td><td>'+esc(r.trainer==null?"n/a":r.trainer)+'</td><td class="num">'+clock(r.released_at)+'</td><td class="num">'+f(r.upload_s,1)+'</td>'+
-      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+" ("+f(ld.latency_s,0)+" s)":"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
+      sids.map(function(k){var ld=(r.loads||{})[k];return '<td class="num">'+(ld?clock(ld.loaded_at)+(ld.at_start?" (at start)":" ("+f(ld.latency_s,0)+" s)"):"not loaded")+'</td>'}).join("")+'</tr>'}).join("")+'</table>';
 }
 function render(){
   if(!V)return;O=V.overview;

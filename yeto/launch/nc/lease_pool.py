@@ -94,7 +94,9 @@ class Member:
     hourly_ucr: int | None = None
     started: float | None = None  # sampler start (or the last in-place restart)
     joined: bool = False
-    restarts: int = 0
+    restarts: int = 0  # in-place restarts counted toward elastic.max_sampler_restarts
+    ready_since: float | None = None  # this incarnation's sampler joined at
+    ever_ready: bool = False  # a sampler on this node joined once (restarts before that are setup)
     unreachable_since: float | None = None
     status_fail_since: float | None = None
     alerted: list[str] = field(default_factory=list)  # one-shot events already sent
@@ -700,6 +702,9 @@ class LeasePool:
             ready = (m.joined if getattr(self.ops, "probe", None) is not None else self.ops.ready(m))
             if ready:
                 m.state, m.joined = READY, True
+                if not m.ever_ready:  # restarts while the node was still being set up are not a crash loop
+                    m.ever_ready, m.restarts = True, 0
+                m.ready_since = now
                 self.breaker.success()
                 self.log(f"pool: {m.ticket} ready (shard {m.shard})")
                 self._event("member_ready", ticket=m.ticket, account=m.account, shard=m.shard,
@@ -737,6 +742,7 @@ class LeasePool:
             restart(m, self.shards())
             now = self.clock()
             m.config_error = None
+            m.restarts = 0  # restarts before a configuration fix are not a crash loop
             m.state, m.started, m.joined, m.created = STARTING, now, False, now
             self._event("sampler_retry", ticket=m.ticket, shard=m.shard)
             done.append(m.ticket)
@@ -759,6 +765,10 @@ class LeasePool:
 
     def _crashed(self, m: Member, now: float, detail: str) -> None:
         restart = getattr(self.ops, "restart", None)
+        reset = self.ecfg.sampler_restart_reset_s
+        if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
+            m.restarts = 0  # healthy long enough since the last restart: a new crash, not a loop
+        m.ready_since = None
         if restart is not None and m.restarts < self.ecfg.max_sampler_restarts:
             m.restarts += 1
             self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts, detail=detail)
@@ -936,6 +946,8 @@ class LeasePool:
         if path.exists():
             doc = json.loads(path.read_text())
             pool.members = [Member(**m) for m in doc.get("members", [])]
+            for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
+                m.ever_ready = m.ever_ready or m.joined
             pool.next_shard = doc.get("next_shard", 0)
             pool.stopped = doc.get("stopped")
             pool.finished = doc.get("finished")
