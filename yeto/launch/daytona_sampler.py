@@ -258,7 +258,7 @@ def preflight_script(req: Requirements, *, env_file: str | None = STORE_ENV) -> 
     ]
     if req.store:
         src = f"set -a; . {shlex.quote(env_file)}; set +a; " if env_file else ""
-        lines.append(f"( {src}c=$(curl -s -o /dev/null -m 15 -w '%{{http_code}}' ${{AWS_CA_BUNDLE:+--cacert $AWS_CA_BUNDLE}} "
+        lines.append(f"( {src}c=$(curl -s --retry 2 --retry-connrefused -o /dev/null -m 15 -w '%{{http_code}}' ${{AWS_CA_BUNDLE:+--cacert $AWS_CA_BUNDLE}} "
                      "\"${AWS_ENDPOINT_URL:-}\" 2>/dev/null); f store \"${c:-000}\" )")
     for hostport in req.ssh_hosts:
         host, _, port = hostport.rpartition(":")

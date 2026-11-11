@@ -36,8 +36,25 @@ Mapping
   (``<token>@ssh.app.daytona.io``, port 22), the token from
   ``sandbox.create_ssh_access(expires_in_minutes)``. ``attach`` writes an ssh
   alias (``node_pool.host_alias(ticket)``) and runs ``host_setup``; the token is
-  renewed (alias rewritten) by ``status`` once less than a third of it is left.
-  The token is kept only in the 0600 ssh config, never in the lease file.
+  renewed (alias rewritten) by ``status`` once less than a third of it is left
+  (plus a per-sandbox offset of up to a twelfth, so sandboxes created together do
+  not all renew in the same tick). The token is kept only in the 0600 ssh config,
+  never in the lease file.
+
+Scale (16 sandboxes and more):
+
+* ``order`` does not hold the pool's tick for the whole start: ``Daytona.create``
+  blocks until the sandbox is started (minutes for a GPU sandbox), so it runs in a
+  background thread and ``order`` waits only ``create_wait_s`` (default 5 s) for a
+  fast failure (no spot capacity fails at once and still reaches the pool's
+  breaker). A create still running reads ``waiting``; one that failed later with
+  no sandbox left reads ended ``error`` (the pool refills the slot).
+* Daytona API calls that are refused for rate (HTTP 429, "rate limit", "too many
+  requests") are retried with exponential backoff and full jitter
+  (``api_attempts``, at most 30 s apart); a create is retried only on such a
+  refusal, when nothing was created.
+* The local record and the ssh config are rewritten under one lock: the pool
+  starts members and reads tickets from several threads at once.
 
 Verified against the ``daytona`` Python SDK 0.231.1 (signatures and source, no
 API call) and the docs (gpu-sandboxes, ssh-access) on 2026-11-11:
@@ -77,8 +94,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import threading
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +122,9 @@ FAILED = frozenset({"error", "build_failed"})
 CONFIG_KEYS = frozenset({"kind", "image", "snapshot", "gpus", "gpu_type", "spot", "cpu", "memory_gib", "disk_gib",
                          "name_prefix", "env", "ttl_minutes", "queue_timeout_min", "create_timeout_s",
                          "delete_timeout_s", "ssh_token_minutes", "host_setup", "target", "api_url_env",
-                         "api_key_env", "price_usd_h"})
+                         "api_key_env", "price_usd_h", "create_wait_s", "api_attempts"})
+RATE_LIMIT_MARKS = ("429", "rate limit", "ratelimit", "too many requests", "throttl")
+BACKOFF_CAP_S = 30.0
 LEDGER_KIND = "daytona_sandbox"
 
 
@@ -114,6 +136,14 @@ def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
 
 def _state(value: Any) -> str:
     return str(getattr(value, "value", value) or "unknown").rsplit(".", 1)[-1].lower()
+
+
+def _rate_limited(error: BaseException) -> bool:
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if status == 429:
+        return True
+    text = f"{type(error).__name__} {error}".lower()
+    return any(mark in text for mark in RATE_LIMIT_MARKS)
 
 
 def _not_found(error: BaseException) -> bool:
@@ -132,7 +162,9 @@ class DaytonaProvider:
                  create_timeout_s: float = 900, delete_timeout_s: float = 300, ssh_token_minutes: int = 1440,
                  host_setup: list[str] | None = None, target: str | None = None,
                  api_url_env: str = "DAYTONA_API_URL", api_key_env: str = "DAYTONA_API_KEY",
-                 price_usd_h: float | None = None, sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time):
+                 price_usd_h: float | None = None, create_wait_s: float = 5.0, api_attempts: int = 6,
+                 sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time,
+                 sleep=time.sleep):
         validate(image=image, snapshot=snapshot, gpus=gpus, gpu_type=gpu_type, spot=spot, name_prefix=name_prefix,
                  ttl_minutes=ttl_minutes, ssh_token_minutes=ssh_token_minutes)
         self.run_id, self.slots = run_id, list(slots)
@@ -147,6 +179,24 @@ class DaytonaProvider:
         self._sdk, self._client, self.clock = sdk, client, clock
         self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.record = record or state_dir() / f"daytona-sandboxes-{self.prefix}.json"
+        self.create_wait_s, self.api_attempts = float(create_wait_s), max(1, int(api_attempts))
+        self.sleep = sleep
+        self._lock = threading.RLock()  # the record and the ssh config (several pool threads)
+        self._creating: dict[str, threading.Thread] = {}
+        self._create_error: dict[str, BaseException] = {}
+        self.rate_limited = 0  # refusals for rate seen (retried)
+
+    def _call(self, fn, *args: Any, **kw: Any) -> Any:
+        """``fn(*args, **kw)``, retried on a rate-limit refusal with backoff and full jitter."""
+        for attempt in range(self.api_attempts):
+            try:
+                return fn(*args, **kw)
+            except Exception as error:
+                if not _rate_limited(error) or attempt + 1 == self.api_attempts:
+                    raise
+                self.rate_limited += 1
+                self.sleep(random.uniform(0, min(BACKOFF_CAP_S, 1.0 * 2 ** attempt)))
+        raise AssertionError("unreachable")
 
     @property
     def sampler_route(self) -> Any:
@@ -183,15 +233,23 @@ class DaytonaProvider:
             return {}
 
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
-        self.record.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.record.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rows, indent=1))
-        tmp.replace(self.record)
+        with self._lock:
+            self.record.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.record.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(rows, indent=1))
+            tmp.replace(self.record)
+
+    def _update(self, ticket: str, **fields: Any) -> None:
+        """Set ``fields`` on the record row of ``ticket`` (read-modify-write under the lock)."""
+        with self._lock:
+            rows = self._rows()
+            rows.setdefault(ticket, {}).update(fields)
+            self._save(rows)
 
     def _get(self, ticket: str) -> Any | None:
         """The sandbox, None when Daytona has no such sandbox; other errors raise."""
         try:
-            return self.client.get(ticket)
+            return self._call(self.client.get, ticket)
         except Exception as error:
             if _not_found(error):
                 return None
@@ -199,7 +257,7 @@ class DaytonaProvider:
 
     def _labelled(self) -> list[Any]:
         sdk = self.sdk
-        rows = self.client.list(sdk.ListSandboxesQuery(labels={LABEL_RUN: self.run_id}))
+        rows = self._call(self.client.list, sdk.ListSandboxesQuery(labels={LABEL_RUN: self.run_id}))
         return [s for s in rows if _state(getattr(s, "state", None)) not in GONE
                 and str(getattr(s, "name", "")).startswith(self.prefix + "-")]
 
@@ -228,31 +286,68 @@ class DaytonaProvider:
     # -- LeaseProvider
     def order(self, account: int) -> str:
         client = self.client  # a missing key fails here, before anything is recorded
-        rows = self._rows()
-        n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
-        name = f"{self.prefix}-{n}"
-        rows[name] = {"slot": account, "n": n, "open": True, "ordered_at": self.clock()}
-        self._save(rows)  # recorded before the create: a crash mid-create still leaves it ours to delete
+        with self._lock:
+            rows = self._rows()
+            n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
+            name = f"{self.prefix}-{n}"
+            rows[name] = {"slot": account, "n": n, "open": True, "ordered_at": self.clock()}
+            self._save(rows)  # recorded before the create: a crash mid-create still leaves it ours to delete
         attrs = self._ledger_attrs(account)
         _record_ledger("intent", LEDGER_KIND, name, **attrs)
-        try:
-            client.create(self.params(name, account), timeout=self.create_timeout_s)
-        except Exception:
+        params = self.params(name, account)
+
+        def create() -> None:
             try:
-                exists = self._get(name) is not None
-            except Exception:  # noqa: BLE001 - unknown: keep the record open, the patrol/status decide
-                exists = True
-            if exists:
-                _record_ledger("created", LEDGER_KIND, name, name, **attrs)
-                return name  # created (billed) but not started in time: the pool watches it
-            rows = self._rows()
-            rows[name]["open"] = False
-            rows[name]["create_failed"] = True
-            self._save(rows)
-            _record_ledger("released", LEDGER_KIND, None, name, never_created=True)
-            raise
+                self._call(client.create, params, timeout=self.create_timeout_s)
+            except BaseException as error:  # noqa: BLE001 - settled by order() or status()
+                self._create_error[name] = error
+
+        worker = threading.Thread(target=create, name=f"daytona-create-{n}", daemon=True)
+        self._creating[name] = worker
+        worker.start()
+        worker.join(self.create_wait_s)
+        if worker.is_alive():  # still starting: the pool reads it waiting until it is started
+            _record_ledger("created", LEDGER_KIND, name, name, **attrs)
+            return name
+        self._creating.pop(name, None)
+        error = self._create_error.pop(name, None)
+        if error is not None:
+            self._create_failed(name, attrs, error)  # raises unless a sandbox exists anyway
+            return name
         _record_ledger("created", LEDGER_KIND, name, name, **attrs)
         return name
+
+    def _create_failed(self, name: str, attrs: dict[str, Any], error: BaseException) -> None:
+        """A create that raised: keep a sandbox that exists anyway (billed), else close the
+        record and raise ``error``."""
+        try:
+            exists = self._get(name) is not None
+        except Exception:  # noqa: BLE001 - unknown: keep the record open, the patrol/status decide
+            exists = True
+        if exists:
+            _record_ledger("created", LEDGER_KIND, name, name, **attrs)
+            return  # created (billed) but not started in time: the pool watches it
+        self._update(name, open=False, create_failed=True)
+        _record_ledger("released", LEDGER_KIND, None, name, never_created=True)
+        raise error
+
+    def _create_pending(self, ticket: str) -> str | None:
+        """A background create of ``ticket``: ``"running"``, ``"failed"`` (nothing was
+        created; the record is closed) or None (none, or it finished)."""
+        worker = self._creating.get(ticket)
+        if worker is None:
+            return None
+        if worker.is_alive():
+            return "running"
+        self._creating.pop(ticket, None)
+        error = self._create_error.pop(ticket, None)
+        if error is None:
+            return None
+        try:
+            self._create_failed(ticket, self._ledger_attrs(int(self._rows().get(ticket, {}).get("slot", 0))), error)
+        except BaseException:  # noqa: BLE001 - the create's own error: the slot is free again
+            return "failed"
+        return None
 
     def _ledger_attrs(self, slot: int) -> dict[str, Any]:
         """What ``yeto cleanup`` needs to delete the sandbox and price it later."""
@@ -265,8 +360,13 @@ class DaytonaProvider:
         return self.price_usd_h
 
     def status(self, account: int, ticket: str) -> LeaseStatus:
+        pending = self._create_pending(ticket)
         sandbox = self._get(ticket)  # raises on a failed call: a control-plane blip to the pool
         if sandbox is None:
+            if pending == "running":
+                return LeaseStatus("waiting")  # the create call has not registered it yet
+            if pending == "failed":
+                return LeaseStatus("ended", end_reason="error")
             released = self._rows().get(ticket, {}).get("released")
             return LeaseStatus("ended", end_reason="released" if released else "preempted")
         state = _state(getattr(sandbox, "state", None))
@@ -290,15 +390,16 @@ class DaytonaProvider:
         if not self._ours(ticket, sandbox):
             raise PermissionError(f"sandbox {ticket} was not created by this provider for run {self.run_id}")
         if sandbox is not None and _state(getattr(sandbox, "state", None)) not in GONE:
-            self.client.delete(sandbox, timeout=self.delete_timeout_s, wait=True)
+            self._call(self.client.delete, sandbox, timeout=self.delete_timeout_s, wait=True)
             after = self._get(ticket)
             if after is not None and _state(getattr(after, "state", None)) not in GONE:
                 raise RuntimeError(f"sandbox {ticket}: delete sent but it reads {_state(after.state)}")
-        rows = self._rows()
-        row = rows.setdefault(ticket, {"slot": account, "n": 0})
-        row.update(open=False, released=True)
-        self._save(rows)
-        _drop_alias(ticket)
+        with self._lock:
+            rows = self._rows()
+            row = rows.setdefault(ticket, {"slot": account, "n": 0})
+            row.update(open=False, released=True)
+            self._save(rows)
+            _drop_alias(ticket)
         _record_ledger("released", LEDGER_KIND, ticket, ticket)
         return {"ticket": ticket, "state": "ended"}
 
@@ -338,13 +439,20 @@ class DaytonaProvider:
         sandbox = sandbox if sandbox is not None else self._get(ticket)
         if sandbox is None:
             raise RuntimeError(f"sandbox {ticket} is gone")
-        dto = sandbox.create_ssh_access(expires_in_minutes=self.ssh_token_minutes)
+        dto = self._call(sandbox.create_ssh_access, expires_in_minutes=self.ssh_token_minutes)
         return str(dto.token), self.clock() + 60 * self.ssh_token_minutes
 
     def _write_alias(self, ticket: str, token: str, expires: float | None) -> str:
         from . import node_pool  # noqa: PLC0415
 
         alias = node_pool.host_alias(ticket)
+        with self._lock:  # one file for every sandbox: a concurrent rewrite would drop an alias
+            self._write_alias_locked(ticket, alias, token, expires)
+        return alias
+
+    def _write_alias_locked(self, ticket: str, alias: str, token: str, expires: float | None) -> None:
+        from . import node_pool  # noqa: PLC0415
+
         ours = state_dir() / "ssh_config"
         ours.parent.mkdir(parents=True, exist_ok=True)
         blocks = node_pool._blocks(ours.read_text()) if ours.exists() else {}
@@ -352,21 +460,24 @@ class DaytonaProvider:
                                    "  StrictHostKeyChecking accept-new",
                                    f"  UserKnownHostsFile {state_dir() / 'known_hosts'}",
                                    "  ServerAliveInterval 15", "  ServerAliveCountMax 4", ""])
-        ours.write_text("".join(blocks.values()))
-        os.chmod(ours, 0o600)
+        tmp = ours.with_name(f".{ours.name}.{threading.get_ident()}.tmp")
+        tmp.write_text("".join(blocks.values()))
+        os.chmod(tmp, 0o600)
+        tmp.replace(ours)  # a concurrent ssh never reads a half-written config
         node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
         rows = self._rows()
         if ticket in rows:
             rows[ticket]["ssh_expires_at"] = expires
             self._save(rows)
-        return alias
 
     def _renew_ssh(self, ticket: str, sandbox: Any) -> None:
         row = self._rows().get(ticket) or {}
         expires = row.get("ssh_expires_at")
         if expires is None:
             return  # not attached yet
-        if float(expires) - self.clock() > 60 * self.ssh_token_minutes / 3:
+        life = 60 * self.ssh_token_minutes
+        offset = (zlib.crc32(ticket.encode()) % 1000) / 1000 * life / 12  # spreads sandboxes created together
+        if float(expires) - self.clock() > life / 3 + offset:
             return
         token, until = self.ssh_access(ticket, sandbox)
         self._write_alias(ticket, token, until)

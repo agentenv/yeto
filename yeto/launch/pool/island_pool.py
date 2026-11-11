@@ -150,6 +150,9 @@ def is_config_error(error: BaseException) -> bool:
     return type(error).__name__ == "SetupError" or bool(getattr(error, "config_error", False))
 
 
+SLOW_TICK_S = 60.0  # a tick longer than this is logged
+
+
 @dataclass
 class IslandPool:
     config: PoolConfig
@@ -186,6 +189,13 @@ class IslandPool:
     _warned: set[str] = field(default_factory=set)
     # () -> why no order may be placed now (None: allowed): the controller's run budget
     gate: Callable[[], str | None] | None = None
+    # members whose ticket read and node probe run at once at the start of a tick (one
+    # round trip each: 16 serial ssh probes of 2-30 s made one tick minutes long); 1: serial
+    watch_parallel: int = 16
+    _polled: dict[str, Any] = field(default_factory=dict)  # this tick's prefetched results by ticket
+    _probed: dict[str, Any] = field(default_factory=dict)
+    _watch_pool: Any = None
+    last_tick_s: float | None = None  # wall time of the last tick (status, dashboard)
 
     def __post_init__(self) -> None:
         if self.events is None:
@@ -684,6 +694,52 @@ class IslandPool:
 
     # -- one control step ----------------------------------------------------
     def tick(self) -> None:
+        began = time.monotonic()
+        try:
+            self._tick()
+        finally:
+            self._polled.clear()
+            self._probed.clear()
+            self.last_tick_s = round(time.monotonic() - began, 3)
+            if self.last_tick_s > SLOW_TICK_S:
+                self.log(f"pool: tick took {self.last_tick_s:.0f} s ({len(self.live())} members); decisions "
+                         "wait for the slowest ticket read or probe")
+
+    def _prefetch(self) -> None:
+        """Read the tickets and probe the nodes of the watched members at once (the
+        ``_watch`` pass then decides on the results member by member, in order). A
+        member is probed only when its ticket reads active, as ``_watch`` would."""
+        if self.watch_parallel <= 1:
+            return
+        probe = getattr(self.ops, "probe", None)
+        watched = [m for m in self.live() if m.state in (PROVISIONING, STARTING, READY) or m.paused
+                   or m.config_error is not None]
+        if len(watched) < 2:
+            return
+
+        def one(m: Member) -> None:
+            try:
+                status: Any = el.LeaseStatus.of(self.ops.poll(m))
+            except Exception as error:  # noqa: BLE001 - replayed by _status on the loop thread
+                self._polled[m.ticket] = error
+                return
+            self._polled[m.ticket] = status
+            if (probe is not None and status.state == "active" and m.state in (STARTING, READY)
+                    and not m.paused and m.config_error is None and not self._starting(m)
+                    and m.ticket not in self._recheck):
+                try:
+                    self._probed[m.ticket] = probe(m)
+                except Exception as error:  # noqa: BLE001 - replayed by _probe
+                    self._probed[m.ticket] = error
+
+        if self._watch_pool is None:
+            from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+            self._watch_pool = ThreadPoolExecutor(max_workers=self.watch_parallel, thread_name_prefix="pool-watch")
+        for future in [self._watch_pool.submit(one, m) for m in watched]:
+            future.result()
+
+    def _tick(self) -> None:
         now = self.clock()
         if self.stopped:
             return
@@ -697,6 +753,7 @@ class IslandPool:
             self._drain(m, "retry")
         self._reassert_drains()
 
+        self._prefetch()
         for m in self.live():
             if m.paused and self._watch_paused(m, now):
                 continue
@@ -828,7 +885,10 @@ class IslandPool:
 
     def _status(self, m: Member, now: float) -> el.LeaseStatus:
         try:
-            status = el.LeaseStatus.of(self.ops.poll(m))
+            got = self._polled.pop(m.ticket, None)
+            if isinstance(got, BaseException):
+                raise got
+            status = got if got is not None else el.LeaseStatus.of(self.ops.poll(m))
         except Exception as error:  # noqa: BLE001 - the control plane blinked; nothing is decided on it
             if m.status_fail_since is None:
                 m.status_fail_since = now
@@ -846,7 +906,10 @@ class IslandPool:
         if probe is None or m.state not in (STARTING, READY) or self._starting(m):
             return None
         try:
-            return probe(m)
+            got = self._probed.pop(m.ticket, None)
+            if isinstance(got, BaseException):
+                raise got
+            return got if got is not None else probe(m)
         except Exception as error:  # noqa: BLE001 - a probe that cannot run is an unreachable node
             self.log(f"pool: probe of {m.ticket} failed: {error!r}"[:300])
             return el.Probe(node=el.PROBE_UNREACHABLE)
