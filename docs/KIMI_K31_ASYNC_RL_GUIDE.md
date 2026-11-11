@@ -1434,8 +1434,10 @@ island with the island's rendered sampler spec.
 
 **Daytona** sandboxes are written to the run's resource ledger
 (`daytona_sandbox`); set `price_usd_h` in the provider section to price them.
-Like NC leases they belong to the pool: `yeto cleanup --run <run> --include-nc`
-deletes the ones still open.
+Like NC leases they belong to the pool, as do the Modal calls and Sky clusters
+of a sampler pool: a plain `yeto cleanup --run <run>` keeps them, and
+`yeto cleanup --run <run> --include-pools` releases the ones still open (every
+pool provider; `--include-nc` is its deprecated earlier name).
 
 **Spend caps.** Each provider prices its machines in its own currency (NC in
 ucr, Sky / Modal / Daytona in USD from `price_usd_h`); the pool converts every

@@ -168,31 +168,46 @@ def cleanup(ledger: ResourceLedger, ops: CleanupOps, *, dry_run: bool = False,
     return actions
 
 
-# NC leases belong to the NC sampler pool (python -m yeto.launch.nc pool / pool-stop): a trainer
-# launch that fails or exits must never release them (2026-11-10: a failed trainer launch's
-# backstop cleanup released a healthy, set-up sampler node). Only an explicit
-# `yeto cleanup --run R --include-nc` (or pool-stop) releases them.
-POOL_OWNED_KINDS = providers.pool_owned_ledger_kinds()  # {"nc_lease"}
+# Sampler pool machines (NC leases, Daytona sandboxes, Modal sampler calls, Sky sampler
+# clusters) belong to their pool (python -m yeto.launch.nc pool / pool-stop / yeto run down):
+# a trainer launch that fails or exits must never release them (2026-11-10: a failed trainer
+# launch's backstop cleanup released a healthy, set-up sampler node). Only an explicit
+# `yeto cleanup --run R --include-pools` (or pool-stop) releases them.
+POOL_OWNED_KINDS = providers.pool_owned_ledger_kinds()  # every row of these kinds: {"nc_lease", "daytona_sandbox"}
+
+
+def pool_owned(r: Any) -> bool:
+    """A ledger row of a sampler pool machine. Modal calls and Sky clusters share their
+    kind with the trainer's, so a pool row is the one its provider marked (``pool``),
+    or, for rows written before the mark, a Modal call with a pool ``ticket`` / a Sky
+    cluster with a pool ``slot``."""
+    attrs = getattr(r, "attrs", None) or {}
+    if r.kind in POOL_OWNED_KINDS or attrs.get("pool"):
+        return True
+    return (r.kind == "modal_call" and bool(attrs.get("ticket"))) or (r.kind == "sky_cluster" and "slot" in attrs)
 
 
 def cleanup_run(run: str, ops: CleanupOps | None = None, *, dry_run: bool = False,
-                log=print, include_nc: bool = False) -> bool:
-    """Release the run's open resources except the NC pool's leases (``include_nc``);
-    True when nothing it may release is left open."""
+                log=print, include_pools: bool = False, include_nc: bool | None = None) -> bool:
+    """Release the run's open resources except its sampler pools' machines
+    (``include_pools``; ``include_nc`` is its earlier name); True when nothing it may
+    release is left open."""
+    include_pools = bool(include_pools or include_nc)
     ledger = ResourceLedger.for_run(run)
     if not ledger.path.exists():
         log(f"[cleanup] run {run}: no resource ledger at {ledger.path}; nothing to release")
         return True
     locks: list = []
     refused = False
-    if include_nc and any(r.kind in POOL_OWNED_KINDS for r in ledger.open_resources()):
+    if include_pools and any(pool_owned(r) for r in ledger.open_resources()):
         held = _take_pool_locks(run, dry_run=dry_run, log=log)
-        if held is None:  # a pool loop of this run runs: it owns its nodes (pool-stop asks it)
-            include_nc, refused = False, True
+        if held is None:  # a pool loop of this run runs: it owns its machines (pool-stop asks it)
+            include_pools, refused = False, True
         else:
             locks = held
     try:
-        return _cleanup_run(run, ledger, ops, dry_run=dry_run, log=log, include_nc=include_nc) and not refused
+        return _cleanup_run(run, ledger, ops, dry_run=dry_run, log=log, include_pools=include_pools) \
+            and not refused
     finally:
         for fh in locks:
             fh.close()
@@ -200,7 +215,7 @@ def cleanup_run(run: str, ops: CleanupOps | None = None, *, dry_run: bool = Fals
 
 def _take_pool_locks(run: str, *, dry_run: bool, log) -> list | None:
     """The pool locks (``pool_run.lock_path``) recording ``run``, all taken; None when a
-    live pool loop (or a pool-stop) holds one: NC leases are then not released here."""
+    live pool loop (or a pool-stop) holds one: pool machines are then not released here."""
     try:
         from yeto.launch.nc.pool_run import acquire_lock, run_pool_locks  # noqa: PLC0415
     except Exception as error:  # noqa: BLE001 - a tree without the NC pool: nothing to share
@@ -212,20 +227,20 @@ def _take_pool_locks(run: str, *, dry_run: bool, log) -> list | None:
         if fh is None:
             for other in held:
                 other.close()
-            log(f"[cleanup] a pool loop of run {run} holds {path}: its NC leases are left to it "
+            log(f"[cleanup] a pool loop of run {run} holds {path}: its machines are left to it "
                 f"(stop it with python -m yeto.launch.nc pool-stop --config <pool.json>)")
             return None
         held.append(fh)
     return held
 
 
-def _cleanup_run(run: str, ledger: ResourceLedger, ops, *, dry_run: bool, log, include_nc: bool) -> bool:
-    skipped = [] if include_nc else [r for r in ledger.open_resources() if r.kind in POOL_OWNED_KINDS]
+def _cleanup_run(run: str, ledger: ResourceLedger, ops, *, dry_run: bool, log, include_pools: bool) -> bool:
+    skipped = [] if include_pools else [r for r in ledger.open_resources() if pool_owned(r)]
     for r in skipped:
-        log(f"[cleanup] keep {r.key}: an NC pool lease (release it with pool-stop, or "
-            f"yeto cleanup --run {run} --include-nc)")
-    actions = cleanup(ledger, ops or ProductionCleanupOps(), dry_run=dry_run,
-                      kinds=None if include_nc else _kinds_except(ledger, POOL_OWNED_KINDS))
+        log(f"[cleanup] keep {r.key}: a sampler pool machine (release it with pool-stop or yeto run down, "
+            f"or yeto cleanup --run {run} --include-pools)")
+    keys = None if include_pools else tuple(r.key for r in ledger.open_resources() if not pool_owned(r))
+    actions = cleanup(ledger, ops or ProductionCleanupOps(), dry_run=dry_run, keys=keys)
     if not actions:
         log(f"[cleanup] run {run}: every ledger resource is already released")
     for a in actions:
@@ -233,9 +248,6 @@ def _cleanup_run(run: str, ledger: ResourceLedger, ops, *, dry_run: bool, log, i
             + (f" ({a.detail})" if a.detail else ""))
     remaining = [r for r in ledger.open_resources()
                  if not (r.kind == "modal_app" and r.attrs.get("shared"))
-                 and (include_nc or r.kind not in POOL_OWNED_KINDS)]
+                 and (include_pools or not pool_owned(r))]
     return all(a.ok for a in actions) and (dry_run or not remaining)
 
-
-def _kinds_except(ledger: ResourceLedger, skip: frozenset[str]) -> tuple[str, ...]:
-    return tuple(sorted({r.kind for r in ledger.open_resources()} - set(skip))) or ("<none>",)

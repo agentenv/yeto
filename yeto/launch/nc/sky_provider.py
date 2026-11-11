@@ -223,7 +223,7 @@ class SkyProvider:
         (doc.get("offers") or {}).pop(offer.key, None)
         self._save_doc(doc)
         _record_ledger("created", LEDGER_KIND, name, name, offer=offer.key, price_usd_h=offer.price_usd_h,
-                       run=self.run_id, slot=slot)
+                       run=self.run_id, slot=slot, pool=True)
         return name
 
     def status(self, account: int, ticket: str) -> LeaseStatus:

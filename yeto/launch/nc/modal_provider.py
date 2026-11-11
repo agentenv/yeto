@@ -154,7 +154,7 @@ class ModalProvider:
         rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None, ready_key=payload.get("ready_key"))
         rows[ticket].setdefault("calls", []).append(call)
         self._save(rows)
-        _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id,
+        _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id, pool=True,
                        usd_per_hour=self.price_usd_h)
         return call
 

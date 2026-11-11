@@ -24,7 +24,7 @@ process dies, whatever the host name says), ``pool-<shard_base>.pid`` (the loop'
 pid and host, for display), ``pool-<shard_base>.stop`` (a stop request) and
 ``pool-<shard_base>.scale.json`` (``pool-scale``'s target; it records the run id, a file of
 another run is ignored, and ``pool-stop`` removes it once the pool is released).
-``pool-stop`` releasing from the state file and ``yeto cleanup --include-nc``
+``pool-stop`` releasing from the state file and ``yeto cleanup --include-pools``
 take the same lock: neither releases a node while a pool loop runs.
 """
 
