@@ -167,6 +167,7 @@ class FleetController:
         island_relaunch_envs=None,
         followers=(),
         follower_grace_s: float = 120.0,
+        rollout=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -260,6 +261,11 @@ class FleetController:
         # dashboard.fleet.FleetLog (fleet-dashboard 2.3): island lifecycle and
         # periodic cost_tick into the run's fleet.jsonl; best-effort, optional.
         self.fleet_log = fleet_log
+        # yeto.launch.pool.controller.RolloutController or None: the rollout island
+        # pools of the run, driven on their own thread for the life of run(); they
+        # drain (machines released) when run() returns or raises, the STOP flag included.
+        self.rollout = rollout
+        self._rollout_warned = False
 
     def _fleet(self, kind: str, name: str | None = None, *, force: bool = False, **fields) -> None:
         if self.fleet_log is None:
@@ -293,6 +299,37 @@ class FleetController:
         self._abort_error = error
 
     def run(self) -> dict:
+        """Poll until every learner is done or abandoned (:meth:`_run_fleet`); with a
+        ``rollout`` controller its pools run meanwhile and are drained at the end."""
+        if getattr(self, "rollout", None) is None:
+            return self._run_fleet()
+        self.rollout.start()
+        why = "trainer fleet finished"
+        try:
+            return self._run_fleet()
+        except RunStopRequested:
+            why = "STOP flag"
+            raise
+        except BaseException as e:
+            why = f"run ended: {type(e).__name__}"
+            raise
+        finally:
+            left = self.rollout.stop(why)
+            billed = {name: [m.ticket for m in members] for name, members in left.items() if members}
+            if billed:
+                print(f"[launcher] ERROR: rollout machines still billed after the drain: {billed}",
+                      file=sys.stderr)
+
+    def _poll_rollout(self) -> None:
+        if getattr(self, "rollout", None) is None or self._rollout_warned:
+            return
+        problem = self.rollout.check()
+        if problem is not None:
+            self._rollout_warned = True
+            print(f"[launcher] ERROR: {problem}; its machines are drained when the run ends",
+                  file=sys.stderr)
+
+    def _run_fleet(self) -> dict:
         """Poll until every learner is done or abandoned.
 
         Returns {learner name: final status string}; raises RuntimeError
@@ -308,6 +345,7 @@ class FleetController:
             if self._abort_error is not None:
                 raise self._abort_error
             self._fleet("cost_tick")
+            self._poll_rollout()
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)
             elif self.syncer_probe is not None:
