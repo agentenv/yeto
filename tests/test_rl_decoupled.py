@@ -589,3 +589,34 @@ def _stats(rollout_id=0):
     )
 
 
+
+
+def test_fixed_roster_partial_quorum_newer_permit_supersedes_a_closed_round(tmp_path):
+    """Async sync mode on a fixed roster (quorum 1 of 2): fragment 0's round 1
+    commits without this island (its local horizon was not reached), the
+    syncer broadcasts version 1 and permits fragment 0's next round (step 3).
+    The island must drop the closed permit and answer the new one; it used to
+    fail with 'conflicting fragment permits' (seen on a two-island Modal run)."""
+    bridge = _bridge(tmp_path, horizon=2, learner_id=1)
+    initial = _state(0)
+    bridge.client.updates = [_bcast(bridge, 0, 0, initial), _bcast(bridge, 1, 0, initial)]
+    cut = bridge.wait_for_initial_cut(optimizer_steps=0, action_tokens=0)
+    bridge.commit_initial_cut(cut, optimizer_steps=0, action_tokens=0)
+
+    bridge.client.pulls = [PullRequest(0, 1, 1)]
+    bridge.submit_ready(_state(1, 1.0), optimizer_steps=1, action_tokens=10)
+    assert bridge.client.pushes == []  # below the horizon: the permit stays pending
+
+    # the round closed without this island; the next permit of fragment 0 arrives
+    # before (or with) the broadcast of the closed round
+    bridge.client.pulls = [PullRequest(0, 3, 1)]
+    bridge.submit_ready(_state(1, 1.0), optimizer_steps=1, action_tokens=10)
+    assert bridge.client.pushes == []
+
+    committed = _state(1, 10.0)
+    bridge.client.updates = [_bcast(bridge, 0, 1, committed)]
+    batch = bridge.drain_broadcasts(_state(1, 1.0), optimizer_steps=1, action_tokens=10)
+    bridge.commit_broadcasts(batch, optimizer_steps=1, action_tokens=10)
+    bridge.submit_ready(batch.state, optimizer_steps=3, action_tokens=30)
+    assert [(push[0], push[1], push[3]) for push in bridge.client.pushes] == [(0, 3, 1)]
+
