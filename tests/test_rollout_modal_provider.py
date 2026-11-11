@@ -25,11 +25,14 @@ class FakeClient:
     def __init__(self):
         self.calls, self.states, self.log, self.fail_status = {}, {}, [], False
         self.n = 0
+        self.report_ready = None  # () -> object store: the call writes its ready marker at once
 
     def spawn(self, payload):
         self.n += 1
         call = f"fc-{self.n}"
         self.calls[call], self.states[call] = payload, RUNNING
+        if self.report_ready is not None and payload.get("ready_key"):
+            self.report_ready().write(payload["ready_key"], b"{}")
         self.log.append(("spawn", call, payload["shard"]))
         return call
 
@@ -74,7 +77,10 @@ def _ops(tmp_path, client=None, **over):
     client = client or FakeClient()
     provider = from_config(cfg, "run-m", client=client)
     store = SimpleNamespace(objects=Objects())
-    return ModalPoolOps(cfg, provider=provider, fence_store=store), client, store
+    ops = ModalPoolOps(cfg, provider=provider, fence_store=store)
+    if client.report_ready is None:
+        client.report_ready = lambda: ops._store.objects
+    return ops, client, store
 
 
 def test_provider_maps_call_states_and_releases_only_its_own_tickets(tmp_path):
@@ -135,7 +141,68 @@ def test_the_start_payload_is_the_rendered_member_spec_on_the_run_store(tmp_path
     assert spec["sampler_id"] == "m-0" and spec["buffer_shards"] == ["m-0", "m-1"] and spec["start_on_latest"]
     assert spec["store"] == spec["buffer_root"] == "/tmp/stage/b/runs/runs-m"
     assert payload["bucket"] == "b" and payload["run_prefix"] == "runs-m"
+    assert payload["ready_key"] == f"pool-ready/m-0/{m.ticket}.1.json"
     assert ops.probe(m) == el.Probe(node="ok", sampler="running", joined=True)
+
+
+def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
+    """RUNNING is not joined: the pool waits for the call's ready marker, a call
+    that never writes it fails the start by start_timeout_s, and a restarted call
+    does not inherit the marker of the call before it."""
+    client = FakeClient()
+    ops, client, store = _ops(tmp_path, client=client)
+    client.report_ready = None  # the calls report nothing by themselves
+    m = SimpleNamespace(account=1, ticket=ops.order(1), shard="m-0", data_slot=None, replaces_shard=None,
+                        predecessor_lost=False)
+    ops.start(m, ["m-0"])
+    assert ops.probe(m) == el.Probe(node="ok", sampler="running", joined=False) and not ops.ready(m)
+    key = ops.provider.ready_key(m.ticket)
+    store.objects.write(key, b"{}")  # the sampler joined: the body wrote the marker
+    assert ops.probe(m).joined and ops.ready(m)
+    ops.restart(m, ["m-0"])
+    assert ops.provider.ready_key(m.ticket) != key and not ops.probe(m).joined
+
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops.provider.release(1, m.ticket)
+    (tmp_path / "b").mkdir()
+    ops2, client2, _ = _ops(tmp_path / "b")
+    client2.report_ready = None
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = LeasePool(PoolConfig(target=1, accounts=[1], shard_base="m", stop_below_ucr=0,
+                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=1, start_timeout_s=600)),
+                     ops2, clock=clock, log=lambda m: None, events=events)
+    ops2.start_in_background = False
+    for _ in range(14):
+        pool.tick()
+        t[0] += 60
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "member_ready" not in names and "start_timeout" in names
+
+
+def test_the_call_body_reports_ready_once_the_tape_has_the_join(tmp_path, monkeypatch):
+    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+
+    tape = tmp_path / "tape" / "events.jsonl"
+    tape.parent.mkdir()
+    objects = Objects()
+    polls = [0]
+
+    class Proc:
+        returncode = 0
+
+        def poll(self):
+            polls[0] += 1
+            if polls[0] == 2:  # the engine loaded the model and joined
+                (tape.parent / "events.inc1.jsonl").write_text('{"event": "rl_sampler_join"}\n')
+            return None if polls[0] < 4 else 0
+
+    payload = {"shard": "m-0", "bucket": "b", "run_prefix": "r", "ready_key": "pool-ready/m-0/t.1.json",
+               "spec": {"event_tape": str(tape)}}
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
+    out = rollout_sampler_body(payload, popen=lambda *a, **k: Proc(), objects=objects, sleep=lambda s: None,
+                               root=str(tmp_path / "rollout"))
+    assert out["reported_ready"] and out["rc"] == 0 and "pool-ready/m-0/t.1.json" in objects
 
 
 def test_store_env_reads_the_secret_names():

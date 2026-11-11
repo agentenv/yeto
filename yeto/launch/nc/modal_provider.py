@@ -17,9 +17,14 @@ call itself. So the provider splits like this:
 * :class:`ModalPoolOps` (the pool's ``PoolOps``, replacing the SSH node route):
   ``start`` renders the member's sampler spec exactly as the SSH route does
   (:func:`~.cli.render_spec`, ``start_on_latest`` on) and spawns one call of the
-  rollout function with it; ``probe`` maps the call state to a probe (running:
-  joined; ended: an exited sampler, the pool restarts it in place with a new
-  incarnation); ``fence`` / ``fence_incarnation`` go to the run store like the
+  rollout function with it; ``probe`` maps the call state to a probe (ended: an
+  exited sampler, the pool restarts it in place with a new incarnation). A running
+  call is *not* yet joined: the call reports ready itself. Each spawn carries a
+  ``ready_key`` (one per call); the function body writes that object in the run
+  store once the sampler's tape has ``rl_sampler_join`` (the engine loaded the
+  model and claimed its lease), and the probe reads joined from it. A call that
+  never reports ready is a start failure by the pool's ``start_timeout_s``;
+  ``fence`` / ``fence_incarnation`` go to the run store like the
   SSH route; ``drain`` is the provider's release.
 
 The real client (:class:`ModalSdkClient`) deploys one app per pool with a
@@ -58,6 +63,14 @@ FUNCTION = "rollout_sampler"
 RUNNING, SUCCEEDED, FAILED = "RUNNING", "SUCCEEDED", "FAILED"
 STAGE = "/tmp/stage"
 CODE_ROOT = "/root"
+READY_PREFIX = "pool-ready"
+JOIN_PATTERN = "rl_sampler_join"
+
+
+def ready_key(shard: str, ticket: str, n: int) -> str:
+    """The store object a call writes once its sampler joined (one per spawn: a
+    restarted call never reads the marker of the call before it)."""
+    return f"{READY_PREFIX}/{shard}/{ticket}.{int(n)}.json"
 CONFIG_KEYS = frozenset({"kind", "factory", "app_name", "image", "gpu", "gpus", "cpu", "memory_gib", "secret",
                          "bucket", "model_volume", "model_mount", "log_volume", "timeout_h", "python",
                          "name_prefix", "env", "price_usd_h"})
@@ -112,6 +125,10 @@ class ModalProvider:
     def call_id(self, ticket: str) -> str | None:
         return (self._rows().get(ticket) or {}).get("call")
 
+    def ready_key(self, ticket: str) -> str | None:
+        """The ready marker of the island's current call (None: not spawned)."""
+        return (self._rows().get(ticket) or {}).get("ready_key")
+
     # -- LeaseProvider
     def order(self, account: int) -> str:
         rows = self._rows()
@@ -128,9 +145,13 @@ class ModalProvider:
         old = self.call_id(ticket)
         if old and self.client.status(old) == RUNNING:
             self.client.cancel(old)
+        rows = self._rows()
+        n = len(rows[ticket].get("calls") or []) + 1
+        if payload.get("shard") is not None:
+            payload = {**payload, "ready_key": ready_key(str(payload["shard"]), ticket, n)}
         call = str(self.client.spawn(payload))
         rows = self._rows()
-        rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None)
+        rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None, ready_key=payload.get("ready_key"))
         rows[ticket].setdefault("calls", []).append(call)
         self._save(rows)
         _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id,
@@ -198,6 +219,7 @@ class ModalPoolOps:
         self.run_id = cli.run_id(cfg)
         self.provider = provider if provider is not None else from_config(cfg, self.run_id)
         self._store = fence_store
+        self._ready_seen: set[str] = set()
 
     # -- supply
     def order(self, account: int) -> str:
@@ -234,7 +256,23 @@ class ModalPoolOps:
         self.start(m, shards)
 
     def ready(self, m) -> bool:
-        return self.provider.call_state(m.ticket) == RUNNING
+        return self.provider.call_state(m.ticket) == RUNNING and self._reported_ready(m)
+
+    def _reported_ready(self, m) -> bool:
+        """The current call wrote its ready marker (its sampler joined). A store
+        blip reads not ready this tick; the pool's start timeout bounds the wait."""
+        key = self.provider.ready_key(m.ticket)
+        if key is None:
+            return False
+        if key in self._ready_seen:
+            return True
+        try:
+            seen = self._fence_store().objects.read(key) is not None
+        except Exception:  # noqa: BLE001 - the store did not answer: not ready yet
+            return False
+        if seen:
+            self._ready_seen.add(key)
+        return seen
 
     def probe(self, m) -> elastic.Probe:
         try:
@@ -244,7 +282,7 @@ class ModalPoolOps:
         if state is None:
             return elastic.Probe(node="ok", sampler="absent")
         if state == RUNNING:
-            return elastic.Probe(node="ok", sampler="running", joined=True)
+            return elastic.Probe(node="ok", sampler="running", joined=self._reported_ready(m))
         return elastic.Probe(node="ok", sampler="exited", exit_code=0 if state == SUCCEEDED else 1)
 
     def _fence_store(self) -> Any:
@@ -380,18 +418,50 @@ def store_env(payload: dict[str, Any], environ: dict[str, str]) -> dict[str, str
     return env
 
 
-def rollout_sampler_body(payload: dict[str, Any]) -> dict[str, Any]:
-    """Runs INSIDE the Modal container: write the spec, run the engine sampler."""
+def join_seen(spec: dict[str, Any]) -> bool:
+    """The sampler's tape (any incarnation's ``events.<inc>.jsonl`` next to the
+    spec's ``event_tape``) has the join event."""
+    tape = spec.get("event_tape")
+    if not tape:
+        return False
+    path = Path(str(tape)).expanduser()
+    for f in sorted(path.parent.glob(f"{path.stem}*{path.suffix or '.jsonl'}")):
+        try:
+            if JOIN_PATTERN in f.read_text(errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects: Any = None,
+                         poll_s: float = 5.0, sleep: Any = time.sleep, root: str = "/tmp/rollout") -> dict[str, Any]:
+    """Runs INSIDE the Modal container: write the spec, run the engine sampler, and
+    write the call's ready marker (``payload["ready_key"]``) in the run store once
+    the sampler's tape has the join event."""
     import subprocess  # noqa: PLC0415
 
     t0 = time.time()
-    out = Path(f"/tmp/rollout/{payload['shard']}")
+    out = Path(root) / str(payload["shard"])
     out.mkdir(parents=True, exist_ok=True)
     (out / "spec.json").write_text(json.dumps(payload["spec"], indent=1))
     env = dict(os.environ, **store_env(payload, dict(os.environ)))
-    rc = subprocess.run([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler", "--spec",
-                         str(out / "spec.json")], env=env, check=False).returncode
-    return {"rc": rc, "secs": round(time.time() - t0, 1)}
+    proc = (popen or subprocess.Popen)([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler",
+                                        "--spec", str(out / "spec.json")], env=env)
+    key, reported = payload.get("ready_key"), False
+    while proc.poll() is None:
+        if key and not reported and join_seen(payload["spec"]):
+            try:
+                if objects is None:
+                    from yeto.cloud import s3_store  # noqa: PLC0415
+
+                    objects = s3_store.head_objects(env[s3_store.URI_ENV], environ=env)
+                objects.write(key, json.dumps({"ready_at": time.time(), "shard": payload["shard"]}).encode())
+                reported = True
+            except Exception as error:  # noqa: BLE001 - retried next poll; the pool's start timeout bounds it
+                print(f"rollout_sampler: ready marker not written yet: {error}", flush=True)
+        sleep(poll_s)
+    return {"rc": proc.returncode, "secs": round(time.time() - t0, 1), "reported_ready": reported}
 
 
 # -- config ---------------------------------------------------------------------------
