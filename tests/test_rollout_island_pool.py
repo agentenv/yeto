@@ -428,3 +428,42 @@ def test_cleanup_dispatches_nc_lease_through_the_registry(tmp_path, monkeypatch)
     assert actions[0].action == "would release NC ticket T1 (account 4)" and ops.calls == []
     actions = cleanup.cleanup(ledger, ops)
     assert ops.calls == [(4, "T1")] and actions[0].ok and not ledger.open_resources()
+
+
+# -- a pool.json in the controller (the subprocess pool loop's files and lock) ----------
+
+
+def test_nc_pool_of_a_pool_json_runs_in_the_controller_and_shares_the_lock(tmp_path, monkeypatch):
+    import subprocess
+
+    from tests.test_nc_elastic import Clock as NcClock
+    from tests.test_nc_elastic import Cloud
+    from tests.test_nc_pool_run import _cfg
+    from yeto.launch.nc import cli, pool_run
+
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("YETO_NC_ACCOUNTS", "1,4")
+    monkeypatch.setenv("NC_MANAGE", "true")
+    monkeypatch.setenv("NC_QUERY", "true")
+
+    def no_subprocess(*a, **k):
+        raise AssertionError(f"no subprocess in these tests: {a}")
+
+    monkeypatch.setattr(subprocess, "run", no_subprocess)
+    cfg, path = _cfg(tmp_path)
+    clock = NcClock()
+    cloud = Cloud(clock)
+    slot = rc.nc_pool(cfg, path, ops=cloud)
+    slot.pool.clock = clock
+    assert pool_run.lock_holder(pool_run.lock_path(cfg))["role"] == "controller"
+    with pytest.raises(SystemExit, match="another instance holds"):
+        pool_run.run_pool(cfg, path, interval=0)
+    ctl = rc.RolloutController({"nc": slot}, thread_cls=SyncThread, log=lambda _m: None, sleep=lambda _s: None)
+    for _ in range(40):
+        ctl.tick()
+        clock.t += 120
+    assert slot.pool.live() and slot.pool.live()[0].state == READY
+    assert json.loads(cli.pool_state_path(cfg).read_text())["members"]
+    left = ctl.stop("test end")
+    assert left == {"nc": []}
+    assert pool_run.lock_holder(pool_run.lock_path(cfg)) is None
