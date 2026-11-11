@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import cli, elastic, tunnel
+from . import cli, elastic, ssh_sampler, tunnel
 from .client import LEASE_HOURS, NcTools
 from .lease_pool import GONE, LeasePool, Member
 from .provider import is_national_compute, provider_kind
@@ -323,6 +323,41 @@ def daytona_problems(cfg: dict[str, Any]) -> list[str]:
     return problems
 
 
+def model_present(uri: str, env_file: str | os.PathLike[str]) -> bool:
+    """``config.json`` exists under ``uri`` (the model directory in the bucket), read
+    with the nodes' credentials from the store env file."""
+    return bool(elastic.s3_fence_store(uri, env_file).objects.exists("config.json"))
+
+
+def store_layout_problems(cfg: dict[str, Any], env_file: str | os.PathLike[str], bucket: str) -> list[str]:
+    """Store-layout checks of ``pool --dry-run``: ``run_prefix`` does not repeat
+    ``runs/``, the model is in the bucket (a missing upload otherwise surfaces only
+    after a billed node was ordered and set up) and ``dest`` is the directory the
+    sampler container mounts at the spec's model path."""
+    problems = []
+    prefix = str(cfg.get("run_prefix") or "").strip("/")
+    if prefix == "runs" or prefix.startswith("runs/"):
+        problems.append(f"run_prefix {cfg['run_prefix']!r}: the samplers write to s3://{bucket}/runs/<run_prefix>, "
+                        f"so this one lands in s3://{bucket}/runs/{prefix}; drop the leading 'runs/'")
+    pull = cfg.get("model_pull")
+    if not pull:
+        return problems
+    dest = str(pull.get("dest", ssh_sampler.MODEL_HOST)).rstrip("/")
+    if dest != ssh_sampler.MODEL_HOST:
+        problems.append(f"model_pull.dest {dest!r}: the sampler container mounts only {ssh_sampler.MODEL_HOST} "
+                        f"(at {ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST]}); leave dest unset")
+    uri = f"s3://{bucket}/{str(pull['src_key']).strip('/')}"
+    try:
+        present = model_present(uri, env_file)
+    except Exception as error:  # noqa: BLE001 - reported, the operator decides
+        problems.append(f"model_pull: cannot read {uri}/config.json with the store env file: {error!r}"[:400])
+    else:
+        if not present:
+            problems.append(f"model_pull: no {uri}/config.json: upload the model to the bucket first "
+                            "(docs/KIMI_K31_ASYNC_RL_GUIDE.md, Model weights)")
+    return problems
+
+
 def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     """Validate the config and print the orders and the spend the pool would make;
     orders nothing and calls no National Compute API."""
@@ -356,6 +391,8 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             bucket_env = cfg.get("bucket_env", "R2_BUCKET")
             if bucket_env not in elastic.read_env_file(env_file):
                 problems.append(f"store env file has no {bucket_env} (the bucket key; set 'bucket_env')")
+            else:
+                problems += store_layout_problems(cfg, env_file, elastic.read_env_file(env_file)[bucket_env])
     from ..pool import provider as registry  # noqa: PLC0415
 
     entry = registry.registered(provider_kind(cfg))
