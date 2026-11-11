@@ -540,3 +540,47 @@ def test_ssh_ops_drain_request_goes_to_the_dispensers_ledger_in_the_run_store(tm
     bare = cli.NcSshOps(cfg, run=lambda *a, **k: None, provider=SimpleNamespace())
     with pytest.raises(cli.NcError, match="no store dispenser"):
         bare.request_drain(m)
+
+
+def test_run_up_preflight_refuses_score_centering_without_the_samplers_top_logprobs(tmp_path, monkeypatch):
+    run = _run_cfg(tmp_path, monkeypatch)
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"sampler_id": "__SHARD__"}))
+    (tmp_path / "pool.json").write_text(json.dumps({"target": 1, "accounts": [1], "shard_base": "nc",
+                                                    "run": "run-a", "spec": str(spec)}))
+    run.cfg["trainer"]["argv"] = ["--rl-loss", "policy_loss"]
+    assert run.rollout_fields_problem() is None
+    run.cfg["trainer"]["argv"] = ["--rl-loss", "score_centering"]
+    assert "top_logprobs_num unset" in run.rollout_fields_problem()
+    spec.write_text(json.dumps({"rollout_fields": {"top_logprobs_num": 128}}))
+    assert run.rollout_fields_problem() is None
+    run.cfg["trainer"]["argv"] = ["--rl-loss=score_centering", "--rl-rollout-top-logprobs-num", "64"]
+    assert "top-64" in run.rollout_fields_problem()
+    assert run.preflight() is False
+
+
+def test_run_up_sees_its_finished_trainer_child_as_exited():
+    """run up starts the trainer with Popen and never waits on it: the finished launcher
+    is a zombie child, which kill(pid, 0) alone reports alive (the trainer's end was
+    never seen and release_nc_on_finish never ran)."""
+    import os
+    import sys
+    import time
+
+    from yeto.rl import up
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    pid = proc.pid
+    deadline = time.time() + 30
+    while time.time() < deadline:  # exited but not reaped: a zombie
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        if up._alive(pid) is False:
+            break
+        time.sleep(0.05)
+    assert up._alive(pid) is False
+    assert up._alive(os.getppid()) is True  # not a child: kill 0 decides
+    assert up._alive(None) is False
+    proc.returncode = 0  # reaped above; keep Popen.__del__ quiet
