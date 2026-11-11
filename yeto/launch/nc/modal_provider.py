@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -369,6 +370,7 @@ class ModalSdkClient:
         self.app_name = str(cfg.get("app_name") or f"yeto-rollout-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}")
         self._modal = modal
         self._deployed = False
+        self._deploy_lock = threading.Lock()
 
     @property
     def modal(self):
@@ -394,14 +396,18 @@ class ModalSdkClient:
         return app
 
     def deploy(self) -> None:
-        if self._deployed:
-            return
-        app = self.build_app()
-        _record_ledger("intent", "modal_app", self.app_name)
-        app.deploy(name=self.app_name)
-        if getattr(app, "app_id", None):
-            _record_ledger("created", "modal_app", app.app_id, self.app_name, role="rollout", run=self.run_id)
-        self._deployed = True
+        # the pool starts islands on background threads (start_in_background): two first
+        # spawns must not deploy the app at once (Modal refuses the second deploy with
+        # "App deploy name ... is already taken" and that island's start fails)
+        with self._deploy_lock:
+            if self._deployed:
+                return
+            app = self.build_app()
+            _record_ledger("intent", "modal_app", self.app_name)
+            app.deploy(name=self.app_name)
+            if getattr(app, "app_id", None):
+                _record_ledger("created", "modal_app", app.app_id, self.app_name, role="rollout", run=self.run_id)
+            self._deployed = True
 
     def spawn(self, payload: dict[str, Any]) -> str:
         self.deploy()

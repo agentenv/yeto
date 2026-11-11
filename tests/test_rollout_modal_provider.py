@@ -201,6 +201,35 @@ def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
     assert "member_ready" not in names and "start_timeout" in names
 
 
+def test_two_first_spawns_on_threads_deploy_the_app_once():
+    """The pool starts islands on background threads; a pool of target 2 spawned both at
+    once and Modal refused the second, concurrent deploy (start_failed: 'App deploy name
+    ... is already taken')."""
+    import threading
+    import time as _time
+
+    deploys = []
+
+    class App:
+        app_id = None
+
+        def deploy(self, name):
+            deploys.append(name)
+            _time.sleep(0.2)  # the image build: the other thread arrives meanwhile
+
+    fn = SimpleNamespace(spawn=lambda payload: SimpleNamespace(object_id=f"fc-{payload['shard']}"))
+    modal = SimpleNamespace(Function=SimpleNamespace(from_name=lambda app, name: fn))
+    client = ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal)
+    client.build_app = lambda: App()
+    calls = []
+    threads = [threading.Thread(target=lambda s=s: calls.append(client.spawn({"shard": s}))) for s in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert deploys == ["yeto-rollout-run-m"] and sorted(calls) == ["fc-a", "fc-b"]
+
+
 def test_a_reused_container_does_not_report_the_earlier_calls_join(tmp_path, monkeypatch):
     """Modal ran the next call in the same warm container: the earlier call's tape (with
     its rl_sampler_join) was still on disk and the new call reported ready at once,
