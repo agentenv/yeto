@@ -58,6 +58,7 @@ from typing import Any
 EXTENSION = "yeto.rl.adapters.sampler_engines.vllm_expert_reload.K31ExpertReloadExtension"
 RELOAD_METHOD = "k31_reload_experts"
 FINGERPRINT_METHOD = "k31_param_fingerprint"
+RELEASE_CACHE_METHOD = "k31_release_cached_memory"
 INDEX_FILE = "model.safetensors.index.json"
 RELEASE_PREFIX = "release-"  # yeto.rl.engine.release_overlay
 EXPERT_TENSOR = re.compile(r"^(?:language_model\.)?(?:model\.)?layers\.(?P<layer>\d+)\.block_sparse_moe\.experts\."
@@ -270,6 +271,21 @@ def fingerprint(tensor: Any) -> str:
     return f"{int(acc_sum) & (2**64 - 1):016x}{int(acc_xor) & (2**64 - 1):016x}:{data.numel()}"
 
 
+def expert_chunks(entry: Mapping[str, Any], max_experts: int | None) -> list[tuple[list[int], dict[str, str]]]:
+    """One layer's released experts (``group_by_layer`` entry) cut into chunks of at
+    most ``max_experts`` (None / 0: one chunk), each with its own tensors: the
+    in-place reload's memory guard stages one chunk at a time."""
+    experts = list(entry["experts"])
+    size = len(experts) if not max_experts or max_experts <= 0 else int(max_experts)
+    out = []
+    for i in range(0, len(experts), size):
+        part = set(experts[i:i + size])
+        tensors = {name: file for name, file in entry["tensors"].items()
+                   if int(EXPERT_TENSOR.match(name)["expert"]) in part}
+        out.append((sorted(part), tensors))
+    return out
+
+
 def release_cached_memory(torch: Any) -> None:
     """Hand the reload's freed staging / conversion blocks back to the device: they
     stay in the caching allocator otherwise, outside vLLM's budget, and the serving
@@ -284,7 +300,16 @@ class K31ExpertReloadExtension:
     called on every rank by ``collective_rpc``. Only str arguments arrive over
     HTTP, so ``files`` is a JSON list."""
 
-    def k31_reload_experts(self, weights_path: str, files: str | None = None) -> dict[str, Any]:
+    def k31_release_cached_memory(self) -> dict[str, Any]:
+        """Empty this rank's caching allocator (the reload memory guard's first step)."""
+        import torch  # noqa: PLC0415
+
+        release_cached_memory(torch)
+        free, total = torch.cuda.mem_get_info()
+        return {"free_bytes": int(free), "total_bytes": int(total)}
+
+    def k31_reload_experts(self, weights_path: str, files: str | None = None,
+                           max_experts: str | None = None) -> dict[str, Any]:
         import torch  # noqa: PLC0415
         from safetensors import safe_open  # noqa: PLC0415
         from vllm.config import set_current_vllm_config  # noqa: PLC0415
@@ -307,16 +332,22 @@ class K31ExpertReloadExtension:
         read_s = 0.0
         try:
             with torch.no_grad(), set_current_vllm_config(self.vllm_config):
+                chunk = int(max_experts) if max_experts else None
                 for layer, entry in plan.items():
-                    t0 = time.perf_counter()
-                    named = []
-                    for name, file in entry["tensors"].items():
-                        if file not in handles:
-                            handles[file] = safe_open(str(root / file), framework="pt", device="cpu")
-                        named.append((name, handles[file].get_tensor(name)))
-                    read_s += time.perf_counter() - t0
-                    written += reload_layer(model, modules[layer][1], entry["experts"], named)
-                    experts += len(entry["experts"])
+                    pieces = expert_chunks(entry, chunk)
+                    for part, tensors in pieces:
+                        t0 = time.perf_counter()
+                        named = []
+                        for name, file in tensors.items():
+                            if file not in handles:
+                                handles[file] = safe_open(str(root / file), framework="pt", device="cpu")
+                            named.append((name, handles[file].get_tensor(name)))
+                        read_s += time.perf_counter() - t0
+                        written += reload_layer(model, modules[layer][1], part, named)
+                        experts += len(part)
+                        if len(pieces) > 1:
+                            del named
+                            release_cached_memory(torch)  # the chunk's staging goes back first
         finally:
             handles.clear()
             release_cached_memory(torch)
@@ -324,7 +355,7 @@ class K31ExpertReloadExtension:
             hook = getattr(self.model_runner, reset, None)
             if callable(hook):
                 hook()
-        return {"layers": len(plan), "experts": experts, "bytes": written,
+        return {"layers": len(plan), "experts": experts, "bytes": written, "max_experts": max_experts,
                 "read_s": round(read_s, 3), "seconds": round(time.perf_counter() - began, 3)}
 
     def k31_param_fingerprint(self, pattern: str = "") -> dict[str, str]:

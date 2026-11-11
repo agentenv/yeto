@@ -35,7 +35,7 @@ def add_parser(sub: Any) -> None:
     va.add_argument("--force", action="store_true", help="check tasks already validated again")
     va.add_argument("--trials-dir", default="/tmp/yeto_sandbox_trials")
     va.add_argument("--out", default=None, help="write the ids of the tasks that passed here (one per line)")
-    td = ssub.add_parser("teardown", help="remove this run's labelled containers (nothing else)")
+    td = ssub.add_parser("teardown", help="remove this run's labelled sidecars and trial containers (and their networks); nothing else")
     common(td)
     td.add_argument("--images", action="store_true", help="also remove images this run built")
     td.add_argument("--dry-run", action="store_true")

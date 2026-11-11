@@ -72,6 +72,8 @@ class Probe:
     running: int | None = None
     queued: int | None = None
     trainer_wait: bool = False
+    vram_alerts: int | None = None  # rl_sampler_vram_high lines on the newest tape (vram_guard)
+    vram_max_frac: float | None = None  # the last alert's fullest card
 
     @classmethod
     def parse(cls, text: str, returncode: int) -> Probe:
@@ -95,12 +97,13 @@ class Probe:
             except (KeyError, ValueError):
                 return None
 
-        running, queued = num("run"), num("wq")
+        running, queued, alerts = num("run"), num("wq"), num("vh")
         return cls(node="ok", sampler=sampler, exit_code=int(code) if code not in (None, "", "-") else None,
                    joined=doc.get("joined") == "1",
                    progress_age_s=float(age) if age not in (None, "", "-") else None,
                    gen_tokens=num("tok"), running=None if running is None else int(running),
-                   queued=None if queued is None else int(queued), trainer_wait=doc.get("tw") == "1")
+                   queued=None if queued is None else int(queued), trainer_wait=doc.get("tw") == "1",
+                   vram_alerts=None if alerts is None else int(alerts), vram_max_frac=num("vm"))
 
 
 def resolve_metrics_port(value: int | str | None, spec: Mapping[str, Any] | None) -> int | None:

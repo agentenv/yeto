@@ -49,6 +49,9 @@ class Objects:
     def list(self, prefix):
         return sorted(k for k in self.data if k.startswith(prefix))
 
+    def delete(self, key):
+        self.data.pop(key, None)
+
 
 class Cloud:
     """National Compute + nodes. Each ticket: account, state, grant time, lease end,
@@ -861,6 +864,7 @@ def test_background_start_keeps_the_other_members_watched():
     cloud.start = slow_start
     cloud.start_in_background = True
     pool = _pool(clock, cloud, target=2, accounts=(1, 4))
+    pool.start_retries = 0  # this test is about the watch, not the transient-start retry
     _run(pool, clock, 600)
     t1, t2 = pool.members[0], pool.members[1]
     assert t1.state == READY and t2.state == "starting"  # t2 still in its start
@@ -1118,3 +1122,105 @@ def test_member_ready_carries_the_providers_machine_hour_in_usd():
     assert pool._usd_per_h(Member(ticket="t", account=1, shard="s")) == 24.0
     pool.ops = object()
     assert pool._usd_per_h(Member(ticket="t", account=1, shard="s")) is None
+
+
+# -- a transient start failure is retried in place (report: one ssh exit 255 cost a node) ----
+
+def test_one_ssh_exit_255_in_the_start_is_retried_on_the_same_node():
+    clock = Clock()
+    cloud = Cloud(clock)
+    sync_start = cloud.start
+    fails = {"n": 1}
+
+    def flaky_start(m, shards):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise subprocess.CalledProcessError(255, ["ssh", "yeto-nc-x"], stderr="read timeout")
+        sync_start(m, shards)
+
+    cloud.start = flaky_start
+    pool = _pool(clock, cloud, accounts=(1,))
+    _run(pool, clock, 3600)
+    names = _names(pool)
+    assert "start_retry" in names and "start_failed" not in names and "released" not in names
+    assert [m.state for m in pool.members] == [READY] and len(cloud.tickets) == 1  # no second order
+    retry = next(e for e in pool.events.events if e["event"].endswith("start_retry"))
+    assert retry["attempt"] == 1 and retry["retry_in_s"] == pool.start_retry_s
+
+
+def test_transient_start_failures_are_bounded_and_back_off():
+    clock = Clock()
+    cloud = Cloud(clock)
+    starts = []
+
+    def down(m, shards):
+        starts.append(clock())
+        raise subprocess.TimeoutExpired(["ssh", "yeto-nc-x"], 60)
+
+    cloud.start = down
+    pool = _pool(clock, cloud, accounts=(1,), max_orders=1)
+    _run(pool, clock, 3600, step=10.0)
+    first = pool.members[0]
+    assert first.state == GONE and first.start_retries == pool.start_retries == 3
+    assert len([t for t in starts if t <= starts[0] + 600]) == 4  # the first try and 3 retries
+    gaps = [b - a for a, b in zip(starts, starts[1:4])]
+    assert gaps[0] >= 30 and gaps[1] >= 60 and gaps[2] >= 120  # doubled every retry
+    assert _names(pool).count("start_retry") >= 3 and "start_failed" in _names(pool)
+
+
+def test_a_refused_spec_is_not_retried():
+    clock = Clock()
+    cloud = Cloud(clock)
+
+    def refuse(m, shards):
+        raise ValueError("spec sampler_id 'x' is not the shard")
+
+    cloud.start = refuse
+    pool = _pool(clock, cloud, accounts=(1,), max_orders=1)
+    _run(pool, clock, 600)
+    assert "start_retry" not in _names(pool) and pool.members[0].state == GONE
+
+
+# -- a stale stop request of an earlier attempt's shard does not stop a new pool's sampler ----
+
+class CloudWithHandoffs(Cloud):
+    def clear_stale_handoff(self, m, keep):
+        from yeto.launch.pool.data_path import R2DataPath
+
+        return R2DataPath(self.store).clear_stale_handoff(m.shard, keep=keep)
+
+
+def test_a_new_pool_sets_aside_the_handoff_a_failed_attempt_left_on_its_shard_name():
+    clock = Clock()
+    cloud = CloudWithHandoffs(clock)
+    # attempt 1: the start fails for good; the shard nc-0 is fenced (a handoff record) and released
+    cloud.start = lambda m, shards: (_ for _ in ()).throw(ValueError("bad image"))
+    first = _pool(clock, cloud, accounts=(1,), max_orders=1)
+    _run(first, clock, 600)
+    assert first.members[0].shard == "nc-0" and first.members[0].state == GONE
+    assert handoff_requested(cloud.store, "nc-0")
+    # attempt 2 of the same run: a fresh pool numbers its shards from nc-0 again
+    cloud.start = Cloud.start.__get__(cloud)
+    second = _pool(clock, cloud, accounts=(1,))
+    _run(second, clock, clock.t + 3600)
+    m = second.members[0]
+    assert m.shard == "nc-0" and m.state == READY
+    assert not handoff_requested(cloud.store, "nc-0")  # the old request no longer stops the new sampler
+    aside = [k for k in cloud.store.objects.data if k.startswith("sample-buffer/handoffs-aside/nc-0-")]
+    assert len(aside) == 1
+    record = json.loads(cloud.store.objects.data[aside[0]])
+    assert record["successor"] == f"pool-fence:{first.members[0].ticket}" and record["set_aside_reason"]
+    assert "stale_handoff_set_aside" in _names(second)
+
+
+def test_a_handoff_from_this_pools_own_member_or_fence_is_kept():
+    from yeto.rl.engine.sampler_resume import request_handoff, set_aside_handoff
+
+    store = SimpleNamespace(objects=Objects())
+    request_handoff(store, "nc-0", "nc-1")
+    assert set_aside_handoff(store, "nc-0", keep={"nc-1"}) is None and handoff_requested(store, "nc-0")
+    request_handoff(store, "nc-2", "pool-fence:t7")
+    assert set_aside_handoff(store, "nc-2", keep={"pool-fence:t7"}) is None and handoff_requested(store, "nc-2")
+    assert set_aside_handoff(store, "nc-3") is None  # no record: nothing to do
+    assert set_aside_handoff(store, "nc-0", keep={"nc-9"})["successor"] == "nc-1"
+    assert not handoff_requested(store, "nc-0") and handoff_requested(store, "nc-2")

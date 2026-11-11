@@ -474,7 +474,7 @@ class PortReleaseLoader:
 
 LOAD_PATH_FIELDS = ("expert_update", "expert_update_fallback", "expert_update_fallback_detail",
                     "expert_update_repair", "update_s", "files", "sparse", "sparse_fallback",
-                    "sparse_fallback_detail", "sparse_repair")
+                    "sparse_fallback_detail", "sparse_repair", "memory_guard")
 
 
 def check_sampling_fits(sampling: SamplingParams, engine: SamplerEngine, *,

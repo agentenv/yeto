@@ -443,6 +443,10 @@ class NcSshOps:
     def fence_incarnation(self, m: Member) -> None:
         self.data_path().fence_incarnation(m.shard, by=m.ticket)
 
+    def clear_stale_handoff(self, m: Member, keep: Any) -> Any:
+        clear = getattr(self.data_path(), "clear_stale_handoff", None)  # the syncer path keeps no handoff record
+        return None if clear is None else clear(m.shard, keep=keep)
+
     def data_path(self) -> Any:
         """The work contract's data path of this pool (:func:`pool_data_path`)."""
         return pool_data_path(self.cfg, self._fence_store,

@@ -95,6 +95,7 @@ from typing import Any
 
 import numpy as np
 
+from yeto.rl.engine import vram_guard
 from yeto.rl.engine.sampler_engine import (
     FINISH_LENGTH,
     FINISH_STOP,
@@ -310,6 +311,10 @@ class VllmOptions:
     # (vllm_expert_reload: only the released experts, the cold start's transform);
     # the yeto package must be importable in the server (PYTHONPATH)
     expert_reload: bool = False
+    # the in-place expert reload's memory guard (yeto.rl.engine.vram_guard.reload_plan):
+    # GiB left free on the fullest GPU while it stages; the reload goes in smaller
+    # chunks, or by restart, when the staging would not fit
+    reload_reserve_gib: float = 2.0
 
 
 def decode_top_logprobs(logprobs: dict[str, Any], *, k: int) -> tuple[Any, Any] | None:
@@ -392,9 +397,11 @@ class VllmServerEngine(ServerEngine):
     REFUSED_FORMATS = LEGACY_REFUSED_FORMATS
 
     def __init__(self, config: ServerConfig, options: VllmOptions | None = None, *, run: Any = None,
-                 **kw: Any) -> None:
+                 card_memory: Any = None, **kw: Any) -> None:
         """``run(argv) -> str``: runs the card tool of the ROCm check (default:
-        ``yeto.hw.card_telemetry.run_command``)."""
+        ``yeto.hw.card_telemetry.run_command``). ``card_memory() -> [card sample]``:
+        the per-GPU memory the in-place reload guard reads (default: the card
+        tool of ``config.device_family``)."""
         options = options or VllmOptions()
         if options.platform is not None and options.platform not in PLATFORMS:
             raise SamplerEngineError(f"vllm platform must be one of {PLATFORMS} or None, got {options.platform!r}")
@@ -423,6 +430,7 @@ class VllmServerEngine(ServerEngine):
                 raise SamplerEngineError(f"vllm k31_preset {options.k31_preset!r} is a {preset['platform']} preset; "
                                          f"the server runs on {options.platform!r}")
         self._run = run
+        self._card_memory = card_memory
         self._served_dir: Path | None = None  # the directory the running server loaded
         self._moe_layers: int | None = options.moe_layers
         self._dense_layers = 0
@@ -657,19 +665,75 @@ class VllmServerEngine(ServerEngine):
             report = self.start(model_dir, self._version or 0)
             self._served_dir = Path(model_dir)
             return {"reload": "restart", "expert_reload_off": why, "restart_s": report.pause_s}
+        guard = self._reload_memory_guard(model_dir, plan)
+        if guard["mode"] == vram_guard.SAFE_RESTART:
+            # not even one expert per chunk fits next to the served weights: a restart
+            # frees the GPUs first instead of staging into memory that is not free
+            report = self.start(model_dir, self._version or 0)
+            self._served_dir = Path(model_dir)
+            return {"reload": "restart", "expert_reload_off": "gpu_memory", "restart_s": report.pause_s,
+                    "memory_guard": guard}
+        kwargs = {"weights_path": str(model_dir), "files": json.dumps(list(plan.files))}
+        if guard["mode"] == vram_guard.SAFE_CHUNKED:
+            kwargs["max_experts"] = str(int(guard["max_experts"]))
         began = self._clock()
         self.call("POST", "/pause?mode=wait")
         try:
-            result = self.call("POST", "/collective_rpc", {
-                "method": vllm_expert_reload.RELOAD_METHOD,
-                "kwargs": {"weights_path": str(model_dir), "files": json.dumps(list(plan.files))}})
+            result = self.call("POST", "/collective_rpc", {"method": vllm_expert_reload.RELOAD_METHOD,
+                                                           "kwargs": kwargs})
         finally:
             self.call("POST", "/resume")
         self._served_dir = Path(model_dir)
         ranks = (result or {}).get("results") or []
         return {"reload": "collective_rpc " + vllm_expert_reload.RELOAD_METHOD, "rpc_results": len(ranks),
                 "experts": plan.expert_count, "pause_s": round(self._clock() - began, 3),
-                "rank_seconds": max((r.get("seconds", 0.0) for r in ranks if isinstance(r, dict)), default=None)}
+                "rank_seconds": max((r.get("seconds", 0.0) for r in ranks if isinstance(r, dict)), default=None),
+                "memory_guard": guard}
+
+    def _free_bytes(self) -> int | None:
+        """Free memory of the fullest GPU (None: no reading; the guard then lets the
+        reload run as before)."""
+        reader = self._card_memory
+        if reader is None:
+            from yeto.hw.card_telemetry import collector_for, run_command  # noqa: PLC0415
+            from yeto.rl.engine.telemetry import load_nvml  # noqa: PLC0415
+
+            family = "rocm" if self.options.platform == "rocm" else "cuda"
+            try:
+                collector = collector_for(family, nvml_loader=load_nvml, run=self._run or run_command)
+                collector.open()
+            except Exception:  # noqa: BLE001 - no card tool on this image
+                return None
+            reader = self._card_memory = collector.sample
+        try:
+            return vram_guard.min_free_bytes(reader())
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _reload_memory_guard(self, model_dir: Path, plan: Any) -> dict[str, Any]:
+        """Free GPU memory against the release's staging (``vram_guard.reload_plan``);
+        short: the engine's caching allocator is emptied on every rank and the cards
+        are read again before the reload is cut into chunks or turned into a restart."""
+        try:
+            layers = vllm_expert_reload.group_by_layer(vllm_expert_reload.released_tensors(model_dir, plan.files))
+            estimate = vram_guard.staging_bytes(vram_guard.layer_bytes(model_dir, layers), layers,
+                                                tp=int(self.options.tp))
+        except Exception as error:  # noqa: BLE001 - the extension refuses a bad release itself
+            return {"mode": vram_guard.SAFE_IN_PLACE, "estimate_error": f"{type(error).__name__}: {error}"[:200]}
+        reserve = int(float(self.options.reload_reserve_gib) * vram_guard.GIB)
+        guard = vram_guard.reload_plan(self._free_bytes(), estimate, reserve_bytes=reserve)
+        if guard["mode"] == vram_guard.SAFE_IN_PLACE:
+            return guard
+        try:
+            self.call("POST", "/collective_rpc", {"method": vllm_expert_reload.RELEASE_CACHE_METHOD, "kwargs": {}})
+        except SamplerEngineError as error:
+            guard["empty_cache_error"] = str(error)[:200]
+        first = guard
+        guard = vram_guard.reload_plan(self._free_bytes(), estimate, reserve_bytes=reserve)
+        guard["first_free_bytes"] = first["free_bytes"]
+        guard["emptied_cache"] = "empty_cache_error" not in first
+        print(f"[vllm-server] in-place reload memory guard: {guard}", flush=True)
+        return guard
 
     # ------------------------------------------------------------------ requests
     def _body(self, prompt: Any, sampling: SamplingParams, **extra: Any) -> dict[str, Any]:

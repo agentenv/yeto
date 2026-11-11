@@ -54,7 +54,8 @@ POOL_DRAINING = "nc_elastic_scale_draining"
 POOL_STOPPED = "nc_elastic_pool_stopped"
 POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
-             "by", "usd_per_h", "end_reason", "replaces", "continues_shard")
+             "by", "usd_per_h", "end_reason", "replaces", "continues_shard", "max_frac", "alerts",
+             "retry_in_s", "successor")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
@@ -100,6 +101,7 @@ class AsyncState:
             s = self.sampler[iid] = {"rounds": {}, "start": None, "last_wait": None, "ended": False,
                                      "backlog": [], "max_backlog_groups": None, "resource": None,
                                      "first_round_ts": None, "last_type": None, "last_ts": None,
+                                     "vram": None,
                                      # one entry per sampler incarnation (an in-place restart is a new one)
                                      "incarnations": []}
         return s
@@ -189,6 +191,17 @@ class AsyncState:
                     row[k] = _f(agentic.get(k))
             if agentic and row.get("reward_mean") is None and _f(agentic.get("reward_mean")) is not None:
                 row["reward_mean"] = _f(agentic.get("reward_mean"))
+        elif ev in ("rl_sampler_vram_high", "rl_sampler_vram_ok"):
+            # vram_guard.VramWatch: a card above the alert threshold, or every card back under
+            v = s["vram"] or {"alerts": 0, "max_frac": None}
+            high = ev == "rl_sampler_vram_high"
+            frac = _f(r.get("max_frac"))
+            v.update({"high": high, "ts": ts, "threshold": _f(r.get("threshold")), "last_frac": frac})
+            if high:
+                v["alerts"] += 1
+                v["max_frac"] = frac if v["max_frac"] is None or frac is None else max(v["max_frac"], frac)
+                v["cards"] = r.get("cards") if isinstance(r.get("cards"), list) else None
+            s["vram"] = v
         elif ev == "rl_sampler_policy_loaded":
             ft = r.get("follower_timings") if isinstance(r.get("follower_timings"), dict) else {}
             seen = _f(r.get("seen_at"))
@@ -196,7 +209,9 @@ class AsyncState:
                                "released_at": _f(r.get("released_at")), "seen_at": seen, "loaded_at": ts,
                                "resolve_s": _f(ft.get("resolve_s")), "load_s": _f(ft.get("load_s")),
                                "pause_s": _f(r.get("pause_s")), "buffer_selected": r.get("buffer_selected"),
-                               "load_wall_s": round(ts - seen, 3) if ts is not None and seen is not None else None})
+                               "load_wall_s": round(ts - seen, 3) if ts is not None and seen is not None else None,
+                               "memory_guard": (r.get("memory_guard") or {}).get("mode")
+                               if isinstance(r.get("memory_guard"), dict) else None})
         elif ev == "rl_sampler_start_on_latest" and r.get("base_version") is not None:
             # a new or replacement island starts on the newest release: a load of that
             # version (at start, not a hot reload), so the release row shows the island
@@ -384,6 +399,7 @@ class AsyncState:
                 "restarts": [{"ts": x["first_ts"], "incarnation": x["incarnation"]} for x in incs[1:]],
                 "backlog": s["backlog"][-500:], "max_backlog_groups": s["max_backlog_groups"],
                 "waiting": s["last_wait"], "ended": s["ended"], "resource": s["resource"],
+                "vram": s.get("vram"),
                 "sampling": s.get("sampling"), "provenance": s.get("provenance"),
                 "incarnation": incs[-1]["incarnation"] if incs else s.get("incarnation"), "shard": s.get("shard"),
                 "first_ts": s.get("start"), "last_ts": s.get("last_ts"),

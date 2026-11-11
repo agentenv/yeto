@@ -10,9 +10,11 @@
   (``sync_to``). A task that fails does not stop the others; it is recorded
   with its error. Present images and matching sidecars are left alone.
 * ``validate``: oracle (must score 1) and nop (must score 0) per prepared task.
-* ``teardown``: removes containers labelled ``yeto.sandbox.run=<run>`` only
-  (each one's label is checked again before removal); adopted and foreign
-  containers are never touched.
+* ``teardown``: removes containers labelled ``yeto.sandbox.run=<run>`` (the
+  sidecars) and the Harbor trial containers labelled ``ai.yeto.run=<run>``
+  with their compose networks (:func:`.trial_labels.sweep_run`; a pool stop
+  leaves them behind), each one's label checked again before removal; adopted
+  and foreign containers, and those of other runs, are never touched.
 
 Results go to the readiness manifest (:mod:`.ready`).
 """
@@ -515,7 +517,11 @@ def teardown(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = Non
             if tid and not dry_run:
                 task_updates.setdefault(tid, {"hosts": {}})["hosts"][host.name] = {
                     "prepared": False, "error": "torn down"}
-        out[host.name] = {"containers": [cid for cid, _ in mine], "images": removed_images, "dry_run": dry_run}
+        from .trial_labels import sweep_run  # noqa: PLC0415
+
+        trials = sweep_run(dk, cfg.run, dry_run=dry_run)
+        out[host.name] = {"containers": [cid for cid, _ in mine], "images": removed_images, "dry_run": dry_run,
+                          "trial_containers": trials["containers"], "trial_networks": trials["networks"]}
     if task_updates:
         ready_mod.merge_write(objects, cfg.ready_key, cfg.run, tasks=task_updates)
     return out

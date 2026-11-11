@@ -551,6 +551,24 @@ class Run:
             return None
         return out.stdout.split() if out.returncode == 0 else None
 
+    def _sweep_trials(self, host: str) -> None:
+        """Remove this run's trial containers and their compose networks on ``host``
+        (``trial_labels.sweep_run``); a failure is logged, the count after it decides."""
+        from yeto.sandbox.docker import DockerHost, subprocess_runner  # noqa: PLC0415
+        from yeto.sandbox.trial_labels import sweep_run  # noqa: PLC0415
+
+        base = subprocess_runner(600.0)
+        env = {k: v for k, v in self.env.items() if k != "DOCKER_CONTEXT"}
+        env["DOCKER_HOST"] = host
+        dk = DockerHost(host, runner=lambda argv, _env, stdin: base(argv, env, stdin))
+        try:
+            done = sweep_run(dk, self.run)
+        except Exception as error:  # noqa: BLE001 - the container count below verifies
+            _log(f"sandbox: trial sweep on {host} failed: {type(error).__name__}: {error}")
+            return
+        _log(f"sandbox: {host}: removed {len(done['containers'])} trial container(s), "
+             f"networks of {len(done['networks'])} trial(s)")
+
     def run_containers(self) -> int | None:
         """This run's running trial containers on every sandbox host (asked at once);
         None when no host answered."""
@@ -834,9 +852,7 @@ class Run:
         hosts = self.sandbox_hosts()
         if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
             for host in hosts:
-                ids = self._host_containers(host, every=True) or []
-                if ids:
-                    self._cmd(["docker", "-H", host, "rm", "-f", *ids], log="down.log", timeout=600)
+                self._sweep_trials(host)
             left = self.run_containers()
             _log(f"sandbox: {left} container(s) of this run left")
             ok &= left == 0

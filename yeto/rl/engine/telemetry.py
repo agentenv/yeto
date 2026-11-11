@@ -141,9 +141,12 @@ class ResourceSampler(_Periodic):
                  collector: CardCollector | None = None,
                  rss: Callable[[], int | None] = _cpu_rss_bytes,
                  clock: Callable[[], float] = time.monotonic,
-                 labels: Callable[[], Mapping[str, Any]] | None = None, **kw: Any):
+                 labels: Callable[[], Mapping[str, Any]] | None = None,
+                 vram_watch: Any = None, **kw: Any):
         super().__init__(interval_s, **kw)
         self._emit = emit
+        # ``vram_guard.VramWatch``: high-VRAM alerts from the same card samples (sampler nodes)
+        self._vram_watch = vram_watch
         family = os.environ.get(DEVICE_FAMILY_ENV) or "cuda"
         self._collector = collector or collector_for(family, nvml_loader=nvml_loader)
         self._rss = rss
@@ -193,6 +196,11 @@ class ResourceSampler(_Periodic):
                 self._peak_rss = max(self._peak_rss or 0, int(rss))
         self._emit(RESOURCE_EVENT, available=True, t=self._clock(), pid=os.getpid(),
                    source=self.source, gpus=gpus, cpu_rss_bytes=rss, **self._labels())
+        if self._vram_watch is not None:
+            try:
+                self._vram_watch.observe(gpus)
+            except Exception as error:  # noqa: BLE001 - an alert must not end the sampling
+                print(f"[telemetry] vram watch: {type(error).__name__}: {error}", flush=True)
         return True
 
     def take_peaks(self) -> dict[str, int]:

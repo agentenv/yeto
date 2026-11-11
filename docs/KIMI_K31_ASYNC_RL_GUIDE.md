@@ -528,6 +528,25 @@ sampler refuses a value above 0.86 unless
 `engine.options.allow_high_gpu_memory` is set. At 0.84 the KV cache still
 holds about 2.5M tokens, far more than 20 agentic trials of 32K tokens use.
 
+**GPU memory guard.** The sampler samples every GPU's memory once a minute.
+When a GPU is above 97% it writes `rl_sampler_vram_high` to its event tape.
+While the GPU stays high it writes the event again every 10 minutes. When every
+GPU is back under the threshold it writes `rl_sampler_vram_ok`. The pool
+reports the alert as the pool event `sampler_vram_high`, and the dashboard
+shows it on the sampler row. You can change the threshold and intervals with
+the spec section `vram_guard`: `{"high_frac": 0.97, "realert_s": 600,
+"interval_s": 60}`.
+
+Before an in-place expert reload, the sampler estimates the staging memory it
+needs: the largest layer of released experts, narrowed over TP, times two (the
+staging copy plus the kernel-format copy), plus `engine.options.reload_reserve_gib`
+(default 2). It compares this with the free memory of the fullest GPU. If
+there is not enough room, the sampler first empties the engine's allocator
+cache on every rank and measures again. If there is still not enough room, it
+reloads each layer in smaller chunks of experts. If not even one expert fits,
+it reloads by restarting the server. `memory_guard` in the
+`rl_sampler_policy_loaded` event records which path was taken.
+
 ## 4. Launch
 
 ### 4.1 Dry run
@@ -814,7 +833,8 @@ yeto run down --config <run.json>
 2. stops the dashboard and the trainer (`yeto down <run>`);
 3. releases the NC pool (`pool-stop`);
 4. tears down the sandboxes (`yeto sandbox teardown`) and removes this run's
-   trial containers;
+   trial containers (label `ai.yeto.run=<run>`) and their compose networks;
+   containers of other runs are not touched;
 5. verifies with `pool-status` and reports `down: verified` or
    `down: NOT verified, see down.log`.
 
