@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .elastic import LeaseStatus
+    from ..pool.status import LeaseStatus
 
 OPEN_STATES = frozenset({"queued", "held", "provisioning", "active", "releasing"})
 MI355X_RATE_UCR_PER_GPU_HOUR = 3_000_000
@@ -239,7 +239,7 @@ class NcClient:
         """``ticket`` as a :class:`~.elastic.LeaseStatus`. The account's current
         ticket is the only one the tool reports; another id (or none) means ``ticket``
         ended (one open order per account). A failed call raises."""
-        from .elastic import LeaseStatus  # noqa: PLC0415
+        from ..pool.status import LeaseStatus  # noqa: PLC0415
 
         t = self.status().get("ticket") or {}
         if t.get("id") != ticket:

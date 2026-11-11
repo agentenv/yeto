@@ -1,6 +1,6 @@
 """A Daytona sampler pool end to end on one Linux host, without Daytona or a GPU.
 
-The real pool (``LeasePool`` + ``NcSshOps`` + ``DaytonaProvider`` + the process route)
+The real pool (``IslandPool`` + ``NcSshOps`` + ``DaytonaProvider`` + the process route)
 runs against a fake Daytona client whose sandboxes are local directories, and a fake
 ``ssh`` that resolves the provider's alias through the user's ssh config (``Include``)
 and runs the remote command with ``bash`` in that directory (``/work``, ``/models``,
@@ -29,9 +29,11 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.launch import daytona_sampler as ds
-from yeto.launch.nc import cli, elastic as el, node_pool
+from yeto.launch.nc import cli, node_pool
 from yeto.launch.nc.daytona_provider import SSH_HOST, DaytonaProvider
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 from test_nc_daytona_provider import FakeDaytona, FakeSdk
 
@@ -220,10 +222,10 @@ def world(tmp_path, monkeypatch):
     ops.fence = lambda m: fenced.append(m.shard)  # the store fence is covered elsewhere (no object store here)
     ops.fence_incarnation = lambda m: fenced.append(m.shard)
     events = el.EventLog(log=lambda m: None, run="run-e")
-    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="dt", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0,
-                                elastic=el.ElasticConfig(max_orders=4, unreachable_grace_s=2, engine_stall_s=None)),
-                     ops, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="dt", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=4, unreachable_grace_s=2, engine_stall_s=None)),
+                      ops, log=lambda m: None, events=events)
     yield SimpleNamespace(pool=pool, ops=ops, boxes=boxes, run=run, events=events, fenced=fenced,
                           ssh_config=ssh_config, tmp=tmp_path)
     for name in list(boxes.boxes):

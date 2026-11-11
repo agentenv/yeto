@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.launch.nc import cli, elastic as el
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc import cli, elastic
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 from yeto.launch.nc.sky_provider import SkyProvider, from_config
 
 
@@ -150,7 +152,7 @@ class SkyOps:
         raise AssertionError
 
     def fence(self, m):
-        el.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
+        elastic.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
 
     def drain(self, m):
         self.p.release(m.account, m.ticket)
@@ -182,10 +184,10 @@ def test_pool_over_sky_replaces_a_reclaimed_spot_node_with_the_shared_policy():
     sky = FakeSky()
     ops = SkyOps(_provider(sky), sky, clock)
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-s")
-    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0,
-                                elastic=el.ElasticConfig(max_orders=3, breaker_failures=2)),
-                     ops, clock=clock, log=lambda m: None, events=events)
+    pool = IslandPool(PoolConfig(target=1, accounts=[1, 2], shard_base="s", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=3, breaker_failures=2)),
+                      ops, clock=clock, log=lambda m: None, events=events)
     for _ in range(10):
         pool.tick()
         t[0] += 60

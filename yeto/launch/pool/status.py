@@ -5,7 +5,7 @@ the provisioning circuit breaker (:class:`Breaker`), the run budget (:class:`Bud
 and the event log (:class:`EventLog`).
 
 Nothing here talks to a cloud. The National Compute pool (``yeto.launch.nc``) is
-where these were first written; ``yeto.launch.nc.elastic`` re-exports every name.
+where these were first written.
 A lease-bounded provider (National Compute) sets ``lease_until``; a provider
 without leases (Daytona, sky, Modal) leaves it None and its islands are never
 drained for a lease end. Money is counted in the provider's cost unit (``ucr`` for

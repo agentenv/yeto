@@ -20,9 +20,10 @@ from test_daytona_pool_process_e2e import STUB_PYTHON, Boxes, Ssh, _kill, _tagge
 from test_nc_daytona_provider import FakeSdk
 
 from yeto.launch.nc import cli, node_pool
-from yeto.launch.nc import elastic as el
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
 from yeto.launch.nc.daytona_provider import DaytonaProvider
-from yeto.launch.nc.lease_pool import GONE, READY, LeasePool, PoolConfig
+from yeto.launch.pool.island_pool import GONE, READY, IslandPool
 
 pytestmark = pytest.mark.skipif(not Path("/proc/self/environ").exists() or shutil.which("setsid") is None,
                                 reason="needs Linux /proc and setsid")
@@ -85,10 +86,10 @@ def fleet(tmp_path, monkeypatch):
     ops.fence = lambda m: fenced.append(m.shard)
     ops.fence_incarnation = lambda m: fenced.append(m.shard)
     events = el.EventLog(log=lambda m: None, run="run-16")
-    pool = LeasePool(PoolConfig(target=N, accounts=slots, shard_base="dt", stop_below_ucr=0,
-                                min_balance_to_order_ucr=0,
-                                elastic=el.ElasticConfig(max_orders=64, unreachable_grace_s=2, engine_stall_s=None)),
-                     ops, log=LOG.append, events=events)
+    pool = IslandPool(PoolConfig(target=N, accounts=slots, shard_base="dt", stop_below_ucr=0,
+                                 min_balance_to_order_ucr=0,
+                                 elastic=el.ElasticConfig(max_orders=64, unreachable_grace_s=2, engine_stall_s=None)),
+                      ops, log=LOG.append, events=events)
     yield pool, boxes, events, fenced
     for name in list(boxes.boxes):
         _kill(name)

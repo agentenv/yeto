@@ -9,10 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.launch.nc import cli, elastic as el
+from yeto.launch.nc import cli, elastic
 from yeto.launch.nc import client as ncc
 from yeto.launch.nc import tunnel
-from yeto.launch.nc.lease_pool import DRAINING, GONE, READY, LeasePool, PoolConfig
+from yeto.launch.nc.lease_pool import PoolConfig
+from yeto.launch.pool import status as el
+from yeto.launch.pool.island_pool import DRAINING, GONE, READY, IslandPool
 from yeto.rl.engine.incarnation_lease import IncarnationGate, IncarnationLease, read_lease
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -121,7 +123,7 @@ class Cloud:
         return el.Probe(node="ok", sampler=rec["sampler"], exit_code=rec["exit"], joined=rec["joined_at"] is not None)
 
     def fence(self, m):
-        el.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
+        elastic.fence_shard(self.store, m.shard, by=m.ticket, clock=self.clock)
         self.log.append(("fence", m.ticket, m.shard, self.clock()))
 
     def drain(self, m):
@@ -155,7 +157,7 @@ def _pool(clock, cloud, *, target=1, accounts=(1, 4), data_slots=None, **elastic
     cfg = PoolConfig(target=target, accounts=list(accounts), shard_base="nc", data_slots=data_slots,
                      elastic=el.ElasticConfig(**elastic))
     events = el.EventLog(log=lambda m: None, clock=clock, run="run-a")
-    return LeasePool(cfg, cloud, clock=clock, log=lambda m: None, events=events)
+    return IslandPool(cfg, cloud, clock=clock, log=lambda m: None, events=events)
 
 
 def _run(pool, clock, until, step=60.0):
@@ -214,7 +216,7 @@ def test_probe_parses_the_node_line():
     assert el.Probe.parse("YETO_NC_PROBE status=absent exit=- joined=0 age=-", 0).sampler == "absent"
     assert el.Probe.parse("", 255).node == el.PROBE_UNREACHABLE
     assert el.Probe.parse("ssh: connect timed out", 1).node == el.PROBE_UNREACHABLE
-    script = el.probe_script("yeto-sampler-nc-0", "/mnt/nvme/work/sampler/events-x*.jsonl")
+    script = elastic.probe_script("yeto-sampler-nc-0", "/mnt/nvme/work/sampler/events-x*.jsonl")
     assert "docker inspect" in script and "rm " not in script and "stop" not in script
 
 
@@ -599,15 +601,15 @@ def test_crash_between_order_and_save_then_restart_adopts_the_node(tmp_path):
     clock = Clock()
     cloud = Cloud(clock)
     path = tmp_path / "pool.json"
-    pool = LeasePool.restore(path, PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), cloud,
-                             clock=clock, log=lambda m: None,
-                             events=el.EventLog(log=lambda m: None, clock=clock, run="run-a"))
+    pool = IslandPool.restore(path, PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), cloud,
+                              clock=clock, log=lambda m: None,
+                              events=el.EventLog(log=lambda m: None, clock=clock, run="run-a"))
     pool.tick()  # orders t1; the state is on disk before the tick ends
     assert json.loads(path.read_text())["members"][0]["ticket"] == "t1"
     # (b) the state file moved away: a fresh pool adopts it too
     path.rename(tmp_path / "moved.json")
-    fresh = LeasePool.restore(path, pool.config, cloud, clock=clock, log=lambda m: None,
-                              events=el.EventLog(log=lambda m: None, clock=clock, run="run-a"))
+    fresh = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda m: None,
+                               events=el.EventLog(log=lambda m: None, clock=clock, run="run-a"))
     _run(fresh, clock, 1800)
     assert not any(e[0] == "drain" for e in cloud.log)
     assert [m.ticket for m in fresh.live()] == ["t1"] and fresh.live()[0].state == READY
@@ -642,7 +644,7 @@ def test_pool_state_roundtrip_keeps_elastic_state(tmp_path):
     pool.breaker.failures = 2
     path = tmp_path / "pool.json"
     pool.save(path)
-    again = LeasePool.restore(path, pool.config, cloud, clock=clock, log=lambda m: None)
+    again = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda m: None)
     assert again.snapshot() == pool.snapshot()
 
 
@@ -883,7 +885,7 @@ def test_restore_keeps_a_cut_off_start_whose_sampler_runs(tmp_path):
     assert m.state == "starting" and not m.joined
     path = tmp_path / "pool.json"
     pool.save(path)
-    again = LeasePool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None)
+    again = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None)
     again.tick()
     assert again.members[0].state == "starting" and cloud.tickets[m.ticket]["starts"] == 1
     assert len(cloud.kinds("order")) == 1
@@ -898,7 +900,7 @@ def test_restore_reruns_a_start_the_restart_cut_off_before_the_sampler(tmp_path)
     cloud.tickets[m.ticket]["sampler"] = "absent"  # the start died before the sampler
     path = tmp_path / "pool.json"
     pool.save(path)
-    again = LeasePool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None)
+    again = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None)
     again.tick()
     assert cloud.tickets[m.ticket]["starts"] == 2 and len(cloud.kinds("order")) == 1
 

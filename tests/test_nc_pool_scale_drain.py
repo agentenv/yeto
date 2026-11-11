@@ -17,7 +17,7 @@ from tests.test_nc_pool_run import _cfg
 from tests.test_store_dispense import FakeObjects, _open, _rows, _slots, _write
 from yeto.dashboard.async_rl import AsyncState
 from yeto.launch.nc import cli, pool_run
-from yeto.launch.nc.lease_pool import GONE, READY
+from yeto.launch.pool.island_pool import GONE, READY
 from yeto.rl import up
 from yeto.rl.engine import store_dispense as sd
 from yeto.rl.engine.incarnation_lease import read_lease
@@ -368,15 +368,15 @@ def test_a_node_with_a_replacement_in_flight_drains_and_the_replacement_goes_now
 
 
 def test_a_draining_member_survives_a_pool_restart(tmp_path):
-    from yeto.launch.nc.lease_pool import LeasePool
+    from yeto.launch.pool.island_pool import IslandPool
 
     cfg, path, clock, cloud, pool = _elastic(tmp_path, target=2)
     victim = max(_ready(pool), key=lambda m: m.created)
     assert pool_run.scale_pool(cfg, path, 1) == 0
     pool.tick()
     _save(pool)
-    again = LeasePool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
-                              log=lambda m: None, events=pool.events)
+    again = IslandPool.restore(pool.state_path, cli.pool_config(cfg, allowed=None), cloud, clock=clock,
+                               log=lambda m: None, events=pool.events)
     again.scale_path, again.scale_run = pool.scale_path, pool.scale_run
     v2 = next(m for m in again.members if m.ticket == victim.ticket)
     assert v2.retiring_since is not None and v2.drain_seq
@@ -522,7 +522,7 @@ def test_the_dashboard_shows_the_pool_size_through_a_scale(tmp_path):
 def test_ssh_ops_drain_request_goes_to_the_dispensers_ledger_in_the_run_store(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.launch.nc.lease_pool import Member
+    from yeto.launch.pool.island_pool import Member
 
     cfg, _path = _cfg(tmp_path, sampler={"dispense": DISPENSE})
     ops = cli.NcSshOps(cfg, run=lambda *a, **k: None, provider=SimpleNamespace())
