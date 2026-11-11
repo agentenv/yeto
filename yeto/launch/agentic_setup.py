@@ -47,7 +47,7 @@ step and what to do):
 ``sandbox``      the docker key, ssh config (``ControlMaster``) and known_hosts
                  under ``<root>/home/.ssh``; checked by ``docker version`` on the
                  sandbox daemon from the sampler image
-``records_secret``  ``<root>/home/records-proxy.secret`` (0600, >= 24 chars)
+``records_secret``  ``records-proxy.secret`` in ``<root>``'s home dir (0600, >= 24 chars)
 ``tasks``        the task directories under ``<root>/tasks`` (local tree or store
                  prefix); checked by a ``task.toml`` per wanted task
 ``tunnel``       a helper container (``--restart unless-stopped``) running

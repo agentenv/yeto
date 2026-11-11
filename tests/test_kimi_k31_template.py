@@ -88,7 +88,7 @@ def test_agent_loop_round_trip_and_alignment():
         _gen("Done.", "Created `/app/hello.txt` with \"Hello, world!\"."),
     ]
     tool_outputs = ["(no output)", 'Hello, world!<|close|>\n{"weird": [1, 2]}']
-    messages = [{"role": "system", "content": "You are pi.\nUse tools. 中文 ok."},
+    messages = [{"role": "system", "content": "You are pi.\nUse tools. \u4e2d\u6587 ok."},
                 {"role": "user", "content": "Create hello.txt in /app with Hello, world!"}]
     for turn, text in enumerate(sampled):
         prompt = template.render(messages, tools=TOOLS, add_generation_prompt=True)

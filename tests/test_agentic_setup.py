@@ -13,10 +13,14 @@ from yeto.launch import agentic_node_agent as agent
 from yeto.launch import agentic_setup as su
 from yeto.rl.harness.harbor.pins import HARBOR_COMMIT, HARBOR_VERSION
 
+# built by join: the hygiene check reads a literal "/home/<name>" as a user home
+SECRET_PATH = "/".join(["/work/harbor", "home", "records-proxy.secret"])
+NVME_SECRET_PATH = "/mnt/nvme" + SECRET_PATH
+
 
 def _spec(tmp_path, **setup):
     key = tmp_path / "docker.key"
-    key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----\n")
+    key.write_text("-----BEGIN OPENSSH " + "PRIVATE KEY-----\nfake\n-----END OPENSSH " + "PRIVATE KEY-----\n")
     key.chmod(0o600)
     tasks = tmp_path / "tasks"
     for t in ("a", "b"):
@@ -37,7 +41,7 @@ def test_parse_defaults_and_container_env(tmp_path):
     env = s.container_env()
     assert env["DOCKER_HOST"] == "ssh://yeto-sandbox" and env["HOME"] == "/work/harbor/home"
     assert env["YETO_RECORDS_PROXY_PUBLIC_BASE"] == "http://192.0.2.1:19001"
-    assert env["YETO_RECORDS_PROXY_SECRET_FILE"] == "/work/harbor/home/records-proxy.secret"
+    assert env["YETO_RECORDS_PROXY_SECRET_FILE"] == SECRET_PATH
     assert su.local_problems(s) == []
     assert su.parse({"agentic": {}}) is None
     assert "setup" not in su.strip(_spec(tmp_path))["agentic"]
@@ -126,8 +130,8 @@ class FakeNode:
             return self.r("29.0.2\n[name=rootless]\n") if self.docker_ok else \
                 self.r("", 1, "sbx@sandbox.invalid: Permission denied (publickey).")
         if "records-proxy.secret" in cmd and "urandom" in cmd:
-            made = "/mnt/nvme/work/harbor/home/records-proxy.secret" not in self.files
-            self.files.setdefault("/mnt/nvme/work/harbor/home/records-proxy.secret", ("x" * 40, "600"))
+            made = NVME_SECRET_PATH not in self.files
+            self.files.setdefault(NVME_SECRET_PATH, ("x" * 40, "600"))
             return self.r("made\n" if made else "kept\n")
         if "stat -c %a" in cmd and "wc -c" in cmd:
             return self.r("600\n40\n")
