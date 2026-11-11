@@ -9,6 +9,7 @@ mod membership;
 mod recovery;
 mod resend;
 mod merge;
+mod par;
 mod dispense;
 mod dispense_service;
 mod members;
@@ -17,6 +18,8 @@ mod eval_checkpoint;
 mod protocol;
 mod sample_relay;
 mod server;
+mod sha256;
+mod shutdown;
 mod state;
 mod subscriber;
 
@@ -82,6 +85,11 @@ struct Args {
     /// Pre-merge learner-delta correction: "heloco" or "none".
     #[arg(long, default_value = "heloco")]
     delta_correction: String,
+    /// Threads for the merge and outer optimizer step (results are
+    /// bit-identical for any value). Unset: $YETO_SYNCER_MERGE_THREADS;
+    /// 0 or neither: available cores, capped at 32.
+    #[arg(long)]
+    merge_threads: Option<usize>,
     /// Give up waiting for quorum after this long.
     #[arg(long, default_value_t = 900)]
     quorum_timeout_s: u64,
@@ -141,6 +149,23 @@ struct Args {
     /// keep merging. --resume never reads these files.
     #[arg(long, value_delimiter = ',')]
     checkpoint_at_steps: Vec<u64>,
+    /// Write the --checkpoint-every checkpoints on a background thread while
+    /// rounds keep merging, instead of stopping the scheduler for the whole
+    /// write (a 120B state is ~1 TB; minutes per checkpoint). A crash during
+    /// the write resumes from the previous checkpoint. Per-round checkpoints
+    /// (--checkpoint-every 1) and policy sweeps are unaffected. Memory: the
+    /// writer holds the snapshot, so a fragment committed before the writer
+    /// reached it is copied once; in the worst case (every fragment commits
+    /// during the write) host memory peaks at about twice params + momentum.
+    #[arg(long)]
+    background_checkpoint: bool,
+    /// Write --checkpoint-path once before the first round (after INIT or
+    /// --resume), so the rounds before the first --checkpoint-every one are
+    /// covered too. Skipped when --resume found that checkpoint (it is the
+    /// state just loaded). On a background thread with
+    /// --background-checkpoint.
+    #[arg(long)]
+    checkpoint_on_start: bool,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -150,6 +175,13 @@ struct Args {
     /// sessions are refused.
     #[arg(long)]
     bcast_delta_full_every: Option<u64>,
+    /// On SIGTERM / SIGINT: stop launching rounds, give the rounds still
+    /// gathering this many seconds to close (then drop them; they have not
+    /// touched the state), commit every computed round, write
+    /// --checkpoint-path synchronously and exit 0. A second signal exits at
+    /// once without a checkpoint.
+    #[arg(long, default_value_t = 600)]
+    shutdown_timeout_s: u64,
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -276,6 +308,11 @@ struct Args {
     /// parameters, which stay in --checkpoint-path / --final-state).
     #[arg(long, default_value = "full", value_parser = ["full", "manifest"])]
     final_cut_payload: String,
+    /// A late delta carried into a later round counts as that island's
+    /// answer to the round (quorum and the all-answered check). Off keeps
+    /// carries outside quorum, the historical RL async rule.
+    #[arg(long)]
+    carry_answers_round: bool,
     /// Task dispenser: islands claim the rows of --data they train
     /// from this syncer (TASK_* connections, docs/PROTOCOL.md "Task
     /// dispenser"). Off by default.
@@ -387,6 +424,12 @@ fn main() -> anyhow::Result<()> {
     let dispense = dispense_config(&args)?;
     let member_lease = member_lease(&args)?;
     let shard = args.shard_plan()?;
+    let merge_threads = par::resolve_threads(
+        args.merge_threads,
+        std::env::var(par::THREADS_ENV).ok().as_deref(),
+    )?;
+    par::set_default_threads(merge_threads);
+    tracing::info!(merge_threads, "merge thread count");
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,
@@ -476,6 +519,8 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         checkpoint_at_steps: args.checkpoint_at_steps,
+        background_checkpoint: args.background_checkpoint,
+        checkpoint_on_start: args.checkpoint_on_start,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
@@ -489,6 +534,9 @@ fn main() -> anyhow::Result<()> {
         island_hmac_key,
         expected_island_contract,
         syncer_epoch: args.syncer_epoch,
+        shutdown: Some(std::sync::Arc::new(shutdown::Shutdown::new(std::time::Duration::from_secs(
+            args.shutdown_timeout_s,
+        )))),
         membership,
         recovery,
         inline_resend: args.inline_resend,
@@ -497,6 +545,7 @@ fn main() -> anyhow::Result<()> {
         shard,
         expert_token_weights: args.expert_token_weights,
         final_cut_manifest_only: args.final_cut_payload == "manifest",
+        carry_answers_round: args.carry_answers_round,
         dispense,
         dispense_log: args.dispense_log.clone(),
         member_lease,

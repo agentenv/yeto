@@ -104,6 +104,8 @@ pub struct Config {
     pub quorum_timeout_s: u64,
     /// Bounded wait for learners to apply and acknowledge the terminal cut.
     pub final_ack_timeout_s: u64,
+    /// Graceful stop (`crate::shutdown`); None: signals keep their default action.
+    pub shutdown: Option<Arc<crate::shutdown::Shutdown>>,
     pub total_steps: u64,
     /// Strict dense-policy mode: one logical local step contributes every
     /// fragment in a serial sweep.  None preserves the legacy independent
@@ -121,6 +123,13 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Write the `checkpoint_every` checkpoints on a background thread while
+    /// rounds keep merging (`GlobalState::save_checkpoint_in_background`)
+    /// instead of on the scheduler. Every other checkpoint waits for it.
+    pub background_checkpoint: bool,
+    /// Write the checkpoint once before the first round, unless `resume`
+    /// loaded it (`--checkpoint-on-start`).
+    pub checkpoint_on_start: bool,
     /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
     /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
     /// below `total_steps`. Empty: none.
@@ -209,6 +218,13 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// A late delta carried into a round (async rounds, `LateCarry`) answers
+    /// that round for its expected island: it counts towards quorum and the
+    /// all-answered check. The carry spends the island's anchor, so without
+    /// this a quorum-1 round holding only carried deltas waits for the
+    /// slowest island. Off keeps carries outside quorum (the historical RL
+    /// async rule). In the semantic profile hash (appended only when on).
+    pub carry_answers_round: bool,
     /// Task dispenser (`dispense.rs`): islands claim the rows they
     /// train over TASK_* connections. Hands out data only, never changes a
     /// merge, so it is not in the semantic profile hash. None: off.
@@ -234,6 +250,7 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
+const CARRY_ANSWERS_ROUND_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-carry-answers-round-v1\0";
 const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
 const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
 const EVAL_CHECKPOINTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-eval-checkpoints-v1\0";
@@ -304,6 +321,10 @@ impl Config {
             for step in &self.checkpoint_at_steps {
                 encoded.extend_from_slice(&step.to_le_bytes());
             }
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.carry_answers_round {
+            encoded.extend_from_slice(CARRY_ANSWERS_ROUND_PROFILE_DOMAIN);
         }
         Sha256::digest(encoded).into()
     }
@@ -731,7 +752,45 @@ fn append_tensor_bytes(
     }
     let first = byte_offset / width;
     let last = byte_end.div_ceil(width);
-    for (index, value) in values[first..last].iter().enumerate() {
+    // Values cut by the range ends go byte by byte; the whole values between
+    // them are encoded in one pass (a broadcast chunk is 4 MiB, and the
+    // per-value slicing alone held a forwarder to ~0.4 GB/s).
+    let first_whole = byte_offset.div_ceil(width).min(last);
+    let last_whole = (byte_end / width).max(first_whole);
+    append_value_bytes(dtype, width, values, first..first_whole, byte_offset, byte_end, out);
+    let whole = &values[first_whole..last_whole];
+    let start = out.len();
+    out.resize(start + whole.len() * width, 0);
+    let dst = &mut out[start..];
+    match dtype {
+        DTYPE_F32 => {
+            for (d, value) in dst.chunks_exact_mut(4).zip(whole) {
+                d.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        DTYPE_BF16 => {
+            for (d, value) in dst.chunks_exact_mut(2).zip(whole) {
+                d.copy_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
+    }
+    append_value_bytes(dtype, width, values, last_whole..last, byte_offset, byte_end, out);
+    Ok(())
+}
+
+/// The bytes of `values[range]` that fall in `byte_offset..byte_end`.
+fn append_value_bytes(
+    dtype: u8,
+    width: usize,
+    values: &[f32],
+    range: std::ops::Range<usize>,
+    byte_offset: usize,
+    byte_end: usize,
+    out: &mut Vec<u8>,
+) {
+    let first = range.start;
+    for (index, value) in values[range].iter().enumerate() {
         let value_index = first + index;
         let value_start = value_index * width;
         let start = byte_offset.saturating_sub(value_start);
@@ -745,7 +804,6 @@ fn append_tensor_bytes(
             _ => unreachable!(),
         }
     }
-    Ok(())
 }
 
 /// One receive-only subscriber connection (`subscriber.rs`).
@@ -1084,7 +1142,63 @@ struct Push {
     /// Expert token weights: the per-tensor merge scale of this push (see
     /// `protocol::decode_expert_tags`); `None` when the option is off.
     tensor_scales: Option<Vec<f64>>,
+    /// The learner's wire payload, kept only while it is smaller than the
+    /// decoded gradient, so a late push queued for its fragment's next
+    /// round (`LateCarry`) can drop `outer_gradient` and wait as wire bytes.
+    wire: Option<PushWire>,
     transfer: PushTransfer,
+}
+
+/// A PUSH_FRAGMENT delta payload as received (dtype, tensor segments, bytes).
+struct PushWire {
+    dtype: u8,
+    segments: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl Push {
+    /// Keep only the wire bytes (a late push waiting ~F rounds: an int4
+    /// payload is 1/7.5 of its f32 gradient). No-op without wire bytes.
+    fn compress(&mut self) {
+        if self.wire.is_some() {
+            self.outer_gradient = Vec::new();
+        }
+    }
+
+    /// A push that joins a round keeps its decoded gradient only: the wire
+    /// copy exists for a push that waits in the late-carry queue.
+    fn release_wire(&mut self) {
+        self.wire = None;
+    }
+
+    /// Undo `compress`: decode the wire bytes exactly as on receipt, so the
+    /// gradient is bit-identical to the one dropped.
+    fn expand(&mut self) {
+        if let Some(wire) = self.wire.take() {
+            if self.outer_gradient.is_empty() {
+                self.outer_gradient = decode_outer_gradient(&wire)
+                    .expect("a push payload that decoded on receipt decodes again");
+            }
+        }
+    }
+}
+
+/// `decode_outer_gradient` of `bytes` with `wire`'s dtype and segments.
+fn decode_push_segments_to_gradient(wire: &PushWire, bytes: &[u8]) -> Result<Vec<f32>> {
+    let mut outer_gradient = Vec::new();
+    decode_push_segments(wire.dtype, bytes, &wire.segments, &mut outer_gradient)?;
+    // Every wire dtype carries learner_delta = local - raw_anchor.
+    // Merge math consumes the corresponding outer gradient with the
+    // opposite sign and never reconstructs a full learner parameter.
+    for value in &mut outer_gradient {
+        *value = -*value;
+    }
+    Ok(outer_gradient)
+}
+
+/// The outer gradient `raw_anchor - local` of a push payload.
+fn decode_outer_gradient(wire: &PushWire) -> Result<Vec<f32>> {
+    decode_push_segments_to_gradient(wire, &wire.bytes)
 }
 
 /// When and how fast one PUSH_FRAGMENT reached the syncer (full-parameter
@@ -1387,6 +1501,28 @@ fn round_grace(
         grace = grace.max(terminal_grace);
     }
     (grace, floor)
+}
+
+/// `--checkpoint-on-start`: write the checkpoint before the first round.
+/// Without it the first rounds (16 at ~860 s per write on the 120B run) have
+/// no checkpoint, and a restart then loses the INIT and every merge so far.
+/// A resume already has one (the state it loaded); a finished run needs none.
+/// Returns whether a write was started.
+fn save_start_checkpoint(cfg: &Config, st: &GlobalState, resumed: bool, last_step: u64) -> Result<bool> {
+    let Some(path) = cfg.checkpoint_path.as_ref().filter(|_| cfg.checkpoint_on_start) else {
+        return Ok(false);
+    };
+    if resumed || st.global_step >= last_step {
+        return Ok(false);
+    }
+    if cfg.background_checkpoint {
+        st.save_checkpoint_in_background(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint started in the background");
+    } else {
+        st.save_checkpoint(path)?;
+        info!(step = st.global_step, path = %path.display(), "start checkpoint written");
+    }
+    Ok(true)
 }
 
 /// Whether step `t` is the last round of its fragment within `total_steps`.
@@ -1710,6 +1846,19 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
         bail!("--bcast-delta-full-every must be at least 2");
     }
+    if cfg.background_checkpoint
+        && (cfg.checkpoint_path.is_none()
+            || cfg.checkpoint_every < 2
+            || cfg.policy_sweep_fragments.is_some())
+    {
+        bail!(
+            "--background-checkpoint needs --checkpoint-path and --checkpoint-every of at least 2, \
+             without --policy-sweep-fragments (per-round checkpoints persist before their broadcast)"
+        );
+    }
+    if cfg.checkpoint_on_start && cfg.checkpoint_path.is_none() {
+        bail!("--checkpoint-on-start needs --checkpoint-path");
+    }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
             bail!("--async-checkpoint requires --policy-sweep-fragments");
@@ -1961,6 +2110,9 @@ fn check_and_record_profile(cfg: &Config, profile: &[u8; 32]) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    if let Some(stop) = &cfg.shutdown {
+        stop.install_signal_handlers()?;
+    }
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
     check_and_record_profile(&cfg, &semantic_profile_hash)?;
@@ -3049,7 +3201,28 @@ async fn read_loop(
     event_tx: &mpsc::Sender<Event>,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let mut inits = std::collections::VecDeque::new();
+    let result = read_frames(rd, group, event_tx, budget_cutoff, &mut inits).await;
+    // A failed INIT decode is this connection's protocol error too.
+    let decoded = reap_init_params(&mut inits, true).await;
+    if let (Ok(()), Err(error)) = (&result, &decoded) {
+        report_protocol_error(group, error).await;
+    }
+    result.and(decoded)
+}
+
+async fn read_frames(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    group: &Arc<Group>,
+    event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
+    inits: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
     loop {
+        if let Err(error) = reap_init_params(inits, false).await {
+            report_protocol_error(group, &error).await;
+            return Err(error);
+        }
         let mut header_at: Option<Instant> = None;
         let frame = match read_frame_limited(rd, |msg_type| {
             header_at = Some(Instant::now());
@@ -3085,11 +3258,15 @@ async fn read_loop(
         group.wire.recv.fetch_add(frame.payload.len() as u64 + 13, Ordering::Relaxed);
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
+                Ok(Some((inner, _))) if inner.msg_type == MSG_INIT_PARAMS => {
+                    inits.push_back(spawn_init_params(group, inner, event_tx));
+                    Ok(())
+                }
                 Ok(Some((inner, recv_seconds))) => {
                     dispatch_inner(
                         group,
                         inner.msg_type,
-                        &inner.payload,
+                        inner.payload(),
                         recv_seconds,
                         event_tx,
                         budget_cutoff,
@@ -3119,7 +3296,7 @@ async fn report_protocol_error(group: &Arc<Group>, error: &anyhow::Error) {
 
 /// Adds one chunk; a completed message comes back with its receive time
 /// (first chunk to last chunk).
-fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>> {
+fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Reassembled, f64)>> {
     let mut r = Reader(payload);
     let msg_id = r.u64()?;
     let total_u64 = r.u64()?;
@@ -3197,17 +3374,107 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>
     }
     let msg_type = r.u8()?;
     let len = r.u64()? as usize;
-    let payload = r.rest();
-    if payload.len() != len {
+    if r.rest().len() != len {
         bail!("inner frame length mismatch");
     }
-    Ok(Some((
-        Frame {
-            msg_type,
-            payload: payload.to_vec(),
-        },
-        recv_seconds,
-    )))
+    // The payload stays in the buffer: copying a model-sized INIT out of it
+    // was one more single-threaded pass on the read loop.
+    Ok(Some((Reassembled { msg_type, buf }, recv_seconds)))
+}
+
+/// A reassembled inner frame: its 13-byte header, then the payload.
+struct Reassembled {
+    msg_type: u8,
+    buf: Vec<u8>,
+}
+
+impl Reassembled {
+    fn payload(&self) -> &[u8] {
+        &self.buf[13..]
+    }
+}
+
+/// INIT_PARAMS of one connection hashed and decoded at once, off its read
+/// loop. Each holds a fragment (~30 GB transient for a 120B f32 fragment:
+/// the payload and its decoded values), and the digest is one sequential
+/// ~1.6 GB/s pass, so the read loop keeps receiving the next fragments
+/// while earlier ones are checked instead of stalling its stream.
+const INIT_PIPELINE: usize = 4;
+
+/// Validate, hash and decode one INIT_PARAMS payload: (fragment, SHA-256 of
+/// its tensor bytes, values).
+fn decode_init_params(group: &Group, payload: &[u8]) -> Result<(u32, [u8; 32], Vec<f32>)> {
+    if group.member.learner_id != 0 {
+        bail!("only learner 0 may send INIT_PARAMS");
+    }
+    let mut r = Reader(payload);
+    let fragment_id = r.u32()?;
+    let fragment = group
+        .layout
+        .fragments
+        .get(fragment_id as usize)
+        .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
+    let numel = fragment.numel()?;
+    let bytes = r.rest();
+    let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
+    if bytes.len() != expected {
+        bail!(
+            "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
+            bytes.len()
+        );
+    }
+    // The digest is one sequential pass; decode the values meanwhile.
+    let (sha256, values) = std::thread::scope(|scope| {
+        let digest = scope.spawn(|| crate::sha256::digest(bytes));
+        let mut values = Vec::new();
+        let decoded = decode_tensor_with(crate::par::default_threads(), bulk_dtype(group.dtype), bytes, &mut values);
+        (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
+    });
+    Ok((fragment_id, sha256, values?))
+}
+
+/// Hash and decode a reassembled INIT_PARAMS on the blocking pool, then
+/// hand it to the coordinator. The coordinator applies INITs in any
+/// order (each fragment once, from the current generation only).
+fn spawn_init_params(
+    group: &Arc<Group>,
+    inner: Reassembled,
+    event_tx: &mpsc::Sender<Event>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let (group, event_tx) = (Arc::clone(group), event_tx.clone());
+    tokio::spawn(async move {
+        let member = group.member;
+        let (fragment_id, sha256, values) =
+            tokio::task::spawn_blocking(move || decode_init_params(&group, inner.payload()))
+                .await
+                .context("INIT_PARAMS decoder panicked")??;
+        event_tx
+            .send(Event::Init {
+                member,
+                fragment_id,
+                values,
+                sha256,
+            })
+            .await
+            .ok();
+        Ok(())
+    })
+}
+
+/// Wait for the finished (all, with `all`) INIT_PARAMS decoders of a read
+/// loop, oldest first; the first failure is returned.
+async fn reap_init_params(
+    pending: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+    all: bool,
+) -> Result<()> {
+    while let Some(oldest) = pending.front() {
+        if !all && !oldest.is_finished() && pending.len() < INIT_PIPELINE {
+            break;
+        }
+        let oldest = pending.pop_front().expect("front exists");
+        oldest.await.context("INIT_PARAMS task panicked")??;
+    }
+    Ok(())
 }
 
 async fn dispatch_inner(
@@ -3220,28 +3487,7 @@ async fn dispatch_inner(
 ) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
-            if group.member.learner_id != 0 {
-                bail!("only learner 0 may send INIT_PARAMS");
-            }
-            let mut r = Reader(payload);
-            let fragment_id = r.u32()?;
-            let fragment = group
-                .layout
-                .fragments
-                .get(fragment_id as usize)
-                .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
-            let numel = fragment.numel()?;
-            let bytes = r.rest();
-            let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
-            if bytes.len() != expected {
-                bail!(
-                    "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
-                    bytes.len()
-                );
-            }
-            let sha256: [u8; 32] = Sha256::digest(bytes).into();
-            let mut values = Vec::new();
-            decode_tensor(bulk_dtype(group.dtype), bytes, &mut values)?;
+            let (fragment_id, sha256, values) = decode_init_params(group, payload)?;
             event_tx
                 .send(Event::Init {
                     member: group.member,
@@ -3310,16 +3556,12 @@ async fn dispatch_inner(
                 None
             };
             let bytes = r.rest();
-            let mut outer_gradient = Vec::new();
             let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
-            decode_push_segments(group.dtype, bytes, &segments, &mut outer_gradient)
+            let wire = PushWire { dtype: group.dtype, segments, bytes: Vec::new() };
+            let outer_gradient = decode_push_segments_to_gradient(&wire, bytes)
                 .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
-            // Every wire dtype carries learner_delta = local - raw_anchor.
-            // Merge math consumes the corresponding outer gradient with the
-            // opposite sign and never reconstructs a full learner parameter.
-            for value in &mut outer_gradient {
-                *value = -*value;
-            }
+            // Only a payload smaller than its gradient is worth keeping.
+            let wire = (bytes.len() < 4 * numel).then(|| PushWire { bytes: bytes.to_vec(), ..wire });
             event_tx
                 .send(Event::Push {
                     member: group.member,
@@ -3334,6 +3576,7 @@ async fn dispatch_inner(
                         c_tokens,
                         outer_gradient,
                         tensor_scales,
+                        wire,
                         transfer: PushTransfer {
                             recv_seconds,
                             arrived_unix: unix_now(),
@@ -3638,14 +3881,20 @@ async fn scheduler(
                 break;
             }
         }
-        match recv_init_event(
-            &mut events,
-            &budget_cutoff,
-            budget_reports.len(),
-            cfg.learners,
-        )
-        .await?
-        {
+        let init_event = recv_init_event(&mut events, &budget_cutoff, budget_reports.len(), cfg.learners);
+        let event = match cfg.shutdown.as_deref() {
+            Some(stop) => tokio::select! {
+                biased;
+                _ = stop.requested() => {
+                    // Nothing merged yet: the checkpoint on disk (if any) is current.
+                    info!("stop requested before training started; exiting");
+                    return Ok(());
+                }
+                event = init_event => event?,
+            },
+            None => init_event.await?,
+        };
+        match event {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                 bail!("RL strict failure {metric}: {message}");
@@ -3851,6 +4100,8 @@ async fn scheduler(
                 info!(step = st.global_step, path = %path.display(), "checkpoint committed");
             }
         }
+    } else {
+        save_start_checkpoint(&cfg, &st, resumed, last_step)?;
     }
     // Send everyone the initial (or resumed) global parameters so all
     // learners start bit-identical (also serves recovery for late joiners).
@@ -3924,6 +4175,9 @@ async fn scheduler(
     if dynamic {
         write_pool_status(&cfg, &registry, st.global_step, "running");
     }
+    // A stop signal (`crate::shutdown`): set once every round has drained.
+    let mut stopped = false;
+    let mut stop_logged = false;
     'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
@@ -3933,6 +4187,55 @@ async fn scheduler(
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
             break 'outer;
+        }
+        let stop_deadline = cfg.shutdown.as_ref().and_then(|stop| stop.deadline());
+        if let Some(deadline) = stop_deadline {
+            if !stop_logged {
+                stop_logged = true;
+                info!(
+                    step = st.global_step,
+                    gathering = inflight.len(),
+                    computing = computing.len() + ready.len(),
+                    "stopping: no new rounds; waiting for the rounds in flight"
+                );
+            }
+            if Instant::now() >= deadline && !inflight.is_empty() {
+                // A gathering round has not touched the state; after --resume
+                // its step is launched again.
+                let dropped: Vec<u64> = inflight.iter().map(|round| round.t).collect();
+                warn!(steps = ?dropped, "stop timeout: abandoning the rounds still gathering");
+                for round in inflight.drain(..) {
+                    busy_fragments.remove(&round.p);
+                }
+            } else if !inflight.is_empty() {
+                // A round that holds no delta and none of whose islands is
+                // still connected cannot close: do not wait the timeout out.
+                let orphaned: Vec<usize> = {
+                    let registry = registry.lock().unwrap();
+                    inflight
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, round)| {
+                            round.pushes.is_empty()
+                                && round.carried.is_empty()
+                                && !round.expected_members.iter().any(|m| registry.groups.contains_key(m))
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+                if !orphaned.is_empty() {
+                    let steps: Vec<u64> = orphaned.iter().map(|&i| inflight[i].t).collect();
+                    warn!(?steps, "stopping: abandoning gathering rounds whose islands are all gone");
+                    for &i in orphaned.iter().rev() {
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                    }
+                }
+            }
+            if inflight.is_empty() && computing.is_empty() && ready.is_empty() && publishing.is_none() {
+                stopped = true;
+                break 'outer;
+            }
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
         for member in &expired {
@@ -4031,6 +4334,7 @@ async fn scheduler(
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && Instant::now() >= next_launch
         {
             if !budget_cutoff.try_linearize_work() {
@@ -4088,6 +4392,7 @@ async fn scheduler(
                 fold,
                 pushes: HashMap::new(),
                 carried: Vec::new(),
+                carry_answers: cfg.carry_answers_round,
             });
             if let Some(carry) = late_carry.as_mut() {
                 let round = inflight.last_mut().expect("round just launched");
@@ -4160,6 +4465,13 @@ async fn scheduler(
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
                         break 'outer;
+                    }
+                    if stop_deadline.is_some() {
+                        // Stopping: no new attempt; the round is launched again after --resume.
+                        let round = inflight.remove(i);
+                        busy_fragments.remove(&round.p);
+                        warn!(step = round.t, "stop: quorum timeout, round abandoned");
+                        continue;
                     }
                     let r = &mut inflight[i];
                     let groups = current_groups(&registry);
@@ -4358,6 +4670,7 @@ async fn scheduler(
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
+            && stop_deadline.is_none()
             && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
@@ -4369,6 +4682,11 @@ async fn scheduler(
         if !resends.is_empty() {
             // Check the background resends for drained ones a few times a second.
             let check = deadline_now + RESEND_CHECK_INTERVAL;
+            earliest = Some(earliest.map_or(check, |d| d.min(check)));
+        }
+        if cfg.shutdown.is_some() {
+            // Notice a stop signal (and its timeout) within a fraction of a second.
+            let check = deadline_now + SHUTDOWN_CHECK_INTERVAL;
             earliest = Some(earliest.map_or(check, |d| d.min(check)));
         }
         let wake = if let Some(pending) = publishing.as_mut() {
@@ -4896,6 +5214,24 @@ async fn scheduler(
         resends.stop(&registry)
     };
 
+    if stopped {
+        drop(forwarders); // a catch-up in progress is resent after the restart
+        st.drain_iso_backend().await?;
+        eval_checkpoints.finish().await?;
+        if let Some(path) = &cfg.checkpoint_path {
+            // Waits for a background checkpoint first, then writes this cut.
+            st.save_checkpoint(path)?;
+            info!(step = st.global_step, path = %path.display(), "stop: checkpoint written");
+        } else {
+            warn!(step = st.global_step, "stop without --checkpoint-path: the merged state is not saved");
+        }
+        if dynamic {
+            write_pool_status(&cfg, &registry, st.global_step, "stopped");
+        }
+        info!(step = st.global_step, "stopped; restart with --resume to continue");
+        return Ok(());
+    }
+
     if cfg.learner_budget_steps.is_some() {
         wait_forwarders(std::mem::take(&mut forwarders)).await;
         cutoff_established |= budget_cutoff.deadline().is_some();
@@ -5265,13 +5601,32 @@ struct Round {
     /// `LateCarry`): merged here against their own base, in arrival order.
     /// They never count toward quorum and stay buffered until the merge.
     carried: Vec<(Member, Push)>,
+    /// `Config::carry_answers_round`, frozen at launch.
+    carry_answers: bool,
 }
 
 impl Round {
+    /// Islands that answered this round: its own pushes plus, with
+    /// `carry_answers`, expected islands whose late delta of an earlier
+    /// round was carried into it (see `Config::carry_answers_round`).
+    fn responders(&self) -> Vec<&Member> {
+        let mut responders: Vec<&Member> = self.pushes.keys().collect();
+        if !self.carry_answers {
+            return responders;
+        }
+        for (member, _push) in &self.carried {
+            if self.expected_members.contains(member) && !responders.contains(&member) {
+                responders.push(member);
+            }
+        }
+        responders
+    }
+
     fn quorum_reached(&self) -> bool {
+        let responders = self.responders();
         match &self.capacity_quorum {
-            Some(quorum) => quorum.reached(&self.expected_members, self.pushes.keys()),
-            None => self.pushes.len() >= self.quorum_size,
+            Some(quorum) => quorum.reached(&self.expected_members, responders),
+            None => responders.len() >= self.quorum_size,
         }
     }
 
@@ -5362,7 +5717,8 @@ enum RoundAction {
 fn round_action(round: &Round, now: Instant) -> RoundAction {
     // A round never merges nothing: if lease expiry emptied its expected
     // set, it waits for the quorum timeout and relaunches.
-    if !round.pushes.is_empty() && round.pushes.len() >= round.expected_members.len() {
+    let responders = round.responders().len();
+    if responders > 0 && responders >= round.expected_members.len() {
         return RoundAction::Complete;
     }
     if round.quorum_reached() {
@@ -5494,6 +5850,90 @@ fn rebind_current_unanswered_rounds(
     repulls
 }
 
+/// A PULL that a member gets on joining a round launched without it.
+#[derive(Debug, Eq, PartialEq)]
+struct JoinedPull {
+    t: u64,
+    p: usize,
+    attempt: u32,
+    base_version: u64,
+    pull: bytes::Bytes,
+}
+
+/// Admit a member that just left its catch-up (or recovery replay) to the
+/// rounds still gathering that were launched without any generation of it.
+///
+/// A round's expected set is frozen at launch to the members not held by a
+/// catch-up then. Without this, a learner that finishes its catch-up after
+/// the launch is pulled only when the quorum timeout relaunches the round,
+/// so one expected learner that cannot answer yet (an H-gate far from
+/// satisfied) stalls the round, and every later commit behind it, for the
+/// whole timeout. Joining is what the launch would have done had the member
+/// been ready then: the member becomes expected in the current attempt and
+/// gets that attempt's pull; quorum size, attempt, base version and the
+/// quorum, soft and grace deadlines stay as they are (a grace window already
+/// armed is not extended, the joiner's push counts if it arrives before it).
+///
+/// Skipped: a round that already completed, one where this learner has a
+/// slot, a push, or a carried delta (a reconnect is rebound, never pulled
+/// twice), one whose base version the member was not caught up to
+/// (`floor`), a round under a capacity quorum (its threshold assumes an
+/// expected set that only shrinks), and an exact fold that already holds
+/// pushes (its roster is fixed; an empty one is rebuilt for the new roster).
+/// Fixed rosters never call this: every logical learner is expected from
+/// launch.
+fn join_gathering_rounds(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    rounds: &mut [Round],
+    member: Member,
+    floor: &[u64],
+    now: Instant,
+) -> Vec<JoinedPull> {
+    // Same lock discipline as the rebind: a newer generation cannot become
+    // current between the check and the membership rewrites.
+    let registry = registry.lock().unwrap();
+    if registry.current.get(&member.learner_id) != Some(&member) {
+        return Vec::new();
+    }
+    let mut joined = Vec::new();
+    for round in rounds {
+        let same_learner = |other: &Member| other.learner_id == member.learner_id;
+        if round.expected_members.iter().any(same_learner)
+            || round.pushes.keys().any(same_learner)
+            || round.carried.iter().any(|(other, _)| same_learner(other))
+            || floor.get(round.p).is_none_or(|version| *version < round.base_version)
+            || round_action(round, now) == RoundAction::Complete
+        {
+            continue;
+        }
+        // A capacity quorum is a share of the expected capacity, which may
+        // only shrink while a round gathers: a joiner would raise the bar of
+        // a quorum already reached (and an armed grace) instead of helping.
+        if round.capacity_quorum.is_some() {
+            continue;
+        }
+        let rebuild_fold = matches!(round.fold, Some(RoundFold::Exact(_)));
+        if rebuild_fold && !round.pushes.is_empty() {
+            continue;
+        }
+        round.expected_members.push(member);
+        round.expected_members.sort_unstable();
+        if rebuild_fold {
+            round.fold = round_fold(cfg, st, round.p, &round.expected_members, round.quorum_size);
+        }
+        joined.push(JoinedPull {
+            t: round.t,
+            p: round.p,
+            attempt: round.attempt,
+            base_version: round.base_version,
+            pull: round.pull.clone(),
+        });
+    }
+    joined
+}
+
 fn route_push(
     rounds: &mut [Round],
     member: Member,
@@ -5523,6 +5963,18 @@ fn route_push(
         return PushDisposition::FutureBase;
     }
     if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
+        // The island answered this round's pull; it will not push again for
+        // it. Waiting on its slot would stall the round until the quorum
+        // timeout (and every later round behind it), so release the slot and
+        // let the round close with the remaining responders. The refused work
+        // is not lost: the island's next push is still relative to its raw
+        // anchor. A fixed roster never merges a partial roster, so it keeps
+        // the slot; so does a round with an exact fold, whose order and
+        // weights were fixed for the full expected roster. A streaming fold
+        // normalises over whatever it folded, so it may close without it.
+        if !fixed_roster && !matches!(round.fold, Some(RoundFold::Exact(_))) {
+            round.forget_unanswered(member);
+        }
         return PushDisposition::StaleBase;
     }
     let duplicate = if fixed_roster {
@@ -5536,6 +5988,8 @@ fn route_push(
     if duplicate {
         return PushDisposition::Duplicate;
     }
+    let mut push = push;
+    push.release_wire();
     round.pushes.insert(member, push);
     advance_fold(round, member);
     PushDisposition::Accepted
@@ -5549,21 +6003,25 @@ fn route_push(
 /// same fragment against its own base, weighted by its counters (and the
 /// carry discount), as long as its base lag stays within `--max-base-lag`.
 ///
-/// A carried delta counts once: after the syncer carries a delta from an
-/// anchor (fragment version), a later push of that island connection from
-/// the same or an older anchor of that fragment is refused
-/// (`anchor_reused`), and a late push from an anchor whose delta was
-/// already merged is not carried. Pushes that never involve a carry keep
-/// the existing stale-base rules.
+/// A delta counts once: after the syncer carries a delta from an anchor
+/// (fragment version), a later push of that island from the same or an
+/// older anchor of that fragment is refused (`anchor_reused`) on any of its
+/// connections; after it gathers one, the same holds for the island's later
+/// connections. An island that redials (a WAN drop, a syncer it lost
+/// for a while) releases the anchors its lost pushes held, so it may answer
+/// the next pull from an anchor whose delta did reach this syncer; that
+/// second delta repeats the first one's local steps and must not be merged
+/// again. A round restart frees the anchors of the pushes it dropped
+/// (`release_anchor`). Pushes from newer anchors keep the stale-base rules.
 struct LateCarry {
     limit: u64,
     /// Late pushes waiting for their fragment's next round.
     queued: HashMap<usize, Vec<(Member, Push)>>,
-    /// Newest base version of a carried delta per island connection and
-    /// fragment.
-    anchors: HashMap<(Member, usize), u64>,
-    /// Newest base version of a delta gathered by its own round.
-    gathered: HashMap<(Member, usize), u64>,
+    /// Newest base version of a carried delta per island and fragment.
+    anchors: HashMap<(u32, usize), u64>,
+    /// Newest base version of a delta gathered by its own round, per island
+    /// and fragment, with the connection generation that pushed it.
+    gathered: HashMap<(u32, usize), (u64, u64)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5591,32 +6049,42 @@ impl LateCarry {
         }
     }
 
-    /// True when `push` reuses an anchor this connection already spent.
+    /// True when `push` reuses an anchor whose delta this island already had
+    /// carried (on any connection) or gathered on an earlier connection. One
+    /// connection may answer consecutive rounds from the same anchor (an
+    /// asynchronous learner that has not installed the newer version yet);
+    /// a redialed one repeating the anchor resends a delta already taken.
     fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
-        self.anchors
-            .get(&(member, push.fragment_id as usize))
-            .is_some_and(|&spent| push.base_version <= spent)
+        let key = (member.learner_id, push.fragment_id as usize);
+        let carried = self.anchors.get(&key).is_some_and(|&taken| push.base_version <= taken);
+        let gathered = self
+            .gathered
+            .get(&key)
+            .is_some_and(|&(taken, generation)| push.base_version <= taken && member.generation != generation);
+        carried || gathered
     }
 
     fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let spent = self.anchors.entry((member, fragment)).or_insert(0);
+        let spent = self.anchors.entry((member.learner_id, fragment)).or_insert(0);
         *spent = (*spent).max(base_version);
     }
 
     fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
-        let taken = self.gathered.entry((member, fragment)).or_insert(0);
-        *taken = (*taken).max(base_version);
+        let taken = self.gathered.entry((member.learner_id, fragment)).or_insert((0, member.generation));
+        if base_version >= taken.0 {
+            *taken = (base_version, member.generation);
+        }
     }
 
     /// A restarted round drops its gathered pushes; their islands answer the
     /// new attempt from the same anchor, so the anchor is free again.
     fn release_anchor(&mut self, member: Member, push: &Push) {
-        let key = (member, push.fragment_id as usize);
-        if self.gathered.get(&key) == Some(&push.base_version) {
+        let key = (member.learner_id, push.fragment_id as usize);
+        if let Some(taken) = self.gathered.get_mut(&key).filter(|taken| taken.0 == push.base_version) {
             if push.base_version == 0 {
                 self.gathered.remove(&key);
             } else {
-                self.gathered.insert(key, push.base_version - 1);
+                taken.0 = push.base_version - 1;
             }
         }
     }
@@ -5645,8 +6113,8 @@ impl LateCarry {
         }
         if self
             .gathered
-            .get(&(member, p))
-            .is_some_and(|&taken| push.base_version <= taken)
+            .get(&(member.learner_id, p))
+            .is_some_and(|&(taken, _)| push.base_version <= taken)
         {
             return CarryOutcome::Rejected(PushDisposition::Duplicate);
         }
@@ -5662,6 +6130,8 @@ impl LateCarry {
                 Err(disposition) => CarryOutcome::Rejected(disposition),
             };
         }
+        let mut push = push;
+        push.compress();
         self.queued.entry(p).or_default().push((member, push));
         CarryOutcome::Queued
     }
@@ -5673,7 +6143,8 @@ impl LateCarry {
         };
         queued
             .into_iter()
-            .map(|(member, push)| {
+            .map(|(member, mut push)| {
+                push.expand();
                 let missed = push.global_step;
                 (member, missed, attach_carry(round, member, push, self.limit))
             })
@@ -5744,6 +6215,8 @@ fn attach_carry(
     if lag > limit {
         return Err(PushDisposition::StaleBase);
     }
+    let mut push = push;
+    push.release_wire();
     round.carried.push((member, push));
     Ok(lag)
 }
@@ -6119,9 +6592,19 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
-                st.save_checkpoint(path)?;
-                info!(step = t, path = %path.display(), "checkpoint written");
+            // The last step is persisted by the final checkpoint anyway; a
+            // periodic one there wrote the same ~1 TB cut twice in a row.
+            if cfg.checkpoint_every > 0
+                && st.schedule().round_number(t) % cfg.checkpoint_every == 0
+                && t < st.schedule().last_step(cfg.total_steps)
+            {
+                if cfg.background_checkpoint {
+                    st.save_checkpoint_in_background(path)?;
+                    info!(step = t, path = %path.display(), "background checkpoint started");
+                } else {
+                    st.save_checkpoint(path)?;
+                    info!(step = t, path = %path.display(), "checkpoint written");
+                }
             }
         }
     }
@@ -6539,12 +7022,19 @@ async fn admit_recovering_outside_training(registry: &Registry, group: &Arc<Grou
     send_recovery(registry, out).await;
 }
 
-/// Rebind the unanswered pulls of existing rounds to `group` (a reconnected
-/// or recovered generation). False when the budget cutoff closed the gate.
+/// Pull a member that just left its catch-up or recovery replay into every
+/// round still gathering: rebind the slots of its earlier generation, then
+/// join the rounds launched without it (`join_gathering_rounds`). `floor` is
+/// the per-fragment versions it was caught up to. False when the budget
+/// cutoff was established.
+#[allow(clippy::too_many_arguments)]
 async fn repull_rounds_for(
+    cfg: &Config,
+    st: &GlobalState,
     group: &Arc<Group>,
     registry: &Registry,
     inflight: &mut [Round],
+    floor: &[u64],
     fixed_roster: bool,
     budget_cutoff: &BudgetCutoff,
 ) -> bool {
@@ -6552,6 +7042,11 @@ async fn repull_rounds_for(
         fixed_roster_repulls(inflight, group.member)
     } else {
         rebind_current_unanswered_rounds(registry, inflight, group.member)
+    };
+    let joins = if fixed_roster {
+        Vec::new()
+    } else {
+        join_gathering_rounds(cfg, st, registry, inflight, group.member, floor, Instant::now())
     };
     for repull in repulls {
         if !send_small_until_cutoff(group, MSG_PULL_REQ, repull.pull, budget_cutoff).await {
@@ -6566,6 +7061,20 @@ async fn repull_rounds_for(
             attempt = repull.attempt,
             base_version = repull.base_version,
             "rebound outstanding pull to reconnected learner generation"
+        );
+    }
+    for join in joins {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, join.pull, budget_cutoff).await {
+            return false;
+        }
+        info!(
+            learner_id = group.member.learner_id,
+            generation = group.member.generation,
+            step = join.t,
+            fragment = join.p,
+            attempt = join.attempt,
+            base_version = join.base_version,
+            "caught-up learner joined a round launched without it"
         );
     }
     true
@@ -7326,6 +7835,8 @@ impl<G: Clone> CatchUps<G> {
 
 /// How often the scheduler checks background resends while any is active.
 const RESEND_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the scheduler looks for a stop signal while it waits.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// At the end of the round loop, wait this long for a forwarder to hand
 /// over the fragment it is sending before it is aborted.
 const RESEND_STOP_WAIT: Duration = Duration::from_secs(30);
@@ -8047,7 +8558,7 @@ async fn finish_catch_up(
             );
             write_pool_status(cfg, registry, st.global_step, "running");
         }
-        if !repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await {
+        if !repull_rounds_for(cfg, st, group, registry, inflight, floor, fixed_roster, budget_cutoff).await {
             return false;
         }
     }
@@ -8125,7 +8636,7 @@ async fn finish_recovery_replay(
         );
         write_pool_status(cfg, registry, st.global_step, "running");
     }
-    repull_rounds_for(group, registry, inflight, fixed_roster, budget_cutoff).await
+    repull_rounds_for(cfg, st, group, registry, inflight, &st.versions, fixed_roster, budget_cutoff).await
 }
 
 async fn broadcast_updated_fragment(st: &GlobalState, registry: &Registry, p: usize) -> Result<()> {
@@ -8711,6 +9222,52 @@ mod hello_auth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `append_tensor_bytes` as it was: every value sliced by the range.
+    fn reference_tensor_bytes(dtype: u8, values: &[f32], offset: usize, len: usize) -> Vec<u8> {
+        let mut all = Vec::new();
+        for value in values {
+            match dtype {
+                DTYPE_F32 => all.extend_from_slice(&value.to_le_bytes()),
+                _ => all.extend_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes()),
+            }
+        }
+        all[offset..offset + len].to_vec()
+    }
+
+    #[test]
+    fn tensor_byte_ranges_match_the_value_by_value_encoding() {
+        let values: Vec<f32> = (0..97)
+            .map(|i| match i % 11 {
+                0 => f32::NAN,
+                1 => -0.0,
+                2 => f32::MAX,
+                3 => 1e-40, // subnormal: bf16 rounding
+                _ => (i as f32 * 0.731).sin() * 3.0e4,
+            })
+            .collect();
+        for dtype in [DTYPE_F32, DTYPE_BF16] {
+            let total = tensor_nbytes(dtype, values.len()).unwrap();
+            for offset in 0..12.min(total) {
+                for len in (0..14).chain([total - offset - 1, total - offset]) {
+                    if offset + len > total {
+                        continue;
+                    }
+                    let mut out = vec![0xAA];
+                    append_tensor_bytes(dtype, &values, offset, len, &mut out).unwrap();
+                    assert_eq!(out[0], 0xAA);
+                    assert_eq!(out[1..], reference_tensor_bytes(dtype, &values, offset, len)[..], "{dtype} {offset}+{len}");
+                }
+            }
+            // Ranges cut inside the tail, too.
+            for offset in [total - 7, total - 3, total - 1] {
+                let mut out = Vec::new();
+                append_tensor_bytes(dtype, &values, offset, total - offset, &mut out).unwrap();
+                assert_eq!(out, reference_tensor_bytes(dtype, &values, offset, total - offset));
+            }
+            assert!(append_tensor_bytes(dtype, &values, 1, total, &mut Vec::new()).is_err());
+        }
+    }
     use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
@@ -9049,6 +9606,7 @@ mod tests {
             delta_correction: false,
             quorum_timeout_s: 1,
             final_ack_timeout_s: 1,
+            shutdown: None,
             total_steps,
             policy_sweep_fragments: None,
             outer_lr: 1.0,
@@ -9059,6 +9617,8 @@ mod tests {
             checkpoint_path: None,
             checkpoint_every: 0,
             checkpoint_at_steps: Vec::new(),
+            background_checkpoint: false,
+            checkpoint_on_start: false,
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -9079,6 +9639,7 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            carry_answers_round: false,
             dispense: None,
             dispense_log: None,
             max_subscribers: 0,
@@ -9089,6 +9650,7 @@ mod tests {
     }
 
     const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
+    const CARRY_ANSWERS_ROUND_VECTOR: &str = "13a39546746435ebc1878d962f2fb52cf97a5ba66b45757855746adab4e666d7";
     const GRACE_FLOOR_VECTOR: &str = "6f9104e302f894575fe2203cfe91a93ff37d16e37b4e75c4367b060d13748d12";
     const TERMINAL_GRACE_VECTOR: &str = "6f40c5c1c02e6c63b99bf5aa77fab924fed928a42a9e0d88811583a19fc1aa39";
 
@@ -9144,6 +9706,16 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
+        // Carried deltas answering their round append their own domain;
+        // Python vector in tests/test_sync_fragment_boundary.py.
+        config.final_cut_manifest_only = false;
+        config.carry_answers_round = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_ne!(config.semantic_profile_hash(), original);
+        assert_eq!(digest, CARRY_ANSWERS_ROUND_VECTOR);
+        config.carry_answers_round = false;
+        config.final_cut_manifest_only = true;
         // A grace floor appends its own block; off keeps the hash. Python
         // vector in tests/test_sync_grace_floor.py.
         config.final_cut_manifest_only = false;
@@ -9471,6 +10043,7 @@ mod tests {
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
@@ -9568,6 +10141,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9581,6 +10155,7 @@ mod tests {
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9651,6 +10226,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9664,6 +10240,7 @@ mod tests {
                     c_tokens,
                     outer_gradient: vec![0.25],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9691,6 +10268,7 @@ mod tests {
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
                         tensor_scales: None,
+                        wire: None,
                         transfer: PushTransfer::default(),
                     },
                 )
@@ -9714,6 +10292,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes,
         }
     }
@@ -10703,6 +11282,126 @@ mod tests {
             resumed.load_checkpoint(&checkpoint).unwrap();
             validate_resumed_policy_sweep(&config, &resumed).unwrap();
             assert_eq!(resumed.versions, vec![3, 4]);
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn checkpoint_on_start_covers_the_rounds_before_the_first_periodic_one() {
+        let directory = unique_test_directory("start-checkpoint");
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("start-{background}.ckpt"));
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 4;
+            config.background_checkpoint = background;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            // Off: nothing before the first periodic checkpoint.
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            assert!(!checkpoint.exists());
+            config.checkpoint_on_start = true;
+            validate_config(&config).unwrap();
+            // A resume already holds the state on disk; a finished run needs none.
+            assert!(!save_start_checkpoint(&config, &state, true, 8).unwrap());
+            state.global_step = 8;
+            assert!(!save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.global_step = 0;
+            assert!(!checkpoint.exists());
+            assert!(save_start_checkpoint(&config, &state, false, 8).unwrap());
+            state.wait_for_background_checkpoint().unwrap();
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!((on_disk.global_step, on_disk.versions.clone()), (0, state.versions.clone()));
+        }
+        let mut config = round_test_config(8);
+        config.checkpoint_on_start = true;
+        assert!(validate_config(&config).is_err(), "needs a checkpoint path");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn background_checkpoint_keeps_rounds_going_and_writes_the_same_cuts() {
+        let directory = unique_test_directory("background-checkpoint");
+        let learner = member(0, 30);
+        let mut files = Vec::new();
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("state-{background}.ckpt"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            config.background_checkpoint = background;
+            validate_config(&config).unwrap();
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap(); // version zero
+            let mut sync_seconds = 0.0;
+            for step in 1..=5u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                assert_eq!(chunked_inner_type(&frames.try_recv().unwrap()), MSG_BCAST_FRAGMENT);
+                state.wait_for_background_checkpoint().unwrap();
+                let mut on_disk = two_fragment_sweep_state();
+                on_disk.policy_sweep_fragments = None;
+                on_disk.load_checkpoint(&checkpoint).unwrap();
+                assert_eq!(on_disk.global_step, step - step % 2, "step {step} background {background}");
+            }
+            files.push(std::fs::read(&checkpoint).unwrap());
+        }
+        assert_eq!(files[0], files[1]);
+        // The last step is left to the final checkpoint: no periodic write there.
+        {
+            let checkpoint = directory.join("last-step.ckpt");
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(4);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap();
+            let mut sync_seconds = 0.0;
+            for step in 1..=4u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                while frames.try_recv().is_ok() {}
+            }
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!(on_disk.global_step, 2);
+        }
+        // Only for periodic checkpoints with a path, never per round or in a sweep.
+        for mutate in [
+            |config: &mut Config| config.checkpoint_path = None,
+            |config: &mut Config| config.checkpoint_every = 1,
+            |config: &mut Config| config.policy_sweep_fragments = Some(2),
+        ] {
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(directory.join("unused.ckpt"));
+            config.checkpoint_every = 2;
+            config.background_checkpoint = true;
+            mutate(&mut config);
+            assert!(format!("{:#}", validate_config(&config).unwrap_err()).contains("--background-checkpoint"));
         }
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -11863,6 +12562,36 @@ mod tests {
     }
 
     #[test]
+    fn queued_late_push_holds_wire_bytes_and_decodes_bit_identically() {
+        let vals: Vec<f32> = (0..1000).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013).collect();
+        let bytes = crate::protocol::encode_i4(&vals, 64);
+        let segments = push_segments(DTYPE_F32_PUSH_I4, vals.len(), &[600, 400]).unwrap();
+        let wire = PushWire { dtype: DTYPE_F32_PUSH_I4, segments, bytes: Vec::new() };
+        let eager = decode_push_segments_to_gradient(&wire, &bytes).unwrap();
+        assert!(bytes.len() < 4 * vals.len());
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        late.outer_gradient = eager.clone();
+        late.wire = Some(PushWire { bytes, ..wire });
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        let mut rounds: Vec<Round> = Vec::new();
+        assert_eq!(carry.carry(&mut rounds, island, late, 8, 7), CarryOutcome::Queued);
+        for queued in carry.queued.values().flatten() {
+            assert!(queued.1.outer_gradient.is_empty(), "queued push keeps only wire bytes");
+            assert!(queued.1.wire.is_some());
+        }
+        let mut next = test_round(vec![member(0, 10), island]);
+        next.t = 9;
+        next.base_version = 7;
+        assert_eq!(carry.attach_queued(&mut next).len(), 1);
+        let got = &next.carried[0];
+        let got_bits: Vec<u32> = got.1.outer_gradient.iter().map(|v| v.to_bits()).collect();
+        let want_bits: Vec<u32> = eager.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, want_bits);
+    }
+
+    #[test]
     fn late_push_joins_an_already_open_later_round() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let mut open = test_round(vec![member(0, 10)]);
@@ -11907,6 +12636,32 @@ mod tests {
     }
 
     #[test]
+    fn a_gathered_anchor_yields_one_delta_across_reconnects() {
+        // Island 1 answered round t=7 of fragment 1 from anchor 5; the delta
+        // is gathered. The link drops, the learner redials (generation 11),
+        // releases its spent anchor and answers the next pull from the same
+        // anchor 5 before the round's broadcast reached it: refused.
+        let mut carry = LateCarry::new(Some(4), false).unwrap();
+        let (old, new) = (member(1, 10), member(1, 11));
+        carry.note_gathered(old, 1, 5);
+        let again = test_push_for(1, 5);
+        assert!(carry.reuses_anchor(new, &again));
+        // The connection that pushed it may answer the next round from the
+        // same anchor (it has not installed the newer version yet).
+        assert!(!carry.reuses_anchor(old, &again));
+        // From the broadcast it then gets (version 7) it pushes again.
+        assert!(!carry.reuses_anchor(new, &test_push_for(1, 7)));
+        // A restart of that round drops the gathered delta: the anchor is
+        // free for the new attempt, from either connection.
+        carry.release_anchor(old, &test_push_for(1, 5));
+        assert!(!carry.reuses_anchor(new, &again));
+        // A restarted syncer starts with nothing taken: the delta it lost is
+        // merged once when the island answers from that anchor again.
+        let fresh = LateCarry::new(Some(4), false).unwrap();
+        assert!(!fresh.reuses_anchor(new, &again));
+    }
+
+    #[test]
     fn a_carried_anchor_yields_one_delta() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let island = member(1, 10);
@@ -11916,8 +12671,14 @@ mod tests {
         assert!(carry.reuses_anchor(island, &push));
         assert!(carry.reuses_anchor(island, &test_push_for(1, 3)));
         assert!(!carry.reuses_anchor(island, &test_push_for(1, 7)));
-        // Another connection or fragment is unaffected.
-        assert!(!carry.reuses_anchor(member(1, 11), &push));
+        // The island's next connection may not spend it again (a redialed
+        // learner answers from the same anchor); another island or
+        // fragment is unaffected.
+        assert!(carry.reuses_anchor(member(1, 11), &push));
+        assert!(!carry.reuses_anchor(member(3, 10), &test_push_for(1, 5)));
+        let mut elsewhere = test_push_for(1, 5);
+        elsewhere.fragment_id += 1;
+        assert!(!carry.reuses_anchor(island, &elsewhere));
         // A late push from an anchor already merged by its own round is not
         // carried; a restart clears the gathered push and frees the anchor.
         let other = member(2, 10);
@@ -11932,6 +12693,71 @@ mod tests {
         let mut late = test_push_for(2, 5);
         late.global_step = 7;
         assert_eq!(carry.carry(&mut Vec::new(), other, late, 8, 7), CarryOutcome::Queued);
+    }
+
+    #[test]
+    fn carried_delta_counts_towards_quorum_and_responders() {
+        // Regression: at quorum 1 a round whose only delta from the fast
+        // island arrived as a late carry (anchor spent) waited for the
+        // stalled island instead of closing after grace.
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert!(!round.quorum_reached());
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(round.pushes.is_empty());
+        assert!(round.quorum_reached());
+        // Grace still applies, as for an own push.
+        round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_stays_outside_quorum_when_the_flag_is_off() {
+        let fast = member(0, 1);
+        let mut round = test_round(vec![fast, member(1, 1)]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+    }
+
+    #[test]
+    fn carried_delta_completes_a_round_once_every_expected_island_answered() {
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), slow, test_push_for(1, 5), Some(1), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_of_an_unexpected_member_does_not_count() {
+        let expected = member(0, 1);
+        let replaced = member(0, 0);
+        let mut round = test_round(vec![expected]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        assert_eq!(attach_carry(&mut round, replaced, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        // A carried push from the same island counts once.
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 5), 1), Ok(0));
+        assert_eq!(round.responders().len(), 1);
     }
 
     fn carried_merge(cfg: &Config) -> f32 {
@@ -12043,6 +12869,7 @@ mod tests {
             grace_ms: None,
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::new(),
         }
     }
@@ -12059,6 +12886,7 @@ mod tests {
             c_tokens: 20,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -12376,6 +13204,294 @@ mod tests {
         assert_eq!(preserved_push.local_step, 77);
     }
 
+    /// A round launched while a learner was still in its catch-up: the
+    /// learner joins it once the catch-up is done, exactly once per round.
+    #[test]
+    fn caught_up_learner_joins_a_round_launched_without_it_once() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![first]);
+        round.base_version = 0;
+        round.pull = encode_pull(1, 7, 1);
+        let quorum_deadline = round.quorum_deadline;
+        let mut rounds = vec![round];
+
+        let joined = join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now());
+        assert_eq!(
+            joined,
+            vec![JoinedPull { t: 7, p: 1, attempt: 1, base_version: 0, pull: encode_pull(1, 7, 1) }]
+        );
+        assert_eq!(rounds[0].expected_members, vec![first, late]);
+        assert_eq!((rounds[0].attempt, rounds[0].quorum_size), (1, 1));
+        assert_eq!(rounds[0].quorum_deadline, quorum_deadline);
+        // The tail runs again (a second catch-up of the same generation, a
+        // recovery replay): no second pull, no second slot.
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, late).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first, late]);
+        // The joiner's push is now accepted for this attempt.
+        let mut push = test_push_for(1, 0);
+        push.base_version = 0;
+        assert_eq!(route_push(&mut rounds, late, push, Some(64), false), PushDisposition::Accepted);
+        // A generation that is not current never joins.
+        let mut fresh = vec![test_round(vec![first])];
+        fresh[0].base_version = 0;
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut fresh, member(2, 1), &[0, 0], Instant::now())
+            .is_empty());
+    }
+
+    /// A capacity quorum's threshold is a share of the expected capacity:
+    /// a joiner would raise it under a round that already reached it.
+    #[test]
+    fn caught_up_learner_does_not_join_a_capacity_quorum_round() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let mut cfg = round_test_config(4);
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![first]);
+        round.base_version = 0;
+        round.capacity_quorum = cfg.membership.round_quorum();
+        assert!(round.capacity_quorum.is_some());
+        let mut rounds = vec![round];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first]);
+    }
+
+    /// A reconnect of a learner the round already expects is the rebind's
+    /// job: the new generation is pulled once, by the rebind, and only after
+    /// the captured generation is gone.
+    #[test]
+    fn reconnected_generation_is_rebound_not_joined() {
+        let captured = member(1, 20);
+        let replacement = member(1, 21);
+        let registry = registry_with_current(replacement);
+        registry.lock().unwrap().groups.insert(captured, test_group(captured));
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![member(0, 10), captured]);
+        round.base_version = 0;
+        let mut rounds = vec![round];
+
+        // The captured generation is still connected: neither path pulls.
+        assert!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).is_empty());
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, replacement, &[0, 0], Instant::now())
+            .is_empty());
+        assert_eq!(rounds[0].expected_members, vec![member(0, 10), captured]);
+        // Once it is gone, the rebind moves the slot and pulls once; the
+        // join then sees the learner expected and adds nothing.
+        registry.lock().unwrap().groups.remove(&captured);
+        assert_eq!(rebind_current_unanswered_rounds(&registry, &mut rounds, replacement).len(), 1);
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, replacement, &[0, 0], Instant::now())
+            .is_empty());
+        assert_eq!(rounds[0].expected_members, vec![member(0, 10), replacement]);
+    }
+
+    /// A round in its grace window takes a joiner's push until the grace
+    /// deadline, which the join does not move; a completed round takes no
+    /// joiner.
+    #[test]
+    fn joiner_counts_in_an_armed_grace_window_until_its_deadline() {
+        let answered = member(0, 10);
+        let silent = member(2, 30);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let cfg = round_test_config(4);
+        let st = resend_test_state(2);
+        let mut round = test_round(vec![answered, silent]);
+        round.base_version = 0;
+        let mut first_push = test_push_for(0, 0);
+        first_push.base_version = 0;
+        round.pushes.insert(answered, first_push);
+        assert!(round.quorum_reached());
+        let now = Instant::now();
+        let grace_deadline = now + Duration::from_secs(60);
+        round.grace_deadline = Some(grace_deadline);
+        let mut rounds = vec![round];
+
+        assert_eq!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], now).len(), 1);
+        assert_eq!(rounds[0].grace_deadline, Some(grace_deadline));
+        assert_eq!(round_action(&rounds[0], now), RoundAction::Wait);
+        let mut push = test_push_for(1, 0);
+        push.base_version = 0;
+        assert_eq!(route_push(&mut rounds, late, push, Some(64), false), PushDisposition::Accepted);
+        assert_eq!(rounds[0].pushes.len(), 2);
+        // Still waiting for the silent one until the unchanged deadline.
+        assert_eq!(round_action(&rounds[0], now), RoundAction::Wait);
+        assert_eq!(round_action(&rounds[0], grace_deadline), RoundAction::Complete);
+
+        // Past its grace deadline the round is complete: no join.
+        let mut closed = test_round(vec![answered, silent]);
+        closed.base_version = 0;
+        closed.pushes.insert(answered, test_push_for(0, 0));
+        closed.grace_deadline = Some(now);
+        let mut closed = vec![closed];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut closed, late, &[0, 0], now).is_empty());
+        assert_eq!(closed[0].expected_members, vec![answered, silent]);
+    }
+
+    /// No join where the learner already counts (a carried delta), where its
+    /// catch-up did not reach the round's base, or where an exact fold has
+    /// already taken pushes; an empty exact fold is rebuilt for the roster.
+    #[test]
+    fn join_skips_carried_stale_and_started_exact_rounds() {
+        let first = member(0, 10);
+        let late = member(1, 20);
+        let registry = registry_with_current(late);
+        let mut cfg = round_test_config(4);
+        cfg.max_base_lag = Some(64);
+        let st = resend_test_state(2);
+
+        let mut carried = test_round(vec![first]);
+        carried.base_version = 0;
+        carried.carried.push((member(1, 19), test_push_for(1, 0)));
+        let mut behind = test_round(vec![first]);
+        behind.base_version = 3;
+        let mut rounds = vec![carried, behind];
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[2, 2], Instant::now()).is_empty());
+        assert!(rounds.iter().all(|round| round.expected_members == vec![first]));
+
+        // Exact fold of the launch roster [0] with quorum 2: rebuilt for [0, 1].
+        let exact = |expected: &[Member]| round_fold(&cfg, &st, 1, expected, 2);
+        assert!(matches!(exact(&[first]), Some(RoundFold::Exact(_))));
+        let mut empty = test_round(vec![first]);
+        empty.base_version = 0;
+        empty.quorum_size = 2;
+        empty.fold = exact(&[first]);
+        let mut rounds = vec![empty];
+        assert_eq!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).len(), 1);
+        let Some(RoundFold::Exact(fold)) = &rounds[0].fold else { panic!("exact fold expected") };
+        assert_eq!(fold.next_learner(), Some(0));
+        let mut push = test_push_for(0, 0);
+        push.outer_gradient = vec![1.0; 4];
+        assert_eq!(route_push(&mut rounds, first, push, Some(64), false), PushDisposition::Accepted);
+        let Some(RoundFold::Exact(fold)) = &rounds[0].fold else { panic!("exact fold expected") };
+        assert_eq!(fold.next_learner(), Some(1), "the rebuilt roster waits for the joiner");
+
+        // An exact fold that already holds a push keeps its roster.
+        let mut started = test_round(vec![first, member(2, 30)]);
+        started.base_version = 0;
+        started.quorum_size = 2;
+        started.fold = exact(&[first, member(2, 30)]);
+        let mut push = test_push_for(0, 0);
+        push.outer_gradient = vec![1.0; 4];
+        let mut rounds = vec![started];
+        assert_eq!(route_push(&mut rounds, first, push, Some(64), false), PushDisposition::Accepted);
+        assert!(join_gathering_rounds(&cfg, &st, &registry, &mut rounds, late, &[0, 0], Instant::now()).is_empty());
+        assert_eq!(rounds[0].expected_members, vec![first, member(2, 30)]);
+    }
+
+    fn scheduler_test_group(member: Member, layout: &Layout, control: mpsc::Sender<OutFrame>) -> Arc<Group> {
+        let group = Arc::try_unwrap(test_group_with_control(member, control)).ok().unwrap();
+        Arc::new(Group { layout: layout.clone(), ..group })
+    }
+
+    /// (fragment, step, attempt) of the next PULL on a learner's control
+    /// stream; other frames (the catch-up) are skipped.
+    async fn next_pull(frames: &mut mpsc::Receiver<OutFrame>) -> (u32, u64, u32) {
+        loop {
+            let frame = frames.recv().await.expect("control stream closed");
+            if frame.msg_type == MSG_PULL_REQ {
+                let payload = &frame.parts[0];
+                return (
+                    u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+                    u64::from_le_bytes(payload[4..12].try_into().unwrap()),
+                    u32::from_le_bytes(payload[12..16].try_into().unwrap()),
+                );
+            }
+        }
+    }
+
+    /// The resumed-fleet stall: the first learner done with its catch-up is
+    /// the only one a round is launched to, and its H-gate keeps it from
+    /// answering. The learner that finishes its catch-up next is pulled into
+    /// that round and its push commits it well before the quorum timeout
+    /// (before the fix it was pulled only when the timeout relaunched it).
+    #[tokio::test]
+    async fn round_commits_from_a_learner_that_finished_its_catch_up_after_the_launch() {
+        let layout = Layout {
+            fragments: (0..2)
+                .map(|_| crate::state::FragmentInfo {
+                    merge_mode: crate::state::MERGE_AVG,
+                    tensor_numels: vec![4],
+                    tensor_shapes: None,
+                })
+                .collect(),
+        };
+        let directory = unique_test_directory("late-joiner-pull");
+        let tape = directory.join("tape.jsonl");
+        let mut cfg = round_test_config(4);
+        cfg.learners = 1;
+        cfg.quorum = 1;
+        cfg.max_base_lag = Some(64);
+        cfg.carry_answers_round = true;
+        cfg.quorum_timeout_s = 3600;
+        cfg.event_tape = Some(tape.clone());
+        cfg.membership = crate::membership::MembershipConfig { max_learners: Some(2), ..Default::default() };
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        let budget_cutoff = Arc::new(BudgetCutoff::new(false, Duration::from_secs(cfg.quorum_timeout_s)));
+        let (events, events_rx) = mpsc::channel(64);
+        let (first, late) = (member(0, 1), member(1, 1));
+        let (first_control, mut first_frames) = mpsc::channel(1024);
+        let (late_control, mut late_frames) = mpsc::channel(1024);
+        let first_group = scheduler_test_group(first, &layout, first_control);
+        let late_group = scheduler_test_group(late, &layout, late_control);
+
+        registry.lock().unwrap().register_group(first_group.clone(), Instant::now()).unwrap();
+        events.send(Event::Hello { group: first_group }).await.unwrap();
+        for fragment_id in 0..2 {
+            let init = Event::Init { member: first, fragment_id, values: vec![0.0; 4], sha256: [0; 32] };
+            events.send(init).await.unwrap();
+        }
+        let driver = async {
+            // Learner 0 alone gets the pull of step 1 and never answers it.
+            let pull = next_pull(&mut first_frames).await;
+            assert_eq!((pull.1, pull.2), (1, 1));
+            registry.lock().unwrap().register_group(late_group.clone(), Instant::now()).unwrap();
+            events.send(Event::Hello { group: late_group }).await.unwrap();
+            let joined = tokio::time::timeout(Duration::from_secs(10), next_pull(&mut late_frames))
+                .await
+                .expect("the learner that caught up after the launch was not pulled into the round");
+            assert_eq!(joined, pull);
+            let mut push = test_push_for(1, 0);
+            push.fragment_id = pull.0;
+            push.global_step = 1;
+            push.round_attempt = 1;
+            push.outer_gradient = vec![0.5; 4];
+            events.send(Event::Push { member: late, push }).await.unwrap();
+            let committed = async {
+                loop {
+                    let text = std::fs::read_to_string(&tape).unwrap_or_default();
+                    if let Some(line) = text.lines().find(|line| line.contains("\"sync/responders\"") && line.contains("\"step\":1,")) {
+                        return line.to_string();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            let record = tokio::time::timeout(Duration::from_secs(10), committed)
+                .await
+                .expect("step 1 did not commit before the quorum timeout");
+            for field in [
+                "\"attempt\":1,",
+                "\"expected\":[0,1],",
+                "\"responded\":[1],",
+                "\"missed_members\":[{\"id\":0,\"generation\":1}],",
+            ] {
+                assert!(record.contains(field), "{field} missing from {record}");
+            }
+        };
+        tokio::select! {
+            result = scheduler(cfg, events_rx, registry.clone(), budget_cutoff) => panic!("scheduler ended: {result:?}"),
+            () = driver => {}
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     #[test]
     fn round_membership_rejects_mid_round_join_and_new_generation() {
         let captured = member(0, 10);
@@ -12473,6 +13589,7 @@ mod tests {
             c_tokens: 1,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -12506,6 +13623,52 @@ mod tests {
             PushDisposition::FutureBase
         );
         assert_eq!(rounds[0].pushes.len(), 1);
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_so_the_round_completes() {
+        // Regression: with --max-base-lag 8 and quorum == learners, a push
+        // refused as StaleBase left its island in expected_members, so the
+        // round (and every later step) waited for the full quorum timeout.
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn stale_base_rejection_first_still_waits_for_the_other_island() {
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
     }
 
     #[test]
@@ -12554,6 +13717,7 @@ mod tests {
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer {
                     recv_seconds: 1.5,
                     arrived_unix: 1792000000.25,
@@ -12731,6 +13895,7 @@ mod tests {
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -12747,6 +13912,7 @@ mod tests {
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -13064,6 +14230,7 @@ mod tests {
             c_tokens: 1 + u64::from(learner_id),
             outer_gradient: gradient,
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -13343,6 +14510,50 @@ mod tests {
             .unwrap();
         st.commit_merge(merge).unwrap();
         st.params[0].to_vec()
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_of_a_streaming_fold_round() {
+        // Async carry needs a streaming fold, and that is where stale bases
+        // happen: the refused island must not hold the round until timeout.
+        let cfg = streaming_cfg();
+        let mut st = fold_test_state(crate::state::MERGE_AVG);
+        st.versions[0] = 15;
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Streaming(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, fast, push(0, 15), Some(8), false), PushDisposition::Accepted);
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+        prepare_round_compute(&cfg, &st, &mut rounds[0]).unwrap().finish_inline().unwrap();
+    }
+
+    #[test]
+    fn stale_base_rejection_keeps_the_slot_of_an_exact_fold_round() {
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        let st = fold_test_state(crate::state::MERGE_AVG);
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Exact(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast, slow]);
     }
 
     #[test]

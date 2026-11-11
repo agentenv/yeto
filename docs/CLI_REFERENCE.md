@@ -349,7 +349,7 @@ batching and data handling.
 | `--lora-alpha` | `32` | LoRA alpha |
 | `--lora-targets` | `auto` | `auto`, `attention`, `attention-routed-experts`, `all-linear` |
 | `--base-quantization` | `none` | `none` or `nf4` (QLoRA; CUDA; needs `--shard ddp`) |
-| `--shard` | `ddp` | `ddp` or `fsdp` (shards the frozen base across GPUs/nodes, LoRA only) |
+| `--shard` | `ddp` | `ddp` or `fsdp` (shards the frozen base across GPUs/nodes; with `--tuning full` it runs without a syncer only, use `ddp` for synced full tuning) |
 | `--island-backend` | `torch` | `torch` (FSDP2/DDP) or `megatron` (Megatron-Core EP/TP/PP for large MoE) |
 | `--expert-parallel` | — | Megatron: EP degree (default fills the island) |
 | `--tensor-parallel` | `1` | Megatron: TP degree |

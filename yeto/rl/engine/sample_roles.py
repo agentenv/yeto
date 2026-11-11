@@ -73,7 +73,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from .data_split import DataSlot  # noqa: F401 - re-exported (callers import it from here)
-from .selection import FULL_PARAMETER_SYNC_PRESET
+from .selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
@@ -166,15 +166,17 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
         raise ValueError("synced trainers do not combine with convertible nodes")
     tuning = getattr(args, "tuning", "lora")
     if tuning not in ("lora", "full"):
-        raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
+        raise ValueError("synced trainers merge LoRA deltas or run a full-parameter preset: "
                          "they need --tuning lora or --tuning full")
-    if tuning == "full" and not full and getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
-        # --tuning full on a synced trainer: the full-parameter preset (the syncer merges the
-        # islands' pseudo-gradients) or the K3.1 form (whole-checkpoint releases; no LoRA delta
-        # to merge); the generic path keeps the LoRA merge and its golden argv
+    if tuning == "full" and not synced_full_parameter(args) \
+            and getattr(args, "rl_model_recipe", "generic") != "kimi_k31":
+        # --tuning full on a synced trainer: a full-parameter preset (the syncer merges the
+        # islands' pseudo-gradients) or the K3.1 form (whole-checkpoint releases; no LoRA
+        # delta to merge); the generic path keeps the LoRA merge and its golden argv
         raise ValueError("synced trainers with --tuning full need --rl-model-recipe kimi_k31 "
-                         f"(whole-checkpoint releases) or --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} "
-                         "(full-parameter pseudo-gradients); other recipes need --tuning lora")
+                         "(whole-checkpoint releases) or a full-parameter preset (full-parameter "
+                         f"pseudo-gradients): --tuning full needs --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} "
+                         f"or {SAO_STREAMING_SYNC_PRESET}; other recipes need --tuning lora")
     if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
             getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
         # The strict sweep publishes in lockstep (policy age 0); a synced trainer
@@ -613,6 +615,19 @@ def buffer_full_parameter(args: Any) -> bool:
     a single island with both roles updates its own engines in place."""
     return (getattr(args, "tuning", "lora") == "full"
             and bool(getattr(args, "rl_single_island_no_sync", False)))
+
+
+def synced_full_parameter(args: Any) -> bool:
+    """``--tuning full`` on synced islands: every parameter trains and the
+    full-parameter sync preset (whole-model fragments) carries it. The same
+    islands run with ``--tuning lora`` and the full-parameter preset (the
+    preset alone selects full parameter mode); ``--tuning full`` states it."""
+    from .selection import FULL_PARAMETER_SYNC_PRESETS, canonical_sync_preset
+
+    return (getattr(args, "tuning", "lora") == "full"
+            and not bool(getattr(args, "rl_single_island_no_sync", False))
+            and canonical_sync_preset(str(getattr(args, "rl_sync_preset", "strict-avg")))
+            in FULL_PARAMETER_SYNC_PRESETS)
 
 
 def check_pair(args: Any, num_islands: int) -> None:

@@ -147,9 +147,13 @@ def build_layout(
         for name, numel in sorted(layered, key=lambda x: (layer_index(x[0]), x[0])):
             bins[bin_of_layer[layer_index(name)]].tensors.append((name, numel))
         rest = loose  # norms, biases, etc. fall through to bin-packing below
+    # Running bin totals: recomputing ``Fragment.numel`` per placement is
+    # quadratic in the tensor count (minutes for an unfused 120B MoE).
+    totals = [b.numel for b in bins]
     for name, numel in rest:
-        target = min(bins, key=lambda b: b.numel)  # min() is stable: first-smallest wins
-        target.tensors.append((name, numel))
+        i = min(range(len(bins)), key=totals.__getitem__)  # min() is stable: first-smallest wins
+        bins[i].tensors.append((name, numel))
+        totals[i] += numel
     fragments.extend(b for b in bins if b.tensors)  # strided can leave bins empty
     if matrix_mode == MERGE_ISO:
         for frag in fragments:

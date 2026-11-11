@@ -217,3 +217,59 @@ def test_ports_entry_takes_the_full_parameter_identity_from_run_miles(monkeypatc
     assert (seen["lora_config_hash"], seen["layout_hash"]) == ("c" * 64, "d" * 64)
     assert seen["yeto_policy_sync"] is True
     assert miles_args.yeto_rl_learner_id == 0
+
+
+def test_tuning_full_selects_the_same_full_parameter_islands():
+    """--tuning full states full parameter training on the full-parameter preset:
+    the plan equals the default-tuning plan of the same preset."""
+    args, plan = _dense_plan(("--tuning", "full"))
+    _, lora_plan = _dense_plan()
+    assert args.tuning == "full"
+    for island, reference in zip(plan["island_requests"], lora_plan["island_requests"]):
+        command = island["learner_command"]
+        assert _flag(command, "--parameter-mode") == "full"
+        assert "--lora-r" not in command
+        assert _flag(command, "--syncer-profile-sha256") == _flag(
+            reference["learner_command"], "--syncer-profile-sha256")
+    assert plan["role_syncers"][0]["command"] == lora_plan["role_syncers"][0]["command"]
+
+
+def test_tuning_full_takes_the_asynchronous_full_parameter_rounds():
+    """The asynchronous multi-fragment counterpart of the decoupled preset."""
+    args, plan = _dense_plan(("--tuning", "full", "--rl-sync-full-parameter-rounds", "async",
+                              "--local-rl-rounds-per-sync", "2"))
+    command = plan["island_requests"][0]["learner_command"]
+    assert _flag(command, "--parameter-mode") == "full"
+    assert "--full-parameter-rounds async" in command
+
+
+def test_tuning_full_island_command_passes_the_island_checks():
+    from yeto.rl.adapters.miles import island_entry
+
+    _, plan = _dense_plan(("--tuning", "full"))
+    command = plan["island_requests"][0]["learner_command"]
+    tokens = shlex.split(command.split("-m yeto.rl.adapters.miles.island_entry", 1)[1])
+    tokens = [{"$SYNCER_ADDR": "127.0.0.1:29400", "$LEARNER_ID": "0"}.get(t, t) for t in tokens]
+    parsed = island_entry.parse_args(tokens)
+    assert island_entry._full_parameter_mode(parsed, parsed.sync_preset) is True
+    island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
+
+
+@pytest.mark.parametrize("preset", ["strict-avg", "decoupled"])
+def test_tuning_full_on_a_lora_layout_preset_names_the_full_parameter_preset(preset, monkeypatch):
+    from yeto.launcher import _prepare_rl_args
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", ("--tuning", "full", "--rl-sync-preset", preset,
+                                    "--fragments", "2"), gpu=TWO_ISLANDS)
+    with pytest.raises(ValueError, match="--rl-sync-full-parameter-rounds async"):
+        _prepare_rl_args(args)
+
+
+def test_tuning_full_refuses_the_expert_full_hybrid(monkeypatch):
+    from yeto.launcher import _prepare_rl_args
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", EXPERT_FULL + ("--tuning", "full"), gpu="modal:16xh100")
+    with pytest.raises(ValueError, match="needs --tuning lora"):
+        _prepare_rl_args(args)

@@ -192,7 +192,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         choices=["ddp", "fsdp"],
         default="ddp",
         help="torch backend multi-GPU strategy; fsdp shards the frozen base "
-        "across the learner's GPUs/nodes (lora only) so the model no "
+        "across the learner's GPUs/nodes (synced full tuning needs ddp) so the model no "
         "longer has to fit on one GPU",
     )
     tune.add_argument(
