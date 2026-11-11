@@ -102,7 +102,14 @@ FAILED = frozenset({"error", "build_failed"})
 CONFIG_KEYS = frozenset({"kind", "image", "snapshot", "gpus", "gpu_type", "spot", "cpu", "memory_gib", "disk_gib",
                          "name_prefix", "env", "ttl_minutes", "queue_timeout_min", "create_timeout_s",
                          "delete_timeout_s", "ssh_token_minutes", "host_setup", "target", "api_url_env",
-                         "api_key_env"})
+                         "api_key_env", "price_usd_h"})
+LEDGER_KIND = "daytona_sandbox"
+
+
+def _record_ledger(fn: str, *args: Any, **kw: Any) -> None:
+    from yeto.cost.ledger import record_safely  # noqa: PLC0415
+
+    record_safely(fn, *args, **kw)
 
 
 def _state(value: Any) -> str:
@@ -125,7 +132,7 @@ class DaytonaProvider:
                  create_timeout_s: float = 900, delete_timeout_s: float = 300, ssh_token_minutes: int = 1440,
                  host_setup: list[str] | None = None, target: str | None = None,
                  api_url_env: str = "DAYTONA_API_URL", api_key_env: str = "DAYTONA_API_KEY",
-                 sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time):
+                 price_usd_h: float | None = None, sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time):
         validate(image=image, snapshot=snapshot, gpus=gpus, gpu_type=gpu_type, spot=spot, name_prefix=name_prefix,
                  ttl_minutes=ttl_minutes, ssh_token_minutes=ssh_token_minutes)
         self.run_id, self.slots = run_id, list(slots)
@@ -138,6 +145,7 @@ class DaytonaProvider:
         self.host_setup = list(host_setup or ())
         self.target, self.api_url_env, self.api_key_env = target, api_url_env, api_key_env
         self._sdk, self._client, self.clock = sdk, client, clock
+        self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.record = record or state_dir() / f"daytona-sandboxes-{self.prefix}.json"
 
     @property
@@ -225,6 +233,8 @@ class DaytonaProvider:
         name = f"{self.prefix}-{n}"
         rows[name] = {"slot": account, "n": n, "open": True, "ordered_at": self.clock()}
         self._save(rows)  # recorded before the create: a crash mid-create still leaves it ours to delete
+        attrs = self._ledger_attrs(account)
+        _record_ledger("intent", LEDGER_KIND, name, **attrs)
         try:
             client.create(self.params(name, account), timeout=self.create_timeout_s)
         except Exception:
@@ -233,13 +243,26 @@ class DaytonaProvider:
             except Exception:  # noqa: BLE001 - unknown: keep the record open, the patrol/status decide
                 exists = True
             if exists:
+                _record_ledger("created", LEDGER_KIND, name, name, **attrs)
                 return name  # created (billed) but not started in time: the pool watches it
             rows = self._rows()
             rows[name]["open"] = False
             rows[name]["create_failed"] = True
             self._save(rows)
+            _record_ledger("released", LEDGER_KIND, None, name, never_created=True)
             raise
+        _record_ledger("created", LEDGER_KIND, name, name, **attrs)
         return name
+
+    def _ledger_attrs(self, slot: int) -> dict[str, Any]:
+        """What ``yeto cleanup`` needs to delete the sandbox and price it later."""
+        return {"run_id": self.run_id, "prefix": self.prefix, "slot": slot, "gpus": self.gpus,
+                "gpu_type": self.gpu_type, "usd_per_hour": self.price_usd_h,
+                "api_url_env": self.api_url_env, "api_key_env": self.api_key_env}
+
+    def hourly_cost(self, ticket: str | None = None) -> float | None:  # noqa: ARG002
+        """USD per hour of one sandbox (``price_usd_h``), None when not configured."""
+        return self.price_usd_h
 
     def status(self, account: int, ticket: str) -> LeaseStatus:
         sandbox = self._get(ticket)  # raises on a failed call: a control-plane blip to the pool
@@ -276,6 +299,7 @@ class DaytonaProvider:
         row.update(open=False, released=True)
         self._save(rows)
         _drop_alias(ticket)
+        _record_ledger("released", LEDGER_KIND, ticket, ticket)
         return {"ticket": ticket, "state": "ended"}
 
     def node(self, account: int, ticket: str) -> NodeLease:
@@ -395,3 +419,36 @@ def from_config(cfg: dict[str, Any], run_id: str, *, sdk: Any = None, client: An
 def registry_factory(cfg: dict[str, Any], run_id: str, section: dict[str, Any]) -> DaytonaProvider:  # noqa: ARG001
     """The registered ``daytona`` factory (``yeto.launch.pool.provider``)."""
     return from_config(cfg, run_id)
+
+
+def cleanup_release(r: Any, ops: Any, dry_run: bool) -> tuple[bool, str, Any]:
+    """Release one ``daytona_sandbox`` ledger entry (``yeto cleanup``): through
+    ``ops.daytona_delete(resource)`` when the cleanup ops have it, else a provider
+    rebuilt from the ledger attrs, whose ``release`` deletes only this run's sandboxes."""
+    name = r.id or r.name
+    if dry_run:
+        return True, f"would delete Daytona sandbox {name}", None
+    delete = getattr(ops, "daytona_delete", None)
+    if delete is not None:
+        res = delete(r)
+    else:
+        a = r.attrs
+        prefix, run_id = a.get("prefix"), a.get("run_id")
+        if not prefix or not run_id:
+            return False, f"Daytona sandbox {name} without run/prefix in the ledger: not deleted", None
+        p = DaytonaProvider(run_id, slots=[int(a.get("slot") or 0)], image="ledger",
+                            api_url_env=a.get("api_url_env") or "DAYTONA_API_URL",
+                            api_key_env=a.get("api_key_env") or "DAYTONA_API_KEY")
+        p.prefix = prefix
+        res = p.release(int(a.get("slot") or 0), name)
+    return True, f"deleted Daytona sandbox {name}", res
+
+
+def ledger_cost(r: Any, now: float, rates: Any) -> Any:
+    """Cost of one ``daytona_sandbox`` entry: created to released (or now) at its
+    ``usd_per_hour`` (the configured ``price_usd_h``; unpriced when not set)."""
+    from yeto.cost import billing  # noqa: PLC0415
+
+    rate = r.attrs.get("usd_per_hour")
+    return billing._span_cost(r, r.created_at, now, None if rate is None else float(rate),  # noqa: SLF001
+                              "" if rate is not None else "no price_usd_h configured")

@@ -412,7 +412,9 @@ register(ProviderKind(
     release_resource="yeto.launch.nc.provider:cleanup_release", resource_cost="yeto.launch.nc.provider:ledger_cost",
     caps=ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)))
 register(ProviderKind(
-    "daytona", "yeto.launch.nc.daytona_provider:registry_factory",
+    "daytona", "yeto.launch.nc.daytona_provider:registry_factory", ledger_kind="daytona_sandbox",
+    release_resource="yeto.launch.nc.daytona_provider:cleanup_release",
+    resource_cost="yeto.launch.nc.daytona_provider:ledger_cost",
     offline_problems="yeto.launch.nc.pool_run:daytona_problems",
     caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd")))
 register(ProviderKind(

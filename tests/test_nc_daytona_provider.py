@@ -409,3 +409,32 @@ def test_daytona_pool_warnings_name_sandboxes_not_national_compute_leases():
     assert "sandbox" in banner and "nc down" not in banner and "lease_until" not in banner.split("\n")[2]
     assert "nc down" in pool_run.billing_banner("pool.json", [], national=True)
     assert "National Compute" in pool_run.lease_warning(BASE, "pool.json")
+
+
+def test_sandboxes_go_to_the_resource_ledger_and_yeto_cleanup_deletes_them(tmp_path, monkeypatch):
+    from yeto.cost import billing, cleanup
+    from yeto.cost.ledger import LEDGER_ENV, ResourceLedger
+    from yeto.launch.pool import provider as providers
+
+    path = tmp_path / "resources.jsonl"
+    monkeypatch.setenv(LEDGER_ENV, str(path))
+    dt = FakeDaytona()
+    p = _provider(dt, price_usd_h=40.0)
+    assert p.hourly_cost() == 40.0
+    a, b = p.order(1), p.order(2)
+    dt.fail_create = RuntimeError("no capacity")
+    with pytest.raises(RuntimeError):
+        p.order(1)  # a create that left nothing: closed in the ledger as never created
+    p.release(2, b)
+    assert providers.ledger_kinds()["daytona_sandbox"].kind == "daytona"
+    open_ = ResourceLedger(path).open_resources()
+    assert [r.key for r in open_] == [f"daytona_sandbox:{a}"] and open_[0].attrs["usd_per_hour"] == 40.0
+    costs = billing.resource_costs(open_, open_[0].created_at + 1800)
+    assert costs.items[0].rate_usd_per_hour == 40.0
+
+    deleted = []
+    ops = SimpleNamespace(daytona_delete=lambda r: deleted.append(r.id) or p.release(1, r.id))
+    assert cleanup.cleanup(ResourceLedger(path), ops, dry_run=True)[0].ok and not deleted
+    acts = cleanup.cleanup(ResourceLedger(path), ops)
+    assert [x.ok for x in acts] == [True] and deleted == [a]
+    assert ResourceLedger(path).open_resources() == []
