@@ -113,6 +113,31 @@ Allowed differences (not part of the contract)
   per member (any request renews all its blocks). A member that beats keeps
   everything alive in both.
 * Expiry of a holder nobody else observed (above).
+* After an expiry the syncer retires the member (its next request is
+  ``FENCED``; the task source then rejoins under a new incarnation). The store
+  has no member table: an expired sampler keeps its incarnation and claims
+  again. Either way its expired claims are gone.
+* A member fenced as superseded or retired by the controller stops for good
+  (the syncer task source does not rejoin; a store sampler raises
+  ``DispenseFencedEnd``); any other fence of a syncer member rejoins.
+
+Where each operation lives
+--------------------------
+
+========================  ==========================================  ==============================================
+operation                 store ledger (R2 path)                      syncer (syncer path)
+========================  ==========================================  ==============================================
+join                      ``StoreDispensedPrompts.open`` + ``recover``  TASK_HELLO (``task_dispense.TaskSource``)
+claim                     ``StoreDispensedPrompts.poll`` / ``take``     TASK_CLAIM
+done / drop / fail /      ``written`` / ``_end`` / ``close``            TASK_REPORT trained / dropped / requeue /
+release                                                               release
+beat                      ``renew`` (own thread, ``lease / 3``)         any request, TASK_HEARTBEAT
+still_holds               ``still_holds``                              ``Dispenser::holds`` (the island drops a
+                                                                      group whose report is ``fenced``)
+fence                     incarnation lease (``fence_shard``)           MEMBER_RETIRE (no separate lease)
+retire                    ``store_dispense.retire`` /                  ``task_dispense.retire_member`` (MEMBER_RETIRE
+                          ``python -m ...store_dispense retire``       frame, island HMAC key)
+========================  ==========================================  ==============================================
 """
 
 from __future__ import annotations

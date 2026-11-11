@@ -65,3 +65,31 @@ def test_without_a_key_only_the_head_itself_may_retire(syncer_binary, tmp_path):
         a.close()
     finally:
         syncer.stop()
+
+
+def test_a_retired_task_source_stops_instead_of_rejoining(syncer_binary, tmp_path):  # noqa: F811
+    """A task source retired by the controller does not reopen under a new
+    incarnation (it would take work again after a scale-down)."""
+    import time
+
+    syncer = Syncer(syncer_binary, tmp_path, lease_s=600.0)
+    island = td.sampler_holder_id("nc-2")
+    try:
+        events: list = []
+        connect = td.tcp_connector(("127.0.0.1", syncer.port), learner_id=island, rows=100,
+                                   fingerprint=FP, key=KEY, timeout_s=5.0)
+        source = td.TaskSource(connect=connect, block=4, prefetch_blocks=1, retry_s=0.05,
+                               incarnation=lambda: 0x7777, emit=lambda kind, **f: events.append(kind)).start()
+        assert len(source.take(4, timeout_s=5)) == 4
+        answer = td.retire_member(("127.0.0.1", syncer.port), island, reason="scale_down", key=KEY)
+        assert answer["status"] == "retired" and answer["incarnation"] == 0x7777 and answer["reclaimed"] >= 4
+        with pytest.raises(td.DispenseFenced, match=r"\(retired by the controller\)$"):
+            while True:
+                source.take(4, timeout_s=5)
+        assert "rl_dispense_retired" in events
+        time.sleep(0.5)
+        opens = [r for r in syncer.records() if r.get("kind") == "dispense_open"]
+        assert [r["incarnation"] for r in opens] == [f"{0x7777:016x}"]
+        source.close(release=False)
+    finally:
+        syncer.stop()

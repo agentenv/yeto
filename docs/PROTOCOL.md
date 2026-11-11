@@ -902,7 +902,7 @@ rule.
   otherwise at the next dispense request); items it stored in the relay stay.
 - A process fenced as `(superseded)` stops: a newer process of the same
   island holds the id (its task source, subscriber and relay producer all
-  end). A process fenced for another reason opens again with a new
+  end). So does a process fenced as `(retired by the controller)`. A process fenced for another reason opens again with a new
   incarnation (the task source does; a fenced subscriber or relay producer
   ends its process, whose relaunch has a new incarnation).
 

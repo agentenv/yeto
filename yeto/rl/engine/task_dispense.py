@@ -132,11 +132,19 @@ class DispenseFenced(ConnectionError):
 # island on the head: it must not come back under a new incarnation (that
 # would supersede the newer process on every channel), so it stops.
 SUPERSEDED_MARK = "(superseded)"
+# The controller retired this process (MEMBER_RETIRE: scale-down, evict): it
+# must not come back under a new incarnation either (WorkContract ``retire``).
+RETIRED_MARK = "(retired by the controller)"
 
 
 def is_superseded(error: BaseException) -> bool:
     """The fence names a newer incarnation of this island (not a lease expiry)."""
     return str(error).endswith(SUPERSEDED_MARK)
+
+
+def is_retired_by_controller(error: BaseException) -> bool:
+    """The fence says the controller retired this process."""
+    return str(error).endswith(RETIRED_MARK)
 
 
 class DispenseEnded(RuntimeError):
@@ -998,14 +1006,17 @@ class TaskSource:
                 if self._conn is not None:
                     self._conn.close()
                 self._conn = None
-                if is_superseded(error):
+                if is_superseded(error) or is_retired_by_controller(error):
                     # A newer process of this island joined (on any channel
-                    # of the head's member table); this one stops for good.
+                    # of the head's member table), or the controller retired
+                    # this one; it stops for good.
                     # emit before waking takers so the event is recorded by the
                     # time take() raises the fence
-                    logger.error("task dispenser: a newer incarnation superseded this island: %s", error)
-                    self._emit("rl_dispense_superseded", incarnation=f"{self.incarnation:016x}",
-                               error=str(error))
+                    retired = is_retired_by_controller(error)
+                    logger.error("task dispenser: %s: %s", "the controller retired this island" if retired
+                                 else "a newer incarnation superseded this island", error)
+                    self._emit("rl_dispense_retired" if retired else "rl_dispense_superseded",
+                               incarnation=f"{self.incarnation:016x}", error=str(error))
                     with self._cv:
                         self._fatal = error
                         self._cv.notify_all()
