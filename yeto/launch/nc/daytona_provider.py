@@ -136,6 +136,14 @@ class DaytonaProvider:
         self._sdk, self._client, self.clock = sdk, client, clock
         self.record = record or state_dir() / f"daytona-sandboxes-{self.prefix}.json"
 
+    @property
+    def sampler_route(self) -> Any:
+        """Daytona sandboxes have no docker: the sampler runs as a process
+        (:class:`yeto.launch.daytona_sampler.DaytonaSamplerRoute`)."""
+        from ..daytona_sampler import DaytonaSamplerRoute, k31_disk_plan  # noqa: PLC0415
+
+        return DaytonaSamplerRoute(gpus=self.gpus, plan=k31_disk_plan())
+
     # -- sdk
     @property
     def sdk(self):

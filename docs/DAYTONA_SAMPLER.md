@@ -49,17 +49,16 @@ follower prunes every other download first. Overlays are symlinks.
 
 | Item | GiB |
 |---|---|
-| Base MXFP4 checkpoint | B (about 500) |
-| Releases on disk | 2 x R (R about 103 for an expert-subset release; up to 207 for a full one) |
+| Base MXFP4 checkpoint | B (Kimi-K3.1-Pro: 1.56 TB, about 1,453) |
+| Releases on disk | 2 x R (R about 193 for a 128-expert release, about 96 for 64 experts) |
 | Snapshot root file system | about 60 |
 | vLLM / AITER / triton caches | 64 |
 | Harbor site, tasks, trial logs, tapes | 64 |
 | Headroom | 15 % |
 
-`daytona_sampler.k31_disk_plan()` computes this. With B = 500 and R = 103 the sandbox needs
-1,029 GiB. Request at least 1,100 GiB of disk. GPU sandboxes default to 512 GiB whatever
-the GPU count, and the maximum is 512 GiB per GPU (4,096 GiB for 8). If your base
-checkpoint is the full 1.56 TB export, the plan is about 2,250 GiB.
+`daytona_sampler.k31_disk_plan()` computes this. With 128-expert releases the sandbox needs
+2,332 GiB; request at least 2,400 GiB of disk. GPU sandboxes default to 512 GiB whatever
+the GPU count, and the maximum is 512 GiB per GPU (4,096 GiB for 8).
 
 Memory: Daytona allows up to 192 GiB per GPU (1,536 GiB for 8). The preflight requires
 512 GiB by default (`Requirements.memory_gib`). `/dev/shm` must be at least 64 GiB, the size

@@ -160,8 +160,10 @@ class DiskPlan:
         return int(-(-need // 1))
 
 
-def k31_disk_plan(*, base_gib: float = 500.0, release_gib: float = 103.0) -> DiskPlan:
-    """Kimi-K3.1 MXFP4 sampler: base checkpoint + 2 releases + image + caches."""
+def k31_disk_plan(*, base_gib: float = 1453.0, release_gib: float = 193.0) -> DiskPlan:
+    """Kimi-K3.1 MXFP4 sampler: base checkpoint + 2 releases + image + caches.
+    Defaults: the 1.56 TB (1453 GiB) Kimi-K3.1-Pro base and a 128-expert release
+    (207 GB, 193 GiB); a 64-expert release is about 96 GiB."""
     return DiskPlan(base_gib=base_gib, release_gib=release_gib)
 
 

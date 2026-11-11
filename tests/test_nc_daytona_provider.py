@@ -389,3 +389,10 @@ def test_spot_create_failures_trip_the_breaker():
         t[0] += 60
     assert len([c for c in dt.calls if c[0] == "create"]) <= 2
     assert not any(b.state != "destroyed" for b in dt.boxes.values())
+
+
+def test_a_daytona_pool_runs_the_sampler_as_a_process():
+    from yeto.launch.daytona_sampler import DaytonaSamplerRoute
+
+    provider = DaytonaProvider("run-x", slots=[0], snapshot="yeto-sampler", sdk=object(), client=object())
+    assert isinstance(provider.sampler_route, DaytonaSamplerRoute)

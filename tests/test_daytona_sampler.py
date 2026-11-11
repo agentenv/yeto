@@ -120,9 +120,9 @@ def test_requirements_of_reads_hot_reload_and_ssh_hosts(tmp_path):
 
 def test_disk_plan_for_k31():
     plan = ds.k31_disk_plan()
-    assert plan.required_gib == 1029  # (500 + 2 x 103 + 60 + 64 + 64) x 1.15
-    assert plan.data_gib == 834
-    assert ds.k31_disk_plan(base_gib=1560).required_gib == 2248
+    assert plan.required_gib == 2332  # (1453 + 2 x 193 + 60 + 64 + 64) x 1.15
+    assert plan.data_gib == 1967
+    assert ds.k31_disk_plan(release_gib=96).required_gib == 2108  # 64-expert releases
     assert plan.required_gib <= 8 * 512  # Daytona's per-GPU disk ceiling
 
 
