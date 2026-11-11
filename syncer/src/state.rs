@@ -154,6 +154,10 @@ pub struct GlobalState {
     /// HeLoCo per-tensor directional correction of learner deltas against
     /// the outer momentum before merging (None disables).
     pub delta_correction: Option<merge::Heloco>,
+    /// Threads used by the merge and the outer optimizer step. Results are
+    /// bit-identical for every value (see `crate::par`); 1 runs the
+    /// historical single-threaded code.
+    pub merge_threads: usize,
     /// Spectrum flattener. Torch mode owns one persistent child process.
     iso_backend: IsoBackend,
     /// bf16 downlink anchors; in memory only, never checkpointed.
@@ -165,6 +169,15 @@ pub struct GlobalState {
     /// Small records written next to every checkpoint at the same cut
     /// (the task dispenser). Empty: none.
     pub checkpoint_sidecars: Vec<Arc<dyn CheckpointSidecar>>,
+    /// The periodic checkpoint written off the scheduler
+    /// (`save_checkpoint_in_background`), until a later save waits for it.
+    background_checkpoint: std::sync::Mutex<Option<BackgroundCheckpoint>>,
+}
+
+/// A checkpoint write on its own thread.
+struct BackgroundCheckpoint {
+    step: u64,
+    writer: std::thread::JoinHandle<Result<()>>,
 }
 
 /// A small record captured at every checkpoint cut and written next to the
@@ -369,10 +382,12 @@ impl GlobalState {
             global_step: 0,
             ledger: Default::default(),
             checkpoint_sidecars: Vec::new(),
+            background_checkpoint: std::sync::Mutex::new(None),
             outer_lr,
             outer_momentum,
             wire_dtype,
             delta_correction: None,
+            merge_threads: crate::par::default_threads(),
             iso_backend: IsoBackend::start(iso_backend_config)?,
             downlink: None,
             shard: ShardPlan::default(),
@@ -544,8 +559,20 @@ impl GlobalState {
         // current global trajectory). Inputs already have outer-gradient
         // sign, so correction operates on copies without reconstructing
         // learner parameters or consulting a parameter anchor.
+        let threads = self.merge_threads;
+        let parallel = threads > 1 && numel >= PARALLEL_MIN_NUMEL;
+        let tensor_numels: Vec<usize> = frag.tensor_numels.iter().map(|&n| n as usize).collect();
         let corrected: Vec<Vec<f32>>;
-        let outer_gradients: Vec<&[f32]> = if let Some(h) = self.delta_correction {
+        let outer_gradients: Vec<&[f32]> = if let (Some(h), true) = (self.delta_correction, parallel) {
+            corrected = heloco_correct_all_par(
+                outer_gradients,
+                &self.momentum[fid],
+                &tensor_numels,
+                &h,
+                threads,
+            );
+            corrected.iter().map(|v| v.as_slice()).collect()
+        } else if let Some(h) = self.delta_correction {
             let momentum = &self.momentum[fid];
             corrected = outer_gradients
                 .iter()
@@ -575,6 +602,18 @@ impl GlobalState {
             {
                 bail!("fragment {fid}: tensor scales do not match the learners and tensors");
             }
+        }
+        if parallel {
+            let delta = merge_tensors_par(
+                fid,
+                frag.merge_mode,
+                outer_gradients,
+                weights,
+                tensor_scales,
+                &tensor_numels,
+                threads,
+            )?;
+            return self.prepare_reduced_merge(fid, base_version, delta);
         }
         let mut tensor_weights = weights.to_vec();
         let mut delta = vec![0.0f32; numel];
@@ -673,7 +712,7 @@ impl GlobalState {
         {
             iso_jobs[0].matrix = std::mem::take(&mut delta);
         }
-        if delta.iter().any(|value| !value.is_finite()) {
+        if crate::par::any_non_finite(self.merge_threads, &delta) {
             bail!("fragment {fid}: merged outer gradient is non-finite");
         }
         Ok(PreparedMerge {
@@ -708,6 +747,9 @@ impl GlobalState {
                 "fragment {fid}: computed merge has {} values, expected {expected}",
                 delta.len()
             );
+        }
+        if self.merge_threads > 1 && expected >= PARALLEL_MIN_NUMEL {
+            return self.commit_merge_par(fid, &delta);
         }
         let gnorm = delta
             .iter()
@@ -744,6 +786,89 @@ impl GlobalState {
         debug_assert!(self.params[fid].iter().all(|value| value.is_finite()));
         debug_assert!(self.momentum[fid].iter().all(|value| value.is_finite()));
         Ok(gnorm)
+    }
+
+    /// Multi-threaded `commit_merge` with the same checks, error priority and
+    /// bits. ‖delta‖ stays one sequential reduction; it runs on its own
+    /// thread, overlapped with the chunked validation and optimizer step.
+    /// For finite f32 inputs that f64 sum of squares cannot overflow
+    /// (it would need more than 1e230 values), so a finite delta implies a
+    /// finite norm and the state may be mutated before the norm is joined.
+    fn commit_merge_par(&mut self, fid: usize, delta: &[f32]) -> Result<f64> {
+        let threads = self.merge_threads;
+        if crate::par::any_non_finite(threads, delta) {
+            bail!("fragment {fid}: merged outer gradient is non-finite");
+        }
+        let (lr, mu) = (self.outer_lr, self.outer_momentum);
+        let period = self.delayed_nesterov_period;
+        let params = &mut self.params[fid];
+        let momentum = &mut self.momentum[fid];
+        let delayed = &mut self.delayed_nesterov;
+        std::thread::scope(|scope| -> Result<f64> {
+            let gnorm = scope.spawn(|| delta.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt());
+            let workers = threads.saturating_sub(1).max(1);
+            let c = crate::par::CHUNK;
+            let bad = std::sync::atomic::AtomicBool::new(false);
+            let flag = |b: bool| {
+                if b {
+                    bad.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            };
+            if let Some(period) = period {
+                let state = &mut delayed[fid];
+                let update = merge::delayed_nesterov_update(state.step, period);
+                let tasks: Vec<_> = params
+                    .chunks(c)
+                    .zip(momentum.chunks(c))
+                    .zip(state.accum.chunks(c))
+                    .zip(delta.chunks(c))
+                    .collect();
+                crate::par::run_tasks(workers, tasks, |(((p, m), a), d)| {
+                    flag(p.iter().zip(m).zip(a).zip(d).any(|(((p, m), a), d)| {
+                        let (p, m, a) =
+                            merge::delayed_nesterov_elem(*p, *m, *a, *d, lr, mu, period, update);
+                        !p.is_finite() || !m.is_finite() || !a.is_finite()
+                    }));
+                });
+                if bad.load(std::sync::atomic::Ordering::Relaxed) {
+                    bail!("fragment {fid}: outer optimizer produced non-finite state");
+                }
+                merge::delayed_nesterov_step_par(
+                    Arc::make_mut(params).as_mut_slice(),
+                    Arc::make_mut(momentum).as_mut_slice(),
+                    state,
+                    delta,
+                    lr,
+                    mu,
+                    period,
+                    workers,
+                );
+            } else {
+                let tasks: Vec<_> =
+                    params.chunks(c).zip(momentum.chunks(c)).zip(delta.chunks(c)).collect();
+                crate::par::run_tasks(workers, tasks, |((p, m), d)| {
+                    flag(p.iter().zip(m).zip(d).any(|((param, momentum), gradient)| {
+                        let next_momentum = mu * *momentum + *gradient;
+                        let next_param = *param - lr * (*gradient + mu * next_momentum);
+                        !next_param.is_finite() || !next_momentum.is_finite()
+                    }));
+                });
+                if bad.load(std::sync::atomic::Ordering::Relaxed) {
+                    bail!("fragment {fid}: outer optimizer produced non-finite state");
+                }
+                merge::nesterov_step_par(
+                    Arc::make_mut(params).as_mut_slice(),
+                    Arc::make_mut(momentum).as_mut_slice(),
+                    delta,
+                    lr,
+                    mu,
+                    workers,
+                );
+            }
+            let gnorm = gnorm.join().expect("norm thread panicked");
+            debug_assert!(gnorm.is_finite());
+            Ok(gnorm)
+        })
     }
 
     /// The Delayed Nesterov variant of the outer step in `commit_merge`,
@@ -1190,7 +1315,59 @@ impl GlobalState {
     /// Written to `<path>.tmp` then renamed, so a crash mid-write never
     /// corrupts the previous checkpoint.
     pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        // Never two writers on `<path>.tmp`; the newest cut lands last.
+        self.wait_for_background_checkpoint()?;
         self.checkpoint_snapshot()?.save(path)
+    }
+
+    /// Start writing the current cut to `path` on its own thread and return
+    /// at once (`--background-checkpoint`). The write is the same as
+    /// `save_checkpoint`'s: the snapshot shares the fragment buffers, so a
+    /// later commit copies only a fragment the writer has not reached yet.
+    /// A previous background write is waited for first. A failed write
+    /// surfaces from the next wait: the next checkpoint, or the final one
+    /// (`save_checkpoint` waits too); `path` keeps the previous cut.
+    pub fn save_checkpoint_in_background(&self, path: &std::path::Path) -> Result<()> {
+        self.wait_for_background_checkpoint()?;
+        let snapshot = self.checkpoint_snapshot()?;
+        let step = self.global_step;
+        let target = path.to_path_buf();
+        let writer = std::thread::Builder::new()
+            .name("yeto-checkpoint".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                snapshot.save(&target)?;
+                tracing::info!(
+                    step,
+                    path = %target.display(),
+                    seconds = %format!("{:.1}", started.elapsed().as_secs_f64()),
+                    "background checkpoint written"
+                );
+                Ok(())
+            })
+            .context("cannot start the checkpoint writer thread")?;
+        *self.background_checkpoint.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(BackgroundCheckpoint { step, writer });
+        Ok(())
+    }
+
+    /// Wait for the background checkpoint write, if any, and return its result.
+    pub fn wait_for_background_checkpoint(&self) -> Result<()> {
+        let pending = self
+            .background_checkpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let Some(BackgroundCheckpoint { step, writer }) = pending else {
+            return Ok(());
+        };
+        if !writer.is_finished() {
+            tracing::info!(step, "waiting for the background checkpoint");
+        }
+        match writer.join() {
+            Ok(result) => result.with_context(|| format!("background checkpoint at step {step}")),
+            Err(_) => bail!("background checkpoint writer at step {step} panicked"),
+        }
     }
 
     /// The exact bytes `save_checkpoint` writes (tests and small states).
@@ -1475,6 +1652,135 @@ impl GlobalState {
     }
 }
 
+/// Fragments smaller than this always take the single-threaded path; thread
+/// start-up would cost more than it saves. Results do not depend on it.
+pub(crate) const PARALLEL_MIN_NUMEL: usize = 1 << 16;
+
+/// A tensor at least this large (and larger than its fair share of the
+/// fragment) is processed alone with chunk-level parallelism; smaller tensors
+/// are processed whole, many at a time.
+const LARGE_TENSOR_MIN_NUMEL: usize = 1 << 20;
+
+fn is_large_tensor(tn: usize, numel: usize, threads: usize) -> bool {
+    tn >= LARGE_TENSOR_MIN_NUMEL && tn.saturating_mul(threads) > numel
+}
+
+/// Offsets of each tensor in its fragment.
+fn tensor_offsets(tensor_numels: &[usize]) -> Vec<usize> {
+    let mut off = 0;
+    tensor_numels
+        .iter()
+        .map(|&n| {
+            let o = off;
+            off += n;
+            o
+        })
+        .collect()
+}
+
+/// HeLoCo-corrected copies of every learner's outer gradient, bit-identical
+/// to the serial per-learner, per-tensor `heloco_correct` loop: each
+/// (learner, tensor) correction is independent of the others.
+fn heloco_correct_all_par(
+    outer_gradients: &[&[f32]],
+    momentum: &[f32],
+    tensor_numels: &[usize],
+    h: &merge::Heloco,
+    threads: usize,
+) -> Vec<Vec<f32>> {
+    let numel = momentum.len();
+    let offsets = tensor_offsets(tensor_numels);
+    let mut corrected: Vec<Vec<f32>> = outer_gradients.iter().map(|_| vec![0.0f32; numel]).collect();
+    let mut small = Vec::new();
+    let mut large = Vec::new();
+    for (buf, gradient) in corrected.iter_mut().zip(outer_gradients) {
+        for ((out, &off), &tn) in crate::par::split_lengths(buf, tensor_numels)
+            .into_iter()
+            .zip(&offsets)
+            .zip(tensor_numels)
+        {
+            let task = (out, &gradient[off..off + tn], &momentum[off..off + tn]);
+            if is_large_tensor(tn, numel, threads) {
+                large.push(task);
+            } else {
+                small.push(task);
+            }
+        }
+    }
+    // Largest first keeps the tail of the queue short.
+    small.sort_by_key(|(out, _, _)| std::cmp::Reverse(out.len()));
+    crate::par::run_tasks(threads, small, |(out, gradient, momentum)| {
+        out.copy_from_slice(gradient);
+        merge::heloco_correct(out, momentum, h);
+    });
+    // Large tensors of different learners are corrected concurrently, each
+    // with its share of the threads, so their sequential norms overlap.
+    let outer = large.len().clamp(1, threads);
+    let inner = (threads / outer).max(1);
+    crate::par::run_tasks(outer, large, |(out, gradient, momentum)| {
+        crate::par::copy(inner, out, gradient);
+        merge::heloco_correct_par(out, momentum, h, inner.max(2));
+    });
+    corrected
+}
+
+/// The per-tensor reduction loop of `prepare_merge_scaled`, run with
+/// tensors in parallel (large tensors chunk-parallel). Bit-identical to the
+/// serial loop: each tensor's merge reads only its own slices.
+fn merge_tensors_par(
+    fid: usize,
+    merge_mode: u8,
+    outer_gradients: &[&[f32]],
+    weights: &[f64],
+    tensor_scales: Option<&[&[f64]]>,
+    tensor_numels: &[usize],
+    threads: usize,
+) -> Result<Vec<f32>> {
+    if !tensor_numels.is_empty() && !matches!(merge_mode, MERGE_AVG | MERGE_ISO | MERGE_RDA) {
+        bail!("fragment {fid}: unsupported merge mode {merge_mode}");
+    }
+    let numel: usize = tensor_numels.iter().sum();
+    let offsets = tensor_offsets(tensor_numels);
+    let mut delta = vec![0.0f32; numel];
+    let tensor_weights = |tensor_index: usize| -> Vec<f64> {
+        match tensor_scales {
+            None => weights.to_vec(),
+            Some(scales) => weights.iter().zip(scales).map(|(&w, s)| w * s[tensor_index]).collect(),
+        }
+    };
+    let mut small = Vec::new();
+    let mut large = Vec::new();
+    for (tensor_index, out) in crate::par::split_lengths(&mut delta, tensor_numels).into_iter().enumerate() {
+        if is_large_tensor(out.len(), numel, threads) {
+            large.push((tensor_index, out));
+        } else {
+            small.push((tensor_index, out));
+        }
+    }
+    small.sort_by_key(|(_, out)| std::cmp::Reverse(out.len()));
+    let slices_of = |tensor_index: usize, tn: usize| -> Vec<&[f32]> {
+        let off = offsets[tensor_index];
+        outer_gradients.iter().map(|g| &g[off..off + tn]).collect()
+    };
+    crate::par::run_tasks(threads, small, |(tensor_index, out)| {
+        let slices = slices_of(tensor_index, out.len());
+        let weights = tensor_weights(tensor_index);
+        match merge_mode {
+            MERGE_RDA => merge::merge_rda(&slices, &weights, out),
+            _ => merge::merge_avg(&slices, &weights, out),
+        }
+    });
+    for (tensor_index, out) in large {
+        let slices = slices_of(tensor_index, out.len());
+        let weights = tensor_weights(tensor_index);
+        match merge_mode {
+            MERGE_RDA => merge::merge_rda_par(&slices, &weights, out, threads),
+            _ => merge::merge_avg_par(&slices, &weights, out, threads),
+        }
+    }
+    Ok(delta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1540,6 +1846,191 @@ mod tests {
                 },
             ],
         }
+    }
+
+    // ---- parallel merge: bit identity with the single-threaded path ----
+
+    struct Rng(u64);
+    impl Rng {
+        fn next_f32(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02
+        }
+        fn vec(&mut self, n: usize) -> Vec<f32> {
+            (0..n).map(|_| self.next_f32()).collect()
+        }
+    }
+
+    fn par_state(tensors: &[u64], mode: u8, heloco: bool, delayed: Option<u32>, threads: usize) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![FragmentInfo {
+                merge_mode: mode,
+                tensor_numels: tensors.to_vec(),
+                tensor_shapes: None,
+            }],
+        };
+        let mut st = GlobalState::new(layout, 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
+        st.merge_threads = threads;
+        if heloco {
+            st.delta_correction = Some(merge::Heloco::default());
+        }
+        st.set_delayed_nesterov_period(delayed).unwrap();
+        let numel = tensors.iter().sum::<u64>() as usize;
+        st.init_fragment(0, Rng(99).vec(numel)).unwrap();
+        st
+    }
+
+    /// Learner gradients for one round that exercise every branch: random
+    /// tensors, an all-zero tensor (RDA φ(0), HeLoCo skip), exactly
+    /// cancelling tensors (RDA fallback to the average), and a learner that
+    /// opposes the momentum (HeLoCo shrink) next to near-orthogonal ones
+    /// (HeLoCo rotate) and aligned ones (pass through).
+    fn round_gradients(tensors: &[u64], round: u64, momentum: &[f32]) -> Vec<Vec<f32>> {
+        let numel = tensors.iter().sum::<u64>() as usize;
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (round + 1).wrapping_mul(0x2545_f491));
+        let mut g: Vec<Vec<f32>> = (0..3).map(|_| rng.vec(numel)).collect();
+        let mut off = 0usize;
+        for (t, &tn) in tensors.iter().enumerate() {
+            let range = off..off + tn as usize;
+            match t % 4 {
+                0 => g[1][range.clone()].fill(0.0),
+                1 => {
+                    let v = g[0][range.clone()].to_vec();
+                    for (x, y) in g[1][range.clone()].iter_mut().zip(&v) {
+                        *x = -*y;
+                    }
+                }
+                _ => {}
+            }
+            if t % 3 == 2 && !momentum.is_empty() {
+                for (x, m) in g[2][range.clone()].iter_mut().zip(&momentum[range.clone()]) {
+                    *x = -4.0 * *m + *x * 0.01;
+                }
+            }
+            if t % 5 == 4 && !momentum.is_empty() {
+                for (x, m) in g[0][range.clone()].iter_mut().zip(&momentum[range.clone()]) {
+                    *x = *m + *x * 0.01;
+                }
+            }
+            off += tn as usize;
+        }
+        g
+    }
+
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    fn assert_parallel_matches_serial(tensors: &[u64], mode: u8, heloco: bool, delayed: Option<u32>, scaled: bool) {
+        let weights = [1.0f64, 2.5, 0.75];
+        let scales: Vec<Vec<f64>> = (0..3)
+            .map(|m| (0..tensors.len()).map(|t| 0.5 + ((m * 7 + t * 3) % 5) as f64).collect())
+            .collect();
+        let scale_refs: Vec<&[f64]> = scales.iter().map(|s| s.as_slice()).collect();
+        let mut states: Vec<GlobalState> =
+            [1usize, 2, 3, 8].iter().map(|&n| par_state(tensors, mode, heloco, delayed, n)).collect();
+        for round in 0..4u64 {
+            let momentum = states[0].momentum[0].to_vec();
+            let grads = round_gradients(tensors, round, &momentum);
+            let refs: Vec<&[f32]> = grads.iter().map(|g| g.as_slice()).collect();
+            let mut results = Vec::new();
+            for st in states.iter_mut() {
+                let prepared = st
+                    .prepare_merge_scaled(0, round, &refs, &weights, scaled.then_some(scale_refs.as_slice()))
+                    .unwrap();
+                let gnorm = st.commit_merge(prepared.finish_inline().unwrap()).unwrap();
+                st.versions[0] = round + 1;
+                let accum = st.delayed_nesterov.first().map(|s| bits(&s.accum));
+                results.push((gnorm.to_bits(), bits(&st.params[0]), bits(&st.momentum[0]), accum));
+            }
+            for (i, r) in results.iter().enumerate().skip(1) {
+                assert!(
+                    *r == results[0],
+                    "tensors {tensors:?} mode {mode} heloco {heloco} delayed {delayed:?} scaled {scaled}: \
+                     state {i} diverged from serial at round {round}"
+                );
+            }
+        }
+    }
+
+    const PAR_LAYOUTS: &[&[u64]] = &[
+        // Below the parallel threshold: always the serial path.
+        &[7, 300, 1],
+        // Many small tensors, scheduled whole across threads.
+        &[40_000, 3, 70_001, 0, 65_536, 12_345, 99_999, 1, 131_073],
+        // One dominant tensor (chunk-parallel path) beside small ones.
+        &[1_500_003, 17, 65_537, 0, 4_099],
+        // Only one tensor, not a multiple of the chunk length.
+        &[(1 << 20) + 12_345],
+    ];
+
+    #[test]
+    fn parallel_merge_is_bitwise_serial_rda_heloco() {
+        for layout in PAR_LAYOUTS {
+            assert_parallel_matches_serial(layout, MERGE_RDA, true, None, false);
+        }
+    }
+
+    #[test]
+    fn parallel_merge_is_bitwise_serial_avg_and_scales() {
+        for layout in PAR_LAYOUTS {
+            assert_parallel_matches_serial(layout, MERGE_AVG, false, None, false);
+            assert_parallel_matches_serial(layout, MERGE_RDA, false, None, true);
+            assert_parallel_matches_serial(layout, MERGE_AVG, true, None, true);
+        }
+    }
+
+    #[test]
+    fn parallel_merge_is_bitwise_serial_delayed_nesterov() {
+        for layout in PAR_LAYOUTS {
+            assert_parallel_matches_serial(layout, MERGE_RDA, true, Some(3), false);
+        }
+    }
+
+    #[test]
+    fn parallel_merge_rejects_non_finite_like_serial() {
+        let tensors: &[u64] = &[200_000, 70_000];
+        let numel = 270_000usize;
+        let outcome = |threads: usize, poison: f32, at: usize, heloco: bool| {
+            let mut st = par_state(tensors, MERGE_RDA, heloco, None, threads);
+            let before = (bits(&st.params[0]), bits(&st.momentum[0]));
+            let mut g = Rng(5).vec(numel);
+            g[at] = poison;
+            let other = Rng(6).vec(numel);
+            let err = st
+                .prepare_merge(0, 0, &[&g, &other], &[1.0, 1.0])
+                .and_then(|p| p.finish_inline())
+                .and_then(|c| st.commit_merge(c))
+                .unwrap_err()
+                .to_string();
+            assert_eq!((bits(&st.params[0]), bits(&st.momentum[0])), before, "state mutated");
+            err
+        };
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for at in [0, 199_999, 269_999] {
+                for heloco in [false, true] {
+                    let serial = outcome(1, poison, at, heloco);
+                    for threads in [2, 5] {
+                        assert_eq!(outcome(threads, poison, at, heloco), serial);
+                    }
+                }
+            }
+        }
+        // A finite merged gradient whose optimizer step overflows f32.
+        let overflow = |threads: usize| {
+            let mut st = par_state(tensors, MERGE_AVG, false, None, threads);
+            let before = bits(&st.params[0]);
+            let mut g = vec![0.0f32; numel];
+            g[123_456] = 3.0e38;
+            let err = st.merge_and_step(0, &[&g], &[1.0]).unwrap_err().to_string();
+            assert_eq!(bits(&st.params[0]), before);
+            err
+        };
+        let serial = overflow(1);
+        assert!(serial.contains("outer optimizer produced non-finite state"), "{serial}");
+        assert_eq!(overflow(4), serial);
     }
 
     #[test]
@@ -1759,6 +2250,41 @@ mod tests {
         snapshot.save(&path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), cut);
         assert_ne!(st.encode_checkpoint().unwrap(), cut);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_checkpoint_writes_its_cut_while_later_commits_go_on() {
+        let dir = std::env::temp_dir().join(format!("yeto-ckpt-background-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut st = state_with_fingerprint(layout2(), 0x24);
+        st.init_fragment(0, vec![1.5; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        st.global_step = 3;
+        let first = st.encode_checkpoint().unwrap();
+        st.save_checkpoint_in_background(&path).unwrap();
+        // Commits do not wait for the writer; the file still holds step 3.
+        st.merge_and_step(0, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        st.global_step = 4;
+        let second = st.encode_checkpoint().unwrap();
+        st.wait_for_background_checkpoint().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        // The next background write waits for none (already joined) and
+        // writes the newer cut; a synchronous save after it waits for it.
+        st.save_checkpoint_in_background(&path).unwrap();
+        st.merge_and_step(1, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        st.global_step = 5;
+        let third = st.encode_checkpoint().unwrap();
+        st.save_checkpoint(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), third);
+        assert_ne!(first, second);
+        // A failed background write is reported by the next wait.
+        let missing = dir.join("no-such-dir").join("state.ckpt");
+        st.save_checkpoint_in_background(&missing).unwrap();
+        let error = st.wait_for_background_checkpoint().unwrap_err();
+        assert!(format!("{error:#}").contains("background checkpoint at step 5"), "{error:#}");
+        st.wait_for_background_checkpoint().unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -72,7 +72,12 @@ _TERMINAL_GRACE_DOMAIN = b"yeto-syncer-terminal-grace-v1\0"
 # the listed global steps (syncer --checkpoint-at-steps) append their block.
 _CHECKPOINT_AT_STEPS_FIELD = "checkpoint_at_steps"
 _EVAL_CHECKPOINTS_DOMAIN = b"yeto-syncer-eval-checkpoints-v1\0"
+# Optional. Absent or false = carried late deltas stay outside quorum
+# (byte-identical hash); true (syncer --carry-answers-round) appends its domain.
+_CARRY_ANSWERS_ROUND_FIELD = "carry_answers_round"
+_CARRY_ANSWERS_ROUND_DOMAIN = b"yeto-syncer-carry-answers-round-v1\0"
 _OPTIONAL_FIELDS = {
+    _CARRY_ANSWERS_ROUND_FIELD,
     _DELAYED_NESTEROV_FIELD,
     _EXPERT_TOKEN_WEIGHTS_FIELD,
     _FINAL_CUT_MANIFEST_ONLY_FIELD,
@@ -174,6 +179,7 @@ class SyncerSemanticProfile:
     grace_arrival_quantile: float = 0.0
     terminal_grace_ms: int = 0
     checkpoint_at_steps: tuple[int, ...] = ()
+    carry_answers_round: bool = False
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
@@ -264,6 +270,9 @@ class SyncerSemanticProfile:
             ),
             checkpoint_at_steps=_steps(
                 _CHECKPOINT_AT_STEPS_FIELD, raw.get(_CHECKPOINT_AT_STEPS_FIELD, ())
+            ),
+            carry_answers_round=_boolean(
+                _CARRY_ANSWERS_ROUND_FIELD, raw.get(_CARRY_ANSWERS_ROUND_FIELD, False)
             ),
         )
         profile._validate_general()
@@ -373,6 +382,8 @@ class SyncerSemanticProfile:
             encoded.extend(_EVAL_CHECKPOINTS_DOMAIN)
             encoded.extend(struct.pack("<Q", len(self.checkpoint_at_steps)))
             encoded.extend(struct.pack(f"<{len(self.checkpoint_at_steps)}Q", *self.checkpoint_at_steps))
+        if self.carry_answers_round:
+            encoded.extend(_CARRY_ANSWERS_ROUND_DOMAIN)
         return bytes(encoded)
 
     @property

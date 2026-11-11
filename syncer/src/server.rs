@@ -121,6 +121,10 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Write the `checkpoint_every` checkpoints on a background thread while
+    /// rounds keep merging (`GlobalState::save_checkpoint_in_background`)
+    /// instead of on the scheduler. Every other checkpoint waits for it.
+    pub background_checkpoint: bool,
     /// Global steps whose cut is also written to `<checkpoint_path>.step-<t>`
     /// off the scheduler (`crate::eval_checkpoint`); strictly increasing,
     /// below `total_steps`. Empty: none.
@@ -209,6 +213,13 @@ pub struct Config {
     /// must expect it, so it is in the semantic profile hash (appended only
     /// when on). Off sends every final fragment to every island.
     pub final_cut_manifest_only: bool,
+    /// A late delta carried into a round (async rounds, `LateCarry`) answers
+    /// that round for its expected island: it counts towards quorum and the
+    /// all-answered check. The carry spends the island's anchor, so without
+    /// this a quorum-1 round holding only carried deltas waits for the
+    /// slowest island. Off keeps carries outside quorum (the historical RL
+    /// async rule). In the semantic profile hash (appended only when on).
+    pub carry_answers_round: bool,
     /// Task dispenser (`dispense.rs`): islands claim the rows they
     /// train over TASK_* connections. Hands out data only, never changes a
     /// merge, so it is not in the semantic profile hash. None: off.
@@ -234,6 +245,7 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 const FINAL_CUT_MANIFEST_ONLY_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-final-cut-manifest-only-v1\0";
+const CARRY_ANSWERS_ROUND_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-carry-answers-round-v1\0";
 const GRACE_FLOOR_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-grace-floor-v1\0";
 const TERMINAL_GRACE_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-terminal-grace-v1\0";
 const EVAL_CHECKPOINTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-eval-checkpoints-v1\0";
@@ -304,6 +316,10 @@ impl Config {
             for step in &self.checkpoint_at_steps {
                 encoded.extend_from_slice(&step.to_le_bytes());
             }
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.carry_answers_round {
+            encoded.extend_from_slice(CARRY_ANSWERS_ROUND_PROFILE_DOMAIN);
         }
         Sha256::digest(encoded).into()
     }
@@ -731,7 +747,45 @@ fn append_tensor_bytes(
     }
     let first = byte_offset / width;
     let last = byte_end.div_ceil(width);
-    for (index, value) in values[first..last].iter().enumerate() {
+    // Values cut by the range ends go byte by byte; the whole values between
+    // them are encoded in one pass (a broadcast chunk is 4 MiB, and the
+    // per-value slicing alone held a forwarder to ~0.4 GB/s).
+    let first_whole = byte_offset.div_ceil(width).min(last);
+    let last_whole = (byte_end / width).max(first_whole);
+    append_value_bytes(dtype, width, values, first..first_whole, byte_offset, byte_end, out);
+    let whole = &values[first_whole..last_whole];
+    let start = out.len();
+    out.resize(start + whole.len() * width, 0);
+    let dst = &mut out[start..];
+    match dtype {
+        DTYPE_F32 => {
+            for (d, value) in dst.chunks_exact_mut(4).zip(whole) {
+                d.copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        DTYPE_BF16 => {
+            for (d, value) in dst.chunks_exact_mut(2).zip(whole) {
+                d.copy_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes());
+            }
+        }
+        _ => unreachable!(),
+    }
+    append_value_bytes(dtype, width, values, last_whole..last, byte_offset, byte_end, out);
+    Ok(())
+}
+
+/// The bytes of `values[range]` that fall in `byte_offset..byte_end`.
+fn append_value_bytes(
+    dtype: u8,
+    width: usize,
+    values: &[f32],
+    range: std::ops::Range<usize>,
+    byte_offset: usize,
+    byte_end: usize,
+    out: &mut Vec<u8>,
+) {
+    let first = range.start;
+    for (index, value) in values[range].iter().enumerate() {
         let value_index = first + index;
         let value_start = value_index * width;
         let start = byte_offset.saturating_sub(value_start);
@@ -745,7 +799,6 @@ fn append_tensor_bytes(
             _ => unreachable!(),
         }
     }
-    Ok(())
 }
 
 /// One receive-only subscriber connection (`subscriber.rs`).
@@ -1084,7 +1137,63 @@ struct Push {
     /// Expert token weights: the per-tensor merge scale of this push (see
     /// `protocol::decode_expert_tags`); `None` when the option is off.
     tensor_scales: Option<Vec<f64>>,
+    /// The learner's wire payload, kept only while it is smaller than the
+    /// decoded gradient, so a late push queued for its fragment's next
+    /// round (`LateCarry`) can drop `outer_gradient` and wait as wire bytes.
+    wire: Option<PushWire>,
     transfer: PushTransfer,
+}
+
+/// A PUSH_FRAGMENT delta payload as received (dtype, tensor segments, bytes).
+struct PushWire {
+    dtype: u8,
+    segments: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl Push {
+    /// Keep only the wire bytes (a late push waiting ~F rounds: an int4
+    /// payload is 1/7.5 of its f32 gradient). No-op without wire bytes.
+    fn compress(&mut self) {
+        if self.wire.is_some() {
+            self.outer_gradient = Vec::new();
+        }
+    }
+
+    /// A push that joins a round keeps its decoded gradient only: the wire
+    /// copy exists for a push that waits in the late-carry queue.
+    fn release_wire(&mut self) {
+        self.wire = None;
+    }
+
+    /// Undo `compress`: decode the wire bytes exactly as on receipt, so the
+    /// gradient is bit-identical to the one dropped.
+    fn expand(&mut self) {
+        if let Some(wire) = self.wire.take() {
+            if self.outer_gradient.is_empty() {
+                self.outer_gradient = decode_outer_gradient(&wire)
+                    .expect("a push payload that decoded on receipt decodes again");
+            }
+        }
+    }
+}
+
+/// `decode_outer_gradient` of `bytes` with `wire`'s dtype and segments.
+fn decode_push_segments_to_gradient(wire: &PushWire, bytes: &[u8]) -> Result<Vec<f32>> {
+    let mut outer_gradient = Vec::new();
+    decode_push_segments(wire.dtype, bytes, &wire.segments, &mut outer_gradient)?;
+    // Every wire dtype carries learner_delta = local - raw_anchor.
+    // Merge math consumes the corresponding outer gradient with the
+    // opposite sign and never reconstructs a full learner parameter.
+    for value in &mut outer_gradient {
+        *value = -*value;
+    }
+    Ok(outer_gradient)
+}
+
+/// The outer gradient `raw_anchor - local` of a push payload.
+fn decode_outer_gradient(wire: &PushWire) -> Result<Vec<f32>> {
+    decode_push_segments_to_gradient(wire, &wire.bytes)
 }
 
 /// When and how fast one PUSH_FRAGMENT reached the syncer (full-parameter
@@ -1709,6 +1818,16 @@ fn validate_config(cfg: &Config) -> Result<()> {
     validate_shard_config(cfg)?;
     if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
         bail!("--bcast-delta-full-every must be at least 2");
+    }
+    if cfg.background_checkpoint
+        && (cfg.checkpoint_path.is_none()
+            || cfg.checkpoint_every < 2
+            || cfg.policy_sweep_fragments.is_some())
+    {
+        bail!(
+            "--background-checkpoint needs --checkpoint-path and --checkpoint-every of at least 2, \
+             without --policy-sweep-fragments (per-round checkpoints persist before their broadcast)"
+        );
     }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
@@ -3049,7 +3168,28 @@ async fn read_loop(
     event_tx: &mpsc::Sender<Event>,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let mut inits = std::collections::VecDeque::new();
+    let result = read_frames(rd, group, event_tx, budget_cutoff, &mut inits).await;
+    // A failed INIT decode is this connection's protocol error too.
+    let decoded = reap_init_params(&mut inits, true).await;
+    if let (Ok(()), Err(error)) = (&result, &decoded) {
+        report_protocol_error(group, error).await;
+    }
+    result.and(decoded)
+}
+
+async fn read_frames(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    group: &Arc<Group>,
+    event_tx: &mpsc::Sender<Event>,
+    budget_cutoff: &BudgetCutoff,
+    inits: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
     loop {
+        if let Err(error) = reap_init_params(inits, false).await {
+            report_protocol_error(group, &error).await;
+            return Err(error);
+        }
         let mut header_at: Option<Instant> = None;
         let frame = match read_frame_limited(rd, |msg_type| {
             header_at = Some(Instant::now());
@@ -3085,11 +3225,15 @@ async fn read_loop(
         group.wire.recv.fetch_add(frame.payload.len() as u64 + 13, Ordering::Relaxed);
         let dispatched = match frame.msg_type {
             MSG_CHUNK => match reassemble(group, &frame.payload) {
+                Ok(Some((inner, _))) if inner.msg_type == MSG_INIT_PARAMS => {
+                    inits.push_back(spawn_init_params(group, inner, event_tx));
+                    Ok(())
+                }
                 Ok(Some((inner, recv_seconds))) => {
                     dispatch_inner(
                         group,
                         inner.msg_type,
-                        &inner.payload,
+                        inner.payload(),
                         recv_seconds,
                         event_tx,
                         budget_cutoff,
@@ -3119,7 +3263,7 @@ async fn report_protocol_error(group: &Arc<Group>, error: &anyhow::Error) {
 
 /// Adds one chunk; a completed message comes back with its receive time
 /// (first chunk to last chunk).
-fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>> {
+fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Reassembled, f64)>> {
     let mut r = Reader(payload);
     let msg_id = r.u64()?;
     let total_u64 = r.u64()?;
@@ -3197,17 +3341,107 @@ fn reassemble(group: &Arc<Group>, payload: &[u8]) -> Result<Option<(Frame, f64)>
     }
     let msg_type = r.u8()?;
     let len = r.u64()? as usize;
-    let payload = r.rest();
-    if payload.len() != len {
+    if r.rest().len() != len {
         bail!("inner frame length mismatch");
     }
-    Ok(Some((
-        Frame {
-            msg_type,
-            payload: payload.to_vec(),
-        },
-        recv_seconds,
-    )))
+    // The payload stays in the buffer: copying a model-sized INIT out of it
+    // was one more single-threaded pass on the read loop.
+    Ok(Some((Reassembled { msg_type, buf }, recv_seconds)))
+}
+
+/// A reassembled inner frame: its 13-byte header, then the payload.
+struct Reassembled {
+    msg_type: u8,
+    buf: Vec<u8>,
+}
+
+impl Reassembled {
+    fn payload(&self) -> &[u8] {
+        &self.buf[13..]
+    }
+}
+
+/// INIT_PARAMS of one connection hashed and decoded at once, off its read
+/// loop. Each holds a fragment (~30 GB transient for a 120B f32 fragment:
+/// the payload and its decoded values), and the digest is one sequential
+/// ~1.6 GB/s pass, so the read loop keeps receiving the next fragments
+/// while earlier ones are checked instead of stalling its stream.
+const INIT_PIPELINE: usize = 4;
+
+/// Validate, hash and decode one INIT_PARAMS payload: (fragment, SHA-256 of
+/// its tensor bytes, values).
+fn decode_init_params(group: &Group, payload: &[u8]) -> Result<(u32, [u8; 32], Vec<f32>)> {
+    if group.member.learner_id != 0 {
+        bail!("only learner 0 may send INIT_PARAMS");
+    }
+    let mut r = Reader(payload);
+    let fragment_id = r.u32()?;
+    let fragment = group
+        .layout
+        .fragments
+        .get(fragment_id as usize)
+        .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
+    let numel = fragment.numel()?;
+    let bytes = r.rest();
+    let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
+    if bytes.len() != expected {
+        bail!(
+            "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
+            bytes.len()
+        );
+    }
+    // The digest is one sequential pass; decode the values meanwhile.
+    let (sha256, values) = std::thread::scope(|scope| {
+        let digest = scope.spawn(|| crate::sha256::digest(bytes));
+        let mut values = Vec::new();
+        let decoded = decode_tensor_with(crate::par::default_threads(), bulk_dtype(group.dtype), bytes, &mut values);
+        (digest.join().expect("INIT digest thread panicked"), decoded.map(|()| values))
+    });
+    Ok((fragment_id, sha256, values?))
+}
+
+/// Hash and decode a reassembled INIT_PARAMS on the blocking pool, then
+/// hand it to the coordinator. The coordinator applies INITs in any
+/// order (each fragment once, from the current generation only).
+fn spawn_init_params(
+    group: &Arc<Group>,
+    inner: Reassembled,
+    event_tx: &mpsc::Sender<Event>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let (group, event_tx) = (Arc::clone(group), event_tx.clone());
+    tokio::spawn(async move {
+        let member = group.member;
+        let (fragment_id, sha256, values) =
+            tokio::task::spawn_blocking(move || decode_init_params(&group, inner.payload()))
+                .await
+                .context("INIT_PARAMS decoder panicked")??;
+        event_tx
+            .send(Event::Init {
+                member,
+                fragment_id,
+                values,
+                sha256,
+            })
+            .await
+            .ok();
+        Ok(())
+    })
+}
+
+/// Wait for the finished (all, with `all`) INIT_PARAMS decoders of a read
+/// loop, oldest first; the first failure is returned.
+async fn reap_init_params(
+    pending: &mut std::collections::VecDeque<tokio::task::JoinHandle<Result<()>>>,
+    all: bool,
+) -> Result<()> {
+    while let Some(oldest) = pending.front() {
+        if !all && !oldest.is_finished() && pending.len() < INIT_PIPELINE {
+            break;
+        }
+        let oldest = pending.pop_front().expect("front exists");
+        oldest.await.context("INIT_PARAMS task panicked")??;
+    }
+    Ok(())
 }
 
 async fn dispatch_inner(
@@ -3220,28 +3454,7 @@ async fn dispatch_inner(
 ) -> Result<()> {
     match msg_type {
         MSG_INIT_PARAMS => {
-            if group.member.learner_id != 0 {
-                bail!("only learner 0 may send INIT_PARAMS");
-            }
-            let mut r = Reader(payload);
-            let fragment_id = r.u32()?;
-            let fragment = group
-                .layout
-                .fragments
-                .get(fragment_id as usize)
-                .with_context(|| format!("INIT_PARAMS for unknown fragment {fragment_id}"))?;
-            let numel = fragment.numel()?;
-            let bytes = r.rest();
-            let expected = tensor_nbytes(bulk_dtype(group.dtype), numel)?;
-            if bytes.len() != expected {
-                bail!(
-                    "INIT_PARAMS fragment {fragment_id} has {} tensor bytes, expected {expected}",
-                    bytes.len()
-                );
-            }
-            let sha256: [u8; 32] = Sha256::digest(bytes).into();
-            let mut values = Vec::new();
-            decode_tensor(bulk_dtype(group.dtype), bytes, &mut values)?;
+            let (fragment_id, sha256, values) = decode_init_params(group, payload)?;
             event_tx
                 .send(Event::Init {
                     member: group.member,
@@ -3310,16 +3523,12 @@ async fn dispatch_inner(
                 None
             };
             let bytes = r.rest();
-            let mut outer_gradient = Vec::new();
             let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
-            decode_push_segments(group.dtype, bytes, &segments, &mut outer_gradient)
+            let wire = PushWire { dtype: group.dtype, segments, bytes: Vec::new() };
+            let outer_gradient = decode_push_segments_to_gradient(&wire, bytes)
                 .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
-            // Every wire dtype carries learner_delta = local - raw_anchor.
-            // Merge math consumes the corresponding outer gradient with the
-            // opposite sign and never reconstructs a full learner parameter.
-            for value in &mut outer_gradient {
-                *value = -*value;
-            }
+            // Only a payload smaller than its gradient is worth keeping.
+            let wire = (bytes.len() < 4 * numel).then(|| PushWire { bytes: bytes.to_vec(), ..wire });
             event_tx
                 .send(Event::Push {
                     member: group.member,
@@ -3334,6 +3543,7 @@ async fn dispatch_inner(
                         c_tokens,
                         outer_gradient,
                         tensor_scales,
+                        wire,
                         transfer: PushTransfer {
                             recv_seconds,
                             arrived_unix: unix_now(),
@@ -4088,6 +4298,7 @@ async fn scheduler(
                 fold,
                 pushes: HashMap::new(),
                 carried: Vec::new(),
+                carry_answers: cfg.carry_answers_round,
             });
             if let Some(carry) = late_carry.as_mut() {
                 let round = inflight.last_mut().expect("round just launched");
@@ -5265,13 +5476,32 @@ struct Round {
     /// `LateCarry`): merged here against their own base, in arrival order.
     /// They never count toward quorum and stay buffered until the merge.
     carried: Vec<(Member, Push)>,
+    /// `Config::carry_answers_round`, frozen at launch.
+    carry_answers: bool,
 }
 
 impl Round {
+    /// Islands that answered this round: its own pushes plus, with
+    /// `carry_answers`, expected islands whose late delta of an earlier
+    /// round was carried into it (see `Config::carry_answers_round`).
+    fn responders(&self) -> Vec<&Member> {
+        let mut responders: Vec<&Member> = self.pushes.keys().collect();
+        if !self.carry_answers {
+            return responders;
+        }
+        for (member, _push) in &self.carried {
+            if self.expected_members.contains(member) && !responders.contains(&member) {
+                responders.push(member);
+            }
+        }
+        responders
+    }
+
     fn quorum_reached(&self) -> bool {
+        let responders = self.responders();
         match &self.capacity_quorum {
-            Some(quorum) => quorum.reached(&self.expected_members, self.pushes.keys()),
-            None => self.pushes.len() >= self.quorum_size,
+            Some(quorum) => quorum.reached(&self.expected_members, responders),
+            None => responders.len() >= self.quorum_size,
         }
     }
 
@@ -5362,7 +5592,8 @@ enum RoundAction {
 fn round_action(round: &Round, now: Instant) -> RoundAction {
     // A round never merges nothing: if lease expiry emptied its expected
     // set, it waits for the quorum timeout and relaunches.
-    if !round.pushes.is_empty() && round.pushes.len() >= round.expected_members.len() {
+    let responders = round.responders().len();
+    if responders > 0 && responders >= round.expected_members.len() {
         return RoundAction::Complete;
     }
     if round.quorum_reached() {
@@ -5523,6 +5754,18 @@ fn route_push(
         return PushDisposition::FutureBase;
     }
     if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
+        // The island answered this round's pull; it will not push again for
+        // it. Waiting on its slot would stall the round until the quorum
+        // timeout (and every later round behind it), so release the slot and
+        // let the round close with the remaining responders. The refused work
+        // is not lost: the island's next push is still relative to its raw
+        // anchor. A fixed roster never merges a partial roster, so it keeps
+        // the slot; so does a round with an exact fold, whose order and
+        // weights were fixed for the full expected roster. A streaming fold
+        // normalises over whatever it folded, so it may close without it.
+        if !fixed_roster && !matches!(round.fold, Some(RoundFold::Exact(_))) {
+            round.forget_unanswered(member);
+        }
         return PushDisposition::StaleBase;
     }
     let duplicate = if fixed_roster {
@@ -5536,6 +5779,8 @@ fn route_push(
     if duplicate {
         return PushDisposition::Duplicate;
     }
+    let mut push = push;
+    push.release_wire();
     round.pushes.insert(member, push);
     advance_fold(round, member);
     PushDisposition::Accepted
@@ -5662,6 +5907,8 @@ impl LateCarry {
                 Err(disposition) => CarryOutcome::Rejected(disposition),
             };
         }
+        let mut push = push;
+        push.compress();
         self.queued.entry(p).or_default().push((member, push));
         CarryOutcome::Queued
     }
@@ -5673,7 +5920,8 @@ impl LateCarry {
         };
         queued
             .into_iter()
-            .map(|(member, push)| {
+            .map(|(member, mut push)| {
+                push.expand();
                 let missed = push.global_step;
                 (member, missed, attach_carry(round, member, push, self.limit))
             })
@@ -5744,6 +5992,8 @@ fn attach_carry(
     if lag > limit {
         return Err(PushDisposition::StaleBase);
     }
+    let mut push = push;
+    push.release_wire();
     round.carried.push((member, push));
     Ok(lag)
 }
@@ -6119,9 +6369,19 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
-                st.save_checkpoint(path)?;
-                info!(step = t, path = %path.display(), "checkpoint written");
+            // The last step is persisted by the final checkpoint anyway; a
+            // periodic one there wrote the same ~1 TB cut twice in a row.
+            if cfg.checkpoint_every > 0
+                && st.schedule().round_number(t) % cfg.checkpoint_every == 0
+                && t < st.schedule().last_step(cfg.total_steps)
+            {
+                if cfg.background_checkpoint {
+                    st.save_checkpoint_in_background(path)?;
+                    info!(step = t, path = %path.display(), "background checkpoint started");
+                } else {
+                    st.save_checkpoint(path)?;
+                    info!(step = t, path = %path.display(), "checkpoint written");
+                }
             }
         }
     }
@@ -8711,6 +8971,52 @@ mod hello_auth_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `append_tensor_bytes` as it was: every value sliced by the range.
+    fn reference_tensor_bytes(dtype: u8, values: &[f32], offset: usize, len: usize) -> Vec<u8> {
+        let mut all = Vec::new();
+        for value in values {
+            match dtype {
+                DTYPE_F32 => all.extend_from_slice(&value.to_le_bytes()),
+                _ => all.extend_from_slice(&half::bf16::from_f32(*value).to_bits().to_le_bytes()),
+            }
+        }
+        all[offset..offset + len].to_vec()
+    }
+
+    #[test]
+    fn tensor_byte_ranges_match_the_value_by_value_encoding() {
+        let values: Vec<f32> = (0..97)
+            .map(|i| match i % 11 {
+                0 => f32::NAN,
+                1 => -0.0,
+                2 => f32::MAX,
+                3 => 1e-40, // subnormal: bf16 rounding
+                _ => (i as f32 * 0.731).sin() * 3.0e4,
+            })
+            .collect();
+        for dtype in [DTYPE_F32, DTYPE_BF16] {
+            let total = tensor_nbytes(dtype, values.len()).unwrap();
+            for offset in 0..12.min(total) {
+                for len in (0..14).chain([total - offset - 1, total - offset]) {
+                    if offset + len > total {
+                        continue;
+                    }
+                    let mut out = vec![0xAA];
+                    append_tensor_bytes(dtype, &values, offset, len, &mut out).unwrap();
+                    assert_eq!(out[0], 0xAA);
+                    assert_eq!(out[1..], reference_tensor_bytes(dtype, &values, offset, len)[..], "{dtype} {offset}+{len}");
+                }
+            }
+            // Ranges cut inside the tail, too.
+            for offset in [total - 7, total - 3, total - 1] {
+                let mut out = Vec::new();
+                append_tensor_bytes(dtype, &values, offset, total - offset, &mut out).unwrap();
+                assert_eq!(out, reference_tensor_bytes(dtype, &values, offset, total - offset));
+            }
+            assert!(append_tensor_bytes(dtype, &values, 1, total, &mut Vec::new()).is_err());
+        }
+    }
     use crate::eval_checkpoint::{eval_checkpoint_path, BeforeWrite, EvalCheckpoints};
 
     const CAP: Duration = Duration::from_millis(1000);
@@ -9059,6 +9365,7 @@ mod tests {
             checkpoint_path: None,
             checkpoint_every: 0,
             checkpoint_at_steps: Vec::new(),
+            background_checkpoint: false,
             async_checkpoint: false,
             bcast_delta_full_every: None,
             resume: false,
@@ -9079,6 +9386,7 @@ mod tests {
             weighted_fold: Default::default(),
             expert_token_weights: false,
             final_cut_manifest_only: false,
+            carry_answers_round: false,
             dispense: None,
             dispense_log: None,
             max_subscribers: 0,
@@ -9089,6 +9397,7 @@ mod tests {
     }
 
     const FINAL_CUT_MANIFEST_ONLY_VECTOR: &str = "e605792438d8fc745769a6b4334707d749856a1cb0eef84b0b03c9eb5072560f";
+    const CARRY_ANSWERS_ROUND_VECTOR: &str = "13a39546746435ebc1878d962f2fb52cf97a5ba66b45757855746adab4e666d7";
     const GRACE_FLOOR_VECTOR: &str = "6f9104e302f894575fe2203cfe91a93ff37d16e37b4e75c4367b060d13748d12";
     const TERMINAL_GRACE_VECTOR: &str = "6f40c5c1c02e6c63b99bf5aa77fab924fed928a42a9e0d88811583a19fc1aa39";
 
@@ -9144,6 +9453,16 @@ mod tests {
             config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
         assert_ne!(config.semantic_profile_hash(), original);
         assert_eq!(digest, FINAL_CUT_MANIFEST_ONLY_VECTOR);
+        // Carried deltas answering their round append their own domain;
+        // Python vector in tests/test_sync_fragment_boundary.py.
+        config.final_cut_manifest_only = false;
+        config.carry_answers_round = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_ne!(config.semantic_profile_hash(), original);
+        assert_eq!(digest, CARRY_ANSWERS_ROUND_VECTOR);
+        config.carry_answers_round = false;
+        config.final_cut_manifest_only = true;
         // A grace floor appends its own block; off keeps the hash. Python
         // vector in tests/test_sync_grace_floor.py.
         config.final_cut_manifest_only = false;
@@ -9471,6 +9790,7 @@ mod tests {
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
@@ -9568,6 +9888,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9581,6 +9902,7 @@ mod tests {
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9651,6 +9973,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -9664,6 +9987,7 @@ mod tests {
                     c_tokens,
                     outer_gradient: vec![0.25],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -9691,6 +10015,7 @@ mod tests {
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
                         tensor_scales: None,
+                        wire: None,
                         transfer: PushTransfer::default(),
                     },
                 )
@@ -9714,6 +10039,7 @@ mod tests {
             grace_ms: Some(0),
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes,
         }
     }
@@ -10703,6 +11029,91 @@ mod tests {
             resumed.load_checkpoint(&checkpoint).unwrap();
             validate_resumed_policy_sweep(&config, &resumed).unwrap();
             assert_eq!(resumed.versions, vec![3, 4]);
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn background_checkpoint_keeps_rounds_going_and_writes_the_same_cuts() {
+        let directory = unique_test_directory("background-checkpoint");
+        let learner = member(0, 30);
+        let mut files = Vec::new();
+        for background in [false, true] {
+            let checkpoint = directory.join(format!("state-{background}.ckpt"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            config.background_checkpoint = background;
+            validate_config(&config).unwrap();
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap(); // version zero
+            let mut sync_seconds = 0.0;
+            for step in 1..=5u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                assert_eq!(chunked_inner_type(&frames.try_recv().unwrap()), MSG_BCAST_FRAGMENT);
+                state.wait_for_background_checkpoint().unwrap();
+                let mut on_disk = two_fragment_sweep_state();
+                on_disk.policy_sweep_fragments = None;
+                on_disk.load_checkpoint(&checkpoint).unwrap();
+                assert_eq!(on_disk.global_step, step - step % 2, "step {step} background {background}");
+            }
+            files.push(std::fs::read(&checkpoint).unwrap());
+        }
+        assert_eq!(files[0], files[1]);
+        // The last step is left to the final checkpoint: no periodic write there.
+        {
+            let checkpoint = directory.join("last-step.ckpt");
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(4);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 2;
+            let mut state = two_fragment_sweep_state();
+            state.policy_sweep_fragments = None;
+            state.save_checkpoint(&checkpoint).unwrap();
+            let mut sync_seconds = 0.0;
+            for step in 1..=4u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step, 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                    .await
+                    .unwrap();
+                while frames.try_recv().is_ok() {}
+            }
+            let mut on_disk = two_fragment_sweep_state();
+            on_disk.policy_sweep_fragments = None;
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!(on_disk.global_step, 2);
+        }
+        // Only for periodic checkpoints with a path, never per round or in a sweep.
+        for mutate in [
+            |config: &mut Config| config.checkpoint_path = None,
+            |config: &mut Config| config.checkpoint_every = 1,
+            |config: &mut Config| config.policy_sweep_fragments = Some(2),
+        ] {
+            let mut config = round_test_config(8);
+            config.checkpoint_path = Some(directory.join("unused.ckpt"));
+            config.checkpoint_every = 2;
+            config.background_checkpoint = true;
+            mutate(&mut config);
+            assert!(format!("{:#}", validate_config(&config).unwrap_err()).contains("--background-checkpoint"));
         }
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -11863,6 +12274,36 @@ mod tests {
     }
 
     #[test]
+    fn queued_late_push_holds_wire_bytes_and_decodes_bit_identically() {
+        let vals: Vec<f32> = (0..1000).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013).collect();
+        let bytes = crate::protocol::encode_i4(&vals, 64);
+        let segments = push_segments(DTYPE_F32_PUSH_I4, vals.len(), &[600, 400]).unwrap();
+        let wire = PushWire { dtype: DTYPE_F32_PUSH_I4, segments, bytes: Vec::new() };
+        let eager = decode_push_segments_to_gradient(&wire, &bytes).unwrap();
+        assert!(bytes.len() < 4 * vals.len());
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        late.outer_gradient = eager.clone();
+        late.wire = Some(PushWire { bytes, ..wire });
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        let mut rounds: Vec<Round> = Vec::new();
+        assert_eq!(carry.carry(&mut rounds, island, late, 8, 7), CarryOutcome::Queued);
+        for queued in carry.queued.values().flatten() {
+            assert!(queued.1.outer_gradient.is_empty(), "queued push keeps only wire bytes");
+            assert!(queued.1.wire.is_some());
+        }
+        let mut next = test_round(vec![member(0, 10), island]);
+        next.t = 9;
+        next.base_version = 7;
+        assert_eq!(carry.attach_queued(&mut next).len(), 1);
+        let got = &next.carried[0];
+        let got_bits: Vec<u32> = got.1.outer_gradient.iter().map(|v| v.to_bits()).collect();
+        let want_bits: Vec<u32> = eager.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got_bits, want_bits);
+    }
+
+    #[test]
     fn late_push_joins_an_already_open_later_round() {
         let mut carry = LateCarry::new(Some(2), false).unwrap();
         let mut open = test_round(vec![member(0, 10)]);
@@ -11932,6 +12373,71 @@ mod tests {
         let mut late = test_push_for(2, 5);
         late.global_step = 7;
         assert_eq!(carry.carry(&mut Vec::new(), other, late, 8, 7), CarryOutcome::Queued);
+    }
+
+    #[test]
+    fn carried_delta_counts_towards_quorum_and_responders() {
+        // Regression: at quorum 1 a round whose only delta from the fast
+        // island arrived as a late carry (anchor spent) waited for the
+        // stalled island instead of closing after grace.
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert!(!round.quorum_reached());
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(round.pushes.is_empty());
+        assert!(round.quorum_reached());
+        // Grace still applies, as for an own push.
+        round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_stays_outside_quorum_when_the_flag_is_off() {
+        let fast = member(0, 1);
+        let mut round = test_round(vec![fast, member(1, 1)]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+    }
+
+    #[test]
+    fn carried_delta_completes_a_round_once_every_expected_island_answered() {
+        let fast = member(0, 1);
+        let slow = member(1, 1);
+        let mut round = test_round(vec![fast, slow]);
+        round.carry_answers = true;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        assert_eq!(attach_carry(&mut round, fast, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), slow, test_push_for(1, 5), Some(1), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn carried_delta_of_an_unexpected_member_does_not_count() {
+        let expected = member(0, 1);
+        let replaced = member(0, 0);
+        let mut round = test_round(vec![expected]);
+        round.carry_answers = true;
+        round.quorum_size = 1;
+        assert_eq!(attach_carry(&mut round, replaced, test_push_for(0, 4), 1), Ok(1));
+        assert!(!round.quorum_reached());
+        // A carried push from the same island counts once.
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 4), 1), Ok(1));
+        assert_eq!(attach_carry(&mut round, expected, test_push_for(0, 5), 1), Ok(0));
+        assert_eq!(round.responders().len(), 1);
     }
 
     fn carried_merge(cfg: &Config) -> f32 {
@@ -12043,6 +12549,7 @@ mod tests {
             grace_ms: None,
             fold: None,
             carried: Vec::new(),
+            carry_answers: false,
             pushes: HashMap::new(),
         }
     }
@@ -12059,6 +12566,7 @@ mod tests {
             c_tokens: 20,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -12473,6 +12981,7 @@ mod tests {
             c_tokens: 1,
             outer_gradient: vec![1.0],
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -12506,6 +13015,52 @@ mod tests {
             PushDisposition::FutureBase
         );
         assert_eq!(rounds[0].pushes.len(), 1);
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_so_the_round_completes() {
+        // Regression: with --max-base-lag 8 and quorum == learners, a push
+        // refused as StaleBase left its island in expected_members, so the
+        // round (and every later step) waited for the full quorum timeout.
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn stale_base_rejection_first_still_waits_for_the_other_island() {
+        let fast = member(0, 10);
+        let slow = member(1, 20);
+        let mut round = test_round(vec![fast, slow]);
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, slow, test_push_for(1, 6), Some(8), false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert_eq!(
+            route_push(&mut rounds, fast, test_push_for(0, 15), Some(8), false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
     }
 
     #[test]
@@ -12554,6 +13109,7 @@ mod tests {
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
                 tensor_scales: None,
+                wire: None,
                 transfer: PushTransfer {
                     recv_seconds: 1.5,
                     arrived_unix: 1792000000.25,
@@ -12731,6 +13287,7 @@ mod tests {
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -12747,6 +13304,7 @@ mod tests {
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
                     tensor_scales: None,
+                    wire: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -13064,6 +13622,7 @@ mod tests {
             c_tokens: 1 + u64::from(learner_id),
             outer_gradient: gradient,
             tensor_scales: None,
+            wire: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -13343,6 +13902,50 @@ mod tests {
             .unwrap();
         st.commit_merge(merge).unwrap();
         st.params[0].to_vec()
+    }
+
+    #[test]
+    fn stale_base_rejection_releases_the_slot_of_a_streaming_fold_round() {
+        // Async carry needs a streaming fold, and that is where stale bases
+        // happen: the refused island must not hold the round until timeout.
+        let cfg = streaming_cfg();
+        let mut st = fold_test_state(crate::state::MERGE_AVG);
+        st.versions[0] = 15;
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Streaming(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, fast, push(0, 15), Some(8), false), PushDisposition::Accepted);
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+        prepare_round_compute(&cfg, &st, &mut rounds[0]).unwrap().finish_inline().unwrap();
+    }
+
+    #[test]
+    fn stale_base_rejection_keeps_the_slot_of_an_exact_fold_round() {
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        let st = fold_test_state(crate::state::MERGE_AVG);
+        let (fast, slow) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![fast, slow]);
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 15;
+        round.quorum_size = 2;
+        round.fold = round_fold(&cfg, &st, 0, &[fast, slow], 2);
+        assert!(matches!(round.fold, Some(RoundFold::Exact(_))));
+        let mut rounds = vec![round];
+        let push = |learner, base| Push { base_version: base, ..fold_test_push(learner) };
+        assert_eq!(route_push(&mut rounds, slow, push(1, 6), Some(8), false), PushDisposition::StaleBase);
+        assert_eq!(rounds[0].expected_members, vec![fast, slow]);
     }
 
     #[test]
