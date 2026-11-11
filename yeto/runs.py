@@ -87,7 +87,7 @@ def _ps_rows() -> list[tuple[int, str, str]]:
     import subprocess
 
     try:
-        out = subprocess.run(["ps", "-eo", "pid=,stat=,args="], capture_output=True,
+        out = subprocess.run(["ps", "-ww", "-eo", "pid=,stat=,args="], capture_output=True,
                              text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return []
