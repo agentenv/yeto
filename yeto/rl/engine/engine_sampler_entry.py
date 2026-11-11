@@ -422,23 +422,12 @@ def build_reward(spec: Mapping[str, Any]) -> Reward:
 # -------------------------------------------------------------------- store
 
 def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> tuple[Any, Any]:
-    """(release store, sample buffer) of the spec."""
-    from .policy_release import RELEASE_DIR, PolicyReleaseStore  # noqa: PLC0415
-    from .release_delta import default_mirror  # noqa: PLC0415
-    from .resume import store_for  # noqa: PLC0415
-    from .sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index  # noqa: PLC0415
+    """(release store, sample buffer) of the spec's r2 data path
+    (:func:`~.rollout_data_path.open_r2`)."""
+    from .rollout_data_path import open_r2  # noqa: PLC0415
 
-    store = str(_require(spec, "store"))
-    releases = PolicyReleaseStore(store_for(store, environ=environ),
-                                  release_dir=str(spec.get("release_dir") or RELEASE_DIR),
-                                  mirror=default_mirror(environ, store=store))  # delta releases
-    buffer_store = store_for(str(spec.get("buffer_root") or store), environ=environ)
-    sampler_id = str(_require(spec, "sampler_id"))
-    shards = [str(s) for s in spec.get("buffer_shards") or ()]
-    if shards and sampler_id not in shards:
-        raise SamplerSpecError(f"sampler {sampler_id!r} is not one of the buffer shards {shards}")
-    index = shard_index(sampler_id) if needs_shards(buffer_store) or shards else INDEX
-    return releases, FileSampleBuffer(buffer_store, batch_size=1, index=index)  # as open_buffer(sampler=True)
+    path = open_r2(spec, environ)
+    return path.weights, path.samples
 
 
 def incarnation_tape(path: str | Path, incarnation: str) -> Path:
@@ -492,7 +481,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         on_event: Callable[..., None] | None = None,
         stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None = None,
         stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None,
-        reclaim_deadline: "ReclaimDeadline | None" = None) -> int:
+        reclaim_deadline: "ReclaimDeadline | None" = None,
+        on_data_path: Callable[[Any], Any] | None = None) -> int:
     """Build every part of the island from ``spec``, run it from the resume
     point, stop the engine; returns the rounds this incarnation ran.
     ``resource_sampler(emit)`` returns a started telemetry thread (default:
@@ -500,8 +490,9 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     factory = no telemetry). ``stop()``: the caller's own end condition (no new
     round starts; the island leaves FINISHED, not PREEMPTED). ``on_event(event,
     **fields)`` sees every tape record after it is written. ``stores(incarnation,
-    emit)``: the (release store, sample buffer) pair instead of :func:`build_stores`
-    (a spot sampler follows the syncer and writes to the relay).
+    emit)``: the (release store, sample buffer) pair instead of the spec's data path
+    (``data_path``: :mod:`.rollout_data_path`; an older caller's hook).
+    ``on_data_path(path)``: sees the opened :class:`~.rollout_data_path.DataPath`.
     ``reclaim_deadline``: armed when the reclaim marker appears; it ends the
     process at its deadline even when a trial or a cleanup step still blocks.
     ``stop_reason()``: after the loop ends, (LeaveReason, detail) to leave with
@@ -510,7 +501,11 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
 
     from .sampler_resume import new_incarnation  # noqa: PLC0415
 
+    from .rollout_data_path import normalize_spec  # noqa: PLC0415
+
     env = os.environ if environ is None else environ
+    if stores is None:
+        spec = normalize_spec(spec)
     spec = apply_rollout_quant(spec)
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
@@ -525,7 +520,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     with _member_incarnation_env(env, incarnation, shard=spec.get("sampler_id")):
         return _run(spec, env, config, incarnation, environ=environ, resource_sampler=resource_sampler,
                     stop=stop, on_event=on_event, stores=stores, stop_reason=stop_reason,
-                    reclaim_deadline=reclaim_deadline)
+                    reclaim_deadline=reclaim_deadline, on_data_path=on_data_path)
 
 
 @contextlib.contextmanager
@@ -560,6 +555,19 @@ def _member_incarnation_env(env: Any, incarnation: str, *, shard: Any = None):
 POOL_FENCE_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: the lease a pool fence writes
 
 
+def sweep_gate(spec: Mapping[str, Any], environ: Any = None) -> Any:
+    """A sandbox gate of ``spec["agentic"]["envs"]`` for the predecessor sweep only
+    (no readiness manifest is read); None without that section."""
+    from yeto.sandbox.gate import gate_from_spec  # noqa: PLC0415
+
+    try:
+        return gate_from_spec(spec, None, environ=environ)
+    except Exception as error:  # noqa: BLE001 - orphans only cost room
+        print(f"[engine-sampler] no sandbox gate for the predecessor sweep: {type(error).__name__}: {error}",
+              flush=True)
+        return None
+
+
 def predecessor_fenced(member_store: Any, predecessor: str) -> bool:
     """Whether a pool fence holds ``predecessor``'s incarnation lease (its node is
     taken for gone: no incarnation of it writes again)."""
@@ -573,16 +581,24 @@ def predecessor_fenced(member_store: Any, predecessor: str) -> bool:
 
 
 def sweep_predecessor(prompts: Any, member_store: Any, predecessor: str, left: bool,
-                      emit: Callable[..., None]) -> int:
+                      emit: Callable[..., None], *, spec: Mapping[str, Any] | None = None,
+                      environ: Any = None) -> int:
     """A replacement (``continues_shard``) runs in a new shard id, so the stale sweep
     of its own shard never reaches the trial containers the predecessor left on the
     sandbox host (a node evicted or killed runs no teardown). Once the predecessor
     left or a pool fence holds its lease, remove them (``rl_sandbox_orphans_removed``
-    with ``shard``). A predecessor still running unfenced is left alone."""
+    with ``shard``). A predecessor still running unfenced is left alone. Without a
+    store dispenser's sandbox gate (e.g. the syncer path's task dispenser), a gate
+    of the spec's ``agentic.envs`` does the sweep."""
     sweep = getattr(getattr(prompts, "gate", None), "sweep_shard", None)
-    if not callable(sweep):
+    if not callable(sweep) and not (spec is not None and isinstance(spec.get("agentic"), Mapping)
+                                    and spec["agentic"].get("envs")):
         return 0
     if not (left or predecessor_fenced(member_store, predecessor)):
+        return 0
+    if not callable(sweep):
+        sweep = getattr(sweep_gate(spec, environ), "sweep_shard", None)
+    if not callable(sweep):
         return 0
     removed = int(sweep(predecessor) or 0)
     if removed:
@@ -591,16 +607,89 @@ def sweep_predecessor(prompts: Any, member_store: Any, predecessor: str, left: b
     return removed
 
 
+def predecessor_entries_of(buffer: Any, predecessor: str) -> list[Any]:
+    """The predecessor shard's index entries (the data path's ``shard_entries``; an
+    older sink: its store's shard index)."""
+    read = getattr(buffer, "shard_entries", None)
+    if callable(read):
+        return list(read(predecessor))
+    from .sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+    return FileSampleBuffer(buffer.store, batch_size=1, index=shard_index(str(predecessor)),
+                            create_index=False).entries()
+
+
+PREDECESSOR_RETIRED = "predecessor_retired"  # spec: the pool stopped / retired the predecessor
+
+
+def continue_predecessor(data_path: Any, spec: Mapping[str, Any], prompts: Any, predecessor: str,
+                         successor: str, emit: Callable[..., None], *, environ: Any = None) -> int | None:
+    """The first round of a fresh replacement (``continues_shard``), and the sweep of
+    the predecessor's orphan trial containers.
+
+    On a data path whose member store every host shares (r2) the handoff waits for
+    the predecessor's LEAVE (``sampler_resume.handoff_start``). On one whose member
+    store is the host's own (syncer) there is no record to wait on: the syncer's
+    member table fences the predecessor, the task dispenser hands out the rows, and
+    sample ids carry the incarnation, so the replacement starts at round 0 at once.
+    The pool says it retired the predecessor with ``predecessor_retired`` in the
+    spec; that (or the predecessor's LEAVE / pool fence on r2) allows the sweep."""
+    from .sampler_resume import HANDOFF_EVENT, handoff_start  # noqa: PLC0415
+
+    member_store = data_path.member_store
+    retired = bool(spec.get(PREDECESSOR_RETIRED))
+    if getattr(data_path, "shares_member_store", True):
+        start, detail = handoff_start(member_store, predecessor, successor,
+                                      lambda: predecessor_entries_of(data_path.samples, predecessor),
+                                      wait_s=float(spec.get("handoff_wait_s") or 900.0))
+    else:
+        start, detail = None, {"predecessor": predecessor, "predecessor_left": retired,
+                               "start_rollout_id": None, "data_path": str(data_path.kind)}
+    emit(HANDOFF_EVENT, **detail)
+    sweep_predecessor(prompts, member_store, predecessor, bool(detail.get("predecessor_left")) or retired, emit,
+                      spec=spec, environ=environ)
+    return start
+
+
 def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
          environ: Mapping[str, str] | None, resource_sampler: Callable[[Callable[..., None]], Any] | None,
          stop: Callable[[], bool] | None, on_event: Callable[..., None] | None,
          stores: Callable[[str, Callable[..., None]], tuple[Any, Any]] | None,
          stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None = None,
-         reclaim_deadline: "ReclaimDeadline | None" = None) -> int:
+         reclaim_deadline: "ReclaimDeadline | None" = None,
+         on_data_path: Callable[[Any], Any] | None = None) -> int:
+    tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
+    write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
+
+    def emit(event: str, **fields: Any) -> None:
+        write(event, **fields)
+        if on_event is not None:
+            on_event(event, **fields)
+
+    from .rollout_data_path import LegacyDataPath, member_store_of, open_data_path  # noqa: PLC0415
+
+    if stores is None:
+        data_path = open_data_path(spec, environ=environ, incarnation=incarnation, emit=emit)
+    else:  # an older caller's (release store, sample buffer) hook
+        data_path = LegacyDataPath(*stores(incarnation, emit), member_store_of(spec, environ))
+    if on_data_path is not None:
+        on_data_path(data_path)
+    try:
+        return _run_on(data_path, spec, env, config, incarnation, emit=emit, tape=tape, environ=environ,
+                       resource_sampler=resource_sampler, stop=stop, stop_reason=stop_reason,
+                       reclaim_deadline=reclaim_deadline)
+    finally:
+        data_path.close()
+
+
+def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
+            emit: Callable[..., None], tape: Path, environ: Mapping[str, str] | None,
+            resource_sampler: Callable[[Callable[..., None]], Any] | None, stop: Callable[[], bool] | None,
+            stop_reason: Callable[[], tuple[Any, Mapping[str, Any]] | None] | None,
+            reclaim_deadline: "ReclaimDeadline | None") -> int:
     from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .incarnation_lease import FENCED_EVENT, LEASE_EVENT  # noqa: PLC0415
-
     from .sampler_resume import (  # noqa: PLC0415
         RECLAIM_MARKER_ENV,
         ReclaimWatcher,
@@ -611,15 +700,11 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         resume_point,
     )
 
-    tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
-    write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
-
-    def emit(event: str, **fields: Any) -> None:
-        write(event, **fields)
-        if on_event is not None:
-            on_event(event, **fields)
-
-    releases, buffer = build_stores(spec, environ) if stores is None else stores(incarnation, emit)
+    releases, buffer = data_path.weights, data_path.samples
+    if stop_reason is None:
+        stop_reason = data_path.stop_reason
+    caller_stop = stop
+    stop = lambda: data_path.stopping() or (caller_stop is not None and caller_stop())  # noqa: E731
     if spec.get("start_on_latest"):
         # a restarted sampler starts its engine on the newest release (no first round
         # on the base weights; the follower then never reloads it)
@@ -640,9 +725,7 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
         if getattr(prompts, "emit", False) is None:
             prompts.emit = emit
         prompts.recover(buffer.entries())
-    from .resume import store_for  # noqa: PLC0415
-
-    member_store = store_for(str(spec.get("buffer_root") or spec["store"]), environ=environ)
+    member_store = data_path.member_store
     membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
     lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ)
@@ -724,18 +807,8 @@ def _run(spec: Mapping[str, Any], env: Any, config: Any, incarnation: str, *,
                                            name="sampler-lease-watcher").start()
         start = None
         if predecessor and not resume.resumed:  # a fresh replacement: continue the predecessor's prompts
-            from .sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
-            from .sampler_resume import HANDOFF_EVENT, handoff_start  # noqa: PLC0415
-
-            def predecessor_entries() -> list[Any]:
-                shard = FileSampleBuffer(buffer.store, batch_size=1, index=shard_index(str(predecessor)),
-                                         create_index=False)
-                return shard.entries()
-
-            start, detail = handoff_start(member_store, str(predecessor), config.sampler_id, predecessor_entries,
-                                          wait_s=float(spec.get("handoff_wait_s") or 900.0))
-            emit(HANDOFF_EVENT, **detail)
-            sweep_predecessor(prompts, member_store, str(predecessor), bool(detail.get("predecessor_left")), emit)
+            start = continue_predecessor(data_path, spec, prompts, str(predecessor), config.sampler_id, emit,
+                                         environ=env)
         rounds = 0 if buffer.data_ended else island.run(start)
         if handed_off() and not buffer.data_ended and not reclaimed():
             # a successor continues the prompts in its own shard: this shard gets no more
@@ -960,14 +1033,18 @@ def hold_after_reclaim(environ: Mapping[str, str] | None = None, *, hold_s: floa
     return True
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m yeto.rl.engine.engine_sampler",
-                                     description="run an engine sampler island from a spec file")
+def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = None,
+         prog: str = "python -m yeto.rl.engine.engine_sampler") -> int:
+    """``default_data_path``: the ``data_path`` of a spec that names none (the spot
+    sampler entry passes ``syncer``)."""
+    parser = argparse.ArgumentParser(prog=prog, description="run a sampler island from a spec file")
     parser.add_argument("--spec", required=True, help="the sampler spec JSON (module doc)")
     args = parser.parse_args(argv)
     deadline = ReclaimDeadline()
     try:
         spec = load_spec(args.spec)
+        if default_data_path is not None:
+            spec.setdefault("data_path", default_data_path)
         rounds = run(spec, reclaim_deadline=deadline)
     except SamplerSpecError as error:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
