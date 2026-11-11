@@ -91,7 +91,9 @@ def test_provider_maps_call_states_and_releases_only_its_own_tickets(tmp_path):
     assert p.status(1, ticket).state == "active" and not p.account_free(1) and p.account_free(2)
     call = p.spawn(ticket, {"shard": "m-0"})
     assert p.status(1, ticket).state == "active"
-    client.states[call] = SUCCEEDED  # the sampler exited by itself (or hit the function timeout)
+    client.states[call] = SUCCEEDED  # the sampler exited 0 (the run finished): not lost
+    assert p.status(1, ticket) == el.LeaseStatus("active")
+    client.states[call] = FAILED  # it crashed, was cancelled outside, or hit the function timeout
     assert p.status(1, ticket) == el.LeaseStatus("ended", end_reason="lost")
     client.fail_status = True
     with pytest.raises(ConnectionError):  # a blip to the pool, never an end
@@ -116,9 +118,28 @@ def test_release_cancels_a_running_call_and_confirms(tmp_path):
     t2 = p2.order(1)
     c2 = p2.spawn(t2, {"shard": "n-0"})
     client2.cancel = lambda call: None  # Modal took the cancel but the call still runs
+    p2.sleep, p2.cancel_wait_s = (lambda s: None), 0.0
     with pytest.raises(RuntimeError, match="still runs"):
         p2.release(1, t2)
     assert p2.run_tickets() == [(1, t2)] and client2.states[c2] == RUNNING
+
+
+def test_release_waits_for_the_asynchronous_cancel():
+    """Modal takes a cancel at once but the call reads RUNNING for a few seconds: the
+    release polls instead of failing (a real Modal L4 call read RUNNING right after
+    cancel and the pool logged nc_elastic_drain_failed, then retried)."""
+    now = [0.0]
+    client = FakeClient()
+    p = ModalProvider("run-m", slots=[1], client=client, clock=lambda: now[0],
+                      sleep=lambda s: now.__setitem__(0, now[0] + s), cancel_wait_s=30.0)
+    ticket = p.order(1)
+    call = p.spawn(ticket, {"shard": "m-0"})
+    ends_at = 6.0
+    client.cancel = lambda c: client.log.append(("cancel", c))
+    status = client.status
+    client.status = lambda c: FAILED if now[0] >= ends_at else status(c)
+    assert p.release(1, ticket)["state"] == "ended" and ("cancel", call) in client.log
+    assert now[0] >= ends_at and p.run_tickets() == []
 
 
 def test_a_restart_cancels_the_running_call_first(tmp_path):
@@ -178,6 +199,92 @@ def test_a_running_call_is_joined_only_once_it_reports_ready(tmp_path):
         t[0] += 60
     names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
     assert "member_ready" not in names and "start_timeout" in names
+
+
+def test_two_first_spawns_on_threads_deploy_the_app_once():
+    """The pool starts islands on background threads; a pool of target 2 spawned both at
+    once and Modal refused the second, concurrent deploy (start_failed: 'App deploy name
+    ... is already taken')."""
+    import threading
+    import time as _time
+
+    deploys = []
+
+    class App:
+        app_id = None
+
+        def deploy(self, name):
+            deploys.append(name)
+            _time.sleep(0.2)  # the image build: the other thread arrives meanwhile
+
+    fn = SimpleNamespace(spawn=lambda payload: SimpleNamespace(object_id=f"fc-{payload['shard']}"))
+    modal = SimpleNamespace(Function=SimpleNamespace(from_name=lambda app, name: fn))
+    client = ModalSdkClient({"image": "i", "secret": "s"}, run_id="run-m", modal=modal)
+    client.build_app = lambda: App()
+    calls = []
+    threads = [threading.Thread(target=lambda s=s: calls.append(client.spawn({"shard": s}))) for s in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert deploys == ["yeto-rollout-run-m"] and sorted(calls) == ["fc-a", "fc-b"]
+
+
+def test_a_reused_container_does_not_report_the_earlier_calls_join(tmp_path, monkeypatch):
+    """Modal ran the next call in the same warm container: the earlier call's tape (with
+    its rl_sampler_join) was still on disk and the new call reported ready at once,
+    while its sampler still waited for the layout. Only a tape this call's sampler
+    writes counts."""
+    from yeto.launch.nc.modal_provider import rollout_sampler_body  # noqa: PLC0415
+
+    tape = tmp_path / "tape" / "events.jsonl"
+    tape.parent.mkdir()
+    (tape.parent / "events.old1.jsonl").write_text('{"event": "rl_sampler_join"}\n')  # the earlier call
+    objects, polls = Objects(), [0]
+
+    class Proc:
+        returncode = 0
+
+        def poll(self):
+            polls[0] += 1
+            if polls[0] == 3:
+                (tape.parent / "events.new2.jsonl").write_text('{"event": "rl_sampler_join"}\n')
+            return None if polls[0] < 5 else 0
+
+    seen = []
+    payload = {"shard": "m-0", "bucket": "b", "run_prefix": "r", "ready_key": "pool-ready/m-0/t.2.json",
+               "spec": {"event_tape": str(tape)}}
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://e")
+    real_write = objects.write
+    objects.write = lambda k, v: seen.append(polls[0]) or real_write(k, v)
+    out = rollout_sampler_body(payload, popen=lambda *a, **k: Proc(), objects=objects, sleep=lambda s: None,
+                               root=str(tmp_path / "rollout"))
+    assert out["reported_ready"] and seen == [3]  # not at the first poll (the old tape)
+
+
+def test_a_sampler_that_finished_ends_the_pool_without_a_refill(tmp_path):
+    """The syncer told the run's samplers the run finished: the sampler exits 0, the call
+    returns. The pool reads a finished sampler (released, nothing ordered again), not a
+    lost island (a real Modal run refilled it and the new island found no run)."""
+    t = [0.0]
+    clock = lambda: t[0]  # noqa: E731
+    ops, client, _ = _ops(tmp_path)
+    events = el.EventLog(log=lambda m: None, clock=clock, run="run-m")
+    pool = LeasePool(PoolConfig(target=1, accounts=[1, 2], shard_base="m", stop_below_ucr=0,
+                                min_balance_to_order_ucr=0, elastic=el.ElasticConfig(max_orders=4)),
+                     ops, clock=clock, log=lambda m: None, events=events)
+    ops.start_in_background = False
+    for _ in range(3):
+        pool.tick()
+        t[0] += 30
+    [m] = [m for m in pool.members if m.state == READY]
+    client.states[ops.provider.call_id(m.ticket)] = SUCCEEDED
+    for _ in range(4):
+        pool.tick()
+        t[0] += 30
+    names = [e["event"].removeprefix("nc_elastic_") for e in events.events]
+    assert "sampler_finished" in names and "evicted" not in names
+    assert names.count("ordered") == 1 and pool.finished and not pool.live()
 
 
 def test_the_call_body_reports_ready_once_the_tape_has_the_join(tmp_path, monkeypatch):
@@ -349,3 +456,7 @@ def test_the_sdk_client_spawns_through_a_deployed_function():
     assert client.status("fc-9") == RUNNING
     client.cancel("fc-9")
     assert modal.spawned[-1] == ("cancel", {"terminate_containers": True})
+    # a returned call is SUCCEEDED only when its sampler exited 0 (the body returns its rc)
+    results = {"fc-0": {"rc": 0}, "fc-1": {"rc": 1}}
+    modal.FunctionCall = SimpleNamespace(from_id=lambda c: SimpleNamespace(get=lambda timeout=None: results[c]))
+    assert client.status("fc-0") == SUCCEEDED and client.status("fc-1") == FAILED

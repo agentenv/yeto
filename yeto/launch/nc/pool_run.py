@@ -186,6 +186,7 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         build_reward,
         island_config,
     )
+    from yeto.rl.engine.rollout_data_path import normalize_spec  # noqa: PLC0415
 
     pc = pc or cli.pool_config(cfg, allowed=None)
     member = Member(pc.accounts[0], "<ticket>", f"{pc.shard_base}-0",
@@ -194,7 +195,9 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         spec = cli.render_spec(cfg, member, [f"{pc.shard_base}-{i}" for i in range(pc.target)])
         from yeto.launch.agentic_setup import strip  # noqa: PLC0415
 
-        checked = apply_rollout_quant(strip(spec))
+        # the data path's defaults first, as the sampler applies them at start (syncer:
+        # no round limit, a member store under work_dir)
+        checked = apply_rollout_quant(normalize_spec(strip(spec)))
         island_config(checked)  # required keys, sampling parameters
         build_engine(checked)  # engine section, server + options dataclasses, rollout_fields (no process)
         build_reward(checked)  # reward_kind and the reward function import
@@ -695,11 +698,11 @@ def scale_refusal(cfg: dict[str, Any], doc: dict[str, Any], target: int, retire:
         return (f"target {target} > {len(pc.accounts)} slots (one {w['unit']} per slot: the pool config's "
                 f"'accounts'; add slots and restart the pool)")
     before = current_target(cfg, doc)
-    if target != before and cli.pool_dispense(cfg) is None:
+    if target != before and not cli.pool_has_dispenser(cfg):
         if pc.data_slots is None and target > before:  # removing one repeats nothing: allowed
-            return ("the samplers have no store dispenser (prompts.dispense.backend store): every sampler "
-                    "reads every prompt, so another node repeats every task; set sampler.dispense in the "
-                    "pool config (an elastic run needs it)")
+            return ("the samplers have no dispenser (prompts.dispense.backend store, or the syncer's "
+                    "dispenser on data_path syncer): every sampler reads every prompt, so another node "
+                    "repeats every task; set sampler.dispense in the pool config (an elastic run needs it)")
         if pc.data_slots is not None and not force_static:
             return (f"static data_slots {pc.data_slots}: a removed node's slot pauses (its prompts wait "
                     f"until a scale up continues the slot) and no scale up goes past {pc.data_slots} nodes; "

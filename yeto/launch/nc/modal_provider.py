@@ -10,8 +10,10 @@ call itself. So the provider splits like this:
   calls nothing (nothing bills before the call is spawned); ``status``: a ticket
   without a call reads ``active`` (ready to start), a call that runs reads
   ``active``, a call that ended reads ended (``released`` when this provider
-  cancelled it, ``lost`` when it exited by itself or failed: fence, release its
-  claims, refill); a failed status call raises (a control-plane blip). ``release``
+  cancelled it, ``lost`` when it failed or its sampler exited non-zero: fence,
+  release its claims, refill); a call whose sampler exited 0 (the run finished)
+  reads ``active`` and the probe's exited sampler ends it as finished, with no
+  refill; a failed status call raises (a control-plane blip). ``release``
   cancels the call (``terminate_containers=True``) and confirms it no longer
   runs; only tickets of this run (name prefix *and* the record) are touched.
 * :class:`ModalPoolOps` (the pool's ``PoolOps``, replacing the SSH node route):
@@ -48,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -90,7 +93,7 @@ class ModalProvider:
 
     def __init__(self, run_id: str, *, slots: list[int], client: Any = None, name_prefix: str = "yeto-smp",
                  price_usd_h: float | None = None, record: Path | None = None, clock=time.time,
-                 config: dict[str, Any] | None = None):
+                 config: dict[str, Any] | None = None, sleep=time.sleep, cancel_wait_s: float = 60.0):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name_prefix):
             raise ValueError("name_prefix: lower-case letters, digits and '-'")
         self.run_id, self.slots = run_id, list(slots)
@@ -98,6 +101,8 @@ class ModalProvider:
         self.price_usd_h = None if price_usd_h is None else float(price_usd_h)
         self.config = dict(config or {})
         self._client, self.clock = client, clock
+        # a cancel is asynchronous: the call reads RUNNING for some seconds after it
+        self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
         self.record = record or state_dir() / f"modal-calls-{self.prefix}.json"
 
     @property
@@ -174,6 +179,11 @@ class ModalProvider:
             return LeaseStatus("active")
         if row.get("cancelled") == row["call"]:
             return LeaseStatus("ended", end_reason="released")
+        if state == SUCCEEDED:
+            # the call returned with its sampler's exit 0 (the run finished, the data
+            # ended): the island is not lost; the probe reads the exited sampler, the
+            # pool drains it and orders no replacement
+            return LeaseStatus("active")
         return LeaseStatus("ended", end_reason="lost")
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
@@ -183,13 +193,24 @@ class ModalProvider:
         if call:
             if self.client.status(call) == RUNNING:
                 self.client.cancel(call)
-            if self.client.status(call) == RUNNING:
-                raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs")
+            if not self._ended_after_cancel(call):
+                raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs "
+                                   f"after {self.cancel_wait_s:g} s")
             _record_ledger("released", LEDGER_KIND, call, FUNCTION)
         rows = self._rows()
         rows[ticket].update(open=False, cancelled=call)
         self._save(rows)
         return {"ticket": ticket, "call": call, "state": "ended"}
+
+    def _ended_after_cancel(self, call: str) -> bool:
+        """The call no longer runs, polled for up to ``cancel_wait_s`` (Modal stops the
+        container a few seconds after it took the cancel)."""
+        deadline = self.clock() + self.cancel_wait_s
+        while self.client.status(call) == RUNNING:
+            if self.clock() >= deadline:
+                return False
+            self.sleep(2.0)
+        return True
 
     def node(self, account: int, ticket: str) -> NodeLease:
         return NodeLease(account, ticket, "", "", "", None, None, None, None)  # no host to reach
@@ -349,6 +370,7 @@ class ModalSdkClient:
         self.app_name = str(cfg.get("app_name") or f"yeto-rollout-{re.sub(r'[^a-z0-9-]', '-', run_id.lower())}")
         self._modal = modal
         self._deployed = False
+        self._deploy_lock = threading.Lock()
 
     @property
     def modal(self):
@@ -374,14 +396,18 @@ class ModalSdkClient:
         return app
 
     def deploy(self) -> None:
-        if self._deployed:
-            return
-        app = self.build_app()
-        _record_ledger("intent", "modal_app", self.app_name)
-        app.deploy(name=self.app_name)
-        if getattr(app, "app_id", None):
-            _record_ledger("created", "modal_app", app.app_id, self.app_name, role="rollout", run=self.run_id)
-        self._deployed = True
+        # the pool starts islands on background threads (start_in_background): two first
+        # spawns must not deploy the app at once (Modal refuses the second deploy with
+        # "App deploy name ... is already taken" and that island's start fails)
+        with self._deploy_lock:
+            if self._deployed:
+                return
+            app = self.build_app()
+            _record_ledger("intent", "modal_app", self.app_name)
+            app.deploy(name=self.app_name)
+            if getattr(app, "app_id", None):
+                _record_ledger("created", "modal_app", app.app_id, self.app_name, role="rollout", run=self.run_id)
+            self._deployed = True
 
     def spawn(self, payload: dict[str, Any]) -> str:
         self.deploy()
@@ -389,15 +415,19 @@ class ModalSdkClient:
         return str(fn.spawn(payload).object_id)
 
     def status(self, call_id: str) -> str:
+        """RUNNING; SUCCEEDED: the body returned and its sampler exited 0; FAILED: it
+        raised (cancelled, function timeout) or its sampler exited non-zero."""
         call = self.modal.FunctionCall.from_id(call_id)
         try:
-            call.get(timeout=0)
+            result = call.get(timeout=0)
         except TimeoutError:
             return RUNNING
         except Exception as exc:  # noqa: BLE001 - a raised result is a failed island
             if "timeout" in str(exc).lower() and type(exc).__name__ in ("TimeoutError", "OutputExpiredError"):
                 return RUNNING
             return FAILED
+        if isinstance(result, dict) and result.get("rc") not in (0, None):
+            return FAILED  # rollout_sampler_body returns the sampler's exit code
         return SUCCEEDED
 
     def cancel(self, call_id: str) -> None:
@@ -423,14 +453,21 @@ def store_env(payload: dict[str, Any], environ: dict[str, str]) -> dict[str, str
     return env
 
 
-def join_seen(spec: dict[str, Any]) -> bool:
-    """The sampler's tape (any incarnation's ``events.<inc>.jsonl`` next to the
-    spec's ``event_tape``) has the join event."""
+def tape_files(spec: dict[str, Any]) -> set[Path]:
+    """Every incarnation's tape next to the spec's ``event_tape`` (``events.<inc>.jsonl``)."""
     tape = spec.get("event_tape")
     if not tape:
-        return False
+        return set()
     path = Path(str(tape)).expanduser()
-    for f in sorted(path.parent.glob(f"{path.stem}*{path.suffix or '.jsonl'}")):
+    return set(path.parent.glob(f"{path.stem}*{path.suffix or '.jsonl'}"))
+
+
+def join_seen(spec: dict[str, Any], *, before: set[Path] | frozenset[Path] = frozenset()) -> bool:
+    """The sampler's tape (an incarnation's ``events.<inc>.jsonl`` next to the
+    spec's ``event_tape``) has the join event. ``before``: tapes that existed before
+    this call started its sampler -- Modal reuses a warm container for the next
+    call, so an earlier call's tape (and its join) may still be on its disk."""
+    for f in sorted(tape_files(spec) - set(before)):
         try:
             if JOIN_PATTERN in f.read_text(errors="replace"):
                 return True
@@ -451,11 +488,12 @@ def rollout_sampler_body(payload: dict[str, Any], *, popen: Any = None, objects:
     out.mkdir(parents=True, exist_ok=True)
     (out / "spec.json").write_text(json.dumps(payload["spec"], indent=1))
     env = dict(os.environ, **store_env(payload, dict(os.environ)))
+    before = tape_files(payload["spec"])  # a reused container keeps an earlier call's tapes
     proc = (popen or subprocess.Popen)([payload.get("python", "python3"), "-m", "yeto.rl.engine.engine_sampler",
                                         "--spec", str(out / "spec.json")], env=env)
     key, reported = payload.get("ready_key"), False
     while proc.poll() is None:
-        if key and not reported and join_seen(payload["spec"]):
+        if key and not reported and join_seen(payload["spec"], before=before):
             try:
                 if objects is None:
                     from yeto.cloud import s3_store  # noqa: PLC0415

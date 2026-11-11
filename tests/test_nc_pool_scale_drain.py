@@ -251,7 +251,7 @@ def test_static_data_slots_without_a_dispenser_are_refused_unless_forced(tmp_pat
 def test_a_pool_without_a_task_source_refuses_any_scale(tmp_path, capsys):
     cfg, path, clock, cloud, pool = _elastic(tmp_path, target=1, cloud_cls=Cloud, sampler={})
     assert pool_run.scale_pool(cfg, path, 2) == 2
-    assert "no store dispenser" in capsys.readouterr().out
+    assert "have no dispenser" in capsys.readouterr().out
 
 
 def test_the_spec_s_dispenser_counts_as_the_task_source(tmp_path):

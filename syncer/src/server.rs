@@ -841,6 +841,12 @@ struct SubscriberHub {
     /// Groups of SUBSCRIBE connections still waiting for the session (their
     /// data streams may already attach).
     waiting: Mutex<HashMap<Member, Arc<Group>>>,
+    /// The newest published version of every fragment (cheap `Arc` copies of
+    /// the scheduler's masters), offered to a subscriber at SUBSCRIBE. Without
+    /// it a new subscriber waited for the next merge, and a run whose merges
+    /// wait on that subscriber's groups (a replacement sampler on a stale base
+    /// under the trainer's policy-age gate) never merged again.
+    latest: Mutex<Option<(Vec<u64>, Vec<Arc<Vec<f32>>>)>>,
 }
 
 impl SubscriberHub {
@@ -850,6 +856,36 @@ impl SubscriberHub {
             members,
             conns: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
+            latest: Mutex::new(None),
+        }
+    }
+
+    /// Keep the state's fragment versions for the next SUBSCRIBE.
+    fn remember(&self, st: &GlobalState) {
+        *self.latest.lock().unwrap() = Some((st.versions.clone(), st.params.clone()));
+    }
+
+    /// Offer the newest published version of every fragment to a just
+    /// registered subscriber (the snapshot a publish would otherwise send).
+    /// Nothing before the first publish or resume: the subscriber then serves
+    /// its base and the next publish sends the snapshot.
+    fn offer_latest(&self, conn: &Arc<SubscriberConn>) {
+        let latest = self.latest.lock().unwrap();
+        let Some((versions, params)) = latest.as_ref() else {
+            return;
+        };
+        let mut queued = false;
+        {
+            let mut pending = conn.pending.lock().unwrap();
+            for q in 0..params.len() {
+                if conn.group.layout.fragments.get(q).and_then(|f| f.numel().ok()) == Some(params[q].len()) {
+                    queued |= pending.offer(q, versions[q], params[q].clone());
+                }
+            }
+            conn.needs_snapshot.store(false, Ordering::Release);
+        }
+        if queued {
+            conn.notify.notify_one();
         }
     }
 
@@ -906,6 +942,7 @@ impl SubscriberHub {
     /// scheduler never waits for a subscriber link). New subscribers also get
     /// every other fragment at its current version.
     fn publish(&self, st: &GlobalState, p: usize) {
+        self.remember(st);
         for conn in self.live() {
             if conn.is_closed() {
                 continue;
@@ -2949,6 +2986,7 @@ async fn serve_subscriber(
     });
     tokio::spawn(writer_task(wr, rx, conn.group.wire.clone()));
     hub.register(conn.clone());
+    hub.offer_latest(&conn);
     info!(
         subscriber = subscriber_id,
         generation = member.generation,
@@ -3971,6 +4009,11 @@ async fn scheduler(
                             }
                             info!(step = st.global_step, "resumed from checkpoint");
                             resumed = true;
+                            // A subscriber that joins before the next merge gets the resumed cut.
+                            let hub = registry.lock().unwrap().subscribers.clone();
+                            if let Some(hub) = hub {
+                                hub.remember(&st);
+                            }
                         }
                     }
                     local_init = Some(LocalInit::new(

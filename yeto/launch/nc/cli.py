@@ -629,6 +629,17 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
         section = cfg.get("syncer") or {}
         if section.get("address"):
             spec.setdefault("syncer", str(section["address"]))
+        dispense = (spec.get("prompts") or {}).get("dispense")
+        if isinstance(dispense, dict) and str(dispense.get("backend") or "tcp") == "tcp":
+            # the syncer's task dispenser: each pool member claims as its own island, the
+            # holder id the pool retires / drains it by (SyncerDataPath); one id for every
+            # member of the base spec would make each new member supersede the others
+            from yeto.rl.engine.task_dispense import sampler_holder_id  # noqa: PLC0415
+
+            dispense = dict(dispense, learner_id=sampler_holder_id(m.shard))
+            if spec.get("syncer"):
+                dispense.setdefault("address", str(spec["syncer"]))
+            spec["prompts"] = dict(spec["prompts"], dispense=dispense)
     backlog = cfg.get("backlog")
     if backlog:
         spec["max_backlog_groups"] = tasks.backlog_groups(
@@ -688,6 +699,23 @@ def pool_config_warnings(cfg: dict[str, Any]) -> list[str]:
                      "not released at once (the other samplers wait out the dispense lease, lease_s) and its "
                      "sampler is not fenced; remove the key (default on) for an elastic pool")
     return notes
+
+
+def pool_has_dispenser(cfg: dict[str, Any]) -> bool:
+    """The pool's samplers take their tasks from a dispenser (no task goes to two
+    of them, so the pool may add or remove samplers): the store dispenser
+    (:func:`pool_dispense`), or on ``data_path: syncer`` the syncer's task
+    dispenser (``prompts.dispense`` of the spec with the default ``tcp`` backend)."""
+    if pool_dispense(cfg) is not None:
+        return True
+    if cfg.get("data_path", "r2") != "syncer":
+        return False
+    try:
+        spec = json.loads(Path(os.path.expanduser(str(cfg["spec"]))).read_text()) if cfg.get("spec") else {}
+    except (OSError, ValueError):
+        return False
+    found = (spec.get("prompts") or {}).get("dispense") if isinstance(spec, dict) else None
+    return isinstance(found, dict) and str(found.get("backend") or "tcp") == "tcp"
 
 
 def pool_dispense(cfg: dict[str, Any]) -> dict[str, Any] | None:
