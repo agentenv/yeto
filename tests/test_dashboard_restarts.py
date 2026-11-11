@@ -154,6 +154,40 @@ def test_store_only_run_infers_hardware_cost_and_read_position(tmp_path):
     assert b["has_reads"] and b["read"] == 2 and b["read_source"] == "trainer groups consumed"
 
 
+def test_an_nc_sampler_with_a_small_engine_is_billed_as_the_whole_node(tmp_path):
+    """A tp1 engine (a small model) still holds a whole 8-GPU NC node: the cost row is
+    the node rate, not one GPU's."""
+    sid = f"{RUN}-0"
+    _put(tmp_path, sid, "5ce0ed95", 0, [
+        {"event": "rl_sampler_start", "sampler_id": sid, "provenance": {"card_model": "MI355X", "topology": "tp1"},
+         "time_unix": T0}] + _sampler("x", 0, T0 + 1800, groups=5, reward=0.5))
+    _put(tmp_path, "pool", "controller", 0, [{"event": "nc_elastic_member_ready", "shard": sid, "t": T0 - 10}])
+    r = _pump(tmp_path)
+    ov = r.overview(now=T0 + 1800)
+    card = {c["id"]: c for c in ov["islands"]}[sid]
+    assert (card["cloud"], card["gpus"]) == ("nc", 8)
+    row = {x["id"]: x for x in ov["cost"]["islands"]}[sid]
+    assert abs(row["rate_usd_h"] - 24.0) < 1e-6
+
+
+def test_nc_cost_runs_from_the_order_to_the_release_of_the_ticket(tmp_path):
+    """A node bills from its order to its release, not over the sampler tape's span; a
+    released node no longer counts in the burn rate."""
+    sid = f"{RUN}-0"
+    _put(tmp_path, sid, "5ce0ed95", 0, [
+        {"event": "rl_sampler_start", "sampler_id": sid, "provenance": {"card_model": "MI355X", "topology": "tp8"},
+         "time_unix": T0 + 1200}] + _sampler("x", 0, T0 + 1800, groups=5, reward=0.5))
+    _put(tmp_path, "pool", "controller", 0, [
+        {"event": "nc_elastic_ordered", "ticket": "t1", "account": 4, "shard": sid, "t": T0},
+        {"event": "nc_elastic_member_ready", "ticket": "t1", "shard": sid, "t": T0 + 1100},
+        {"event": "nc_elastic_released", "ticket": "t1", "account": 4, "why": "released", "t": T0 + 3600}])
+    r = _pump(tmp_path)
+    ov = r.overview(now=T0 + 7200)
+    row = {x["id"]: x for x in ov["cost"]["islands"]}[sid]
+    assert abs(row["hours"] - 1.0) < 1e-6 and abs(row["cost_usd"] - 24.0) < 1e-6
+    assert row["running"] is False and not ov["cost"]["burn_usd_h"]
+
+
 def test_failed_trainer_does_not_end_samplers_and_relaunch_is_starting(tmp_path):
     sid = f"{RUN}-0"
     old, new = "l0-modal-20261110T151448Z", "l0-modal-20261110T164111Z"

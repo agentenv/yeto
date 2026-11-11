@@ -10,6 +10,9 @@
     "verda:H200": 2.99,
     "*:A100": 1.79,
     "modal:B300": 8.5,
+    "modal:L40S": 1.95,
+    "modal:L4": 0.8,
+    "modal:A10G": 1.1,
     "nc:MI355X": 3.0
   },
   "host_prices": {
