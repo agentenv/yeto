@@ -406,6 +406,48 @@ def test_run_up_in_process_logs_a_rollout_stall_once(tmp_path, monkeypatch, caps
         up.load_config(str(path))
 
 
+def test_in_process_drain_on_exit_false_leaves_the_pools_for_the_next_run_up(tmp_path, monkeypatch, capsys):
+    """rollout.drain_on_exit false: a process exit drains nothing (the machines bill,
+    undriven, with a banner), and the next run up of the config adopts the members."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool import controller as ctl  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    cfg = dict(run_cfg, controller="in_process", rollout={"drain_on_exit": False})
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    banners = []
+    monkeypatch.setattr(up.atexit, "register", lambda fn: banners.append(fn))
+    run = up.Run(cfg)
+    c = run.start_controller(ops=ops, thread_cls=_NoThread)
+    for _ in range(3):
+        c.tick()
+        clock.t += 60
+    tickets = {name: [m.ticket for m in pool.live()] for name, pool in c.pools.items()}
+    assert all(tickets.values()) and not c.drain_on_exit
+    assert ctl.drain_active("process exit") == {}  # the exit drains nothing
+    assert not any(p.released for p in providers.values())
+    banners[0]()
+    assert "STILL BILLING, undriven" in capsys.readouterr().out
+    for slot in c.slots.values():  # the process is gone: its pool locks with it
+        slot.lock.close()
+        slot.lock = None
+    with ctl._ACTIVE_LOCK:  # noqa: SLF001
+        ctl._ACTIVE.remove(c)  # noqa: SLF001
+    again = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert {name: [m.ticket for m in pool.live()] for name, pool in again.pools.items()} == tickets
+        again.tick()
+        assert not any(p.released for p in providers.values()) and \
+            sum(len(p.orders) for p in providers.values()) == 2  # adopted, nothing ordered again
+    finally:
+        again.stop("test")
+    with pytest.raises(ValueError, match="drain_on_exit"):
+        up.rollout_section({"rollout": {"drain_on_exit": "no"}})
+
+
 def test_run_up_in_process_refuses_no_monitor(tmp_path, monkeypatch):
     run_cfg, _, _ = _two_pools(tmp_path)
     path = tmp_path / "run-ip.json"

@@ -388,6 +388,9 @@ starts, reports and stops every pool; `yeto run down` releases all of them.
 | `sandbox.max_containers_per_sampler` | Optional. Raises the warning threshold to this many containers per billed NC node, so it follows `yeto run scale`. |
 | `pool.config` | Path of `pool.json`. Required unless `samplers` is set (see below). |
 | `pool.interval_s` | Seconds between pool control ticks (default 30). |
+| `controller` | `subprocess` (default: one pool process per pool) or `in_process` (every pool in the `yeto run up` process; see section 12). |
+| `rollout.drain_on_exit` | `in_process` only. `true` (default): the exit of `yeto run up` drains every pool. `false`: the machines stay up for the next `yeto run up` to adopt (section 12). |
+| `rollout.stall_alert_s` | `in_process` only. Seconds every ready sampler may stay silent (no group, no trainer-wait heartbeat) before a rollout stall warning (default 1800, `0`: off). An alert only. |
 | `trainer.argv` | The `yeto launch` arguments of the trainer. Required. |
 | `trainer.usd_per_h` | Trainer price per hour for the spend estimate. |
 | `trainer.progress_paths` | Extra files whose growth counts as trainer progress for the silence backstop. |
@@ -1418,6 +1421,12 @@ island with the island's rendered sampler spec.
 | `price_usd_h` | Price of one island hour (resource ledger). |
 
 - An order bills nothing; an island bills from its spawn until its cancel.
+- A running call is not a joined sampler. Each call writes a ready marker
+  (`pool-ready/<shard>/<ticket>.<n>.json` in the run store) once its sampler's
+  event tape has `rl_sampler_join` (model loaded, lease claimed); only then is
+  the island ready. A call that never reports ready within
+  `elastic.start_timeout_s` (default 3600) is a failed start: it is cancelled
+  and replaced, and counts toward the breaker.
 - `model_pull` and `node_hooks` are not available (no node); put the weights
   in a Modal volume.
 - Calls and the app are written to the run's resource ledger
@@ -1443,7 +1452,12 @@ island HMAC key>"}` on the entry or once at the top of the run config. The
 pool writes `data_path` and `syncer` into each sampler spec, fences and drains
 islands through the syncer's member table, and marks a replacement sampler
 with `predecessor_retired: true` when the pool has already retired the island
-it replaces.
+it replaces. The syncer keeps its drain set in memory only; the pool re-sends
+every drain it still wants (scale-down victims, `--hold-tasks` pauses) on each
+tick, so a restarted syncer is drained again within one pool interval. The
+syncer dispenser retries a row at most `--dispense-max-redo` times (default 2,
+the same as the store ledger's `max_redo`); a lease expiry counts, so a row
+outlives two holders that died with it and is settled `exhausted` at the third.
 
 **One controller for every pool.** By default `yeto run up` starts one
 `python -m yeto.launch.nc pool` process per pool. With `"controller":
@@ -1454,6 +1468,61 @@ is refused in this mode. `yeto launch --rollout-pool <pool.json>` (repeatable)
 does the same inside the launcher's fleet controller. `yeto rollout status`
 reports each pool's controller view (target, members, pending handoffs,
 breaker) read from its saved state, without touching any machine.
+
+The controller also watches the rollout side: when every ready sampler with a
+progress signal (its event tape grew, or its engine generated tokens) has been
+silent for `rollout.stall_alert_s` (default 1800; `0` turns it off), and none
+of them is waiting for the trainer, `yeto run up` (and the launcher's fleet
+controller, event `rollout_stalled` in `fleet.jsonl`) logs a rollout stall
+warning once. It is an alert only: nothing is stopped. A sampler blocked on
+the trainer writes wait heartbeats and is never counted as stalled. Modal
+calls give no progress signal and are not part of this check.
+
+**The in-process controller needs a host that stays up.** With
+`"controller": "in_process"` the sampler pools are driven by the `yeto run up`
+process itself. Run it under tmux or systemd on a host that stays up for the
+whole run, not in an interactive SSH session that can drop. What happens when
+that process exits is set by `rollout.drain_on_exit`:
+
+| `rollout.drain_on_exit` | When the `yeto run up` process exits (normal exit, Ctrl-C, SIGTERM) |
+|---|---|
+| `true` (default) | Every pool is drained: samplers stopped, machines released and confirmed ended. |
+| `false` | Nothing is drained. The machines keep running and billing, and no pool drives them (no refill, no breaker, no budget cap) until the next `yeto run up --config <run.json>` adopts them from the pool state files. The exit prints the tickets still billing. |
+
+Use `false` only with a supervisor that restarts the process at once, for
+example this systemd unit:
+
+```ini
+# /etc/systemd/system/yeto-run-<run>.service
+[Unit]
+Description=yeto run up <run> (in-process rollout controller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=<user>
+WorkingDirectory=<yeto-checkout>
+EnvironmentFile=<env-file-with-credentials>
+ExecStart=<yeto-checkout>/.venv/bin/yeto run up --config <run.json>
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=1800
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```json
+"controller": "in_process",
+"rollout": {"drain_on_exit": false, "stall_alert_s": 1800}
+```
+
+`TimeoutStopSec` gives a `drain_on_exit: true` drain time to confirm every
+release before systemd kills the process. `systemctl stop` sends SIGTERM,
+which runs the same exit path as Ctrl-C. To end the run for good, use
+`yeto run down --config <run.json>`, not `systemctl stop` with
+`drain_on_exit: false`.
 
 ## Planned enhancements
 

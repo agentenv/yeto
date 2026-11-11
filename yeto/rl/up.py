@@ -60,6 +60,7 @@ finds the pool holding T); ``yeto rollout scale`` is the same command.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -103,19 +104,25 @@ def load_config(path: str) -> dict[str, Any]:
     return cfg
 
 
-ROLLOUT_KEYS = {"stall_alert_s"}
+ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
 
 
 def rollout_section(cfg: dict[str, Any]) -> dict[str, Any]:
     """The run config's ``rollout`` section (the in-process controller's knobs):
     ``stall_alert_s`` (default 1800; 0: off): every ready sampler silent that long --
-    no group, no trainer-wait heartbeat -- is logged as a rollout stall (an alert only)."""
+    no group, no trainer-wait heartbeat -- is logged as a rollout stall (an alert only);
+    ``drain_on_exit`` (default true): when this process exits (also on SIGTERM), the
+    in-process controller drains every pool; false: the machines keep running, nothing
+    drives them, and the next ``yeto run up`` of this config adopts them from the pool
+    state files (for a supervised host: tmux, systemd ``Restart=on-failure``)."""
     section = cfg.get("rollout") or {}
     if not isinstance(section, dict):
         raise ValueError("run config: rollout must be an object")
     unknown = set(section) - ROLLOUT_KEYS
     if unknown:
         raise ValueError(f"run config: unknown rollout keys {sorted(unknown)} (known: {sorted(ROLLOUT_KEYS)})")
+    if "drain_on_exit" in section and not isinstance(section["drain_on_exit"], bool):
+        raise ValueError("run config: rollout.drain_on_exit must be true or false")
     return dict(section)
 
 
@@ -309,10 +316,26 @@ class Run:
         interval = min(r.interval_s for r in self.pools)
         section = rollout_section(self.cfg)
         kw.setdefault("stall_s", float(section.get("stall_alert_s", DEFAULT_STALL_S)))
+        kw.setdefault("drain_on_exit", bool(section.get("drain_on_exit", True)))
         self.controller = RolloutController(slots, stop_flag=self.dir / "STOP", interval=interval, log=_log, **kw)
         self.controller.start()
+        if not self.controller.drain_on_exit:
+            _log("rollout.drain_on_exit is false: if this process exits, the sampler machines keep running "
+                 "(and billing) undriven until `yeto run up` of this config adopts them, or `yeto run down`")
+            atexit.register(self._undriven_banner)
         _log(f"rollout controller: {len(slots)} pool(s) in this process ({', '.join(slots)})")
         return self.controller
+
+    def _undriven_banner(self) -> None:
+        """At exit with ``rollout.drain_on_exit`` false: what is left running, undriven."""
+        controller = self.controller
+        if controller is None or controller.stopped:
+            return
+        live = {name: [m.ticket for m in pool.live()] for name, pool in controller.pools.items()}
+        live = {name: tickets for name, tickets in live.items() if tickets}
+        if live:
+            _log(f"exit without a drain (rollout.drain_on_exit false): STILL BILLING, undriven: {live}; "
+                 "adopt them with `yeto run up --config <run.json>` or release them with `yeto run down`")
 
     def _objects(self):
         from yeto.cloud.s3_store import head_objects  # noqa: PLC0415
@@ -960,6 +983,10 @@ def add_parser(sub: Any) -> None:
             q.add_argument("--hold-tasks", action="store_true", help="its sampler claims no new task meanwhile")
 
 
+def _exit_on_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
+    raise SystemExit(128 + int(signum))
+
+
 def main(args: Any) -> int:
     run = Run(load_config(args.config))
     if args.rl_command == "status":
@@ -987,6 +1014,10 @@ def main(args: Any) -> int:
     if not run.sandbox_prepare():
         _log("sandbox prepare failed: nothing ordered")
         return 2
+    if run.in_process:
+        # SIGTERM (systemd stop, kill) ends the process through SystemExit, so the exit
+        # path (the drain, or with drain_on_exit false the undriven banner) runs
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
     run.pool()
     if getattr(args, "trainer_now", False):
         _log("--trainer-now: the trainer starts now, in parallel with the NC node setup")
