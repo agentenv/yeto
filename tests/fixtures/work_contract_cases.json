@@ -1196,6 +1196,160 @@
      }
     }
    ]
+  },
+  {
+   "name": "still_holds_tracks_settle_release_and_retire",
+   "why": "a sampler checks still_holds before it writes a group: true while the claim is its own, false once settled, released, or retired (the dispenser gave the item out again)",
+   "config": {
+    "rows": 4,
+    "passes": 1,
+    "max_redo": 1,
+    "lease_s": 900
+   },
+   "steps": [
+    {
+     "op": "join",
+     "m": "A#1",
+     "expect": 0
+    },
+    {
+     "op": "join",
+     "m": "B#1",
+     "expect": 0
+    },
+    {
+     "op": "claim",
+     "m": "A#1",
+     "n": 3,
+     "expect": {
+      "items": [
+       0,
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": true
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 3,
+     "expect": false
+    },
+    {
+     "op": "holds",
+     "m": "B#1",
+     "item": 0,
+     "expect": false
+    },
+    {
+     "op": "done",
+     "m": "A#1",
+     "items": [
+      0
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 0,
+     "expect": false
+    },
+    {
+     "op": "release",
+     "m": "A#1",
+     "items": [
+      1
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 1,
+     "expect": false
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": {
+      "items": [
+       1
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "B#1",
+     "item": 1,
+     "expect": true
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 2,
+     "expect": true
+    },
+    {
+     "op": "retire",
+     "m": "A#1",
+     "expect": 1
+    },
+    {
+     "op": "holds",
+     "m": "A#1",
+     "item": 2,
+     "expect": false
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 3,
+     "expect": {
+      "items": [
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "op": "holds",
+     "m": "B#1",
+     "item": 2,
+     "expect": true
+    },
+    {
+     "op": "done",
+     "m": "B#1",
+     "items": [
+      1,
+      2,
+      3
+     ],
+     "expect": "ok"
+    },
+    {
+     "op": "claim",
+     "m": "B#1",
+     "n": 1,
+     "expect": "end"
+    },
+    {
+     "op": "totals",
+     "expect": {
+      "trained": 4,
+      "dropped": 0,
+      "exhausted": 0
+     }
+    }
+   ]
   }
  ]
 }

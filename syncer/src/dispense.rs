@@ -1112,8 +1112,22 @@ impl Dispenser {
             .sum()
     }
 
+    /// TASK_HOLDS: which of `positions` live `holder` still holds. A query,
+    /// not a renewal (like the store ledger's `still_holds`: only beats and
+    /// work keep a member alive); a retired holder is refused `fenced`.
+    pub fn holds_request(&mut self, holder: Holder, positions: &[u64], _now: Instant) -> DResult<Vec<bool>> {
+        let retired = {
+            let members = self.members.lock().unwrap();
+            members.is_retired(holder).then(|| members.fenced_text(holder))
+        };
+        if let Some(text) = retired {
+            self.events.push(DispenseEvent::Fenced { holder, request: "holds" });
+            return Err(DispenseError::Fenced(text));
+        }
+        Ok(positions.iter().map(|&p| self.holds(holder, p)).collect())
+    }
+
     /// Whether live `holder` holds `position` unreported (WorkContract `still_holds`).
-    #[cfg_attr(not(test), allow(dead_code))] // tests and offline tools
     pub fn holds(&self, holder: Holder, position: u64) -> bool {
         let Some(live) = self.live.get(&holder) else { return false };
         live.blocks.iter().filter_map(|id| self.blocks.get(id)).any(|block| {

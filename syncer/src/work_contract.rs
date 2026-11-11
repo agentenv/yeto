@@ -305,9 +305,10 @@ impl SyncerContract {
         let _ = self.d.heartbeat(m, now); // a retired member's beat is refused: nothing to check here
     }
 
+    /// TASK_HOLDS, as the island's task source asks it (a refusal: not held).
     fn holds(&mut self, m: Holder, item: u64) -> bool {
-        self.tick();
-        self.d.holds(m, item)
+        let now = self.tick();
+        self.d.holds_request(m, &[item], now).is_ok_and(|held| held[0])
     }
 
     fn retire(&mut self, m: Holder) -> u64 {

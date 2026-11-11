@@ -70,6 +70,9 @@ MSG_TASK_GRANT = 53
 MSG_TASK_REPORT = 54
 MSG_TASK_ACK = 55
 MSG_TASK_HEARTBEAT = 56
+MSG_TASK_HOLDS = 68  # still_holds: which positions this incarnation still holds
+MSG_TASK_HELD = 69
+MAX_TASK_HOLDS = 4096
 TASK_PROTOCOL_VERSION = 1
 TASK_PROTOCOL_VERSION_STREAMS = 2  # TASK_HELLO with streams
 TASK_HELLO_MAC_DOMAIN = b"yeto-task-hello-mac-v1\0"
@@ -656,6 +659,19 @@ def retire_member(address: tuple[str, int], learner_id: int, incarnation: int | 
     return decode_member_retired(body)
 
 
+def encode_holds(positions: Sequence[int]) -> bytes:
+    if len(positions) > MAX_TASK_HOLDS:
+        raise ValueError(f"TASK_HOLDS of {len(positions)} positions (at most {MAX_TASK_HOLDS})")
+    return struct.pack(f"<I{len(positions)}Q", len(positions), *[int(p) for p in positions])
+
+
+def decode_held(payload: bytes) -> list[bool]:
+    (n,) = struct.unpack_from("<I", payload)
+    if len(payload) != 4 + n:
+        raise DispenseError(f"TASK_HELD of {len(payload)} bytes for {n} positions")
+    return [b == 1 for b in payload[4:]]
+
+
 class DispenseConnection:
     """One TCP connection to the dispenser; one answer per request, in order."""
 
@@ -717,6 +733,12 @@ class DispenseConnection:
         self._send(MSG_TASK_HEARTBEAT, b"")
         decode_ack(self._answer(MSG_TASK_ACK))
 
+    def holds(self, positions: Sequence[int]) -> list[bool]:
+        """TASK_HOLDS: which of ``positions`` this incarnation still holds (a
+        query, not a lease renewal; a retired incarnation is refused fenced)."""
+        self._send(MSG_TASK_HOLDS, encode_holds(positions))
+        return decode_held(self._answer(MSG_TASK_HELD))
+
     def close(self) -> None:
         try:
             self.sock.close()
@@ -766,6 +788,8 @@ class TaskSource:
         self._stopped = False
         self._closing = False  # no more claims
         self._conn: DispenseConnection | None = None
+        # still_holds queries for the worker: {"positions", "answer"} (answer None: open)
+        self._queries: list[dict[str, Any]] = []
         self.incarnation = self._new_incarnation()
         self.lease_s: float | None = None
         self._contact: float | None = None  # last answer from the dispenser
@@ -839,6 +863,33 @@ class TaskSource:
                 for block, items in by_block.items():
                     self._pending.append((block, kind, items))
             self._cv.notify_all()
+
+    def still_holds(self, position: int, *, timeout_s: float = 10.0) -> bool:
+        """This incarnation still holds ``position`` on the dispenser (the
+        WorkContract's ``still_holds``, checked before a group is written): taken
+        here, not reported, and the syncer answers TASK_HOLDS yes. False once the
+        incarnation was fenced, retired or superseded (the dispenser gave the
+        row to another island). Head unreachable for ``timeout_s``: True while
+        this island's lease is still valid on its own clock."""
+        position = int(position)
+        query: dict[str, Any] = {"positions": [position], "answer": None}
+        with self._cv:
+            if self._fatal is not None or position not in self._owner:
+                return False
+            incarnation = self.incarnation
+            self._queries.append(query)
+            self._cv.notify_all()
+            deadline = self._clock() + float(timeout_s)
+            while query["answer"] is None:
+                if self._fatal is not None or self.incarnation != incarnation:
+                    return False
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    if query in self._queries:
+                        self._queries.remove(query)
+                    return position in self._owner and self._lease_valid()
+                self._cv.wait(timeout=min(0.1, remaining))
+            return bool(query["answer"][0]) and position in self._owner
 
     def taken(self) -> set[int]:
         """Positions taken and not reported yet."""
@@ -932,6 +983,9 @@ class TaskSource:
             self._owner.clear()
             self._pending.clear()
             self._inflight = None
+            for query in self._queries:  # nothing is held any more
+                query["answer"] = [False] * len(query["positions"])
+            self._queries.clear()
             self.stats["fenced"] += 1
             old = self.incarnation
             self.incarnation = self._new_incarnation()
@@ -951,6 +1005,24 @@ class TaskSource:
             conn = self._conn
             if conn is None:
                 raise ConnectionError("no dispenser connection")
+            query = self._queries.pop(0) if self._queries and self._inflight is None else None
+        if query is not None:
+            try:
+                held = conn.holds(query["positions"])
+            except DispenseFenced:
+                with self._cv:
+                    query["answer"] = [False] * len(query["positions"])
+                    self._cv.notify_all()
+                raise
+            except BaseException:
+                with self._cv:
+                    self._queries.insert(0, query)  # asked again after the reconnect
+                raise
+            with self._cv:
+                query["answer"] = held
+                self._cv.notify_all()
+            return True
+        with self._cv:
             if self._inflight is None:
                 if self._pending:
                     self._seq += 1
@@ -1026,6 +1098,9 @@ class TaskSource:
                                incarnation=f"{self.incarnation:016x}", error=str(error))
                     with self._cv:
                         self._fatal = error
+                        for query in self._queries:
+                            query["answer"] = [False] * len(query["positions"])
+                        self._queries.clear()
                         self._cv.notify_all()
                     return
                 self._reset_after_fence(error)
@@ -1091,6 +1166,11 @@ class DispensedRows:
     def held_back(self) -> set[int]:
         """Positions whose group the backend put back into its own buffer."""
         return set()
+
+    def still_holds(self, position: int) -> bool:
+        """The syncer still gives this island ``position`` (WorkContract
+        ``still_holds``; the sampler checks it before it writes a group)."""
+        return self.tasks.still_holds(int(position))
 
     def _hook_round(self) -> int:
         """The round of a filter call (default: filter calls in this process)."""

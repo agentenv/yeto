@@ -144,8 +144,9 @@ claim                     ``StoreDispensedPrompts.poll`` / ``take``     TASK_CLA
 done / drop / fail /      ``written`` / ``_end`` / ``close``            TASK_REPORT trained / dropped / requeue /
 release                                                               release
 beat                      ``renew`` (own thread, ``lease / 3``)         any request, TASK_HEARTBEAT
-still_holds               ``still_holds``                              ``Dispenser::holds`` (the island drops a
-                                                                      group whose report is ``fenced``)
+still_holds               ``still_holds``                              ``TaskSource.still_holds`` /
+                                                                      ``DispensedRows.still_holds`` (TASK_HOLDS
+                                                                      frame; a query, not a lease renewal)
 fence                     incarnation lease (``fence_shard``)           MEMBER_RETIRE (no separate lease)
 retire                    ``store_dispense.retire`` /                  ``task_dispense.retire_member`` (MEMBER_RETIRE
                           ``python -m ...store_dispense retire``       frame, island HMAC key)
