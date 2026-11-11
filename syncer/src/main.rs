@@ -19,6 +19,7 @@ mod protocol;
 mod sample_relay;
 mod server;
 mod sha256;
+mod shutdown;
 mod state;
 mod subscriber;
 
@@ -158,6 +159,13 @@ struct Args {
     /// during the write) host memory peaks at about twice params + momentum.
     #[arg(long)]
     background_checkpoint: bool,
+    /// Write --checkpoint-path once before the first round (after INIT or
+    /// --resume), so the rounds before the first --checkpoint-every one are
+    /// covered too. Skipped when --resume found that checkpoint (it is the
+    /// state just loaded). On a background thread with
+    /// --background-checkpoint.
+    #[arg(long)]
+    checkpoint_on_start: bool,
     /// Policy sweep: write per-round checkpoints off the scheduler; each
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
@@ -167,6 +175,13 @@ struct Args {
     /// sessions are refused.
     #[arg(long)]
     bcast_delta_full_every: Option<u64>,
+    /// On SIGTERM / SIGINT: stop launching rounds, give the rounds still
+    /// gathering this many seconds to close (then drop them; they have not
+    /// touched the state), commit every computed round, write
+    /// --checkpoint-path synchronously and exit 0. A second signal exits at
+    /// once without a checkpoint.
+    #[arg(long, default_value_t = 600)]
+    shutdown_timeout_s: u64,
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -505,6 +520,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_every: args.checkpoint_every,
         checkpoint_at_steps: args.checkpoint_at_steps,
         background_checkpoint: args.background_checkpoint,
+        checkpoint_on_start: args.checkpoint_on_start,
         async_checkpoint: args.async_checkpoint,
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
@@ -518,6 +534,9 @@ fn main() -> anyhow::Result<()> {
         island_hmac_key,
         expected_island_contract,
         syncer_epoch: args.syncer_epoch,
+        shutdown: Some(std::sync::Arc::new(shutdown::Shutdown::new(std::time::Duration::from_secs(
+            args.shutdown_timeout_s,
+        )))),
         membership,
         recovery,
         inline_resend: args.inline_resend,

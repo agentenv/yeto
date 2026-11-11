@@ -55,8 +55,41 @@ ms-swift's argument parser, so environment variables are the only channel):
   YETO_DILOCO_HMAC_KEY_PATH       path to the HMAC key file (optional)
   YETO_DILOCO_DISABLE             set to 1 to make the callback a no-op
   YETO_DILOCO_INITIAL_CUT_TIMEOUT seconds to install the syncer's initial cut
-                                  fragment by fragment before training (0 =
-                                  apply it at the boundaries; default 0)
+                                  (or a resumed island's catch-up) fragment by
+                                  fragment before training; default 3600.  0 =
+                                  apply it at the first boundaries instead: the
+                                  whole cut (4 bytes per parameter) then queues
+                                  on rank 0 first, and a resumed island takes it
+                                  only after one more step
+  YETO_DILOCO_RESUME_DIR          checkpoint directory whose sync record to
+                                  resume from (default: ``args.mcore_model``
+                                  when it holds one)
+  YETO_DILOCO_SAVE_ANCHORS        1 = also save every rank's anchor shards
+                                  with each checkpoint (~2 bytes per local
+                                  parameter per rank for bf16); default 0
+  YETO_DILOCO_INIT_PROBE_S        resumed learner 0 with an initial-cut wait:
+                                  send INIT_PARAMS only if the syncer sends no
+                                  catch-up within this many seconds (an
+                                  initialized syncer ignores INIT); default 1800
+  YETO_DILOCO_HEARTBEAT_S         seconds between rank 0's HEARTBEATs to the
+                                  syncer, sent from a thread (independent of
+                                  step ends) so its --island-lease-s can be on;
+                                  default 30, 0 = none
+  YETO_DILOCO_HEARTBEAT_STALL_S   stop heartbeating once the training loop
+                                  made no progress for this long, so a hung
+                                  island loses its lease; default 0 (never)
+  YETO_DILOCO_LR_RESUME           auto (default) | off: rebuild the learning
+                                  rate schedule of a resume that did not load
+                                  it (``restore_lr_schedule``)
+
+Resume: every checkpoint also gets the sync's record (``on_save`` ->
+``MegatronDiLoCoSync.save_state``): each fragment's anchor version and
+H-gate counters.  On a restart from that checkpoint the syncer's catch-up
+no longer overwrites the island: a fragment still at its checkpointed
+version keeps its local values (anchor only), a newer one becomes
+``global_new + (local - anchor_old)`` if the anchors were saved and the
+global otherwise; without a record (a cold start) the island takes the
+syncer's cut as before.
 """
 
 from __future__ import annotations
@@ -108,7 +141,12 @@ class DiLoCoHookConfig:
     hmac_key_path: Optional[str] = None
     final_cut_payload: str = "full"
     transport: str = "cpu"
-    initial_cut_timeout: float = 0.0
+    initial_cut_timeout: float = 3600.0
+    resume_dir: Optional[str] = None
+    save_anchors: bool = False
+    init_probe_s: float = 1800.0
+    heartbeat_s: float = 30.0
+    heartbeat_stall_s: float = 0.0
 
     @classmethod
     def from_env(cls, env=None) -> "DiLoCoHookConfig":
@@ -146,7 +184,12 @@ class DiLoCoHookConfig:
             hmac_key_path=get("HMAC_KEY_PATH"),
             final_cut_payload=get("FINAL_CUT_PAYLOAD", default="full"),  # type: ignore[arg-type]
             transport=get("TRANSPORT", default="cpu"),  # type: ignore[arg-type]
-            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 0.0),
+            initial_cut_timeout=get_float("INITIAL_CUT_TIMEOUT", 3600.0),
+            resume_dir=get("RESUME_DIR"),
+            save_anchors=(get("SAVE_ANCHORS", default="0") or "").strip().lower() in {"1", "true", "yes", "on"},
+            init_probe_s=get_float("INIT_PROBE_S", 1800.0),
+            heartbeat_s=get_float("HEARTBEAT_S", 30.0),
+            heartbeat_stall_s=get_float("HEARTBEAT_STALL_S", 0.0),
         )
         if cfg.initial_cut_timeout < 0:
             raise ValueError(f"{ENV_PREFIX}INITIAL_CUT_TIMEOUT must be >= 0")
@@ -223,7 +266,8 @@ def trainable_filter(name: str, param) -> bool:
     return bool(getattr(param, "requires_grad", False))
 
 
-def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
+def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig, *,
+                         resume_dir: Optional[str] = None, resume_iteration: Optional[int] = None):
     from yeto.swift_megatron.sync import MegatronDiLoCoSync
 
     return MegatronDiLoCoSync(
@@ -240,7 +284,78 @@ def default_sync_factory(model_chunks, optimizer, cfg: DiLoCoHookConfig):
         final_cut_payload=cfg.final_cut_payload,
         transport=cfg.transport,
         initial_cut_timeout=cfg.initial_cut_timeout,
+        resume_dir=resume_dir,
+        resume_iteration=resume_iteration,
+        init_probe_s=cfg.init_probe_s,
+        heartbeat_s=cfg.heartbeat_s,
+        heartbeat_stall_s=cfg.heartbeat_stall_s,
     )
+
+
+def resume_dir_for(cfg: DiLoCoHookConfig, args) -> Optional[str]:
+    """The checkpoint directory whose sync record a resumed island reads:
+    ``YETO_DILOCO_RESUME_DIR``, else the checkpoint ms-swift loaded
+    (``--mcore_model``) when it holds a record.  None: a cold start."""
+    from yeto.swift_megatron.sync import RESUME_STATE_FILE
+
+    if cfg.resume_dir:
+        return cfg.resume_dir
+    loaded = getattr(args, "mcore_model", None)
+    if isinstance(loaded, str) and os.path.isfile(os.path.join(loaded, RESUME_STATE_FILE)):
+        return loaded
+    return None
+
+
+def save_dir_for(args, iteration: int, *call_args, **call_kwargs) -> Optional[str]:
+    """The directory of the checkpoint ``on_save`` reports: its
+    ``output_dir`` argument, else ``<args.output_dir>/checkpoint-<iteration>``."""
+    for value in (call_kwargs.get("output_dir"), call_kwargs.get("save_dir"), *call_args):
+        if isinstance(value, (str, os.PathLike)):
+            return os.fspath(value)
+    root = getattr(args, "output_dir", None) or getattr(args, "save", None)
+    return os.path.join(root, f"checkpoint-{iteration}") if root else None
+
+
+def restore_lr_schedule(trainer) -> Optional[int]:
+    """Put a resumed run's LR schedule where an uninterrupted run would be.
+
+    ms-swift loads the ``OptimizerParamScheduler`` state only together with
+    the optimizer (``load_mcore_checkpoint``: ``not finetune and not
+    no_load_optim``), and a checkpoint saved with ``--no_save_optim`` holds
+    no scheduler state at all.  So an island that saves parameters only and
+    resumes with ``--no_load_optim true --finetune false`` gets back its
+    iteration and data position but restarts the schedule at step 0: warmup
+    again, the whole decay shifted by the resumed iteration, silently.
+
+    The scheduler counts samples (ms-swift steps it by ``global_batch_size``
+    per successful update), so a fresh scheduler (``num_steps == 0``) at a
+    resumed iteration ``i > 0`` is stepped by ``i * global_batch_size`` here,
+    which sets every parameter group's lr and weight decay the way ``i``
+    uninterrupted updates would.  A scheduler restored from the checkpoint
+    (``num_steps > 0``) and a cold start are left alone.  Returns the samples
+    stepped, or None.  Runs on every rank (each holds its own optimizer)."""
+    if (os.environ.get(ENV_PREFIX + "LR_RESUME", "auto").strip().lower() or "auto") == "off":
+        return None
+    scheduler = getattr(trainer, "opt_param_scheduler", None)
+    iteration = int(getattr(trainer.state, "iteration", 0) or 0)
+    if scheduler is None or iteration <= 0 or int(getattr(scheduler, "num_steps", 0) or 0) != 0:
+        return None
+    samples = iteration * int(trainer.args.global_batch_size)
+    scheduler.step(increment=samples)
+    logger.warning("yeto DiLoCo: the checkpoint of iteration %d restored no LR schedule; stepped it by %d "
+                   "samples to resume it in place", iteration, samples)
+    return samples
+
+
+def _visible_logs() -> None:
+    """This module's and the sync core's WARNING/INFO lines would otherwise
+    go to the root handler the Megatron entry point leaves at ERROR."""
+    _ensure_repo_on_path()
+    try:
+        from yeto.swift_megatron.sync import ensure_visible_logs, log as sync_log
+    except ImportError:  # pragma: no cover - the sync core needs torch
+        return
+    ensure_visible_logs(logger, sync_log)
 
 
 def _model_chunks(trainer) -> list:
@@ -286,11 +401,16 @@ class YetoDiLoCoCallback(_CallbackBase):
             logger.warning("yeto DiLoCo callback disabled via %sDISABLE", ENV_PREFIX)
             return
         self.config = DiLoCoHookConfig.from_env()
+        _visible_logs()
+        restore_lr_schedule(trainer)
         self._wrap_train_step()
         # Build here (not in on_train_begin) so a bad config fails before data
         # loading; the trainer has already loaded the resume checkpoint, which
         # is what learner 0's INIT_PARAMS carries.
-        self.sync = type(self).sync_factory(_model_chunks(trainer), trainer.optimizer, self.config)
+        start = int(self.state.iteration)
+        resume_dir = resume_dir_for(self.config, self.args) if start > 0 else None
+        self.sync = type(self).sync_factory(_model_chunks(trainer), trainer.optimizer, self.config,
+                                            resume_dir=resume_dir, resume_iteration=start)
         atexit.register(self.close)
         logger.info("yeto DiLoCo sync attached: learner %d/%d, interval %d, fragments %d, start iteration %d",
                     self.config.learner_id, self.config.num_learners, self.config.sync_interval_steps,
@@ -365,6 +485,17 @@ class YetoDiLoCoCallback(_CallbackBase):
                 handle.write(json.dumps(record) + "\n")
         except OSError as error:  # never let bookkeeping kill a training step
             logger.warning("yeto DiLoCo: cannot write step log %s: %s", path, error)
+
+    def on_save(self, *args, **kwargs):
+        """Record the sync state next to the checkpoint just written (every rank)."""
+        if self.sync is None or self._closed or getattr(self.sync, "finished", False):
+            return
+        iteration = int(self.state.iteration)
+        output_dir = save_dir_for(self.args, iteration, *args, **kwargs)
+        if output_dir is None:
+            logger.warning("yeto DiLoCo: on_save without a checkpoint directory; sync state not recorded")
+            return
+        self.sync.save_state(output_dir, iteration=iteration, save_anchors=self.config.save_anchors)
 
     def on_train_end(self):
         self.close()

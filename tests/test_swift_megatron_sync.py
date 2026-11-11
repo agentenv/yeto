@@ -74,6 +74,125 @@ def test_chunks_are_bounded_and_keep_order():
 
 
 # ----------------------------------------------------------------------------- fake Megatron island
+def test_heartbeat_thread_beats_between_steps_and_stops_on_a_stall():
+    class Beats:
+        def __init__(self):
+            self.steps = []
+
+        def heartbeat(self, step):
+            self.steps.append(step)
+
+    client, progress = Beats(), [time.monotonic()]
+    beat = sm._Heartbeat(client, 0.02, 0.3, lambda: 7, lambda: progress[0])
+    deadline = time.monotonic() + 5
+    while len(client.steps) < 3:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert set(client.steps) == {7}
+    time.sleep(0.5)  # no progress for longer than the stall limit: silence
+    quiet = len(client.steps)
+    time.sleep(0.2)
+    assert len(client.steps) == quiet
+    progress[0] = time.monotonic()
+    while len(client.steps) == quiet:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    beat.stop()
+    assert not beat.thread.is_alive()
+
+
+class _LinkClient:
+    """The client surface ``_PushSender`` and ``_ready_pushes`` use: a link
+    generation the test bumps, and a push result it chooses."""
+
+    def __init__(self, result=True):
+        self.connection_generation, self.result, self.pushes, self.pulls = 1, result, [], []
+
+    def push_fragment_parts(self, *head_and_parts):
+        if isinstance(self.result, BaseException):
+            raise self.result
+        self.pushes.append(head_and_parts[:-1])
+        return self.result
+
+    def drain_pulls(self):
+        pulls, self.pulls = self.pulls, []
+        return pulls
+
+
+@pytest.mark.parametrize("outcome", ["not-queued", "torso-lost", "socket-error"])
+def test_push_sender_treats_an_undelivered_push_as_a_drop(outcome):
+    """``push_fragment_parts`` returns False when the link is down (nothing
+    queued) and raises PartialMessageGenerationLost when the connection died
+    mid-message: neither reaches the syncer, so the anchor is released
+    instead of blocking that fragment's later pulls (or failing the island)."""
+
+    from yeto.protocol import PartialMessageGenerationLost
+
+    result = {"not-queued": False,
+              "torso-lost": PartialMessageGenerationLost(connection_generation=1, connection_epoch=1,
+                                                         queued_chunks=1, operation="PUSH_FRAGMENT"),
+              "socket-error": ConnectionResetError("reset")}[outcome]
+    stats = {"pushed": 0, "push_bytes": 0, "dropped_pushes": 0}
+    dropped, sent = [], []
+    sender = sm._PushSender(_LinkClient(result), stats, lambda *a: dropped.append(a), sent.append)
+    sender.submit((2, 9, 1, 7, 40, 3, 300), parts=[b"\0" * 8])
+    assert sender.wait_idle(5)
+    sender.stop()
+    assert dropped == [(2, 7, 9)] and sent == [2]
+    assert stats["dropped_pushes"] == 1 and stats["pushed"] == 0
+    sender.raise_error()  # not an island failure
+
+
+def _bare_sync(client, fragments=2):
+    from yeto.diloco_sync import DiLoCoSyncState
+
+    sync = object.__new__(sm.MegatronDiLoCoSync)
+    sync.client, sync.sender, sync.interval = client, None, 1
+    sync.state = DiLoCoSyncState.create(fragments, track_anchors=False)
+    sync.state.fragment_versions = [5] * fragments
+    sync.anchored = [True] * fragments
+    sync.spent, sync.spent_link, sync.pushed_from = [None] * fragments, [None] * fragments, [None] * fragments
+    sync.iteration, sync.units_total, sync.stats = 20, 100, {"deferred_pushes": 0}
+    return sync
+
+
+def test_a_spent_anchor_is_released_once_the_island_redials():
+    """A PUSH queued on a connection that later died may never have reached
+    the syncer, and a restarted syncer has lost the round it was carried
+    into; after the redial the next pull of that fragment is answered from
+    the same anchor (the syncer refuses it if it does hold that delta)."""
+
+    from yeto.protocol import PullRequest
+
+    client = _LinkClient()
+    sync = _bare_sync(client)
+    sync.spent[0] = (5, 7)  # pushed from anchor 5 for round 7, on link 1
+    sync._push_sent(0)
+    assert sync.spent_link[0] == 1
+    client.pulls = [PullRequest(0, 9, 1)]  # another round of the same anchor
+    assert sync._ready_pushes() == []  # same link: the syncer has the delta
+    assert sync.state.pending_pulls == [PullRequest(0, 9, 1)]
+    client.connection_generation = 2  # the link was replaced
+    assert [p[:3] for p in sync._ready_pushes()] == [(0, 9, 1)]
+    assert sync.spent == [None, None] and sync.stats["released_anchors"] == 1
+    # A record from the process the island resumed from: released likewise.
+    sync.spent[1], sync.spent_link[1] = (5, 4), sm._PREVIOUS_PROCESS
+    client.pulls = [PullRequest(1, 10, 1)]
+    assert [p[:3] for p in sync._ready_pushes()] == [(1, 10, 1)]
+
+
+def test_a_dropped_push_frees_its_anchor_on_the_same_link():
+    from yeto.protocol import PullRequest
+
+    client = _LinkClient()
+    sync = _bare_sync(client)
+    sync.spent[0] = (5, 7)
+    sync._push_sent(0)
+    sync._push_dropped(0, 5, 7)
+    client.pulls = [PullRequest(0, 9, 1)]
+    assert [p[:3] for p in sync._ready_pushes()] == [(0, 9, 1)]
+
+
 def _full(name: str, shape) -> torch.Tensor:
     """The initial full value of a global tensor (bf16-exact, so INIT is lossless)."""
 
@@ -498,6 +617,375 @@ def test_initial_cut_is_installed_fragment_by_fragment_before_training(tmp_path)
     _join(procs, 200, tmp_path)
 
 
+def _resume_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"resume-{rank}", lambda: _resume_body(rank, world, port, out_dir))
+
+
+def _resume_body(rank, world, port, out_dir):
+    """An island checkpoints after three steps and restarts from it; the
+    syncer's rejoin catch-up must not undo the island's local progress."""
+
+    from yeto.diloco_sync import shifted_resume_value
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full_shapes = _global_shapes(2, 1)
+    old_g = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    new_g = {n: (_full(n, s) - 0.25).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    cut = {}  # fid -> (version, values) of the next sync's catch-up
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        bcasts = [BcastFragment(fid, v, pack_tensor(_flat(layout, fid, values), 2))
+                  for fid, (v, values) in sorted(cut.items())]
+        return _ScriptedClient(layout, {("bcast", 1): bcasts})
+
+    def make(resume_dir=None, resume_iteration=None):
+        return sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=1, num_learners=2,
+                                     fragments=3, sync_interval_steps=100, chunk_numel=40, parallel_context=ctx,
+                                     client_factory=factory, initial_cut_timeout=60, resume_dir=resume_dir,
+                                     resume_iteration=resume_iteration)
+
+    def shard(full, p):
+        if getattr(p, "tensor_model_parallel", False):
+            size = p._full_shape[p.partition_dim] // 2
+            full = full.narrow(p.partition_dim, tp * size, size)
+        return full
+
+    ckpt, bare = Path(out_dir, "checkpoint-3"), Path(out_dir, "checkpoint-3-bare")
+    # The first run: the initial cut (version 4), three local steps, a checkpoint.
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    first = make()
+    for it in (1, 2, 3):
+        opt.step({id(p): _local_update(p, 1, it, tp, 2) for p in trainable})
+        first.after_optimizer_step(it, 10)
+    assert first.save_state(str(ckpt), iteration=3, save_anchors=True)
+    assert first.save_state(str(bare), iteration=3, save_anchors=False)
+    fid_of = {name: fid for fid, frag in enumerate(first.layout.fragments) for name, _ in frag.tensors}
+    first.close()
+    if rank == 0:
+        record = json.loads((ckpt / sm.RESUME_STATE_FILE).read_text())
+        assert record["versions"] == [4, 4, 4] and record["anchors"] and record["iteration"] == 3
+        assert record["steps_at_reset"] == [0, 0, 0] and record["units_total"] == 30
+        assert not json.loads((bare / sm.RESUME_STATE_FILE).read_text())["anchors"]
+    saved_master = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned}
+    saved_param = {id(p): p.detach().clone() for p in trainable}
+
+    def restart():  # the trainer loads the checkpoint again
+        for p in trainable:
+            if id(p) in opt.owned:
+                opt.master(p).copy_(saved_master[id(p)])
+            p.data.copy_(saved_param[id(p)])
+
+    def check(sync, expect):  # expect(p) -> the full local FP32 value or None (= the checkpoint, bit for bit)
+        assert sync.anchored == [True] * 3
+        for p in trainable:
+            want = expect(p)
+            if want is None:
+                if id(p) in opt.owned:
+                    assert torch.equal(opt.master(p), saved_master[id(p)]), p._full_name
+                assert torch.equal(p.detach(), saved_param[id(p)]), p._full_name
+                continue
+            if id(p) in opt.owned:
+                s, e, _ = opt.owned[id(p)]
+                assert torch.equal(opt.master(p), want.reshape(-1)[s:e]), p._full_name
+                assert torch.equal(p.detach().reshape(-1)[s:e], want.reshape(-1)[s:e].to(torch.bfloat16))
+
+    def check_anchors(sync, values):
+        for p in trainable:
+            assert torch.equal(sync.anchors[id(p)].float(), shard(values[p._full_name], p)), p._full_name
+
+    # (a) The syncer is still at the checkpoint's anchor version: anchor only.
+    restart()
+    cut.update({fid: (4, old_g) for fid in range(3)})
+    same = make(str(ckpt), 3)
+    check(same, lambda p: None)
+    check_anchors(same, old_g)
+    assert same.resumed == {0: "anchor", 1: "anchor", 2: "anchor"}
+    same.after_optimizer_step(4, 10)
+    assert same.state.steps_at_reset == [0, 0, 0], "the H gate restarted with the island"
+    assert same.units_total == 40
+    same.close()
+
+    # (b) The syncer moved on: global_new + (local - anchor_old), exactly.
+    restart()
+    cut.update({fid: (9, new_g) for fid in range(3)})
+    moved = make(str(ckpt), 3)
+    for p in trainable:
+        if id(p) in opt.owned:
+            s, e, _ = opt.owned[id(p)]
+            want = shifted_resume_value(shard(new_g[p._full_name], p).reshape(-1)[s:e], saved_master[id(p)],
+                                        shard(old_g[p._full_name], p).reshape(-1)[s:e])
+            assert torch.equal(opt.master(p), want), p._full_name
+            assert torch.equal(p.detach().reshape(-1)[s:e], want.to(torch.bfloat16)), p._full_name
+            assert not torch.equal(want, shard(new_g[p._full_name], p).reshape(-1)[s:e])
+    check_anchors(moved, new_g)
+    assert set(moved.resumed.values()) == {"shift"} and not moved._resume_anchors
+    moved.after_optimizer_step(4, 10)
+    assert moved.state.steps_at_reset == [0, 0, 0] and moved.state.fragment_versions == [9, 9, 9]
+    moved.close()
+
+    # (c) Without saved anchors a moved fragment takes the global; an unmoved one is kept
+    # (a record without the contract, as written by hand for an older checkpoint, is accepted).
+    if rank == 0:
+        record = json.loads((bare / sm.RESUME_STATE_FILE).read_text())
+        del record["contract"]
+        (bare / sm.RESUME_STATE_FILE).write_text(json.dumps(record))
+    restart()
+    cut.update({0: (4, old_g), 1: (9, new_g), 2: (9, new_g)})
+    mixed = make(str(bare), 3)
+    check(mixed, lambda p: None if fid_of[p._full_name] == 0 else shard(new_g[p._full_name], p))
+    assert mixed.resumed == {0: "anchor", 1: "overwrite", 2: "overwrite"}
+    mixed.after_optimizer_step(4, 10)
+    assert mixed.state.steps_at_reset == [0, 3, 3]
+    mixed.close()
+
+    # (d) A cold start (no record, or a record of another iteration) takes the global.
+    for resume in ((None, None), (str(ckpt), 7)):
+        restart()
+        cut.update({fid: (9, new_g) for fid in range(3)})
+        cold = make(*resume)
+        check(cold, lambda p: shard(new_g[p._full_name], p))
+        assert cold.resumed == {} and cold.resume_record is None
+        cold.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_resumed_island_keeps_its_checkpoint_through_the_rejoin_catch_up(tmp_path):
+    procs = _run(_resume_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
+def _catch_up_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"catch-up-{rank}", lambda: _catch_up_body(rank, world, port, out_dir))
+
+
+def _catch_up_body(rank, world, port, out_dir):
+    """A running island redials and gets the syncer's catch-up: a replay of
+    its anchor changes nothing (bit for bit), a rewound or newer catch-up of
+    a fragment it did not push from keeps its local progress (global_new +
+    (local - anchor)), a newer one of a fragment it pushed from its anchor is
+    installed as an ordinary merge."""
+
+    from yeto.diloco_sync import shifted_resume_value
+    from yeto.protocol import BcastFragment, PullRequest
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full_shapes = _global_shapes(2, 1)
+    old_g = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+    new_g = {n: (_full(n, s) - 0.25).to(torch.bfloat16).float() for n, s in full_shapes.items()}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        assert kwargs["accept_rewound_catch_up"] is True
+        client = _ScriptedClient(layout, script)
+        script[("layout",)] = layout
+        return client
+
+    def bcast(fid, version, values, catch_up):
+        layout = script[("layout",)]
+        return BcastFragment(fid, version, pack_tensor(_flat(layout, fid, values), 2), catch_up=catch_up)
+
+    plan = {1: [(fid, 4, old_g, False) for fid in range(3)],  # the initial cut
+            3: "pull",                                         # iteration 2: a pull of fragment 2
+            5: [(0, 4, old_g, False), (1, 2, new_g, True), (2, 9, new_g, True)],
+            6: [(0, 9, new_g, True)]}
+
+    class _Script(dict):  # call -> scripted pulls / broadcasts (packed once the layout is known)
+        def get(self, key, default=None):
+            kind, call = key
+            entry = plan.get(call)
+            if kind == "pull":
+                return [PullRequest(2, 7, 1)] if entry == "pull" else []
+            if isinstance(entry, list):
+                return [bcast(*row) for row in entry]
+            return []
+
+    script = _Script()
+    sync = sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=1, num_learners=2,
+                                 fragments=3, sync_interval_steps=1, chunk_numel=40, parallel_context=ctx,
+                                 client_factory=factory, initial_cut_timeout=60)
+    fid_of = {name: fid for fid, frag in enumerate(sync.layout.fragments) for name, _ in frag.tensors}
+    for it in (1, 2, 3):
+        opt.step({id(p): _local_update(p, 1, it, tp, 2) for p in trainable})
+        sync.after_optimizer_step(it, 10)
+    if rank == 0:
+        assert sync.sender.wait_idle(10) and sync.stats["pushed"] == 1 and sync.pushed_from == [None, None, 4]
+    master = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned}
+    param = {id(p): p.detach().clone() for p in trainable}
+
+    def shard(full, p):
+        if getattr(p, "tensor_model_parallel", False):
+            size = p._full_shape[p.partition_dim] // 2
+            full = full.narrow(p.partition_dim, tp * size, size)
+        return full
+
+    def owned(p, full):
+        s, e, _ = opt.owned[id(p)]
+        return shard(full, p).reshape(-1)[s:e]
+
+    sync.after_optimizer_step(4, 10)  # call 5: no local step since the snapshot
+    for p in trainable:
+        fid = fid_of[p._full_name]
+        if fid == 0:  # a replay of its anchor: untouched
+            assert torch.equal(p.detach(), param[id(p)]), p._full_name
+            if id(p) in opt.owned:
+                assert torch.equal(opt.master(p), master[id(p)])
+            assert torch.equal(sync.anchors[id(p)].float(), shard(old_g[p._full_name], p))
+            continue
+        assert torch.equal(sync.anchors[id(p)].float(), shard(new_g[p._full_name], p)), p._full_name
+        if id(p) not in opt.owned:
+            continue
+        if fid == 1:  # rewound to version 2: rebased exactly
+            want = shifted_resume_value(owned(p, new_g[p._full_name]), master[id(p)], owned(p, old_g[p._full_name]))
+            assert not torch.equal(want, owned(p, new_g[p._full_name]))
+        else:  # newer, pushed from its anchor: the ordinary install
+            want = owned(p, new_g[p._full_name])
+        assert torch.equal(opt.master(p), want), (fid, p._full_name)
+        assert torch.equal(p.detach().reshape(-1)[opt.owned[id(p)][0]:opt.owned[id(p)][1]], want.to(torch.bfloat16))
+    assert sync.state.fragment_versions == [4, 2, 9]
+    assert sync.state.steps_at_reset[1] == 0 and sync.state.steps_at_reset[2] == 4, sync.state.steps_at_reset
+    before = {id(p): opt.master(p).clone() for p in trainable if id(p) in opt.owned and fid_of[p._full_name] == 0}
+    sync.after_optimizer_step(5, 10)  # call 6: a newer catch-up of fragment 0, never pushed: rebased
+    for p in trainable:
+        if fid_of[p._full_name] == 0 and id(p) in opt.owned:
+            want = shifted_resume_value(owned(p, new_g[p._full_name]), before[id(p)], owned(p, old_g[p._full_name]))
+            assert torch.equal(opt.master(p), want), p._full_name
+    if rank == 0:
+        assert sync.stats["confirmed"] == 1 and sync.stats["rebased"] == 2, sync.stats
+    sync.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_running_island_keeps_its_progress_through_a_catch_up(tmp_path):
+    procs = _run(_catch_up_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
+def _resumed_init_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"resumed-init-{rank}", lambda: _resumed_init_body(rank, world, port, out_dir))
+
+
+def _resumed_init_body(rank, world, port, out_dir):
+    """Learner 0 resumed from a checkpoint with a record: an initialized
+    syncer answers its HELLO with the catch-up, so no INIT_PARAMS is sent;
+    a syncer that sends nothing within the probe gets INIT_PARAMS, streamed
+    chunk by chunk, byte-identical to a cold start's."""
+
+    from yeto.protocol import BcastFragment
+    from yeto.tensor_io import pack_tensor
+
+    dist = _init_dist(rank, world, port)
+    tp, dp = rank % 2, rank // 2
+    tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
+    dp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
+    singles = [dist.new_group([r]) for r in range(world)]
+    ctx = sm.ParallelContext(rank, world, tp_groups[dp], tp, 2, singles[rank], 0, 1)
+    chunk = _chunk(tp=tp, pp=0, tp_size=2, pp_size=1)
+    trainable = [p for p in chunk.parameters() if p.requires_grad]
+    opt = _DistOpt(trainable, dp_rank=dp, dp_size=2, dp_group=dp_groups[tp])
+    full = {n: (_full(n, s) + 0.125).to(torch.bfloat16).float() for n, s in _global_shapes(2, 1).items()}
+    clients, cut = [], {"calls": ()}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        script = {("bcast", c): [BcastFragment(fid, 4, pack_tensor(_flat(layout, fid, full), 2)) for fid in range(3)]
+                  for c in cut["calls"]}
+        clients.append(_ScriptedClient(layout, script))
+        return clients[-1]
+
+    def make(resume_dir=None, **kw):
+        return sm.MegatronDiLoCoSync([chunk], opt, syncer="tcp://127.0.0.1:1234", learner_id=0, num_learners=2,
+                                     fragments=3, sync_interval_steps=100, chunk_numel=40, parallel_context=ctx,
+                                     client_factory=factory, resume_dir=resume_dir, resume_iteration=3, **kw)
+
+    cut["calls"] = (1,)
+    first = make(initial_cut_timeout=60)  # a cold start: INIT, then the initial cut
+    ckpt = Path(out_dir, "checkpoint-3")
+    first.save_state(str(ckpt), iteration=3)
+    first.close()
+    cold_init = dict(clients[-1].inits) if rank == 0 else {}
+    if rank == 0:
+        assert sorted(cold_init) == [0, 1, 2]
+    resumed = make(str(ckpt), initial_cut_timeout=60, init_probe_s=30)  # the catch-up arrives: no INIT
+    assert resumed.anchored == [True] * 3 and resumed.resumed == {0: "anchor", 1: "anchor", 2: "anchor"}
+    if rank == 0:
+        assert clients[-1].inits == {}
+    resumed.close()
+    cut["calls"] = ()
+    started = time.monotonic()
+    fresh = make(str(ckpt), initial_cut_timeout=1, init_probe_s=0.5)  # nothing arrives: INIT after the probe
+    assert time.monotonic() - started >= 0.5
+    if rank == 0:  # the island's current masters (the installed cut), streamed by chunk
+        layout = clients[-1].layout
+        assert clients[-1].inits == {fid: bytes(pack_tensor(_flat(layout, fid, full), fresh.bulk)) for fid in range(3)}
+    fresh.close()
+    dist.destroy_process_group()
+
+
+@pytest.mark.timeout(240)
+def test_a_resumed_learner_zero_sends_init_only_when_the_syncer_needs_it(tmp_path):
+    procs = _run(_resumed_init_worker, 4, free_port(), str(tmp_path))
+    _join(procs, 200, tmp_path)
+
+
+def _init_abort_worker(rank, world, port, out_dir):
+    _guard(out_dir, f"init-abort-{rank}", lambda: _init_abort_body(rank, world, port))
+
+
+def _init_abort_body(rank, world, port):
+    dist = _init_dist(rank, world, port)
+    single = dist.new_group([0])
+    ctx = sm.ParallelContext(0, 1, single, 0, 1, single, 0, 1)
+    chunk = _chunk(tp=0, pp=0, tp_size=1, pp_size=1)
+    opt = _DistOpt([p for p in chunk.parameters() if p.requires_grad], dp_rank=0, dp_size=1, dp_group=single)
+    holder = {}
+
+    def factory(addrs, learner_id, layout, wire, streams, **kwargs):
+        holder["client"] = _ScriptedClient(layout, {})
+        return holder["client"]
+
+    # learner 1: no INIT from the constructor; the test sends it by hand
+    sync = sm.MegatronDiLoCoSync([chunk], opt, syncer="127.0.0.1:1", learner_id=1, num_learners=2,
+                                 fragments=2, sync_interval_steps=1, chunk_numel=16,
+                                 parallel_context=ctx, client_factory=factory)
+    original = sync._export_fragment_chunks
+
+    def failing(fid, delta):
+        for i, parts in enumerate(original(fid, delta=delta)):
+            if i == 1:
+                raise RuntimeError("collective timed out")
+            yield parts
+
+    sync._export_fragment_chunks = failing
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="collective timed out"):
+        sync._send_init()
+    assert time.monotonic() - started < 30
+
+
+def test_an_init_export_that_raises_fails_instead_of_hanging(tmp_path):
+    procs = _run(_init_abort_worker, 1, free_port(), str(tmp_path))
+    _join(procs, 120, tmp_path)
+
+
 # ----------------------------------------------------------------------------- two islands, real syncer (TP2 x PP2)
 def build_syncer() -> Path:
     binary = ROOT / "syncer/target/debug/yeto-syncer"
@@ -538,7 +1026,8 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, 
     syncer = sm.MegatronDiLoCoSync([chunk], opt, syncer=f"127.0.0.1:{syncer_port}", learner_id=island,
                                    num_learners=2, fragments=3, sync_interval_steps=2,
                                    wire_dtype=opts.get("wire", "bf16"),
-                                   chunk_numel=64, parallel_context=ctx, final_cut_payload="full")
+                                   chunk_numel=64, parallel_context=ctx, final_cut_payload="full",
+                                   heartbeat_s=opts.get("heartbeat_s", 30.0))
     it = 0
     dropped = False
     started = time.monotonic()
@@ -571,7 +1060,7 @@ def _island_body(rank, world, island, dist_port, syncer_port, out_dir, drop_at, 
     if rank == 0:
         torch.save({"names": names, "values": dict(zip(names, values, strict=True)),
                     "events": list(syncer.events), "stats": dict(syncer.stats), "dropped": dropped,
-                    "timeline": timeline,
+                    "timeline": timeline, "lease_expiries": syncer.client.lease_expiries,
                     "fragments": [[n for n, _ in f.tensors] for f in syncer.layout.fragments]},
                    Path(out_dir, f"island{island}.pt"))
     syncer.close()
@@ -711,3 +1200,127 @@ def test_decoupled_quorum_one_keeps_the_fast_island_merging_while_the_other_stal
     # A late-carried delta counts towards its round's quorum, so the fast
     # island's rounds keep closing while the other island stalls.
     assert merged_during >= 3, merged_during
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("stop", ["sigterm", "sigkill"])
+def test_islands_keep_merging_across_a_syncer_restart(tmp_path, stop):
+    """The syncer is stopped while both islands keep training and answering
+    the pulls they already hold, then comes back with --resume on the same
+    port.  ``sigterm``: it writes its checkpoint and exits.  During the
+    outage a PUSH is not queued at all (``push_fragment_parts`` returns
+    False) and is a drop; a PUSH that went out on the old connection holds an
+    anchor whose round the restarted syncer no longer has, and is released
+    once the island redials.  ``sigkill``: a crash; the syncer resumes from
+    its last periodic checkpoint, older than what the islands hold, and its
+    catch-up rewinds them (rebased onto it) instead of being dropped while
+    every push from the lost versions is refused as a future base.  Both
+    islands must reach the restarted syncer's final cut."""
+
+    import signal
+
+    binary = build_syncer()
+    from process_groups import group_popen
+
+    port = free_port()
+    final_state = tmp_path / "final.bin"
+    ckpt = tmp_path / "syncer.ckpt"
+    flags = [str(binary), "--port", str(port), "--learners", "2", "--grace-ms", "200",
+             "--terminal-grace-ms", "2000", "--total-steps", "30", "--final-state", str(final_state),
+             "--checkpoint-path", str(ckpt), "--checkpoint-every", "4", "--shutdown-timeout-s", "5",
+             *DECOUPLED_SYNCER_FLAGS]
+    logs: list[str] = []
+
+    def start(extra):
+        proc = group_popen(flags + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        logs.append("")
+        return proc
+
+    def read(i, proc):  # the log file written so far
+        logs[i] += proc.stdout.read()
+        return logs[i]
+
+    first = start([])
+    second = None
+    procs = []
+    try:
+        procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
+        procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None, {"step_s": 0.05})
+        deadline = time.monotonic() + 120
+        # sigkill: past a periodic checkpoint (every 4 rounds), not on one.
+        while read(0, first).count("outer step") < (8 if stop == "sigterm" else 10):
+            assert time.monotonic() < deadline, "the first syncer never merged enough rounds"
+            assert first.poll() is None, "the first syncer exited early"
+            time.sleep(0.05)
+        if stop == "sigterm":
+            first.send_signal(signal.SIGTERM)
+            assert first.wait(timeout=60) == 0, "SIGTERM did not end in a clean checkpoint"
+        else:
+            first.kill()
+            first.wait(timeout=60)
+        assert ckpt.exists()
+        time.sleep(3.0)  # the outage: both islands keep stepping
+        second = start(["--resume"])
+        _join(procs, 240, tmp_path)
+        assert second.wait(timeout=60) == 0, "the restarted syncer exited nonzero"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+        for i, proc in enumerate((first, second)):
+            if proc is not None:
+                if proc.poll() is None:
+                    proc.kill()
+                read(i, proc)
+                (tmp_path / f"syncer{i}.log").write_text(logs[i])
+        print(logs[-1][-4000:])
+
+    islands = [torch.load(tmp_path / f"island{i}.pt") for i in range(2)]
+    for name in islands[0]["names"]:
+        assert torch.equal(islands[0]["values"][name], islands[1]["values"][name]), name
+    final = read_final_state(final_state)
+    for fid, frag_names in enumerate(islands[0]["fragments"]):
+        assert torch.equal(torch.cat([islands[0]["values"][n].reshape(-1) for n in frag_names]), final[fid])
+    assert "outer step" in logs[1], "the restarted syncer merged nothing"
+    if stop == "sigkill":
+        assert sum(i["stats"].get("rebased", 0) for i in islands) > 0, "no island was rewound"
+    print(json.dumps([i["stats"] for i in islands]))
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("heartbeat_s", [0.3, 0.0])
+def test_heartbeats_keep_a_stalled_island_inside_its_lease(tmp_path, heartbeat_s):
+    """--island-lease-s 2 with an island that makes no boundary for 4 s:
+    rank 0's heartbeat thread keeps its lease; without heartbeats the syncer
+    expires it (the island redials as a re-JOIN)."""
+
+    binary = build_syncer()
+    from process_groups import group_popen
+
+    port = free_port()
+    final_state = tmp_path / "final.bin"
+    proc = group_popen([str(binary), "--port", str(port), "--learners", "2", "--grace-ms", "200",
+                        "--terminal-grace-ms", "2000", "--total-steps", "30", "--final-state", str(final_state),
+                        "--island-lease-s", "2", *DECOUPLED_SYNCER_FLAGS],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    procs = []
+    try:
+        procs += _run(_island_worker, 4, 0, free_port(), port, str(tmp_path), None,
+                      {"step_s": 0.05, "heartbeat_s": heartbeat_s})
+        procs += _run(_island_worker, 4, 1, free_port(), port, str(tmp_path), None,
+                      {"step_s": 0.05, "stall_at": 6, "stall_s": 4.0, "heartbeat_s": heartbeat_s})
+        _join(procs, 240, tmp_path)
+        assert proc.wait(timeout=60) == 0, "syncer exited nonzero"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+        if proc.poll() is None:
+            proc.kill()
+        log = proc.stdout.read() if proc.stdout else ""
+        (tmp_path / "syncer.log").write_text(log)
+    islands = [torch.load(tmp_path / f"island{i}.pt") for i in range(2)]
+    for name in islands[0]["names"]:
+        assert torch.equal(islands[0]["values"][name], islands[1]["values"][name]), name
+    expired = '"reason":"lease_expired"' in log or islands[1]["lease_expiries"] > 0
+    assert expired == (heartbeat_s == 0), (islands[1]["lease_expiries"], heartbeat_s)
