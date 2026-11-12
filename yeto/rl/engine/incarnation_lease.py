@@ -65,7 +65,7 @@ import random
 import os
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -317,6 +317,9 @@ def claim_patiently(lease: IncarnationLease, entries: Callable[[], Iterable[Any]
             return None
 
 
+_ORDINALS_KEPT = 4096  # IncarnationGate: the positions whose ordinal it keeps
+
+
 class IncarnationGate:
     """The buffer reader's stale-incarnation verdict (module doc).
 
@@ -344,6 +347,8 @@ class IncarnationGate:
         self._failing: dict[str, list[float]] = {}
         self._seen: Counter[tuple[str, str]] = Counter()  # (sampler, incarnation) over positions < _upto
         self._upto = 0
+        # position -> its ordinal among its incarnation's entries (a verdict asked again)
+        self._ordinals: OrderedDict[int, int] = OrderedDict()
         self.stale = 0
         self.deferred = 0  # verdicts that raised LeaseUnknown
         self.read_failures = 0
@@ -377,7 +382,9 @@ class IncarnationGate:
     def _lease(self, sampler: str, *, force: bool = False) -> dict[str, Any] | None:
         now = self.monotonic()
         cached = self._leases.get(sampler)
-        if cached is None or now - cached[0] >= self.refresh_s or (force and now - cached[0] >= 1.0):
+        # while its reads fail an older read does not answer (fail closed)
+        if (cached is None or sampler in self._failing or now - cached[0] >= self.refresh_s
+                or (force and now - cached[0] >= 1.0)):
             return self._read(sampler, now)
         return cached[1]
 
@@ -403,7 +410,13 @@ class IncarnationGate:
         if sampler is None or inc is None:
             return None
         sampler, inc = str(sampler), str(inc)
-        ordinal = self._ordinal(int(position), (sampler, inc))
+        # judged before (the index is append-only: its ordinal stands), or counted now
+        ordinal = self._ordinals.get(int(position)) if int(position) < self._upto else None
+        if ordinal is None:
+            ordinal = self._ordinal(int(position), (sampler, inc))
+            self._ordinals[int(position)] = ordinal
+            while len(self._ordinals) > _ORDINALS_KEPT:
+                self._ordinals.popitem(last=False)
         try:
             lease = self._lease(sampler)
             if lease is not None and str(lease.get("incarnation")) != inc and inc not in lease.get("superseded", ()):
@@ -426,6 +439,35 @@ class IncarnationGate:
         self.stale += 1
         return (f"incarnation {inc} of {sampler} superseded by {holder} (generation "
                 f"{lease.get('generation')}); entry {ordinal} of it, {sealed} sealed")
+
+    def recheck(self, items: list[tuple[Any, int]], read: dict[str, float], *,
+                fresh_s: float = 1.0) -> list[str | None | LeaseUnknown]:
+        """:meth:`verdict` on ``items`` (``(entry, position)`` pairs it let through
+        earlier) with their leases read again now: one read per shard, except a
+        shard that ``read`` (shard -> monotonic time of this caller's last recheck
+        read; updated) shows read less than ``fresh_s`` seconds ago. A result is
+        None (train it), the stale detail, or a :class:`LeaseUnknown` (unreadable:
+        the caller waits and asks again)."""
+        now = self.monotonic()
+        failed: dict[str, LeaseUnknown] = {}
+        out: list[str | None | LeaseUnknown] = []
+        for entry, position in items:
+            sampler = (getattr(entry, "sampler_round", None) or {}).get("sampler")
+            if sampler is not None and now - read.get(str(sampler), -float("inf")) >= fresh_s:
+                read[str(sampler)] = now
+                try:
+                    self._read(str(sampler), now)
+                except LeaseUnknown as error:
+                    failed[str(sampler)] = error
+            if sampler is not None and str(sampler) in failed:
+                self.deferred += 1  # not read again by the verdict
+                out.append(failed[str(sampler)])
+                continue
+            try:
+                out.append(self.verdict(entry, int(position)))
+            except LeaseUnknown as error:
+                out.append(error)
+        return out
 
 
 INCARNATION_FENCE_ENV = "YETO_BUFFER_INCARNATION_FENCE"  # "0": no stale-incarnation gate
