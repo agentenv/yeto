@@ -613,6 +613,94 @@ def test_staged_s3_store_carries_snapshots_and_cuts_between_hosts(tmp_path):
     assert (second.store.root / ROUND_CUTS / "r000001-x" / "shard-0.pt").read_bytes() == b"w" * 100
 
 
+def test_a_first_cut_that_died_while_uploading_is_dropped_by_the_next_container(tmp_path):
+    """A staged store: the ranks upload the shards of the store's first cut long before
+    the commit that names it. A trainer that dies meanwhile leaves shards and no LATEST;
+    the first-cut mark is in the object store too, so the next container (an empty
+    stage) drops them and starts at rollout 0 instead of refusing every start."""
+    from yeto.rl.engine import resume as rs
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def store(host):
+        return store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / host)}, client=s3)
+
+    first = store("container-1")
+    rs.ResumeController(state_dir=tmp_path / "state-1", store=first)
+    rs.mark_first_cut(first.root, "r000004-x", store=first)
+    shard = first.root / rs.ROUND_CUTS / "r000004-x" / "rank-0.pt"
+    shard.parent.mkdir(parents=True)
+    shard.write_bytes(b"w" * 100)
+    first.push_local_file(f"{rs.ROUND_CUTS}/r000004-x/rank-0.pt")  # the rank's own upload; then the trainer dies
+    assert ("bkt", "runs/a/round-cuts/r000004-x.first-cut-in-progress") in s3.objects
+
+    second = rs.ResumeController(state_dir=tmp_path / "state-2", store=store("container-2"))
+    assert second.restored is None
+    assert second.discarded_first_cut == ["round-cuts/r000004-x", "round-cuts/r000004-x.first-cut-in-progress"]
+    assert not [key for _, key in s3.objects if "round-cuts" in key]
+    # an unmarked cut without LATEST is still refused
+    s3.objects[("bkt", "runs/a/round-cuts/r000008-y/rank-0.pt")] = b"w"
+    with pytest.raises(rs.StoreIntegrityError, match="no LATEST"):
+        rs.ResumeController(state_dir=tmp_path / "state-3", store=store("container-3"))
+
+
+def test_a_discard_of_a_first_cut_that_dies_while_deleting_is_finished_by_the_next_start(tmp_path):
+    """The mark is the last object of an unfinished first cut to leave the store: a
+    discard cut short (a failed delete, a killed container) can be done again."""
+    from yeto.rl.engine import resume as rs
+
+    class DeleteDies(FakeS3):
+        die_after: int | None = None
+
+        def delete_object(self, Bucket, Key):
+            if self.die_after is not None:
+                if self.die_after == 0:
+                    raise _error("InternalError", "DeleteObject")
+                self.die_after -= 1
+            return super().delete_object(Bucket=Bucket, Key=Key)
+
+    s3 = DeleteDies()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def store(host):
+        return store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / host)}, client=s3)
+
+    first = store("container-1")
+    rs.ResumeController(state_dir=tmp_path / "state-1", store=first)
+    rs.mark_first_cut(first.root, "r000004-x", store=first)
+    for rank in range(3):
+        shard = first.root / rs.ROUND_CUTS / "r000004-x" / f"rank-{rank}.pt"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        shard.write_bytes(b"w" * 100)
+        first.push_local_file(f"{rs.ROUND_CUTS}/r000004-x/rank-{rank}.pt")
+    s3.die_after = 1
+    with pytest.raises(ClientError):
+        rs.ResumeController(state_dir=tmp_path / "state-2", store=store("container-2"))
+    assert ("bkt", "runs/a/round-cuts/r000004-x.first-cut-in-progress") in s3.objects
+    s3.die_after = None
+    third = rs.ResumeController(state_dir=tmp_path / "state-3", store=store("container-3"))
+    assert third.discarded_first_cut and not [key for _, key in s3.objects if "round-cuts" in key]
+
+
+def test_the_first_cut_mark_leaves_the_object_store_with_the_first_commit(tmp_path):
+    from yeto.rl.engine import resume as rs
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI, s3_store.STAGE_ENV: str(tmp_path / "stage")}
+    staged = store_for(tmp_path / "mount", environ=env, client=s3)
+    ctl = rs.ResumeController(state_dir=tmp_path / "state", store=staged)
+    rs.mark_first_cut(staged.root, "r000001-x", store=staged)
+    cut = staged.root / rs.ROUND_CUTS / "r000001-x"
+    cut.mkdir(parents=True)
+    (cut / "shard-0.pt").write_bytes(b"w" * 100)
+    (ctl.state_dir / "round-cut.json").write_text(json.dumps({"cut_id": "r000001-x", "next_rollout_id": 1}))
+    assert ctl.sync_checkpoint_store("round_cut")
+    keys = sorted(key for _, key in s3.objects)
+    assert "runs/a/LATEST" in keys and "runs/a/round-cuts/r000001-x/shard-0.pt" in keys
+    assert not [key for key in keys if key.endswith(rs.FIRST_CUT_MARK)]
+
+
 def test_a_stalled_range_read_is_retried_not_fatal(tmp_path, monkeypatch):
     from botocore.exceptions import ReadTimeoutError
 
