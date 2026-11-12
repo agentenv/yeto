@@ -109,6 +109,13 @@ class RolloutBatchHandle:
     # The task-dispenser positions of those groups (row runs,
     # ``data_split.row_runs``); None when no stale group had one.
     buffer_stale_positions: list[list[int]] | None = None
+    # Groups inside the window that a trainer resumed behind its releases passed over
+    # because no record names their version (consumed, never trained): the count,
+    # ``[[version, groups], ...]`` and their task-dispenser positions (row runs).
+    # None = none this round, or not a buffer reader.
+    buffer_unidentified_groups: int | None = None
+    buffer_unidentified_versions: list[list[int]] | None = None
+    buffer_unidentified_positions: list[list[int]] | None = None
     # xhw guard (yeto.rl.engine.xhw_guard): the round's tokens and rollout-side
     # statistics per source, and the groups a quarantine passed over / a downweight
     # scaled; None = not reported (no buffer reader).

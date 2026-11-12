@@ -159,6 +159,13 @@ class PolicyRelease:
     policy_hash: str
     path: str  # relative to the release root: "r<seq>-v<version>"
     buffer_selected: int | None = None
+    # The buffer position these weights are trained up to: every group before it was
+    # selected by a round the weights include (or passed over), none at or after it.
+    # Read on the trainer's thread at the publication, not when the record is written:
+    # ``buffer_selected`` of a staged release is the read position when its upload
+    # ended, rounds later. A relaunch without a round cut reads the buffer on from
+    # here. None: not recorded (an earlier yeto, or nothing was read yet).
+    buffer_trained: int | None = None
     released_at: float = 0.0
     weights: str = FULL
     sha256: str | None = None  # None: not digested (a full checkpoint)
@@ -661,7 +668,8 @@ class PolicyReleaseStore:
         return [found[seq] for seq in sorted(found)]
 
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
-                buffer_selected: int | None = None, weights: str = FULL,
+                buffer_selected: int | None = None, buffer_trained: int | None = None,
+                weights: str = FULL,
                 engine_checksum: str | None = None,
                 buffer_shards: dict[str, int] | None = None,
                 derived_from: dict[str, Any] | None = None,
@@ -688,6 +696,7 @@ class PolicyReleaseStore:
         try:
             record = self._write_release(timer, latest, version, policy_hash, write, weights=weights,
                                          buffer_selected=buffer_selected,
+                                         buffer_trained=buffer_trained,
                                          engine_checksum=engine_checksum,
                                          buffer_shards=buffer_shards, derived_from=derived_from,
                                          origin=origin, manifest=manifest)
@@ -699,6 +708,7 @@ class PolicyReleaseStore:
 
     def release_staged(self, version: int, policy_hash: str, staged: Path, *,
                        position: Callable[[], tuple[int | None, dict[str, int] | None]],
+                       buffer_trained: int | None = None,
                        weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None,
                        delta_base: DeltaBase | None = None,
@@ -756,6 +766,7 @@ class PolicyReleaseStore:
         buffer_selected, buffer_shards = position()
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
+                               buffer_trained=None if buffer_trained is None else int(buffer_trained),
                                released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
@@ -873,7 +884,8 @@ class PolicyReleaseStore:
                        buffer_selected: int | None, engine_checksum: str | None,
                        buffer_shards: dict[str, int] | None, derived_from: dict[str, Any] | None,
                        origin: dict[str, Any] | None,
-                       manifest: dict[str, Any] | None = None) -> PolicyRelease:
+                       manifest: dict[str, Any] | None = None,
+                       buffer_trained: int | None = None) -> PolicyRelease:
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
@@ -887,6 +899,7 @@ class PolicyReleaseStore:
             files = file_sizes(directory)
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
+                               buffer_trained=None if buffer_trained is None else int(buffer_trained),
                                released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
@@ -1007,10 +1020,34 @@ class FollowerCounters:
 
 
 DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
-# a background download starts after a random 0..DOWNLOAD_SPREAD_S delay: samplers that see
-# the same LATEST together do not open their range reads on the store in the same second
+# A background download starts after a delay of 0..DOWNLOAD_SPREAD_S: samplers that see
+# the same LATEST together do not open their range reads on the store in the same second.
+# The delay is fixed per sampler (:func:`download_delay_s`), so two samplers keep their
+# distance at every release. It postpones the release on that sampler by at most the
+# spread: keep the spread well below the trainer's release interval, or a sampler stays
+# one more version behind (the number of versions behind stays bounded either way: the
+# delay is the same constant for every release, and only the newest release is fetched).
 DOWNLOAD_SPREAD_S = 5.0
+DOWNLOAD_SPREAD_ENV = "YETO_RL_RELEASE_SPREAD_S"  # the spread in seconds (0: no delay)
+DOWNLOAD_SPREAD_KEY_ENV = "YETO_RL_RELEASE_SPREAD_KEY"  # what tells this sampler apart (default: the host name)
 DOWNLOAD_WAIT_S = 5.0  # refresh waits this long for a download it starts before going on
+
+
+def download_delay_s(environ: Mapping[str, str] | None = None) -> float:
+    """This sampler's delay before a background download: a fixed point of
+    ``0..spread`` taken from its key (:data:`DOWNLOAD_SPREAD_KEY_ENV`, else the
+    host name), ``spread`` from :data:`DOWNLOAD_SPREAD_ENV`, else
+    :data:`DOWNLOAD_SPREAD_S`."""
+    import socket  # noqa: PLC0415
+
+    env = os.environ if environ is None else environ
+    raw = env.get(DOWNLOAD_SPREAD_ENV)
+    spread = max(0.0, float(raw)) if raw not in (None, "") else float(DOWNLOAD_SPREAD_S)
+    if spread <= 0:
+        return 0.0
+    key = env.get(DOWNLOAD_SPREAD_KEY_ENV) or socket.gethostname()
+    point = int.from_bytes(hashlib.sha256(str(key).encode("utf-8", "replace")).digest()[:8], "big") / 2 ** 64
+    return spread * point
 
 
 def _download_failed(release: PolicyRelease, error: BaseException, served: int) -> ReleaseNotLoaded:
@@ -1035,7 +1072,7 @@ class _Fetch:
 
     def start(self, releases: "PolicyReleaseStore", *, from_store: bool, timer: Callable[[], float]) -> None:
         def run() -> None:
-            time.sleep(random.uniform(0.0, DOWNLOAD_SPREAD_S))
+            time.sleep(download_delay_s())
             began = timer()
             try:
                 self.directory = releases.resolve(self.release, from_store=from_store)
@@ -1103,6 +1140,8 @@ class PolicyFollower:
     a newer release is fetched when it ends. A failed download (any error but
     :class:`ReleaseIncomplete`) raises :class:`ReleaseNotLoaded` (reason
     ``download_failed``) once and is tried again ``download_retry_s`` later.
+    :meth:`prefetch` starts and polls the same download outside a refresh; the
+    release it reports on disk is the one the next refresh loads.
     Without it, a failed download raises the same :class:`ReleaseNotLoaded`
     on the refresh that tried it.
 
@@ -1143,6 +1182,7 @@ class PolicyFollower:
         self.background_download = bool(background_download)
         self.download_retry_s = float(download_retry_s)
         self._fetch: _Fetch | None = None
+        self._ready: _Fetch | None = None  # the download prefetch() reported on disk
         if max_defer_s is not None and float(max_defer_s) <= 0:
             raise ValueError("max_defer_s must be > 0 (None: no bound)")
         self.max_defer_s = None if max_defer_s is None else float(max_defer_s)
@@ -1168,13 +1208,77 @@ class PolicyFollower:
             return 0
         return max(0, int(self.last_seen.version) - int(self.version))
 
+    def _served_seq(self) -> int:
+        return -1 if self.release is None else int(self.release.seq)
+
+    def _newest(self, latest: PolicyRelease | None) -> PolicyRelease | None:
+        """``latest`` unless it is a stale read (below the newest release seen): then
+        the newest one seen."""
+        if latest is not None and self.last_seen is not None and latest.seq < self.last_seen.seq:
+            return self.last_seen
+        return latest
+
+    def _ready_fetch(self) -> "_Fetch | None":
+        """The download :meth:`prefetch` reported on disk, while it is still newer
+        than the served release."""
+        fetch = self._ready
+        if fetch is None or fetch is not self._fetch or fetch.release.seq <= self._served_seq():
+            self._ready = None
+            return None
+        return fetch
+
     def pending_seq(self) -> int | None:
         """The seq of a release newer than the served one in the store (one read
-        of ``LATEST``; nothing is loaded), else None."""
-        latest = self.releases.latest()
-        if latest is None or (self.release is not None and latest.seq <= self.release.seq):
+        of ``LATEST``; nothing is loaded), else None. Once :meth:`prefetch` has
+        reported a release on disk it is that release's seq (the one the next
+        :meth:`refresh` loads), also when the store has a newer one by then."""
+        ready = self._ready_fetch()
+        if ready is not None:
+            return int(ready.release.seq)
+        latest = self._newest(self.releases.latest())
+        if latest is None or latest.seq <= self._served_seq():
             return None
         return int(latest.seq)
+
+    def prefetch(self) -> int | bool:
+        """Start (or poll) the background download of the newest release, when it is
+        newer than the served one. Returns the seq of the release that is on local
+        disk and that the next :meth:`refresh` loads; True when there is nothing to
+        fetch (no newer release, no background download); False while it downloads
+        or cannot be fetched. Nothing is loaded.
+
+        A release reported here stays the one to load until it is loaded: a newer
+        release published meanwhile is fetched after that load. (A caller that
+        drains its trials for the reported release then always gets a load for the
+        drain; without this a release published during the drain made the refresh
+        drop the downloaded one and load nothing.)
+
+        The same checks as :meth:`refresh` apply before any byte is fetched: a stale
+        read of ``LATEST`` does not replace a newer release already seen, and a
+        release of another scheme is not downloaded. A failed download, a failed
+        rebuild and a scheme mismatch read False and stay unreported here: the next
+        :meth:`refresh` raises them (``rl_sampler_release_not_loaded``)."""
+        if not self.background_download:
+            return True
+        ready = self._ready_fetch()
+        if ready is not None:
+            return int(ready.release.seq)
+        latest = self._newest(self.releases.latest())
+        if latest is None or latest.seq <= self._served_seq():
+            return True
+        if self.last_seen is None or latest.seq != self.last_seen.seq:
+            self.seen_at = round(self.wall(), 3)
+        self.last_seen = latest
+        if self.scheme is not None:
+            try:
+                check_release_scheme(latest, self.scheme)
+            except SchemeMismatch:
+                return False  # raised by refresh; never downloaded
+        fetch = self._fetched(latest, report=False)
+        if fetch is None:
+            return False
+        self._ready = fetch
+        return int(fetch.release.seq)
 
     def refresh(self) -> PolicyRelease | None:
         """The release loaded by this call, or None when there is no new one, when
@@ -1197,7 +1301,11 @@ class PolicyFollower:
             check_release_scheme(latest, self.scheme)
         fetched = None
         if self.background_download:
-            fetched = self._fetched(latest)
+            fetched = self._ready_fetch()  # reported on disk by prefetch: this one is loaded
+            if fetched is not None:
+                latest = fetched.release  # ``last_seen`` stays the newest; it is fetched next
+            else:
+                fetched = self._fetched(latest)
             if fetched is None:  # still downloading, or waiting to retry: keep generating
                 return None
         forced = False
@@ -1212,7 +1320,7 @@ class PolicyFollower:
             forced = True  # deferral bound reached (class doc)
         if fetched is not None:
             directory = fetched.directory
-            self._fetch = None
+            self._fetch = self._ready = None
             timer.add("resolve_s", fetched.seconds)
         else:
             try:
@@ -1255,11 +1363,13 @@ class PolicyFollower:
         self.last_timings = timer.as_dict()
         return latest
 
-    def _fetched(self, latest: PolicyRelease) -> "_Fetch | None":
+    def _fetched(self, latest: PolicyRelease, *, report: bool = True) -> "_Fetch | None":
         """The finished background download of ``latest``, else None after starting
         or polling it. A failed download raises :class:`ReleaseNotLoaded` once
         (reason ``download_failed``) and is tried again ``download_retry_s`` later;
-        the engines keep the release they serve meanwhile."""
+        the engines keep the release they serve meanwhile. ``report`` False
+        (:meth:`prefetch`): a failure not raised yet is left for the next call with
+        ``report`` True, which raises it and starts the retry delay."""
         fetch = self._fetch
         if fetch is not None and fetch.release.seq != latest.seq and not fetch.done.is_set():
             self.incomplete = f"downloading r{fetch.release.seq}-v{fetch.release.version}"
@@ -1279,6 +1389,8 @@ class PolicyFollower:
             self.incomplete = str(error)
             return None
         if not fetch.reported:
+            if not report:
+                return None
             fetch.reported = True
             # jittered: samplers that failed together (a store refusal) do not retry together
             fetch.retry_at = self.timer() + self.download_retry_s * random.uniform(0.75, 1.0)

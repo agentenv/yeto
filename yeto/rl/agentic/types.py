@@ -141,9 +141,12 @@ class TokenTurn:
     # log-probs ``[len(completion), K]`` (ids / values) and R3 routed experts
     # ``[len(prompt) + len(completion) - 1, L_moe, top_k]`` (the engine's rows
     # for every position of the call, as a single-turn sample's).
+    # ``routed_experts_cut``: the recorder kept only the leading rows (its
+    # training window, ``RecordingBackend.r3_response_len``).
     completion_top_ids: Any = field(default=None, compare=False)
     completion_top_logprobs: Any = field(default=None, compare=False)
     routed_experts: Any = field(default=None, compare=False)
+    routed_experts_cut: bool = field(default=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.completion_top_ids is None) != (self.completion_top_logprobs is None):
@@ -158,7 +161,9 @@ class TokenTurn:
         if self.routed_experts is not None:
             rows = len(self.prompt_ids) + len(self.completion_ids) - 1
             shape = getattr(self.routed_experts, "shape", None)
-            if shape is None or len(shape) != 3 or shape[0] != rows:
+            fits = shape is not None and len(shape) == 3 and (
+                0 < shape[0] < rows if self.routed_experts_cut else shape[0] == rows)
+            if not fits:
                 raise TokenAlignmentError(f"turn routed experts {shape} do not cover {rows} positions")
         if len(self.completion_ids) != len(self.completion_logprobs):
             raise TokenAlignmentError(

@@ -72,6 +72,7 @@ The dispenser lives in the `prompts.dispense` section of the sampler spec:
 | `mix` | `--data-mix` source weights (rows carry `metadata.yeto_data_source`). | none |
 | `by_label`, `labels` | One stream per task label (`task_label`). `labels` limits this sampler to those labels. | none |
 | `scan_s`, `max_scan_s` | How often an idle sampler lists the ledger (backs off up to `max_scan_s`). | 30, 120 |
+| `full_scan` | `true`: every scan lists the whole ledger. By default a scan lists only the tasks that are not settled yet. | false |
 
 A single task can override the lease through `metadata.dispense_lease_s` in its row.
 
@@ -165,9 +166,13 @@ Samplers also record dispenser events on their event tape:
 
 ## Limits
 
-- **Request cost.** Each listing of the ledger is one request, and an idle sampler lists at most
-  once per `scan_s`. A held task costs one renewal write every `lease_s / 3`, plus two or three
-  small reads before its group is written.
+- **Request cost.** A sampler scans at most once per `scan_s`. A scan lists the tasks that are not
+  settled yet: 5 listing requests and 1 read when they lie together at the front of the ledger
+  (the usual case), 4 more for each group of old unsettled tasks far behind, and at worst one
+  request per 1000 keys of the ledger when unsettled tasks are spread over all of it. The first
+  scan of a process lists every settlement once. A held task costs one renewal write every
+  `lease_s / 3` and three existence checks every third renewal, plus three checks before its
+  group is written. `status --open` lists only the unsettled tasks and reads only their claims.
 - **Expired holders.** An expired holder that is still alive (cut off from the bucket for longer
   than the lease) may write its group in the short window before it notices it lost the task. The
   task is then trained twice, which only happens past a full lease of lost connectivity. Fenced

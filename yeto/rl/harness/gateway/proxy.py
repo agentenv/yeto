@@ -94,8 +94,10 @@ class RecordsProxy:
     def __init__(self, engine: TokenSamplerEngine, template: ChatTemplate, *, model: str,
                  signed_sampling: dict[str, Any], sampler_id: str = "records-proxy",
                  compaction: CompactionConfig | None = None, max_chains: int | None = None,
-                 harness_board: Any = None, member: str | None = None) -> None:
-        self.backend = RecordingBackend(engine, template, sampler_id=sampler_id, compaction=compaction)
+                 harness_board: Any = None, member: str | None = None,
+                 r3_response_len: int | None = None) -> None:
+        self.backend = RecordingBackend(engine, template, sampler_id=sampler_id, compaction=compaction,
+                                        r3_response_len=r3_response_len)
         self.gateway = Gateway(GatewayConfig(
             model=model, signed_sampling=dict(signed_sampling), max_chains=max_chains,
             keeps_history_reasoning=template.spec.keeps_history_reasoning,

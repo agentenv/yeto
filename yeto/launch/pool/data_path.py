@@ -75,6 +75,31 @@ class R2DataPath:
 
         return set_aside_handoff(self.records, shard, keep=keep, reason="new pool member on this shard name")
 
+    def exit_evidence(self, shard: str) -> dict[str, Any]:
+        """Read only: what the run's store says about why a sampler of ``shard`` ended, for
+        the pool to tell a fenced sampler (it ends with exit 0 too) from the end of the data.
+        ``handoff``: the successor named by the shard's stop request (None: no request);
+        ``lease``: the holder of its incarnation lease; ``pool_fenced``: that holder is a pool
+        fence; ``incarnation`` / ``leave``: the shard's newest member record (by ``joined_at``)
+        and its leave reason (None: no LEAVE written); ``superseded``: the lease lists that
+        incarnation as superseded (False: the lease's holder never replaced it, e.g. it
+        never claimed the lease). A store error raises."""
+        from yeto.launch.nc.elastic import FENCE_PREFIX  # noqa: PLC0415
+        from yeto.rl.engine import sampler_resume  # noqa: PLC0415
+        from yeto.rl.engine.incarnation_lease import lease_key  # noqa: PLC0415
+
+        records, read = self.records, sampler_resume._read_record  # noqa: SLF001
+        handoff = read(records, f"{sampler_resume.HANDOFF_DIR}/{shard}.json")
+        lease = read(records, lease_key(shard)) or {}
+        members = [read(records, key)
+                   for key in sampler_resume._list_records(records, f"{sampler_resume.MEMBERS_DIR}/{shard}")]  # noqa: SLF001
+        newest = max((m for m in members if m), key=lambda m: float(m.get("joined_at") or 0.0), default={})
+        holder = None if lease.get("incarnation") is None else str(lease["incarnation"])
+        return {"handoff": None if handoff is None else str(handoff.get("successor")),
+                "lease": holder, "pool_fenced": bool(holder and holder.startswith(f"{FENCE_PREFIX}:")),
+                "incarnation": newest.get("incarnation"), "leave": newest.get("leave_reason"),
+                "superseded": str(newest.get("incarnation")) in [str(i) for i in lease.get("superseded") or ()]}
+
     def request_drain(self, shard: str, seq: str) -> str:
         from yeto.rl.engine import store_dispense  # noqa: PLC0415
 

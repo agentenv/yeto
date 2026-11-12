@@ -88,7 +88,9 @@ BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
 # of the buffer holds their store-dispenser task (both consumed, not trained);
 # buffer_duplicate_task_unverified_groups: of those, the ones whose earlier group this
 # trainer process did not judge itself (below a restored watermark)
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
+# buffer_unidentified_groups: groups of a version no record names, passed over by a
+# trainer that resumed behind its releases (BatchReader.set_unidentified_gate)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted",
                                  "buffer_damaged_payload_groups", "buffer_duplicate_task_groups",
                                  "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS})
@@ -97,7 +99,10 @@ ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
-ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
+# buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:
+# their task-dispenser positions as row runs
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions", "buffer_unidentified_versions",
+                                      "buffer_unidentified_positions"})
 # buffer_damaged_payloads: one record per such group ({"position", "sample_id",
 # "payload_ref", "reason"[, "dispense_position"]}); buffer_duplicate_tasks: ({"slot",
 # "position", "sample_id", "first_position", "first_sample_id", "first_trained_here"

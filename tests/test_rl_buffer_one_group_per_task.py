@@ -129,7 +129,12 @@ def test_a_listing_taken_before_a_late_settlement_trains_the_task_once(tmp_path)
     s3.now += 1000
     stale = scanner.objects.list_meta(NAMESPACE + "/")
     assert holder.write(items) == 1
-    scanner.prompts.ledger.objects.list_meta = lambda prefix: stale
+    def stale_listing(prefix, *, start_after="", end=""):  # the old listing, any key range of it
+        keys, now = stale
+        return [(k, t) for k, t in keys if k.startswith(prefix) and k > start_after
+                and (not end or k < end)], now
+
+    scanner.prompts.ledger.objects.list_meta = stale_listing
     taken = scanner.draw()
     assert _slots(taken) == [slot]
     s3.now += 1

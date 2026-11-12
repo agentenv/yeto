@@ -936,6 +936,40 @@ class Run:
                             "--namespace", self._namespace(), "--brief"],
                            env=self.env, capture_output=True, text=True, timeout=300, check=False)
         out["dispense"] = (p.stdout or p.stderr)[-3000:]
+        out["trainer_buffer"] = self.trainer_buffer_counts()
+        return out
+
+    def trainer_buffer_counts(self) -> dict[str, Any]:
+        """What the trainer's buffer reader passed over, summed over the trainer's log
+        (every launch of this run): groups without a policy identity after a resume
+        (``rl_buffer_unidentified_policy_skipped``), groups older than the policy-age
+        window (``rl_buffer_stale_skipped``), and the reader's last starvation warning
+        (``rl_buffer_unidentified_policy_starved``: it reads groups and keeps none)."""
+        from yeto.rl.event_echo import PREFIX  # noqa: PLC0415
+
+        out: dict[str, Any] = {"unidentified_policy_groups": 0, "stale_groups": 0, "unidentified_starved": None}
+        log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
+        if not log or not Path(log).is_file():
+            return out
+        wanted = ("rl_buffer_unidentified_policy_skipped", "rl_buffer_stale_skipped",
+                  "rl_buffer_unidentified_policy_starved")
+        with open(log, errors="replace") as fh:
+            for line in fh:
+                at = line.find(PREFIX)
+                if at < 0 or not any(name in line for name in wanted):
+                    continue
+                try:
+                    record = json.loads(line[at + len(PREFIX):])
+                except ValueError:
+                    continue
+                event = record.get("event")
+                if event == wanted[0]:
+                    out["unidentified_policy_groups"] += int(record.get("unidentified_policy_groups") or 0)
+                elif event == wanted[1]:
+                    out["stale_groups"] += int(record.get("stale_groups") or 0)
+                elif event == wanted[2]:
+                    out["unidentified_starved"] = {k: record.get(k) for k in (
+                        "time_unix", "rollout_id", "selections", "unidentified_policy_groups_total")}
         return out
 
     def scale_refusal(self, wanted: int, i: int = 0) -> str | None:

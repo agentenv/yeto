@@ -41,6 +41,7 @@ from .buffer_rollout import (
     SHARD_ENV,
     TRAINER,
     WAIT_ENV,
+    unidentified_metadata,
     BatchReader,
     DataSlot,
     SampleBufferRolloutError,
@@ -304,7 +305,8 @@ class _BufferRound:
                                   "buffer_duplicate_tasks": duplicates[:MAX_DUPLICATE_TASK_RECORDS]}
                                  if duplicates else {}),
                               **({"buffer_stale_positions": row_runs(stale)}
-                                 if (stale := getattr(report, "stale_positions", None)) else {}))
+                                 if (stale := getattr(report, "stale_positions", None)) else {}),
+                              **unidentified_metadata(report))
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on

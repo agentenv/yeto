@@ -386,6 +386,13 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                   f"buffer_shards {spec.get('buffer_shards')})")
             from yeto.launch import agentic_setup  # noqa: PLC0415
 
+            from yeto.rl.engine.agentic_round import drain_settings, drain_timeout_warning  # noqa: PLC0415
+
+            if isinstance(spec.get("agentic"), dict):
+                drain_settings(spec, drain=True)  # a bad drain_timeout_s / abandon_grace_s: a problem here
+            warning = drain_timeout_warning(spec)  # none for a spec that resolves to the live switch
+            if warning is not None:
+                notes.append(warning)
             setup_lines, setup_problems = agentic_setup.dry_run_report(spec, base_dir=Path(cfg["spec"]).parent)
             for line in setup_lines:
                 print(f"agentic.setup: {line}")
@@ -662,6 +669,50 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     else:
         print(f"pool-retry: no pool loop is alive; start it again (python -m yeto.launch.nc pool --config "
               f"{config_path}) and it restarts the sampler in place on {names}")
+    return 0
+
+
+def downgrade_state_file(cfg: dict[str, Any], config_path: str, *, drop_owed_fences: bool = False) -> int:
+    """``pool-state-downgrade --config F``: before going back to a yeto that reads only
+    the older pool state format, write the state file in that format (the file as it was
+    is kept next to it as ``<name>.format<N>.bak``). Refused while a pool loop is alive
+    and while a member is in a state the older code does not know."""
+    from ..pool import island_pool  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    if not state.exists():
+        print(f"pool-state-downgrade: no state file {state}: nothing to do")
+        return 0
+    lock = acquire_lock(lock_path(cfg), run=cli.run_id(cfg), role="pool-state-downgrade")
+    if lock is None:
+        print("pool-state-downgrade: refused, nothing changed: a pool loop is alive and rewrites the file "
+              f"every tick; stop it first (kill the loop, or pool-stop --config {config_path})")
+        return 2
+    try:
+        text = state.read_text()
+        doc = json.loads(text)
+        found = int(doc.get("format", 1))
+        if found <= 1:
+            print(f"pool-state-downgrade: {state} is format 1 already: nothing to do")
+            return 0
+        island_pool.check_state_format(doc, state)
+        new, notes = island_pool.downgrade_state(doc, drop_owed_fences=drop_owed_fences)
+        if new is None:
+            print("pool-state-downgrade: refused, nothing changed:")
+            for note in notes:
+                print(f"  - {note}")
+            return 2
+        backup = state.with_name(f"{state.name}.format{found}.bak")
+        backup.write_text(text)
+        tmp = state.with_suffix(state.suffix + ".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(state)
+    finally:
+        lock.close()
+    for note in notes:
+        print(f"pool-state-downgrade: WARNING: {note}")
+    print(f"pool-state-downgrade: {state} written as format 1 ({len(new['members'])} member(s)); the format "
+          f"{found} file is kept as {backup}")
     return 0
 
 
@@ -1023,7 +1074,22 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
 
 # -- status --------------------------------------------------------------------
 
+def check_state_file(cfg: dict[str, Any]) -> None:
+    """Raise ``PoolStateFormatError`` when the pool's state file has a format newer than
+    this code reads (every pool command reads the file; none may guess at it)."""
+    from ..pool.island_pool import check_state_format  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    try:
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return  # unreadable: each command reports that in its own way
+    if isinstance(doc, dict):
+        check_state_format(doc, state)
+
+
 def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> int:
+    check_state_file(cfg)
     state = cli.pool_state_path(cfg)
     doc = json.loads(state.read_text()) if state.exists() else {}
     path = cli.pool_events_path(cfg)

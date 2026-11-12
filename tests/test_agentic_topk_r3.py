@@ -141,7 +141,7 @@ def test_records_backend_records_engine_arrays_and_keeps_only_the_newest_r3():
                         top_logprobs_num=K)
     engine.start(None, 3)
     backend = object.__new__(RecordingBackend)
-    backend.engine, backend.sampler_id = engine, "records-proxy"
+    backend.engine, backend.sampler_id, backend.r3_response_len = engine, "records-proxy", None
     backend.template = SimpleNamespace(stop_token_ids=(), stop_text=lambda t: None)
     backend.counters = {"t": __import__("collections").Counter()}
     session, segment = _Session("t", []), Segment(0, head=[], base=0)
@@ -153,6 +153,80 @@ def test_records_backend_records_engine_arrays_and_keeps_only_the_newest_r3():
     assert second.routed_experts.shape == (len(segment.token_ids) - 1, LAYERS, TOPK)
     seg = join_turns(turns_from_records({"sessions": [{"samples": [segment.sample()]}]}))
     assert seg.response_top_ids.shape == (len(seg.response_ids), K)
+
+
+def _record_trial(r3_response_len, tails=((1, 2, 3), (4, 5), (6,), (7, 8, 9)), reply=(7, 8, 9)):
+    """One multi-turn trial through a real RecordingBackend; its records joined."""
+    import asyncio
+
+    from yeto.rl.adapters.sampler_engines.fake import FakeEngine
+    from yeto.rl.engine.sampler_engine import SamplingParams
+    from yeto.rl.harness.gateway.records import RecordingBackend, _Prompt
+
+    engine = FakeEngine(token_reply=lambda prompt, i: list(reply), routed_experts=(EXPERTS, LAYERS, TOPK),
+                        top_logprobs_num=K)
+    engine.start(None, 3)
+    template = SimpleNamespace(stop_token_ids=(), stop_text=lambda t: None,
+                               spec=SimpleNamespace(name="fake", verified=True))
+    backend = RecordingBackend(engine, template, check_render=False, r3_response_len=r3_response_len)
+    session_id = asyncio.run(backend.create_session("t"))
+    session = backend.sessions[session_id]
+    segment = session.segments[0]
+    params = SamplingParams(max_tokens=8)
+    for tail in tails:
+        asyncio.run(backend._sample(session, segment, _Prompt(stop=(), tail=tail), params, kind="action"))
+    return segment, backend.records("t")
+
+
+@pytest.mark.parametrize("max_response_len", [1, 4, 9, 13, 200])
+def test_r3_rows_cut_to_the_training_window_join_bit_identically(max_response_len):
+    """RecordingBackend(r3_response_len=R) keeps only the rows join_turns(max_response_len=R)
+    uses; the joined sample is the same as from the full rows, bit for bit."""
+    full_segment, full = _record_trial(None)
+    cut_segment, cut = _record_trial(max_response_len)
+    ref = join_turns(turns_from_records(full), max_response_len=max_response_len, rebase=True)
+    got = join_turns(turns_from_records(cut), max_response_len=max_response_len, rebase=True)
+    assert got.routed_experts.dtype == ref.routed_experts.dtype == numpy.uint16
+    assert got.routed_experts.shape == ref.routed_experts.shape
+    assert got.routed_experts.tobytes() == ref.routed_experts.tobytes()
+    assert (got.prompt_ids, got.response_ids, got.response_mask, got.response_logprobs, got.truncated) == \
+        (ref.prompt_ids, ref.response_ids, ref.response_mask, ref.response_logprobs, ref.truncated)
+    assert got.response_top_ids.tobytes() == ref.response_top_ids.tobytes()
+    assert got.response_top_logprobs.tobytes() == ref.response_top_logprobs.tobytes()
+    window = 3 + max_response_len - 1  # first prompt (3 tokens) + R - 1
+    stored, whole = cut_segment.turns[-1].routed_experts, full_segment.turns[-1].routed_experts
+    assert len(whole) == len(full_segment.token_ids) - 1
+    if window < len(whole):  # cut: a copy of the leading rows, not a view of the full array
+        assert cut_segment.turns[-1].routed_experts_cut and len(stored) == window
+        assert stored.base is None and stored.tobytes() == whole[:window].tobytes()
+    else:
+        assert not cut_segment.turns[-1].routed_experts_cut and len(stored) == len(whole)
+    assert json.loads(_records_dumps(cut))  # the HTTP route still serializes the records
+
+
+def test_join_copies_the_r3_rows_it_keeps_and_refuses_a_short_window():
+    turns = _three_turns()
+    seg = join_turns(turns, max_response_len=4)
+    assert seg.routed_experts.base is None  # not a view keeping the last turn's rows alive
+    assert seg.routed_experts.tobytes() == turns[-1].routed_experts[:len(seg.prompt_ids) + 3].tobytes()
+    last = turns[-1]
+    short = TokenTurn(prompt_ids=last.prompt_ids, completion_ids=last.completion_ids,
+                      completion_logprobs=last.completion_logprobs, completion_top_ids=last.completion_top_ids,
+                      completion_top_logprobs=last.completion_top_logprobs,
+                      routed_experts=last.routed_experts[:4].copy(), routed_experts_cut=True)
+    with pytest.raises(TokenAlignmentError, match="routed-expert rows"):
+        join_turns([*turns[:-1], short], max_response_len=4)
+    with pytest.raises(TokenAlignmentError, match="routed experts"):  # uncut rows must cover every position
+        TokenTurn(prompt_ids=last.prompt_ids, completion_ids=last.completion_ids,
+                  completion_logprobs=last.completion_logprobs, routed_experts=last.routed_experts[:4].copy())
+
+
+def test_r3_response_len_must_be_positive():
+    from yeto.rl.adapters.sampler_engines.fake import FakeEngine
+    from yeto.rl.harness.gateway.records import RecordingBackend
+
+    with pytest.raises(ValueError, match="r3_response_len"):
+        RecordingBackend(FakeEngine(), SimpleNamespace(), r3_response_len=0)
 
 
 def _sample(index=0):

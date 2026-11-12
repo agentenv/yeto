@@ -548,6 +548,11 @@ def handle_from_metadata(
             [[int(v) for v in run] for run in payload["buffer_stale_positions"]]
             if payload.get("buffer_stale_positions") else None
         ),
+        buffer_unidentified_groups=(
+            int(payload["buffer_unidentified_groups"]) if "buffer_unidentified_groups" in payload else None
+        ),
+        **{key: [[int(v) for v in run] for run in payload[key]] if payload.get(key) else None
+           for key in ("buffer_unidentified_versions", "buffer_unidentified_positions")},
         buffer_source_tokens=(
             {str(k): int(v) for k, v in payload["buffer_source_tokens"].items()}
             if isinstance(payload.get("buffer_source_tokens"), dict) else None
@@ -871,6 +876,15 @@ class MilesRolloutPool:
             logger.warning("live data cursor unknown: the executor's data source reports no "
                            "complete cursor")
         return (None if cursor is None else dict(cursor)), length
+
+    def set_unidentified_policy_gate(self, start_version: int, known_versions: Any) -> None:
+        """Driver (``_gate_unidentified_policies``): tell the buffer reader in the
+        rollout executor which versions below the start version a record names; a
+        pool whose rollout is not a buffer reader keeps it unused."""
+        from .buffer_rollout import executor_set_unidentified_gate
+
+        self._in_executor(executor_set_unidentified_gate, int(start_version),
+                          sorted(int(v) for v in known_versions))
 
     def seek_data_cursor(self, cursor: Mapping[str, int]) -> dict[str, int] | None:
         """Restart (driver ``_restore_data_cursor``): move the executor's data
