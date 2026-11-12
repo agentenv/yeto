@@ -61,6 +61,13 @@ def summarize(results: Sequence[Result]) -> dict[str, object]:
             "metrics": dict(sorted(metrics.items())), "process_errors": dict(sorted(errors.items()))}
 
 
+def _run_one(config: SimConfig) -> Result:
+    logging.getLogger("yeto").setLevel(logging.CRITICAL)  # the dispenser warns on every expiry
+    result = run_seed(config)
+    result.trace, result.trimmed = (result.minimal_trace(60) if not result.ok else []), True
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tests.store_sim.run", description=__doc__.split("\n")[0])
     parser.add_argument("--seeds", default="0:20", help="A:B (B exclusive) or one seed")
@@ -71,6 +78,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lease-s", type=float, default=SimConfig.lease_s, help="the dispenser lease")
     parser.add_argument("--check", action="append", default=[], metavar="MODULE:NAME",
                         help="one more invariant (sim.load_check); may repeat")
+    parser.add_argument("--legacy-samplers", type=int, default=0,
+                        help="shards whose samplers run the rules of before shard ownership records")
+    parser.add_argument("--jobs", type=int, default=1, help="worker processes")
     parser.add_argument("--backend", choices=("fake", "r2"), default="fake")
     parser.add_argument("--r2-prefix", help="with --backend r2: the temporary prefix of the bucket")
     parser.add_argument("--json", action="store_true", help="print the summary as one JSON object")
@@ -80,12 +90,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.backend != "fake":
         raise SystemExit("--backend r2 is not built yet: the simulation runs on the fake store only")
     faults = parse_faults(args.faults)
-    logging.getLogger("yeto").setLevel(logging.CRITICAL)  # the dispenser warns on every expiry
+    configs = [SimConfig(seed=seed, samplers=args.samplers, slots=args.slots, steps=args.steps,
+                         lease_s=args.lease_s, legacy_samplers=args.legacy_samplers,
+                         checks=tuple(args.check), faults=faults) for seed in parse_seeds(args.seeds)]
     results, shown, started = [], 0, time.time()
-    for seed in parse_seeds(args.seeds):
-        result = run_seed(SimConfig(seed=seed, samplers=args.samplers, slots=args.slots, steps=args.steps,
-                                    lease_s=args.lease_s, checks=tuple(args.check), faults=faults))
-        results.append(result)
+    if args.jobs > 1:
+        import multiprocessing
+
+        with multiprocessing.get_context("spawn").Pool(args.jobs) as pool:
+            stream = pool.imap_unordered(_run_one, configs, chunksize=4)
+            results = sorted(stream, key=lambda r: r.config.seed)
+    else:
+        results = [_run_one(config) for config in configs]
+    for result in results:
         if not result.ok and not args.json:
             shown += 1
             print(result.report(trace=args.trace if shown <= args.show else 0), flush=True)

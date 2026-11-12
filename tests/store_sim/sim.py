@@ -102,6 +102,7 @@ class Result:
     errors: dict[str, int]
     steps: int
     trace: list[str]
+    trimmed: bool = False  # ``trace`` is already the minimal one (a result sent between processes)
 
     @property
     def ok(self) -> bool:
@@ -120,7 +121,7 @@ class Result:
             lines.append(f"  process errors: {json.dumps(self.errors, sort_keys=True)}")
         if not self.ok and trace:
             lines.append(f"  trace (events naming the violating records, then the last {trace}):")
-            lines += [f"    {line}" for line in self.minimal_trace(trace)]
+            lines += [f"    {line}" for line in (self.trace if self.trimmed else self.minimal_trace(trace))]
         return "\n".join(lines)
 
     def minimal_trace(self, tail: int) -> list[str]:
