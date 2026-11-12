@@ -851,7 +851,17 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                       f"{config.sampler_id}; no group is written from now on", flush=True)
                 emit(FENCED_EVENT, incarnation=incarnation, superseded_by=lease.fenced_by)
 
-            fence_watcher = ReclaimWatcher(lease.poll, on_fenced, poll_s=lease_poll_s,
+            def poll_lease() -> bool:
+                owned = lease.owned
+                fenced_now = lease.poll()
+                if lease.adopted and not owned:  # the trainer's generation lease came after the join
+                    from .sample_buffer import OWNER_EVENT  # noqa: PLC0415
+
+                    emit(OWNER_EVENT, shard=config.sampler_id, incarnation=incarnation, by=lease.owner.by,
+                         epoch=lease.owner.epoch, pos=lease.owner.pos, adopted=True)
+                return fenced_now
+
+            fence_watcher = ReclaimWatcher(poll_lease, on_fenced, poll_s=lease_poll_s,
                                            name="sampler-lease-watcher").start()
         start = None
         if predecessor and not resume.resumed:  # a fresh replacement: continue the predecessor's prompts

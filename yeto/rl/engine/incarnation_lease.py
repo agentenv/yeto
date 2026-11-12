@@ -51,7 +51,10 @@ check-then-write window. The lease JSON is still written (observation, older
 readers) but decides nothing, and the trainer's :class:`IncarnationGate` judges
 only the records of a shard's legacy part (before its first ownership record).
 Everywhere else (a shared-directory buffer, the syncer data path, a run whose
-trainer is older) the lease JSON and the gate work as described above.
+trainer is older) the lease JSON and the gate work as described above. A sampler
+that joined before the run's trainer claimed its generation lease starts under
+the lease JSON and moves to ownership records at a later :meth:`~IncarnationLease.poll`
+(``adopted``), unless its shard was fenced meanwhile.
 """
 
 from __future__ import annotations
@@ -204,6 +207,8 @@ class IncarnationLease:
         self.by = str(by)
         self.max_read_failures = int(max_read_failures)
         self.owned = False  # the shard's ownership records decide, not the lease JSON
+        self.adopted = False  # owned since a poll after the join (the trainer's lease came later)
+        self._record: dict[str, Any] | None = None  # the lease record this incarnation wrote
         self.owner: Any = None  # this incarnation's ownership record (owned)
         self.holder: str | None = None  # who the last read named
         self.fenced_by: str | None = None
@@ -253,7 +258,32 @@ class IncarnationLease:
             if owner is None:
                 raise
         self.holder = self.incarnation
+        self._record = record
         return record
+
+    def _adopt(self) -> None:
+        """A sampler under the lease record: once the run's trainer reads ownership
+        records, take the shard with one (only a shard that has none: a fence that
+        got there first stays, and fences this incarnation)."""
+        from .sample_buffer import ShardFenced  # noqa: PLC0415
+
+        try:
+            if not owner_records_enabled(self.buffer):
+                return
+            self.owner = self.buffer.claim_owner(self.incarnation, by=self.by, first_only=True)
+        except ShardFenced as fenced:
+            self.owned = True
+            self.holder = self.fenced_by = fenced.owner.incarnation
+            return
+        except Exception:  # noqa: BLE001 - not this time; the lease record still fences
+            return
+        self.owned = self.adopted = True
+        if self._record is not None:  # the fence's hint of the shard's end (observation)
+            self._record["owner"] = {"epoch": self.owner.epoch, "pos": self.owner.pos, "by": self.owner.by}
+            try:
+                _put(self.store, lease_key(self.sampler), self._record)
+            except Exception:  # noqa: BLE001
+                pass
 
     def poll(self) -> bool:
         """Read the fence; True once another incarnation holds the shard (sticky).
@@ -281,6 +311,8 @@ class IncarnationLease:
             self.holder = str(lease.get("incarnation"))
             if self.holder != self.incarnation:
                 self.fenced_by = self.holder
+            elif self._record is not None and getattr(self.buffer, "can_own", False):
+                self._adopt()
             return self.fenced_by is not None
 
     @property

@@ -826,7 +826,10 @@ no ownership record precedes it. So:
   any amount. `claimed_at` is information only.
 
 `rl_shard_owner` (shard, incarnation, epoch, by) is emitted by the sampler at
-its join and by the pool at a fence. `sample-buffer/leases/<shard>.json` is
+its join and by the pool at a fence. A sampler that joined before the trainer
+of a new run was up starts under the older lease record and writes its
+ownership record at one of its next fence polls (`adopted: true` in the
+event; every `incarnation_lease.poll_s`, 30 s by default). `sample-buffer/leases/<shard>.json` is
 still written, for the dashboard and for older readers; it no longer decides
 anything on such a shard.
 

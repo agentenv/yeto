@@ -947,15 +947,19 @@ class FileSampleBuffer:
         with self._lock:
             return self.shard is not None and self._owner is not None and self._owner.incarnation != self._writer
 
-    def claim_owner(self, incarnation: str, *, by: str = "sampler") -> ShardOwner:
+    def claim_owner(self, incarnation: str, *, by: str = "sampler", first_only: bool = False) -> ShardOwner:
         """Append this shard's ownership record for ``incarnation`` (module doc) and
         write as it from now on: every earlier incarnation's later write is void.
-        Returns the record's owner."""
+        Returns the record's owner. ``first_only``: only when the shard has no
+        ownership record yet (a running writer that starts to use them must not take
+        the shard back from a fence): else :class:`ShardFenced`, nothing written."""
         if not self.can_own:
             raise SampleBufferError("shard ownership records need a shard index on an object store")
         made: list[dict[str, Any]] = []
 
         def record() -> dict:
+            if first_only and self._owner is not None:
+                raise ShardFenced(self.shard, str(incarnation), self._owner)
             epoch = (0 if self._owner is None else self._owner.epoch) + 1
             made.append({"schema": OWNER_SCHEMA, "pos": self._positions,
                          "owner": {"incarnation": str(incarnation), "epoch": epoch, "by": str(by),

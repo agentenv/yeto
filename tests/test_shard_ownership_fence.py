@@ -977,3 +977,36 @@ def test_every_valid_group_is_merged_once_in_shard_order_and_no_void_one(tmp_pat
         assert merged[shard] == _valid_groups(objects, shard), shard
     assert len(fresh.select("t", 10**6)) == sum(len(ids) for ids in merged.values())
     assert fresh.duplicate_merged_records == 0 and fresh.unmerged_shard_gaps == 0
+
+
+def test_a_sampler_that_joined_before_the_trainer_moves_to_ownership_records_at_a_later_poll(tmp_path):
+    """A fresh run: the samplers join before the trainer claimed its generation lease
+    and start under the lease record. Without the move they would stay there until
+    their next restart."""
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer, lease = _sampler(objects, "inc-1")
+    _add(writer, "inc-1", [0])
+    assert lease.poll() is False and not lease.owned and len(_shard(objects)) == 1
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    assert lease.poll() is False and lease.owned and lease.adopted and lease.owner.epoch == 1
+    assert read_lease(_records(objects), SHARD)["owner"] == {"epoch": 1, "pos": 1, "by": "sampler"}
+    _add(writer, "inc-1", [1])
+    assert lease.poll() is False and len(_shard(objects)) == 3  # one ownership record, not one per poll
+    elastic.fence_incarnation(_records(objects), SHARD, by="t-1")
+    with pytest.raises(ShardFenced):
+        _add(writer, "inc-1", [2])
+    assert _names(_trainer(objects)) == ["inc-1-g0", "inc-1-g1"]
+
+
+def test_a_sampler_does_not_take_its_shard_back_from_a_fence_when_it_moves_to_ownership_records(tmp_path):
+    """The pool fenced the shard with an ownership record before the sampler's next
+    poll: the sampler's move finds an owner and is fenced by it."""
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer, lease = _sampler(objects, "inc-1")
+    _add(writer, "inc-1", [0])
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1")[0].epoch == 1  # no lease record written
+    assert lease.poll() is True and lease.fenced_by == "pool-fence:t-1" and not lease.adopted
+    assert [r["owner"]["incarnation"] for r in _shard(objects) if "owner" in r] == ["pool-fence:t-1"]
+    with pytest.raises(ShardFenced):
+        _add(writer, "inc-1", [1])
