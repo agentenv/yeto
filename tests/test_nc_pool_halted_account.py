@@ -408,3 +408,44 @@ def test_an_unreadable_ledger_does_not_lift_a_known_halt():
     _run(pool, clock, clock.t + 2 * H)
     assert "slot_halt_cleared" in _names(pool)
     assert len([m for m in pool.members if m.state == READY]) == 2 and not pool.breaker.failures
+
+
+def test_a_release_refused_for_an_unconfirmed_delete_is_asked_again_after_the_hold_not_every_tick():
+    clock = Clock()
+    cloud = GuardedCloud(clock, tells=True, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.drain_errors[m.ticket] = ncc.NcRefused("account 1: a delete for ticket tX is not confirmed yet")
+    cloud.tickets[m.ticket].update(sampler="exited", exit=1)
+    pool.config.elastic.max_sampler_restarts = 0
+    _run(pool, clock, clock.t + H)
+    assert m.state == DRAINING and len(cloud.kinds("drain_refused")) <= H / 600 + 2  # not 60 (one per tick)
+    del cloud.drain_errors[m.ticket]
+    _run(pool, clock, clock.t + 700)
+    assert m.state == GONE
+
+
+def test_a_halt_lifted_while_no_order_is_due_is_seen_and_a_new_halt_alerts_again():
+    clock = Clock()
+    cloud = GuardedCloud(clock, halted={1}, tells=True, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(4, 1))
+    _run(pool, clock, H)
+    assert len(_events(pool, "slot_halted")) == 1
+    cloud.halted.clear()  # clear-halt while the pool is at its target (no order, no free-slot look)
+    _run(pool, clock, clock.t + H)
+    assert "slot_halt_cleared" in _names(pool)
+    cloud.halted.add(1)
+    _run(pool, clock, clock.t + H)
+    assert len(_events(pool, "slot_halted")) == 2
+
+
+def test_every_slot_halted_says_so_where_no_order_is_placed():
+    clock = Clock()
+    cloud = GuardedCloud(clock, halted={1, 4}, tells=True, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 2 * H)
+    assert not pool.breaker.failures and not pool.stopped and not cloud.kinds("refused")
+    (short,) = _events(pool, "slots_below_target")
+    assert short["usable"] == 0 and short["level"] == "critical"
+    assert "halted (clear-halt needed): [1, 4]" in _events(pool, "order_refused")[-1]["why"]

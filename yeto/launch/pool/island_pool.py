@@ -247,6 +247,7 @@ class IslandPool:
     _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
     _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
     _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
+    _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _executor: Any = None
@@ -458,6 +459,8 @@ class IslandPool:
         if account is None:
             refused = (f"no free slot: {len(self.live())} of {len(self.config.accounts)} slots (the pool's "
                        f"'{self.config.slot_name}s') hold a machine of this pool (one per slot), target {self.config.target}")
+            if self._slot_halts:
+                refused += f"; halted (clear-halt needed): {sorted(self._slot_halts, key=str)}"
             if refused != self._no_account:  # once per change, not every tick
                 self._event("order_refused", why=refused)
             self._no_account = refused
@@ -581,16 +584,19 @@ class IslandPool:
             member.state = DRAINING
         now = self.clock()
         if member.ticket in self._drain_hold:
-            # its slot is halted: a release is refused until an operator lifts the halt. Asked
-            # again when the ops say it is lifted (ops that cannot tell: after SLOT_RETRY_S).
+            # its release was refused: a halted slot is asked again when the ops say the halt
+            # is lifted (ops that cannot tell: after SLOT_RETRY_S); any other guard refusal
+            # (an unconfirmed delete, ...) after SLOT_RETRY_S, not every tick
+            on_lift = member.ticket in self._drain_on_halt and getattr(self.ops, "slot_halt", None) is not None
             held = self._slot_halt(member.account) is not None or (
-                getattr(self.ops, "slot_halt", None) is None and self._drain_hold[member.ticket] > now)
+                not on_lift and self._drain_hold[member.ticket] > now)
             if held and self._ticket_ended(member):  # it ended meanwhile: nothing left to release
                 self._released(member, why, ended_already=True)
                 return True
             if held:
                 return False
         self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
         try:
             self.ops.drain(member)
         except Exception as error:  # noqa: BLE001
@@ -612,9 +618,11 @@ class IslandPool:
                     self._once(member, "release_ownership", "release_hit_foreign_ticket", level="critical", why=why,
                                kind=type(error).__name__, error=str(error)[:300], action=action)
                     self._note_halt(member.account, {"halt": str(error)[:300], "expected_ticket": member.ticket})
+                    self._drain_on_halt.add(member.ticket)
                 else:
                     if error_is(error, HALTED_ERRORS):
                         self._note_halt(member.account, {"halt": str(error)[:300]})
+                        self._drain_on_halt.add(member.ticket)
                     self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
                                error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=action,
                                detail="the member is kept as it is (still billed) until the release is allowed")
@@ -637,6 +645,7 @@ class IslandPool:
         member.state = GONE
         member.drain_error = None
         self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
         if ended_already:  # no delete was sent and none is: the patrol does not ask for one either
             self._drain_hold[member.ticket] = float("inf")
         for key in ("release_deferred", "release_blocked", "release_ownership"):
@@ -1181,6 +1190,8 @@ class IslandPool:
             halt = self._slot_halt(account)
             if halt is not None:
                 self._note_halt(account, halt)
+            elif getattr(self.ops, "slot_halt", None) is not None:
+                self._halt_lifted(account)  # lifted while no order was due: a later halt alerts again
 
         # replacements for members close to their lease end
         for m in self.live():
