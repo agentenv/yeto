@@ -6,10 +6,10 @@ from __future__ import annotations
 import datetime
 import http.server
 import threading
-import time
 
 import pytest
 
+from tests.test_s3_store_throttled_download import record_sleeps
 from yeto.cloud import s3_store
 
 CREDS = {s3_store.KEY_ID_ENV: "AKIDSTORE", s3_store.SECRET_ENV: "store-secret"}
@@ -75,7 +75,7 @@ def test_a_listing_refused_with_503_is_sent_nine_times_with_jittered_waits(monke
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Refusing)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     waits: list[float] = []
-    monkeypatch.setattr(time, "sleep", waits.append)
+    record_sleeps(monkeypatch, waits.append, callers=("botocore",))  # its retry waits only
     _Refusing.hits = []
     try:
         client = s3_store._client({**CREDS, s3_store.ENDPOINT_ENV: f"http://127.0.0.1:{server.server_address[1]}",

@@ -59,7 +59,13 @@ def start_syncer(binary: Path, tmp_path: Path, *, total_steps: int, learners: in
     env = {**os.environ, "TOKIO_WORKER_THREADS": "4", "YETO_ISLAND_HMAC_KEY": KEY}
     with log.open("w") as out:
         process = subprocess.Popen(command, stdout=out, stderr=subprocess.STDOUT, env=env)
-    wait_for(lambda: "syncer listening" in log.read_text(), "syncer did not start", timeout=30)
+    try:
+        wait_for(lambda: "syncer listening" in log.read_text() or process.poll() is not None,
+                 "syncer did not start", timeout=30)
+    except TimeoutError:
+        raise TimeoutError(f"syncer did not start: {log.read_text()}") from None
+    if process.poll() is not None:
+        raise RuntimeError(f"syncer exited {process.returncode}: {log.read_text()}")
     return process, port, log
 
 
@@ -116,6 +122,9 @@ class Learner:
         self.held = {fid: (0, initial(fid, numel)) for fid in range(fragments)}
         self.hold = hold
         self.on_merge = on_merge
+        # Push no step above this one (None: no bound). A test sets it to
+        # hold the run at a known step while a subscriber joins.
+        self.limit: int | None = None
         self.pushed: list[int] = []
         self.error: BaseException | None = None
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -140,7 +149,9 @@ class Learner:
                 for permit in pending:
                     step, fid = permit.global_step, permit.fragment_id
                     base = step - self.fragments if step > self.fragments else 0
-                    if self.held[fid][0] != base or (self.hold is not None and not self.hold.is_set()):
+                    limit = self.limit
+                    if (self.held[fid][0] != base or (self.hold is not None and not self.hold.is_set())
+                            or (limit is not None and step > limit)):
                         still.append(permit)
                         continue
                     delta = target(fid, step, self.numel) - self.held[fid][1]
@@ -233,7 +244,13 @@ def test_reclaimed_subscriber_does_not_stop_merges_and_a_new_one_catches_up(sync
                                       extra=("--max-subscribers", "1"))
     gate = threading.Event()
     merged: list[int] = []
-    learner = Learner(port, hold=gate, on_merge=lambda fid, v: merged.append(v)).start()
+    learner = Learner(port, hold=gate, on_merge=lambda fid, v: merged.append(v))
+    # The run is held at known steps so it cannot end before the replacement
+    # joins: unbounded, the learner merges all 6 rounds in about a second, and
+    # a runner that stalls the test thread that long lets the syncer finish
+    # and exit first (the replacement's dial is then refused).
+    learner.limit = P
+    learner.start()
     first = subscriber(port)
     first_follow = WeightFollower(first, P)
     first.start()
@@ -246,13 +263,16 @@ def test_reclaimed_subscriber_does_not_stop_merges_and_a_new_one_catches_up(sync
             sock.close()
         first.close()
         reclaimed_at = len(merged)
-        # Merges go on without it.
+        # Merges go on without it (up to step 3 P; the run has 6 P).
+        learner.limit = 3 * P
         wait_for(lambda: len(merged) >= reclaimed_at + P, "merges stopped after the subscriber left")
+        wait_for(lambda: len(learner.pushed) == 3 * P and len(merged) == 3 * P, "the held rounds did not merge")
         second = subscriber(port)  # a replacement incarnation: new generation, same id
         follow = WeightFollower(second, P)
         second.start()
         cut = wait_for(lambda: (follow.drain(), follow.cut())[1], "replacement got no full cut")
         assert min(cut.versions) >= 1  # every fragment at a version merged before it joined
+        learner.limit = None
         finish(process, learner)
         wait_for(lambda: second.run_finished(), "replacement never heard the run end")
         follow.drain()

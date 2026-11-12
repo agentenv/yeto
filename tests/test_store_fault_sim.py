@@ -28,7 +28,6 @@ from store_sim.sim import Result, SimConfig, run_seed
 from yeto.cloud.s3_store import S3ObjectStore
 from yeto.rl.adapters.miles import buffer_rollout
 from yeto.rl.engine import sample_buffer, store_dispense
-from yeto.rl.engine.incarnation_lease import IncarnationLease
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -64,7 +63,6 @@ CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",")
 # Everything that is not listed here is strict everywhere.
 ONE_GROUP_PER_TASK = hasattr(buffer_rollout, "TaskSlots")  # the reader trains one group per dispensed task
 PLAN_IDENTITY = hasattr(store_dispense.StoreLedger, "plan_id")  # the dispenser names its plan in every record
-LEASE_READS_ARE_VERDICTS = hasattr(IncarnationLease, "unknown")  # a lease that was not read is "unknown"
 OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a sampler that fails between the buffer append of a group and its ``trained`` settlement
     # (or whose claim expires between its check and its write) leaves the slot to be run again
@@ -72,13 +70,11 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a claim taken while ``store_dispense.retire`` lists the ledger is not released by it, and
     # the retired process learns of its marker only at its next scan: it still writes that group
     "retired_writer_group_trained": (PLAN_IDENTITY, 0.25),
-    # ``IncarnationLease.claim`` takes a previous lease it could not read (a timeout is an
-    # OSError to ``read_record``) for no lease: the new record forgets who it supersedes
-    "lease_forgot_a_superseded_incarnation": (LEASE_READS_ARE_VERDICTS, 0.2),
-    # the same root on the trainer's side: ``IncarnationGate`` takes a lease read that failed
-    # (``read_record`` gives None) for no lease, caches that for ``refresh_s`` and trains the
-    # fenced incarnation's groups meanwhile (fail-open)
-    "stale_incarnation_group_trained": (LEASE_READS_ARE_VERDICTS, 0.05),
+    # the gate judges a group when the take selects it, against a lease it caches for
+    # ``refresh_s`` (30 s); the take may then wait for later groups and train it after a fence
+    # the cached lease did not show yet (seen with a partitioned zombie, preset fence-zombie).
+    # The fail-open read (a failed lease read taken for "no lease") is fixed (#373)
+    "stale_incarnation_group_trained": (False, 0.05),
     # until the old incarnation of a second start reads its lease both write the shard; a round
     # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
     "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
@@ -231,7 +227,9 @@ def test_every_fault_at_once_breaks_nothing_but_the_open_findings():
                    reason="open finding: a slot can be trained twice when its sampler fails between the "
                           "buffer append and the trained settlement (fixed by one group per dispensed task)")
 def test_no_slot_is_trained_twice_under_every_fault_at_once():
-    _assert_holds(_run("all"))
+    # strict on the slot; the other open findings (of other layers) keep their shares
+    _assert_holds(_run("all"), open_findings={kind: finding for kind, finding in OPEN_FINDINGS.items()
+                                              if kind != "trained_twice_same_slot"})
 
 
 def test_the_tasks_of_samplers_that_died_are_taken_over_by_the_others():

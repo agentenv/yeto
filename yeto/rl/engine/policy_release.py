@@ -749,10 +749,27 @@ class PolicyReleaseStore:
             self._written = latest
             return None
         self._written = None  # until this release is in the store
-        if self._names is None:  # the mount was just reloaded (first release of this process)
-            self._names = self._listed_names()
+        # the mount was just reloaded (first release of this process, or after a failed one)
+        if self._names is None:
+            names = self._listed_names()
+            # LATEST again after the listing (one read per process): a release another
+            # writer published between the first read and the listing is in the listing
+            # but above that read's seq; taken for a partial upload, it would be removed
+            # while LATEST names it
+            with timer.phase("read_latest_s"):
+                latest = self._latest_for_release()
+            if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
+                self._written = latest
+                return None
+        else:
+            names = self._names
+        self._names = None  # until this release is in the store: a failed one lists again
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
+        if name in names:  # a partial upload of a killed or failed attempt (no LATEST names it):
+            # its files are not all replaced by this upload (a staged store's push deletes
+            # only what its own stage uploaded), and a reader downloads every object under it
+            self.store.remove_tree(f"{self.release_dir}/{name}")
         upload, delta = staged, None
         if delta_base is not None and weights == FULL:
             with timer.phase("delta_s"):
@@ -782,16 +799,20 @@ class PolicyReleaseStore:
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
                                   f"{self.release_dir}/{LATEST}": text})
-        self._names = [n for n in self._names if n != name] + [name]
+        # a directory at this seq or above is a partial upload no LATEST named (the
+        # store's seq continues from LATEST): oldest, so it never takes a kept place
+        def orphan(n: str) -> bool:
+            return n != name and int(_RELEASE_NAME.fullmatch(n).group(1)) >= seq
+        names = [n for n in names if orphan(n)] + [n for n in names if n != name and not orphan(n)] + [name]
         if delta is not None:
             self._bases[name] = str(delta["base_path"])
         with timer.phase("prune_s"):
-            kept = self._kept_names()
-            for old in self._names:
+            kept = self._kept_names(names)
+            for old in names:
                 if old not in kept:
                     self.store.remove_tree(f"{self.release_dir}/{old}")
                     self._bases.pop(old, None)
-            self._names = [n for n in self._names if n in kept]
+            self._names = [n for n in names if n in kept]
         self._written = record
         self.last_timings = timer.as_dict()
         self.last_visible_at = round(self.clock(), 3)  # LATEST names it
@@ -817,7 +838,7 @@ class PolicyReleaseStore:
                      "base_version": base.release.version, "ratio": round(result.ratio, 6),
                      "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}
 
-    def _kept_names(self) -> set[str]:
+    def _kept_names(self, names: list[str]) -> set[str]:
         """The newest ``keep`` releases and every base their deltas need.
 
         A base is read from this writer's own deltas (``_bases``) and, for a
@@ -828,7 +849,7 @@ class PolicyReleaseStore:
         island pruned ``r1-v0`` while keeping the delta ``r2-v1``). An unreadable
         record keeps the release rather than dropping a base that may be needed.
         """
-        kept = set(self._names[-self.keep:])
+        kept = set(names[-self.keep:])
         pending = list(kept)
         while pending:
             name = pending.pop()
@@ -855,11 +876,23 @@ class PolicyReleaseStore:
         return base
 
     def _listed_names(self) -> list[str]:
-        """The release directories under the root, in ``seq`` order."""
-        if not self.root.is_dir():
-            return []
-        named = sorted((int(m.group(1)), p.name) for p in self.root.iterdir()
-                       if p.is_dir() and (m := _RELEASE_NAME.fullmatch(p.name)))
+        """The release directories under the root and, for a store with an object
+        API, in the store, in ``seq`` order. A staged store's root does not hold
+        the releases of an earlier process (each upload is evicted from the stage,
+        and a restarted trainer may run on another node): listed from the stage
+        alone, a restarted trainer never pruned them, nor knew a partial upload
+        of a killed one under the name it writes next."""
+        found = set()
+        if self.root.is_dir():
+            found |= {p.name for p in self.root.iterdir() if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)}
+        objects = self.store.objects
+        if objects is not None:
+            prefix = f"{self.release_dir}/"
+            for key in objects.list(prefix):
+                head = key[len(prefix):].split("/", 1)
+                if len(head) == 2 and _RELEASE_NAME.fullmatch(head[0]):
+                    found.add(head[0])
+        named = sorted((int(m.group(1)), name) for name in found if (m := _RELEASE_NAME.fullmatch(name)))
         return [name for _, name in named]
 
     def _latest_without_reload(self) -> PolicyRelease | None:

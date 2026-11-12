@@ -73,6 +73,8 @@ from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
 from .task_dispense import DISPENSE_POSITION_KEY
 
+DISPENSE_ATTEMPT_KEY = "dispense_attempt"  # store_dispense.ATTEMPT_KEY (that module imports this one)
+
 ROUND_EVENT = "rl_sampler_engine_round"
 START_EVENT = "rl_sampler_start"
 WRITE_DEFERRED_EVENT = "rl_sampler_write_deferred"  # a group write waiting for a store read
@@ -139,6 +141,13 @@ def dispense_position(item: PromptItem) -> int | None:
     """The task-dispenser position of a prompt's row, None without one."""
     spot = item.metadata.get(DISPENSE_POSITION_KEY)
     return spot if isinstance(spot, int) and not isinstance(spot, bool) else None
+
+
+def dispense_attempt(item: PromptItem) -> int | None:
+    """The store dispenser's attempt a prompt was claimed under (its metadata
+    ``store_dispense.ATTEMPT_KEY``); None for a prompt of any other source."""
+    attempt = item.metadata.get(DISPENSE_ATTEMPT_KEY)
+    return attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else None
 
 
 def sample_record(item: PromptItem, completion: Completion, *, reward: float, version: int,
@@ -276,16 +285,26 @@ class EngineRound:
         # reward carries no GRPO advantage; it is scored, counted and not written
         self.drop_zero_variance = False
 
+    def _dispense_plan(self) -> str | None:
+        """The identity of the store dispenser the prompts come from
+        (``StoreDispensedPrompts.plan_id``); None for any other prompt source."""
+        plan = getattr(self.prompts, "plan_id", None)
+        return plan if isinstance(plan, str) and plan else None
+
     def _round_record(self, rollout_id: int, last: bool, position: int | None = None,
-                      cursor: Mapping[str, int] | None = None) -> dict[str, Any] | None:
+                      cursor: Mapping[str, int] | None = None, attempt: int | None = None,
+                      plan: str | None = None) -> dict[str, Any] | None:
         """``cursor``: the data cursor taken when the round drew its prompts
-        (default: read now; a streaming round reads it at the draw)."""
+        (default: read now; a streaming round reads it at the draw). ``attempt``:
+        the store dispenser's attempt of the task at ``position``; ``plan``: that
+        dispenser's identity."""
         if self.incarnation is None:
             return None
         if cursor is None and self.data_cursor is not None:
             cursor = self.data_cursor(rollout_id)
         return SamplerRound(self.writer.sampler_id, self.incarnation, rollout_id,
-                            data_cursor=cursor, last=last, dispense_position=position).record()
+                            data_cursor=cursor, last=last, dispense_position=position,
+                            dispense_attempt=attempt, dispense_plan=plan).record()
 
     def _written(self, rollout_id: int, positions: list[int], keep: Sequence[int] = (),
                  requeue: Sequence[int] = (), outcome: Mapping[int, Mapping[str, Any]] | None = None) -> None:
@@ -427,7 +446,8 @@ class EngineRound:
         prefix = "" if self.incarnation is None else f"{self.incarnation}-"
         spot = dispense_position(item)
         self.writer.write(group, group_key=f"{prefix}r{int(rollout_id)}-{item.prompt_id}", provenance=record,
-                          sampler_round=self._round_record(int(rollout_id), last, spot, cursor))
+                          sampler_round=self._round_record(int(rollout_id), last, spot, cursor,
+                                                           dispense_attempt(item), self._dispense_plan()))
         if self.guard is not None:
             self.guard.written(int(rollout_id))
         return spot

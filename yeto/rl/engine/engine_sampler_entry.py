@@ -853,11 +853,17 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
         if lease is not None:  # this incarnation now owns the island's shard
-            claimed = lease.claim(buffer.entries(), earlier=resume.incarnations)
+            from yeto.rl.engine.incarnation_lease import claim_patiently  # noqa: PLC0415
+
+            claimed = claim_patiently(lease, buffer.entries, resume.incarnations,
+                                      should_stop=lambda: reclaimed() or (stop is not None and stop()))
+        # stopped (a reclaim, a stop) while the previous lease could not be read: no round runs
+        unclaimed = lease is not None and claimed is None
+        if lease is not None and not unclaimed:
             emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
                  superseded=claimed["superseded"], sealed=claimed["sealed"])
             island.round.write_fenced = lease.check_before_write
-            island.round.write_unknown = lease.unknown  # unread for too long: the group waits
+            island.round.write_unknown = lease.unread_too_long  # unread for too long: the group waits
             if hasattr(prompts, "fenced"):  # store dispenser: a fenced incarnation renews and writes nothing
                 prompts.fenced = lambda: lease.fenced
 
@@ -880,12 +886,12 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             fence_watcher = ReclaimWatcher(poll_lease, on_fenced, poll_s=lease_poll_s,
                                            name="sampler-lease-watcher").start()
         start = None
-        if predecessor and not resume.resumed:  # a fresh replacement: continue the predecessor's prompts
+        if predecessor and not resume.resumed and not unclaimed:  # a fresh replacement: continue the predecessor's prompts
             start = continue_predecessor(data_path, spec, prompts, str(predecessor), config.sampler_id, emit,
                                          environ=env)
         dispense_fence = None
         try:
-            rounds = 0 if buffer.data_ended else island.run(start)
+            rounds = 0 if buffer.data_ended or unclaimed else island.run(start)
         except BaseException as error:
             dispense_fence = dispense_fence_detail(error)
             if dispense_fence is None:

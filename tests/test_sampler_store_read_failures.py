@@ -29,8 +29,7 @@ from yeto.launch.pool.data_path import R2DataPath
 from yeto.rl.engine import engine_sampler
 from yeto.rl.engine import engine_sampler_entry as entry
 from yeto.rl.engine import store_dispense as sd
-from yeto.rl.engine.incarnation_lease import (IncarnationGate, IncarnationLease, LeaseUnreadable, lease_key,
-                                              read_lease)
+from yeto.rl.engine.incarnation_lease import IncarnationLease, read_lease
 from yeto.rl.engine.policy_release import LATEST_UNREAD, PolicyFollower, PolicyReleaseStore
 from yeto.rl.engine.resume import STORE_IMPL_ENV
 from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index
@@ -215,21 +214,21 @@ def test_a_lease_unread_for_longer_than_the_bound_refuses_group_writes_until_it_
     lease.claim()
     s3.down = READS
     for mono.now in (10.0, 150.0, 299.0):
-        assert lease.check_before_write() is False and not lease.unknown()
+        assert lease.check_before_write() is False and not lease.unread_too_long()
     mono.now = 301.0
-    assert lease.check_before_write() is True and lease.unknown() and not lease.fenced
+    assert lease.check_before_write() is True and lease.unread_too_long() and not lease.fenced
     assert lease.unread_refusals == 1 and lease.health()["lease_unread_s"] == 301.0
     assert IncarnationLease(objects_store(objects), "s-0", "i1").max_unread_s == 60.0  # the default: two polls
     s3.down = frozenset()  # the store answers again: this incarnation still holds the lease
     mono.now = 303.0
-    assert lease.check_before_write() is False and not lease.unknown()
+    assert lease.check_before_write() is False and not lease.unread_too_long()
     s3.down = READS  # a second outage, during which the pool fences it
     IncarnationLease(objects_store(s3_store.S3ObjectStore(URI, client=s3.peer())), "s-0", "pool-fence:t1").claim()
     mono.now = 700.0
-    assert lease.check_before_write() is True and lease.unknown()
+    assert lease.check_before_write() is True and lease.unread_too_long()
     s3.down = frozenset()
     mono.now = 702.0
-    assert lease.check_before_write() is True and lease.fenced_by == "pool-fence:t1" and not lease.unknown()
+    assert lease.check_before_write() is True and lease.fenced_by == "pool-fence:t1" and not lease.unread_too_long()
 
 
 def test_a_lease_without_a_bound_fails_open_for_as_long_as_it_is_unread():
@@ -239,98 +238,32 @@ def test_a_lease_without_a_bound_fails_open_for_as_long_as_it_is_unread():
     lease.claim()
     s3.down = READS
     mono.now = 86400.0
-    assert lease.check_before_write() is False and not lease.unknown()
+    assert lease.check_before_write() is False and not lease.unread_too_long()
 
 
-def test_a_fence_whose_read_of_the_previous_lease_timed_out_still_supersedes_its_holder():
+def test_a_lease_read_the_store_refuses_is_a_lease_read_error_that_says_it_is_fatal():
+    """#373's contract (a refused read is LeaseReadError, never "absent"), and the
+    sampler's classifier still sees through it."""
+    from yeto.rl.engine.incarnation_lease import LeaseReadError
+    from yeto.rl.engine.object_store import is_fatal_store_error
+
     s3, objects = _world()
-    IncarnationLease(objects_store(objects), "s-0", "i1", clock=lambda: 100.0).claim()
-    s3.fail("get_object", ReadTimeoutError(endpoint_url="https://store"), key="leases/s-0")
-    slept: list[float] = []
-    record = IncarnationLease(objects_store(objects), "s-0", "pool-fence:t1",
-                              clock=lambda: 1000.0).claim(sleep=slept.append)
-    assert record["superseded"] == ["i1"] and record["generation"] == 2 and slept == [0.5]
-    late = SampleIndexEntry("s-0-i1-r7-row3", 0, "payloads/x.bin", tokens=1, appended_at=2000.0,
-                            sampler_round={"sampler": "s-0", "incarnation": "i1", "rollout_id": 7})
-    assert IncarnationGate(objects_store(objects), lambda: [late]).verdict(late, 0) is not None
-
-
-def test_a_claim_that_cannot_read_the_previous_lease_writes_no_lease():
-    """A claim written over an unread lease would name nothing superseded: the
-    trainer's gate would then train what the fenced incarnation writes."""
-    s3, objects = _world()
-    IncarnationLease(objects_store(objects), "s-0", "i1", clock=lambda: 100.0).claim()
-    before = objects.read(lease_key("s-0"))
-    s3.down = READS
-    slept: list[float] = []
-    fence = IncarnationLease(objects_store(objects), "s-0", "pool-fence:t1", clock=lambda: 1000.0)
-    with pytest.raises(LeaseUnreadable, match="could not be read in 4 tries"):
-        fence.claim(sleep=slept.append)
-    s3.down = frozenset()
-    assert objects.read(lease_key("s-0")) == before and slept == [0.5, 1.0, 2.0]
-    assert fence.claim()["superseded"] == ["i1"]
+    IncarnationLease(objects_store(objects), "s-0", "i1").claim()
+    s3.fail("get_object", ClientError({"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetObject"),
+            key="leases/s-0")
+    with pytest.raises(LeaseReadError) as caught:
+        read_lease(objects_store(objects), "s-0", strict=True)
+    assert is_fatal_store_error(caught.value)
+    s3.fail("get_object", unavailable("GetObject"), key="leases/s-0")
+    with pytest.raises(LeaseReadError) as caught:
+        read_lease(objects_store(objects), "s-0", strict=True)
+    assert not is_fatal_store_error(caught.value)
 
 
 def test_a_first_claim_finds_no_lease_and_writes_generation_one():
     _s3, objects = _world()
-    record = IncarnationLease(objects_store(objects), "s-0", "i1").claim(sleep=lambda s: pytest.fail("no retry"))
+    record = IncarnationLease(objects_store(objects), "s-0", "i1", sleep=lambda s: pytest.fail("no retry")).claim()
     assert record["generation"] == 1 and record["superseded"] == []
-
-
-# ===================================================================== the trainer's gate
-def _late_group(objects, mono=None, **kwargs):
-    """``s-0``'s incarnation ``i1`` superseded by a pool fence, one group of ``i1``
-    appended after it, and the trainer's gate."""
-    IncarnationLease(objects_store(objects), "s-0", "i1", clock=lambda: 100.0).claim()
-    late = SampleIndexEntry("s-0-i1-r7-row3", 0, "payloads/x.bin", tokens=1, appended_at=2000.0,
-                            sampler_round={"sampler": "s-0", "incarnation": "i1", "rollout_id": 7})
-    gate = IncarnationGate(objects_store(objects), lambda: [late], monotonic=mono or time.monotonic, **kwargs)
-    return late, gate
-
-
-def _fence(objects):
-    IncarnationLease(objects_store(objects), "s-0", "pool-fence:t1", clock=lambda: 1000.0).claim()
-
-
-@pytest.mark.parametrize("error", [lambda: ReadTimeoutError(endpoint_url="https://store"),
-                                   lambda: unavailable("GetObject")], ids=["times out", "refused"])
-def test_a_lease_the_gate_never_read_is_read_again_before_its_entries_get_a_verdict(error):
-    """Neither "no lease" (the fenced incarnation's group trained) nor an error out
-    of the trainer's take."""
-    s3, objects = _world()
-    slept: list[float] = []
-    late, gate = _late_group(objects, sleep=slept.append, unread_retry_s=2.0)
-    _fence(objects)
-    s3.fail("get_object", error(), key="leases/s-0")
-    s3.fail("get_object", error(), key="leases/s-0")
-    assert gate.verdict(late, 0) is not None and slept == [2.0, 2.0] and gate.read_failures == 2
-
-
-def test_a_gate_that_cannot_read_a_lease_for_too_long_raises_instead_of_letting_the_entry_through():
-    s3, objects = _world()
-    slept: list[float] = []
-    late, gate = _late_group(objects, sleep=slept.append, unread_retry_s=2.0, unread_wait_s=6.0)
-    s3.down = READS
-    with pytest.raises(LeaseUnreadable):
-        gate.verdict(late, 0)
-    assert slept == [2.0, 2.0, 2.0]
-
-
-def test_a_failed_refresh_of_a_lease_keeps_the_lease_the_gate_read_last():
-    """Not cached as "no lease" for the refresh period."""
-    s3, objects = _world()
-    mono = Mono()
-    late, gate = _late_group(objects, mono, sleep=lambda s: pytest.fail("a known lease is not waited for"))
-    _fence(objects)
-    assert gate.verdict(late, 0) is not None
-    mono.now = 31.0  # past refresh_s
-    s3.fail("get_object", ReadTimeoutError(endpoint_url="https://store"), key="leases/s-0")
-    assert gate.verdict(late, 0) is not None and gate.read_failures == 1
-    calls = s3.calls.count("get_object")
-    mono.now = 32.0  # read again unread_retry_s later, not at every verdict
-    assert gate.verdict(late, 0) is not None and s3.calls.count("get_object") == calls
-    mono.now = 34.0
-    assert gate.verdict(late, 0) is not None and s3.calls.count("get_object") == calls + 1
 
 
 # ===================================================================== handoff records
