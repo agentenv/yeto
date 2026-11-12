@@ -357,7 +357,8 @@ MUTATIONS = [
     Mutation(_a_drain_is_answered_with_claims_still_held, "pool", ("drain_answered_while_holding_a_claim",)),
     # -- fencing: a superseded incarnation's late groups are not trained
     Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
-    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
+    # (the round is judged again before training: the seal's off-by-one shows from seed 130 on)
+    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 240)),
     Mutation(_a_new_lease_supersedes_nobody, "process", ("lease_forgot_a_superseded_incarnation",)),
     Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",)),
     # -- the buffer: every shard record merged once, read as itself, consumed once per cut lineage

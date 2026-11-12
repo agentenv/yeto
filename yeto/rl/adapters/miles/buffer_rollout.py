@@ -82,6 +82,7 @@ from yeto.rl.engine.merged_release import (
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
 from yeto.rl.engine.incarnation_lease import LeaseUnknown
 from yeto.rl.engine.policy_age import age_floor
+from yeto.rl.engine.trainer_lifecycle import Selected
 from yeto.rl.engine.xhw_guard import downweight_group, rollout_stats, source_key
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
@@ -698,6 +699,10 @@ class TaskSlots:
         if key is not None:
             self._pending.setdefault(key, int(position))
 
+    def release(self, position: int) -> None:
+        """The group at ``position`` left the take under way: it holds no task."""
+        self._pending = {key: p for key, p in self._pending.items() if p != int(position)}
+
     def commit(self, end: int) -> None:
         """The take returns its round (the positions below ``end``): its groups hold their tasks."""
         for key, position in self._pending.items():
@@ -1154,7 +1159,18 @@ class BatchReader:
         if self._deferred:
             start = min(start, self._deferred[0][0])
         deferred_now = 0
-        while len(chosen) < groups:
+        lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
+        accounts = (decoded, accounted, versions, source_groups, source_tokens, position_sources)
+        while True:
+            if len(chosen) >= groups:
+                # judged again right before the round is handed over: a fence that came
+                # while the take waited for later groups keeps an earlier one out
+                rejected, again_deferred = self._recheck(chosen, accounts, lease_reads)
+                fenced += rejected
+                deferred_now += again_deferred
+                if not rejected and not again_deferred:
+                    break
+                continue
             # the reads of the last selection end before the next refresh (a reload)
             read_s += self._settle([read for _, read, _ in chosen])
             waiting, self._deferred = self._deferred, []
@@ -1245,6 +1261,11 @@ class BatchReader:
                 self.sleep(self.poll_s)
                 continue
             if self.buffer.data_ended:
+                rejected, again_deferred = self._recheck(chosen, accounts, lease_reads)
+                fenced += rejected
+                deferred_now += again_deferred
+                if rejected or again_deferred:  # replaced if the buffer holds more; or waits
+                    continue
                 break
             if self.clock() - progress > self.wait_s:
                 raise self._ended(SampleBufferRolloutError(
@@ -1273,6 +1294,7 @@ class BatchReader:
         if self._deferred:  # the watermark never passes a group the gate could not judge yet
             self._deferred.sort(key=lambda pending: pending[0])
             end = min(end, self._deferred[0][0])
+        chosen.sort(key=lambda c: c[0])  # buffer order (a group judged again joins late)
         out = [(position, decoded[position]) for position, _, _ in chosen]
         stale += len(self._stale_payloads)
         stale_positions += [p for p in self._stale_payloads if p is not None]
@@ -1449,21 +1471,77 @@ class BatchReader:
             elif sized:
                 nonfinite += 1
             drop.add(position)
-            version, tokens = accounted.pop(int(position))
-            versions[version] -= 1
-            if not versions[version]:
-                del versions[version]
-            source = position_sources.pop(int(position), None)
-            if source is not None:
-                source_groups[source] -= 1
-                source_tokens[source] -= tokens
-                if not source_groups[source]:
-                    del source_groups[source]
-                    source_tokens.pop(source, None)
+            self._unchoose(position, decoded, accounted, versions, source_groups, source_tokens,
+                           position_sources)
         if drop:
             chosen[:] = [c for c in chosen if c[0] not in drop]
         self._nonfinite += nonfinite
         return len(drop) - nonfinite - damaged - duplicate
+
+    def _recheck(self, chosen: list, accounts: tuple, lease_reads: dict[str, float]) -> tuple[int, int]:
+        """Judge the ``chosen`` groups again, each shard's lease read again (at most
+        once per shard while the take does not wait, :meth:`IncarnationGate.recheck`):
+        a group fenced since its selection is dropped (counted stale, its task free:
+        a group this take passed over for that task is judged again); from the first
+        one whose lease is unreadable on, every group waits in ``self._deferred``
+        (strict order), judged again. Returns ``(dropped, deferred)``."""
+        recheck = getattr(self.gate, "recheck", None)
+        if not chosen or not callable(recheck):
+            return 0, 0
+        entries = None
+        items: list[tuple[int, Any]] = []
+        for position, _, _ in chosen:
+            entry = self._entry_of.get(int(position))
+            if entry is None:  # carried over from the last take
+                entries = self.buffer.entries() if entries is None else entries
+                entry = entries[int(position)]
+            items.append((int(position), entry))
+        items.sort(key=lambda pair: pair[0])
+        verdicts = recheck([(entry, position) for position, entry in items], lease_reads)
+        drop: set[int] = set()
+        defer_from = None
+        for (position, entry), verdict in zip(items, verdicts):
+            if isinstance(verdict, LeaseUnknown):
+                defer_from = position
+                break
+            if verdict is not None:
+                drop.add(position)
+        waiting = [] if defer_from is None else [(p, e) for p, e in items if p >= defer_from]
+        removed = drop | {position for position, _ in waiting}
+        # a group passed over by this take because a group now removed held its task is
+        # judged again (the task is free, or waits with the removed group)
+        freed = [d for d in self._duplicates if d["first_trained_here"] and d["first_position"] in removed]
+        if freed:
+            self._duplicates = [d for d in self._duplicates if d not in freed]
+            entries = self.buffer.entries() if entries is None else entries
+            waiting += [(int(d["position"]), entries[int(d["position"])]) for d in freed]
+        for position, entry in waiting:
+            self._deferred.append((position, Selected(position=position, entry=entry)))
+        self._deferred.sort(key=lambda pending: pending[0])
+        if removed:
+            chosen[:] = [c for c in chosen if int(c[0]) not in removed]
+            for position in removed:
+                self._unchoose(position, *accounts)
+                if self.tasks is not None:
+                    self.tasks.release(int(position))
+        return len(drop), len(waiting) - len(freed)
+
+    @staticmethod
+    def _unchoose(position: int, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
+                  source_tokens: dict, position_sources: dict) -> None:
+        """Undo the accounting of a chosen group (it is not in the round)."""
+        decoded.pop(int(position), None)
+        version, tokens = accounted.pop(int(position))
+        versions[version] -= 1
+        if not versions[version]:
+            del versions[version]
+        source = position_sources.pop(int(position), None)
+        if source is not None:
+            source_groups[source] -= 1
+            source_tokens[source] -= tokens
+            if not source_groups[source]:
+                del source_groups[source]
+                source_tokens.pop(source, None)
 
     def _gate_verdict(self, item: Any) -> Any:
         """The incarnation gate's verdict on a selected ``item``: None (train it), the

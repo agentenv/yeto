@@ -27,7 +27,7 @@ from store_sim.fault_s3 import Crash, FaultConfig, FaultyS3Client, Injector, S3S
 from store_sim.sim import Result, SimConfig, run_seed
 from yeto.cloud.s3_store import S3ObjectStore
 from yeto.rl.adapters.miles import buffer_rollout
-from yeto.rl.engine import sample_buffer, store_dispense
+from yeto.rl.engine import incarnation_lease, sample_buffer, store_dispense
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -63,6 +63,7 @@ CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",")
 # Everything that is not listed here is strict everywhere.
 ONE_GROUP_PER_TASK = hasattr(buffer_rollout, "TaskSlots")  # the reader trains one group per dispensed task
 PLAN_IDENTITY = hasattr(store_dispense.StoreLedger, "plan_id")  # the dispenser names its plan in every record
+GATE_RECHECK = hasattr(incarnation_lease.IncarnationGate, "recheck")  # the round is judged again before training
 OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a sampler that fails between the buffer append of a group and its ``trained`` settlement
     # (or whose claim expires between its check and its write) leaves the slot to be run again
@@ -73,8 +74,9 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # the gate judges a group when the take selects it, against a lease it caches for
     # ``refresh_s`` (30 s); the take may then wait for later groups and train it after a fence
     # the cached lease did not show yet (seen with a partitioned zombie, preset fence-zombie).
-    # The fail-open read (a failed lease read taken for "no lease") is fixed (#373)
-    "stale_incarnation_group_trained": (False, 0.05),
+    # The fail-open read (a failed lease read taken for "no lease") is fixed (#373); the take
+    # judges its round again, the leases read again, right before it hands it over (GATE_RECHECK)
+    "stale_incarnation_group_trained": (GATE_RECHECK, 0.05),
     # until the old incarnation of a second start reads its lease both write the shard; a round
     # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
     "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
