@@ -180,6 +180,8 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
     if sink is not None:
         client.install_inbound_chunk_sink(sink)
     concurrent = 0
+    early: list = []  # PULLs of a later sweep
+    failed = True
     try:
         client.start()
         for fid in range(FRAGMENTS):
@@ -188,9 +190,19 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
             permits: dict[int, object] = {}
 
             def gather():
+                # A PULL belongs to the sweep of its global step, not to the
+                # sweep in which it arrives: the streamed profile sends the
+                # next sweep's PULL for a fragment as soon as that fragment's
+                # step is committed, which may be before this sweep's PULL for
+                # the other fragment arrives (its step is committed later).
                 client.check_health()
-                for permit in client.drain_pulls():
-                    permits[permit.fragment_id] = permit
+                arrived = early + list(client.drain_pulls())
+                early.clear()
+                for permit in arrived:
+                    if (permit.global_step - 1) // FRAGMENTS + 1 == sweep:
+                        permits[permit.fragment_id] = permit
+                    else:
+                        early.append(permit)
                 return any(not getattr(p, "pushed", False) for p in permits.values())
 
             while len(permits) < FRAGMENTS:
@@ -217,9 +229,12 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
         result = {f.fragment_id: bytes(f.data) for f in finals}
         client.acknowledge_finalization(manifest)
         assert process.wait(timeout=15) == 0
+        failed = False
     finally:
         client.close()
         log = _stop(process)
+        if failed:  # why the syncer closed the connection, refused a push, ...
+            print(log[-6000:])
     assert "syncer semantic profile" not in log, log
     return concurrent, list(manifest.versions), result, (tmp_path / "state.ckpt").read_bytes(), log
 
