@@ -745,7 +745,19 @@ class PolicyReleaseStore:
             return None
         self._written = None  # until this release is in the store
         # the mount was just reloaded (first release of this process, or after a failed one)
-        names = self._listed_names() if self._names is None else self._names
+        if self._names is None:
+            names = self._listed_names()
+            # LATEST again after the listing (one read per process): a release another
+            # writer published between the first read and the listing is in the listing
+            # but above that read's seq; taken for a partial upload, it would be removed
+            # while LATEST names it
+            with timer.phase("read_latest_s"):
+                latest = self._latest_for_release()
+            if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
+                self._written = latest
+                return None
+        else:
+            names = self._names
         self._names = None  # until this release is in the store: a failed one lists again
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
