@@ -273,6 +273,37 @@ def test_a_later_cut_is_not_marked(tmp_path):
     assert cp.join_commit(driver)["ok"] is True
 
 
+def test_a_cut_after_a_failed_first_store_sync_is_marked_too(tmp_path, monkeypatch):
+    """The first cut's store sync fails (transient store error) after its pointer
+    moved locally: the store still has no LATEST. The next cut is marked first as
+    well, so a run that dies while writing it leaves a store the next start drops
+    (rollout 0) instead of one it refuses forever (an unmarked cut, no LATEST)."""
+    store = _store(tmp_path / "store", _Vol())
+    rank, _ctl, driver, cp = _trained_island(tmp_path, store, 2)
+    real, calls = rs.write_snapshot, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("transient store error")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "write_snapshot", flaky)
+    assert cp.save(driver, rollout_id=2)["store_commit"] == "deferred"
+    assert cp.join_commit(driver)["ok"] is False
+    assert cp.pointer() is not None and rs.read_latest(store.root) is None
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(4)))
+    driver.local_step = driver.published_version = 3
+    cp.source.ledger = _Ledger(3)
+    info = cp.save(driver, rollout_id=3)
+    assert info["store_commit"] == "deferred"
+    assert rs.first_cut_mark(store.root, info["cut_id"]).is_file()
+    cp.trainer.finish_cut(cp._deferred["pending"])  # shards written, then the process dies
+    ctl_b = _rctl(tmp_path, "b", store)
+    assert ctl_b.restored is None and f"{rs.ROUND_CUTS}/{info['cut_id']}" in ctl_b.discarded_first_cut
+    assert list((store.root / rs.ROUND_CUTS).iterdir()) == []
+
+
 def test_a_run_dead_during_its_first_cut_commit_starts_over_at_zero(tmp_path):
     store = _store(tmp_path / "store", _Vol())
     _rank, _ctl, _driver, _cp_a, info = _first_cut_in_flight(tmp_path, store)

@@ -270,6 +270,12 @@ class RoundCutCheckpoint:
         # writers are collected (and their files dropped) at the next cut, when done
         self._abandoned: list[_PreparedCut] = []
         self._declined: int | None = None  # rollout whose prepare met a running commit
+        # the store holds a committed LATEST (restored at start, or a cut of this process
+        # committed it): until then every cut is marked first (_start). A local pointer
+        # is no proof: it moves before the store sync, which may fail or not be committed yet
+        from yeto.rl.engine.resume import read_latest
+
+        self._store_committed = read_latest(Path(controller.checkpoint_store)) is not None
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -378,9 +384,11 @@ class RoundCutCheckpoint:
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
         if background and callable(start):
-            if self.pointer() is None:
+            if not self._store_committed:
                 # the store's first cut: until its LATEST is committed the store holds a
-                # cut and no LATEST; the mark lets a restart drop it and start at 0
+                # cut and no LATEST; the mark lets a restart drop it and start at 0. Also
+                # a later cut while no earlier one is committed (its store sync failed or
+                # still runs): an unmarked cut beside them would make the store unstartable
                 from yeto.rl.engine.resume import mark_first_cut
 
                 mark_first_cut(self.controller.checkpoint_store, context.cut_id,
@@ -621,6 +629,8 @@ class RoundCutCheckpoint:
                 return
             with commit_budget(getattr(self.controller, "store", None), done["cut_bytes"]):
                 box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
+            if box["result"].get("ok", True) and box["result"].get("committed", True):
+                self._store_committed = True
 
         def run_held() -> None:
             started = time.monotonic()
@@ -781,6 +791,8 @@ class RoundCutCheckpoint:
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
+        if synced and sync.get("committed", True) and not sync.get("commit_error"):
+            self._store_committed = True
         info.update(extra)
         info["store_synced"] = bool(synced)
         info["store_commit"] = "inline"
