@@ -44,6 +44,7 @@ Limits (first implementation):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -533,6 +534,12 @@ class TakeReport:
     # payload holds an older version, below the floor (the record and the payload
     # disagree; the tokens trained are the payload's, so the payload decides)
     stale_payload_groups: int = 0
+    # groups inside the policy-age window whose version no record names for a trainer
+    # that resumed behind its releases (BatchReader.set_unidentified_gate): consumed,
+    # never trained; {version: groups} and their task-dispenser positions
+    unidentified_policy_groups: int = 0
+    unidentified_policy_versions: dict[int, int] = field(default_factory=dict)
+    unidentified_policy_positions: list[int] = field(default_factory=list)
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -552,7 +559,8 @@ class TakeReport:
                 "sample_buffer/padded_fraction": float(self.padded_fraction),
                 "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups),
                 "sample_buffer/damaged_payload_groups": float(self.damaged_payload_groups),
-                "sample_buffer/stale_payload_groups": float(self.stale_payload_groups)}
+                "sample_buffer/stale_payload_groups": float(self.stale_payload_groups),
+                "sample_buffer/unidentified_policy_groups": float(self.unidentified_policy_groups)}
 
 
 def _dispense_position(entry: Any) -> int | None:
@@ -561,7 +569,44 @@ def _dispense_position(entry: Any) -> int | None:
     return position if isinstance(position, int) and not isinstance(position, bool) else None
 
 
+def unidentified_metadata(report: Any) -> dict[str, Any]:
+    """The round metadata of the groups a reader passed over as of a version no record
+    names (``TakeReport.unidentified_policy_*``); empty when there were none."""
+    count = int(getattr(report, "unidentified_policy_groups", 0) or 0)
+    if not count:
+        return {}
+    from yeto.rl.engine.data_split import row_runs  # noqa: PLC0415
+
+    out: dict[str, Any] = {"buffer_unidentified_groups": count,
+                           "buffer_unidentified_versions": [[int(v), int(n)] for v, n in sorted(
+                               report.unidentified_policy_versions.items())]}
+    if report.unidentified_policy_positions:
+        out["buffer_unidentified_positions"] = row_runs(report.unidentified_policy_positions)
+    return out
+
+
 MIN_GROUP_SAMPLES = 2  # fewer: no in-group spread, no group-relative advantage
+# the reader's warning when it reads groups and keeps none (BatchReader._note_selection)
+UNIDENTIFIED_STARVED_EVENT = "rl_buffer_unidentified_policy_starved"
+UNIDENTIFIED_STARVED_SELECTS_ENV = "YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS"  # 0: never warn
+DEFAULT_UNIDENTIFIED_STARVED_SELECTS = 3
+
+
+def _starved_selects_limit(environ: Mapping[str, str] | None = None) -> int:
+    raw = (os.environ if environ is None else environ).get(UNIDENTIFIED_STARVED_SELECTS_ENV, "").strip()
+    try:
+        return max(0, int(raw)) if raw else DEFAULT_UNIDENTIFIED_STARVED_SELECTS
+    except ValueError:
+        return DEFAULT_UNIDENTIFIED_STARVED_SELECTS
+
+
+def _echo_event(event: str, **fields: Any) -> None:
+    """One ``YETO_RL_EVENT`` stdout record from the rollout executor's process (it has
+    no event tape of its own; the island's log stream carries the record)."""
+    from yeto.rl.event_echo import format_record
+
+    print(format_record({"island_id": fields.pop("island_id", None), "time_unix": time.time(),
+                         "event": str(event), **fields}), flush=True)
 
 
 def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
@@ -699,10 +744,65 @@ class BatchReader:
         # dispense positions (None without one) of the take's groups whose payload is
         # older than the floor although their index record is not
         self._stale_payloads: list[int | None] = []
+        # set_unidentified_gate: (start version K, the versions below K a record names)
+        self._unidentified_gate: tuple[int, frozenset[int]] | None = None
+        self._unidentified: dict[str, Any] = {"versions": {}, "positions": []}
+        # selections in a row that yielded groups and kept none, at least one of them
+        # unidentified: after UNIDENTIFIED_STARVED_SELECTS of them the reader warns
+        # (the take goes on waiting: the samplers may still serve an older release)
+        self.starved_selects_limit = _starved_selects_limit()
+        self._starved_selects = 0
+        self.unidentified_total = 0  # groups passed over as unidentified by this reader
+        self.emit: Callable[..., None] = _echo_event
+
+    def set_unidentified_gate(self, start_version: int, known_versions: Any) -> None:
+        """A relaunched trainer starts at vK and reads the buffer on from an earlier
+        position. A group of a version below K that no record names any more (its release
+        was pruned) cannot be given a policy identity: it is consumed and counted
+        (``TakeReport.unidentified_policy_groups``), never trained, instead of
+        stopping the trainer at every start. Versions from K on are this process's
+        own publications; a version that is unknown there is still an error."""
+        self._unidentified_gate = (int(start_version), frozenset(int(v) for v in known_versions))
+
+    def _is_unidentified(self, entry: Any) -> bool:
+        gate = self._unidentified_gate
+        version = int(entry.behavior_version)
+        if gate is None or version >= gate[0] or version in gate[1]:
+            return False
+        seen = self._unidentified
+        seen["versions"][version] = seen["versions"].get(version, 0) + 1
+        self.unidentified_total += 1
+        position = _dispense_position(entry)
+        if position is not None:
+            seen["positions"].append(position)
+        return True
 
     def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         self.xhw_actions = {str(k): dict(v) for k, v in (actions or {}).items()}
         return self.xhw_actions
+
+    def _note_selection(self, rollout_id: int, selected: int, kept: int, unidentified: int) -> None:
+        """Count selections that kept nothing while groups were passed over as
+        unidentified; at ``starved_selects_limit`` in a row (and every further
+        multiple of it) warn: the trainer is reading groups and can train none."""
+        if not selected:
+            return
+        if kept or not unidentified:
+            self._starved_selects = 0
+            return
+        self._starved_selects += 1
+        limit = self.starved_selects_limit
+        if limit > 0 and self._starved_selects % limit == 0:
+            gate = self._unidentified_gate
+            fields = {"rollout_id": int(rollout_id), "selections": self._starved_selects,
+                      "unidentified_policy_groups_total": self.unidentified_total,
+                      "start_version": None if gate is None else gate[0],
+                      "known_versions": None if gate is None else sorted(gate[1]),
+                      "buffer_position": int(self.buffer.read_cursor)}
+            logging.getLogger(__name__).warning(
+                "sample buffer: %d selections in a row kept no group (groups of versions no record "
+                "names are passed over): %s", self._starved_selects, fields)
+            self.emit(UNIDENTIFIED_STARVED_EVENT, **fields)
 
     def _quarantined(self, source: str, rollout_id: int) -> bool:
         action = self.xhw_actions.get(source) or {}
@@ -837,6 +937,7 @@ class BatchReader:
         self._floor = floor
         dropped_small = 0
         self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
+        self._unidentified = {"versions": {}, "positions": []}
         carried_in, self._carry = self._carry, None
         if carried_in is not None:  # selected by the last take; its position is that round's end
             position, group, version, tokens, source, dispensed = carried_in
@@ -854,12 +955,15 @@ class BatchReader:
             begun = self.clock()
             selected = self._select(groups - len(chosen))
             select_s += self.clock() - begun
+            kept_before, unidentified_before = len(chosen), self.unidentified_total
             for item in selected:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
+                    continue
+                if self._is_unidentified(item.entry):
                     continue
                 if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
                     fenced += 1  # a fenced incarnation's late write: never trained, never read
@@ -879,6 +983,8 @@ class BatchReader:
                 chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
+            self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
+                                 self.unidentified_total - unidentified_before)
             if selected:  # decode now: a group that is dropped is replaced by the next selection
                 read_s += self._settle([read for _, read, _ in chosen])
                 begun = self.clock()
@@ -946,7 +1052,10 @@ class BatchReader:
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
                                damaged_payload_groups=len(damaged), damaged_payloads=damaged,
-                               stale_payload_groups=len(self._stale_payloads))
+                               stale_payload_groups=len(self._stale_payloads),
+                               unidentified_policy_groups=sum(self._unidentified["versions"].values()),
+                               unidentified_policy_versions=dict(sorted(self._unidentified["versions"].items())),
+                               unidentified_policy_positions=list(self._unidentified["positions"]))
 
     @staticmethod
     def _choose(position: int, group: list, version: int, tokens: int, source: str, chosen: list,
@@ -989,6 +1098,8 @@ class BatchReader:
                 dispensed = _dispense_position(item.entry)
                 if dispensed is not None:
                     skipped["stale_positions"].append(dispensed)
+                continue
+            if self._is_unidentified(item.entry):
                 continue
             if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
                 skipped["fenced"] += 1
@@ -1127,6 +1238,15 @@ class BatchReader:
                 del self._ends[rid]
         return int(self.buffer.watermark)
 
+    def trained_before(self, rollout_id: int) -> int:
+        """The buffer position the policy of version ``rollout_id`` is trained up to:
+        the end of the last round below ``rollout_id`` this reader took, or the
+        position it started from (the last committed watermark) when it took none.
+        Unlike ``buffer.read_cursor`` it does not move with a round selected later
+        or a group carried over to the next round."""
+        done = [rid for rid in self._ends if rid < int(rollout_id)]
+        return int(self._ends[max(done)]) if done else int(self.buffer.watermark)
+
     def reset(self, watermark: int) -> int:
         """Continue at the restored cut's watermark (rounds after it are selected again)."""
         self.buffer.reset_to(int(watermark))
@@ -1217,6 +1337,9 @@ def reader_basis_version(weight_version: int | None, policy_token: str | None) -
 def register_reader(reader: BatchReader) -> None:
     """Called by the reader rollout function in the rollout executor's process."""
     _ACTIVE[TRAINER] = reader
+    unidentified = _PENDING_UNIDENTIFIED_GATE.pop(TRAINER, None)
+    if unidentified is not None:
+        reader.set_unidentified_gate(*unidentified)
     pending = _PENDING_RELAY_GATE.pop(TRAINER, None)
     if pending is not None:  # relay mode only (executor_set_relay_gate_version)
         reader.gate_version = pending
@@ -1249,6 +1372,28 @@ def executor_read_cursor(_executor: Any) -> int | None:
     selected group (None before the reader exists)."""
     reader = _ACTIVE.get(TRAINER)
     return None if reader is None else int(reader.buffer.read_cursor)
+
+
+# set before the reader exists (the driver starts before the first rollout call builds it)
+_PENDING_UNIDENTIFIED_GATE: dict[str, tuple[int, list[int]]] = {}
+
+
+def executor_set_unidentified_gate(_executor: Any, start_version: int, known_versions: list[int]) -> bool:
+    """Runs INSIDE the rollout executor actor: :meth:`BatchReader.set_unidentified_gate`
+    (kept for the reader when it does not exist yet). True: set on the reader now."""
+    reader = _ACTIVE.get(TRAINER)
+    if reader is None:
+        _PENDING_UNIDENTIFIED_GATE[TRAINER] = (int(start_version), [int(v) for v in known_versions])
+        return False
+    reader.set_unidentified_gate(int(start_version), known_versions)
+    return True
+
+
+def executor_trained_before(_executor: Any, rollout_id: int) -> int | None:
+    """Runs INSIDE the rollout executor actor: :meth:`BatchReader.trained_before`
+    (None before the reader exists)."""
+    reader = _ACTIVE.get(TRAINER)
+    return None if reader is None else reader.trained_before(int(rollout_id))
 
 
 def executor_read_shards(_executor: Any) -> dict[str, int] | None:

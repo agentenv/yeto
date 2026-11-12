@@ -156,3 +156,136 @@ def test_a_resumed_account_and_a_round_cut_resume_are_refused_together():
         sync.resume_at(3)
     with pytest.raises(ValueError, match="below 0"):
         LocalOnlySync(2).resume_at(-1)
+
+
+def test_a_relaunch_without_a_cut_reads_the_buffer_from_where_the_newest_release_is_trained(tmp_path):
+    """The record of vK holds the buffer position its weights are trained up to
+    (``buffer_trained``); a relaunched single trainer hands it to its round cuts as
+    the place to read from when the store holds no cut (RoundCutCheckpoint.resume),
+    and its sync knows the account continued without one. ``buffer_selected`` (the
+    read position when the record was written) is never that place."""
+    store = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
+    for version, trained in ((1, 4), (2, 9), (3, None)):
+        store.release(version, f"h{version}", lambda d: (d / "w.bin").write_text("w"),
+                      buffer_selected=30, buffer_trained=trained)
+    assert resumed_releases(store, 2).buffer_trained is None  # v3 recorded none
+    store.release(4, "h4", lambda d: (d / "w.bin").write_text("w"), buffer_selected=30, buffer_trained=17)
+    assert resumed_releases(store, 2).buffer_trained == 17
+
+    calls = []
+    cuts = SimpleNamespace(resume=lambda driver: None, buffer_start_without_cut=0)
+    sync = LocalOnlySync(2)
+    sync.round_cuts = cuts
+    driver = SimpleNamespace(sync=sync, _max_policy_age=lambda: 2, emit=lambda event, **f: calls.append((event, f)),
+                             export_local_resident=lambda *, policy_version: SimpleNamespace(
+                                 policy_version=policy_version))
+    assert si._resume_single_trainer(driver, store) == {"resumed_base": 4}
+    assert cuts.buffer_start_without_cut == 17 and calls[-1][1]["buffer_trained"] == 17
+    assert sync.start(driver).rollout_id == 4 and sync.continues_releases_without_cut is True
+    fresh = LocalOnlySync(2)
+    fresh.start(driver)
+    assert fresh.continues_releases_without_cut is False  # a run that starts here
+
+
+def test_a_reader_older_than_buffer_trained_reads_a_record_that_has_it(tmp_path):
+    """The record gained a field; a reader built before it (the samplers of a
+    running pool) keeps only the fields it knows, with the real ``from_record``."""
+    import dataclasses
+    import json
+
+    from yeto.rl.engine.policy_release import LATEST, RELEASE_DIR, PolicyRelease
+
+    store = PolicyReleaseStore(CheckpointStore(tmp_path))
+    store.release(3, "h3", lambda d: (d / "w.bin").write_text("w"), buffer_selected=8, buffer_trained=6)
+    record = json.loads((tmp_path / RELEASE_DIR / LATEST).read_text())
+    assert record["buffer_trained"] == 6
+    earlier = dataclasses.make_dataclass(
+        "PolicyRelease", [(f.name, f.type, f) for f in dataclasses.fields(PolicyRelease)
+                          if f.name != "buffer_trained"], frozen=True)
+    earlier.from_record = classmethod(PolicyRelease.from_record.__func__)
+    read = earlier.from_record(record)
+    assert not hasattr(read, "buffer_trained")
+    assert (read.seq, read.version, read.policy_hash, read.buffer_selected) == (1, 3, "h3", 8)
+
+
+def test_the_reader_reports_where_a_version_is_trained_up_to(tmp_path):
+    """``BatchReader.trained_before(v)``: the end of the last round below v, not the
+    read position (a later round's selection, a carried-over group, do not move it);
+    the start position while this reader took no round."""
+    from tests.buffer_rollout_procs import sample
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader, GroupWriter
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    store = CheckpointStore(tmp_path)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for g in range(6):
+        writer.write([sample(2 * g, g, 0), sample(2 * g + 1, g, 0)], group_key=f"g{g}")
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1, create_index=False), max_policy_age=2,
+                         wait_s=0.0, poll_s=0.0, read_workers=1, prefetch=False, incarnation_gate=None)
+    reader.reset(1)
+    assert reader.trained_before(0) == 1 and reader.trained_before(5) == 1
+    reader.take(0, 2, current_version=0)
+    assert reader.trained_before(0) == 1 and reader.trained_before(1) == 3
+    reader.take(1, 2, current_version=1)  # round 1 is selected: v1 is still trained up to 3
+    assert (reader.buffer.read_cursor, reader.trained_before(1), reader.trained_before(2)) == (5, 3, 5)
+    assert reader.watermark_before(1) == 3 and reader.trained_before(1) == 3  # a cut before round 1
+
+
+def test_the_reader_passes_over_groups_without_an_identity_and_warns_when_it_keeps_none(tmp_path, caplog):
+    """The gate of a relaunched trainer (start version 5, the store still names v4):
+    groups of v2 and v3 inside the window are consumed untrained and counted, v4 and
+    v5 are kept, and a version above the start version is not the gate's business.
+    Selections in a row that keep nothing raise the starvation warning."""
+    from tests.buffer_rollout_procs import sample
+    from yeto.rl.adapters.miles import buffer_rollout as br2
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    store = CheckpointStore(tmp_path)
+    writer = br2.GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for g, version in enumerate((2, 3, 3, 2, 3, 2, 4, 5, 9)):
+        writer.write([sample(2 * g, g, version), sample(2 * g + 1, g, version)], group_key=f"g{g}")
+    reader = br2.BatchReader(FileSampleBuffer(store, batch_size=1, create_index=False), max_policy_age=8,
+                             wait_s=0.0, poll_s=0.0, read_workers=1, prefetch=False, incarnation_gate=None)
+    events = []
+    reader.emit = lambda event, **fields: events.append((event, fields))
+    reader.set_unidentified_gate(5, [4])
+    with caplog.at_level("WARNING"):
+        taken, report = reader.take(5, 1, current_version=5)
+    assert [group[0]["group_index"] for _, group in taken] == [6]  # the group of v4
+    assert report.unidentified_policy_groups == 6 and report.unidentified_policy_versions == {2: 3, 3: 3}
+    assert report.metrics()["sample_buffer/unidentified_policy_groups"] == 6.0
+    # six selections of one group kept nothing: the warning at the third and the sixth
+    assert [(e, f["selections"], f["unidentified_policy_groups_total"]) for e, f in events] == [
+        (br2.UNIDENTIFIED_STARVED_EVENT, 3, 3), (br2.UNIDENTIFIED_STARVED_EVENT, 6, 6)]
+    assert events[0][1]["start_version"] == 5 and events[0][1]["known_versions"] == [4]
+    assert sum("kept no group" in r.message for r in caplog.records) == 2
+    taken, report = reader.take(6, 2, current_version=5)
+    assert [group[0]["group_index"] for _, group in taken] == [7, 8]  # v5, and v9: not below the start
+    assert report.unidentified_policy_groups == 0 and len(events) == 2
+    assert br2._starved_selects_limit({br2.UNIDENTIFIED_STARVED_SELECTS_ENV: "7"}) == 7
+    assert br2._starved_selects_limit({br2.UNIDENTIFIED_STARVED_SELECTS_ENV: "0"}) == 0
+
+
+def test_the_miles_pool_hands_the_gate_to_the_reader_in_the_executor():
+    """The driver's gate reaches the reader through the rollout executor, also when
+    the reader does not exist yet (the first rollout call builds it)."""
+    from yeto.rl.adapters.miles import buffer_rollout as br2
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
+
+    pool = SimpleNamespace(_in_executor=lambda fn, *args: fn(None, *args))
+    br2._ACTIVE.pop(br2.TRAINER, None)
+    MilesRolloutPool.set_unidentified_policy_gate(pool, 7, {6})
+    assert br2._PENDING_UNIDENTIFIED_GATE[br2.TRAINER] == (7, [6])
+    gates = []
+    reader = SimpleNamespace(set_unidentified_gate=lambda start, known: gates.append((start, list(known))),
+                             gate_version=None)
+    br2.register_reader(reader)
+    MilesRolloutPool.set_unidentified_policy_gate(pool, 9, {7, 8})
+    br2._ACTIVE.pop(br2.TRAINER, None)
+    assert gates == [(7, [6]), (9, [7, 8])] and br2.TRAINER not in br2._PENDING_UNIDENTIFIED_GATE
+    report = SimpleNamespace(unidentified_policy_groups=3, unidentified_policy_versions={5: 2, 4: 1},
+                             unidentified_policy_positions=[11, 12, 40])
+    assert br2.unidentified_metadata(report) == {
+        "buffer_unidentified_groups": 3, "buffer_unidentified_versions": [[4, 1], [5, 2]],
+        "buffer_unidentified_positions": [[11, 12, 1], [40, 40, 1]]}
+    assert br2.unidentified_metadata(SimpleNamespace(unidentified_policy_groups=0)) == {}

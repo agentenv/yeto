@@ -85,7 +85,9 @@ BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
                     "buffer_carried_over_groups", "buffer_padded_samples")
 # buffer_damaged_payload_groups: groups the reader passed over because their payload
 # is missing or is not a group (consumed, not trained)
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
+# buffer_unidentified_groups: groups of a version no record names, passed over by a
+# trainer that resumed behind its releases (BatchReader.set_unidentified_gate)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted",
                                  "buffer_damaged_payload_groups", *BUFFER_FILL_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
@@ -93,7 +95,10 @@ ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
-ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
+# buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:
+# their task-dispenser positions as row runs
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions", "buffer_unidentified_versions",
+                                      "buffer_unidentified_positions"})
 # buffer_damaged_payloads: one record per such group ({"position", "sample_id",
 # "payload_ref", "reason"[, "dispense_position"]}; BatchReader's TakeReport)
 ROUND_METADATA_RECORD_KEYS = frozenset({"buffer_damaged_payloads"})

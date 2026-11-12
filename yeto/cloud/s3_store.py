@@ -38,6 +38,7 @@ import pickle
 import subprocess
 import sys
 import random
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,67 @@ try:  # botocore ships with boto3
 except ImportError:  # pragma: no cover - a store without boto3 never reads
     pass
 RANGE_READ_ATTEMPTS = 5
+# A download file (``S3ObjectStore._partial``) is named by where its writer runs
+# (:func:`_host_token`), its pid and the call. The next download of the same target
+# removes it once it has no writer:
+# * the same pid namespace and the pid is gone, or the pid is this process's but
+#   the file is none of its downloads (an earlier process that had the pid):
+#   after DEAD_PARTIAL_GRACE_S without a write;
+# * the same pid namespace and the pid is alive: after STALE_PARTIAL_S without a
+#   write (the pid went to another process);
+# * a writer that cannot be asked about (another host or container, a host whose
+#   pid namespace cannot be read, a name of another format): after
+#   UNKNOWN_PARTIAL_S without a write.
+# Never on the pid alone: a running download marks its file every
+# PARTIAL_HEARTBEAT_S (one part can take minutes to arrive before it is written),
+# so a file inside these windows may have a writer whatever its name says.
+STALE_PARTIAL_S = 3600.0
+UNKNOWN_PARTIAL_S = 600.0
+DEAD_PARTIAL_GRACE_S = 120.0
+PARTIAL_HEARTBEAT_S = 20.0
+_LIVE_PARTIALS: set[str] = set()  # the download files this process is writing
+_LIVE_PARTIALS_LOCK = threading.Lock()
+
+
+@functools.lru_cache(maxsize=1)
+def _pid_namespace() -> str | None:
+    """What tells this pid namespace from every other one: the boot of the kernel
+    and the namespace's inode (Linux). None when it cannot be read (macOS, no
+    /proc): a pid in a file's name then proves nothing. The host name does not
+    do: containers on the host network, or started with one fixed name, share it
+    while each has its own pids, often the same ones."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        return f"{boot}:{os.stat('/proc/self/ns/pid').st_ino}"
+    except (OSError, ValueError):
+        return None
+
+
+def _host_token() -> str:
+    """Where this process runs, in a download file's name: a pid means something
+    only next to it."""
+    import hashlib
+    import socket
+
+    return hashlib.sha256(f"{socket.gethostname()}\n{_pid_namespace() or ''}".encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # EPERM: a process of another user
+        return True
+    return True
+
+
+def _read_retry_pause(attempt: int) -> None:
+    """Wait before try ``attempt + 2`` of a body read: exponential, with jitter (16
+    samplers cut off at once do not come back in lock step)."""
+    time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))
+
+
 # botocore's retries of one request (throttling 429 / 503 SlowDown included):
 # "standard" mode backs off exponentially with jitter, so 16 samplers refused at
 # once by the store do not come back in lock step; AWS_RETRY_MODE /
@@ -147,10 +209,41 @@ def _warn_part_checksums_off(uri: str, error: Exception) -> None:
           file=sys.stderr, flush=True)
 
 
+def error_code(error: BaseException) -> str:
+    """The store's error code of a botocore ``ClientError``, ``""`` for anything else.
+    A connection-level error (botocore ``HTTPClientError``: ``ReadTimeoutError``,
+    ``ConnectionClosedError``) has ``response = None``, not a dict: it has no code,
+    and asking for one must not replace it with an ``AttributeError``."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return ""
+    return str((response.get("Error") or {}).get("Code", ""))
+
+
 def _b64(digest: bytes) -> str:
     import base64
 
     return base64.b64encode(digest).decode("ascii")
+
+
+def multipart_etag(part_etags: Sequence[Any]) -> str | None:
+    """The ETag S3 and R2 report for a multipart object whose parts have
+    ``part_etags`` (in part order; each the MD5 of its part, as UploadPart answers
+    without SSE-KMS / SSE-C): the MD5 of the concatenated raw part MD5s, then
+    ``-<parts>`` (measured on R2, a one-part upload included). Unquoted; None when
+    a part ETag is not an MD5, so nothing can be derived."""
+    import hashlib
+
+    raw = b""
+    for etag in part_etags:
+        text = str(etag or "").strip('"')
+        if len(text) != 32:
+            return None
+        try:
+            raw += bytes.fromhex(text)
+        except ValueError:
+            return None
+    return f"{hashlib.md5(raw).hexdigest()}-{len(part_etags)}" if part_etags else None
 
 
 def composite_sha256(part_digests: Sequence[str]) -> str:
@@ -492,13 +585,30 @@ class S3ObjectStore:
         return self._full(check_key(key))
 
     def _code(self, error: Exception) -> str:
-        return str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+        return error_code(error)
 
     def read(self, key: str) -> bytes | None:
-        try:
-            return self.client.get_object(Bucket=self.bucket, Key=self._key(key))["Body"].read()
-        except self.client.exceptions.NoSuchKey:
-            return None
+        """The object's bytes, None when it is missing. A body cut short (a reset
+        connection, a stalled stream) is read again, up to
+        :data:`RANGE_READ_ATTEMPTS` times: botocore retries the request, never the
+        body it streams afterwards, and one reset while the trainer reads a payload
+        or a sampler its lease would otherwise end the caller. Each try is one GET
+        of one version: an object replaced meanwhile is read as it is now, one
+        deleted meanwhile is missing. An error answer (403, a 503 after the SDK's
+        retries) is raised as before."""
+        full = self._key(key)
+        for attempt in range(RANGE_READ_ATTEMPTS):
+            try:
+                response = self.client.get_object(Bucket=self.bucket, Key=full)
+            except self.client.exceptions.NoSuchKey:
+                return None
+            try:
+                return response["Body"].read()
+            except RANGE_READ_RETRYABLE:
+                if attempt + 1 == RANGE_READ_ATTEMPTS:
+                    raise
+                _read_retry_pause(attempt)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def write(self, key: str, data: bytes) -> None:
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
@@ -594,6 +704,12 @@ class S3ObjectStore:
         so a later call (the next push, a restarted process) continues it. A journal
         of another version of the file aborts its upload and starts again.
 
+        A CompleteMultipartUpload that the store applied but did not answer (the
+        SDK's retry, or the next try, then finds ``NoSuchUpload``): when every part
+        is journaled and the upload is gone, the object under the key is compared
+        with the journal (:meth:`_completed`) and, when it is that upload, the file
+        is not sent again (a 100-200 GB release file otherwise goes up twice).
+
         An endpoint that answers a checksum with ``NotImplemented`` (Cloudflare R2
         on UploadPart) turns checksums off for this store, with one warning per
         process, and the file is uploaded again without them."""
@@ -624,8 +740,8 @@ class S3ObjectStore:
         journal = _UploadJournal(source, {"bucket": self.bucket, "key": full, "size": int(size),
                                           "mtime_ns": int(st.st_mtime_ns), "part_bytes": int(part),
                                           "checksum": checks})
-        self._open_upload(journal, full, part, size, checks)
-        for attempt in range(1, self.transfer.upload_attempts + 1):
+        completed = self._open_upload(journal, full, part, size, checks, count=count)
+        for attempt in range(1, 0 if completed else self.transfer.upload_attempts + 1):
             try:
                 self._send_parts(journal, full, source, part, size, count, checks)
                 parts = [{"PartNumber": n, "ETag": journal.parts[n]["ETag"],
@@ -643,9 +759,19 @@ class S3ObjectStore:
                         pass
                     journal.remove()
                     raise
-                if attempt == self.transfer.upload_attempts:
+                last = attempt == self.transfer.upload_attempts
+                if last and len(journal.parts) < count:
                     raise  # the upload and its journal stay: the next call continues them
-                listed = self._listed_parts(full, journal.upload_id, part, size)
+                try:
+                    listed = self._listed_parts(full, journal.upload_id, part, size)
+                    if listed is None and self._completed(full, journal.parts, count, size, checks):
+                        break  # the complete took effect and its answer was lost
+                except Exception:  # noqa: BLE001 - the store is still failing
+                    if last:
+                        raise error from None
+                    raise
+                if last:
+                    raise  # as above; the next call looks at the object again when the upload is gone
                 if listed is None:  # the upload is gone (completed elsewhere, expired, aborted)
                     journal.upload_id, journal.parts = None, {}
                     self._open_upload(journal, full, part, size, checks, fresh=True)
@@ -662,17 +788,23 @@ class S3ObjectStore:
         return expected
 
     def _open_upload(self, journal: _UploadJournal, full: str, part: int, size: int, checks: bool, *,
-                     fresh: bool = False) -> None:
-        """Continue the journaled upload of this file version, or create one."""
+                     fresh: bool = False, count: int = 0) -> bool:
+        """Continue the journaled upload of this file version, or create one. True
+        when the journaled upload is gone and the object is what it completed
+        (:meth:`_completed`; a process killed, or out of tries, between the complete
+        and its answer): nothing is left to send."""
         state = None if fresh else journal.load()
         if state is not None and state.get("upload_id") and "stale_upload_id" not in state:
             listed = self._listed_parts(full, str(state["upload_id"]), part, size)
+            saved = {int(n): v for n, v in dict(state.get("parts") or {}).items()}
             if listed is not None:
                 journal.upload_id = str(state["upload_id"])
-                saved = {int(n): v for n, v in dict(state.get("parts") or {}).items()}
                 journal.parts = self._agreed(saved, listed, checks)
                 journal.save()
-                return
+                return False
+            if count and self._completed(full, saved, count, size, checks):
+                journal.upload_id, journal.parts = str(state["upload_id"]), saved
+                return True
         stale = (state or {}).get("stale_upload_id")
         if stale:
             try:  # another version of the file: its parts are never completed
@@ -683,6 +815,39 @@ class S3ObjectStore:
         journal.upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=full, **extra)["UploadId"]
         journal.parts = {}
         journal.save()
+        return False
+
+    def _completed(self, full: str, parts: Mapping[int, Mapping[str, Any]], count: int, size: int,
+                   checks: bool) -> bool:
+        """Whether the object under ``full`` is the multipart upload of the journaled
+        ``parts``, for an upload the store does not know any more: a complete that
+        took effect answers the next one (the SDK's own retry included) with
+        ``NoSuchUpload`` (measured on R2), like an aborted or expired upload.
+
+        Proof, not a guess: every part 1..``count`` is journaled, the object has the
+        file's size, and it carries what only these parts produce: the composite
+        SHA-256 of their checksums when the store reports one, else the multipart
+        ETag of their ETags (:func:`multipart_etag`; R2 takes no part checksums).
+        Anything else (no object, another size, part ETags that are not MD5s, an
+        endpoint with another ETag scheme such as OSS) is False: the file is
+        uploaded again, as before."""
+        if set(parts) != set(range(1, count + 1)):
+            return False
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=full,
+                                           **({"ChecksumMode": "ENABLED"} if checks else {}))
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            if self._code(error) in _MISSING:
+                return False
+            raise
+        if int(head.get("ContentLength", -1)) != int(size):
+            return False
+        ordered = [parts[n] for n in range(1, count + 1)]
+        reported = head.get("ChecksumSHA256")
+        if checks and reported and all(p.get("sha256") for p in ordered):
+            return str(reported) == composite_sha256([p["sha256"] for p in ordered])
+        expected = multipart_etag([p.get("ETag") for p in ordered])
+        return expected is not None and str(head.get("ETag") or "").strip('"') == expected
 
     def _send_parts(self, journal: _UploadJournal, full: str, source: str | os.PathLike[str], part: int,
                     size: int, count: int, checks: bool) -> None:
@@ -760,10 +925,83 @@ class S3ObjectStore:
             data = self.read(key)
             if data is None:  # deleted since the HEAD (a prune)
                 return False
-            Path(target).write_bytes(data)
+            self._drop_stale_partials(target)
+            partial = self._partial(target)
+            try:  # never a cut-short file at the final name (a killed process, a full disk)
+                Path(partial).write_bytes(data)
+                os.replace(partial, target)
+            finally:
+                self._release_partial(partial)
             return True
         pin = {"IfMatch": etag} if etag else {}
-        partial = f"{target}{DOWNLOAD_SUFFIX}"  # renamed onto target once whole (a resumed download keeps it)
+        self._drop_stale_partials(target)
+        partial = self._partial(target)  # renamed onto target once whole
+        try:
+            self._read_ranges(key, full, partial, size, part, pin)
+            os.replace(partial, target)
+        finally:  # a failed download leaves nothing (its name is this call's alone)
+            self._release_partial(partial)
+        return True
+
+    @staticmethod
+    def _partial(target: str | os.PathLike[str]) -> str:
+        """The file a download of ``target`` is written to: next to it, named by this
+        host, process and call, so two downloads of one target (two processes sharing
+        a cache directory, a retry beside a stalled try) never truncate or interleave
+        each other's bytes; the last rename wins with a whole file. It ends in
+        :data:`DOWNLOAD_SUFFIX`: what a killed process left is recognised and removed
+        (:meth:`_drop_stale_partials`, ``policy_release``), and a stage push skips it."""
+        import uuid
+
+        partial = f"{target}.{_host_token()}-{os.getpid()}-{uuid.uuid4().hex[:8]}{DOWNLOAD_SUFFIX}"
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.add(os.path.abspath(partial))
+        return partial
+
+    @staticmethod
+    def _release_partial(partial: str) -> None:
+        Path(partial).unlink(missing_ok=True)
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.discard(os.path.abspath(partial))
+
+    @staticmethod
+    def _partial_abandoned(path: Path, owner: str) -> bool:
+        """Whether download file ``path`` (``owner``: the part of its name between
+        the target's name and :data:`DOWNLOAD_SUFFIX`) has no writer any more."""
+        host, _, rest = owner.partition("-")
+        pid, _, _ = rest.partition("-")
+        idle = time.time() - path.stat().st_mtime
+        if _pid_namespace() is None or host != _host_token() or not pid.isdigit():
+            return idle > UNKNOWN_PARTIAL_S  # nobody here to ask
+        if int(pid) == os.getpid():  # this process, or an earlier one that had its pid
+            with _LIVE_PARTIALS_LOCK:
+                mine = os.path.abspath(path) in _LIVE_PARTIALS
+            return not mine and idle > DEAD_PARTIAL_GRACE_S
+        return idle > (STALE_PARTIAL_S if _pid_alive(int(pid)) else DEAD_PARTIAL_GRACE_S)
+
+    @classmethod
+    def _drop_stale_partials(cls, target: str | os.PathLike[str]) -> None:
+        """Remove what killed downloads of ``target`` left next to it (a file of up
+        to the object's size each; a sampler whose release prefetch is cut off again
+        and again would fill its disk): :meth:`_partial_abandoned`. The file of a
+        download still running, in this process or another, stays: it was written
+        or marked (:meth:`_read_ranges`) a moment ago."""
+        path = Path(target)
+        head = path.name + "."
+        try:
+            with os.scandir(path.parent) as entries:
+                names = [e.name for e in entries if e.name.startswith(head) and e.name.endswith(DOWNLOAD_SUFFIX)]
+        except OSError:
+            return
+        for name in names:
+            other = path.with_name(name)
+            try:
+                if cls._partial_abandoned(other, name[len(head):-len(DOWNLOAD_SUFFIX)]):
+                    other.unlink(missing_ok=True)
+            except OSError:  # raced with that download's rename or another cleanup
+                pass
+
+    def _read_ranges(self, key: str, full: str, partial: str, size: int, part: int, pin: Mapping[str, Any]) -> None:
         with open(partial, "wb") as fh:
             fh.truncate(size)
 
@@ -778,17 +1016,30 @@ class S3ObjectStore:
                         # body read of one part would otherwise fail the whole download
                         if attempt + 1 == RANGE_READ_ATTEMPTS:
                             raise
-                        time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))  # jitter: no lock step
+                        _read_retry_pause(attempt)
                         continue
                     break
                 if len(body) != end - offset + 1:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
                 os.pwrite(fh.fileno(), body, offset)
 
-            with ThreadPoolExecutor(self.transfer.concurrency) as pool:
-                list(pool.map(fetch, range(0, size, part)))
-        os.replace(partial, target)
-        return True
+            done = threading.Event()
+
+            def mark() -> None:  # "this file has a writer", while parts are on their way
+                while not done.wait(PARTIAL_HEARTBEAT_S):
+                    try:
+                        os.utime(partial)
+                    except OSError:
+                        return
+
+            marker = threading.Thread(target=mark, name="yeto-get-mark", daemon=True)
+            marker.start()
+            try:
+                with ThreadPoolExecutor(self.transfer.concurrency) as pool:
+                    list(pool.map(fetch, range(0, size, part)))
+            finally:
+                done.set()
+                marker.join()
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
         """Download each ``(key, target)`` like :meth:`read_file`; returns the keys
@@ -1057,7 +1308,7 @@ def describe_store_error(error: BaseException, uri: str = "", environ: Mapping[s
     None for any other error."""
     env = os.environ if environ is None else environ
     name = type(error).__name__
-    code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+    code = error_code(error)
     endpoint = store_endpoint(env)
     where = f"endpoint {endpoint}" if endpoint else "AWS S3 (no endpoint set)"
     hint_endpoint = (f"set {ENDPOINT_ENV} or AWS_ENDPOINT_URL (or --endpoint-url, or endpoint_url in the "

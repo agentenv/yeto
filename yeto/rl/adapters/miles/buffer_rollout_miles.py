@@ -40,6 +40,7 @@ from .buffer_rollout import (
     SHARD_ENV,
     TRAINER,
     WAIT_ENV,
+    unidentified_metadata,
     BatchReader,
     DataSlot,
     SampleBufferRolloutError,
@@ -289,7 +290,8 @@ class _BufferRound:
                                   "buffer_damaged_payloads": damaged[:MAX_DAMAGED_PAYLOAD_RECORDS]}
                                  if damaged else {}),
                               **({"buffer_stale_positions": row_runs(stale)}
-                                 if (stale := getattr(report, "stale_positions", None)) else {}))
+                                 if (stale := getattr(report, "stale_positions", None)) else {}),
+                              **unidentified_metadata(report))
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on
