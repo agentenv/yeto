@@ -19,6 +19,7 @@ This page covers:
 - [The pool config](#the-pool-config-pooljson) and every field's default
 - [Commands](#commands): `--dry-run`, `pool`, `pool-status`, `pool-stop`
 - [What the pool does](#what-the-pool-does)
+- [Known limitations](#known-limitations)
 - [Billing](#billing)
 
 ## Before you start
@@ -91,6 +92,9 @@ same state dir write:
 
 - `tickets.json`, the **ticket ledger**: one row for each ticket this tool
   created. `down`, `pool-stop` and the patrol release only tickets in it.
+  An order is written to it before it is sent, as a row with
+  `"ticket": null` (a *pending order*). The ticket id is filled in from the
+  order's own answer, and from nowhere else.
 - `leases.json`: the address and lease end of each granted node.
 
 Each change is one read-modify-write under a lock (`tickets.lock`,
@@ -365,6 +369,78 @@ them by id and confirms each one reads `ended`. It never uses `--all` and
 never touches another run's or another person's ticket. Exit code 0 means
 every node is released. Exit code 1 prints the banner with the tickets left.
 
+### An unrecorded order: `adopt`
+
+```
+python -m yeto.launch.nc adopt --account <account> --ticket <ticket> --yes
+```
+
+Use it after an `nc_elastic_order_unrecorded` event whose `action` names the
+`adopt` command, or after an order that failed with `ticket <id> may be that
+order ... not recorded`. The account shows an open ticket, the ledger has a
+pending order of this tool on that account, and nothing ties the two
+together. Only a person can decide:
+
+1. Open the ticket in the National Compute console. Check that it was placed
+   at the time of the event and that nobody else ordered on the account.
+2. If it is this tool's order, run `adopt`. The pending order becomes the
+   ticket's row (`adopted_by: "operator"`, with the run tag of the order). A
+   running pool's patrol then finds it as an open ticket of the run that no
+   member owns: it takes the node in as a member, or releases it when the pool
+   is stopping or has `release_orphans`. `pool-stop` releases it too. Without
+   a pool, release it with `down --account <account> --ticket <ticket>`.
+3. If it is someone else's ticket, leave it. If it is nobody's, release it in
+   the console.
+
+`adopt` refuses unless all of this holds:
+
+- the ticket is the account's current open ticket and is not in the ledger;
+- the ledger has a pending order of the account, its call is over, and this
+  tool saw this very ticket for it within 30 minutes of the order (that is the
+  ticket the event named);
+- it is not the ticket the account showed before the order;
+- if the ticket has a grant time: it was granted no earlier than 5 minutes
+  before the order was sent and no later than 4 hours after the order call
+  ended.
+
+Without `--yes` it only prints what it would do. It never deletes anything.
+
+A pending order is closed, and can no longer make any ticket adoptable, when:
+
+- the account reads free twice in a row after the order call (the order
+  placed nothing that is open); or
+- a later order on the account succeeds.
+
+A ticket first seen more than 30 minutes after the order is reported once,
+with `stale: true` and no `adopt` command. It cannot be adopted: handle it in
+the console.
+
+The ledger keeps one pending row per account (`"ticket": null` with an
+`order` id): `owner` is the host and process that sent the order,
+`created_at` the last order sent, `since` the first one without a recorded
+outcome, `call_ended` when the failed call returned (absent: the process died
+inside the call; the call then counts as over 6 minutes after `created_at`),
+`error` its error, `free_reads` the free reads counted so far, and
+`observed_ticket` / `observed_at` the unrecorded ticket reported.
+
+### A halted account: `clear-halt`
+
+```
+python -m yeto.launch.nc clear-halt --account <account> [--yes]
+```
+
+The pool halts an account, by a halt row in the ledger, in two cases (see
+[Known limitations](#known-limitations)):
+
+| Event (`severity: critical`) | What happened |
+|---|---|
+| `nc_elastic_foreign_ticket_released` (`ticket`, `expected`) | A delete of this tool released `ticket`, which is not its own. Tell its owner. |
+| `nc_elastic_delete_unconfirmed` (`expected`, `delete_sent_at`) | A delete meant for `expected` was sent, and that ticket is gone from the account without ever reading `ended`. The pool cannot tell what the delete released. Usually it was `expected`; check in the console which ticket of the account was released around `delete_sent_at`. |
+
+While the halt is there, every order, delete and adopt on the account is
+refused, by the pool and by the CLI. Check the account in the console, then
+lift the halt with `--yes`. Without `--yes` the command prints the halt.
+
 ### Retry after a configuration error: `pool-retry`
 
 ```
@@ -467,6 +543,36 @@ one SSH round trip. Then it acts:
   is decided (`exit_evidence_unreadable`) until it does.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
+- **Only its own tickets.** The pool and the CLI delete, stop and reach a
+  ticket only when the ledger proves it is theirs: the row was written before
+  the order was sent and holds the ticket id from that order's answer, or an
+  operator adopted the ticket (`adopted_by: "operator"`). Any other ticket on
+  the account is only read and reported.
+- **An order whose answer was lost.** If the order call fails (a timeout,
+  output that cannot be parsed, an error after the request), National Compute
+  may still have placed the order. The pool does not guess. The pending order
+  stays in the ledger, and when the account then shows an open ticket that no
+  ledger row holds, the pool emits `order_unrecorded` (with the account and
+  the ticket id) once, and the order fails with `not recorded`. The node of
+  such a ticket is never looked up or reached. That ticket is
+  **billing and nobody will release it**: the pool places no further order on
+  the account and never deletes the ticket. See
+  [`adopt`](#an-unrecorded-order-adopt). When the order tool answers
+  `created: false` (someone else's order is on the account), nothing is
+  recorded either.
+- **Releasing a node.** The order tool's delete takes no ticket id: it
+  releases whatever ticket the account holds when it runs. So before each
+  delete the pool reads the account twice, the second time right before the
+  call, and sends the delete only if both show its own ticket, open. The
+  delete is written to the ledger before it is sent (a row with
+  `pending_delete`) and stays there until the account shows that ticket
+  `ended`. Every later status read of the account, by any command and however
+  much later, settles it; until then the account takes no other write. It sends
+  no delete within 120 s (`YETO_NC_DELETE_GUARD_S`) of the ticket's
+  `lease_until` or `preempt_at`: the release fails with `no delete sent now`
+  and is retried after that point. Keep `end_margin_s` well above this guard
+  (the default is 10 minutes), so the normal drain before the lease end is
+  not deferred.
 - **A status answer the pool cannot use.** The pool acts on an NC status
   answer only when the order tool succeeded (exit 0) and the answer has a
   `ticket` field that is `null` (the account has no order) or a ticket with a
@@ -483,7 +589,8 @@ one SSH round trip. Then it acts:
 Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
 `sampler_restart`, `sampler_crash_loop`, `sampler_finished`,
-`order_refused`, `breaker_open` and `pool_stopped`.
+`order_refused`, `order_unrecorded`, `foreign_ticket_released`,
+`delete_unconfirmed`, `legacy_ledger_rows`, `breaker_open` and `pool_stopped`.
 
 Each sampler writes its event tape as `<stem>.<incarnation>.jsonl` (from the
 spec's `event_tape`), one file per incarnation. To read the tapes in the
@@ -499,6 +606,46 @@ and `~/.ssh/config` includes it, so you can copy the tapes with plain `scp`:
 scp 'yeto-nc-<ticket>:/mnt/nvme/work/sampler/events*.jsonl' <tapes-dir>/
 yeto dashboard export --tapes <tapes-dir>
 ```
+
+## Known limitations
+
+- **A delete cannot name its ticket.** `nc-manage delete --account N`
+  releases the account's current ticket. The pool checks the ticket right
+  before the call and stays away from the lease end and from an announced
+  preemption, but one window is left: between that last read and the delete,
+  the pool's ticket ends on its own (an unannounced preemption, a release in
+  the console) *and* another user of the account places an order. The delete
+  then releases their ticket. The pool cannot prevent this. What it does:
+  - If the account then shows another ticket as `releasing` or released, the
+    pool names it (`foreign_ticket_released`) and halts the account.
+  - If the released ticket is no longer shown (the account shows no order, or
+    a newer ticket), the pool only knows that its delete was never confirmed
+    on its own ticket. It halts the account all the same
+    (`delete_unconfirmed`). This also happens, rarely, after a normal release:
+    the delete's answer did not name the ticket and the ended ticket was never
+    shown. A halt for a person to check is the price of never writing on
+    without knowing.
+  - Either way the pool places no order on the account in between.
+
+  *Suggested change to the order tool:* give `nc-manage delete` a
+  `--ticket <id>` argument that calls the release-by-id endpoint the tool
+  already wraps (`release(ticketId)` in `tool/core.mjs`), and have it refuse
+  when the id is not the session's ticket. The pool would then pass the id and
+  this window, and the halts above, go away.
+- **A queued ticket has no time.** National Compute reports `granted_at` for
+  an active ticket and no order time at all. An unrecorded order whose ticket
+  is still queued cannot be checked against the time of the order, so
+  [`adopt`](#an-unrecorded-order-adopt) relies on the operator's check in the
+  console. Do not adopt a ticket you cannot place.
+- **Tickets recorded by an earlier version.** Ledger rows written before
+  orders were recorded with their order (no `order` field) are still treated
+  as this tool's, so a running node can be released after an upgrade. The
+  earlier version could record a ticket that the order tool merely found on
+  the account. At its first patrol, a pool lists its open rows of that kind
+  once in a `legacy_ledger_rows` event. Check that each ticket listed is one
+  this tool ordered; if one is not, set `"ended": true` on its row.
+- **Two wrong "no order" answers in a row** for an account that has a ticket
+  are taken as true: the lease counts as ended.
 
 ## Billing
 

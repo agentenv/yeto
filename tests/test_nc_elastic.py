@@ -679,7 +679,7 @@ class FakeNc:
             doc = {"ticket": dict(self.ticket or {"state": "none"}, others=[]), "balance": {"balance_ucredits": 10**9}}
         elif argv[1] == "create":
             self.ticket = {"id": "abc123", "state": "queued"}
-            doc = {"ok": True, "ticket": dict(self.ticket)}
+            doc = {"ok": True, "created": True, "ticket": dict(self.ticket)}
         else:
             raise AssertionError(argv)
         return SimpleNamespace(returncode=0, stdout=json.dumps(doc), stderr="")
