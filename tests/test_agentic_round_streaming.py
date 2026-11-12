@@ -808,3 +808,43 @@ def test_a_drain_stops_waiting_for_cancelled_trials_that_do_not_end(tmp_path):
     assert drain["timed_out"] and drain["detached_trials"] == N
     (group,) = [f for n, f in events if n == GROUP_EVENT]
     assert group["prompt_id"] == "a" and not group["written"] and group["lost"] == {LOST_DRAIN: N}
+
+
+def test_a_backlog_of_slow_settles_does_not_stretch_the_drain(tmp_path):
+    import yeto.rl.agentic  # noqa: F401  (imported before the threads race on it)
+    import yeto.rl.harness.harbor.trial  # noqa: F401
+
+    class SlowHarness(StubbornHarness):
+        async def run(self, task, endpoint):
+            if "-a-" not in task.trajectory_id:
+                await asyncio.sleep(0.2)
+            return await super().run(task, endpoint)
+
+    harness = SlowHarness({"b": 0.0, "c": 0.0, "d": 0.0, "e": 0.0})
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a", "b", "c", "d"], 1: ["e"]}),
+                                 drain_timeout_s=0.25, abandon_grace_s=0.05, max_in_flight=16)
+    rnd.release_pending = lambda: pending["seq"]
+    order = []
+    settle, abandon = rnd._settle, rnd._abandon
+
+    def slow_settle(group, tally):
+        time.sleep(0.3)  # e.g. writing a group of 1M-token rows
+        order.append("settle")
+        return settle(group, tally)
+
+    def record_abandon():
+        order.append("abandon")
+        return abandon()
+
+    rnd._settle, rnd._abandon = slow_settle, record_abandon
+    try:
+        rnd(0)
+        time.sleep(0.05)
+        pending["seq"] = 3  # due while b, c, d still run; a is stuck
+        rnd(1)
+    finally:
+        harness.release.set()
+        rnd.close()
+    # b, c, d end together after the drain began; the drain is cut after one settle, not after all three
+    assert "abandon" in order and order.index("abandon") <= 1 and order.count("settle") >= 3, order

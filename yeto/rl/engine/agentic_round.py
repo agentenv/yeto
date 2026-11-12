@@ -389,6 +389,10 @@ class AgenticRound(EngineRound):
         self._error: BaseException | None = None
         self.session_collisions = 0  # trials lost to a recorder session id already open
         self._open_started = 0  # groups with a trial started and one not ended
+        self._drain_started: float | None = None  # drain state (calling thread)
+        self._drain_abandoned = 0
+        self._drain_abandoned_at: float | None = None
+        self._drain_detached = 0
         self._paused = False  # draining: no new group starts
         self._cancel_reason = LOST_DRAIN
         self._busy, self._busy_mark = 0.0, clock()  # trial-seconds in flight
@@ -659,31 +663,22 @@ class AgenticRound(EngineRound):
     def _stream(self, tally: _Tally, *, final: bool) -> None:
         """Settle the groups that end until the stream wants the next round's
         tasks, or until a drain ends (``final``: until every group is settled)."""
-        drain_started = None
-        abandoned = 0
-        abandoned_at = None
-        detached = 0
         while True:
             self._wake.clear()
             while self._retry_events:
                 self.emit(RETRY_EVENT, **self._retry_events.popleft())
             while self._finished:
                 self._settle(self._finished.popleft(), tally)
+                self._drain_deadlines()  # a settle can take a while: keep the drain bound
             self._raise()
             if self._paused:
-                if drain_started is None:
-                    drain_started = self.clock()
+                if self._drain_started is None:
+                    self._drain_started = self.clock()
                 if self._open_started == 0 or self.reclaimed():
-                    self._end_drain(self.clock() - drain_started, abandoned, detached)
+                    self._end_drain(self.clock() - self._drain_started, self._drain_abandoned,
+                                    self._drain_detached)
                     return
-                if (not abandoned and self.drain_timeout_s is not None
-                        and self.clock() - drain_started >= self.drain_timeout_s):
-                    abandoned = max(1, self._on_loop(self._abandon))
-                    abandoned_at = self.clock()
-                    continue
-                if (abandoned_at is not None and not detached
-                        and self.clock() - abandoned_at >= self.abandon_grace_s):
-                    detached = max(1, self._on_loop(self._detach_running))
+                if self._drain_deadlines():
                     continue
             elif final:
                 if not self._unsettled or self.reclaimed():
@@ -697,9 +692,32 @@ class AgenticRound(EngineRound):
                     return
             self._wake.wait(self.wait_s)
 
+    def _drain_deadlines(self) -> bool:
+        """Abandon a drain past ``drain_timeout_s`` and detach its cancelled
+        trials ``abandon_grace_s`` later, timed from the drain's start (also
+        between settles, so a backlog of groups to write does not stretch the
+        drain); True when it acted."""
+        if not self._paused or self._drain_started is None:
+            return False
+        now = self.clock()
+        if (not self._drain_abandoned and self.drain_timeout_s is not None
+                and now - self._drain_started >= self.drain_timeout_s):
+            self._drain_abandoned = max(1, self._on_loop(self._abandon))
+            self._drain_abandoned_at = self.clock()
+            return True
+        if (self._drain_abandoned_at is not None and not self._drain_detached
+                and now - self._drain_abandoned_at >= self.abandon_grace_s):
+            self._drain_detached = max(1, self._on_loop(self._detach_running))
+            return True
+        return False
+
     def _begin_drain(self, seq: int) -> None:
         self._drain_seq = seq
         self._drain_since = self.clock()
+        self._drain_started = self._drain_since
+        self._drain_abandoned = 0
+        self._drain_abandoned_at = None
+        self._drain_detached = 0
         self._drain_in_flight = len(self._running)
         self._paused = True
 
@@ -710,6 +728,7 @@ class AgenticRound(EngineRound):
             self._drain_total += self.clock() - self._drain_since
         self._drain_since = None
         self._drained_seq = self._drain_seq
+        self._drain_started = None
         self.emit(DRAIN_EVENT, seq=self._drain_seq, policy_version=self.engine.served_version(),
                   waited_s=round(waited, 3), in_flight=self._drain_in_flight,
                   timed_out=bool(abandoned), abandoned_trials=int(abandoned), detached_trials=int(detached))
@@ -958,7 +977,9 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
       as a warning); ``abandon_grace_s`` (default 120): after the drain's
       timeout cancelled its trials, the longest wait for one that ignores the
       cancel (blocked in a sandbox tool call) before it is counted lost and
-      the drain ends;
+      the drain ends. Both deadlines run from the drain's start and are also
+      checked between settles, so a drain lasts at most the cut + the grace +
+      the write of one group;
     * ``proxy``: ``{"host", "port"}`` of the records proxy; the public base and
       the path secret come from ``YETO_RECORDS_PROXY_PUBLIC_BASE`` and
       ``YETO_RECORDS_PROXY_SECRET_FILE`` (the Modal tunnel, written in the container);
