@@ -761,3 +761,50 @@ def test_no_drain_starts_until_the_pending_release_is_downloaded(tmp_path):
         rnd.close()
     (drain,) = [f for n, f in events if n == DRAIN_EVENT]
     assert drain["seq"] == 1
+
+
+class StubbornHarness(Harness):
+    """A trial blocked in a sandbox tool call: it ignores cancellation until released."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.release = threading.Event()
+        self.cancels = 0
+
+    async def run(self, task, endpoint):
+        if "-a-" not in task.trajectory_id:
+            return await super().run(task, endpoint)
+        self.started.append(task.trajectory_id)
+        while not self.release.is_set():
+            try:
+                await asyncio.sleep(0.005)
+            except asyncio.CancelledError:
+                self.cancels += 1
+        return TrialVerdict(rewards={"reward": 1.0})
+
+
+def test_a_drain_stops_waiting_for_cancelled_trials_that_do_not_end(tmp_path):
+    harness = StubbornHarness({"b": 0.0})
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), drain_timeout_s=0.05,
+                                 abandon_grace_s=0.05)
+    rnd.release_pending = lambda: pending["seq"]
+    try:
+        rnd(0)
+        pending["seq"] = 3
+        t0 = time.time()
+        rnd(1)  # returns although trial a never honours the cancel
+        assert time.time() - t0 < 5 and harness.cancels >= 1
+        assert not rnd.holds_weights()
+        harness.release.set()  # the stuck trial ends later: its result is dropped
+        deadline = time.time() + 5
+        while rnd._detached and time.time() < deadline:
+            time.sleep(0.01)
+        assert not rnd._detached and rnd.detached_total == N
+    finally:
+        harness.release.set()
+        rnd.close()
+    (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+    assert drain["timed_out"] and drain["detached_trials"] == N
+    (group,) = [f for n, f in events if n == GROUP_EVENT]
+    assert group["prompt_id"] == "a" and not group["written"] and group["lost"] == {LOST_DRAIN: N}
