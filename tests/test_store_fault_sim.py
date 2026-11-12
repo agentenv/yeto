@@ -64,6 +64,8 @@ CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",")
 # Everything that is not listed here is strict everywhere.
 ONE_GROUP_PER_TASK = hasattr(buffer_rollout, "TaskSlots")  # the reader trains one group per dispensed task
 PLAN_IDENTITY = hasattr(store_dispense.StoreLedger, "plan_id")  # the dispenser names its plan in every record
+# retire writes its marker before it lists the claims; a claim pass that won checks the marker
+RETIRE_MARKER_FIRST = hasattr(store_dispense.StoreLedger, "retired_now")
 GATE_RECHECK = hasattr(incarnation_lease.IncarnationGate, "recheck")  # the round is judged again before training
 OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a sampler that fails between the buffer append of a group and its ``trained`` settlement
@@ -71,7 +73,7 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     "trained_twice_same_slot": (ONE_GROUP_PER_TASK, 0.5),
     # a claim taken while ``store_dispense.retire`` lists the ledger is not released by it, and
     # the retired process learns of its marker only at its next scan: it still writes that group
-    "retired_writer_group_trained": (PLAN_IDENTITY, 0.25),
+    "retired_writer_group_trained": (RETIRE_MARKER_FIRST, 0.25),
     # the gate judges a group when the take selects it, against a lease it caches for
     # ``refresh_s`` (30 s); the take may then wait for later groups and train it after a fence
     # the cached lease did not show yet (seen with a partitioned zombie, preset fence-zombie).
@@ -105,10 +107,10 @@ def _quiet_dispenser():
     logger.setLevel(level)
 
 
-def _run(preset: str, **config) -> list[Result]:
+def _run(preset: str, *, seeds: int | None = None, **config) -> list[Result]:
     config.setdefault("checks", CHECKS)
     return [run_seed(SimConfig(seed=seed, faults=FaultConfig.preset(preset), **config))
-            for seed in range(FIRST, FIRST + SEEDS)]
+            for seed in range(FIRST, FIRST + (seeds or SEEDS))]
 
 
 def _assert_holds(results: list[Result], *, open_findings: dict[str, tuple[bool, float]] | None = None) -> None:
@@ -258,7 +260,8 @@ def test_no_slot_is_trained_twice_under_every_fault_at_once():
 def test_the_tasks_of_samplers_that_died_are_taken_over_by_the_others():
     """Samplers die holding claims and nobody restarts them: only the lease expiry
     frees their tasks, and every task still ends."""
-    results = _run("abandon")
+    # a sampler dies only while it holds groups in flight: a few seeds may see none
+    results = _run("abandon", seeds=max(SEEDS, 12))
     assert sum(r.metrics.get("samplers_abandoned", 0) for r in results) > 0
     _assert_holds(results, open_findings=OPEN_FINDINGS)
 
