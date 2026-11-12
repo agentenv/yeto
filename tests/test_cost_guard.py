@@ -746,3 +746,33 @@ def test_automatic_cleanup_keeps_the_nc_pool_lease(tmp_path, monkeypatch):
 
     assert cleanup_mod.cleanup_run("r-nc", Ops(), log=lambda m: None)
     assert calls == [] and [r.kind for r in led.open_resources()] == ["nc_lease"]
+
+
+def test_a_modal_sampler_pools_calls_count_before_the_billing_report_shows_them(tmp_path):
+    # the pool's app is recorded without a rate; each call carries the pool's price_usd_h
+    p = tmp_path / "r.jsonl"
+    ledger_at(p, T0).created("modal_app", "ap-roll", "yeto-rollout-rp", role="rollout", run="rp")
+    ledger_at(p, T0).created("modal_call", "fc-1", "rollout_sampler", ticket="yeto-smp-1", run="rp",
+                             pool=True, usd_per_hour=68.0)
+    ledger_at(p, T0 + H).created("modal_call", "fc-2", "rollout_sampler", ticket="yeto-smp-2", run="rp",
+                                 pool=True, usd_per_hour=68.0)
+    s = resource_costs(ResourceLedger(p).resources(), T0 + 2 * H, billing=ModalBilling(lambda s, e: []))
+    assert s.total_usd == pytest.approx(3 * 68.0)  # 2 h + 1 h of sampler calls, nothing billed yet
+    assert not s.unpriced
+    # once the report covers the first hour, the calls estimate only the time after it
+    rows = [BillingRow("ap-roll", "yeto-rollout-rp", T0, 70.0)]
+    s = resource_costs(ResourceLedger(p).resources(), T0 + 2 * H, billing=ModalBilling(lambda s, e: rows))
+    assert s.total_usd == pytest.approx(70.0 + 68.0 + 68.0)
+
+
+def test_the_guard_stops_on_a_modal_sampler_pool_before_its_billing_arrives(tmp_path, runs_dir):
+    p = tmp_path / "r.jsonl"
+    ledger_at(p, T0).created("modal_app", "ap-roll", "yeto-rollout-rp", role="rollout", run="rp")
+    ledger_at(p, T0).created("modal_call", "fc-1", "rollout_sampler", ticket="t", run="rp", pool=True,
+                             usd_per_hour=68.0)
+    clock, stops = Clock(T0 + 2 * H), []
+    g = CostGuard("rp", GuardConfig(budget_usd=100.0), ledger=ResourceLedger(p),
+                  billing=ModalBilling(lambda s, e: []), graceful_stop=stops.append,
+                  force_stop=lambda why: None, clock=clock, log=lambda m: None, start=T0)
+    g.tick()
+    assert stops and "budget" in stops[0]

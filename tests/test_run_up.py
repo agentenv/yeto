@@ -441,3 +441,16 @@ def test_status_counts_what_the_trainer_reader_passed_over(make_run, tmp_path):
     assert (counts["unidentified_policy_groups"], counts["stale_groups"]) == (5, 2)
     assert counts["unidentified_starved"] == {"time_unix": 13.0, "rollout_id": 9, "selections": 3,
                                               "unidentified_policy_groups_total": 5}
+
+
+def test_a_modal_pools_spend_uses_its_provider_price_not_the_nc_rate(make_run, tmp_path, monkeypatch):
+    run = make_run(nc_usd_per_h=24)
+    run.cfg["trainer"]["usd_per_h"] = 0
+    up.Path(run.pool_config).write_text(json.dumps(
+        {"shard_base": "s", "provider": {"kind": "modal", "gpu": "B300", "gpus": 8, "price_usd_h": 68}}))
+    now = 100_000.0
+    monkeypatch.setattr(up.time, "time", lambda: now)
+    run.state["t0"] = now - 7200
+    _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": now - 3600}])
+    assert run.node_usd_per_h() == pytest.approx(68.0)
+    assert run.spend_usd() == pytest.approx(68.0)

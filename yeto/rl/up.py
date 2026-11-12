@@ -448,8 +448,17 @@ class Run:
         return nc + tr
 
     def node_usd_per_h(self, i: int = 0) -> float:
-        """One node hour of pool ``i``: its ``usd_per_h``, else ``budget.nc_usd_per_h``."""
+        """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
+        states (``price_usd_h`` of a Modal / Daytona / Sky pool, the one the pool's own budget
+        charges), else ``budget.nc_usd_per_h``."""
         price = self.pools[i].usd_per_h
+        if price is None:
+            try:
+                from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+
+                price = pool_price(self.pools[i].load())[0]
+            except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
+                price = None
         return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
 
     def nc_node_hours(self, now: float | None = None) -> float:

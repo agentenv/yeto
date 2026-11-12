@@ -210,7 +210,28 @@ class Rates:
         return None if unit is None else unit * float(attrs["gpus"])
 
 
-def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: Rates) -> ItemCost:
+def _app_rows(r: Resource, rows: Iterable[BillingRow], end: float) -> list[BillingRow]:
+    lo = floor_hour(r.created_at)
+    return sorted((b for b in rows if b.object_id == r.id and lo <= b.interval_start < end),
+                  key=lambda b: b.interval_start)
+
+
+def _billed_until(r: Resource, rows: Iterable[BillingRow], now: float) -> float:
+    """Where the billing report of app ``r`` ends (its created time without a billed hour)."""
+    end = r.released_at if r.released_at is not None else now
+    mine = _app_rows(r, rows, end)
+    return (mine[-1].interval_start + HOUR) if mine else r.created_at
+
+
+def _pool_call_rate(r: Resource) -> float | None:
+    """The ``usd_per_hour`` a sampler pool's Modal call carries (the pool's ``price_usd_h``)."""
+    if r.kind != "modal_call" or not r.attrs.get("pool") or r.attrs.get("usd_per_hour") is None:
+        return None
+    return float(r.attrs["usd_per_hour"])
+
+
+def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: Rates, *,
+                    tail_by_calls: bool = False) -> ItemCost:
     end = r.released_at if r.released_at is not None else now
     item = ItemCost(r.key, r.kind, r.name, r.created_at, end, r.open)
     lo, hi = floor_hour(r.created_at), end
@@ -234,7 +255,9 @@ def _modal_app_cost(r: Resource, rows: Iterable[BillingRow], now: float, rates: 
             item.note = "rate from the newest complete billed hour"
     item.rate_usd_per_hour = rate
     gap_start = max(r.created_at, billed_until)
-    if gap_start < end:
+    if tail_by_calls:  # a sampler pool's app: its priced calls estimate the unbilled tail
+        item.note = (item.note + "; " if item.note else "") + "unbilled tail estimated per sampler call"
+    elif gap_start < end:
         if rate is None:
             item.priced = False
             item.note = "no rate for the unbilled tail (set usd_per_hour or a price table)"
@@ -293,13 +316,28 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
     rows: list[BillingRow] = []
     if apps and billing is not None:
         rows = billing.rows(min(r.created_at for r in apps), now)
+    # A sampler pool's Modal app (role rollout) is recorded without a rate; each of its
+    # calls carries the pool's price (usd_per_hour). Those calls estimate the time after
+    # the app's newest billed hour, so the samplers count against the budget before the
+    # billing report shows them.
+    priced_runs = {str(r.attrs.get("run")) for r in resources if _pool_call_rate(r) is not None}
+    rollout_apps = [r for r in apps if r.attrs.get("role") == "rollout" and str(r.attrs.get("run")) in priced_runs]
+    rollout_keys = {r.key for r in rollout_apps}
+    covered_until: dict[str, float] = {}
+    for r in rollout_apps:
+        run = str(r.attrs.get("run"))
+        covered_until[run] = max(covered_until.get(run, 0.0), _billed_until(r, rows, now))
     items: list[ItemCost] = []
     for r in resources:
         if r.kind == "modal_app":
             if r.id is None:
                 items.append(_span_cost(r, r.created_at, now, None, "app id unknown (intent only)"))
             else:
-                items.append(_modal_app_cost(r, rows, now, rates))
+                items.append(_modal_app_cost(r, rows, now, rates, tail_by_calls=r.key in rollout_keys))
+        elif _pool_call_rate(r) is not None:
+            start = max(r.created_at, covered_until.get(str(r.attrs.get("run")), 0.0))
+            items.append(_span_cost(r, start, now, _pool_call_rate(r),
+                                    "sampler pool call: estimate after its app's newest billed hour"))
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
             items.append(_provider_cost(r.kind)(r, now, rates))
         elif r.kind == "sky_cluster":
