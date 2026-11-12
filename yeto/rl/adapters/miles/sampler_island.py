@@ -1134,6 +1134,9 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
                     version=int(init_release["version"]), policy_hash=init_release["policy_hash"])
     if resumed is None:
         return {}
+    # without a round cut this process trains from what it loaded: the base checkpoint
+    # (policy v0), unless it loaded a release
+    driver.base_policy_is_start_state = init_release is None
     resume_at = getattr(getattr(driver, "sync", None), "resume_at", None)
     if callable(resume_at):
         resume_at(resumed.start_version, behind_round_cuts=True)

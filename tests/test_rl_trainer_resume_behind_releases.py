@@ -150,7 +150,7 @@ class _UploadDuringNextRound:
 
 def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
             kill_in_round=None, kill_before_safe_point=None, set_aside_before=None,
-            store=None, staged=False):
+            store=None, staged=False, init_release=None):
     """One trainer launch over the run's store. ``kill_in_round`` /
     ``kill_before_safe_point``: where this process dies. ``store``: this host's
     store (default: the shared directory ``tmp_path / "store"``). ``staged``: the
@@ -189,7 +189,7 @@ def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
     checkpoint.buffer_watermark = reader.watermark_before  # buffer_rollout.wire_sample_buffer
     checkpoint.buffer_resume = reader.reset
     releases = PolicyReleaseStore(store)
-    resumed = si._resume_single_trainer(driver, releases)
+    resumed = si._resume_single_trainer(driver, releases, init_release=init_release)
     # k31/resume-pruned-release-groups: wire_policy_releases hands the publisher the
     # driver's published policies for the release records (absent on main)
     published_of = getattr(si, "_published_of", None)
@@ -306,7 +306,9 @@ def test_a_relaunch_behind_the_releases_passes_over_the_groups_of_pruned_release
     launch = _launch(tmp_path, "launch2", samplers, age=age, every=1000, rounds=3)
     assert _run_or_raise(launch) == "finished"
     [gate] = _events(launch, "rl_buffer_unidentified_policy_gate")
-    assert (gate["start_version"], gate["known_versions"]) == (dies_at, [dies_at - 1])
+    # v0 is named by the restored ledger while it is inside the window (age 8)
+    known = ([0] if dies_at - age <= 0 else []) + [dies_at - 1]
+    assert (gate["start_version"], gate["known_versions"]) == (dies_at, known)
     assert _unidentified(launch) == unidentified
     trained = _trained(launch)
     assert sorted(trained) == [dies_at, dies_at + 1, dies_at + 2]
@@ -346,6 +348,82 @@ def test_an_unpublished_version_is_still_an_identity_error(tmp_path):
     relaunch = _launch(tmp_path / "b", "launch2", samplers, age=8, every=1000, rounds=6)
     with pytest.raises(PolicyIdentityError, match="=99 "):
         _run_or_raise(relaunch)
+
+
+def _early_run(tmp_path, *, age, cut_every, dies_in_round, backlog=3):
+    """A run that dies early: the samplers filled the buffer with ``backlog`` rounds of
+    base-weight (v0) groups before the trainer started, as at the start of every run."""
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    for _ in range(backlog):
+        samplers.write_round()
+    first = _launch(tmp_path, "launch1", samplers, age=age, every=cut_every, kill_in_round=dies_in_round)
+    assert _run(first) == "killed"
+    return samplers, first
+
+
+def test_the_base_policy_is_named_by_the_start_state_of_a_relaunch_without_a_cut(tmp_path):
+    """max_policy_age 2. The trainer released v1 and died in round 1, before any cut;
+    the buffer still holds groups of the base weights v0, which have no release (the
+    base policy is never released). The relaunch starts at v1 from the base
+    checkpoint: its start state is v0, so the groups of v0 inside the window are
+    trained, not passed over as unidentified."""
+    samplers, _first = _early_run(tmp_path, age=2, cut_every=1000, dies_in_round=1)
+    assert _release_versions(tmp_path) == [1] and _latest_cut(tmp_path) is None
+    launch = _launch(tmp_path, "launch2", samplers, age=2, every=1000, rounds=2)
+    assert _run_or_raise(launch) == "finished"
+    [base] = _events(launch, "rl_base_policy_restored")
+    assert base["source"] == "start_state"
+    [gate] = _events(launch, "rl_buffer_unidentified_policy_gate")
+    assert (gate["start_version"], gate["known_versions"], gate["base_version_named"]) == (1, [0], True)
+    assert _unidentified(launch) == {}
+    assert _trained(launch)[1] == [0, 0]  # round 1 trains groups of v0
+
+
+def test_a_relaunch_that_loaded_a_release_does_not_take_its_start_state_for_the_base_policy(tmp_path):
+    """``--rl-init-from-release``: the start state is the release's weights, not the
+    base checkpoint's. v0 stays unnamed and its groups are passed over and counted."""
+    samplers, _first = _early_run(tmp_path, age=2, cut_every=1000, dies_in_round=1)
+    record = PolicyReleaseStore(CheckpointStore(tmp_path / "store")).latest()
+    launch = _launch(tmp_path, "launch2", samplers, age=2, every=1000, rounds=1,
+                     init_release={"path": record.path, "version": record.version,
+                                   "policy_hash": record.policy_hash})
+    assert _run_or_raise(launch) == "finished"
+    assert _events(launch, "rl_base_policy_restored") == []
+    [gate] = _events(launch, "rl_buffer_unidentified_policy_gate")
+    assert (gate["known_versions"], gate["base_version_named"]) == ([], False)
+    assert set(_unidentified(launch)) == {0} and 0 not in _trained(launch)[1]
+
+
+def test_the_base_policy_is_named_by_the_ledger_of_a_restored_cut(tmp_path):
+    """A cut at 1, releases v1 and v2, killed in round 2. The relaunch restores the
+    cut (its weights are v1's, not the base's) and starts at v2 with v0 still inside
+    the window. The ledger restored with the cut recorded round 0's policy: v0."""
+    samplers, first = _early_run(tmp_path, age=2, cut_every=1, dies_in_round=2)
+    assert _latest_cut(tmp_path)["next_rollout_id"] == 2 and _release_versions(tmp_path) == [1, 2]
+    v0 = [e for e in _events(first, "rl_publication") if e["policy_version"] == 0][0]["rl/policy_token"]
+    launch = _launch(tmp_path, "launch2", samplers, age=2, every=1000, rounds=2)
+    assert _run_or_raise(launch) == "finished"
+    [base] = _events(launch, "rl_base_policy_restored")
+    assert (base["source"], f"yeto:0:{base['policy_hash']}") == ("ledger", v0)
+    assert _events(launch, "rl_buffer_unidentified_policy_gate")[0]["known_versions"] == [0, 1]
+    assert _unidentified(launch) == {} and 0 in _trained(launch)[2]
+
+
+def test_the_base_policy_stays_unnamed_after_a_cut_whose_ledger_lost_round_zero(tmp_path):
+    """The ledger of an earlier launch was set aside (a relaunch without a cut), then
+    a cut was taken: its ledger starts at that relaunch. A launch that restores this
+    cut has no record of v0; its groups are passed over, and the gate event says so."""
+    samplers, first = _early_run(tmp_path, age=3, cut_every=1000, dies_in_round=1, backlog=6)
+    second = _launch(tmp_path, "launch2", samplers, age=3, every=1, kill_in_round=2,
+                     state_dir=first.state_dir, set_aside_before=time.time() + 60)
+    assert _run(second) == "killed"
+    assert _events(second, "rl_ledger_set_aside") and _latest_cut(tmp_path)["next_rollout_id"] == 2
+    third = _launch(tmp_path, "launch3", samplers, age=3, every=1000, rounds=1)
+    assert _run_or_raise(third) == "finished"
+    assert _events(third, "rl_base_policy_restored") == []
+    [gate] = _events(third, "rl_buffer_unidentified_policy_gate")
+    assert gate["base_version_named"] is False and 0 not in gate["known_versions"]
+    assert set(_unidentified(third)) == {0}
 
 
 def test_a_resume_from_the_newest_cut_passes_nothing_over_when_every_version_is_named(tmp_path):

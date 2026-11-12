@@ -665,6 +665,10 @@ class IslandDriver:
         # (None: it is): "sample_buffer" for a trainer that reads the sample buffer
         # and draws no prompts (``_restore_data_cursor``).
         self.data_cursor_optional: str | None = None
+        # The weights this process loaded at start are the base checkpoint (policy v0),
+        # not a release: set by the wiring of a relaunched single trainer
+        # (``_restore_base_policy``).
+        self.base_policy_is_start_state = False
         # Task assignment: an island whose rounds count from 0 in every process
         # (full parameter) keeps its data position in the run store
         # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
@@ -1088,6 +1092,46 @@ class IslandDriver:
         self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
                   versions=sorted(restored))
 
+    def _restore_base_policy(self, start: Any) -> None:
+        """The base policy v0 is never released (the samplers start on the base
+        checkpoint themselves), so no release record names it, yet a relaunch whose
+        start version K is within ``max_policy_age`` of 0 reads groups of v0 inside
+        its window: early in a run nearly every buffered group is one. Two records
+        still name v0:
+
+        * the weights this process loaded, when it restored no round cut and loaded
+          the base checkpoint (``base_policy_is_start_state``: not a release,
+          ``--rl-init-from-release``): the start state's hash is v0's;
+        * the batch ledger restored with a round cut: round 0 was trained from v0
+          and recorded its policy token.
+
+        With neither (a cut whose ledger does not hold round 0), v0 stays unnamed and
+        its groups are passed over like those of a pruned release
+        (``rl_buffer_unidentified_policy_gate`` then says ``base_version_named`` False)."""
+        start_rollout_id = int(start.rollout_id)
+        if (start_rollout_id <= 0 or start_rollout_id - self._max_policy_age() > 0
+                or not callable(getattr(self, "published_policy_history", None))
+                or self.published_policies.hash_of(0) is not None):
+            return
+        policy_hash, source = None, None
+        if getattr(self.sync, "continues_releases_without_cut", False):
+            if getattr(self, "base_policy_is_start_state", False):
+                policy_hash, source = start.state.policy_tensor_hash(), "start_state"
+        elif self.ledger is not None:
+            from .policy_age import token_version
+
+            token = str((self.ledger.batch(0) or {}).get("policy_token") or "")
+            if token_version(token) == 0:
+                policy_hash, source = token.split(":", 2)[2], "ledger"
+        if not policy_hash:
+            return
+        self.published_policies.record(0, str(policy_hash))
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_base_policy_restored", rollout_id=start_rollout_id, source=source,
+                  policy_hash=str(policy_hash))
+
     def _gate_unidentified_policies(self, start_rollout_id: int) -> None:
         """A relaunched trainer whose account continues over the store's releases
         (``published_policy_history``) starts at vK and reads its sample buffer on
@@ -1109,8 +1153,11 @@ class IslandDriver:
             return
         known = sorted(v for v in self.published_policies.hashes() if v < start_rollout_id)
         setter(int(start_rollout_id), known)
+        in_window = start_rollout_id - self._max_policy_age() <= 0
         self.emit("rl_buffer_unidentified_policy_gate", rollout_id=start_rollout_id,
-                  start_version=int(start_rollout_id), known_versions=known)
+                  start_version=int(start_rollout_id), known_versions=known,
+                  # the base policy has no release record (_restore_base_policy)
+                  **({"base_version_named": 0 in known} if in_window else {}))
 
     def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """Name every group's generating policy by its label.
@@ -2800,6 +2847,7 @@ class IslandDriver:
                 try:
                     start = self.sync.start(self)
                     self._restore_published_policies(start.rollout_id)
+                    self._restore_base_policy(start)
                     self._gate_unidentified_policies(start.rollout_id)
                     if self.ledger is not None:
                         self._set_aside_ledger_of_a_base_restart(start.rollout_id)

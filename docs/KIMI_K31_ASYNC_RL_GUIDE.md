@@ -841,6 +841,14 @@ continue when it joins.
   the start version `K` of a relaunched trainer are treated this way. A group
   of a version from `K` on that was never published, or a label with another
   hash, still stops the trainer with `not a published policy`.
+  The base policy `v0` has no release either (the samplers start on the base
+  checkpoint), but it is named while it is inside the window: by the weights
+  the trainer loaded when it starts without a cut from the base checkpoint,
+  or by the batch ledger restored with a cut (`rl_base_policy_restored`).
+  Groups of `v0` are then trained. They are passed over only when neither
+  exists: a start with `--rl-init-from-release` and no cut, or a cut whose
+  ledger was started after round 0 (the gate event then has
+  `base_version_named: false`).
   When the reader reads groups and keeps none 3 selections in a row
   (`YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS`), it logs a warning and emits
   `rl_buffer_unidentified_policy_starved`; it keeps waiting for groups of a
