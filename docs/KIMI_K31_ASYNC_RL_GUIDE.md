@@ -138,7 +138,15 @@ repository and point the configs at them.
 | Agentic environment file | samplers | pool `agentic_env_file: "<agentic-env-file>"` (HARBOR_*, DOCKER_HOST, ...) |
 
 An NC account holds one node at a time. To run `N` samplers and keep a
-replacement ready, provide at least `N + 1` accounts.
+replacement ready, you need `N + 1` accounts. Provide `N + 2`. The pool takes
+an account out of use (it *halts* it) when it cannot prove that a node release
+it sent hit its own node: National Compute's delete command cannot name the
+node. A halted account stays out until a person has checked it; the events
+`nc_elastic_foreign_ticket_released` and `nc_elastic_delete_unconfirmed`
+announce it. The steps are in
+[NC_POOL.md, "A halted account"](NC_POOL.md#a-halted-account-clear-halt):
+run `python -m yeto.launch.nc clear-halt --account <account-id>`, check the
+account in the National Compute console, then run it again with `--yes`.
 
 ### Images
 
