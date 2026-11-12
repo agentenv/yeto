@@ -8,8 +8,10 @@ retire procedure:
 * :class:`R2DataPath` (``data_path: r2``, async GRPO): drain = ``store_dispense.
   request_drain`` until ``drain_answered`` (the pool bounds it with
   ``elastic.scale_drain_timeout_s``); retire = fence the shard (handoff record +
-  incarnation lease, ``yeto.launch.nc.elastic.fence_shard``) **and**
-  ``store_dispense.retire`` (every open claim of the sampler released at once);
+  the pool's shard ownership record + incarnation lease,
+  ``yeto.launch.nc.elastic.fence_shard``) **and** ``store_dispense.retire``
+  (every open claim of the sampler released at once). ``fence_incarnation`` (a
+  stalled engine restarted in place) is the same without the handoff record;
 * :class:`SyncerDataPath` (``data_path: syncer``, decoupled DiLoCo): drain =
   ``task_dispense.retire_member(mode="drain")`` until its status reads
   ``drained``; retire = ``mode="retire"``; ``cancel_drain`` = ``mode="undrain"``.
@@ -56,17 +58,24 @@ class R2DataPath:
         from yeto.launch.nc import elastic  # noqa: PLC0415
 
         lease = elastic.fence_shard(self.records, shard, by=by, **self._kw())
-        if self.dispense is not None:
-            from yeto.rl.engine import store_dispense  # noqa: PLC0415
-
-            objects, namespace = self.dispense
-            store_dispense.retire(objects, namespace, shard, reason=f"pool fence by {by}")
+        self._retire(shard, f"pool fence by {by}")
         return lease
 
     def fence_incarnation(self, shard: str, by: str) -> Any:
         from yeto.launch.nc import elastic  # noqa: PLC0415
 
-        return elastic.fence_incarnation(self.records, shard, by=by, **self._kw())
+        lease = elastic.fence_incarnation(self.records, shard, by=by, **self._kw())
+        # the stuck incarnation's claims go back at once: the dispenser no longer reads
+        # the lease record to find a fenced holder (store_dispense, plan version 3)
+        self._retire(shard, f"pool incarnation fence by {by}")
+        return lease
+
+    def _retire(self, shard: str, reason: str) -> None:
+        if self.dispense is not None:
+            from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+            objects, namespace = self.dispense
+            store_dispense.retire(objects, namespace, shard, reason=reason)
 
     def clear_stale_handoff(self, shard: str, keep: Any = ()) -> dict[str, Any] | None:
         """Set aside a stop request for ``shard`` whose successor is not in ``keep``

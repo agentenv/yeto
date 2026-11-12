@@ -98,6 +98,7 @@ from typing import Any
 from .buffer_payload import (ENGINE_META, ROLLOUT_ROUTED_EXPERTS, ROLLOUT_TOP_LOGPROBS, ROLLOUT_TOP_LOGPROBS_IDS,
                              TOP_LOGPROBS_DTYPE, TOP_LOGPROBS_IDS_DTYPE, routed_experts_uint16)
 from .engine_sampler import ROUND_EVENT, EngineRound, PromptItem, dispense_position, unique_prompt_ids
+from .sample_buffer import ShardFenced
 from .policy_versions import engine_weight_version
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
 
@@ -735,11 +736,18 @@ class AgenticRound(EngineRound):
                 tally.rewards.append(sample["reward"])
                 tally.lengths.append(int(sum(sample["loss_mask"])))
                 samples.append(sample)
-            self._write_group(rid, group.item, samples, record=record, last=state.open == 0, cursor=state.cursor)
-            tally.written += 1
-            if group.retry_reasons and len(kept) == n:
-                tally.refilled += 1
-            tally.samples += len(samples)
+            try:
+                self._write_group(rid, group.item, samples, record=record, last=state.open == 0,
+                                  cursor=state.cursor)
+            except ShardFenced:  # the shard changed owner since the check: the write was refused
+                reason = "fenced"
+                self.dropped_groups += 1
+                tally.dropped += 1
+            else:
+                tally.written += 1
+                if group.retry_reasons and len(kept) == n:
+                    tally.refilled += 1
+                tally.samples += len(samples)
         written = reason is None and group.spot is not None
         # below_min_samples: the trials were lost to infrastructure (ABORTED, version, drain), not
         # scored wrong (a 0 reward is kept): the task goes out again, counted toward the redo limit

@@ -287,9 +287,11 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
     with ``backend: "store"``; ``store_dispense.StoreDispensedPrompts``): the
     ledger lives under ``namespace`` of the run's store (``dispense.store``, else
     ``buffer_root`` / ``store``), so samplers that share only the bucket share
-    the tasks. The holder is the sampler id, the incarnation this process's;
-    the incarnation leases of the other samplers (same store) free the claims of
-    a fenced one at once."""
+    the tasks. The holder is the sampler id, the incarnation this process's.
+    On a plan written by older code (version 2) the incarnation lease records of
+    the other samplers (same store) free the claims of a fenced one at once; from
+    plan version 3 on the pool's retire marker and the new incarnation's recover
+    do, and the lease record is not read (``store_dispense`` module doc)."""
     from .incarnation_lease import read_lease  # noqa: PLC0415
     from .resume import store_for  # noqa: PLC0415
     from .store_dispense import StoreDispensedPrompts  # noqa: PLC0415
@@ -759,8 +761,10 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     member_store = data_path.member_store
     membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
-    lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ)
-    fenced = lambda: lease is not None and lease.fenced  # noqa: E731
+    lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ,
+                                            buffer=buffer)
+    # the shard writer's own verdict too: a write refused by the shard's ownership records
+    fenced = lambda: (lease is not None and lease.fenced) or bool(getattr(buffer, "fenced", False))  # noqa: E731
     island = None
     from .sampler_resume import handoff_requested  # noqa: PLC0415
 
@@ -832,7 +836,12 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
         if lease is not None:  # this incarnation now owns the island's shard
             claimed = lease.claim(buffer.entries(), earlier=resume.incarnations)
             emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
-                 superseded=claimed["superseded"], sealed=claimed["sealed"])
+                 superseded=claimed["superseded"], sealed=claimed["sealed"], owned=lease.owned)
+            if lease.owned:  # the shard's ownership record is the fence (sample_buffer module doc)
+                from .sample_buffer import OWNER_EVENT  # noqa: PLC0415
+
+                emit(OWNER_EVENT, shard=config.sampler_id, incarnation=incarnation, by=lease.owner.by,
+                     epoch=lease.owner.epoch, pos=lease.owner.pos)
             island.round.write_fenced = lease.check_before_write
             if hasattr(prompts, "fenced"):  # store dispenser: a fenced incarnation renews and writes nothing
                 prompts.fenced = lambda: lease.fenced
@@ -861,10 +870,17 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             print(f"[engine-sampler] the task dispenser fenced this incarnation: {error}", flush=True)
             emit("rl_sampler_dispense_fenced", **dispense_fence)
             rounds = int(getattr(island.loop, "rounds_done", 0))
-        if handed_off() and not buffer.data_ended and not reclaimed():
+        if lease is not None and not lease.fenced:
+            lease.poll()  # a fenced incarnation does not end the shard: its owner may still write
+        if handed_off() and not buffer.data_ended and not reclaimed() and not fenced():
             # a successor continues the prompts in its own shard: this shard gets no more
             # groups, so it ends (the trainer's merged index ends once every shard has)
-            buffer.mark_data_end()
+            from .sample_buffer import ShardFenced  # noqa: PLC0415
+
+            try:
+                buffer.mark_data_end()
+            except ShardFenced as error:  # fenced between the poll and the write: nothing written
+                print(f"[engine-sampler] the shard's data end was not written: {error}", flush=True)
         preempted = reclaimed()
         fence = None if preempted else (LeaveReason.FENCED, lease.detail()) if fenced() \
             else (LeaveReason.FENCED, dispense_fence) if dispense_fence is not None \
@@ -917,12 +933,15 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
 
 
 def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str, default_store: Any,
-                      environ: Mapping[str, str] | None = None) -> tuple[Any, float]:
+                      environ: Mapping[str, str] | None = None, *, buffer: Any = None) -> tuple[Any, float]:
     """``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
     absent or ``true`` = on, in the buffer store; ``false`` = off; a mapping may name
     ``store`` (another store path every incarnation reads, e.g. a shared bucket mount),
     ``poll_s`` (watcher period, default 30) and ``write_check_s`` (the longest a group
-    write trusts the last read, default 1)."""
+    write trusts the last read, default 1). ``buffer``: the sampler's shard writer;
+    where its shard can hold ownership records they are the fence
+    (``incarnation_lease`` module doc) and ``store`` / ``write_check_s`` only place
+    and pace the observation record."""
     from .incarnation_lease import DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S, IncarnationLease  # noqa: PLC0415
 
     section = spec.get("incarnation_lease", True)
@@ -934,7 +953,7 @@ def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str
         from .resume import store_for  # noqa: PLC0415
 
         store = store_for(str(section["store"]), environ=environ)
-    lease = IncarnationLease(store, sampler_id, incarnation,
+    lease = IncarnationLease(store, sampler_id, incarnation, buffer=buffer,
                              write_check_s=float(section.get("write_check_s", DEFAULT_WRITE_CHECK_S)))
     return lease, float(section.get("poll_s", DEFAULT_POLL_S))
 

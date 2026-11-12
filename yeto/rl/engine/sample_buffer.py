@@ -48,6 +48,48 @@ leave every shard record in the index once. An index written before this rule
 can hold a shard record twice: the reader passes over the second one
 (``duplicate_merged_records``), it is never selected.
 
+Shard ownership (the fence of a sampler shard on an object store). A shard index
+can hold *ownership records* between its group records, each taken like any
+record with a create-if-absent write of the next position::
+
+    {"schema": "yeto.rl.sample-buffer/v2", "pos": p,
+     "owner": {"incarnation": "<incarnation, or pool-fence:<ticket>>", "epoch": e,
+               "by": "sampler" | "pool" | "operator", "claimed_at": <information>}}
+
+``epoch`` counts the ownership records of the shard up to this one. One rule,
+the same for every reader and independent of any clock: a group record (and an
+``end`` record) is valid if no ownership record precedes it (the legacy part of
+the shard), or if the last ownership record before it names the incarnation
+that wrote it (``sampler_round.incarnation``). The position decides: every group
+created before the fence record stays valid, every write of the old incarnation
+after it is void. A sampler claims its shard at its join
+(:meth:`FileSampleBuffer.claim_owner`); the pool fences a shard by appending a
+``pool-fence:<ticket>`` record (:func:`claim_shard_owner`). A shard writer reads
+the index before every create, so it sees the fence and raises
+:class:`ShardFenced` instead of writing; when it loses the create to the fence
+record it reads again and sees it. The merger (:meth:`FileSampleBuffer._merge_shards`)
+applies the rule again - a writer that bypassed the check gets nothing merged -
+and writes ``shard_epoch`` into the merged records of an owned part, from which
+a restarted merger restores the owner (and ``shard_passed``, the shard positions
+it passed over right before the record, so a reader tells them from a hole).
+``epoch`` is information: the rule reads only the order of the records. The
+merged index holds no ownership record. An older trainer fails on a v2 record (schema error), so a sampler
+writes them only when the trainer of the run is new enough
+(``trainer_lease.TrainerLease.current(objects) >= 1``).
+
+Damaged shard records. The merger checks every shard record before it writes it
+into the merged index: one that is not JSON, has another schema or position, or
+lacks a field of an entry is passed over (``bad_shard_records``; never merged, so
+the merged index holds only records the merger can read back), and the groups
+after it and of every other shard are merged as usual. Nothing is written for a
+passed-over record (a fenced write, a damaged record): a restarted merger reads
+each shard again from its highest merged position and passes over the same
+records. A shard position that is missing while later ones exist (an object
+deleted from outside) is not skipped - the record may be a group - but reported
+(``blocked_shards``): the shard's later groups wait until it is back.
+``FileSampleBuffer.merge_events`` (``callable(event, **fields)``) receives
+:data:`MERGE_EVENT` for every such finding.
+
 Sampler islands on several sites (rl-cross-site-sample-store): an object store
 without reliable create-if-absent between hosts (``objects.buffer_shards``, OSS)
 gives each sampler island its own shard, ``shards/<shard>/<pos>.json`` (one
@@ -84,6 +126,11 @@ from .resume import CheckpointStore
 from .trainer_lifecycle import BacklogStats, SampleIndexEntry, Selected
 
 SCHEMA = "yeto.rl.sample-buffer/v1"
+OWNER_SCHEMA = "yeto.rl.sample-buffer/v2"  # a shard ownership record (module doc)
+OWNER_EVENT = "rl_shard_owner"  # a claim or a fence of a shard: shard, incarnation, epoch, by, pos
+# the merger passed over shard records or found a damaged index: ``reason`` (stale_incarnation,
+# bad_record, duplicate_merged_record, unmerged_shard_gap, missing_shard_position), shard, ...
+MERGE_EVENT = "rl_buffer_merge_skipped"
 BUFFER_DIR = "sample-buffer"
 INDEX = "index.jsonl"
 INDEX_OBJECTS = "index"
@@ -111,6 +158,90 @@ def _read_all(objects: ObjectStore, keys: list[str]) -> list[bytes | None]:
 
 class SampleBufferError(RuntimeError):
     pass
+
+
+@dataclasses.dataclass(frozen=True)
+class ShardOwner:
+    """The newest ownership record of a shard (module doc). ``pos``: its position
+    in the shard (-1: restored from a merged record's ``shard_epoch``)."""
+
+    incarnation: str
+    epoch: int
+    by: str = ""
+    pos: int = -1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"incarnation": self.incarnation, "epoch": self.epoch, "by": self.by, "pos": self.pos}
+
+
+class ShardFenced(SampleBufferError):
+    """This writer does not own its shard: another incarnation (or a pool fence)
+    holds the newest ownership record. Nothing was written."""
+
+    def __init__(self, shard: str, incarnation: str | None, owner: ShardOwner) -> None:
+        self.shard, self.incarnation, self.owner = shard, incarnation, owner
+        super().__init__(f"shard {shard!r} is owned by {owner.incarnation!r} (epoch {owner.epoch}, by "
+                         f"{owner.by or 'unknown'}), not by this writer ({incarnation!r}): nothing written")
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def bad_shard_record(record: Mapping[str, Any]) -> str | None:
+    """Why the merger cannot take this shard record (None: it can): the record
+    would be written into the merged index and read back by every later reader."""
+    if "bad" in record:
+        return str(record["bad"])
+    if record.get("schema") == OWNER_SCHEMA:
+        owner = record.get("owner")
+        if not (isinstance(owner, Mapping) and isinstance(owner.get("incarnation"), str)
+                and _is_int(owner.get("epoch")) and owner["epoch"] >= 1):
+            return "ownership record without an owner incarnation and epoch"
+        return None
+    if record.get("schema") != SCHEMA:
+        return f"schema {record.get('schema')!r}"
+    for name in ("sampler_round", "provenance"):
+        if record.get(name) is not None and not isinstance(record[name], Mapping):
+            return f"{name} is not an object"
+    if record.get("end"):
+        return None
+    try:
+        _entry(dict(record))
+    except (KeyError, TypeError, ValueError) as error:
+        return f"not an entry ({type(error).__name__}: {error})"
+    return None
+
+
+def print_merge_event(event: str, **fields: Any) -> None:
+    """One ``YETO_RL_EVENT <json>`` stdout record (the merger's default emitter)."""
+    from yeto.rl.event_echo import format_record  # noqa: PLC0415
+
+    print(format_record({"island_id": None, "time_unix": time.time(), "event": str(event), **fields}),
+          flush=True)
+
+
+def is_owner_record(record: Mapping[str, Any]) -> bool:
+    return record.get("schema") == OWNER_SCHEMA and isinstance(record.get("owner"), Mapping)
+
+
+def _owner_of(record: Mapping[str, Any]) -> ShardOwner:
+    owner = record["owner"]
+    return ShardOwner(incarnation=str(owner["incarnation"]), epoch=int(owner["epoch"]),
+                      by=str(owner.get("by") or ""), pos=int(record["pos"]))
+
+
+def record_incarnation(record: Mapping[str, Any]) -> str | None:
+    """The incarnation that wrote a shard record: a group's ``sampler_round.incarnation``,
+    an ``end`` record's ``incarnation``."""
+    inc = record.get("incarnation") if record.get("end") else (record.get("sampler_round") or {}).get("incarnation")
+    return None if inc is None else str(inc)
+
+
+def owner_accepts(owner: ShardOwner | None, record: Mapping[str, Any]) -> bool:
+    """The validity rule of a shard record under the last ownership record before it
+    (module doc); no clock, no lease."""
+    return owner is None or record_incarnation(record) == owner.incarnation
 
 
 def payload_name(sample_id: str) -> str:
@@ -265,11 +396,16 @@ class ObjectIndex:
     """The index as one object per record, ``index/<pos>.json`` (see the module doc)."""
 
     def __init__(self, objects: ObjectStore, *, prefix: str = f"{BUFFER_DIR}/{INDEX_OBJECTS}/",
-                 start: int = 0) -> None:
+                 start: int = 0, tolerant: bool = False) -> None:
         """``prefix``: the record keys (a shard passes its own); ``start``: the
-        position of the first record to read (a merger skips merged records)."""
+        position of the first record to read (a merger skips merged records).
+        ``tolerant`` (a merger's shard reader): a record that is not a JSON object
+        with its own position is returned as ``{"pos": pos, "bad": reason}`` instead
+        of raising, so one damaged record does not stop the reader."""
         self.objects = objects
         self.prefix = prefix
+        self.tolerant = bool(tolerant)
+        self.blocked_at: int | None = None  # a missing position with later ones listed (last read)
         self._next = int(start)  # the position of the next record to read
         self._last_key = self.key(self._next - 1) if self._next else ""  # the newest record key read
 
@@ -296,20 +432,32 @@ class ObjectIndex:
         before it). One LIST; the records it names are fetched concurrently
         (``_READ_WORKERS``), then taken in position order up to the first gap."""
         keys = []
+        blocked = None
         for i, key in enumerate(self.objects.list(self.prefix, start_after=self._last_key)):
             if key != self.key(self._next + i):
+                blocked = self._next + i  # a later key is listed, this position is not
                 break
             keys.append(key)
         out = []
         for key, raw in zip(keys, _read_all(self.objects, keys)):
             if raw is None:
+                blocked = self._next  # listed, then gone
                 break
             try:
-                out.append(json.loads(raw))
+                record = json.loads(raw)
             except ValueError as error:
-                raise SampleBufferError(f"{key}: bad record: {raw[:200]!r}") from error
+                if not self.tolerant:
+                    raise SampleBufferError(f"{key}: bad record: {raw[:200]!r}") from error
+                record = {"pos": self._next, "bad": f"not JSON: {raw[:80]!r}"}
+            if self.tolerant and not (isinstance(record, dict) and "bad" not in record
+                                      and _is_int(record.get("pos")) and int(record["pos"]) == self._next):
+                reason = record["bad"] if isinstance(record, dict) and "bad" in record else \
+                    f"not a record of position {self._next}: {raw[:80]!r}"
+                record = {"pos": self._next, "bad": reason}
+            out.append(record)
             self._last_key = key
             self._next += 1
+        self.blocked_at = blocked
         return out
 
     def append(self, absorb: Callable[[list[dict[str, Any]]], None],
@@ -364,7 +512,79 @@ class ObjectIndex:
         return shard_names(self.objects)
 
     def shard_reader(self, shard: str, start: int) -> "ObjectIndex":
-        return ObjectIndex(self.objects, prefix=shard_prefix(shard), start=start)
+        return ObjectIndex(self.objects, prefix=shard_prefix(shard), start=start, tolerant=True)
+
+
+@dataclasses.dataclass
+class ShardTail:
+    """What a process that only appends ownership records knows of a shard's end
+    (:func:`claim_shard_owner`): the next position and the newest owner seen. Kept
+    between calls, the next call lists only the keys after it."""
+
+    next: int = 0
+    owner: ShardOwner | None = None
+
+
+def _newest_owner(objects: ObjectStore, keys: list[str], known: ShardOwner | None = None) -> ShardOwner | None:
+    """The newest ownership record among the shard records ``keys`` (in position
+    order), read from the end backwards: no further than the first one found, or
+    than a record written by the ``known`` owner (it still owned the shard there,
+    so no newer ownership record precedes it; None is returned then). First the
+    last record alone, then ``_READ_WORKERS`` at a time."""
+    end = len(keys)
+    for size in (1, *([_READ_WORKERS] * (len(keys) // _READ_WORKERS + 1))):
+        if end <= 0:
+            break
+        chunk, end = keys[max(0, end - size):end], max(0, end - size)
+        for key, raw in reversed(list(zip(chunk, _read_all(objects, chunk)))):
+            try:
+                record = json.loads(raw) if raw is not None else None
+            except ValueError as error:
+                raise SampleBufferError(f"{key}: bad record: {raw[:200]!r}") from error
+            if record is None:
+                raise SampleBufferError(f"{key}: listed but not readable")
+            if isinstance(record, dict) and is_owner_record(record):
+                return _owner_of(record)
+            if known is not None and isinstance(record, dict) and record_incarnation(record) == known.incarnation:
+                return None
+    return None
+
+
+def claim_shard_owner(objects: ObjectStore, shard: str, incarnation: str, *, by: str,
+                      clock: Callable[[], float] = time.time,
+                      tail: ShardTail | None = None) -> tuple[ShardOwner, bool]:
+    """Append an ownership record for ``incarnation`` to ``shard`` without reading the
+    shard's groups (the pool's fence: ``pool-fence:<ticket>``, ``by="pool"``).
+    Returns ``(owner, created)``; ``created`` is False when ``incarnation`` already
+    is the shard's newest owner (a retried fence writes nothing).
+
+    Cost: one LIST of the shard's keys after ``tail`` (1000 keys per request), the
+    GETs from the end back to the newest ownership record among them or to a group
+    of the owner ``tail`` names (usually the last record: one GET), one create; a
+    lost create (the sampler wrote a group meanwhile) lists and reads only what
+    was added. Without a ``tail`` owner, a shard with no ownership record yet is
+    read whole, once (its first fence)."""
+    tail = ShardTail() if tail is None else tail
+    index = ObjectIndex(objects, prefix=shard_prefix(shard))
+    for _ in range(_MAX_CREATE_RACES):
+        keys = []
+        after = index.key(tail.next - 1) if tail.next else ""
+        for i, key in enumerate(objects.list(index.prefix, start_after=after)):
+            if key != index.key(tail.next + i):
+                break
+            keys.append(key)
+        tail.owner = _newest_owner(objects, keys, tail.owner) or tail.owner
+        tail.next += len(keys)
+        if tail.owner is not None and tail.owner.incarnation == str(incarnation):
+            return tail.owner, False
+        epoch = (0 if tail.owner is None else tail.owner.epoch) + 1
+        record = {"schema": OWNER_SCHEMA, "pos": tail.next,
+                  "owner": {"incarnation": str(incarnation), "epoch": epoch, "by": str(by),
+                            "claimed_at": float(clock())}}
+        if objects.create(index.key(tail.next), (json.dumps(record, sort_keys=True) + "\n").encode()):
+            tail.owner, tail.next = _owner_of(record), tail.next + 1
+            return tail.owner, True
+    raise SampleBufferError(f"{index.prefix}: lost {_MAX_CREATE_RACES} ownership claims in a row to other writers")
 
 
 def _objects_of(store: CheckpointStore | ObjectStore) -> ObjectStore | None:
@@ -410,6 +630,7 @@ class UnmergedShards:
         self.objects = objects
         self._readers: dict[str, ObjectIndex] = {}
         self._records: dict[str, list[tuple[int, SampleIndexEntry]]] = {}  # (shard position, entry)
+        self._owners: dict[str, ShardOwner | None] = {}
         self._ended: set[str] = set()
 
     def pending(self, merged: dict[str, int]) -> tuple[list[SampleIndexEntry], bool]:
@@ -422,10 +643,17 @@ class UnmergedShards:
                 continue  # pool leaves one ended shard per reclaim, the run lists only live ones)
             reader = self._readers.get(shard)
             if reader is None:
-                reader = self._readers[shard] = ObjectIndex(self.objects, prefix=shard_prefix(shard))
+                reader = self._readers[shard] = ObjectIndex(self.objects, prefix=shard_prefix(shard),
+                                                            tolerant=True)
                 self._records[shard] = []
             for record in reader.read_new():
-                if record.get("end"):
+                if bad_shard_record(record) is not None:
+                    continue  # the trainer passes it over
+                if is_owner_record(record):
+                    self._owners[shard] = _owner_of(record)
+                elif not owner_accepts(self._owners.get(shard), record):
+                    continue  # a fenced incarnation's write: the trainer never merges it
+                elif record.get("end"):
                     self._ended.add(shard)
                 else:
                     self._records[shard].append((int(record["pos"]), _entry(record)))
@@ -520,6 +748,28 @@ class FileSampleBuffer:
         self._shard_pending: dict[str, list[dict[str, Any]]] = {}  # shard records read, not merged yet
         self._skipped: set[int] = set()  # positions that repeat a merged shard record: never selected
         self._shard_gaps = 0  # shard records an earlier merger passed over (never merged)
+        # shard ownership (module doc). A shard writer: the index positions read (group,
+        # end and ownership records), the shard's newest owner, the incarnation this
+        # writer claimed as, the shard position of every entry.
+        self._positions = 0
+        self._owner: ShardOwner | None = None
+        self._writer: str | None = None
+        self._entry_pos: list[int] = []
+        self.fenced_writes_seen = 0  # shard records of a fenced incarnation read here (never entries)
+        # the merger: every shard's newest owner, the owner epoch of each merged position,
+        # (incarnation, epoch) of each shard's last merged record, the fenced writes dropped
+        self._shard_owner: dict[str, ShardOwner | None] = {}
+        self._shard_epoch_of: list[int] = []
+        self._shard_last: dict[str, tuple[str | None, int]] = {}
+        self._shard_passed: dict[str, int] = {}  # shard records passed over since the last one taken
+        self._fenced_dropped: dict[tuple[str, int, str, str | None], int] = {}  # not reported yet
+        self.fenced_groups_dropped = 0
+        self.bad_shard_records = 0  # damaged shard records passed over (module doc)
+        self._bad_shards: set[str] = set()
+        self._blocked: dict[str, int] = {}  # shard -> its missing position (later ones exist)
+        # ``callable(event, **fields)``: MERGE_EVENT for what the merge passes over (the
+        # merger's default: one ``YETO_RL_EVENT`` stdout record, as the trainer's other events)
+        self.merge_events: Callable[..., None] | None = print_merge_event if merge_shards else None
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
         self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
@@ -562,6 +812,11 @@ class FileSampleBuffer:
         source = {} if entry.provenance is None else {"provenance": dict(entry.provenance)}
         if entry.sampler_round is not None:
             source["sampler_round"] = dict(entry.sampler_round)
+        if self._writer is not None and (entry.sampler_round or {}).get("incarnation") != self._writer:
+            # the trainer would drop it: its validity is its round record's incarnation
+            raise SampleBufferError(f"sample {entry.sample_id}: this shard writer claimed the shard as "
+                                    f"{self._writer!r}, the group's round record names "
+                                    f"{(entry.sampler_round or {}).get('incarnation')!r}")
         self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "sample_id": entry.sample_id,
                                         "behavior_version": int(entry.behavior_version),
                                         "payload_ref": entry.payload_ref, "tokens": int(entry.tokens),
@@ -578,17 +833,105 @@ class FileSampleBuffer:
             yield
 
     def mark_data_end(self) -> None:
-        """The samplers will append nothing more."""
-        self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True})
+        """The samplers will append nothing more. A shard writer that lost its shard
+        (:class:`ShardFenced`) cannot end it: the owner may still write."""
+        who = {} if self._writer is None else {"incarnation": self._writer}
+        self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True, **who})
 
     def _write_record(self, make: Callable[[int], dict]) -> None:
         def record() -> dict:
             if self._ended:
                 raise SampleBufferError("append after the data end")
-            return make(len(self._entries))
+            self._check_owner()  # after the index was read: the fence record is in, or the create loses
+            return make(self._positions)
 
         with self._lock:
             self.index.append(self._absorb, record)
+
+    # ---------------------------------------------------------------- shard ownership
+    @property
+    def can_own(self) -> bool:
+        """Whether this buffer writes a shard that can hold ownership records (a
+        shard on an object store: create-if-absent decides the positions)."""
+        return self.shard is not None and isinstance(self.index, ObjectIndex)
+
+    @property
+    def owner(self) -> ShardOwner | None:
+        """The newest ownership record of this writer's shard, as far as read."""
+        with self._lock:
+            return self._owner
+
+    @property
+    def writer_incarnation(self) -> str | None:
+        """The incarnation this writer claimed its shard as (None: it wrote no claim)."""
+        return self._writer
+
+    @property
+    def fenced(self) -> bool:
+        """This writer's shard is owned by another incarnation or a pool fence (as of
+        the last read; :meth:`refresh` reads again). Every write raises :class:`ShardFenced`."""
+        with self._lock:
+            return self.shard is not None and self._owner is not None and self._owner.incarnation != self._writer
+
+    def claim_owner(self, incarnation: str, *, by: str = "sampler") -> ShardOwner:
+        """Append this shard's ownership record for ``incarnation`` (module doc) and
+        write as it from now on: every earlier incarnation's later write is void.
+        Returns the record's owner."""
+        if not self.can_own:
+            raise SampleBufferError("shard ownership records need a shard index on an object store")
+        made: list[dict[str, Any]] = []
+
+        def record() -> dict:
+            epoch = (0 if self._owner is None else self._owner.epoch) + 1
+            made.append({"schema": OWNER_SCHEMA, "pos": self._positions,
+                         "owner": {"incarnation": str(incarnation), "epoch": epoch, "by": str(by),
+                                   "claimed_at": float(self.clock())}})
+            return made[-1]
+
+        with self._lock:
+            self.index.append(self._absorb, record)
+            self._writer = str(incarnation)
+            return _owner_of(made[-1])
+
+    def _check_owner(self) -> None:
+        if self.shard is not None and self._owner is not None and self._owner.incarnation != self._writer:
+            raise ShardFenced(self.shard, self._writer, self._owner)
+
+    def groups_from(self, position: int) -> int:
+        """A shard writer: its groups at or after shard position ``position`` (the
+        trainer's read position in this shard); ownership records are not groups."""
+        with self._lock:
+            lo, hi = 0, len(self._entry_pos)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if self._entry_pos[mid] < int(position):
+                    lo = mid + 1
+                else:
+                    hi = mid
+            return len(self._entry_pos) - lo
+
+    # ---------------------------------------------------------------- shard ownership (the merger)
+    def shard_owners(self) -> dict[str, dict[str, Any]]:
+        """{shard: its newest owner as far as merged} of the shards with an ownership record."""
+        with self._lock:
+            return {shard: owner.to_dict() for shard, owner in sorted(self._shard_owner.items())
+                    if owner is not None}
+
+    def shard_epoch_at(self, position: int) -> int:
+        """The owner epoch of merged position ``position``: 0 for a record of a
+        shard's legacy part (no ownership record before it)."""
+        with self._lock:
+            return self._shard_epoch_of[int(position)] if 0 <= int(position) < len(self._shard_epoch_of) else 0
+
+    def take_fenced_dropped(self) -> list[dict[str, Any]]:
+        """The fenced incarnations' writes the merge dropped since the last call:
+        ``{"shard", "epoch", "owner", "incarnation", "groups"}`` per shard, owner
+        epoch and writer."""
+        with self._lock:
+            out = [{"shard": shard, "epoch": epoch, "owner": owner, "incarnation": inc, "groups": n}
+                   for (shard, epoch, owner, inc), n in sorted(self._fenced_dropped.items(), key=str)]
+            self._fenced_dropped.clear()
+            return out
 
     def _write_records(self, records: list[dict[str, Any]]) -> None:
         """Append ``records`` (without ``pos``) at the next positions: one write on
@@ -611,7 +954,7 @@ class FileSampleBuffer:
                 if offered:
                     raise SampleBufferError("append after the data end")
                 return []
-            start = len(self._entries)
+            start = self._positions
             return [{**records[i], "pos": start + n} for n, i in enumerate(offered)]
 
         with self._lock:
@@ -631,8 +974,16 @@ class FileSampleBuffer:
 
     def _absorb(self, records: list[dict[str, Any]]) -> None:
         for record in records:
-            if record.get("schema") != SCHEMA or int(record["pos"]) != len(self._entries):
+            owner = self.shard is not None and is_owner_record(record)
+            if (record.get("schema") != SCHEMA and not owner) or int(record["pos"]) != self._positions:
                 raise SampleBufferError(f"sample buffer: record out of order: {json.dumps(record)[:200]}")
+            self._positions += 1
+            if owner:
+                self._owner = _owner_of(record)
+                continue
+            if self.shard is not None and not owner_accepts(self._owner, record):
+                self.fenced_writes_seen += 1  # a fenced incarnation's write: void for every reader
+                continue
             if record.get("end"):
                 self._ended = True
                 continue
@@ -644,9 +995,15 @@ class FileSampleBuffer:
                 if shard_pos < merged:
                     self._skip_duplicate(record, shard, shard_pos)
                 else:
-                    if shard_pos > merged:
-                        self._note_gap(shard, merged, shard_pos)
+                    # positions the merger passed over on purpose (ownership records, fenced
+                    # or damaged records) are no gap: the merged record says how many
+                    passed = int(record.get("shard_passed") or 0)
+                    if shard_pos - passed > merged:
+                        self._note_gap(shard, merged, shard_pos - passed)
                     self._shard_next[shard] = shard_pos + 1
+                    self._shard_last[shard] = (record_incarnation(record), int(record.get("shard_epoch") or 0))
+            self._entry_pos.append(self._positions - 1)
+            self._shard_epoch_of.append(int(record.get("shard_epoch") or 0))
             self._shard_of.append(shard)
             self._shard_pos_of.append(shard_pos)
             self._entries.append(_entry(record))
@@ -660,6 +1017,8 @@ class FileSampleBuffer:
                   f"{shard!r} record {shard_pos} ({record.get('sample_id')!r}), merged before: "
                   f"repeated records are passed over, not trained twice", flush=True)
         self._skipped.add(len(self._entries))
+        self._merge_event("duplicate_merged_record", shard=shard, shard_pos=shard_pos,
+                          position=int(record["pos"]), count=len(self._skipped))
 
     def _note_gap(self, shard: str, merged: int, shard_pos: int) -> None:
         if not self._shard_gaps:
@@ -667,6 +1026,8 @@ class FileSampleBuffer:
                   f"{merged - 1} to {shard_pos}: an earlier merger passed over {shard_pos - merged} "
                   f"record(s) (it counted repeated records); they stay unmerged", flush=True)
         self._shard_gaps += shard_pos - merged
+        self._merge_event("unmerged_shard_gap", shard=shard, shard_pos=merged, records=shard_pos - merged,
+                          count=self._shard_gaps)
 
     @property
     def duplicate_merged_records(self) -> int:
@@ -706,16 +1067,37 @@ class FileSampleBuffer:
             if reader is None:  # first seen here: skip what an earlier merger merged
                 reader = self._shard_readers[shard] = self.index.shard_reader(
                     shard, self._shard_next.get(shard, 0))
+                # the owner there: the last merged record was valid, so its incarnation
+                # owned the shard (epoch 0: the legacy part, no owner yet)
+                last, epoch = self._shard_last.get(shard, (None, 0))
+                self._shard_owner[shard] = ShardOwner(str(last), epoch) if epoch else None
             # What was read stays pending until the index holds it: a merge that fails
             # half way (a store error) is finished by the next refresh, and a record
             # another merger appended meanwhile is dropped here, not merged again.
             merged = self._shard_next.get(shard, 0)
             records = [r for r in self._shard_pending.get(shard, ()) if r["shard_pos"] >= merged]
-            for record in reader.read_new():
-                if record.get("end"):
+            new_records = reader.read_new()
+            self._note_blocked(shard, getattr(reader, "blocked_at", None))
+            for record in new_records:
+                owner = self._shard_owner.get(shard)
+                taken = False
+                if (bad := bad_shard_record(record)) is not None:
+                    self._drop_bad(shard, record, bad)
+                elif is_owner_record(record):
+                    self._shard_owner[shard] = _owner_of(record)
+                elif not owner_accepts(owner, record):
+                    self._drop_fenced(shard, owner, record)
+                elif record.get("end"):
                     self._shards_ended.add(shard)
                 elif int(record["pos"]) >= merged:
-                    records.append({**record, "shard": shard, "shard_pos": int(record["pos"])})
+                    taken = True
+                    more = {} if owner is None else {"shard_epoch": owner.epoch}
+                    if self._shard_passed.get(shard):
+                        more["shard_passed"] = self._shard_passed[shard]
+                    records.append({**record, "shard": shard, "shard_pos": int(record["pos"]), **more})
+                # the reader starts right after the last merged record, so this counts
+                # exactly the positions between two merged records of the shard
+                self._shard_passed[shard] = 0 if taken else self._shard_passed.get(shard, 0) + 1
             self._shard_pending[shard] = records
             new.append(records)
         if self._ended:
@@ -735,6 +1117,67 @@ class FileSampleBuffer:
             for shard, records in self._shard_pending.items():
                 done = self._shard_next.get(shard, 0)
                 self._shard_pending[shard] = [r for r in records if r["shard_pos"] >= done]
+
+    def _merge_event(self, reason: str, **fields: Any) -> None:
+        if self.merge_events is not None:
+            try:
+                self.merge_events(MERGE_EVENT, reason=reason, **fields)
+            except Exception as error:  # noqa: BLE001 - observation only
+                print(f"[sample-buffer] merge event not delivered: {type(error).__name__}: {error}", flush=True)
+
+    def _drop_bad(self, shard: str, record: Mapping[str, Any], why: str) -> None:
+        """A damaged shard record: passed over, never written into the merged index."""
+        self.bad_shard_records += 1
+        if shard not in self._bad_shards:
+            self._bad_shards.add(shard)
+            print(f"[sample-buffer] WARNING: shard {shard!r} record {record.get('pos')} is damaged "
+                  f"({why}): passed over, not merged; the shard's other groups are", flush=True)
+        self._merge_event("bad_record", shard=shard, shard_pos=record.get("pos"), detail=str(why)[:200],
+                          count=self.bad_shard_records)
+
+    def _note_blocked(self, shard: str, position: int | None) -> None:
+        """A shard position is missing while later ones exist: reported, never skipped."""
+        if position is None:
+            self._blocked.pop(shard, None)
+        elif self._blocked.get(shard) != position:
+            self._blocked[shard] = position
+            print(f"[sample-buffer] WARNING: shard {shard!r} has no record at position {position} but "
+                  f"later ones: its groups from there on are NOT merged until that object is back "
+                  f"(deleted from outside?)", flush=True)
+            self._merge_event("missing_shard_position", shard=shard, shard_pos=position)
+
+    @property
+    def blocked_shards(self) -> dict[str, int]:
+        """{shard: the missing position its merge waits at} (module doc)."""
+        with self._lock:
+            return dict(sorted(self._blocked.items()))
+
+    def merge_counters(self) -> dict[str, int]:
+        """Cumulative counts of what this reader's merge found and passed over."""
+        with self._lock:
+            return {"duplicate_merged_records": len(self._skipped), "unmerged_shard_gaps": self._shard_gaps,
+                    "stale_incarnation_groups": self.fenced_groups_dropped,
+                    "bad_shard_records": self.bad_shard_records, "blocked_shards": len(self._blocked)}
+
+    def _drop_fenced(self, shard: str, owner: ShardOwner, record: Mapping[str, Any]) -> None:
+        """A shard record after an ownership record that names another incarnation
+        (a fenced writer that bypassed its own check): never merged."""
+        if record.get("end"):
+            print(f"[sample-buffer] WARNING: shard {shard!r}: the data end at {record.get('pos')} was "
+                  f"written by {record_incarnation(record)!r}, the shard is owned by {owner.incarnation!r} "
+                  f"(epoch {owner.epoch}): ignored", flush=True)
+            return
+        if not self.fenced_groups_dropped:
+            print(f"[sample-buffer] WARNING: shard {shard!r} record {record.get('pos')} "
+                  f"({record.get('sample_id')!r}) was written by {record_incarnation(record)!r} after "
+                  f"{owner.incarnation!r} took the shard (epoch {owner.epoch}): such groups are not "
+                  f"merged, not trained", flush=True)
+        self.fenced_groups_dropped += 1
+        key = (shard, owner.epoch, owner.incarnation, record_incarnation(record))
+        self._fenced_dropped[key] = self._fenced_dropped.get(key, 0) + 1
+        self._merge_event("stale_incarnation", shard=shard, shard_pos=record.get("pos"), epoch=owner.epoch,
+                          owner=owner.incarnation, incarnation=record_incarnation(record),
+                          sample_id=record.get("sample_id"), count=self.fenced_groups_dropped)
 
     def shard_at(self, position: int) -> str | None:
         """The sampler shard of merged position ``position`` (None: no merged shards)."""

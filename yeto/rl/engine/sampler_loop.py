@@ -170,6 +170,10 @@ class SamplerLoop:
         lanes = fastest_lane_read(self.buffer, shard)
         if lanes is not None:
             read = max(read, lanes)
+        groups_from = getattr(self.buffer, "groups_from", None)
+        if shard is not None and callable(groups_from):
+            # ``read`` is a shard position; the shard's ownership records hold positions too
+            return int(groups_from(read))
         return max(0, len(self.buffer) - read)
 
     def _load_newest(self, *, in_flight: bool = False) -> None:

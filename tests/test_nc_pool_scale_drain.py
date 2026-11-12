@@ -45,6 +45,10 @@ class DrainCloud(Cloud):
         super().__init__(clock, **kw)
         self.ledger_objects = FakeObjects()
 
+    def fence(self, m):  # R2DataPath.fence_shard: the shard's fence and the ledger's retire
+        super().fence(m)
+        sd.retire(self.ledger_objects, NS, m.shard, reason=f"pool fence by {m.ticket}")
+
     def request_drain(self, m):
         m.drain_seq = sd.request_drain(self.ledger_objects, NS, m.shard, seq=f"{m.ticket}:{self.clock()}")
         self.log.append(("request_drain", m.ticket, m.shard, self.clock()))
@@ -100,8 +104,9 @@ def _idle(sampler):
 
 
 def _sampler(path, cloud, shard, **kw):
-    """A store-dispenser sampler of ``shard`` as engine_sampler_entry wires it: its claims
-    are fenced when its incarnation lease names another incarnation (the pool's fence)."""
+    """A store-dispenser sampler of ``shard`` as engine_sampler_entry wires it: it is
+    fenced when another incarnation holds its shard (the pool's fence, which also
+    retires it in the ledger)."""
     def lease(h):
         return (read_lease(cloud.store, h) or {}).get("incarnation")
 
@@ -197,7 +202,7 @@ def test_fence_mode_frees_the_removed_nodes_claims_at_once(tmp_path):
     sk.written(0, got)
     tasks = {t["slot"]: t for t in sd.status(cloud.ledger_objects, NS)["tasks"]}
     assert tasks[0]["state"] == "trained" and tasks[0]["holder"] == keep.shard
-    assert tasks[0]["failure_reasons"] == ["0:release:fenced"]
+    assert tasks[0]["failure_reasons"] == ["0:release:retired"]
 
 
 def test_a_drain_that_never_answers_is_fenced_at_its_timeout(tmp_path):

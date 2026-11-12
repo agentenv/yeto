@@ -652,8 +652,9 @@ shortest-lease one. Two modes, set per run by `elastic.scale_down` in
 | `fence` | Fenced at once: its task claims go back to the dispenser and the other nodes take them at their next claim, without waiting for the claim lease. Its trials in flight are lost (the tasks are redone elsewhere). Then the same release as above. |
 
 In both modes the groups the node wrote before the fence stay in its shard and
-the trainer reads them as usual; a group written after the fence is dropped by
-the trainer's incarnation gate. No task is given out twice and none is lost.
+the trainer reads them as usual; nothing the node writes after the fence is
+trained (see "What a fence is" in section 5.2). No task is given out twice and
+none is lost.
 No replacement is ordered for a removed node, and the other nodes are not
 touched. A removed node that is evicted, crashes or reaches its lease end
 while it drains is released at once, again with no replacement. The events
@@ -784,10 +785,55 @@ same run:
 | t + 100 s | `nc_elastic_ordered ... continues_shard=<old shard>` |
 | t + 10 min | `nc_elastic_member_ready`, `rl_sampler_start_on_latest` with the newest release |
 
-The reclaimed node's claims are released by the first sampler that scans the
-dispenser after the fence (a fenced holder's claim is released at once, not
-after `lease_s`). With a single sampler that is the replacement, so the tasks
-continue when it joins.
+The reclaimed node's claims are released by the fence itself (the pool retires
+the sampler in the dispenser ledger; a fenced holder's claim is released at
+once, not after `lease_s`), and the other samplers take them at their next
+claim. With a single sampler that is the replacement, so the tasks continue
+when it joins.
+
+**What a fence is.** Each sampler writes its groups into its own shard of the
+buffer, `sample-buffer/shards/<shard>/<position>.json`, one object per record,
+each created only if the position is still free. A fence is one more record in
+that sequence, an *ownership record*
+(`{"schema": "yeto.rl.sample-buffer/v2", "pos", "owner": {"incarnation",
+"epoch", "by", "claimed_at"}}`): a sampler writes one for itself when it joins
+(`by: sampler`), the pool writes `pool-fence:<ticket>` when it fences a shard
+or restarts a stalled sampler in place (`by: pool`). One rule decides what is
+trained, the same for every reader: a group counts if the last ownership
+record before it names the sampler process (incarnation) that wrote it, or if
+no ownership record precedes it. So:
+
+- every group the node created before the fence record is trained, including
+  the ones written in the last seconds before it;
+- nothing a fenced process writes afterwards is trained. Its write reads the
+  shard first and is refused (`ShardFenced`, nothing is created; the task goes
+  back to the dispenser), and the trainer applies the rule again when it
+  merges the shards, so a process that skipped the check gains nothing
+  (`sample_buffer/stale_incarnation_groups`, event `rl_buffer_merge_skipped`
+  with `reason: stale_incarnation`, the shard and the owner's epoch);
+- a fenced process cannot mark its shard as ended either;
+- no clock takes part: the control host's and the nodes' clocks may differ by
+  any amount. `claimed_at` is information only.
+
+`rl_shard_owner` (shard, incarnation, epoch, by) is emitted by the sampler at
+its join and by the pool at a fence. `sample-buffer/leases/<shard>.json` is
+still written, for the dashboard and for older readers; it no longer decides
+anything on such a shard.
+
+Storage: one ownership record (about 200 bytes) per sampler start and per
+fence, in the shard it concerns; the merged index holds none. A sampler's
+fence check is the incremental listing of its own shard that every write does
+anyway. A pool fence lists the shard from the last ownership record on (one
+request per 1000 records) and reads one or two records.
+
+The merge also passes over a shard record it cannot read (not JSON, another
+schema, a missing field): `sample_buffer/bad_shard_records`, event
+`rl_buffer_merge_skipped` with `reason: bad_record`; the other groups of that
+shard and all other shards are trained as usual. A shard position that is
+missing while later ones exist (an object deleted from the bucket by hand or by
+a lifecycle rule) is not skipped: the trainer prints a warning and emits
+`reason: missing_shard_position`, and the shard's later groups wait until the
+object is back.
 
 ### 5.3 Resuming training
 
@@ -820,6 +866,20 @@ accepted when the algorithm's semantic hash is unchanged, and the manifest
 records the old and new pack with your reason. To resume deliberately on the
 pinned pack, use `--rl-code-pack-keep` instead. For algorithm changes,
 Recommended practice: start a new run (another `--cluster-prefix`).
+
+Mixed versions on one run store (the fence format of section 5.2):
+
+| Trainer | Samplers / pool | What happens |
+|---|---|---|
+| new | new | Ownership records fence the shards. A shard that already holds groups from before the upgrade keeps them: its part before the first ownership record is read under the older rule (lease record, 60 s clock margin). |
+| old (no trainer generation lease in the store) | new | The samplers and the pool write no ownership record and use the lease record as before. Nothing changes for the old trainer. |
+| new | old, on a run started by old code | Works as before the upgrade (lease record). Restart the samplers on the new code to get the fence above; the dispenser plan of the run stays at its version. |
+| any | old, on a run started by new code | Refused at the sampler's start: `dispense mismatch: version is 2 here, 3 in .../plan.json`. Use the new sampler image. |
+| old, after a new trainer ran on the store | - | Not supported: the old trainer stops with `record out of order` on the first ownership record. Keep the trainer on the new code. |
+
+Upgrade order for a running run: trainer first, then the pool (control host),
+then the samplers (the pool's in-place restart or node replacement brings them
+up on the new image).
 
 ### 5.5 Stopping
 
@@ -1427,8 +1487,8 @@ Daytona deletes a spot sandbox without notice when an on-demand user needs the
 capacity (Started, Deleting, Deleted, with `spotEvictedAt` recorded). The pool
 reads that as an eviction, the same as a National Compute eviction:
 
-1. the shard is fenced, so the trainer frees its claims at once and ignores
-   anything the lost sandbox still writes;
+1. the shard is fenced (section 5.2, "What a fence is"), so its claims are
+   freed at once and nothing the lost sandbox still writes is trained;
 2. the sandbox is confirmed deleted;
 3. a replacement sandbox is created and continues the shard and its data slot.
 

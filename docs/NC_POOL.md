@@ -365,6 +365,25 @@ one SSH round trip. Then it acts:
 - **Eviction, lost node, overdue lease.** The node's shard is fenced, so a
   node that comes back cannot add groups the trainer would take. The ticket
   is deleted. The next order continues the shard.
+
+  The fence is a record in the shard itself: the pool appends an ownership
+  record `pool-fence:<ticket>` at the shard's next position
+  (`sample-buffer/shards/<shard>/<position>.json`, created only if the
+  position is free; event `rl_shard_owner`). Every group the node created
+  before that record is trained; nothing it writes after it is, and it cannot
+  mark the shard as ended. The sampler's own write reads the shard first and
+  is refused, and the trainer applies the same rule when it merges. No clock
+  is compared, so a clock difference between the control host and a node does
+  not matter. The pool also retires the sampler in the dispenser ledger, so
+  its open claims go back at once. A sampler restarted in place after an
+  engine stall is fenced the same way, without the stop request; the
+  restarted process takes the shard again with its own ownership record.
+
+  On a run whose trainer runs older code (no trainer generation lease in the
+  store), and on the `syncer` data path, the pool writes no ownership record:
+  the fence is the lease record `sample-buffer/leases/<shard>.json` and the
+  syncer's member table, as before. See "Upgrading the code of a running
+  run" in `KIMI_K31_ASYNC_RL_GUIDE.md` for mixed versions.
 - **Configuration error.** Before it orders anything, `pool` (and
   `--dry-run`) renders the sampler spec and builds locally every part the
   sampler builds at start: the island config (required keys such as

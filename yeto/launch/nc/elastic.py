@@ -31,11 +31,14 @@ Pieces:
 * :class:`Budget` - run spend cap, concurrent node cap, order cap;
 * :class:`EventLog` - JSONL events (``nc_elastic_*``) plus an optional hook;
 * :func:`fence_shard` - isolate the shard of a node taken for gone: a handoff
-  request (a live sampler stops at its next round) and a claim of the shard's
-  incarnation lease (``yeto.rl.engine.incarnation_lease``) by the pool, so a
-  node that comes back cannot add groups the trainer would take (the trainer's
-  ``IncarnationGate`` drops groups of a superseded incarnation appended after
-  the claim).
+  request (a live sampler stops at its next round) and the pool's ownership
+  record ``pool-fence:<ticket>`` appended to the shard's index
+  (``sample_buffer`` module doc), so a node that comes back cannot add groups
+  the trainer would take: every group created before the record stays valid,
+  nothing written after it is, whatever any clock says. On a shard without
+  ownership records (a shared-directory buffer, a run whose trainer is older)
+  the fence is the claim of the shard's incarnation lease
+  (``yeto.rl.engine.incarnation_lease``) and the trainer's ``IncarnationGate``.
 
 The provider-neutral pieces (:class:`LeaseStatus`, :class:`Probe`,
 :func:`classify`, :class:`ElasticConfig`, :class:`Breaker`, :class:`Budget`,
@@ -90,28 +93,41 @@ def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler
 FENCE_PREFIX = "pool-fence"
 
 
+def _claim(store: Any, shard: str, by: str, clock: Callable[[], float]) -> dict[str, Any]:
+    """The pool's fence of ``shard``: its ownership record where the shard holds
+    them, then the lease record (with ``owner``: epoch, position, ``created``)."""
+    from yeto.rl.engine.incarnation_lease import IncarnationLease, fence_shard_owner  # noqa: PLC0415
+
+    name = f"{FENCE_PREFIX}:{by}"
+    fenced = fence_shard_owner(store, shard, name, by="pool", clock=clock)
+    record = IncarnationLease(store, shard, name, clock=clock).claim(owner=None if fenced is None else fenced[0])
+    if fenced is not None:
+        record["owner"]["created"] = fenced[1]
+    return record
+
+
 def fence_incarnation(store: Any, shard: str, *, by: str, clock: Callable[[], float] = time.time) -> dict[str, Any]:
     """Supersede the running incarnation of ``shard`` without asking the shard to stop
     (no handoff record): the sampler restarted in place on the same shard claims the
-    lease anew at its join. Used for a stalled engine: its claims are released at once."""
-    from yeto.rl.engine.incarnation_lease import IncarnationLease  # noqa: PLC0415
-
-    return IncarnationLease(store, shard, f"{FENCE_PREFIX}:{by}", clock=clock).claim()
+    shard anew at its join. Used for a stalled engine: its claims are released at once
+    (``R2DataPath.fence_incarnation`` retires it in the dispenser)."""
+    return _claim(store, shard, by, clock)
 
 
 def fence_shard(store: Any, shard: str, *, by: str, clock: Callable[[], float] = time.time) -> dict[str, Any]:
     """Isolate ``shard`` (its node is taken for gone): ask its sampler to stop
-    (handoff record) and claim its incarnation lease as ``pool-fence:<by>``. A
-    sampler of the shard that is still running (a node back from a network
-    partition) is fenced at its next lease read and writes no further group; a
-    group it wrote anyway after the claim (minus the gate's clock margin) is a
-    stale incarnation to the trainer. Groups written before stay (they are whole:
-    a group is one object). Returns the lease record."""
-    from yeto.rl.engine.incarnation_lease import IncarnationLease  # noqa: PLC0415
+    (handoff record) and take the shard as ``pool-fence:<by>``. A sampler of the
+    shard that is still running (a node back from a network partition) cannot
+    create another record after the pool's ownership record: its write reads the
+    shard index first and is refused, and the trainer merges nothing of it past
+    that position. Groups created before stay (they are whole: a group is one
+    object). On a shard without ownership records the lease claim fences as
+    before (the sampler's next lease read; the trainer's gate with its clock
+    margin). Returns the lease record."""
     from yeto.rl.engine.sampler_resume import request_handoff  # noqa: PLC0415
 
     request_handoff(store, shard, f"{FENCE_PREFIX}:{by}", clock=clock)
-    return IncarnationLease(store, shard, f"{FENCE_PREFIX}:{by}", clock=clock).claim()
+    return _claim(store, shard, by, clock)
 
 
 class ObjectRecords:

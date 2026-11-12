@@ -78,10 +78,11 @@ Operations (pre-condition, effect, idempotency, concurrency)
     own included. Neither ever hands an item to two live members.
 
 ``fence(member)``
-    The data plane learns that the member's machine was replaced (store: its
-    incarnation lease names another incarnation, ``fence_shard``). Its open
-    claims are released at the next scan of any member, not counted, without
-    waiting for the lease; the member is fenced on its next operation.
+    The data plane learns that the member's machine was replaced (store: the
+    pool takes its shard - ``fence_shard`` / ``fence_incarnation``, an ownership
+    record in the shard's index - and retires it in the ledger). Its open
+    claims are released at once, not counted, without waiting for the lease;
+    the member is fenced on its next operation.
 
 ``retire(member, reason) -> released``
     The controller removes a member now (scale-down, evict, preemption seen
@@ -147,7 +148,7 @@ beat                      ``renew`` (own thread, ``lease / 3``)         any requ
 still_holds               ``still_holds``                              ``TaskSource.still_holds`` /
                                                                       ``DispensedRows.still_holds`` (TASK_HOLDS
                                                                       frame; a query, not a lease renewal)
-fence                     incarnation lease (``fence_shard``)           MEMBER_RETIRE (no separate lease)
+fence                     shard ownership record + retire marker        MEMBER_RETIRE (no separate lease)
 retire                    ``store_dispense.retire`` /                  ``task_dispense.retire_member`` (MEMBER_RETIRE
                           ``python -m ...store_dispense retire``       frame, island HMAC key)
 drain / drained           ``store_dispense.request_drain`` /           ``retire_member(..., mode="drain")`` until

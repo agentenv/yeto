@@ -223,9 +223,11 @@ def test_fenced_sampler_cannot_write_and_its_claims_are_freed(tmp_path):
     old = _open(path, store, holder="old", inc="i-old", groups=2, lease_of_holder=leases.get,
                 fenced=lambda: fenced["v"])
     assert _slots(old(0)) == [0, 1]
-    # the NC pool fences the shard (fence_shard: lease -> "pool-fence:<by>")
+    # the NC pool fences the shard (fence_shard / fence_incarnation): the sampler loses
+    # its shard and the pool retires it in the ledger
     leases["old"] = "pool-fence:pool"
     fenced["v"] = True
+    sd.retire(store, "run/dispense", "old", reason="pool fence by pool")
     assert not old.still_holds(0)  # its own check: no group write
     assert old.renew() == 0  # no renewal
     new = _open(path, store, holder="nc-2", inc="i2", groups=2, lease_of_holder=leases.get)
@@ -236,7 +238,7 @@ def test_fenced_sampler_cannot_write_and_its_claims_are_freed(tmp_path):
     new.written(0, _slots(items))
     tasks = {t["slot"]: t for t in _status(store)["tasks"]}
     assert tasks[0]["state"] == "trained" and tasks[0]["fails"] == {"0": "release"}
-    assert tasks[0]["failure_reasons"] == ["0:release:fenced"]
+    assert tasks[0]["failure_reasons"] == ["0:release:retired"]
     assert tasks[0]["holder"] == "nc-2"
     with pytest.raises(DispenseEnded):
         old(1)  # a fenced incarnation takes nothing new

@@ -458,10 +458,18 @@ class IslandPool:
         if fence is None or m.started is None:
             return
         try:
-            fence(m)
+            self._owner_event(m, fence(m))
             self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why)
         except Exception as error:  # noqa: BLE001 - the trainer's age filter is the second line
             self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+
+    def _owner_event(self, m: Member, lease: Any) -> None:
+        """``rl_shard_owner`` when the fence appended the pool's ownership record to the
+        shard (r2 data path, ``sample_buffer`` module doc): shard, epoch, incarnation, by."""
+        owner = lease.get("owner") if isinstance(lease, dict) else None
+        if owner and owner.get("created"):
+            self._event("rl_shard_owner", ticket=m.ticket, shard=m.shard, incarnation=lease.get("incarnation"),
+                        by=owner.get("by"), epoch=owner.get("epoch"), pos=owner.get("pos"))
 
     def _retire(self, m: Member, why: str, *, lost: bool) -> None:
         """A member that will not sample again: fence, release, hand its slot on."""
@@ -1358,7 +1366,7 @@ class IslandPool:
         fence = getattr(self.ops, "fence_incarnation", None)  # lease only: the shard keeps sampling
         if fence is not None:  # the stuck incarnation's claims go back at once
             try:
-                fence(m)
+                self._owner_event(m, fence(m))
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")
             except Exception as error:  # noqa: BLE001 - the restart supersedes it at its join anyway
                 self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
