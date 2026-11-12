@@ -672,7 +672,14 @@ class IslandPool:
     def record_target(self, target: int, *, source: str, **extra: Any) -> None:
         """The pool lowers its own target (a manual release it detected): written to the
         control file under the scale lock, so the target outlives a restart and a later
-        ``pool-scale`` starts from it."""
+        ``pool-scale`` starts from it.
+
+        The file is read again under the lock and changed relative to what it holds then:
+        a request written since this tick read it (``pool-scale --remove T``: a lower
+        target, a retire list) keeps its target change and its tickets, and stays unapplied
+        (``scale_seq`` is not moved past it), so the next read of the file applies it. The
+        time of the last manual change (``manual_at``: the hold against automatic scaling)
+        is kept too."""
         if self.scale_path is None:
             return
         import fcntl  # noqa: PLC0415
@@ -686,15 +693,24 @@ class IslandPool:
                 old = {}
             if self.scale_run is not None and old.get("run") not in (None, self.scale_run):
                 old = {}
+            try:
+                unapplied = int(old.get("seq", 0)) > self.scale_seq and int(old["target"]) >= 0
+            except (KeyError, TypeError, ValueError):
+                unapplied = False
             seq = max(int(old.get("seq", 0)), self.scale_seq) + 1
-            new = {**{k: v for k, v in old.items() if k in ("paused", "hold_tasks", "manual_released")},
-                   "run": self.scale_run if self.scale_run is not None else old.get("run"), "target": int(target),
-                   "seq": seq, "retire": [], "mode": None, "source": source, "requested": self.clock(),
+            wanted = int(target)
+            if unapplied:  # the same step down from the target that request asked for
+                wanted = max(0, int(old["target"]) + int(target) - self.config.target)
+            new = {**{k: v for k, v in old.items() if k in ("paused", "hold_tasks", "manual_released", "manual_at")},
+                   "run": self.scale_run if self.scale_run is not None else old.get("run"), "target": wanted,
+                   "seq": seq, "retire": list(old.get("retire") or ()) if unapplied else [],
+                   "mode": old.get("mode") if unapplied else None, "source": source, "requested": self.clock(),
                    "previous": self.config.target, **extra}
             tmp = self.scale_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(new, indent=1))
             tmp.replace(self.scale_path)
-        self.scale_seq = seq
+        if not unapplied:
+            self.scale_seq = seq
         self.config.target = int(target)
 
     def counted(self) -> list[Member]:
