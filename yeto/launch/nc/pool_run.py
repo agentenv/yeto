@@ -665,6 +665,50 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     return 0
 
 
+def downgrade_state_file(cfg: dict[str, Any], config_path: str, *, drop_owed_fences: bool = False) -> int:
+    """``pool-state-downgrade --config F``: before going back to a yeto that reads only
+    the older pool state format, write the state file in that format (the file as it was
+    is kept next to it as ``<name>.format<N>.bak``). Refused while a pool loop is alive
+    and while a member is in a state the older code does not know."""
+    from ..pool import island_pool  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    if not state.exists():
+        print(f"pool-state-downgrade: no state file {state}: nothing to do")
+        return 0
+    lock = acquire_lock(lock_path(cfg), run=cli.run_id(cfg), role="pool-state-downgrade")
+    if lock is None:
+        print("pool-state-downgrade: refused, nothing changed: a pool loop is alive and rewrites the file "
+              f"every tick; stop it first (kill the loop, or pool-stop --config {config_path})")
+        return 2
+    try:
+        text = state.read_text()
+        doc = json.loads(text)
+        found = int(doc.get("format", 1))
+        if found <= 1:
+            print(f"pool-state-downgrade: {state} is format 1 already: nothing to do")
+            return 0
+        island_pool.check_state_format(doc, state)
+        new, notes = island_pool.downgrade_state(doc, drop_owed_fences=drop_owed_fences)
+        if new is None:
+            print("pool-state-downgrade: refused, nothing changed:")
+            for note in notes:
+                print(f"  - {note}")
+            return 2
+        backup = state.with_name(f"{state.name}.format{found}.bak")
+        backup.write_text(text)
+        tmp = state.with_suffix(state.suffix + ".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(state)
+    finally:
+        lock.close()
+    for note in notes:
+        print(f"pool-state-downgrade: WARNING: {note}")
+    print(f"pool-state-downgrade: {state} written as format 1 ({len(new['members'])} member(s)); the format "
+          f"{found} file is kept as {backup}")
+    return 0
+
+
 # -- scale ---------------------------------------------------------------------
 
 def _counted(doc: dict[str, Any]) -> list[dict[str, Any]]:

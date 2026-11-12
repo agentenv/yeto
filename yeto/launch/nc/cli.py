@@ -18,6 +18,7 @@
     pool-stop --config F                  release every node the pool created (running or not)
     pool-retry --config F                 after a configuration error: restart in place, same node(s)
     pool-status --config F                the pool's state, billed nodes and last events (read-only)
+    pool-state-downgrade --config F       before a rollback of yeto: write the state file in the older format
 
 A National Compute lease is NOT ended at ``lease_until``: the node stays active
 and billed until its ticket is deleted. See docs/NC_POOL.md.
@@ -1067,6 +1068,14 @@ def main(argv: list[str] | None = None) -> int:
                          description="Check the fixed pool config and sampler spec, then have the pool loop "
                          "restart the sampler in place on every node halted by a configuration error.")
     prt.add_argument("--config", required=True, help="the fixed pool config JSON")
+    psd = sub.add_parser("pool-state-downgrade", help="before a rollback of yeto: write the pool state file in "
+                         "the older format",
+                         description="Write the pool's state file in the format the yeto before the fence retry "
+                         "reads (it fails on the newer file, also in pool-stop). Run it with the newer yeto, "
+                         "with the pool loop stopped. Refused while a member is `fencing`.")
+    psd.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
+    psd.add_argument("--drop-owed-fences", action="store_true",
+                     help="give up shard fences still owed (the older code does not retry them)")
     psc = sub.add_parser("pool-scale", help="change a pool's sampler target while it runs (more or fewer nodes)",
                          description="Record the wanted target in the pool's state dir; the running loop "
                          "orders (scale up) or fences, drains and releases (scale down) at its next tick. "
@@ -1189,7 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = json.loads(Path(args.config).read_text())
         return pool_run.pause_pool(cfg, args.config, args.ticket, resume=args.cmd == "pool-resume",
                                    hold_tasks=getattr(args, "hold_tasks", False))
-    if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale"):
+    if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale", "pool-state-downgrade"):
         from . import pool_run  # noqa: PLC0415
 
         cfg = json.loads(Path(args.config).read_text())
@@ -1205,6 +1214,8 @@ def main(argv: list[str] | None = None) -> int:
             return pool_run.pool_status(cfg, args.config, events=args.events)
         if args.cmd == "pool-retry":
             return pool_run.retry_pool(cfg, args.config)
+        if args.cmd == "pool-state-downgrade":
+            return pool_run.downgrade_state_file(cfg, args.config, drop_owed_fences=args.drop_owed_fences)
         if args.cmd == "pool-stop":
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
         if args.dry_run:

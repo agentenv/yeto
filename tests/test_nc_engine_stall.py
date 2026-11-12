@@ -395,3 +395,18 @@ def test_after_the_data_ended_a_fenced_sampler_that_exits_0_is_not_restarted():
     _run(pool, clock, clock.t + 3 * MIN)
     assert not cloud.kinds("restart") and len(cloud.kinds("order")) == 2
     assert first.state == GONE and pool.stopped
+
+
+def test_a_stalled_engine_that_recovers_by_itself_keeps_the_fence_note_and_its_exit_0_is_restarted():
+    """The restart failed and the old, fenced sampler's engine generates tokens again: its
+    counter only grew, which is no proof of a new sampler. It then reads the fence and ends
+    with exit 0: restarted, not the end of the data."""
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart()
+    cloud.tickets[first.ticket].update(sampler="running", exit=None)
+    cloud.eng(first.ticket).update(running=8, queued=0, rate=5000.0)  # the old engine recovers
+    _run(pool, clock, clock.t + 10 * MIN)
+    assert first.fenced_for_restart and first.state == READY and not cloud.kinds("restart")
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)  # it leaves fenced
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished is None and pool.stopped is None and len(cloud.kinds("restart")) == 1
+    assert not first.fenced_for_restart and "sampler_left_fenced" in _names(pool)

@@ -113,8 +113,11 @@ class Member:
     # of the data. Only read when the ops cannot say why a sampler ended (no
     # ``exit_evidence``: the run store's lease and member records decide otherwise). Set
     # before the fence call and saved at once; cleared when a restart replaced the sampler,
-    # at a pool-retry, and when the engine's token counter moves again.
+    # at a pool-retry, and when the engine's token counter reads below ``fence_tokens`` (a
+    # new engine process counts from zero: a restart whose call failed did replace the
+    # sampler). Left set when in doubt: the cost is one more restart at the end of the data.
     fenced_for_restart: bool = False
+    fence_tokens: float | None = None  # the engine's token counter when that fence was asked for
     metrics_misses: int = 0  # probes in a row of a running sampler whose engine /metrics did not read
     # scale down in "drain" mode: since when its sampler claims no new task (None: not retiring)
     retiring_since: float | None = None
@@ -1582,12 +1585,14 @@ class IslandPool:
         limit = self.ecfg.engine_stall_s
         if limit is None or probe.gen_tokens is None or probe.sampler != "running":
             return False
+        if m.fenced_for_restart and m.fence_tokens is not None and probe.gen_tokens < m.fence_tokens:
+            # the counter started over: a new engine process runs, so a restart whose call
+            # failed (the ssh dropped after ``docker run``) did replace the fenced sampler. A
+            # counter that only grew proves nothing (the stalled engine may have recovered,
+            # and its sampler still leaves fenced): the note stays.
+            m.fenced_for_restart, m.fence_tokens = False, None
         busy = (probe.running or 0) + (probe.queued or 0) > 0
         if m.tokens_seen is None or probe.gen_tokens != m.tokens_seen:
-            if m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen:
-                # tokens again: the stalled incarnation is not the one running (a restart whose
-                # call failed, e.g. the ssh dropped after ``docker run``, did replace it)
-                m.fenced_for_restart = False
             if m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen and m.stall_failures:
                 self._event("engine_progress_resumed", ticket=m.ticket, shard=m.shard,
                             after_restarts=m.stall_failures)
@@ -1615,7 +1620,7 @@ class IslandPool:
         if fence is not None:  # the stuck incarnation's claims go back at once
             # noted before the call (a fence can take effect and still raise: a lost answer)
             # and saved before the restart (a pool killed during its ssh must not forget it)
-            m.fenced_for_restart = True
+            m.fenced_for_restart, m.fence_tokens = True, probe.gen_tokens
             self._save_now()
             try:
                 fence(m)
@@ -1787,7 +1792,7 @@ class IslandPool:
         return self.live()
 
     def snapshot(self) -> dict:
-        return {"stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,
+        return {"format": STATE_FORMAT, "stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,
                 "target": self.config.target, "scale_seq": self.scale_seq, "shrink": self.shrink,
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget)}
@@ -1803,6 +1808,7 @@ class IslandPool:
         pool.state_path = path
         if path.exists():
             doc = json.loads(path.read_text())
+            check_state_format(doc, path)
             pool.members = [Member(**m) for m in doc.get("members", [])]
             for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
                 m.ever_ready = m.ever_ready or m.joined
@@ -1823,6 +1829,65 @@ class IslandPool:
                     else:  # no probe: run the start again (every step is idempotent)
                         m.state = PROVISIONING
         return pool
+
+
+# -- state file format ---------------------------------------------------------
+# 1: no ``format`` key (the files before the fence retry). 2: ``format``, the member state
+# ``fencing`` and the member fields below. A pool reads any format up to its own; the code
+# before format 2 fails on a format 2 file (unknown member fields), also in pool-stop:
+# ``pool-state-downgrade`` (:func:`downgrade_state`) writes the file back as format 1.
+STATE_FORMAT = 2
+FORMAT_1_MEMBER_FIELDS = (
+    "account", "ticket", "shard", "state", "lease_until", "replaces",
+    "replaced_by", "created", "data_slot", "replaces_shard", "granted", "charged_to",
+    "hourly_ucr", "started", "joined", "restarts", "ready_since", "ever_ready",
+    "unreachable_since", "status_fail_since", "alerted", "predecessor_lost", "predecessor_retired", "handed_off",
+    "end_reason", "drain_error", "config_error", "tokens_seen", "tokens_moved_at", "stall_failures",
+    "metrics_misses", "retiring_since", "drain_seq", "paused", "resumed", "progress_at",
+    "progress_ticks", "trainer_wait", "start_retries", "start_retry_at", "vram_alerts_seen",
+)
+
+
+def check_state_format(doc: dict[str, Any], path: Any = None) -> None:
+    """Refuse a state file written by a newer pool (its fields would be dropped or misread)."""
+    try:
+        found = int(doc.get("format", 1))
+    except (TypeError, ValueError):
+        found = None
+    if found is None or found > STATE_FORMAT:
+        raise RuntimeError(
+            f"pool state {path or ''} has format {doc.get('format')!r}; this code reads up to format "
+            f"{STATE_FORMAT}. It was written by a newer yeto: run the pool commands with that version, or "
+            "write the file back for this one with its `python -m yeto.launch.nc pool-state-downgrade "
+            "--config <pool.json>`")
+
+
+def downgrade_state(doc: dict[str, Any], *, drop_owed_fences: bool = False) -> tuple[dict[str, Any] | None, list[str]]:
+    """``doc`` as a format 1 state document, and why not (then None): a member in a state
+    format 1 does not know (``fencing``), or a shard fence still owed (format 1 would forget
+    it; ``drop_owed_fences`` gives it up, the notes then name each shard left unfenced).
+    The format 2 member fields are dropped: grace and restart bookkeeping only."""
+    notes: list[str] = []
+    refused = False
+    for m in doc.get("members", []):
+        if m.get("state") == FENCING:
+            refused = True
+            notes.append(f"member {m.get('ticket')} (shard {m.get('shard')}) is `fencing`: its node is kept until "
+                         "its shard fence succeeds; the older code does not know this state. Let the pool finish "
+                         "the fence, or run pool-stop (it releases the node) first")
+        elif m.get("fence_pending") is not None:
+            if drop_owed_fences:
+                notes.append(f"shard {m.get('shard')} of {m.get('ticket')} is NOT fenced and the older code will "
+                             "not retry it")
+            else:
+                refused = True
+                notes.append(f"the fence of shard {m.get('shard')} (member {m.get('ticket')}) is still owed; the "
+                             "older code would forget it. Let the pool finish it, or pass --drop-owed-fences")
+    if refused:
+        return None, notes
+    out = {k: v for k, v in doc.items() if k != "format"}
+    out["members"] = [{k: v for k, v in m.items() if k in FORMAT_1_MEMBER_FIELDS} for m in doc.get("members", [])]
+    return out, notes
 
 
 def _slot(account: Any) -> Any:

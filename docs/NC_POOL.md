@@ -384,6 +384,32 @@ To release a single ticket:
 python -m yeto.launch.nc down --account <account> --ticket <ticket>
 ```
 
+### Upgrading and rolling back yeto: the state file format
+
+The pool state file carries a `format` number. Format 1 (no `format` key) is
+what every yeto before the fence retry writes. Format 2 adds the member state
+`fencing` and a few member fields (the fence still owed, grace and restart
+bookkeeping).
+
+- **Upgrade.** Nothing to do: a newer yeto reads the older file and writes
+  the newer format at its next save.
+- **Rollback.** A yeto that writes format 1 cannot read a format 2 file: it
+  fails on the unknown member fields with a `TypeError`, in `pool` and in
+  `pool-stop` alike. Before you install the older version, stop the pool
+  loop and run, with the newer version:
+
+  ```
+  python -m yeto.launch.nc pool-state-downgrade --config pool.json
+  ```
+
+  It writes the state file as format 1 and keeps the original next to it
+  (`<name>.format2.bak`). It is refused while a pool loop is alive, while a
+  member is `fencing` (wait for the fence, or run `pool-stop` first), and
+  while a shard fence is still owed; `--drop-owed-fences` gives those fences
+  up and prints each shard left unfenced.
+- A yeto that meets a state file of a format newer than its own says so and
+  names this command instead of guessing.
+
 ## What the pool does
 
 On each tick, the pool reads every member's ticket and probes its node with
