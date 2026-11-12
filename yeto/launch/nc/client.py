@@ -16,13 +16,17 @@ The tools read their own account file; no account secret passes through here.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +42,10 @@ LEASE_HOURS = 4.0
 
 class NcError(RuntimeError):
     pass
+
+
+class LedgerError(NcError):
+    """The ticket ledger exists and cannot be read (it is not taken for empty)."""
 
 
 class NcRefused(NcError):
@@ -153,29 +161,84 @@ def cost_record(op: str, ticket: str, *, name: str | None = None, **attrs: Any) 
         print(f"WARNING: cost ledger write for NC ticket {ticket} failed: {error!r}", file=sys.stderr, flush=True)
 
 
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def state_file_lock(path: Path) -> Iterator[None]:
+    """Exclusive hold on a state file for one read-modify-write: a lock per path
+    for the threads of this process (the pool reads tickets from several), and an
+    ``flock`` on ``<name>.lock`` next to it for other processes on the same state
+    dir (a manual command while a pool runs). The lock file is never replaced."""
+    key = os.path.abspath(path)
+    with _FILE_LOCKS_GUARD:
+        thread_lock = _FILE_LOCKS.setdefault(key, threading.RLock())
+    with thread_lock:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing the descriptor drops the flock
+
+
+def write_json_atomic(path: Path, doc: Any) -> None:
+    """Replace ``path`` with ``doc``: a temporary file of its own (0600, same
+    directory), synced, then renamed. A reader sees the old file or the new one."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 class Ledger:
-    """Tickets created by this tool (append-only file, 0600)."""
+    """Tickets created by this tool (append-only file, 0600). Every change is one
+    read-modify-write under :func:`state_file_lock`. A ledger that exists and cannot
+    be read is an error, never an empty ledger: the next write would replace every
+    ticket this tool owns with one row."""
 
     def __init__(self, path: Path):
         self.path = path
 
     def load(self) -> list[dict[str, Any]]:
         try:
-            return json.loads(self.path.read_text())
-        except (OSError, ValueError):
+            text = self.path.read_text()
+        except FileNotFoundError:
             return []
+        except OSError as error:
+            raise LedgerError(f"ticket ledger {self.path}: cannot be read: {error!r}") from error
+        try:
+            rows = json.loads(text)
+        except ValueError as error:
+            raise LedgerError(f"ticket ledger {self.path}: not JSON ({error}); repair or move it aside "
+                              "(its tickets may still be billing)") from error
+        if not isinstance(rows, list) or not all(isinstance(r, dict) and "ticket" in r for r in rows):
+            raise LedgerError(f"ticket ledger {self.path}: not a list of ticket rows")
+        return rows
 
     def add(self, account: int, ticket: str, **extra: Any) -> None:
-        rows = self.load()
-        rows.append({"account": account, "ticket": ticket, "created_at": time.time(), **extra})
-        self._write(rows)
+        with state_file_lock(self.path):
+            rows = self.load()
+            rows.append({"account": account, "ticket": ticket, "created_at": time.time(), **extra})
+            self._write(rows)
 
     def mark(self, ticket: str, **fields: Any) -> None:
-        rows = self.load()
-        for row in rows:
-            if row["ticket"] == ticket:
-                row.update(fields)
-        self._write(rows)
+        with state_file_lock(self.path):
+            rows = self.load()
+            for row in rows:
+                if row["ticket"] == ticket:
+                    row.update(fields)
+            self._write(rows)
 
     def owns(self, account: int, ticket: str) -> bool:
         return any(r["account"] == account and r["ticket"] == ticket for r in self.load())
@@ -188,12 +251,7 @@ class Ledger:
         return [r for r in self.open_rows() if r.get("run") == run]
 
     def _write(self, rows: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(rows, f, indent=1)
-        os.replace(tmp, self.path)
+        write_json_atomic(self.path, rows)
 
 
 class NcClient:
@@ -218,12 +276,35 @@ class NcClient:
             doc = json.loads(text[text.index("{"):]) if "{" in text else {}
         except ValueError as exc:
             raise NcError(f"{argv[0]}: unparseable output (exit {out.returncode})") from exc
-        if out.returncode != 0 and not doc:
-            raise NcError(f"{argv[0]} exit {out.returncode}: {(out.stderr or '')[-300:]}")
+        if out.returncode != 0:  # a failed call decides nothing, whatever it printed
+            detail = doc.get("error") or (out.stderr or "")[-300:]
+            raise NcError(f"{argv[0]} exit {out.returncode}: {detail}")
         return doc
 
     def status(self) -> dict[str, Any]:
-        return self._call([*_tool("query"), "status", "--account", str(self.account)])
+        """The account's status, only when the answer can be acted on: the tool
+        succeeded and the answer names the ticket of this session - ``"ticket":
+        null`` (no order) or a ticket with a state. Anything else (no output, an
+        error document, no ``ticket`` field, a ticket without a state) raises: it
+        says nothing about the ticket, and is never read as "no open ticket"."""
+        doc = self._call([*_tool("query"), "status", "--account", str(self.account)])
+        ticket = doc.get("ticket")
+        if doc.get("ok", True) is not True or "ticket" not in doc or not (
+                ticket is None or (isinstance(ticket, dict) and isinstance(ticket.get("state"), str))):
+            raise NcError(f"{_tool('query')[0]} status: account {self.account}: the answer does not report "
+                          f"the ticket (keys {sorted(doc)[:8]}, error {str(doc.get('error'))[:200]!r})")
+        return doc
+
+    def _current(self, expect: str) -> dict[str, Any]:
+        """The account's current ticket ({}: none). An answer that does not show
+        ``expect`` is read once more before anyone concludes that ``expect`` is
+        gone: one wrong "no order" answer must not retire a node or close a ticket
+        in the ledger."""
+        for _ in range(2):
+            current = self.status().get("ticket") or {}
+            if current.get("id") == expect:
+                break
+        return current
 
     def balance(self) -> int | None:
         bal = (self.status().get("balance") or {}).get("balance_ucredits")
@@ -238,10 +319,12 @@ class NcClient:
     def ticket_status(self, ticket: str) -> LeaseStatus:
         """``ticket`` as a :class:`~.elastic.LeaseStatus`. The account's current
         ticket is the only one the tool reports; another id (or none) means ``ticket``
-        ended (one open order per account). A failed call raises."""
+        ended (one open order per account), once two answers in a row say so. A failed
+        call, or an answer that does not report the ticket, raises (the pool reads
+        that as a control-plane blip and decides nothing on it)."""
         from ..pool.status import LeaseStatus  # noqa: PLC0415
 
-        t = self.status().get("ticket") or {}
+        t = self._current(ticket)
         if t.get("id") != ticket:
             return LeaseStatus("ended", end_reason=None)
         state = t.get("state")
@@ -320,8 +403,7 @@ class NcClient:
     def _delete(self, ticket: str) -> dict[str, Any]:
         if not self.ledger.owns(self.account, ticket):
             raise NcRefused(f"ticket {ticket} on account {self.account} was not created by this tool")
-        st = self.status()
-        current = st.get("ticket") or {}
+        current = self._current(ticket)
         if current.get("id") != ticket:
             if current.get("id") is None or current.get("state") not in OPEN_STATES:
                 self.ledger.mark(ticket, ended=True)
@@ -332,9 +414,13 @@ class NcClient:
             self.ledger.mark(ticket, ended=True)
             return {"ticket": ticket, "state": current.get("state"), "already": True}
         doc = self._call([*_tool("manage"), "delete", "--account", str(self.account), "--yes"])
+        if doc.get("ok") is False:
+            raise NcError(f"ticket {ticket}: delete failed: {doc.get('error') or doc}")
+        absent = 0  # "no order" answers in a row: one alone does not confirm the release
         for _ in range(12):
             t = self.status().get("ticket") or {}
-            if t.get("id") in (None, ticket) and t.get("state") not in OPEN_STATES:
+            absent = absent + 1 if t.get("id") is None else 0
+            if (t.get("id") == ticket or absent >= 2) and t.get("state") not in OPEN_STATES:
                 self.ledger.mark(ticket, ended=True, ended_at=t.get("ended_at"), end_reason=t.get("end_reason"))
                 return {"ticket": ticket, "state": t.get("state", "ended"), "ended_at": t.get("ended_at"),
                         "end_reason": t.get("end_reason"), "released": doc.get("released")}
