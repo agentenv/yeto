@@ -108,8 +108,12 @@ class Member:
     tokens_seen: float | None = None  # the engine's generation-token counter at the last probe
     tokens_moved_at: float | None = None  # last probe it moved, or the engine was idle
     stall_failures: int = 0  # stall restarts in a row with no token progress between them
-    # the pool fenced this sampler's incarnation for an in-place restart (a stalled engine):
-    # an exit 0 that follows is the fenced sampler leaving, not the end of the data
+    # the pool fenced (or tried to fence) this sampler's incarnation for an in-place restart
+    # (a stalled engine): an exit 0 that follows is the fenced sampler leaving, not the end
+    # of the data. Only read when the ops cannot say why a sampler ended (no
+    # ``exit_evidence``: the run store's lease and member records decide otherwise). Set
+    # before the fence call and saved at once; cleared when a restart replaced the sampler,
+    # at a pool-retry, and when the engine's token counter moves again.
     fenced_for_restart: bool = False
     metrics_misses: int = 0  # probes in a row of a running sampler whose engine /metrics did not read
     # scale down in "drain" mode: since when its sampler claims no new task (None: not retiring)
@@ -1242,14 +1246,9 @@ class IslandPool:
                 self._once(m, "handed_off", "sampler_handed_off")
                 self._retire(m, "handed off", lost=False)
             return
-        if kind == el.FINISHED and m.fenced_for_restart:
-            # the incarnation this pool fenced for a restart left (a fenced sampler ends with
-            # exit 0) and the restart did not replace it, e.g. its start failed on one ssh
-            # error: the data has not ended. Start the shard's sampler again on the node.
-            self._restart_fenced(m, now)
-            return
         if kind == el.FINISHED:
-            if self._exit_zero_not_data_end(m, now):
+            # once the data ended (another sampler finished) nothing is restarted any more
+            if not self.finished and self._exit_zero_not_data_end(m, now):
                 return
             self._event("sampler_finished", ticket=m.ticket, shard=m.shard)
             # a normal end (the data ended): no restart, no replacement node, no new order
@@ -1375,6 +1374,7 @@ class IslandPool:
             restart(m, self.shards())
             now = self.clock()
             m.config_error = None
+            m.fenced_for_restart = False  # a new sampler replaced the fenced one
             m.restarts = 0  # restarts before a configuration fix are not a crash loop
             m.state, m.started, m.joined, m.created = STARTING, now, False, now
             self._event("sampler_retry", ticket=m.ticket, shard=m.shard)
@@ -1490,9 +1490,19 @@ class IslandPool:
         * no stop request, the lease held by a pool fence or the newest incarnation left
           FENCED: the sampler is restarted in place like a crashed one (counted toward
           ``max_sampler_restarts``; past it the node is replaced);
-        * the store did not read: nothing is decided this tick."""
+        * the store did not read: nothing is decided this tick.
+
+        The store's records decide whenever the ops can read them; ``fenced_for_restart``
+        (this pool's memory of a stall fence) is the fallback for ops that cannot, because
+        the note can be wrong both ways: lost with a killed pool, or left set after a
+        restart whose call failed although the new sampler runs."""
         read = getattr(self.ops, "exit_evidence", None)
         if read is None:
+            if m.fenced_for_restart:
+                # no store to ask: this pool's own note that it fenced the incarnation for a
+                # restart that did not replace it (e.g. its start failed on one ssh error)
+                self._restart_fenced(m, now)
+                return True
             return False
         try:
             seen = read(m)
@@ -1574,6 +1584,10 @@ class IslandPool:
             return False
         busy = (probe.running or 0) + (probe.queued or 0) > 0
         if m.tokens_seen is None or probe.gen_tokens != m.tokens_seen:
+            if m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen:
+                # tokens again: the stalled incarnation is not the one running (a restart whose
+                # call failed, e.g. the ssh dropped after ``docker run``, did replace it)
+                m.fenced_for_restart = False
             if m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen and m.stall_failures:
                 self._event("engine_progress_resumed", ticket=m.ticket, shard=m.shard,
                             after_restarts=m.stall_failures)
@@ -1599,12 +1613,20 @@ class IslandPool:
             return False
         fence = getattr(self.ops, "fence_incarnation", None)  # lease only: the shard keeps sampling
         if fence is not None:  # the stuck incarnation's claims go back at once
+            # noted before the call (a fence can take effect and still raise: a lost answer)
+            # and saved before the restart (a pool killed during its ssh must not forget it)
+            m.fenced_for_restart = True
+            self._save_now()
             try:
                 fence(m)
-                m.fenced_for_restart = True
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")
-            except Exception as error:  # noqa: BLE001 - the restart supersedes it at its join anyway
-                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            except Exception as error:  # noqa: BLE001
+                # not owed like a shard fence: the restart below supersedes the incarnation at
+                # its join, and when that fails too the stall is seen again after
+                # engine_stall_s and both are tried again (max_stall_restart_failures, then
+                # the node is retired with the shard fence, which is retried until it holds)
+                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                            kind="incarnation")
         m.stall_failures += 1
         self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.stall_failures,
                     detail=f"engine stalled: {detail}")

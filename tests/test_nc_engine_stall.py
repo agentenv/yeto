@@ -133,7 +133,7 @@ class _FlakyRestart(MetricsCloud):
 
 def _stall_with_a_failed_restart(**elastic_kw):
     clock = Clock()
-    cloud = _FlakyRestart(clock, ready_after=300)
+    cloud = _StallCloud(clock, ready_after=300)  # a _FlakyRestart (defined below)
     pool = _pool(clock, cloud, target=2, accounts=(1, 4), **elastic_kw)
     _run(pool, clock, clock.t + 1800)
     first, second = [m for m in pool.members if m.state == READY]
@@ -214,3 +214,184 @@ def test_a_fenced_sampler_that_left_late_and_cannot_be_restarted_is_still_replac
     cloud.fail_restarts = 10**6
     _run(pool, clock, clock.t + 30 * MIN)
     assert first.state == GONE and pool.members[-1].replaces_shard == first.shard
+
+
+# -- the pool's note of a stall fence (fenced_for_restart) and the run store's evidence ----
+
+class _Killed(BaseException):
+    """The pool process dies (not an ``Exception``: nothing in the tick catches it)."""
+
+
+class _StallCloud(_FlakyRestart):
+    """``fence_answer_lost``: the lease fence is written and the call raises;
+    ``restart_answer_lost``: the new sampler is started and the call raises;
+    ``restart_error``: raised by a restart instead."""
+
+    fence_answer_lost = False
+    restart_answer_lost = 0
+    restart_error = None
+
+    def fence_incarnation(self, m):
+        super().fence_incarnation(m)
+        if self.fence_answer_lost:
+            raise RuntimeError("read timeout: no answer to the lease write")
+
+    def restart(self, m, shards):
+        if self.restart_error is not None:
+            raise self.restart_error
+        super().restart(m, shards)
+        if self.restart_answer_lost:
+            self.restart_answer_lost -= 1
+            raise RuntimeError("ssh exit 255 after docker run")
+
+
+class _StoreStallCloud(_StallCloud):
+    """Ops that can read the run store (``exit_evidence``), like the SSH ops on data_path r2."""
+
+    def exit_evidence(self, m):
+        from yeto.launch.pool.data_path import R2DataPath
+
+        return R2DataPath(self.store).exit_evidence(m.shard)
+
+
+def _stalled(cloud_cls=_StallCloud, *, target=2, setup=None, run=True, **elastic_kw):
+    """``target`` ready samplers; the first one's engine stalls (``setup(cloud, first)`` first)."""
+    clock = Clock()
+    cloud = cloud_cls(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=target, accounts=(1, 4), **elastic_kw)
+    _run(pool, clock, clock.t + 1800)
+    ready = [m for m in pool.members if m.state == READY]
+    for m in ready:
+        cloud.eng(m.ticket).update(running=8, rate=5000.0)
+    _run(pool, clock, clock.t + 5 * MIN)
+    first = ready[0]
+    if setup is not None:
+        setup(cloud, first)
+    cloud.eng(first.ticket).update(running=8, queued=3, rate=0.0)
+    if run:
+        _run(pool, clock, clock.t + 12 * MIN)
+    return clock, cloud, pool, first, ready[-1]
+
+
+def _lost_fence_answer_and_failed_restart(cloud, first):
+    cloud.fence_answer_lost, cloud.fail_restarts = True, 1
+
+
+def test_a_fence_that_took_effect_but_raised_still_marks_the_sampler_fenced():
+    clock, cloud, pool, first, second = _stalled(setup=_lost_fence_answer_and_failed_restart)
+    assert read_lease(cloud.store, first.shard)["incarnation"] == f"pool-fence:{first.ticket}"
+    assert "fence_failed" in _names(pool) and first.fenced_for_restart and not cloud.kinds("restart")
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)  # the old sampler read the fence
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished is None and pool.stopped is None and "sampler_finished" not in _names(pool)
+    assert len(cloud.kinds("restart")) == 1 and second.state == READY
+
+
+def test_with_the_run_store_a_fence_that_took_effect_but_raised_is_read_from_the_lease():
+    def setup(cloud, first):
+        IncarnationLease(cloud.store, first.shard, "inc-1", clock=cloud.clock).claim()
+        _lost_fence_answer_and_failed_restart(cloud, first)
+
+    clock, cloud, pool, first, second = _stalled(_StoreStallCloud, setup=setup)
+    first.fenced_for_restart = False  # even without the pool's own note
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished is None and "sampler_exit_not_data_end" in _names(pool)
+    assert len(cloud.kinds("restart")) == 1 and second.state == READY
+
+
+def _restart_answer_lost(cloud, first):
+    cloud.restart_answer_lost = 1
+
+
+def test_a_restart_that_took_effect_but_raised_does_not_leave_the_fence_note_behind():
+    """The new sampler runs although the restart call failed (the ssh dropped after
+    ``docker run``): once its engine generates tokens the note is cleared, and its exit 0
+    is the end of the data: no extra restart, no node ordered for data that ended."""
+    clock, cloud, pool, first, second = _stalled(target=1, setup=_restart_answer_lost, max_sampler_restarts=0)
+    assert first.fenced_for_restart and "start_failed" in _names(pool) and len(cloud.kinds("restart")) == 1
+    cloud.eng(first.ticket).update(running=8, queued=0, rate=5000.0)  # the new sampler generates
+    _run(pool, clock, clock.t + 10 * MIN)
+    assert first.state == READY and not first.fenced_for_restart
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)  # the data ended
+    _run(pool, clock, clock.t + 3 * MIN)
+    assert pool.finished and "sampler_finished" in _names(pool) and "sampler_left_fenced" not in _names(pool)
+    assert len(cloud.kinds("restart")) == 1 and len(cloud.kinds("order")) == 1
+
+
+def test_with_the_run_store_a_stale_fence_note_does_not_turn_the_end_of_the_data_into_a_restart():
+    clock, cloud, pool, first, second = _stalled(_StoreStallCloud, target=1, setup=_restart_answer_lost,
+                                                  max_sampler_restarts=0)
+    IncarnationLease(cloud.store, first.shard, "inc-2", clock=clock).claim()  # the new sampler joined
+    first.fenced_for_restart = True  # the note is stale
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    _run(pool, clock, clock.t + 3 * MIN)
+    assert pool.finished and len(cloud.kinds("restart")) == 1 and len(cloud.kinds("order")) == 1
+
+
+def test_a_pool_retry_after_a_fenced_restart_hit_a_config_error_clears_the_fence_note():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart(stop_on_finish=False)
+    error = RuntimeError("image not found")
+    error.config_error = True
+    cloud.restart_error = error
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert first.config_error is not None and pool.halted and first.fenced_for_restart
+    cloud.restart_error = None
+    assert pool.retry() == [first.ticket] and not first.fenced_for_restart
+    cloud.eng(first.ticket).update(running=0, queued=0, rate=0.0)
+    _run(pool, clock, clock.t + 10 * MIN)
+    restarts = len(cloud.kinds("restart"))
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)  # the data ended
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished and len(cloud.kinds("restart")) == restarts and "sampler_finished" in _names(pool)
+
+
+def test_the_fence_note_is_saved_before_the_restart_and_outlives_a_killed_pool(tmp_path):
+    from yeto.launch.nc.lease_pool import PoolConfig
+    from yeto.launch.pool.island_pool import IslandPool
+
+    clock, cloud, pool, first, second = _stalled(run=False)
+    path = tmp_path / "pool.json"
+    pool.state_path = path
+    pool.save(path)
+    cloud.restart_error = _Killed()  # the process is killed while the restart's ssh runs
+    with pytest.raises(_Killed):
+        _run(pool, clock, clock.t + 12 * MIN)
+    assert cloud.fenced_incarnations == [first.ticket]
+    cloud.restart_error = None
+    again = IslandPool.restore(path, PoolConfig(target=2, accounts=[1, 4], shard_base="nc"), cloud, clock=clock,
+                               log=lambda x: None, events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
+    restored = next(m for m in again.members if m.ticket == first.ticket)
+    assert restored.fenced_for_restart and restored.state == READY
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)  # the fenced sampler leaves
+    _run(again, clock, clock.t + 2 * MIN)
+    assert again.finished is None and again.stopped is None and len(cloud.kinds("restart")) == 1
+
+
+def test_a_paused_fenced_sampler_that_exits_0_is_neither_restarted_nor_the_end_of_the_data():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart()
+    first.paused = True
+    _run(pool, clock, clock.t + 5 * MIN)
+    assert pool.finished is None and pool.stopped is None and not cloud.kinds("restart")
+    assert first.fenced_for_restart and first.state == READY
+
+
+def test_a_fenced_sampler_being_scaled_down_that_exits_0_is_released_not_restarted():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart()
+    first.retiring_since = clock.t
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert first.state == GONE and not cloud.kinds("restart")
+    assert pool.finished is None and "sampler_finished" not in _names(pool)
+
+
+def test_after_the_data_ended_a_fenced_sampler_that_exits_0_is_not_restarted():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart(stop_on_finish=False)
+    cloud.tickets[first.ticket].update(sampler="running", exit=None)  # the fenced one has not left yet
+    cloud.eng(first.ticket).update(running=0, queued=0, rate=0.0)
+    cloud.tickets[second.ticket].update(sampler="exited", exit=0)  # the other sampler: the data ended
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished and first.fenced_for_restart and first.state == READY
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    _run(pool, clock, clock.t + 3 * MIN)
+    assert not cloud.kinds("restart") and len(cloud.kinds("order")) == 2
+    assert first.state == GONE and pool.stopped
