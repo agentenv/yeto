@@ -457,7 +457,8 @@ class Run:
         names the trainer's GPU, so its cost is priced), the cost bar's cap
         (``budget.usd``) and an optional price table (``dashboard.prices``)."""
         dash = self.cfg.get("dashboard") or {}
-        argv = ["--store", self.cfg["store"], "--run", self.run]
+        # the launcher writes its records under ~/.yeto/runs/<its --cluster-prefix>
+        argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name()]
         usd = (self.cfg.get("budget") or {}).get("usd")
         if usd:
             argv += ["--budget", str(usd)]
@@ -1035,12 +1036,13 @@ class Run:
         """The trainer launch's run name: its ``--cluster-prefix`` (``yeto launch`` names the
         run ``yeto`` without one). ``yeto down`` / the STOP flag / the worker check use it."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
-        for i, a in enumerate(argv):
+        name = LAUNCH_DEFAULT_NAME
+        for i, a in enumerate(argv):  # argparse: the last one wins
             if a == "--cluster-prefix" and i + 1 < len(argv):
-                return argv[i + 1]
-            if a.startswith("--cluster-prefix="):
-                return a.split("=", 1)[1]
-        return LAUNCH_DEFAULT_NAME
+                name = argv[i + 1]
+            elif a.startswith("--cluster-prefix="):
+                name = a.split("=", 1)[1]
+        return name
 
     def starvation_stop(self, why: str, poll_s: float = 30.0) -> None:
         """Stop a starving trainer the way a budget stop does: the run's STOP flag (``yeto

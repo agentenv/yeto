@@ -77,3 +77,58 @@ def test_trainer_stop_paths_use_the_trainer_launch_name(make_run, monkeypatch):
     assert bare.trainer_launch_name() == "yeto"  # the launch default
 
 
+def test_the_last_cluster_prefix_names_the_launch(make_run):
+    run = make_run()
+    run.cfg["trainer"]["argv"] = ["--cluster-prefix", "a", "--cluster-prefix=b"]
+    assert run.trainer_launch_name() == "b"  # argparse keeps the last
+
+
+def test_the_dashboard_follows_the_trainer_launch_records(make_run):
+    """The launcher writes ``~/.yeto/runs/<--cluster-prefix>/fleet.jsonl``: the dashboard's
+    ``--run`` must be that name, not the run config's ``run``."""
+    argv = make_run().dashboard_args()
+    assert argv[argv.index("--run") + 1] == "r1-trainer"
+
+
+_HOLD = """
+import subprocess, sys, time
+sys.path.insert(0, {root!r})
+from yeto.rl import up
+up.STATE_ROOT = __import__("pathlib").Path({state!r})
+run = up.Run.__new__(up.Run)
+run.dir = up.STATE_ROOT / "r1"
+run.dir.mkdir(parents=True, exist_ok=True)
+assert run.lock_up() is None
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], close_fds=False,
+                         start_new_session=True)
+print(child.pid, flush=True)
+time.sleep(60)
+"""
+
+
+def test_a_sigkilled_run_up_leaves_no_lock_held_by_its_children(make_run, tmp_path):
+    """The lock fd is not inherited (O_CLOEXEC, even with close_fds=False): a detached
+    child (pool / trainer launcher) outliving a SIGKILLed ``up`` does not hold the lock."""
+    import signal
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    run = make_run()
+    root = str(Path(up.__file__).resolve().parents[2])
+    holder = subprocess.Popen([sys.executable, "-c", _HOLD.format(root=root, state=str(run.dir.parent))],
+                              stdout=subprocess.PIPE, text=True)
+    child = int(holder.stdout.readline())
+    try:
+        assert run.lock_up() == holder.pid  # held by the live up
+        run._up_lock = None
+        holder.send_signal(signal.SIGKILL)
+        holder.wait()
+        time.sleep(0.2)
+        assert os.kill(child, 0) is None  # the grandchild still runs
+        assert run.lock_up() is None
+    finally:
+        holder.kill()
+        os.kill(child, signal.SIGKILL)
+        holder.stdout.close()
