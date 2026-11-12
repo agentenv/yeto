@@ -1387,8 +1387,9 @@ new object keys under the store's `sample-buffer/shards/` (listed every
 | `stop_grace_min` | 20 | After the STOP flag, how long the monitor waits for the trainer launcher to exit before `yeto down`. |
 
 What never stops the trainer: a healthy sampler (long agentic trials can go
-an hour without a group), a ready member paused with `yeto run pause`, and
-pool state that cannot be read; these alert only. The incarnation gate's
+an hour without a group), a member paused with `yeto run pause` (in any state),
+pool state that cannot be read (of any pool), and a failed buffer listing; these
+alert only. A stop is decided on a fresh listing of the buffer. The incarnation gate's
 fail-closed pause (`incarnation gate: training paused`, a lease that cannot be
 read) is not starvation: the groups are in the buffer and the trainer waits for
 the lease. When the trainer log shows that pause, the alert names it

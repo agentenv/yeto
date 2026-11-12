@@ -16,8 +16,9 @@ Verdicts, both measured from the last new group (or the start of the watch):
   alert only; agentic trials may run for a long time, so the default is wide);
 * ``stop`` after ``stop_s`` without a new group **and** no healthy sampler for at
   least ``unhealthy_s`` (no member ready, or no pool loop driving one). A ready but
-  paused member (``yeto run pause``) is an operator's choice: no stop while one is
-  paused. Pool state that cannot be read is no evidence either way: no stop.
+  paused member (``yeto run pause``, in any state) is an operator's choice: no stop while
+  one is paused. Pool state that cannot be read (any pool's) and a failed buffer listing
+  are no evidence either way: no stop.
 
 ``0`` turns a verdict off. Neutral: no store, no pool, no clock of its own.
 """
@@ -112,11 +113,12 @@ class StarvationWatch:
         self.alerted = False
 
     def observe(self, now: float, *, new_groups: int | None, health: SamplerHealth,
-                cause: str | None = None) -> Verdict:
+                cause: str | None = None, listed: bool = True) -> Verdict:
         """One poll. ``new_groups``: buffer objects the listing found that the previous
         listing did not (None: not listed this poll, the listing failed, or the first
         listing). ``cause``: what the trainer side reports (e.g. the incarnation gate's
-        fail-closed pause), named in the reason."""
+        fail-closed pause), named in the reason. ``listed``: the latest listing of the
+        buffer succeeded; after a failed one there is no stop (no evidence of no group)."""
         recovered = False
         if new_groups:
             self.since = now
@@ -132,7 +134,9 @@ class StarvationWatch:
         reason = f"no new group in the buffer for {starved / 60:.0f} min; {health.phrase()}"
         if cause:
             reason += f"; trainer side: {cause}"
-        if (cfg.stop_s > 0 and starved >= cfg.stop_s and health.healthy == 0 and health.paused == 0
+        if not listed:
+            reason += "; the latest buffer listing failed"
+        if (listed and cfg.stop_s > 0 and starved >= cfg.stop_s and health.healthy == 0 and health.paused == 0
                 and self.unhealthy_since is not None and now - self.unhealthy_since >= cfg.unhealthy_s):
             return Verdict(STOP, starved, reason + f" (stop after {cfg.stop_s / 60:.0f} min with no "
                            f"healthy sampler for {(now - self.unhealthy_since) / 60:.0f} min)",
@@ -141,7 +145,7 @@ class StarvationWatch:
             new = not self.alerted
             self.alerted = True
             why = ""
-            if cfg.stop_s > 0 and health.healthy == 0 and health.paused == 0:
+            if cfg.stop_s > 0 and listed and health.healthy == 0 and health.paused == 0:
                 why = f" (the trainer is stopped at {cfg.stop_s / 60:.0f} min if no sampler recovers)"
             elif cfg.stop_s > 0:
                 why = " (no stop: a sampler is healthy or paused, or the pool state is unreadable)"

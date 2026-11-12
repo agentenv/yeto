@@ -151,7 +151,7 @@ def test_sampler_health_reads_the_pool_state(run_up):
     assert (h.healthy, h.paused, h.live) == (1, 1, 3)
     run.pool_alive = False
     h = run.sampler_health()
-    assert h.healthy == 0 and h.paused == 0 and "pool loop not running" in h.detail
+    assert h.healthy == 0 and h.paused == 1 and "pool loop not running" in h.detail
 
 
 def test_trainer_side_cause_reads_the_gate_pause_from_the_trainer_log(run_up, tmp_path):
@@ -232,3 +232,52 @@ def test_starvation_off_and_bad_section_refused_by_preflight(run_up):
     assert run.starvation_check(run.clock.t) is None
     run = run_up(starvation={"stop_min": -1})
     assert "stop_min" in run.starvation_problem()
+
+
+def _starve(run, polls=40, step=5 * MIN):
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    why = None
+    for _ in range(polls):
+        why = run.starvation_check(run.clock.t) or why
+        run.clock.t += step
+    return why
+
+
+def test_a_failing_buffer_listing_never_stops(run_up):
+    run = run_up(members=[])
+    run.buffer_keys = lambda: None
+    assert _starve(run) is None
+    assert "listing failed" in run.state["starvation"]["why"]
+
+
+def test_a_listing_that_fails_after_a_good_one_never_stops(run_up):
+    run = run_up(members=[], keys={"k0"})
+    ok = iter([True, True])
+    run.buffer_keys = lambda: set(run.keys) if next(ok, False) else None
+    assert _starve(run) is None
+
+
+def test_a_paused_member_in_any_state_blocks_the_stop(run_up):
+    run = run_up(members=[{"ticket": "a", "state": "starting", "paused": True}], keys={"k0"})
+    assert _starve(run) is None
+
+
+def test_one_unreadable_pool_blocks_the_stop(run_up):
+    run = run_up(members=[], keys={"k0"})
+    run.pools = [run.pools[0], types.SimpleNamespace(name="p2", load=lambda: {"shard_base": "t"})]
+    first = run._members
+    run._members = lambda i: first(0) if i == 0 else None
+    assert run.sampler_health().healthy is None
+    assert _starve(run) is None
+
+
+def test_the_stop_lists_the_buffer_again_first(run_up):
+    run = run_up(starvation={"check_s": 3000}, members=[], keys={"k0"})  # listings at 0, 50, 100, 150 min
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    t0 = run.clock.t
+    while run.clock.t - t0 < 119 * MIN:
+        assert run.starvation_check(run.clock.t) is None
+        run.clock.t += MIN
+    run.keys.add("k1")  # a group lands after the 100-min listing, right before the stop
+    run.clock.t = t0 + 125 * MIN
+    assert run.starvation_check(run.clock.t) is None

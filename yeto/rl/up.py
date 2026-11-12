@@ -846,12 +846,14 @@ class Run:
 
         healthy = paused = live = 0
         readable = False
+        unreadable = False
         notes = []
         controller = getattr(self, "controller", None)
         for i, ref in enumerate(self.pools):
             members = self._members(i)
             if members is None:
                 notes.append(f"{ref.name}: no state")
+                unreadable = True
                 continue
             readable = True
             if controller is not None:
@@ -865,15 +867,17 @@ class Run:
             alive = [m for m in members if m.get("state") != "gone"]
             live += len(alive)
             ready = [m for m in alive if m.get("state") == "ready"]
+            paused += sum(1 for m in alive if m.get("paused"))  # an operator's hold, in any state
             if not driven:
                 notes.append(f"{ref.name}: pool loop not running")
                 continue
-            paused += sum(1 for m in ready if m.get("paused"))
             healthy += sum(1 for m in ready if not m.get("paused"))
             halted = [m for m in alive if m.get("config_error")]
             if halted:
                 notes.append(f"{ref.name}: {len(halted)} member(s) with a config error")
-        return SamplerHealth(healthy if readable else None, paused=paused, live=live, detail="; ".join(notes))
+        if not readable or (unreadable and healthy == 0):  # an unread pool may hold the healthy ones
+            return SamplerHealth(None, paused=paused, live=live, detail="; ".join(notes))
+        return SamplerHealth(healthy, paused=paused, live=live, detail="; ".join(notes))
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails
@@ -901,16 +905,27 @@ class Run:
             watch = self._starvation = StarvationWatch(cfg, now)
             self._starvation_listed: float | None = None
             self._starvation_keys: set[str] | None = None
-        new_groups = None
-        if self._starvation_listed is None or now - self._starvation_listed >= cfg.check_s:
+            self._starvation_list_ok = False
+        def listing() -> int | None:
             self._starvation_listed = now
             keys = self.buffer_keys()
-            if keys is not None:  # a key not in the previous listing: a new group (pruned keys do not count)
-                if self._starvation_keys is not None:
-                    new_groups = len(keys - self._starvation_keys)
-                self._starvation_keys = keys
-        verdict = watch.observe(now, new_groups=new_groups, health=self.sampler_health(),
-                                cause=self.trainer_side_cause())
+            self._starvation_list_ok = keys is not None
+            if keys is None:
+                return None
+            found = None  # a key not in the previous listing: a new group (pruned keys do not count)
+            if self._starvation_keys is not None:
+                found = len(keys - self._starvation_keys)
+            self._starvation_keys = keys
+            return found
+
+        listed_now = self._starvation_listed is None or now - self._starvation_listed >= cfg.check_s
+        new_groups = listing() if listed_now else None
+        health, cause = self.sampler_health(), self.trainer_side_cause()
+        verdict = watch.observe(now, new_groups=new_groups, health=health, cause=cause,
+                                listed=getattr(self, "_starvation_list_ok", False))
+        if verdict.state == STOP and not listed_now:  # a stop is decided on a fresh listing only
+            verdict = watch.observe(now, new_groups=listing(), health=health, cause=cause,
+                                    listed=self._starvation_list_ok)
         if verdict.recovered:
             _log(f"{RECOVERED_EVENT}: a new group reached the buffer")
             self.state.pop("starvation", None)
