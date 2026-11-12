@@ -243,6 +243,8 @@ class SamplerProc:
             self.round = EngineRound(self.engine, writer, reward=lambda item, completion: 0.0, **common)
         if hasattr(self.round, "sleep"):  # a write that waits for a store read: the others go on
             self.round.sleep = self._wait
+            if hasattr(self.round, "monotonic"):
+                self.round.monotonic = self.clock.monotonic  # the write wait runs on simulated time
         self.loop = SamplerLoop(follower=self.follower, buffer=self.buffer, generate=self.round,
                                 num_rollouts=None, max_backlog_groups=1 << 30, emit=self._emit, poll_s=5.0,
                                 sleep=self._block, should_stop=self._should_stop, clock=self.clock.monotonic)
@@ -259,7 +261,8 @@ class SamplerProc:
             self.lease.claim(self.buffer.entries(), earlier=self.resume.incarnations)
         self.round.write_fenced = self.lease.check_before_write
         if hasattr(self.round, "write_unknown") and hasattr(self.lease, "unknown"):
-            self.round.write_unknown = self.lease.unknown
+            self.round.write_unknown = (self.lease.unread_too_long if hasattr(self.lease, "unread_too_long")
+                                        else lambda: bool(self.lease.unknown))
         self.prompts.fenced = lambda: self.lease.fenced
         self.next_rollout_id = self.resume.next_rollout_id
         self.state = "running"

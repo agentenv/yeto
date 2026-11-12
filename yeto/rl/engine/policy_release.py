@@ -114,7 +114,7 @@ from typing import Any
 
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
-from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, object_size
+from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, is_fatal_store_error, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
@@ -293,6 +293,11 @@ class ReleaseIncomplete(PolicyReleaseError):
 class ReleaseDigestMismatch(ReleaseDeltaError):
     """A full release whose weight files are not the released ones (``file_sha256``);
     the follower treats it like a failed delta rebuild (``PolicyFollower``)."""
+
+
+LATEST_UNREAD = "latest_unread"  # ReleaseNotLoaded.reason: the poll of LATEST failed (no release judged)
+# LATEST was read, but it is no release record
+_DAMAGED_RECORD = (ValueError, TypeError, AttributeError, KeyError, PolicyReleaseError)
 
 
 class ReleaseNotLoaded(PolicyReleaseError):
@@ -1221,6 +1226,7 @@ class PolicyFollower:
         self.max_defer_s = None if max_defer_s is None else float(max_defer_s)
         self._deferred_since: float | None = None  # first hold() deferral of the pending release
         self.last_forced = False  # the last load ignored hold() (deferral bound)
+        self.latest_read_failures = 0  # polls of LATEST the store did not answer
         self.last_deferred_s: float | None = None  # how long the last load was deferred
 
     @contextmanager
@@ -1268,7 +1274,13 @@ class PolicyFollower:
         ready = self._ready_fetch()
         if ready is not None:
             return int(ready.release.seq)
-        latest = self._newest(self.releases.latest())
+        try:
+            latest = self._newest(self.releases.latest())
+        except Exception as error:  # noqa: BLE001 - LATEST not read: unknown now, read again at the next poll
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            return None
         if latest is None or latest.seq <= self._served_seq():
             return None
         return int(latest.seq)
@@ -1296,7 +1308,13 @@ class PolicyFollower:
         ready = self._ready_fetch()
         if ready is not None:
             return int(ready.release.seq)
-        latest = self._newest(self.releases.latest())
+        try:
+            latest = self._newest(self.releases.latest())
+        except Exception as error:  # noqa: BLE001 - LATEST not read: nothing on disk to report; read again at the next poll
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            return False
         if latest is None or latest.seq <= self._served_seq():
             return True
         if self.last_seen is None or latest.seq != self.last_seen.seq:
@@ -1318,8 +1336,19 @@ class PolicyFollower:
         the newest one is not complete yet (``incomplete`` says why; the engines
         keep the release they serve), or when the in-flight rule defers it."""
         timer = PhaseTimer(self.timer)
-        with timer.phase("read_latest_s"):
-            latest = self.releases.latest()
+        try:
+            with timer.phase("read_latest_s"):
+                latest = self.releases.latest()
+        except Exception as error:  # noqa: BLE001 - a poll that failed, not a release that failed
+            # the engines keep the release they serve and the next refresh reads again;
+            # "damaged": the record is there and does not parse (the caller bounds those);
+            # refused credentials / no such bucket are no outage: raised as they are
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            damaged = isinstance(error, _DAMAGED_RECORD) and not isinstance(error, OSError)
+            raise ReleaseNotLoaded(f"the newest release could not be read: {type(error).__name__}: {error}",
+                                   reason=LATEST_UNREAD, fields={"damaged": damaged}) from error
         if latest is None:
             return None
         if self.last_seen is not None and latest.seq < self.last_seen.seq:

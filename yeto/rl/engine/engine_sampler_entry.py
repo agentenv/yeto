@@ -61,9 +61,15 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``rollout_quant``: optional ``{"tier", "apply"}``, applied first
   (:func:`apply_rollout_quant`);
 * ``incarnation_lease``: optional (default on, in the buffer store): ``false``, or
-  ``{"store", "poll_s", "write_check_s"}`` (:mod:`.incarnation_lease`):
+  ``{"store", "poll_s", "write_check_s", "max_unread_s"}`` (:mod:`.incarnation_lease`):
   the incarnation claims the island's lease at join and leaves FENCED, writing no
-  more groups, once another incarnation holds it;
+  more groups, once another incarnation holds it; a lease it could not read for
+  ``max_unread_s`` (default 60; null: no bound) holds its group writes back until
+  a read succeeds again (``rl_sampler_write_deferred``);
+* ``write_defer_max_s``: optional (default 600): the longest group writes wait for
+  a store that does not answer whether the sampler still holds the task and the
+  shard; past it (or when the sampler is asked to stop) a waiting group is given
+  up and its task released (``EngineRound._write_refusal``);
 * ``vram_guard``: optional ``{"high_frac", "realert_s", "interval_s"}`` of the
   card sampler's high-VRAM alert (``vram_guard.VramWatch``; default 0.97, every
   600 s while high, a sample every 60 s): ``rl_sampler_vram_high`` /
@@ -764,7 +770,22 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     island = None
     from .sampler_resume import handoff_requested  # noqa: PLC0415
 
-    handed_off = lambda: handoff_requested(member_store, config.sampler_id)  # noqa: E731
+    handoff_unread = [0]  # failed reads of the handoff record in a row
+
+    def handed_off() -> bool:
+        def unread(error: BaseException) -> None:
+            handoff_unread[0] += 1
+            if handoff_unread[0] == 1:  # one event per outage; the next poll reads again
+                emit("rl_sampler_store_read_failed", what="handoff",
+                     error=f"{type(error).__name__}: {error}"[:300])
+
+        failed = handoff_unread[0]
+        requested = handoff_requested(member_store, config.sampler_id, on_error=unread)
+        if failed and handoff_unread[0] == failed:  # read again
+            handoff_unread[0] = 0
+            emit("rl_sampler_store_read_ok", what="handoff", failed_reads=failed)
+        return requested
+
     predecessor = spec.get("continues_shard")
     if predecessor is not None and str(predecessor) == config.sampler_id:
         raise SamplerSpecError("continues_shard names this sampler's own shard")
@@ -826,6 +847,8 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                                       reclaimed=lambda: reclaimed() or fenced(), incarnation=incarnation,
                                       resume=resume,
                                       data_cursor=getattr(prompts, "cursor", None), make_round=make_round)
+        if spec.get("write_defer_max_s") is not None:
+            island.round.write_defer_max_s = float(spec["write_defer_max_s"])
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
@@ -840,6 +863,7 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
             emit(LEASE_EVENT, incarnation=incarnation, generation=claimed["generation"],
                  superseded=claimed["superseded"], sealed=claimed["sealed"])
             island.round.write_fenced = lease.check_before_write
+            island.round.write_unknown = lease.unread_too_long  # unread for too long: the group waits
             if hasattr(prompts, "fenced"):  # store dispenser: a fenced incarnation renews and writes nothing
                 prompts.fenced = lambda: lease.fenced
 
@@ -848,7 +872,18 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
                       f"{config.sampler_id}; no group is written from now on", flush=True)
                 emit(FENCED_EVENT, incarnation=incarnation, superseded_by=lease.fenced_by)
 
-            fence_watcher = ReclaimWatcher(lease.poll, on_fenced, poll_s=lease_poll_s,
+            lease_unread = [False]
+
+            def poll_lease() -> bool:
+                failures = lease.read_failures
+                superseded = lease.poll()
+                if (lease.read_failures > failures) != lease_unread[0]:  # one event per outage, one at its end
+                    lease_unread[0] = not lease_unread[0]
+                    emit("rl_sampler_store_read_failed" if lease_unread[0] else "rl_sampler_store_read_ok",
+                         what="lease", **lease.health())
+                return superseded
+
+            fence_watcher = ReclaimWatcher(poll_lease, on_fenced, poll_s=lease_poll_s,
                                            name="sampler-lease-watcher").start()
         start = None
         if predecessor and not resume.resumed and not unclaimed:  # a fresh replacement: continue the predecessor's prompts
@@ -927,9 +962,11 @@ def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str
     """``(IncarnationLease | None, poll seconds)`` of ``spec["incarnation_lease"]``:
     absent or ``true`` = on, in the buffer store; ``false`` = off; a mapping may name
     ``store`` (another store path every incarnation reads, e.g. a shared bucket mount),
-    ``poll_s`` (watcher period, default 30) and ``write_check_s`` (the longest a group
-    write trusts the last read, default 1)."""
-    from .incarnation_lease import DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S, IncarnationLease  # noqa: PLC0415
+    ``poll_s`` (watcher period, default 30), ``write_check_s`` (the longest a group
+    write trusts the last read, default 1) and ``max_unread_s`` (the longest the lease
+    may stay unread before group writes are held back, default 60; null: no bound)."""
+    from .incarnation_lease import (DEFAULT_MAX_UNREAD_S, DEFAULT_POLL_S, DEFAULT_WRITE_CHECK_S,  # noqa: PLC0415
+                                    IncarnationLease)
 
     section = spec.get("incarnation_lease", True)
     if section is False or section is None:
@@ -940,8 +977,10 @@ def incarnation_lease(spec: Mapping[str, Any], sampler_id: str, incarnation: str
         from .resume import store_for  # noqa: PLC0415
 
         store = store_for(str(section["store"]), environ=environ)
+    max_unread_s = section.get("max_unread_s", DEFAULT_MAX_UNREAD_S)
     lease = IncarnationLease(store, sampler_id, incarnation,
-                             write_check_s=float(section.get("write_check_s", DEFAULT_WRITE_CHECK_S)))
+                             write_check_s=float(section.get("write_check_s", DEFAULT_WRITE_CHECK_S)),
+                             max_unread_s=None if max_unread_s is None else float(max_unread_s))
     return lease, float(section.get("poll_s", DEFAULT_POLL_S))
 
 
