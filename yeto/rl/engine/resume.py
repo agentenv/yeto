@@ -790,6 +790,14 @@ class ResumeController:
             if discarded is None:
                 raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
                                           "start over at rollout 0 on top of an unfinished store")
+            # a staged store: the cut's objects go first, its mark with the commit below.
+            # A discard that dies in between leaves the mark, so the next start can
+            # finish it (a push deletes in key order, which would take the mark first)
+            remote = getattr(store, "delete_remote_tree", None)
+            if callable(remote):
+                for rel in discarded:
+                    if not rel.endswith(FIRST_CUT_MARK):
+                        remote(rel)
             store.commit()
             self.discarded_first_cut = discarded
             # the run starts at 0: a local state dir of the dead run (its pointer may
