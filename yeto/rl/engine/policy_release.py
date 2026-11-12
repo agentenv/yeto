@@ -159,6 +159,13 @@ class PolicyRelease:
     policy_hash: str
     path: str  # relative to the release root: "r<seq>-v<version>"
     buffer_selected: int | None = None
+    # The buffer position these weights are trained up to: every group before it was
+    # selected by a round the weights include (or passed over), none at or after it.
+    # Read on the trainer's thread at the publication, not when the record is written:
+    # ``buffer_selected`` of a staged release is the read position when its upload
+    # ended, rounds later. A relaunch without a round cut reads the buffer on from
+    # here. None: not recorded (an earlier yeto, or nothing was read yet).
+    buffer_trained: int | None = None
     released_at: float = 0.0
     weights: str = FULL
     sha256: str | None = None  # None: not digested (a full checkpoint)
@@ -661,7 +668,8 @@ class PolicyReleaseStore:
         return [found[seq] for seq in sorted(found)]
 
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
-                buffer_selected: int | None = None, weights: str = FULL,
+                buffer_selected: int | None = None, buffer_trained: int | None = None,
+                weights: str = FULL,
                 engine_checksum: str | None = None,
                 buffer_shards: dict[str, int] | None = None,
                 derived_from: dict[str, Any] | None = None,
@@ -688,6 +696,7 @@ class PolicyReleaseStore:
         try:
             record = self._write_release(timer, latest, version, policy_hash, write, weights=weights,
                                          buffer_selected=buffer_selected,
+                                         buffer_trained=buffer_trained,
                                          engine_checksum=engine_checksum,
                                          buffer_shards=buffer_shards, derived_from=derived_from,
                                          origin=origin, manifest=manifest)
@@ -699,6 +708,7 @@ class PolicyReleaseStore:
 
     def release_staged(self, version: int, policy_hash: str, staged: Path, *,
                        position: Callable[[], tuple[int | None, dict[str, int] | None]],
+                       buffer_trained: int | None = None,
                        weights: str = FULL, engine_checksum: str | None = None,
                        origin: dict[str, Any] | None = None,
                        delta_base: DeltaBase | None = None,
@@ -756,6 +766,7 @@ class PolicyReleaseStore:
         buffer_selected, buffer_shards = position()
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
+                               buffer_trained=None if buffer_trained is None else int(buffer_trained),
                                released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
@@ -873,7 +884,8 @@ class PolicyReleaseStore:
                        buffer_selected: int | None, engine_checksum: str | None,
                        buffer_shards: dict[str, int] | None, derived_from: dict[str, Any] | None,
                        origin: dict[str, Any] | None,
-                       manifest: dict[str, Any] | None = None) -> PolicyRelease:
+                       manifest: dict[str, Any] | None = None,
+                       buffer_trained: int | None = None) -> PolicyRelease:
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
@@ -887,6 +899,7 @@ class PolicyReleaseStore:
             files = file_sizes(directory)
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
+                               buffer_trained=None if buffer_trained is None else int(buffer_trained),
                                released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
                                engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else

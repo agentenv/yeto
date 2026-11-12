@@ -416,3 +416,28 @@ def test_a_new_trainer_launch_forgets_the_exit_of_the_previous_one(make_run):
     run._spawn = lambda name, argv: None
     run.trainer()
     assert "trainer_exit_seen" not in run.state and "trainer_finished" not in run.state
+
+
+def test_status_counts_what_the_trainer_reader_passed_over(make_run, tmp_path):
+    """``run status`` sums the trainer log's reader events: groups without a policy
+    identity after a resume, stale groups, and the last starvation warning."""
+    from yeto.rl.event_echo import format_record
+
+    run = make_run()
+    assert run.trainer_buffer_counts() == {"unidentified_policy_groups": 0, "stale_groups": 0,
+                                           "unidentified_starved": None}
+    log = tmp_path / "trainer.log"
+    records = [{"event": "rl_buffer_unidentified_policy_skipped", "unidentified_policy_groups": 4, "rollout_id": 7},
+               {"event": "rl_buffer_stale_skipped", "stale_groups": 2, "rollout_id": 7},
+               {"event": "rl_buffer_unidentified_policy_skipped", "unidentified_policy_groups": 1, "rollout_id": 8},
+               {"event": "rl_buffer_unidentified_policy_starved", "rollout_id": 9, "selections": 3,
+                "unidentified_policy_groups_total": 5},
+               {"event": "rl_round_trained", "rollout_id": 9}]
+    log.write_text("noise\n" + "".join(
+        "[trainer] " + format_record({"island_id": 0, "time_unix": 10.0 + i, **r}) + "\n"
+        for i, r in enumerate(records)) + "YETO_RL_EVENT {broken\n")
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log)}}
+    counts = run.trainer_buffer_counts()
+    assert (counts["unidentified_policy_groups"], counts["stale_groups"]) == (5, 2)
+    assert counts["unidentified_starved"] == {"time_unix": 13.0, "rollout_id": 9, "selections": 3,
+                                              "unidentified_policy_groups_total": 5}

@@ -806,6 +806,61 @@ continue when it joins.
   `--rl-ledger-set-aside-before <now>`. A start from the base then moves the
   earlier batch ledger aside (`ledger.before-<ts>`) instead of stopping on it.
   No manual cleanup is needed.
+- **Without a cut, on a store that holds releases.** A trainer that stopped
+  before its first cut was committed leaves releases `v1..vK` and no cut. The
+  next launch starts from the base checkpoint, continues the version numbers
+  at `vK`, and reads the sample buffer from the position the weights of `vK`
+  are trained up to (`buffer_trained` in the release record and in the
+  `rl_buffer_resume_versions` event), not from the start. Groups trained into
+  `vK` are not read again; groups the stopped trainer selected after it
+  published `vK` (their update never reached the store) are trained again.
+  The earlier batch ledger is moved aside as above.
+  A release record written by an earlier yeto has no `buffer_trained`. Its
+  `buffer_selected` is the trainer's read position when the upload of the
+  release ended, which can lie past groups `vK` never trained, so it is not
+  used: the launch reads the buffer from the start. Of the groups it reads
+  again:
+  - groups older than `--rl-max-policy-age` versions are passed over as stale
+    (`rl_buffer_stale_skipped`);
+  - groups inside the window of a version whose release is no longer in the
+    store are passed over as unidentified (next item);
+  - groups of `vK-1` and `vK` (the two releases the store keeps) are trained.
+    Those the stopped trainer had already trained are trained a second time:
+    at most the groups of two versions.
+  This happens once: after the new launch has released one policy, the newest
+  record has `buffer_trained` and the fallback is not taken again.
+- **Groups without a policy identity after a resume.** A relaunched trainer
+  starts at `vK` and reads the buffer on from an earlier position (a cut's
+  watermark, `buffer_trained`, or the start). The store keeps the newest two
+  releases, so a group inside the `--rl-max-policy-age` window can be of a
+  version below `K` that no record names any more. The trainer cannot tell
+  which weights generated it: it consumes the group without training it and
+  counts it (`rl_buffer_unidentified_policy_skipped` per round, with the
+  versions; `sample_buffer/unidentified_policy_groups`; the dashboard's
+  trainer totals; `trainer_buffer` in `yeto run status`). Only versions below
+  the start version `K` of a relaunched trainer are treated this way. A group
+  of a version from `K` on that was never published, or a label with another
+  hash, still stops the trainer with `not a published policy`.
+  The base policy `v0` has no release either (the samplers start on the base
+  checkpoint), but it is named while it is inside the window: by the weights
+  the trainer loaded when it starts without a cut from the base checkpoint,
+  or by the batch ledger restored with a cut (`rl_base_policy_restored`).
+  Groups of `v0` are then trained. They are passed over only when neither
+  exists: a start with `--rl-init-from-release` and no cut, or a cut whose
+  ledger was started after round 0 (the gate event then has
+  `base_version_named: false`).
+  When the reader reads groups and keeps none 3 selections in a row
+  (`YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS`), it logs a warning and emits
+  `rl_buffer_unidentified_policy_starved`; it keeps waiting for groups of a
+  release the store names.
+  Scope: the resume behavior of this section (`buffer_trained`, the batch
+  ledger moved aside, groups without a policy identity passed over, no cut
+  before the first trained round) is the Miles trainer's, the one this guide
+  runs. A verl buffer trainer does not have it.
+- **Behind the releases.** When the latest cut is older than the newest
+  release, the trainer restores the cut and continues the version numbers at
+  the newest release (`rl_round_cut_behind_releases`). It keeps no cut before
+  it has trained a round (`rl_round_cut_skipped`); the next due cut is kept.
 
 ### 5.4 Upgrading the code of a running run
 
