@@ -273,7 +273,7 @@ class Run:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
                 return False
-            problem = self.rollout_fields_problem(i)
+            problem = self.rollout_fields_problem(i) or self.consistency_problem(i)
             if problem is not None:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
@@ -711,6 +711,21 @@ class Run:
                     f"sampler spec {pool_cfg['spec']} has rollout_fields.top_logprobs_num {have or 'unset'}: "
                     f"set it to {want} (the trainer would fail on its first group)")
         return None
+
+    def consistency_problem(self, pool: int = 0) -> str | None:
+        """The values the trainer and this pool's samplers must share (group size,
+        row widths, R3, expert selection, store, release directory;
+        :mod:`yeto.rl.up_consistency`). Each side's own dry run passes a mismatch;
+        it would surface after the trainer island loaded its weights, or never."""
+        from yeto.rl import up_consistency  # noqa: PLC0415
+
+        try:
+            pool_cfg = self.pools[pool].load()
+        except (OSError, ValueError):
+            return None  # the pool dry-run reports an unreadable pool config
+        found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
+                                        pool_cfg, data_path=self.pools[pool].data_path)
+        return "; ".join(found) if found else None
 
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
