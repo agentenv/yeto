@@ -14,7 +14,7 @@ from yeto.launch.nc import client as ncc
 from yeto.launch.nc import tunnel
 from yeto.launch.nc.lease_pool import PoolConfig
 from yeto.launch.pool import status as el
-from yeto.launch.pool.island_pool import DRAINING, GONE, READY, IslandPool
+from yeto.launch.pool.island_pool import DRAINING, FENCING, GONE, READY, IslandPool
 from yeto.rl.engine.incarnation_lease import IncarnationGate, IncarnationLease, read_lease
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -1269,3 +1269,48 @@ def test_lease_end_with_no_replacement_fences_the_shard_and_alerts():
     _run(pool, clock, clock.t + 600)
     new = [x for x in pool.members if x.ticket != m.ticket]
     assert new and new[0].replaces_shard == m.shard
+
+
+def test_lease_end_fences_when_the_started_successor_failed_meanwhile():
+    """The successor started but then failed (its own fence owed, it is ``fencing``): it
+    answers no handoff, so the old node at its lease end is fenced before it goes."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, start_timeout_s=99 * H)
+    m = _ready_member(pool, clock, cloud)
+    cloud.ready_after = 99 * H
+    while not (m.replaced_by and any(x.ticket == m.replaced_by and x.started for x in pool.members)):
+        pool.tick()
+        clock.t += 60
+    s = next(x for x in pool.members if x.ticket == m.replaced_by)
+    fence = cloud.fence
+
+    def failing(x):
+        if x.ticket == s.ticket:
+            raise RuntimeError("store unreachable")
+        fence(x)
+
+    cloud.fence = failing
+    pool._retire(s, "crashed", lost=True)
+    assert s.state == FENCING
+    _run(pool, clock, m.lease_until + 600)
+    assert m.state == GONE
+    fences = [e for e in cloud.kinds("fence") if e[1] == m.ticket]
+    drains = [e for e in cloud.kinds("drain") if e[1] == m.ticket]
+    assert fences and drains and fences[0][3] <= drains[0][2]
+
+
+def test_a_failing_lease_end_fence_does_not_hold_the_node_past_its_lease():
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud)
+    m = _ready_member(pool, clock, cloud)
+    cloud.bal = pool.config.order_floor() - 1
+
+    def failing(x):
+        raise RuntimeError("store unreachable")
+
+    cloud.fence = failing
+    _run(pool, clock, m.lease_until + 120)
+    assert m.state == GONE and m.fence_pending == "lease end"
+    assert [e for e in cloud.kinds("drain") if e[1] == m.ticket][0][2] <= m.lease_until

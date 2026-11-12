@@ -1183,7 +1183,9 @@ class IslandPool:
                                lease_until=m.lease_until, replacement=successor.ticket if successor else None,
                                replacement_state=successor.state if successor else None,
                                refused=self._refused or self._no_account)
-                    if successor is None or successor.started is None:
+                    # only a successor whose sampler is starting asks for the handoff; one that
+                    # failed meanwhile (fencing, draining, gone) answers nothing: fence then too
+                    if successor is None or successor.state != STARTING or successor.started is None:
                         self._fence(m, "lease end")
                     self._handoff_slot(m)
                 self._drain(m, "lease end")
