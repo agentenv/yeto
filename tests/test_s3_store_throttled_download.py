@@ -3,13 +3,31 @@ process runs at once and is tried again (``yeto.cloud.s3_store.RangeGate``)."""
 
 from __future__ import annotations
 
+import sys
 import threading
+import time
 
 import pytest
 from botocore.exceptions import ClientError
 
 from tests.test_rl_object_store import URI, FakeS3
 from yeto.cloud import s3_store
+
+
+def record_sleeps(monkeypatch, record, callers=("yeto.cloud.s3_store",)):
+    """Replace ``time.sleep`` (one object for the whole process) so only the waits
+    of ``callers`` are handed to ``record``; any other thread (a daemon left by an
+    earlier test in this worker, e.g. a syncer client redialing) still really
+    sleeps and is not counted."""
+    real = time.sleep
+
+    def sleep(seconds):
+        caller = sys._getframe(1).f_globals.get("__name__", "")
+        if any(caller == c or caller.startswith(c + ".") for c in callers):
+            return record(seconds)
+        return real(seconds)
+
+    monkeypatch.setattr(time, "sleep", sleep)
 
 
 def _refusal(code="ServiceUnavailable", status=503):
@@ -87,7 +105,7 @@ def test_a_download_refused_for_its_rate_slows_down_and_completes(tmp_path, monk
     s3 = Limited(allowed=3)
     store, data = _store(s3, ranges=16, concurrency=16)
     pauses = []
-    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    record_sleeps(monkeypatch, pauses.append)
     assert store.read_file("big", tmp_path / "out")
     assert (tmp_path / "out").read_bytes() == data
     assert s3.most > 3 and s3.refused >= 1  # it started at 16 and was refused
@@ -101,7 +119,7 @@ def test_a_range_refused_every_time_fails_the_download_after_its_tries(tmp_path,
     s3 = Limited(allowed=0)
     store, _data = _store(s3, ranges=2, concurrency=1)
     pauses = []
-    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    record_sleeps(monkeypatch, pauses.append)
     with pytest.raises(ClientError, match="ServiceUnavailable"):
         store.read_file("big", tmp_path / "out")
     # each range that ran was tried THROTTLED_READ_ATTEMPTS times (the second one may be cancelled)
@@ -115,10 +133,11 @@ def test_a_replaced_object_still_fails_the_download_at_once(tmp_path, monkeypatc
     store, _data = _store(s3, ranges=3, concurrency=2)
     real = s3.get_object
     monkeypatch.setattr(s3, "get_object", lambda **kw: real(**{**kw, "IfMatch": '"other"'}) if kw.get("Range") else real(**kw))
-    monkeypatch.setattr(s3_store.time, "sleep", lambda s: pytest.fail("no pause: not a rate refusal"))
+    pauses = []
+    record_sleeps(monkeypatch, pauses.append)
     with pytest.raises(ClientError, match="PreconditionFailed"):
         store.read_file("big", tmp_path / "out")
-    assert store.range_gate.cuts == 0
+    assert store.range_gate.cuts == 0 and pauses == []  # no pause: not a rate refusal
 
 
 
@@ -132,7 +151,7 @@ def test_the_retry_layers_of_a_refused_range_stay_bounded(tmp_path, monkeypatch)
     store, _data = _store(s3, ranges=2, concurrency=1)
     pauses = []
     monkeypatch.setattr(s3_store.random, "uniform", lambda lo, hi: hi)  # the longest pause each time
-    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    record_sleeps(monkeypatch, pauses.append)
     with pytest.raises(ClientError):
         store.read_file("big", tmp_path / "out")
     tries = s3_store.THROTTLED_READ_ATTEMPTS
