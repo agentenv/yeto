@@ -315,7 +315,7 @@ class NcSkyOps:
         return client(slot_list(self.cfg)[0]).balance()
 
     def account_free(self, account: int) -> bool:
-        return NcClient.own_ticket(client(account).status()) is None
+        return client(account).account_free()
 
 
 class NcSshOps:
@@ -658,8 +658,12 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
 
 def nc_provider(cfg: dict[str, Any], run: str) -> NCProvider:
     """The National Compute provider of a pool: this tool's ledger, lease key and relay."""
+    def event(name: str, **detail: Any) -> None:  # the pool's events file and its event_command hook
+        hook = island_status.command_hook(cfg["event_command"]) if cfg.get("event_command") else None
+        island_status.EventLog(path=pool_events_path(cfg), run=run, log=_log, hook=hook)(name, **detail)
+
     return NCProvider([int(a) for a in cfg["accounts"]], run, ledger=ledger(), allowed=allowed_accounts(),
-                      model=machine_type(cfg), pubkey=node_pool.ensure_key, before_order=ensure_relay)
+                      model=machine_type(cfg), pubkey=node_pool.ensure_key, before_order=ensure_relay, event=event)
 
 
 def run_id(cfg: dict[str, Any]) -> str:
@@ -1051,6 +1055,17 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--direct", action="store_true",
                    help="delete the ticket here even when a running pool owns it (the pool then sees a manual "
                    "release: it lowers its target and orders no replacement)")
+    ad = sub.add_parser("adopt", help="record a ticket an unrecorded order of this tool placed (an operator's call)",
+                        description="After an order call that failed, the account may show an open ticket that "
+                        "is in no ledger (event order_unrecorded). Check in the National Compute console that this "
+                        "tool's order placed it and no one else did, then adopt it: the ticket is recorded in the "
+                        "ledger (adopted_by=operator) and this tool may use and release it (pool, down, pool-stop).")
+    ad.add_argument("--account", type=int, required=True)
+    ad.add_argument("--ticket", required=True)
+    ad.add_argument("--yes", action="store_true", help="I checked that this ticket is this tool's order")
+    ch = sub.add_parser("clear-halt", help="lift the halt of an account (a delete hit, or may have hit, a foreign ticket)")
+    ch.add_argument("--account", type=int, required=True)
+    ch.add_argument("--yes", action="store_true", help="I checked the account and told the ticket's owner")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",
                         description="Run the lease-aware sampler pool in the foreground. Keep it up for the "
                         "whole run: National Compute does not end a lease at lease_until (it stays billed).")
@@ -1183,6 +1198,41 @@ def main(argv: list[str] | None = None) -> int:
         doc = tasks.with_secrets(tasks.sampler_task(pool, spec_path=str(spec_path), run_prefix=args.run_prefix,
                                                     workdir=args.workdir), args.r2_env_file)
         return launch(doc, cluster_name("sampler", args.ticket), down=False)
+    if args.cmd == "adopt":
+        if not args.yes:
+            print(f"adopt records ticket {args.ticket} (account {args.account}) as this tool's own, to be released "
+                  "by it. Check in the National Compute console that no one else placed it, then pass --yes.")
+            return 2
+        try:
+            row = client(args.account).adopt(args.ticket)
+        except NcError as error:
+            print(f"adopt refused: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, indent=1, default=str))
+        return 0
+    if args.cmd == "clear-halt":
+        halt = ledger().halted(args.account)
+        if halt is None:
+            print(f"account {args.account} is not halted")
+            return 0
+        print(json.dumps(halt, indent=1, default=str))
+        try:  # what the account holds now, for the operator to compare with the console
+            t = client(args.account).status().get("ticket")
+            print(f"account {args.account} now: " + ("no order" if not t else
+                  f"ticket {t.get('id')} state={t.get('state')} end_reason={t.get('end_reason')} "
+                  f"lease_until={t.get('lease_until')}"))
+        except Exception as error:  # noqa: BLE001 - shown, the decision stays with the operator
+            print(f"account {args.account} now: the status could not be read ({error!r})"[:300])
+        if ledger().halted(args.account) is None:
+            print("the halt was lifted by this status read: the expected ticket reads ended")
+            return 0
+        if not args.yes:
+            print("nothing changed. Check the account in the National Compute console, then pass --yes "
+                  "to lift the halt")
+            return 2
+        ledger().clear_halt(args.account)
+        print(f"account {args.account}: halt lifted")
+        return 0
     if args.cmd == "down":
         if not args.direct:
             from . import pool_run  # noqa: PLC0415

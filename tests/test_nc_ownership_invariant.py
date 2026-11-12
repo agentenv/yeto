@@ -1,0 +1,157 @@
+"""The ownership invariant of the National Compute client under injected faults
+(tests/nc_fault_sim.py): no changing call ever hits a ticket outside the ledger, and
+every ticket the tool's orders placed ends released or reported for an operator."""
+
+from __future__ import annotations
+
+import pytest
+
+import nc_fault_sim as sim
+from yeto.launch.nc import client as ncc
+
+SEEDS = range(60)
+HEAVY_SEEDS = range(30)  # under sim.WINDOW_HEAVY: the residual window is hit in most of them
+
+
+def _untouched_foreign(sc):
+    """Foreign tickets the client ended, outside the residual window."""
+    residual = {w["ticket"] for w in sc.nc.writes if w.get("residual")}
+    return [t["id"] for t in sc.nc.tickets.values()
+            if t["by"] == "foreign" and t.get("ended_by") == "client" and t["id"] not in residual]
+
+
+def _problems(tmp_path, seed, config):
+    """One scenario, up to the point where the faults are over and the client has
+    looked at every account again: every breach of the standing invariants."""
+    sc = sim.scenario(tmp_path, seed, **config)
+    sim.run_scenario(sc, steps=150)
+    problems = sim.check_invariants(sc)
+    sim.settle(sc, operator=False)
+    # writes on tickets outside the ledger: 0; residual hits unnoticed with the account writable: 0
+    return sc, problems + sim.check_invariants(sc, settled=True) + _untouched_foreign(sc) + sim.leaks(sc)
+
+
+@pytest.mark.parametrize("seed", HEAVY_SEEDS)
+def test_a_delete_that_took_a_foreign_ticket_always_ends_in_a_halted_account(seed, tmp_path):
+    """The halt state machine under fire: in this setting most runs have a delete that
+    lands in the residual window. Each one must end named and halted, or halted as
+    unconfirmed; none unnoticed, none unjudged, no write on a halted account."""
+    sc, problems = _problems(tmp_path, seed, sim.WINDOW_HEAVY)
+    assert problems == []
+    sim.settle(sc)
+    assert sim.check_invariants(sc) == [] and sim.still_open(sc, "client") == []
+
+
+def test_the_window_heavy_runs_do_hit_the_residual_window(tmp_path):
+    hits = {"detected": 0, "unconfirmed": 0, "pending": 0, "undetected": 0}
+    for seed in HEAVY_SEEDS:
+        sc, _ = _problems(tmp_path / str(seed), seed, sim.WINDOW_HEAVY)
+        for kind, tickets in sim.residual_outcomes(sc).items():
+            hits[kind] += len(tickets)
+    print("residual hits:", hits)
+    assert hits["detected"] >= 8 and hits["unconfirmed"] >= 2 and hits["pending"] == hits["undetected"] == 0, hits
+
+
+# Each mutation removes one part of what keeps the client off other people's tickets.
+# The invariant runs must turn red on it; a part whose removal they do not notice is
+# a part they do not test. (seeds: the pinned ones where the clean client is green)
+MUTATIONS = {
+    "a halt is never written": (ncc.Ledger, "halt", lambda self, account, reason, **fields: None),
+    "a halt is not enforced": (ncc.NcClient, "_refuse_halted", lambda self: None),
+    "a pending delete is never judged": (ncc.NcClient, "_judge_delete", lambda self, t: None),
+    "a delete is sent into an announced end": (ncc.NcClient, "_ending_soon", lambda self, ticket, current: None),
+}
+PINNED = [(sim.WINDOW_HEAVY, seed) for seed in (0, 1, 6, 13)] + [({}, seed) for seed in (2, 20, 42)]
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_the_invariant_runs_turn_red_when_a_guard_is_removed(name, tmp_path, monkeypatch):
+    for i, (config, seed) in enumerate(PINNED):
+        assert _problems(tmp_path / f"clean{i}", seed, config)[1] == []
+    owner, attr, mutant = MUTATIONS[name]
+    monkeypatch.setattr(owner, attr, mutant)
+    red = []
+    for i, (config, seed) in enumerate(PINNED):
+        try:
+            red += _problems(tmp_path / f"mutant{i}", seed, config)[1]
+        except Exception as error:  # noqa: BLE001 - a mutant may also break the run itself
+            red.append(repr(error))
+    assert red, f"the invariant runs do not notice: {name}"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledger(seed, tmp_path):
+    sc, problems = _problems(tmp_path, seed, {})
+    assert problems == []  # what is still open of ours was reported (order_unrecorded, or a halt)
+    foreign = sim.still_open(sc, "foreign")
+
+    sim.settle(sc)  # the operator lifts halts, adopts or releases what was reported; the tool releases the rest
+    assert sim.check_invariants(sc) == [] and _untouched_foreign(sc) == []
+    assert sim.still_open(sc, "client") == [] and sim.still_open(sc, "foreign") == foreign
+
+
+def test_the_scenarios_reach_the_cases_the_invariant_is_about(tmp_path):
+    """The random runs are not vacuous: orders, releases, lost answers that left a
+    ticket, reports, other people's tickets, the residual window and each way the
+    client accounts for it all occur across the seeds."""
+    seen = {"created": 0, "deleted": 0, "reported": 0, "stale_reports": 0, "foreign": 0, "recorded": 0,
+            "residual_detected": 0, "residual_unconfirmed": 0, "residual_pending": 0, "residual_undetected": 0,
+            "false_halts": 0}
+    for seed in SEEDS:
+        sc = sim.scenario(tmp_path / str(seed), seed)
+        sim.run_scenario(sc, steps=150)
+        sim.settle(sc, operator=False)
+        seen["created"] += sum(w["op"] == "create" for w in sc.nc.writes)
+        seen["deleted"] += sum(w["op"] == "delete" and w["ticket"] is not None for w in sc.nc.writes)
+        seen["reported"] += len(sc.reported())
+        seen["stale_reports"] += sum(1 for name, d in sc.events if name == "order_unrecorded" and d.get("stale"))
+        seen["foreign"] += sum(t["by"] == "foreign" for t in sc.nc.tickets.values())
+        seen["recorded"] += sum(1 for r in sc.ledger.load() if r.get("ticket"))
+        for kind, hits in sim.residual_outcomes(sc).items():
+            seen[f"residual_{kind}"] += len(hits)
+        seen["false_halts"] += sim.false_halts(sc)
+    print("scenario coverage:", seen)
+    for key in ("created", "deleted", "reported", "foreign", "recorded"):
+        assert seen[key] >= 30, seen
+    assert seen["stale_reports"] >= 1 and seen["residual_detected"] >= 1, seen
+    assert seen["residual_undetected"] == 0, seen
+
+
+def test_the_check_catches_a_delete_of_a_ticket_that_is_not_in_the_ledger(tmp_path):
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    sc.nc._place(1, "foreign")
+    sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])  # what the client must never do
+    assert len(sim.violations(sc.nc)) == 1
+    sc = sim.scenario(tmp_path / "b", 0, fault_rate=0.0, race_rate=0.0)
+    sc.nc._place(1, "client")  # placed by an order whose answer was lost: in no ledger
+    sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])
+    assert len(sim.violations(sc.nc)) == 1
+    sim.settle(sim.scenario(tmp_path / "c", 0, fault_rate=0.0))
+    sc = sim.scenario(tmp_path / "d", 0, fault_rate=0.0, race_rate=0.0)
+    sc.nc._place(4, "client")
+    assert len(sim.leaks(sc)) == 1  # open, ours, and nobody was told
+
+
+def test_a_delete_after_another_look_at_the_account_is_a_violation_not_a_residual_hit(tmp_path):
+    """The residual window is only "the status answer, then the delete": a client that
+    looked again after the race and still deleted has no excuse."""
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    c = sc.clients[1]
+    c.create(run="run-a")
+    assert sc.nc.race(1)
+    sc.nc(["nc-query", "status", "--account", "1"])  # the client could see the foreign ticket here
+    sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])
+    assert len(sim.violations(sc.nc)) == 1
+    assert sim.residual_outcomes(sc) == {"detected": [], "unconfirmed": [], "pending": [], "undetected": []}
+
+
+def test_the_check_catches_a_client_that_goes_on_after_a_residual_hit_it_did_not_notice(tmp_path):
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    c = sc.clients[1]
+    c.create(run="run-a")
+    assert sc.nc.race(1)
+    sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])  # a client without the pending-delete record
+    assert len(sim.residual_outcomes(sc)["undetected"]) == 1
+    sc.nc.current[1] = None
+    sc.nc(["nc-manage", "create", "--account", "1", "--model", "mi355x", "--yes"])
+    assert sc.nc.creates_after_residual == 1
