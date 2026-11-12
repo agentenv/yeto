@@ -38,6 +38,7 @@ import pickle
 import subprocess
 import sys
 import random
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -64,9 +65,36 @@ try:  # botocore ships with boto3
 except ImportError:  # pragma: no cover - a store without boto3 never reads
     pass
 RANGE_READ_ATTEMPTS = 5
-# a download file (``S3ObjectStore._partial``) nobody wrote to for this long belongs
-# to a process that was killed: the next download of the same target removes it
+# A download file (``S3ObjectStore._partial``) is named by its host, process and
+# call. One whose process is gone (same host) is removed by the next download of the
+# same target at once. One whose writer cannot be asked about (another host or
+# container on a shared directory, a name of another format) is removed after
+# UNKNOWN_PARTIAL_S without a write; one whose pid is alive after STALE_PARTIAL_S
+# without a write (the pid of a killed download, given to another process).
 STALE_PARTIAL_S = 3600.0
+UNKNOWN_PARTIAL_S = 600.0
+_LIVE_PARTIALS: set[str] = set()  # the download files this process is writing
+_LIVE_PARTIALS_LOCK = threading.Lock()
+
+
+@functools.lru_cache(maxsize=1)
+def _host_token() -> str:
+    """This host (or container) in a download file's name: a pid means something
+    only next to it."""
+    import hashlib
+    import socket
+
+    return hashlib.sha256(socket.gethostname().encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # EPERM: a process of another user
+        return True
+    return True
 
 
 def _read_retry_pause(attempt: int) -> None:
@@ -874,12 +902,13 @@ class S3ObjectStore:
             data = self.read(key)
             if data is None:  # deleted since the HEAD (a prune)
                 return False
+            self._drop_stale_partials(target)
             partial = self._partial(target)
             try:  # never a cut-short file at the final name (a killed process, a full disk)
                 Path(partial).write_bytes(data)
                 os.replace(partial, target)
             finally:
-                Path(partial).unlink(missing_ok=True)
+                self._release_partial(partial)
             return True
         pin = {"IfMatch": etag} if etag else {}
         self._drop_stale_partials(target)
@@ -888,34 +917,64 @@ class S3ObjectStore:
             self._read_ranges(key, full, partial, size, part, pin)
             os.replace(partial, target)
         finally:  # a failed download leaves nothing (its name is this call's alone)
-            Path(partial).unlink(missing_ok=True)
+            self._release_partial(partial)
         return True
 
     @staticmethod
     def _partial(target: str | os.PathLike[str]) -> str:
         """The file a download of ``target`` is written to: next to it, named by this
-        process and call, so two downloads of one target (two processes sharing a
-        cache directory, a retry beside a stalled try) never truncate or interleave
+        host, process and call, so two downloads of one target (two processes sharing
+        a cache directory, a retry beside a stalled try) never truncate or interleave
         each other's bytes; the last rename wins with a whole file. It ends in
         :data:`DOWNLOAD_SUFFIX`: what a killed process left is recognised and removed
-        (``policy_release``), and a stage push skips it."""
+        (:meth:`_drop_stale_partials`, ``policy_release``), and a stage push skips it."""
         import uuid
 
-        return f"{target}.{os.getpid()}-{uuid.uuid4().hex[:8]}{DOWNLOAD_SUFFIX}"
+        partial = f"{target}.{_host_token()}-{os.getpid()}-{uuid.uuid4().hex[:8]}{DOWNLOAD_SUFFIX}"
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.add(os.path.abspath(partial))
+        return partial
 
     @staticmethod
-    def _drop_stale_partials(target: str | os.PathLike[str]) -> None:
+    def _release_partial(partial: str) -> None:
+        Path(partial).unlink(missing_ok=True)
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.discard(os.path.abspath(partial))
+
+    @staticmethod
+    def _partial_abandoned(path: Path, owner: str) -> bool:
+        """Whether download file ``path`` (``owner``: the part of its name between
+        the target's name and :data:`DOWNLOAD_SUFFIX`) has no writer any more."""
+        host, _, rest = owner.partition("-")
+        pid, _, _ = rest.partition("-")
+        idle = time.time() - path.stat().st_mtime
+        if host != _host_token() or not pid.isdigit():
+            return idle > UNKNOWN_PARTIAL_S  # nobody here to ask
+        if int(pid) == os.getpid():  # this process, or an earlier one that had its pid (a restarted container)
+            with _LIVE_PARTIALS_LOCK:
+                return os.path.abspath(path) not in _LIVE_PARTIALS
+        return not _pid_alive(int(pid)) or idle > STALE_PARTIAL_S
+
+    @classmethod
+    def _drop_stale_partials(cls, target: str | os.PathLike[str]) -> None:
         """Remove what killed downloads of ``target`` left next to it (a file of up
-        to the object's size each): a live download writes its file all the time, so
-        one untouched for :data:`STALE_PARTIAL_S` has no writer."""
+        to the object's size each; a sampler whose release prefetch is cut off again
+        and again would fill its disk): :meth:`_partial_abandoned`. The file of a
+        download still running, in this process or another, stays."""
         path = Path(target)
+        head = path.name + "."
         try:
-            for other in path.parent.iterdir():
-                if (other.name.startswith(path.name + ".") and other.name.endswith(DOWNLOAD_SUFFIX)
-                        and time.time() - other.stat().st_mtime > STALE_PARTIAL_S):
+            with os.scandir(path.parent) as entries:
+                names = [e.name for e in entries if e.name.startswith(head) and e.name.endswith(DOWNLOAD_SUFFIX)]
+        except OSError:
+            return
+        for name in names:
+            other = path.with_name(name)
+            try:
+                if cls._partial_abandoned(other, name[len(head):-len(DOWNLOAD_SUFFIX)]):
                     other.unlink(missing_ok=True)
-        except OSError:  # raced with another download's rename or cleanup
-            pass
+            except OSError:  # raced with that download's rename or another cleanup
+                pass
 
     def _read_ranges(self, key: str, full: str, partial: str, size: int, part: int, pin: Mapping[str, Any]) -> None:
         with open(partial, "wb") as fh:

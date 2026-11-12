@@ -1223,10 +1223,7 @@ def test_two_downloads_of_one_target_do_not_write_into_each_others_file(tmp_path
     assert target.read_bytes() == data and state["ranges"] == 4 and _partials(tmp_path) == []
 
 
-def test_a_failed_large_download_leaves_no_file_and_a_killed_ones_leftover_is_removed(tmp_path):
-    import os
-    import time
-
+def test_a_failed_large_download_leaves_no_file(tmp_path):
     part = s3_store.MIN_PART_BYTES
     data = bytes(range(256)) * (2 * part // 256)
     target = tmp_path / "model.safetensors"
@@ -1243,18 +1240,75 @@ def test_a_failed_large_download_leaves_no_file_and_a_killed_ones_leftover_is_re
     with pytest.raises(ClientError):
         objects.read_file("big", target)
     assert list(tmp_path.iterdir()) == []
-    killed = tmp_path / f"{target.name}.4242-0123abcd{s3_store.DOWNLOAD_SUFFIX}"  # of a process killed long ago
-    live = tmp_path / f"{target.name}.4243-0123abcd{s3_store.DOWNLOAD_SUFFIX}"  # written a moment ago
-    other = tmp_path / f"other.bin.4242-0123abcd{s3_store.DOWNLOAD_SUFFIX}"  # of another target
-    for path in (killed, live, other):
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_a_download_removes_what_killed_downloads_of_its_target_left_and_no_live_ones_file(tmp_path, size):
+    import os
+    import time
+
+    part = s3_store.MIN_PART_BYTES
+    data = b"{}" if size == "small" else bytes(range(256)) * (2 * part // 256)
+    target = tmp_path / "model.safetensors"
+    host, suffix = s3_store._host_token(), s3_store.DOWNLOAD_SUFFIX
+    quiet = time.time() - s3_store.UNKNOWN_PARTIAL_S - 60  # no write for a little over the short threshold
+    long_ago = time.time() - s3_store.STALE_PARTIAL_S - 60
+
+    def left(owner, mtime=None, name=target.name):
+        path = tmp_path / f"{name}.{owner}{suffix}"
         path.write_bytes(b"x")
-    old = time.time() - 2 * s3_store.STALE_PARTIAL_S
-    os.utime(killed, (old, old))
-    os.utime(other, (old, old))
-    plain = s3_store.S3ObjectStore(URI, client=FakeS3(), transfer=objects.transfer)
-    plain.client.objects[("bkt", plain._key("big"))] = data
-    assert plain.read_file("big", target) and target.read_bytes() == data
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([target.name, live.name, other.name])
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    gone = [left(f"{host}-{_dead_pid()}-0123abcd"),  # its process is gone: at once
+            left(f"{host}-{os.getpid()}-0123abcd"),  # an earlier process that had this pid (a restarted container)
+            left("ffffffff-1-0123abcd", quiet),  # another host's, long without a write
+            left("4242-0123abcd", quiet),  # a name of another format
+            left(f"{host}-{os.getppid()}-89abcdef", long_ago)]  # a live pid that is no download any more
+    kept = [left(f"{host}-{os.getppid()}-0123abcd", quiet),  # another live process: may be between two parts
+            left("ffffffff-1-89abcdef"),  # another host's, written a moment ago
+            left(f"{host}-{_dead_pid()}-0123abcd", long_ago, name="other.bin"),  # of another target
+            tmp_path / (target.name + ".json")]
+    kept[-1].write_bytes(b"x")  # no download file
+    mine = s3_store.S3ObjectStore._partial(target)  # another thread of this process downloads the target
+    open(mine, "wb").close()
+    try:
+        s3 = FakeS3()
+        objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+        s3.objects[("bkt", objects._key("big"))] = data
+        assert objects.read_file("big", target) and target.read_bytes() == data
+        assert not [p.name for p in gone if p.exists()]
+        assert all(p.exists() for p in kept) and os.path.exists(mine)
+    finally:
+        s3_store.S3ObjectStore._release_partial(mine)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([target.name, *(p.name for p in kept)])
+    assert not s3_store._LIVE_PARTIALS
+
+
+def test_a_release_download_cut_off_again_and_again_does_not_pile_up_download_files(tmp_path):
+    """A sampler whose prefetch is killed part way, many times: each try leaves one
+    file of a dead process, and the next try removes it."""
+    part = s3_store.MIN_PART_BYTES
+    data = bytes(range(256)) * (2 * part // 256)
+    target = tmp_path / "model.safetensors"
+    s3 = FakeS3()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+    s3.objects[("bkt", objects._key("big"))] = data
+    for _ in range(3):
+        killed = tmp_path / f"{target.name}.{s3_store._host_token()}-{_dead_pid()}-0123abcd{s3_store.DOWNLOAD_SUFFIX}"
+        killed.write_bytes(data[:part])
+        assert objects.read_file("big", target)
+        assert [p.name for p in tmp_path.iterdir()] == [target.name]
 
 
 def _connection_errors():
