@@ -107,6 +107,9 @@ class Member:
     tokens_seen: float | None = None  # the engine's generation-token counter at the last probe
     tokens_moved_at: float | None = None  # last probe it moved, or the engine was idle
     stall_failures: int = 0  # stall restarts in a row with no token progress between them
+    # the pool fenced this sampler's incarnation for an in-place restart (a stalled engine):
+    # an exit 0 that follows is the fenced sampler leaving, not the end of the data
+    fenced_for_restart: bool = False
     metrics_misses: int = 0  # probes in a row of a running sampler whose engine /metrics did not read
     # scale down in "drain" mode: since when its sampler claims no new task (None: not retiring)
     retiring_since: float | None = None
@@ -1218,6 +1221,12 @@ class IslandPool:
                 self._once(m, "handed_off", "sampler_handed_off")
                 self._retire(m, "handed off", lost=False)
             return
+        if kind == el.FINISHED and m.fenced_for_restart:
+            # the incarnation this pool fenced for a restart left (a fenced sampler ends with
+            # exit 0) and the restart did not replace it, e.g. its start failed on one ssh
+            # error: the data has not ended. Start the shard's sampler again on the node.
+            self._restart_fenced(m, now)
+            return
         if kind == el.FINISHED:
             if self._exit_zero_not_data_end(m, now):
                 return
@@ -1405,6 +1414,7 @@ class IslandPool:
                         after_resume=True)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1422,6 +1432,7 @@ class IslandPool:
             self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts, detail=detail)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1555,6 +1566,7 @@ class IslandPool:
         if fence is not None:  # the stuck incarnation's claims go back at once
             try:
                 fence(m)
+                m.fenced_for_restart = True
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")
             except Exception as error:  # noqa: BLE001 - the restart supersedes it at its join anyway
                 self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
@@ -1563,6 +1575,7 @@ class IslandPool:
                     detail=f"engine stalled: {detail}")
         try:
             restart(m, self.shards())
+            m.fenced_for_restart = False  # the new sampler replaced the fenced one
         except Exception as error:  # noqa: BLE001 - counts as a failed restart; probed again next tick
             self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
             if is_config_error(error):
@@ -1571,6 +1584,43 @@ class IslandPool:
         m.state, m.started, m.joined, m.created = STARTING, now, False, now
         m.tokens_seen = m.tokens_moved_at = None
         return True
+
+    def _restart_fenced(self, m: Member, now: float) -> None:
+        """The sampler this pool fenced for an in-place restart ended with exit 0 and no
+        restart has replaced it yet: start the shard's sampler again on the node, counted
+        toward ``max_sampler_restarts`` (past it the node is retired and replaced)."""
+        if m.retiring_since is not None:  # scaled down: not restarted
+            m.fenced_for_restart = False
+            self._finish_retire(m, now, outcome="sampler exited")
+            return
+        self._once(m, "left_fenced", "sampler_left_fenced")
+        restart = getattr(self.ops, "restart", None)
+        if restart is None or self._paused_now(m):
+            return
+        reset = self.ecfg.sampler_restart_reset_s
+        if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
+            m.restarts = 0  # healthy long enough since the last restart
+        m.ready_since = None  # counted from here: a restart that keeps failing reaches the limit
+        if m.restarts >= self.ecfg.max_sampler_restarts:
+            m.fenced_for_restart = False
+            self._fail(now, f"sampler on {m.ticket} not restarted after its fence")
+            self._retire(m, "fenced restart failed", lost=False)
+            return
+        m.restarts += 1
+        self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts,
+                    detail="left fenced by this pool's restart (exit 0)")
+        try:
+            restart(m, self.shards())
+        except Exception as error:  # noqa: BLE001 - tried again at the next tick
+            self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            if is_config_error(error):
+                self._config_error(m, repr(error)[:300])
+            return
+        m.fenced_for_restart = False
+        if "left_fenced" in m.alerted:
+            m.alerted.remove("left_fenced")
+        m.state, m.started, m.joined, m.created = STARTING, now, False, now
+        m.tokens_seen = m.tokens_moved_at = None
 
     def _patrol(self, now: float) -> None:
         """Open tickets of this run (ledger, by id) that no live member owns are adopted
