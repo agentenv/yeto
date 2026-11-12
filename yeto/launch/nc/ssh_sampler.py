@@ -340,8 +340,12 @@ def pull_body(src_key: str, dest: str, *, max_mb_s: int = 2500, include: str | N
             "aws configure set default.s3.max_concurrent_requests 16 && "
             f"aws configure set default.s3.max_bandwidth {max(1, int(max_mb_s) // jobs)}MB/s && "
             f'echo "YETO_NC_PULL start $(date -u +%FT%TZ) jobs={jobs}" && '
-            f'aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL" '
-            "| awk '{print $4, $3}' | sort -k2 -n -r "
+            # the listing is read before any copy: a refused or empty listing is a failed
+            # pull, not a "done" with nothing copied (a pipeline exits with xargs' status)
+            f'{{ L=$(aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL") '
+            f'|| {{ echo "YETO_NC_PULL fail listing s3://$R2_BUCKET/{src}/"; exit 3; }}; }} && '
+            f'{{ [ -n "$L" ] || {{ echo "YETO_NC_PULL fail empty listing s3://$R2_BUCKET/{src}/"; exit 3; }}; }} && '
+            'printf "%s\\n" "$L" | awk \'{print $4, $3}\' | sort -k2 -n -r '
             f"| xargs -r -P {jobs} -L1 sh -c {shlex.quote(one)} pull "
             '&& echo "YETO_NC_PULL done $(date -u +%FT%TZ)"')
 
