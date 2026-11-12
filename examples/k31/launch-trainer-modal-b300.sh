@@ -56,7 +56,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "$STAGE" = "1" ]; then
   ISLAND=${ISLAND:-modal:1x8xb300}      # one node: 8 x B300, TP1 EP8
   TP=${TP:-1}; PP=${PP:-1}
-  SEQ_LEN=${SEQ_LEN:-8192}
+  SEQ_LEN=${SEQ_LEN:-12288}            # PROMPT_LEN 4096 + the sampler spec's max_tokens 8192
   TOTAL_STEPS=${TOTAL_STEPS:-8}
 else
   ISLAND=${ISLAND:-modal:6x8xb300}      # whole-node cluster, RDMA (yeto.modal_runner clustered)

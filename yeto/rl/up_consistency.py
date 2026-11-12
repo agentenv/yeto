@@ -50,7 +50,8 @@ def trainer_args(argv: list[str]) -> Any | None:
     from yeto.cli import build_parser  # noqa: PLC0415
 
     try:
-        with contextlib.redirect_stderr(io.StringIO()):
+        # stdout too: an argv with --help / --version would print to the run's log
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             args = build_parser().parse_args(["launch", *[str(a) for a in argv]])
     except SystemExit:
         return None

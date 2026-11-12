@@ -8,7 +8,11 @@ ordered."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -192,3 +196,43 @@ def test_an_unknown_release_dir_is_refused(setup):
 def test_an_argv_the_launcher_rejects_is_left_to_its_dry_run(setup):
     setup.argv[:] = ["--gpu", "modal:2x8xb300"]  # no --model: yeto launch --dry-run reports it
     assert setup.make().consistency_problem() is None
+
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "k31"
+
+
+def _example_trainer_argv(tmp_path, env_overrides) -> list[str]:
+    """The ``yeto launch`` argv of examples/k31/launch-trainer-modal-b300.sh (a stub
+    ``yeto`` on PATH records it; nothing launches)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    out = tmp_path / "argv.json"
+    stub = bin_dir / "yeto"
+    stub.write_text(f"#!{sys.executable}\nimport json, sys\njson.dump(sys.argv[2:], open({str(out)!r}, 'w'))\n")
+    stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "MODEL": "org/k31", "MODEL_REVISION": "r",
+           "DATA": "d", "STORE_URI": STORE, "STORE_ENDPOINT": "https://e", "STORE_SECRET": "s",
+           "EXPERT_SELECTION": str(tmp_path / "absent-selection.json"), "RL_IMAGE": "docker:i@sha256:0",
+           "PARAMETER_LAYOUT_SHA256": "0" * 64, **env_overrides}
+    subprocess.run(["bash", str(EXAMPLES / "launch-trainer-modal-b300.sh")], env=env, check=True)
+    return json.loads(out.read_text())  # after "launch"
+
+
+@pytest.mark.parametrize("spec_name", ["sampler-spec.nc-mi355x.json", "sampler-spec.nc-mi355x-vllm.json"])
+@pytest.mark.parametrize("env_overrides", [{"STAGE": "1"}, {"STAGE": "2"}, {"STAGE": "2", "SEQ_LEN": "262144"},
+                                           {"STAGE": "2", "FORM": "synced-2"}],
+                         ids=["stage1", "stage2", "stage2-262k", "stage2-synced2"])
+def test_the_k31_examples_pass_the_consistency_checks(tmp_path, spec_name, env_overrides):
+    """Every STAGE of the example trainer launcher with each example sampler spec it
+    names: a customer who runs the examples as they are is not refused."""
+    argv = _example_trainer_argv(tmp_path, env_overrides)
+    env_file = tmp_path / "store.env"
+    env_file.write_text("R2_BUCKET=bkt\n")
+    pool = {"run_prefix": "r1", "r2_env_file": str(env_file), "spec": str(EXAMPLES / spec_name)}
+    assert up_consistency.trainer_args(argv) is not None
+    assert up_consistency.problems(STORE, argv, pool) == []
+
+
+def test_a_help_argv_prints_nothing(capsys):
+    assert up_consistency.trainer_args(["--help"]) is None
+    assert capsys.readouterr().out == ""
