@@ -219,6 +219,7 @@ idempotent and exit 0; a non-zero exit fails the node start.
 | `max_orders` | Most orders over the whole run. | none |
 | `unreachable_grace_s` | How long probes must fail before a node counts as lost. Shorter failures count as network blips. | `300` |
 | `fence_alert_failures`, `fence_alert_s` | A shard fence that fails is tried again every tick. After this many failures, or this long without success, the pool sends `fence_stuck` once and keeps trying. | `5`, `600` |
+| `fence_order_ahead_s`, `fence_blocked_hold_s` | While a shard's fence is owed, a node to continue the shard is ordered only in the first `fence_order_ahead_s` of the failure. A granted node whose start the fence holds back is released after `fence_blocked_hold_s` (`fence_blocked_node_released`) and ordered again once the fence succeeded. | `300`, `1800` |
 | `fence_max_hold_s` | How long a node is kept (and billed) while its shard fence fails. After that the node is released (`fence_abandoned_node_released`); the fence is still tried and nothing continues the shard before it succeeds. `null`: no limit. | `7200` |
 | `control_plane_alert_s` | How long NC status calls must fail before an alert. The pool never acts on a failed status call alone. | `600` |
 | `stall_s` | A joined sampler whose event tape has not grown for this long counts as crashed. Set it above your longest round. | none (off) |

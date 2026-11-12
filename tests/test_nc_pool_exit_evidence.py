@@ -175,7 +175,7 @@ def test_exit_evidence_reads_the_handoff_the_lease_and_the_newest_member_record(
     store = SimpleNamespace(objects=Objects())
     path = R2DataPath(lambda: store)
     assert path.exit_evidence("nc-0") == {"handoff": None, "lease": None, "pool_fenced": False,
-                                          "incarnation": None, "leave": None}
+                                          "incarnation": None, "leave": None, "superseded": False}
     write_member(store, Member(sampler="nc-0", incarnation="zz-old", joined_at=10.0, resume={}, left_at=20.0,
                                leave_reason="FENCED"))
     write_member(store, Member(sampler="nc-0", incarnation="aa-new", joined_at=30.0, resume={}))
@@ -183,11 +183,12 @@ def test_exit_evidence_reads_the_handoff_the_lease_and_the_newest_member_record(
                                leave_reason="FINISHED"))
     IncarnationLease(store, "nc-0", "aa-new").claim()
     assert path.exit_evidence("nc-0") == {"handoff": None, "lease": "aa-new", "pool_fenced": False,
-                                          "incarnation": "aa-new", "leave": None}
+                                          "incarnation": "aa-new", "leave": None, "superseded": False}
     elastic.fence_shard(store, "nc-0", by="t7")
     before = dict(store.objects.data)
     seen = path.exit_evidence("nc-0")
     assert seen["handoff"] == "pool-fence:t7" and seen["lease"] == "pool-fence:t7" and seen["pool_fenced"]
+    assert seen["superseded"]  # the fence replaced the incarnation that held the lease
     assert path.exit_evidence("nc-1")["leave"] == "FINISHED"
     assert store.objects.data == before  # read only
 
@@ -265,3 +266,40 @@ def test_a_real_sampler_an_operator_retires_exits_zero_fenced_and_the_pool_resta
     cloud.tickets[first.ticket].update(sampler="exited", exit=0)
     pool.tick()
     assert not pool.finished and not pool.stopped and [e[1] for e in cloud.kinds("restart")] == [first.ticket]
+
+
+def test_a_finished_leave_of_an_incarnation_the_pool_fence_superseded_is_restarted_once_then_ends():
+    clock, cloud, pool, first, second = _two_ready()
+    IncarnationLease(cloud.store, first.shard, "inc-1", clock=clock).claim()
+    elastic.fence_incarnation(cloud.store, first.shard, by=first.ticket, clock=clock)  # after its last lease read
+    _sampler_leaves(cloud, first, "FINISHED", incarnation="inc-1")
+    pool.tick()
+    assert not pool.finished and [e[1] for e in cloud.kinds("restart")] == [first.ticket]
+    clock.t += 60
+    IncarnationLease(cloud.store, first.shard, "inc-2", clock=clock).claim()  # the restarted sampler joins
+    _sampler_leaves(cloud, first, "FINISHED", incarnation="inc-2")  # and finds the data ended
+    pool.tick()
+    assert pool.finished and pool.stopped and len(cloud.kinds("restart")) == 1
+
+
+def test_a_real_sampler_without_a_lease_that_finishes_under_an_old_pool_fence_ends_the_pool(tmp_path):
+    import json
+
+    from tests.test_stage1_gaps import _sampler_spec
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.resume import CheckpointStore
+
+    clock, cloud, pool, first, second = _two_ready()
+    store = CheckpointStore(tmp_path / "store")
+    elastic.fence_incarnation(store, first.shard, by=first.ticket)  # a stall fence; the sampler was restarted
+    spec = _sampler_spec(tmp_path, sampler_id=first.shard, num_rollouts=1, incarnation_lease=False)
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    assert entry.main(["--spec", str(path)]) == 0  # it never claims the lease and finishes its data
+    seen = R2DataPath(store).exit_evidence(first.shard)
+    assert seen["pool_fenced"] and seen["leave"] == "FINISHED" and seen["superseded"] is False
+    cloud.exit_evidence = lambda m: R2DataPath(store).exit_evidence(m.shard)
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    pool.tick()
+    assert pool.finished and pool.stopped and not cloud.kinds("restart")
+    assert "sampler_exit_not_data_end" not in _names(pool)

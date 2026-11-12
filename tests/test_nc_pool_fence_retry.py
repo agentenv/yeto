@@ -140,10 +140,10 @@ def test_a_fencing_node_at_its_lease_end_is_released_and_the_fence_stays_owed():
     assert m.state == GONE and [e[1] for e in cloud.kinds("drain")] == [m.ticket]
     assert m.fence_pending == "node lost"
     _run(pool, clock, clock.t + 600)
-    successor = pool.members[-1]
-    assert successor is not m and successor.started is None and len(cloud.kinds("start")) == 1
+    assert pool.members == [m] and len(pool.pending) == 1  # nothing is ordered for an unfenced shard
     cloud.fence_errors = 0
     _run(pool, clock, clock.t + 1800)
+    successor = pool.members[-1]
     assert successor.state == READY and successor.replaces_shard == m.shard and m.fence_pending is None
 
 
@@ -233,13 +233,13 @@ def test_a_node_without_a_lease_end_is_released_after_fence_max_hold_s_and_the_f
     _run(pool, clock, clock.t + 600)
     assert m.state == GONE and [e[1] for e in cloud.kinds("drain")] == [m.ticket]
     assert _names(pool).count("fence_abandoned_node_released") == 1 and m.fence_pending == "node lost"
-    successor = pool.members[-1]
-    assert successor is not m and successor.continues_from == m.ticket and successor.started is None
     _run(pool, clock, clock.t + 3600)
-    assert successor.started is None and len(cloud.kinds("start")) == 1  # still waiting for the fence
+    assert pool.members == [m] and len(cloud.kinds("order")) == 1  # nothing ordered before the fence
     cloud.fence_errors = 0
     _run(pool, clock, clock.t + 1800)
-    assert successor.state == READY and successor.replaces_shard == m.shard and m.fence_pending is None
+    successor = pool.members[-1]
+    assert successor.continues_from == m.ticket and successor.state == READY
+    assert successor.replaces_shard == m.shard and m.fence_pending is None
     assert _names(pool).count("fence_abandoned_node_released") == 1
 
 
@@ -273,3 +273,78 @@ def test_the_fence_knobs_are_validated():
         el.ElasticConfig.from_dict({"fence_alert_failures": 0})
     with pytest.raises(ValueError, match="fence_max_hold_s"):
         el.ElasticConfig.from_dict({"fence_max_hold_s": -1})
+
+
+def _two(**cfg):
+    clock = Clock()
+    cloud = FlakyFence(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=2, accounts=(1, 4, 5), **cfg)
+    _run(pool, clock, 1800)
+    first, second = [m for m in pool.members if m.state == READY]
+    return clock, cloud, pool, first, second
+
+
+def test_a_fence_that_succeeds_after_the_data_ended_orders_no_replacement():
+    """One node is lost and its fence fails; meanwhile the other sampler finishes the
+    data (exit 0). When the fence then succeeds the pool must not order a node."""
+    clock, cloud, pool, first, second = _two()
+    cloud.fence_errors = 5
+    _lose(pool, clock, cloud, first)
+    assert first.state == FENCING
+    orders = len(cloud.kinds("order"))
+    cloud.tickets[second.ticket].update(sampler="exited", exit=0)       # the data ended
+    _run(pool, clock, clock.t + 2 * H)
+    assert pool.finished
+    assert len(cloud.kinds("order")) == orders
+    assert all(m.state == GONE for m in pool.members)
+
+
+def test_a_fence_that_never_succeeds_does_not_keep_a_successor_node_billed_and_idle():
+    """fence_max_hold_s releases the unfenced node; what continues its shard may start only
+    after the fence. With a fence that never succeeds the successor's node must not sit
+    granted, billed and unstarted (nor be ordered again and again)."""
+    clock = Clock()
+    cloud = FlakyFence(clock, ready_after=300, lease_s=10**9)
+    pool = _pool(clock, cloud, accounts=(1, 4), fence_max_hold_s=1800.0)
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.fence_errors = 10**9
+    _lose(pool, clock, cloud, m)
+    _run(pool, clock, clock.t + 12 * H)
+    live = [(x.ticket, x.state, round((clock.t - (x.granted or clock.t)) / 3600, 1)) for x in pool.members if x.state != GONE]
+    assert len(cloud.kinds("order")) <= 2
+    assert not [x for x in live if x[2] > 2.0]
+
+
+def test_a_successor_ordered_in_the_first_minutes_of_a_failing_fence_is_released_after_fence_blocked_hold_s():
+    clock, cloud, pool, m = _setup(fence_order_ahead_s=300, fence_blocked_hold_s=1800)
+    cloud.fence_errors = 10**9
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")  # released at once, the fence owed
+    _run(pool, clock, clock.t + 240)
+    successor = pool.members[-1]
+    assert successor is not m and successor.continues_from == m.ticket and len(cloud.kinds("order")) == 2
+    trips = pool.breaker.failures
+    _run(pool, clock, clock.t + 1500)
+    assert successor.state != GONE and successor.started is None
+    _run(pool, clock, clock.t + 600)
+    assert successor.state == GONE and _names(pool).count("fence_blocked_node_released") == 1
+    assert pool.pending == [{"data_slot": None, "shard": m.shard, "lost": True, "from": m.ticket}]
+    assert pool.breaker.failures == trips and not pool.breaker.trips
+    _run(pool, clock, clock.t + 6 * H)
+    assert len(cloud.kinds("order")) == 2 and len(pool.members) == 2  # nothing ordered while the fence fails
+    cloud.fence_errors = 0
+    _run(pool, clock, clock.t + 1800)
+    last = pool.members[-1]
+    assert len(cloud.kinds("order")) == 3 and last.state == READY and last.replaces_shard == m.shard
+    assert not pool.pending and m.fence_pending is None
+
+
+def test_no_node_is_ordered_for_a_handoff_whose_fence_failed_longer_than_fence_order_ahead_s():
+    clock, cloud, pool, m = _setup(fence_order_ahead_s=0)
+    cloud.fence_errors = 3
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    _run(pool, clock, clock.t + 180)
+    assert len(cloud.kinds("order")) == 1 and len(pool.pending) == 1
+    assert [e["why"] for e in pool.events.events if e["event"] == "nc_elastic_order_refused"][-1].startswith("1 handoff")
+    _run(pool, clock, clock.t + 1800)
+    assert len(cloud.kinds("order")) == 2 and pool.members[-1].state == READY and not pool.pending

@@ -101,6 +101,7 @@ class Member:
     fence_failures: int = 0
     fence_since: float | None = None  # the first failure
     continues_from: str | None = None  # ticket of the member whose slot / shard this one took over
+    fence_wait_since: float | None = None  # granted, its start held back by an owed fence since then
     end_reason: str | None = None
     drain_error: str | None = None
     config_error: str | None = None  # its sampler refused the config: kept as is until pool-retry
@@ -366,7 +367,18 @@ class IslandPool:
             self._no_account = refused
             return None
         self._no_account = None
-        handoff = self.pending[0] if replaces is None and self.pending else None
+        handoff = None
+        if replaces is None and self.pending:
+            # a handoff whose origin's fence is still owed is not ordered for (its node would
+            # sit granted, billed and unstarted), except in the first fence_order_ahead_s
+            handoff = next((p for p in self.pending if not self._handoff_waits_for_fence(p, now)), None)
+            if handoff is None:
+                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing: nothing "
+                           "is ordered to continue an unfenced shard")
+                if refused != self._refused:
+                    self._event("order_refused", why=refused)
+                self._refused = refused
+                return None
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                        f"{self.config.shard_limit} (the trainer's buffer shards / the tunnel ports)")
@@ -389,7 +401,7 @@ class IslandPool:
         self.next_shard += 1
         self.budget.orders += 1
         if handoff is not None:
-            self.pending.pop(0)
+            self.pending.remove(handoff)
         if replaces is not None:
             slot, continues, lost = replaces.data_slot, replaces.shard, False
         elif handoff is not None:
@@ -516,6 +528,15 @@ class IslandPool:
         origins = {t for t in (m.continues_from, m.replaces) if t}
         return next((p for p in self.members if p is not m and p.fence_pending is not None
                      and p.ticket in origins), None)
+
+    def _handoff_waits_for_fence(self, handoff: dict[str, Any], now: float) -> bool:
+        """The member ``handoff`` comes from still owes its fence, for longer than
+        ``fence_order_ahead_s`` (a fence about to succeed does not cost the cold start)."""
+        origin = next((p for p in self.members if p.fence_pending is not None
+                       and p.ticket == handoff.get("from")), None)
+        if origin is None:
+            return False
+        return origin.fence_since is None or now - origin.fence_since >= float(self.ecfg.fence_order_ahead_s)
 
     def _retry_fences(self, now: float) -> None:
         """Every fence still owed is tried again. A ``fencing`` member (its node kept) goes on
@@ -1262,7 +1283,17 @@ class IslandPool:
                 # and hold its claims. The start waits for the fence.
                 self._once(m, "fence_wait", "start_waits_for_fence", predecessor=blocker.ticket,
                            predecessor_shard=blocker.shard)
+                m.fence_wait_since = now if m.fence_wait_since is None else m.fence_wait_since
+                if now - m.fence_wait_since >= float(self.ecfg.fence_blocked_hold_s):
+                    # granted and billed for nothing: released; what it was to continue goes
+                    # back to pending and is ordered again once the fence succeeded. Not a
+                    # provisioning failure (the breaker does not count it).
+                    self._event("fence_blocked_node_released", ticket=m.ticket, account=m.account, shard=m.shard,
+                                predecessor=blocker.ticket, predecessor_shard=blocker.shard,
+                                waited_s=round(now - m.fence_wait_since))
+                    self._retire(m, "start blocked by an owed fence", lost=False)
                 return
+            m.fence_wait_since = None
             if status.state == "active" and "fence_wait" in m.alerted:
                 m.alerted.remove("fence_wait")
                 m.created = now  # the start timeout counts from here, not from the wait
@@ -1473,7 +1504,11 @@ class IslandPool:
         if not seen:
             return False
         successor = seen.get("handoff")
-        fenced = bool(seen.get("pool_fenced")) or seen.get("leave") == "FENCED"
+        # a pool fence on the lease that did not supersede the newest incarnation (it never
+        # held the lease: a sampler without a lease, or an old fence left on the shard) says
+        # nothing about that incarnation: its FINISHED leave is the end of the data
+        untouched = seen.get("leave") == "FINISHED" and seen.get("superseded") is False
+        fenced = (bool(seen.get("pool_fenced")) and not untouched) or seen.get("leave") == "FENCED"
         if successor is None and not fenced:
             return False
         self._event("sampler_exit_not_data_end", ticket=m.ticket, account=m.account, shard=m.shard,
