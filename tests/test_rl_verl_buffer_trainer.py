@@ -103,7 +103,7 @@ def test_feed_maps_versions_judges_and_records_each_position_once(tmp_path):
         meta = feed.pull()
         keep = collector.offer(far.SampleMeta(**meta))
         feed("yeto_keep_last" if keep else "yeto_drop_last")
-    assert added == []  # kept groups are handed over when the round closes (judged again first)
+    assert len(added) == 2  # kept groups reach the trainer actor at once (recorded at round close)
     feed.close_round(0)
     records.sort(key=lambda r: r["position"])
     assert [r["position"] for r in records] == [0, 1, 2] == feed.pulled_positions
@@ -206,6 +206,10 @@ class FakeBufferActor:
 
     def yeto_add_group(self, rows):
         self.kept.append(rows)
+        return len(self.kept)
+
+    def yeto_remove_group(self, uid):
+        self.kept = [r for r in self.kept if r["non_tensor"]["uid"][0] != uid]
         return len(self.kept)
 
     def yeto_assemble(self):

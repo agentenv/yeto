@@ -625,7 +625,8 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                     known_versions=list(resumed.known_versions()),
                     restored_versions=sorted(resumed.window()))
     feed = BufferFeed(buffer, vmap=lambda: island.consume_map, shape=shape,
-                      add_group=lambda rows: actor_call("yeto_add_group", rows), record=record,
+                      add_group=lambda rows: actor_call("yeto_add_group", rows),
+                      remove_group=lambda uid: actor_call("yeto_remove_group", uid), record=record,
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))

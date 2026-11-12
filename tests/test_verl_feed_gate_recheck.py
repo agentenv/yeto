@@ -39,7 +39,12 @@ def _setup(tmp_path, on_sleep):
         sleeps.append(seconds)
         on_sleep(len(sleeps), flaky)
 
+    def remove_group(uid):  # the trainer actor's yeto_remove_group
+        assert sum(rows["non_tensor"]["uid"][0] == uid for rows in added) == 1
+        added[:] = [rows for rows in added if rows["non_tensor"]["uid"][0] != uid]
+
     feed = BufferFeed(reader, vmap=lambda: None, shape=RowShape(16, 16, 0), add_group=added.append,
+                      remove_group=remove_group,
                       record=records.append, emit=lambda name, **f: None, sleep=sleep, poll_s=0.5,
                       wait_s=600.0, clock=lambda: 0.0, incarnation_gate=gate)
     feed._local = lambda version: 0  # noqa: SLF001 - versions are not under test
@@ -124,7 +129,7 @@ def test_an_unreadable_lease_at_the_recheck_waits_then_judges(tmp_path):
     root_store = {}
 
     def on_sleep(count, flaky):
-        assert added == []  # nothing trained while the lease is unknown
+        assert len(added) == 1  # in the actor's round, not assembled while the lease is unknown
         if count == 1:
             IncarnationLease(root_store["store"], "s0", "bbbb", clock=lambda: 0.0).claim()
             _write_group(root_store["writer"], "s0", "bbbb", 0)
@@ -162,6 +167,19 @@ def test_buffer_call_hands_the_round_over_at_assembly(tmp_path):
     call = BufferCall(feed, lambda name, *a, **k: calls.append((name, len(added))), round_id=lambda: 0)
     call("yeto_pull_sample")
     call("yeto_keep_last")
-    assert added == []  # not handed over before the round is judged again
+    assert len(added) == 1 and feed._kept_pending[0][0] == 0  # noqa: SLF001
+    # handed to the actor at once: the feed holds no rows (a 1M-context group is GBs)
+    assert all(not isinstance(x, dict) or "tensors" not in x for p in feed._kept_pending for x in p)  # noqa: SLF001
     call("yeto_assemble")
-    assert calls == [("yeto_assemble", 1)]  # handed over before the trainer assembles
+    assert calls == [("yeto_assemble", 1)]
+
+
+def test_a_fenced_group_is_taken_back_out_of_the_actor(tmp_path):
+    holder = {}
+    store, writer, flaky, feed, added, records = _setup(tmp_path, lambda c, f: holder["on"](c, f))
+    holder["on"] = _fence_while_waiting(store, writer)
+    IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
+    _write_group(writer, "s0", "aaaa", 0)
+    feed.remove_group = None
+    with pytest.raises(Exception, match="cannot take a handed-over group back"):
+        _round(feed, 2)

@@ -282,11 +282,14 @@ class BufferFeed:
 
     ``buffer``: the trainer's ``FileSampleBuffer``; ``vmap``: returns the
     island's live consumption map (module doc, ``pull``); ``add_group(rows)``:
-    hands kept rows to the trainer actor; ``record(fields)``: one record per
-    pulled group."""
+    hands kept rows to the trainer actor (at once: the feed process never holds
+    a round's rows); ``remove_group(uid)``: takes a handed-over group back out of
+    the trainer actor's round before it is assembled (a group fenced since it was
+    kept, :meth:`recheck_kept`); ``record(fields)``: one record per pulled group."""
 
     def __init__(self, buffer: Any, *, vmap: Callable[[], VersionMap], shape: RowShape,
                  add_group: Callable[[dict[str, Any]], Any], record: Callable[[dict[str, Any]], None],
+                 remove_group: Callable[[str], Any] | None = None,
                  tokenize: Callable[[str], Sequence[int]] | None = None, wait_s: float = 3600.0,
                  poll_s: float = 2.0, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
@@ -327,6 +330,7 @@ class BufferFeed:
         self.vmap = vmap
         self.shape = shape
         self.add_group = add_group
+        self.remove_group = remove_group
         self.record = record
         self.tokenize = tokenize
         self.wait_s = float(wait_s)
@@ -340,9 +344,11 @@ class BufferFeed:
         self.cursor_log = cursor_log
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
-        # kept groups not yet handed to the trainer: (position, entry, rows, record);
-        # judged again (:meth:`recheck_kept`) and handed over when the round closes
-        self._kept_pending: list[tuple[int, Any, dict[str, Any], dict[str, Any]]] = []
+        # kept groups of the round being collected, already in the trainer actor (their
+        # rows are not held here: a 1M-context group is GBs of row lists):
+        # (position, entry, record); judged again (:meth:`recheck_kept`) and recorded
+        # kept when the round closes
+        self._kept_pending: list[tuple[int, Any, dict[str, Any]]] = []
         self._lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
         # the closed round's cursor record, written only once that round has trained
         # (:meth:`commit_round`)
@@ -494,11 +500,13 @@ class BufferFeed:
         if None in last.param_versions:  # the collector keeps only groups whose versions it knows
             raise BufferFeedError(f"buffer position {last.position}: kept with an unknown version "
                                   f"{last.param_versions}")
-        rows = group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
-                          param_versions=last.param_versions, shape=self.shape, tokenize=self.tokenize)
-        # handed to the trainer when the round closes (:meth:`close_round`), after the
-        # round's collector judged its kept groups again (:meth:`recheck_kept`)
-        self._kept_pending.append((last.position, last.entry, rows, {**last.record, "kept": True}))
+        # handed to the trainer actor now, as before the recheck: holding the rows here
+        # until the round closes kept a whole round's rows in the feed process. A group
+        # fenced before the round is assembled is taken back out (:meth:`recheck_kept`).
+        self.add_group(group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
+                                  param_versions=last.param_versions, shape=self.shape,
+                                  tokenize=self.tokenize))
+        self._kept_pending.append((last.position, last.entry, {**last.record, "kept": True}))
         self._round_kept.append(last.position)
 
     def recheck_kept(self) -> list[str]:
@@ -513,7 +521,7 @@ class BufferFeed:
             return []
         recheck = getattr(self.gate, "recheck", None)
         while True:
-            items = [(entry, position) for position, entry, _, _ in self._kept_pending]
+            items = [(entry, position) for position, entry, _ in self._kept_pending]
             if callable(recheck):
                 verdicts = recheck(items, self._lease_reads)
             else:
@@ -528,12 +536,16 @@ class BufferFeed:
             self.lease_waits += 1
             self.sleep(self.poll_s)
         fenced: list[str] = []
-        kept: list[tuple[int, Any, dict[str, Any], dict[str, Any]]] = []
+        kept: list[tuple[int, Any, dict[str, Any]]] = []
         for pending, verdict in zip(self._kept_pending, verdicts):
             if verdict is None:
                 kept.append(pending)
                 continue
-            position, entry, _, _ = pending
+            position, entry, _ = pending
+            if self.remove_group is None:
+                raise BufferFeedError(f"buffer position {position}: fenced after it was kept, and this "
+                                      "feed cannot take a handed-over group back (no remove_group)")
+            self.remove_group(f"{UID_PREFIX}{position}")
             self.record({"position": position, "sample_id": entry.sample_id, "kept": False,
                          "dropped": STALE_REASON, "detail": verdict,
                          "source": (entry.provenance or {}).get("sampler_id")})
@@ -545,10 +557,9 @@ class BufferFeed:
         return fenced
 
     def _hand_over(self) -> None:
-        """Hand the round's kept groups to the trainer and record them kept."""
+        """Record the round's kept groups (judged again) kept."""
         pending, self._kept_pending = self._kept_pending, []
-        for _, _, rows, record in pending:
-            self.add_group(rows)
+        for _, _, record in pending:
             self.record(record)
 
     def drop(self) -> None:
