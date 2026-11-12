@@ -5,7 +5,7 @@ Rules this client enforces (the accounts are shared with production):
 * an order is placed only when the account has no open ticket of this session
   (``others[]`` - tickets of other sessions - is ignored, never acted on);
 * every ticket this client creates is recorded in the ledger
-  (``<state_dir>/tickets.json``); ``delete`` refuses a ticket that is not in the
+  (``<state_dir>/tickets.json``), the order itself before it is sent; ``delete`` refuses a ticket that is not in the
   ledger, and refuses unless the account's current ticket id equals the
   expected id right before the call;
 * ``delete --all`` is never issued; only ``nc-manage delete --account N --yes``,
@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 OPEN_STATES = frozenset({"queued", "held", "provisioning", "active", "releasing"})
 MI355X_RATE_UCR_PER_GPU_HOUR = 3_000_000
 LEASE_HOURS = 4.0
+ORDER_IN_FLIGHT_S = 360.0  # an order call (300 s timeout) may still run this long after it was written down
+ORDER_CONFIRM_READS, ORDER_CONFIRM_POLL_S = 3, 5.0  # status reads after an order call that failed
 
 
 class NcError(RuntimeError):
@@ -244,7 +247,65 @@ class Ledger:
         return any(r["account"] == account and r["ticket"] == ticket for r in self.load())
 
     def open_rows(self) -> list[dict[str, Any]]:
-        return [r for r in self.load() if not r.get("ended")]
+        return [r for r in self.load() if r.get("ticket") and not r.get("ended")]
+
+    # An order is written down before it is sent: a row without a ticket. The order
+    # call fills in the ticket; a row that stays without one is an order whose
+    # outcome this tool never learned (the process died inside the call, or the
+    # call failed and the status after it could not be read).
+
+    def pending_orders(self, account: int) -> list[dict[str, Any]]:
+        return [r for r in self.load() if r.get("ticket") is None and r["account"] == account]
+
+    def begin_order(self, account: int, *, before: str | None, **extra: Any) -> str:
+        """Write down an order about to be sent on ``account`` (``before``: the id of
+        the ended ticket the account shows, if any). The caller has just read that
+        the account has no open order, so earlier pending orders of the account are
+        over and dropped - except one whose call may still be running (another
+        process on this state dir): two orders on one account are refused."""
+        order = uuid.uuid4().hex
+        with state_file_lock(self.path):
+            rows, now = self.load(), time.time()
+            for r in rows:
+                if r.get("ticket") is None and r["account"] == account and not r.get("call_ended") \
+                        and now - r["created_at"] < ORDER_IN_FLIGHT_S:
+                    raise NcRefused(f"account {account}: an order of this tool is in flight "
+                                    f"(sent {now - r['created_at']:.0f}s ago); one order per account")
+            rows = [r for r in rows if not (r.get("ticket") is None and r["account"] == account)]
+            rows.append({"account": account, "ticket": None, "order": order, "created_at": now,
+                         "before": before, **extra})
+            self._write(rows)
+        return order
+
+    def end_order(self, order: str, ticket: str | None, *, drop: bool = False,
+                  lost_row: dict[str, Any] | None = None, **fields: Any) -> None:
+        """The order call is over: ``ticket`` is the ticket it placed (the row becomes
+        that ticket's row), or None when it failed and no ticket of it is known (the
+        row stays pending, no longer in flight; ``drop``: no order was sent, forget it)."""
+        with state_file_lock(self.path):
+            rows = self.load()
+            row = next((r for r in rows if r.get("order") == order and r.get("ticket") is None), None)
+            if row is None and ticket is not None and lost_row is not None:
+                row = {**lost_row, "ticket": None, "order": order, "created_at": time.time()}
+                rows.append(row)  # its pending row was dropped meanwhile: the ticket is recorded all the same
+            if row is None:
+                return
+            if drop:
+                rows.remove(row)
+            elif ticket is None:
+                row.update(call_ended=time.time(), **fields)
+            else:
+                row.pop("before", None)
+                row.update(ticket=ticket, **fields)
+            self._write(rows)
+
+    def mark_pending(self, account: int, **fields: Any) -> None:
+        with state_file_lock(self.path):
+            rows = self.load()
+            for row in rows:
+                if row.get("ticket") is None and row["account"] == account:
+                    row.update(fields)
+            self._write(rows)
 
     def run_rows(self, run: str) -> list[dict[str, Any]]:
         """Open tickets this tool created for ``run`` (the tag written at create)."""
@@ -339,19 +400,67 @@ class NcClient:
         return LeaseStatus("ended", until, t.get("end_reason"), preempt, gpus, rate)
 
     def create(self, *, model: str = "mi355x", pubkey: str | None = None, run: str | None = None) -> str:
+        """Order a node; the ticket id, recorded in the ledger. The order is written
+        to the ledger before it is sent, so an order whose answer is lost (a timeout,
+        output that does not parse, the tool failing after the request) is still
+        found: the account's status is read right after, and an open ticket that was
+        not there before the order is the one this call placed."""
         st = self.status()
-        if self.own_ticket(st):
+        own = self.own_ticket(st)
+        if own:
+            pending = self.ledger.pending_orders(self.account)
+            sent = datetime.fromtimestamp(pending[-1]["created_at"], UTC) if pending else None
+            hint = "" if sent is None or self.ledger.owns(self.account, own.get("id")) else (
+                f". An order this tool sent at {sent:%Y-%m-%dT%H:%MZ} was not recorded: ticket {own.get('id')} "
+                "may be that order, still billing and in no ledger; check it in the National Compute console "
+                "and release it there if no one else placed it")
             raise NcRefused(f"account {self.account} already has open ticket "
-                            f"{st['ticket'].get('id')} ({st['ticket'].get('state')}); one order per account")
+                            f"{own.get('id')} ({own.get('state')}); one order per account{hint}")
+        before = (st.get("ticket") or {}).get("id")
+        row = {"account": self.account, "model": model, **({"run": run} if run else {})}
+        order = self.ledger.begin_order(before=before, **row)
         env = {"NC_PUBKEY": pubkey} if pubkey else None
-        doc = self._call([*_tool("manage"), "create", "--account", str(self.account),
-                          "--model", model, "--yes"], env=env)
-        ticket = (doc.get("ticket") or {}).get("id")
-        if not doc.get("ok") or not ticket:
-            raise NcError(f"create failed: {doc.get('error') or doc}")
-        self.ledger.add(self.account, ticket, model=model, **({"run": run} if run else {}))
+        try:
+            doc = self._call([*_tool("manage"), "create", "--account", str(self.account),
+                              "--model", model, "--yes"], env=env)
+            ticket = (doc.get("ticket") or {}).get("id")
+            if doc.get("created") is False and ticket:  # the tool found an open order and placed none
+                self.ledger.end_order(order, None, drop=True)  # no order was sent
+                raise NcRefused(f"account {self.account}: the order was not placed, ticket {ticket} "
+                                f"({doc['ticket'].get('state')}) was opened by someone else; not recording it")
+            if not doc.get("ok") or not ticket:
+                raise NcError(f"create failed: {doc.get('error') or doc}")
+            fields: dict[str, Any] = {}
+        except NcRefused:
+            raise
+        except Exception as error:  # the answer is lost; the order may have been placed
+            ticket = self._placed_order(before)
+            if ticket is None:
+                self.ledger.end_order(order, None, error=repr(error)[:300])
+                raise
+            print(f"WARNING: NC account {self.account}: the order call failed ({error!r}) but placed ticket "
+                  f"{ticket}; recorded in the ledger", file=sys.stderr, flush=True)
+            fields = {"recorded_after": repr(error)[:300]}
+        self.ledger.end_order(order, ticket, lost_row=row, **fields)
         cost_record("created", ticket, name=run, account=self.account, machine_type=model)
         return ticket
+
+    def _placed_order(self, before: str | None) -> str | None:
+        """After an order call that failed: the open ticket of this session that was
+        not the account's ticket before the order (``before``), or None. Only called
+        by the process that sent the order, right after its call, having read before
+        it that the account had no open order; the order tool holds the account's
+        lock during the call. A status that cannot be read decides nothing."""
+        for attempt in range(ORDER_CONFIRM_READS):
+            if attempt:
+                self.sleep(ORDER_CONFIRM_POLL_S)
+            try:
+                own = self.own_ticket(self.status())
+            except Exception:  # noqa: BLE001 - the order call's error is the one raised
+                continue
+            if own and own.get("id") and own["id"] != before:
+                return str(own["id"])
+        return None
 
     def wait_active(self, ticket: str, *, timeout_s: float = 3600, poll_s: float = 20,
                     log: Callable[[str], None] = print) -> NodeLease:
