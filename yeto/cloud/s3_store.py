@@ -126,11 +126,27 @@ def _read_retry_pause(attempt: int) -> None:
     time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))
 
 
-# botocore's retries of one request (throttling 429 / 503 SlowDown included):
-# "standard" mode backs off exponentially with jitter, so 16 samplers refused at
-# once by the store do not come back in lock step; AWS_RETRY_MODE /
-# AWS_MAX_ATTEMPTS in the environment win
+# botocore's retries of one request. "standard" mode retries a 500 / 502 / 503 / 504
+# and the throttling codes (SlowDown, ...) with full jitter: the wait before retry
+# ``n`` is ``random() * min(2 ** (n - 1), 20)`` s, so 16 samplers refused at once by
+# the store do not come back in lock step. ``max_attempts`` here counts retries (the
+# client config's meaning): 8 retries are 9 requests and 8 waits, 45.5 s on average
+# and 91 s at most (measured against an endpoint that always answers 503: mean 45.8 s,
+# p95 65 s). A client also holds a retry quota (500 units, 5 per retry, refilled by
+# successes): after about 100 retries without a success between them a refused
+# request fails at once (measured: the 14th refused call in a row was not retried).
+# "adaptive" mode adds a client-side rate limit, but only after a throttling *code*
+# (SlowDown, Throttling, ...): R2's ``503 ServiceUnavailable: Reduce your concurrent
+# request rate`` is not one, so it would never slow this client down (measured).
+# :func:`client_config` reads the overrides.
 RETRIES = {"mode": "standard", "max_attempts": 8}
+RETRY_MODES = ("standard", "adaptive", "legacy")
+# Seconds to open a connection / to wait for the next bytes of a response. botocore's
+# 60 s connect timeout times 9 requests keeps one call to an unreachable endpoint
+# busy for 9 minutes, longer than the dispenser's lease renewal period (lease / 3 =
+# 300 s); a TCP + TLS handshake that has not finished in 10 s is retried instead.
+CONNECT_TIMEOUT_S = 10.0
+READ_TIMEOUT_S = 60.0  # botocore's default; a 64 MiB range read is many socket reads
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
@@ -148,12 +164,17 @@ PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts of one file mov
 FILE_CONCURRENCY_ENV = "YETO_RL_STORE_FILE_CONCURRENCY"  # files of one push tier moved in parallel
 MAX_CONNECTIONS_ENV = "YETO_RL_STORE_MAX_CONNECTIONS"  # HTTP connection pool of the client (default: the threads)
 DOWNLOAD_PROCESSES_ENV = "YETO_RL_STORE_DOWNLOAD_PROCESSES"  # processes of a many-file download (read_files)
+CONNECT_TIMEOUT_ENV = "YETO_RL_STORE_CONNECT_TIMEOUT_S"  # seconds to open a connection (default 10)
+READ_TIMEOUT_ENV = "YETO_RL_STORE_READ_TIMEOUT_S"  # seconds without a byte of a response (default 60)
+RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (default) / adaptive / legacy
+MAX_ATTEMPTS_ENV = "YETO_RL_STORE_MAX_ATTEMPTS"  # requests of one call, the first included (default 9)
 PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
 UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
-                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV)
+                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV,
+                CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
 # cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
@@ -519,6 +540,36 @@ def client_pool_size(environ: Mapping[str, str]) -> int:
     return max(BOTOCORE_DEFAULT_POOL, t.file_concurrency * t.concurrency)
 
 
+def _seconds(environ: Mapping[str, str], name: str, default: float) -> float:
+    raw = environ.get(name)
+    value = float(raw) if raw else default
+    if value <= 0:
+        raise ValueError(f"{name}={raw!r}: expected seconds > 0")
+    return value
+
+
+def client_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """The botocore ``Config`` arguments of the store's client: the connection pool
+    (:func:`client_pool_size`), the timeouts (:data:`CONNECT_TIMEOUT_ENV` /
+    :data:`READ_TIMEOUT_ENV`) and the retries (:data:`RETRIES`).
+
+    Retry mode: :data:`RETRY_MODE_ENV`, else ``AWS_RETRY_MODE``, else "standard".
+    Requests of one call (the first included): :data:`MAX_ATTEMPTS_ENV`, else
+    ``AWS_MAX_ATTEMPTS``, else 9. Each is read on its own: ``AWS_MAX_ATTEMPTS`` alone
+    keeps "standard" mode (botocore's own default mode is "legacy")."""
+    mode = environ.get(RETRY_MODE_ENV) or environ.get("AWS_RETRY_MODE") or RETRIES["mode"]
+    if mode not in RETRY_MODES:
+        raise ValueError(f"retry mode {mode!r} ({RETRY_MODE_ENV} / AWS_RETRY_MODE): expected one of {RETRY_MODES}")
+    raw = environ.get(MAX_ATTEMPTS_ENV) or environ.get("AWS_MAX_ATTEMPTS")
+    attempts = int(raw) if raw else int(RETRIES["max_attempts"]) + 1
+    if attempts < 1:
+        raise ValueError(f"{MAX_ATTEMPTS_ENV} / AWS_MAX_ATTEMPTS={raw!r}: expected an integer >= 1")
+    return {"max_pool_connections": client_pool_size(environ),
+            "connect_timeout": _seconds(environ, CONNECT_TIMEOUT_ENV, CONNECT_TIMEOUT_S),
+            "read_timeout": _seconds(environ, READ_TIMEOUT_ENV, READ_TIMEOUT_S),
+            "retries": {"mode": mode, "total_max_attempts": attempts}}
+
+
 def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
     import boto3
     from botocore.config import Config
@@ -540,9 +591,8 @@ def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
         raise ObjectStoreError(missing_credentials_message())
     else:
         session = boto3.session.Session()
-    retries = {} if (environ.get("AWS_RETRY_MODE") or environ.get("AWS_MAX_ATTEMPTS")) else {"retries": dict(RETRIES)}
     return session.client("s3", endpoint_url=store_endpoint(environ), region_name=store_region(environ),
-                          config=Config(max_pool_connections=client_pool_size(environ), **retries))
+                          config=Config(**client_config(environ)))
 
 
 class S3ObjectStore:
@@ -1088,23 +1138,49 @@ class S3ObjectStore:
             keys += [item["Key"][strip:] for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
         return keys
 
-    def list_meta(self, prefix: str) -> tuple[list[tuple[str, float]], float]:
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request (``ListObjectsV2``): up to ``limit`` keys after
+        ``start_after`` and the key to continue from (None: that was the last page).
+        A reader that knows which keys it can skip pages through a prefix itself."""
+        strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix), "MaxKeys": int(limit)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        page = self.client.list_objects_v2(**kwargs)
+        contents = page.get("Contents", ())
+        keys = [item["Key"][strip:] for item in contents if not item["Key"].endswith("/")]
+        return keys, (contents[-1]["Key"][strip:] if page.get("IsTruncated") and contents else None)
+
+    def list_meta(self, prefix: str, *, start_after: str = "",
+                  end: str = "") -> tuple[list[tuple[str, float]], float]:
         """``([(key, LastModified epoch s)], server time)`` under ``prefix``: the
         object times and the clock they compare to both come from the server
-        (the ``Date`` header of the listing), never from this host's clock."""
+        (the ``Date`` header of the listing), never from this host's clock.
+
+        ``start_after`` / ``end``: only the keys ``start_after < key < end`` (byte
+        order). The listing starts there (``StartAfter``) and stops at the first
+        page that reaches ``end``, so a short range of a large prefix costs one
+        request, not one per 1000 keys of the prefix."""
         from email.utils import parsedate_to_datetime
 
         strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        stop = self._full(end) if end else None
         out: list[tuple[str, float]] = []
         now: float | None = None
-        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket,
-                                                                          Prefix=self._full(prefix)):
+        for page in self.client.get_paginator("list_objects_v2").paginate(**kwargs):
             date = (page.get("ResponseMetadata") or {}).get("HTTPHeaders", {}).get("date")
             if date:
                 stamp = parsedate_to_datetime(date).timestamp()
                 now = stamp if now is None else max(now, stamp)
+            contents = page.get("Contents", ())
             out += [(item["Key"][strip:], item["LastModified"].timestamp())
-                    for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
+                    for item in contents
+                    if not item["Key"].endswith("/") and (stop is None or item["Key"] < stop)]
+            if stop is not None and contents and contents[-1]["Key"] >= stop:
+                break
         if now is None:  # no Date header: the newest object time is a lower bound of the server clock
             now = max((t for _, t in out), default=0.0)
         return out, now

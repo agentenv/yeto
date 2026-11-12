@@ -173,6 +173,12 @@ class DirectoryObjectStore:
                 if p.is_file() and not p.name.endswith(TMP_SUFFIX))
         return sorted(k for k in keys if k.startswith(prefix) and k > start_after)
 
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request: up to ``limit`` keys after ``start_after`` and the key
+        to continue from (None: that was the last page)."""
+        keys = self.list(prefix, start_after=start_after)
+        return keys[:limit], (keys[limit - 1] if len(keys) > limit else None)
+
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
 
