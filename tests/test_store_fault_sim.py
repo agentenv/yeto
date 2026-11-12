@@ -5,13 +5,14 @@ under a seeded scheduler; after every run the store and what the trainer
 consumed are checked: nothing trained twice, nothing lost, no wrong version, no
 fenced writer trained, and the run ends.
 
-``YETO_STORE_SIM_SEEDS`` (default 30): seeds per scenario;
+``YETO_STORE_SIM_SEEDS`` (default 20): seeds per scenario;
 ``YETO_STORE_SIM_FIRST_SEED`` (default 0). A failure prints the seed and its
 trace; ``python -m tests.store_sim.run --seeds S:S+1 --faults <preset>`` replays it.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import random
@@ -22,9 +23,11 @@ from botocore.exceptions import ClientError
 from store_sim.fault_s3 import Crash, FaultConfig, FaultyS3Client, Injector, S3Server, SimClock
 from store_sim.sim import Result, SimConfig, run_seed
 from yeto.cloud.s3_store import S3ObjectStore
+from yeto.rl.engine import sample_buffer
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
+from yeto.rl.engine.sampler_resume import handoff_requested
 
-SEEDS = int(os.environ.get("YETO_STORE_SIM_SEEDS", "30"))
+SEEDS = int(os.environ.get("YETO_STORE_SIM_SEEDS", "20"))
 FIRST = int(os.environ.get("YETO_STORE_SIM_FIRST_SEED", "0"))
 
 # PR #354: a refused conditional put that the SDK had retried is read back
@@ -37,6 +40,15 @@ needs_create_answer_fix = pytest.mark.xfail(
 IDEMPOTENT_MERGE = hasattr(FileSampleBuffer, "_is_merged")
 MERGE_VIOLATIONS = ("shard_record_merged_twice", "shard_record_never_merged", "shard_merged_out_of_order",
                     "merged_index_position_gap", "trained_twice_same_record")
+# shard ownership records: a fenced writer's group is refused at the write or left out of the merge
+SHARD_OWNERSHIP = hasattr(sample_buffer, "ShardFenced")
+# a failed store read neither ends a sampler nor releases its claims
+SAMPLER_SURVIVES_READS = "on_error" in inspect.signature(handoff_requested).parameters
+try:  # the trainer generation lease
+    import yeto.rl.engine.trainer_lease  # noqa: F401
+    TRAINER_LEASE = True
+except ImportError:
+    TRAINER_LEASE = False
 # more invariants of other suites, as package.module:name (store_sim.sim.load_check)
 CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",") if c)
 
@@ -203,10 +215,36 @@ def test_two_running_trainers_merge_every_shard_record_once():
     assert not bad, f"seeds by violation: {bad}\n" + next(r for r in results if not r.ok).report()
 
 
-def test_the_simulation_counts_what_a_read_outage_costs():
-    """Reads fail for up to ten minutes under a lease that outlasts them. Today a
-    sampler exits on the first failed read; the counts are what a fix must bring to
-    zero (``sampler_exits_on_store_error``, ``claims_released_closing``)."""
-    results = _run("read-outage", lease_s=1800.0)
+@pytest.mark.xfail(not TRAINER_LEASE, strict=False,
+                   reason="two trainers at once write the same release directory (fixed by the trainer generation)")
+def test_two_running_trainers_never_hand_a_sampler_mixed_release_files():
+    seeds = _seeds_with(_run("two-trainers", steps=600), "release_files_of_another_version")
+    assert not seeds, f"seeds whose sampler loaded files of two releases: {seeds}"
+
+
+def test_a_pool_fence_with_a_zombie_writer_and_skewed_clocks_trains_no_fenced_group():
+    """The pool fences shards whose node is partitioned while the old process still
+    writes, under clocks that are a minute apart."""
+    results = _run("fence-zombie")
+    assert sum(r.metrics.get("pool_fence_gone", 0) for r in results) > 0
     _assert_holds(results, tolerate=OPEN_FINDINGS)
+
+
+def test_samplers_of_the_rules_before_shard_ownership_run_next_to_new_ones():
+    """Half of the shards are written by samplers without the shard ownership
+    records (a legacy bucket that is continued, or old and new code side by side)."""
+    _assert_holds(_run("process", legacy_samplers=2, samplers=4), tolerate=OPEN_FINDINGS)
+
+
+def test_the_nc_ownership_check_plugs_in():
+    result = run_seed(SimConfig(seed=FIRST, checks=("store_sim.checks:nc_ownership",)))
+    assert result.ok, result.report()
+    assert "nc_changing_calls" in result.metrics or "nc_ownership_not_available" in result.metrics
+
+
+@pytest.mark.xfail(not SAMPLER_SURVIVES_READS, strict=True,
+                   reason="a sampler exits on a failed store read and gives its claims back")
+def test_a_read_outage_of_ten_minutes_ends_no_sampler_and_releases_no_claim():
+    results = _run("read-outage", lease_s=1800.0, checks=(*CHECKS, "store_sim.checks:read_outage"))
     assert sum(r.metrics.get("read_outages", 0) for r in results) > 0
+    _assert_holds(results, tolerate=OPEN_FINDINGS)

@@ -39,6 +39,7 @@ from yeto.rl.engine.buffer_payload import decode_group
 from .actors import CUT_KEY, NAMESPACE, TRANSPORT_ERRORS, URI, Blocked, SamplerProc, TrainerProc
 from .fault_s3 import ActorClock, Crash, FaultConfig, FaultyS3Client, Injector, S3Server, SimClock
 
+MERGE_DROPS_FENCED_WRITES = hasattr(sample_buffer, "ShardFenced")
 INDEX_PREFIX = f"{sample_buffer.BUFFER_DIR}/{sample_buffer.INDEX_OBJECTS}/"
 # violations that only show with a fault the product does not claim to survive yet
 KNOWN_DESIGN_GAPS = ("two_trainers",)
@@ -66,6 +67,8 @@ class SimConfig:
     trainer_wait_s: float = 600.0
     part_bytes: int = 96  # multipart part / download range size
     page_size: int = 7  # keys per listing page
+    trainer_lease: bool = True  # the trainer claims a generation (where the tree has trainer_lease)
+    legacy_samplers: int = 0  # the first shards run the sampler rules of before shard ownership records
     faults: FaultConfig = field(default_factory=FaultConfig)
     # more invariants, as ``package.module:name`` (:func:`load_check`): each is called with the
     # :class:`Simulation` when it is built (``on_start``), after every scheduler step
@@ -323,12 +326,14 @@ class Simulation:
             self.metric(f"{proc.kind}_crashes")
         except Exception as error:  # noqa: BLE001 - the process exits on it
             transport = isinstance(error, TRANSPORT_ERRORS)
-            if not transport:
+            if type(error).__name__ == "TrainerFenced":
+                self.metric("trainers_fenced_by_a_higher_generation")
+            elif not transport:
                 frame = next((f for f in reversed(traceback.extract_tb(error.__traceback__))
                               if "/yeto/" in f.filename), None)
                 where = "" if frame is None else f" at {Path(frame.filename).name}:{frame.name}"
                 self.errors[f"{proc.kind}: {type(error).__name__}: {str(error)[:110]}{where}"] += 1
-            if not self.injector.enabled:
+            if not self.injector.enabled and type(error).__name__ != "TrainerFenced":
                 self.errors_after_faults.append(f"{proc.actor}: {type(error).__name__}: {str(error)[:160]}")
             self.metric(f"{proc.kind}_exits_on_{'store_error' if transport else 'error'}")
             self.trace("process_error", actor=proc.actor, error=f"{type(error).__name__}: {str(error)[:200]}")
@@ -375,7 +380,8 @@ class Simulation:
 
     def _start_sampler(self, sid: str) -> None:
         self.incarnations[sid] += 1
-        proc = SamplerProc(self, sid, f"i{self.incarnations[sid]}", self.nodes[sid])
+        proc = SamplerProc(self, sid, f"i{self.incarnations[sid]}", self.nodes[sid],
+                           legacy=self.shards.index(sid) < self.config.legacy_samplers)
         self.samplers[sid] = proc
         del self.start_at[sid]
         self.trace("sampler_start", actor=proc.actor, node=proc.node)
@@ -645,7 +651,7 @@ class Simulation:
         groups_of_slot: dict[int, list[str]] = collections.defaultdict(list)
         for sid in self.shards:
             records = [json.loads(server.get(k)) for k in server.keys(sample_buffer.shard_prefix(sid))]
-            records = [r for r in records if not r.get("end")]
+            records = [r for r in records if "sample_id" in r]  # not the end, not an ownership record
             shard_records[sid] = records
             seen: dict[str, int] = {}
             for record in records:
@@ -669,15 +675,20 @@ class Simulation:
                 continue
             by_shard[record["shard"]].append(int(record["shard_pos"]))
         for sid in self.shards:
-            got, want = by_shard.get(sid, []), list(range(len(shard_records[sid])))
+            got, at = by_shard.get(sid, []), {int(r["pos"]): r["sample_id"] for r in shard_records[sid]}
             twice = sorted({p for p in got if got.count(p) > 1})
             if twice:
                 self.violation("shard_record_merged_twice", shard=sid, shard_positions=twice[:10],
-                               sample_id=shard_records[sid][twice[0]]["sample_id"] if twice[0] < len(want) else None)
-            missing = sorted(set(want) - set(got))
+                               sample_id=at.get(twice[0]))
+            missing = sorted(set(at) - set(got))
+            # a merge that reads the shard's ownership records leaves a fenced writer's group out
+            dropped = [p for p in missing if (self.intents.get(at[p]) or {}).get("fenced")
+                       or (self.intents.get(at[p]) or {}).get("retired")] if MERGE_DROPS_FENCED_WRITES else []
+            self.metric("design_loss_fenced_writes_left_out_of_the_merge", len(dropped))
+            missing = [p for p in missing if p not in dropped]
             if missing and ended:
                 self.violation("shard_record_never_merged", shard=sid, shard_positions=missing[:10],
-                               sample_id=shard_records[sid][missing[0]]["sample_id"])
+                               sample_id=at[missing[0]])
             if got != sorted(got):
                 self.violation("shard_merged_out_of_order", shard=sid)
         # -- what the trainer consumed (rounds after a restored cut were trained again: by design)

@@ -122,6 +122,10 @@ PRESETS: dict[str, dict[str, Any]] = {
             "clock_skew_s": 5.0},
     # the store refuses reads for up to ``read_outage_max_s`` (one node or all); writes pass
     "read-outage": {"read_outage": 0.02},
+    # the pool takes partitioned nodes for gone and fences their shards while the old
+    # process still runs; every clock is up to a minute off
+    "fence-zombie": {"partition": 0.04, "partition_max_s": 240.0, "control": 0.08, "preempt": 0.05,
+                     "clock_skew_s": 60.0},
     # the unfixed design gap: two trainers merge the same shards
     "two-trainers": {"trainer_restart": 0.03, "two_trainers": True, "preempt": 0.05},
 }
