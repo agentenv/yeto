@@ -921,3 +921,16 @@ def test_a_handoff_read_the_store_refuses_is_raised():
     with pytest.raises(ClientError, match="NoSuchBucket"):
         s3.fail("get_object", refused("NoSuchBucket", "GetObject"), key="sample-buffer/handoffs/")
         handoff_requested(SimpleNamespace(objects=objects, root="/unused"), "s-0")
+
+
+def test_a_group_write_waits_for_the_store_on_the_rounds_own_clock():
+    now = [0.0]
+    events = []
+    round_ = object.__new__(engine_sampler.EngineRound)
+    round_.reclaimed, round_.write_fenced, round_.write_unknown = (lambda: False), (lambda: True), (lambda: True)
+    round_.should_stop, round_.emit = (lambda: False), (lambda e, **f: events.append((e, f)))
+    round_.write_retry_s, round_.write_defer_max_s, round_.deferred_writes, round_._unread_since = 5.0, 30.0, 0, None
+    round_.monotonic = lambda: now[0]
+    round_.sleep = lambda s: now.__setitem__(0, now[0] + s)
+    assert round_._write_refusal(None) == engine_sampler.STORE_UNREAD
+    assert now[0] == 30.0 and events[-1][1]["given_up"] is True

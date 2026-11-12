@@ -370,7 +370,7 @@ class AgenticRound(EngineRound):
         self.detached_total = 0
         self.release_poll_s = float(release_poll_s)
         self.wait_s = float(wait_s)
-        self.clock = clock
+        self.clock = self.monotonic = clock  # also the group write wait (EngineRound._write_refusal)
         if int(infra_retries) < 0:
             raise ValueError(f"infra_retries must be >= 0, got {infra_retries}")
         self.infra_retries = int(infra_retries)

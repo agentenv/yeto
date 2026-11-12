@@ -267,6 +267,7 @@ class EngineRound:
         self.write_retry_s = DEFAULT_WRITE_RETRY_S
         self.write_defer_max_s = DEFAULT_WRITE_DEFER_MAX_S
         self.sleep: Callable[[float], None] = time.sleep
+        self.monotonic: Callable[[], float] = time.monotonic  # the write wait's clock (injectable)
         self.deferred_writes = 0  # group writes that waited for a store read
         # the loop's stop (build_engine_sampler): a group waiting for the store is given up
         self.should_stop: Callable[[], bool] = lambda: False
@@ -401,7 +402,7 @@ class EngineRound:
             else:
                 self._unread_since = None
                 return None
-            now = time.monotonic()
+            now = getattr(self, "monotonic", time.monotonic)()
             if self._unread_since is None:
                 self._unread_since = now
             if self.should_stop() or now - self._unread_since >= self.write_defer_max_s:

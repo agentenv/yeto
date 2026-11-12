@@ -236,6 +236,8 @@ class SamplerProc:
             self.round = EngineRound(self.engine, writer, reward=lambda item, completion: 0.0, **common)
         if hasattr(self.round, "sleep"):  # a write that waits for a store read: the others go on
             self.round.sleep = self._wait
+            if hasattr(self.round, "monotonic"):
+                self.round.monotonic = self.clock.monotonic  # the write wait runs on simulated time
         self.loop = SamplerLoop(follower=self.follower, buffer=self.buffer, generate=self.round,
                                 num_rollouts=None, max_backlog_groups=1 << 30, emit=self._emit, poll_s=5.0,
                                 sleep=self._block, should_stop=self._should_stop, clock=self.clock.monotonic)
