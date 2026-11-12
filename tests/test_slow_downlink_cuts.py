@@ -85,6 +85,25 @@ def start_syncer(tmp_path, port, total_steps: int, *extra):
     return proc, tape, log
 
 
+def start_as_first_members(tmp_path, first, initializer) -> None:
+    """Start ``first``, and only once the syncer has registered it start
+    ``initializer`` (island 0, which uploads the INIT), so both islands are
+    members when the syncer sends the initial cut.
+
+    The syncer starts its rounds as soon as the INIT is in and the launch
+    quorum (here one island) is connected. An island that connects after
+    that joins through a catch-up and gets no initial cut; started together,
+    the two islands race (the syncer hears island 1's HELLO, or island 0's
+    whole INIT, first)."""
+    log = tmp_path / "syncer.log"
+    first.start()
+    registered = f"learner_id={first.learner_id} "
+    wait_until(lambda: first.first_generation is not None  # its data stream's hello is sent too
+               and any("learner connected" in line and registered in line for line in log.read_text().splitlines()),
+               60, f"island {first.learner_id} did not connect")
+    initializer.start()
+
+
 def finish(proc, islands) -> None:
     for island in islands:
         island.join(timeout=180)
@@ -115,8 +134,7 @@ def test_a_slow_initial_cut_does_not_hold_the_other_island(tmp_path, inline):
     b = CuttingIsland(1, port, store, dtype=DTYPE_F32, slow=slow)
     try:
         started = time.time()
-        a.start()
-        b.start()
+        start_as_first_members(tmp_path, b, a)
         wait_until(lambda: "global parameters initialized" in (tmp_path / "syncer.log").read_text(), 60, "no INIT")
         initialized = next(_log_seconds(line) for line in (tmp_path / "syncer.log").read_text().splitlines()
                            if "global parameters initialized" in line)
