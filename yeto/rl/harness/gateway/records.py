@@ -19,6 +19,13 @@ signed sampling. This backend replaces the session server behind it:
   ``C - |h| < T_comp`` the policy writes a summary in the current segment
   (trainable), and the next segment starts from ``system + u_resume(S) + last
   k steps``. One training sample per segment, as in the Codex bridge.
+* R3 rows to the training window (``r3_response_len``): an engine returns one
+  routing row per stream position (``[len(prompt) + len(completion) - 1, L_moe,
+  top_k]``; GBs at a 1M context), but ``join_turns`` keeps only the first
+  ``len(first prompt) + max_response_len - 1`` rows of the last turn. With
+  ``r3_response_len`` set to that ``max_response_len`` each turn's rows are cut
+  to the window (a copy, so the full array is freed) as soon as the call
+  returns; the joined rows are the same.
 
 The chat completion carries SGLang's ``meta_info.output_token_logprobs``, so a
 Miles session server can also sit behind this backend.
@@ -109,6 +116,7 @@ class TurnRecord:
     top_ids: Any = None
     top_logprobs: Any = None
     routed_experts: Any = None
+    routed_experts_cut: bool = False  # only the training window's rows (RecordingBackend.r3_response_len)
 
 
 @dataclass
@@ -171,7 +179,10 @@ class RecordingBackend:
     """``SessionBackend`` over a :class:`TokenSamplerEngine` (module doc)."""
 
     def __init__(self, engine: TokenSamplerEngine, template: ChatTemplate, *, sampler_id: str = "records-proxy",
-                 compaction: CompactionConfig | None = None, check_render: bool = True) -> None:
+                 compaction: CompactionConfig | None = None, check_render: bool = True,
+                 r3_response_len: int | None = None) -> None:
+        if r3_response_len is not None and int(r3_response_len) <= 0:
+            raise ValueError("r3_response_len must be positive")
         if not isinstance(engine, TokenSamplerEngine):
             raise TypeError(f"{type(engine).__name__} has no generate_tokens (TokenSamplerEngine)")
         self.engine = engine
@@ -179,6 +190,7 @@ class RecordingBackend:
         self.sampler_id = sampler_id
         self.compaction = compaction
         self.check_render = check_render
+        self.r3_response_len = None if r3_response_len is None else int(r3_response_len)
         self.sessions: dict[str, _Session] = {}
         self.tools: dict[str, list[Message]] = {}
         self.counters: dict[str, Counter[str]] = {}
@@ -344,14 +356,37 @@ class RecordingBackend:
         provenance = Provenance.of(self.engine.identity, sampler_id=self.sampler_id, sampling=params)
         if segment.turns:
             segment.turns[-1].routed_experts = None  # superseded by this turn's rows
+            segment.turns[-1].routed_experts_cut = False
         segment.turns.append(TurnRecord(
             top_ids=completion.top_logprobs_ids, top_logprobs=completion.top_logprobs,
             routed_experts=completion.routed_experts,
             turn=session.turns, kind=kind, prompt_added=pending.tail, completion=tuple(completion.token_ids),
             logprobs=tuple(completion.logprobs), finish_reason=completion.finish_reason,
             policy_version=version, provenance=provenance.to_record(), render_diff=pending.render_diff))
+        self._cut_routed_experts(session, segment.turns[-1])
         session.turns += 1
         return completion
+
+    def _r3_rows_cap(self, trajectory_id: str) -> int | None:
+        """Rows of R3 ``join_turns`` can use for the trajectory: its first recorded
+        call's prompt + ``r3_response_len`` - 1 (module doc). None (keep every row)
+        without ``r3_response_len`` or while that first call is not recorded."""
+        if self.r3_response_len is None:
+            return None
+        # records() lists sessions in creation order and segments in order: the
+        # join's first turn is the first turn of the trajectory's first segment
+        first = next((s for s in self.sessions.values() if s.trajectory_id == trajectory_id), None)
+        if first is None or not first.segments[0].turns:
+            return None
+        return len(first.segments[0].turns[0].prompt_added) + self.r3_response_len - 1
+
+    def _cut_routed_experts(self, session: _Session, record: TurnRecord) -> None:
+        rows = record.routed_experts
+        cap = self._r3_rows_cap(session.trajectory_id)
+        if rows is None or cap is None or len(rows) <= cap:
+            return
+        record.routed_experts = rows[:cap].copy()  # a copy: the full array is not kept alive
+        record.routed_experts_cut = True
 
     def _strip_stop(self, ids: Sequence[int]) -> list[int]:
         ids = list(ids)

@@ -912,7 +912,8 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     if public_base and not secret_file:
         raise HarnessConfigError("a public records-proxy base needs a path secret (the tunnel is public)")
     proxy = RecordsProxy(engine, template, model=model, signed_sampling=signed,
-                         sampler_id=str(spec.get("sampler_id", "records-proxy")))
+                         sampler_id=str(spec.get("sampler_id", "records-proxy")),
+                         r3_response_len=max_response_len)  # R3 rows cut to the training window
     recorder = ProxyTokenRecorder(proxy, host=str(proxy_cfg.get("host", "127.0.0.1")),
                                   port=int(proxy_cfg.get("port", 0)), public_base=public_base,
                                   path_secret=Path(secret_file).read_text().strip() if secret_file else None)

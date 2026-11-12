@@ -98,7 +98,8 @@ def turns_from_records(records: Mapping[str, Any]) -> list[TokenTurn]:
                                        policy_error=turn.get("parse_error"),
                                        completion_top_ids=turn.get("top_ids"),
                                        completion_top_logprobs=turn.get("top_logprobs"),
-                                       routed_experts=turn.get("routed_experts")))
+                                       routed_experts=turn.get("routed_experts"),
+                                       routed_experts_cut=bool(turn.get("routed_experts_cut", False))))
                 cursor, pending_stop = end, len(turn.get("stop_added") or ())
             if cursor + pending_stop != len(ids):
                 raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
