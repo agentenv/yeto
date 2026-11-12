@@ -84,6 +84,35 @@ depends on how it stopped:
 The pool refuses to start a second loop on a pool whose loop is still
 running.
 
+### The state files
+
+The state dir holds two files that the pool and every manual command on the
+same state dir write:
+
+- `tickets.json`, the **ticket ledger**: one row for each ticket this tool
+  created. `down`, `pool-stop` and the patrol release only tickets in it.
+- `leases.json`: the address and lease end of each granted node.
+
+Each change is one read-modify-write under a lock (`tickets.lock`,
+`leases.lock`), so the pool and a manual command can run on the same state dir
+at once and no row is lost. Each write goes to a temporary file of its own,
+which then replaces the old file. Both files are mode `0600`. Leave the
+`.lock` files in place.
+
+A ledger that exists but cannot be read (not JSON, or not a list of ticket
+rows) is an error. It is never taken for an empty ledger. Every command that
+needs the ledger fails with `ticket ledger <path>: ...`, and the file is left
+as it is. The tickets in it may still be billing. To recover:
+
+1. Stop the pool loop if it runs (it cannot release anything meanwhile).
+2. Copy `tickets.json` aside, then repair it by hand. It is a JSON list of
+   rows; each row needs `account` and `ticket`, and `run` for the pool to find
+   it. Mark a ticket that has ended with `"ended": true`.
+3. If it cannot be repaired, read the open tickets from
+   `pool-<shard_base>.json` and the NC console, and release them in the
+   console. Then move the broken file away. The next order starts a new
+   ledger.
+
 The trainer has the same requirement: a no-sync trainer runs with
 `--controller local`, so its control loop also lives on your host for the
 whole run.
