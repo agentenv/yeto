@@ -621,12 +621,19 @@ class Simulation:
     def _bypass(self, proc: SamplerProc) -> None:
         """The fenced process writes what it has in flight without any check (``fence_bypass``)."""
         if self.injector.enabled and self.rng.random() < self.config.faults.fence_bypass:
+            # the unchecked write is the process's own write path: while it runs, a preemption
+            # must not run that same process's foreground too (``_run`` skips what is on the
+            # stack), or it finishes a group the unchecked write is writing and the shard holds
+            # it twice -- a double write of the simulation, not of the product
+            self._stack.append(proc)
             try:
                 proc.rogue_write()
             except Crash:
                 raise
             except Exception:  # noqa: BLE001 - its write failed: nothing reached the shard
                 self.metric("unchecked_write_failed")
+            finally:
+                self._stack.pop()
 
     def _replace_node(self, proc: SamplerProc, *, kill: bool = False) -> None:
         sid = proc.sid

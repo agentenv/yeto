@@ -70,6 +70,8 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .object_store import is_absent_store_error
+
 LEASE_DIR = "sample-buffer/leases"
 FENCED_EVENT = "rl_sampler_fenced"
 LEASE_EVENT = "rl_sampler_lease"
@@ -80,6 +82,7 @@ DEFAULT_CLOCK_MARGIN_S = 60.0
 DEFAULT_RETRY_S = 1.0  # the gate reads a lease that failed again at most this often
 DEFAULT_WARN_S = 60.0  # ... and logs a lease it keeps failing to read at most this often
 CLAIM_READ_ATTEMPTS = 3
+DEFAULT_MAX_UNREAD_S = 60.0  # a lease unread for longer allows no group write (two watcher polls)
 CLAIM_PAUSE_S = 2.0  # the first pause between the claim's reads (doubled after each)
 
 # what a store read raises when it could not read (not: the key is absent). An
@@ -99,15 +102,6 @@ try:
     _READ_ERRORS += (_Urllib3Error,)
 except ImportError:  # pragma: no cover
     pass
-# the error codes of an absent key (a store that answers with a bare ClientError)
-_ABSENT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
-
-
-def _error_code(error: BaseException) -> str:
-    response = getattr(error, "response", None)
-    if not isinstance(response, Mapping):
-        return ""
-    return str((response.get("Error") or {}).get("Code", ""))
 
 
 def _claim_pause(attempt: int, sleep: Callable[[float], None] | None = None) -> None:
@@ -164,7 +158,7 @@ def read_record_strict(store: Any, key: str) -> dict[str, Any] | None:
             return None
         doc = json.loads(data)
     except _READ_ERRORS as error:
-        if _error_code(error) in _ABSENT_CODES:
+        if is_absent_store_error(error):
             return None
         raise LeaseReadError(f"{key}: {type(error).__name__}: {error}") from error
     if not isinstance(doc, dict):
@@ -204,8 +198,14 @@ class IncarnationLease:
                  write_check_s: float = DEFAULT_WRITE_CHECK_S,
                  clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] | None = None) -> None:
+                 sleep: Callable[[float], None] | None = None,
+                 max_unread_s: float | None = DEFAULT_MAX_UNREAD_S) -> None:
+        """``max_unread_s``: the longest the lease may stay unread before a group
+        write is refused (:meth:`unread_too_long`); None: no bound."""
         self.store = store
+        self.max_unread_s = None if max_unread_s is None else float(max_unread_s)
+        self.unread_refusals = 0  # group writes refused because the lease stayed unread
+        self._read_at: float | None = None  # the last time the lease was read (or written by claim)
         self.sampler = str(sampler)
         self.incarnation = str(incarnation)
         self.write_check_s = float(write_check_s)
@@ -250,6 +250,7 @@ class IncarnationLease:
                   "superseded": superseded, "sealed": sealed}
         _put(self.store, lease_key(self.sampler), record)
         self.holder = self.incarnation
+        self._read_at = self.monotonic()
         return record
 
     def poll(self) -> bool:
@@ -267,19 +268,40 @@ class IncarnationLease:
             if lease is None:  # unreadable, or absent (deleted): no verdict, fail open
                 self.read_failures += 1
                 return False
+            self._read_at = self._checked_at
             self.holder = str(lease.get("incarnation"))
             if self.holder != self.incarnation:
                 self.fenced_by = self.holder
             return self.fenced_by is not None
 
+    def unread_s(self) -> float:
+        """Seconds since the lease was last read (0.0 before the first read or claim)."""
+        return 0.0 if self._read_at is None else max(0.0, self.monotonic() - self._read_at)
+
+    def unread_too_long(self) -> bool:
+        """Not known to be fenced, but the lease stayed unread for longer than
+        ``max_unread_s``: this incarnation cannot tell whether it still holds it
+        (:attr:`unknown` says only that the last read failed)."""
+        return (self.fenced_by is None and self.max_unread_s is not None
+                and self.unread_s() > self.max_unread_s)
+
     def check_before_write(self) -> bool:
         """Before a group write: the cached verdict when read in the last
-        ``write_check_s`` seconds, else a fresh :meth:`poll`."""
+        ``write_check_s`` seconds, else a fresh :meth:`poll`. True: do not write
+        (fenced, sticky; or :meth:`unread_too_long`, until a read succeeds again)."""
         if self.fenced_by is not None:
             return True
-        if self.monotonic() - self._checked_at < self.write_check_s:
-            return False
-        return self.poll()
+        if self.monotonic() - self._checked_at >= self.write_check_s and self.poll():
+            return True
+        if self.unread_too_long():
+            self.unread_refusals += 1
+            return True
+        return False
+
+    def health(self) -> dict[str, Any]:
+        """The read counters (the sampler's ``rl_sampler_store_read_failed`` / ``_ok`` events, ``what: lease``)."""
+        return {"lease_reads": self.reads, "lease_read_failures": self.read_failures,
+                "lease_unread_s": round(self.unread_s(), 1), "lease_unread_refusals": self.unread_refusals}
 
     def detail(self) -> dict[str, Any]:
         return {"fenced": "superseded", "superseded_by": self.fenced_by, "lease_reads": self.reads,

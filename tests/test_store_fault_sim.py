@@ -16,6 +16,7 @@ moves the window. A failure prints the seed and its trace;
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import random
@@ -79,7 +80,16 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     "stale_incarnation_group_trained": (GATE_RECHECK, 0.05),
     # until the old incarnation of a second start reads its lease both write the shard; a round
     # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
+    # Measured with 100 seeds (YETO_STORE_SIM_FULL=1, main at 1c1783af): preset second-start
+    # shows it in 7 seeds (7, 14, 67, 75, 86, 93, 96), under the ceiling of 0.1 (11 seeds)
     "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
+}
+# A violation that is only the consequence of an open finding in the same seed: kind -> (the
+# finding, what the detail of the violation must name). An unresumable shard makes every restart
+# of its sampler fail on the same SamplerResumeError, and the run ends on the crash-loop budget
+# (seeds 75, 86 and 96 of second-start); a run that does not end for any other reason is strict.
+CONSEQUENCES: dict[str, tuple[str, str]] = {
+    "run_did_not_end": ("shard_left_unresumable", "SamplerResumeError"),
 }
 # ... and only where a fenced process writes without any check of its own (preset fence-bypass):
 # the lease gate caches the lease for 30 s, and the next incarnation seals what it finds
@@ -105,9 +115,9 @@ def _assert_holds(results: list[Result], *, open_findings: dict[str, tuple[bool,
     """No seed violates an invariant; ``open_findings``: the kinds this scenario may
     still show (:data:`OPEN_FINDINGS`), each up to its share of the seeds."""
     allowed = {kind: share for kind, (fixed, share) in (open_findings or {}).items() if not fixed}
-    bad = [r for r in results if set(r.kinds()) - set(allowed)]
+    bad = [r for r in results if _unexplained(r, allowed)]
     if bad:
-        kinds = sorted({k for r in bad for k in r.kinds()} - set(allowed))
+        kinds = sorted({k for r in bad for k in _unexplained(r, allowed)})
         pytest.fail(f"{len(bad)} of {len(results)} seeds violate an invariant ({', '.join(kinds)}); "
                     f"seeds {[r.config.seed for r in bad][:20]}\n" + bad[0].report(), pytrace=False)
     for kind, share in allowed.items():
@@ -116,6 +126,17 @@ def _assert_holds(results: list[Result], *, open_findings: dict[str, tuple[bool,
             pytest.fail(f"{kind} (a known, unfixed finding) shows in {len(seeds)} of {len(results)} seeds, "
                         f"above its ceiling of {share:.0%}: seeds {seeds[:20]}\n"
                         + next(r for r in results if kind in r.violations).report(), pytrace=False)
+
+
+def _unexplained(result: Result, allowed: dict[str, float]) -> set[str]:
+    """The kinds of a seed that neither are allowed open findings nor only their consequence
+    (:data:`CONSEQUENCES`: the cause shows in the same seed and every item names it)."""
+    kinds = set(result.kinds()) - set(allowed)
+    for kind, (cause, names) in CONSEQUENCES.items():
+        if (kind in kinds and cause in allowed and cause in result.violations
+                and all(names in json.dumps(item, default=str) for item in result.violations[kind])):
+            kinds.discard(kind)
+    return kinds
 
 
 def _seeds_with(results: list[Result], kind: str) -> list[int]:
