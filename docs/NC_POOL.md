@@ -427,7 +427,9 @@ one SSH round trip. Then it acts:
   and after `control_plane_alert_s` the pool alerts. A valid answer that does
   not show the member's ticket (no order, or another ticket id) is read a
   second time. The lease counts as ended, and a release records the ticket as
-  already ended, only when both answers agree.
+  already ended, only when both answers agree. After a delete, the release is
+  confirmed when the ticket reads `ended`, or when two answers in a row show no
+  order. A delete call the tool refused is a failed release.
 
 Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
