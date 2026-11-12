@@ -105,6 +105,7 @@ from .buffer_rollout import (
     SampleBufferRolloutError,
     executor_read_cursor,
     executor_read_shards,
+    executor_trained_before,
     executor_set_gate_version,
     open_buffer,
 )
@@ -722,8 +723,12 @@ class ReleasingPublisher:
                  resumed_base: int | None = None,
                  timer: Callable[[], float] = time.perf_counter,
                  manifest: Mapping[str, Any] | None = None,
-                 release_every: int = 1, skip_busy: bool = False) -> None:
-        """``manifest``: every release record's ``manifest`` (``PolicyRelease``:
+                 release_every: int = 1, skip_busy: bool = False,
+                 read_trained: Callable[[int], int | None] | None = None) -> None:
+        """``read_trained(version)``: the buffer position the policy ``version`` is
+        trained up to (``BatchReader.trained_before``), read on the caller's thread
+        at the publication and recorded as the release's ``buffer_trained``.
+        ``manifest``: every release record's ``manifest`` (``PolicyRelease``:
         the partial-experts selection of a Kimi-K3.1 run). ``delta``: staged releases go out as bf16 deltas along this chain
         (``policy_release`` module doc, delta releases). ``read_shards``: the
         trainer's read position per sampler shard (None
@@ -761,6 +766,7 @@ class ReleasingPublisher:
         self.export = export
         self.read_position = read_position
         self.read_shards = read_shards
+        self.read_trained = read_trained
         self.emit = emit
         self.weights = weights
         self.staging = None if staging is None else Path(staging)
@@ -826,7 +832,9 @@ class ReleasingPublisher:
             return
         fields = {"weights": self.weights, "engine_checksum": self._engine_checksum(),
                   "origin": None if self.origin is None else self.origin(state),
-                  "manifest": self.manifest}
+                  "manifest": self.manifest,
+                  # read now, on this thread: a staged upload ends rounds later
+                  "buffer_trained": None if self.read_trained is None else self.read_trained(version)}
         policy_hash = state.policy_tensor_hash()
         event = {"policy_version": version, "local_version": int(state.policy_version),
                  "publish_s": publish_s}
@@ -897,6 +905,7 @@ class ReleasingPublisher:
             return
         self.emit("rl_policy_released", seq=release.seq, origin=release.origin,
                   policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
+                  buffer_trained=release.buffer_trained,
                   weights=release.weights, sha256=release.sha256,
                   engine_checksum=release.engine_checksum, released_at=release.released_at,
                   release_timings=timings, latest_source=self.releases.last_latest_source,
@@ -1083,6 +1092,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
+                                   read_trained=lambda version: in_executor(executor_trained_before, int(version)),
                                    emit=driver.emit, weights=LORA if lora else FULL,
                                    staging=staging,
                                    releaser=None if staging is None else BackgroundReleaser(),
@@ -1128,16 +1138,17 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
     if callable(resume_at):
         resume_at(resumed.start_version, behind_round_cuts=True)
     round_cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
-    if round_cuts is not None and resumed.buffer_selected is not None:
-        # Without a round cut to restore, the buffer is read on from where the launch
-        # that released vK had selected it, not from 0: that launch trained the groups
-        # before it (a restored cut's watermark wins, RoundCutCheckpoint.resume).
-        round_cuts.buffer_start_without_cut = int(resumed.buffer_selected)
+    if round_cuts is not None and resumed.buffer_trained is not None:
+        # Without a round cut to restore, the buffer is read on from the position the
+        # weights of vK are trained up to, not from 0 (a restored cut's watermark wins,
+        # RoundCutCheckpoint.resume). A record without it (an earlier yeto) reads from
+        # 0: its read position (buffer_selected) may lie past groups vK never trained.
+        round_cuts.buffer_start_without_cut = int(resumed.buffer_trained)
     driver.published_policy_history = resumed.history
     driver.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
                 start_version=resumed.start_version, account_resumed=callable(resume_at),
                 known_versions=list(resumed.known_versions()),
-                buffer_selected=resumed.buffer_selected)
+                buffer_trained=resumed.buffer_trained)
     return {"resumed_base": resumed.base_version}
 
 

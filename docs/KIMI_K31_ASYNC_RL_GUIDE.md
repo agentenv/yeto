@@ -809,10 +809,23 @@ continue when it joins.
 - **Without a cut, on a store that holds releases.** A trainer that stopped
   before its first cut was committed leaves releases `v1..vK` and no cut. The
   next launch starts from the base checkpoint, continues the version numbers
-  at `vK`, and reads the sample buffer from the position the release of `vK`
-  recorded (`rl_buffer_resume_versions`, field `buffer_selected`), not from
-  the start: groups the stopped trainer had selected are not read again. The
-  earlier batch ledger is moved aside as above.
+  at `vK`, and reads the sample buffer from the position the weights of `vK`
+  are trained up to (`buffer_trained` in the release record and in the
+  `rl_buffer_resume_versions` event), not from the start. Groups trained into
+  `vK` are not read again; groups the stopped trainer selected after it
+  published `vK` (their update never reached the store) are trained again.
+  The earlier batch ledger is moved aside as above.
+  A release record written by an earlier yeto has no `buffer_trained`. Its
+  `buffer_selected` is the trainer's read position when the upload of the
+  release ended, which can lie past groups `vK` never trained, so it is not
+  used: the launch reads the buffer from the start. Groups older than
+  `--rl-max-policy-age` versions are passed over (`rl_buffer_stale_skipped`);
+  the groups inside the window, at most the groups of the last
+  `--rl-max-policy-age` + 1 versions, are trained a second time. This happens
+  once: the first release of the new launch records `buffer_trained`.
+  Known limit of that replay: with `--rl-max-policy-age` 2 or more it can
+  reach a group of a version whose release was already pruned (the store
+  keeps the newest two), and the trainer stops with `not a published policy`.
 - **Behind the releases.** When the latest cut is older than the newest
   release, the trainer restores the cut and continues the version numbers at
   the newest release (`rl_round_cut_behind_releases`). It keeps no cut before

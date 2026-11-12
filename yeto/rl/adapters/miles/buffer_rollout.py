@@ -951,6 +951,15 @@ class BatchReader:
                 del self._ends[rid]
         return int(self.buffer.watermark)
 
+    def trained_before(self, rollout_id: int) -> int:
+        """The buffer position the policy of version ``rollout_id`` is trained up to:
+        the end of the last round below ``rollout_id`` this reader took, or the
+        position it started from (the last committed watermark) when it took none.
+        Unlike ``buffer.read_cursor`` it does not move with a round selected later
+        or a group carried over to the next round."""
+        done = [rid for rid in self._ends if rid < int(rollout_id)]
+        return int(self._ends[max(done)]) if done else int(self.buffer.watermark)
+
     def reset(self, watermark: int) -> int:
         """Continue at the restored cut's watermark (rounds after it are selected again)."""
         self.buffer.reset_to(int(watermark))
@@ -1072,6 +1081,13 @@ def executor_read_cursor(_executor: Any) -> int | None:
     selected group (None before the reader exists)."""
     reader = _ACTIVE.get(TRAINER)
     return None if reader is None else int(reader.buffer.read_cursor)
+
+
+def executor_trained_before(_executor: Any, rollout_id: int) -> int | None:
+    """Runs INSIDE the rollout executor actor: :meth:`BatchReader.trained_before`
+    (None before the reader exists)."""
+    reader = _ACTIVE.get(TRAINER)
+    return None if reader is None else reader.trained_before(int(rollout_id))
 
 
 def executor_read_shards(_executor: Any) -> dict[str, int] | None:

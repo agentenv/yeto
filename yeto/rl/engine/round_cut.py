@@ -247,9 +247,8 @@ class RoundCutCheckpoint:
         self.buffer_watermark: Any = None  # callable(int) -> int | None
         self.buffer_resume: Any = None  # callable(int) -> int
         # Where the buffer is read from when the store holds no cut: 0, or the
-        # position the newest policy release recorded for a relaunched trainer
-        # (sampler_island._resume_single_trainer): what lies before it was selected
-        # by the launch that released that policy.
+        # position the newest policy release is trained up to, for a relaunched trainer
+        # (sampler_island._resume_single_trainer, PolicyRelease.buffer_trained).
         self.buffer_start_without_cut = 0
         self._unresumable_reported: int | None = None  # rollout of the last skipped cut
         # a cut prepared before the trainer offloads (see prepare()), consumed by save()

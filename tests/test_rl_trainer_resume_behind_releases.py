@@ -42,7 +42,7 @@ from yeto.rl.engine.buffer_payload import group_entry_fields
 from yeto.rl.engine.driver import EventTape, IslandDriver, PolicyIdentityError
 from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.fake import FakeEngine, FakeRolloutPool, fake_capabilities
-from yeto.rl.engine.ledger import LedgerError
+from yeto.rl.engine.ledger import BatchLedger, LedgerError
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 from yeto.rl.engine.resume import CheckpointStore
@@ -116,12 +116,42 @@ class _BufferPool(FakeRolloutPool):
         return {"entries": [], "buffer_groups": 0}
 
 
+class _UploadDuringNextRound:
+    """A ``BackgroundReleaser`` whose upload ends while the next round runs (a staged
+    release of hundreds of GB takes minutes): ``run_pending`` is that moment."""
+
+    busy = False
+
+    def __init__(self):
+        self.job = None
+
+    def wait(self):
+        self.run_pending()
+        return 0.0
+
+    def submit(self, job):
+        self.run_pending()
+        self.job = job
+        return 0.0
+
+    def run_pending(self):
+        job, self.job = self.job, None
+        if job is not None:
+            job()
+
+    drain = wait
+
+
 def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
-            kill_in_round=None, kill_before_safe_point=None, set_aside_before=None):
+            kill_in_round=None, kill_before_safe_point=None, set_aside_before=None,
+            store=None, staged=False):
     """One trainer launch over the run's store. ``kill_in_round`` /
-    ``kill_before_safe_point``: where this process dies."""
-    store_dir = tmp_path / "store"
-    store = CheckpointStore(store_dir)
+    ``kill_before_safe_point``: where this process dies. ``store``: this host's
+    store (default: the shared directory ``tmp_path / "store"``). ``staged``: the
+    releases are staged and uploaded in the background, as a trainer island's full
+    releases are; each upload ends after the next round selected its groups."""
+    store = CheckpointStore(tmp_path / "store") if store is None else store
+    store_dir = store.root
     engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0, groups=GROUPS)
     reader = BatchReader(FileSampleBuffer(store, batch_size=1, create_index=False), max_policy_age=age,
                          wait_s=0.0, poll_s=0.0, read_workers=1, prefetch=False, incarnation_gate=None)
@@ -136,7 +166,10 @@ def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
                                samples_per_group=engine.samples_per_group,
                                algorithm_spec_sha256=algorithm.sha256())
     plan = _plan(store_dir, state_dir or tmp_path / name, every=every)
-    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint="verl@test")
+    controller = rs.ResumeController(state_dir=plan["resume"]["state_dir"], store=store,
+                                     runtime_fingerprint="verl@test", keep=2)  # round_cuts.resume_wiring_for
+    resume = round_cuts.ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir),
+                                     config=dict(plan["resume"]))
     tape = tmp_path / f"{name}.jsonl"
     driver = IslandDriver(
         learner_id=0, rollout=engine.rollout, trainer=engine.trainer, policy_state=engine.policy_state,
@@ -156,9 +189,21 @@ def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
     published_of = getattr(si, "_published_of", None)
     if published_of is not None:
         resumed = {**resumed, "published": published_of(driver)}
+    releaser = _UploadDuringNextRound() if staged else None
     driver.publisher = si.ReleasingPublisher(
         driver.publisher, releases, lambda version, directory: (directory / "w.bin").write_text(str(version)),
-        read_position=lambda: reader.buffer.read_cursor, emit=driver.emit, skip_base=True, **resumed)
+        read_position=lambda: reader.buffer.read_cursor, read_trained=reader.trained_before,
+        emit=driver.emit, skip_base=True, **resumed,
+        **({"staging": tmp_path / f"staging-{name}", "releaser": releaser} if staged else {}))
+    if staged:
+        generate = engine.rollout.generate
+
+        def generate_then_the_upload_ends(rollout_id, **kwargs):
+            batch = generate(rollout_id, **kwargs)  # the round selected its groups ...
+            releaser.run_pending()  # ... and the upload of the previous version ends now
+            return batch
+
+        engine.rollout.generate = generate_then_the_upload_ends
     if kill_before_safe_point is not None:
         safe_point = driver.safe_point
 
@@ -169,7 +214,8 @@ def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
 
         driver.safe_point = killed_before
     return SimpleNamespace(driver=driver, checkpoint=checkpoint, tape=tape, releases=releases,
-                           state_dir=resume.controller.state_dir, store_dir=store_dir)
+                           state_dir=resume.controller.state_dir, store_dir=store_dir, store=store,
+                           controller=controller)
 
 
 def _run(launch):
@@ -355,12 +401,12 @@ def test_the_default_timed_interval_takes_no_cut_at_the_first_safe_point():
 # ------------------------------------------------------------------------------------------
 # releases but no committed cut
 # ------------------------------------------------------------------------------------------
-def _no_cut_run(tmp_path, *, dies, cut_every=1000):
+def _no_cut_run(tmp_path, *, dies, cut_every=1000, staged=False, store=None, samplers=None):
     """No cut was ever committed. The first trainer released v1..v3 and died: in
     round 3 (``"in_round"``), or after it recorded round 3 and before v4 reached the
     store (``"before_release"``: a staged release takes minutes to upload)."""
-    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
-    first = _launch(tmp_path, "launch1", samplers, age=1, every=cut_every,
+    samplers = samplers or _Samplers(CheckpointStore(tmp_path / "store"))
+    first = _launch(tmp_path, "launch1", samplers, age=1, every=cut_every, staged=staged, store=store,
                     **({"kill_in_round": 3} if dies == "in_round" else {}))
     if dies == "before_release":
         publish = first.driver.publisher.publish
@@ -372,7 +418,8 @@ def _no_cut_run(tmp_path, *, dies, cut_every=1000):
 
         first.driver.publisher.publish = killed_releasing
     assert _run(first) == "killed"
-    assert _latest_cut(tmp_path) is None and _release_versions(tmp_path) == [2, 3]
+    if store is None:
+        assert _latest_cut(tmp_path) is None and _release_versions(tmp_path) == [2, 3]
     return samplers, first
 
 
@@ -388,8 +435,8 @@ def test_a_new_container_without_a_cut_continues_above_the_releases(tmp_path, di
     start (DriverError "the ledger holds no data cursor for rollout 2") although a
     buffer trainer draws no prompts, and the buffer was read from position 0 again.
 
-    Now it starts, and reads the buffer from the position the release of v3
-    recorded (``buffer_selected``: the 6 groups rounds 0..2 selected). None of
+    Now it starts, and reads the buffer from the position the release of v3 is
+    trained up to (``buffer_trained``: the 6 groups rounds 0..2 selected). None of
     those is selected again; the groups of round 3, whose update never reached the
     store, are trained."""
     samplers, first = _no_cut_run(tmp_path, dies=dies)
@@ -398,7 +445,7 @@ def test_a_new_container_without_a_cut_continues_above_the_releases(tmp_path, di
     launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
     assert _run_or_raise(launch) == "finished"
     [versions] = _events(launch, "rl_buffer_resume_versions")
-    assert (versions["start_version"], versions["buffer_selected"]) == (3, 6)
+    assert (versions["start_version"], versions["buffer_trained"]) == (3, 6)
     [cursor] = _events(launch, "rl_data_cursor_restored")
     assert (cursor["rollout_id"], cursor["source"], cursor["data_cursor"]) == (3, "sample_buffer", None)
     assert _trained_groups(launch) == {3: ["g6", "g7"]}
@@ -406,18 +453,37 @@ def test_a_new_container_without_a_cut_continues_above_the_releases(tmp_path, di
     assert stale["stale_groups"] == 0  # nothing before the position was read, not even to skip it
 
 
-def test_a_relaunch_without_a_cut_reads_the_buffer_from_zero_when_no_release_names_a_position(tmp_path):
-    """A release record without ``buffer_selected`` (nothing was read when it was
-    written, or an earlier yeto): the relaunch reads from 0 as before, and the
-    policy-age gate passes over what is too old."""
+def test_a_relaunch_trains_the_groups_selected_while_the_newest_release_was_uploading(tmp_path):
+    """Staged releases: the record of vK takes the read position (``buffer_selected``)
+    on the upload thread, when the trainer has already selected round K. The trainer
+    dies before vK+1 reaches the store. Reading on from ``buffer_selected`` skipped
+    round K's groups for good (their tasks are settled in the dispenser, and they were
+    trained only into the lost vK+1); ``buffer_trained`` is read at the publication,
+    so the relaunch trains them."""
+    samplers, first = _no_cut_run(tmp_path, dies="before_release", staged=True)
+    assert _trained_groups(first)[3] == ["g6", "g7"]  # trained into v4, which is lost
+    newest = PolicyReleaseStore(CheckpointStore(tmp_path / "store")).latest()
+    assert (newest.version, newest.buffer_selected, newest.buffer_trained) == (3, 8, 6)
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run_or_raise(launch) == "finished"
+    assert _events(launch, "rl_buffer_resume_versions")[0]["buffer_trained"] == 6
+    assert _trained_groups(launch) == {3: ["g6", "g7"]}
+
+
+def test_a_release_record_of_an_earlier_yeto_is_read_from_zero_not_from_its_read_position(tmp_path):
+    """A record without ``buffer_trained``: its ``buffer_selected`` may lie past
+    groups its weights never trained, so it is not used. The relaunch reads from 0:
+    the policy-age gate passes over what is too old, and what is inside the window
+    is trained again (here the 2 groups of v2, already trained in round 2) rather
+    than anything skipped."""
     samplers, _first = _no_cut_run(tmp_path, dies="in_round")
     for record in (tmp_path / "store" / "policy-releases").rglob("*.json"):
         data = json.loads(record.read_text())
-        data["buffer_selected"] = None
+        assert data.pop("buffer_trained") is not None and data["buffer_selected"] is not None
         record.write_text(json.dumps(data, sort_keys=True))
     launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
     assert _run_or_raise(launch) == "finished"
-    assert _events(launch, "rl_buffer_resume_versions")[0]["buffer_selected"] is None
+    assert _events(launch, "rl_buffer_resume_versions")[0]["buffer_trained"] is None
     assert _events(launch, "rl_buffer_stale_skipped")[0]["stale_groups"] == 4  # v0, v1
     assert _trained_groups(launch) == {3: ["g4", "g5"]}  # v2: inside the window, read again
 
@@ -429,7 +495,7 @@ def test_a_release_position_beyond_the_buffer_index_falls_back_to_zero(tmp_path)
     samplers, _first = _no_cut_run(tmp_path, dies="in_round")
     for record in (tmp_path / "store" / "policy-releases").rglob("*.json"):
         data = json.loads(record.read_text())
-        data["buffer_selected"] = 10_000
+        data["buffer_trained"] = 10_000
         record.write_text(json.dumps(data, sort_keys=True))
     launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
     assert _run_or_raise(launch) == "finished"
@@ -495,3 +561,63 @@ def test_a_retried_container_that_died_inside_a_round_continues_on_its_ledger(tm
     assert _run_or_raise(launch) == "finished"
     assert _events(launch, "rl_ledger_set_aside") == [] and _recorded_rounds(launch) == [0, 1, 2, 3]
     assert _trained_groups(launch) == {3: ["g6", "g7"]}
+
+
+# ------------------------------------------------------------------------------------------
+# the Kimi-K3.1 form: a staged s3 store, releases uploaded in the background
+# ------------------------------------------------------------------------------------------
+def test_a_new_container_after_a_dead_first_cut_on_a_staged_s3_store_continues_and_cuts(tmp_path):
+    """Every container has its own empty stage over one bucket. The first trainer
+    releases v1..v3 (each upload ends a round later), trains round 3 and dies before
+    v4 reaches the bucket, while its first round cut is still uploading (marked,
+    shards in the bucket, no LATEST). The second container drops that cut, continues
+    at v3 with the base weights and reads the buffer from where v3 is trained up to:
+    round 3's groups are trained again, nothing before them is. It cuts; a third
+    container resumes from that cut."""
+    import inspect
+
+    from test_rl_object_store import URI, FakeS3
+
+    from yeto.cloud import s3_store
+
+    s3 = FakeS3()
+    env = {rs.STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def host(name):
+        return rs.store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / name)},
+                            client=s3)
+
+    samplers = _Samplers(host("sampler"))
+    _samplers, first = _no_cut_run(tmp_path, dies="before_release", staged=True, store=host("trainer-a"),
+                                   samplers=samplers)
+    assert _trained_groups(first) == {0: ["g0", "g1"], 1: ["g2", "g3"], 2: ["g4", "g5"], 3: ["g6", "g7"]}
+    newest = PolicyReleaseStore(host("probe")).latest()
+    assert (newest.version, newest.buffer_selected, newest.buffer_trained) == (3, 8, 6)
+    assert rs.read_latest(host("probe-cuts").root) is None
+    dead = None
+    if "store" in inspect.signature(rs.mark_first_cut).parameters:  # the mark reaches the bucket at once
+        dead = "r000004-dead"
+        rs.mark_first_cut(first.store.root, dead, store=first.store)
+        shard = first.store.root / rs.ROUND_CUTS / dead / "rank-0.pt"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"half a cut")
+        first.store.push_local_file(shard.relative_to(first.store.root).as_posix())
+        assert any(key.endswith(f"{dead}/rank-0.pt") for _, key in s3.objects)
+
+    second = _launch(tmp_path, "launch2", samplers, age=1, every=2, rounds=3, staged=True,
+                     store=host("trainer-b"))
+    if dead is not None:
+        assert second.controller.restored is None and second.controller.discarded_first_cut
+        assert not any(dead in key for _, key in s3.objects)
+    assert _run_or_raise(second) == "finished"
+    [versions] = _events(second, "rl_buffer_resume_versions")
+    assert (versions["start_version"], versions["buffer_trained"]) == (3, 6)
+    trained = _trained_groups(second)
+    assert sorted(trained) == [3, 4, 5] and trained[3] == ["g6", "g7"]  # round 3 again; g0..g5 never
+    assert not {"g0", "g1", "g2", "g3", "g4", "g5"} & {g for groups in trained.values() for g in groups}
+    assert [e["rollout_id"] for e in _events(second, "rl_cut_saved")] == [4, 6]
+    assert _events(second, "rl_round_cut_skipped") == []  # 3 is not due with --rl-cut-every 2
+
+    third = _launch(tmp_path, "launch3", samplers, age=1, every=2, rounds=1, store=host("trainer-c"))
+    assert _run_or_raise(third) == "finished"
+    assert _events(third, "rl_resume")[0]["rollout_id"] == 6 and sorted(_trained_groups(third)) == [6]

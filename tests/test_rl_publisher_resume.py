@@ -158,18 +158,19 @@ def test_a_resumed_account_and_a_round_cut_resume_are_refused_together():
         LocalOnlySync(2).resume_at(-1)
 
 
-def test_a_relaunch_without_a_cut_reads_the_buffer_from_the_position_of_the_newest_release(tmp_path):
-    """The record of vK holds the trainer's buffer read position at that release;
-    a relaunched single trainer hands it to its round cuts as the place to read from
-    when the store holds no cut (RoundCutCheckpoint.resume), and its sync knows the
-    account continued without one."""
+def test_a_relaunch_without_a_cut_reads_the_buffer_from_where_the_newest_release_is_trained(tmp_path):
+    """The record of vK holds the buffer position its weights are trained up to
+    (``buffer_trained``); a relaunched single trainer hands it to its round cuts as
+    the place to read from when the store holds no cut (RoundCutCheckpoint.resume),
+    and its sync knows the account continued without one. ``buffer_selected`` (the
+    read position when the record was written) is never that place."""
     store = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
-    for version, position in ((1, 4), (2, 9), (3, None)):
+    for version, trained in ((1, 4), (2, 9), (3, None)):
         store.release(version, f"h{version}", lambda d: (d / "w.bin").write_text("w"),
-                      buffer_selected=position)
-    assert resumed_releases(store, 2).buffer_selected is None  # v3 recorded none
-    store.release(4, "h4", lambda d: (d / "w.bin").write_text("w"), buffer_selected=17)
-    assert resumed_releases(store, 2).buffer_selected == 17
+                      buffer_selected=30, buffer_trained=trained)
+    assert resumed_releases(store, 2).buffer_trained is None  # v3 recorded none
+    store.release(4, "h4", lambda d: (d / "w.bin").write_text("w"), buffer_selected=30, buffer_trained=17)
+    assert resumed_releases(store, 2).buffer_trained == 17
 
     calls = []
     cuts = SimpleNamespace(resume=lambda driver: None, buffer_start_without_cut=0)
@@ -179,8 +180,52 @@ def test_a_relaunch_without_a_cut_reads_the_buffer_from_the_position_of_the_newe
                              export_local_resident=lambda *, policy_version: SimpleNamespace(
                                  policy_version=policy_version))
     assert si._resume_single_trainer(driver, store) == {"resumed_base": 4}
-    assert cuts.buffer_start_without_cut == 17 and calls[-1][1]["buffer_selected"] == 17
+    assert cuts.buffer_start_without_cut == 17 and calls[-1][1]["buffer_trained"] == 17
     assert sync.start(driver).rollout_id == 4 and sync.continues_releases_without_cut is True
     fresh = LocalOnlySync(2)
     fresh.start(driver)
     assert fresh.continues_releases_without_cut is False  # a run that starts here
+
+
+def test_a_reader_older_than_buffer_trained_reads_a_record_that_has_it(tmp_path):
+    """The record gained a field; a reader built before it (the samplers of a
+    running pool) keeps only the fields it knows, with the real ``from_record``."""
+    import dataclasses
+    import json
+
+    from yeto.rl.engine.policy_release import LATEST, RELEASE_DIR, PolicyRelease
+
+    store = PolicyReleaseStore(CheckpointStore(tmp_path))
+    store.release(3, "h3", lambda d: (d / "w.bin").write_text("w"), buffer_selected=8, buffer_trained=6)
+    record = json.loads((tmp_path / RELEASE_DIR / LATEST).read_text())
+    assert record["buffer_trained"] == 6
+    earlier = dataclasses.make_dataclass(
+        "PolicyRelease", [(f.name, f.type, f) for f in dataclasses.fields(PolicyRelease)
+                          if f.name != "buffer_trained"], frozen=True)
+    earlier.from_record = classmethod(PolicyRelease.from_record.__func__)
+    read = earlier.from_record(record)
+    assert not hasattr(read, "buffer_trained")
+    assert (read.seq, read.version, read.policy_hash, read.buffer_selected) == (1, 3, "h3", 8)
+
+
+def test_the_reader_reports_where_a_version_is_trained_up_to(tmp_path):
+    """``BatchReader.trained_before(v)``: the end of the last round below v, not the
+    read position (a later round's selection, a carried-over group, do not move it);
+    the start position while this reader took no round."""
+    from tests.buffer_rollout_procs import sample
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader, GroupWriter
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    store = CheckpointStore(tmp_path)
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for g in range(6):
+        writer.write([sample(2 * g, g, 0), sample(2 * g + 1, g, 0)], group_key=f"g{g}")
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1, create_index=False), max_policy_age=2,
+                         wait_s=0.0, poll_s=0.0, read_workers=1, prefetch=False, incarnation_gate=None)
+    reader.reset(1)
+    assert reader.trained_before(0) == 1 and reader.trained_before(5) == 1
+    reader.take(0, 2, current_version=0)
+    assert reader.trained_before(0) == 1 and reader.trained_before(1) == 3
+    reader.take(1, 2, current_version=1)  # round 1 is selected: v1 is still trained up to 3
+    assert (reader.buffer.read_cursor, reader.trained_before(1), reader.trained_before(2)) == (5, 3, 5)
+    assert reader.watermark_before(1) == 3 and reader.trained_before(1) == 3  # a cut before round 1
