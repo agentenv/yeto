@@ -722,3 +722,42 @@ def test_a_recorder_session_already_open_loses_that_trial_not_the_island(tmp_pat
     assert groups[1]["kept"] == N
     rounds = [f for n, f in events if n == ROUND_EVENT]
     assert rounds[-1]["agentic"]["session_collisions_total"] == 1
+
+
+def test_no_drain_starts_until_the_pending_release_is_downloaded(tmp_path):
+    """The engine keeps starting trials while the release downloads; the drain (and
+    the load right after it) waits for release_ready."""
+    harness = Harness({"b": 0.0, "c": 0.0})
+    harness.gates["a"] = threading.Event()
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"], 2: ["c"]}))
+    ready = {"done": False}
+    polls = []
+    rnd.release_pending = lambda: 1
+
+    def release_ready():
+        polls.append(1)
+        return ready["done"]
+
+    rnd.release_ready = release_ready
+    rnd.release_poll_s = 0.0
+    try:
+        rnd(0)
+        rnd(1)  # downloading: no drain, b starts next to a
+        deadline = time.time() + 5
+        while not any("-b-" in s for s in harness.started) and time.time() < deadline:
+            time.sleep(0.01)
+        assert any("-b-" in s for s in harness.started) and polls
+        assert not [f for n, f in events if n == DRAIN_EVENT]
+        ready["done"] = True  # on disk: the next poll drains
+        done = threading.Thread(target=rnd, args=(2,))
+        done.start()
+        time.sleep(0.05)
+        assert done.is_alive() and not any("-c-" in s for s in harness.started)
+        harness.gates["a"].set()
+        done.join(5)
+        assert not done.is_alive()
+    finally:
+        harness.gates["a"].set()
+        rnd.close()
+    (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+    assert drain["seq"] == 1

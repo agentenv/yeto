@@ -40,3 +40,51 @@ def test_a_drain_timeout_above_the_reload_bound_is_warned():
     {"reload_max_defer_s": 300}])
 def test_no_warning_when_the_drain_is_within_the_bound_or_not_used(spec):
     assert ar.drain_timeout_warning(spec) is None
+
+
+class _Releases:
+    def __init__(self, latest):
+        self.value = latest
+
+    def latest(self):
+        return self.value
+
+
+class _Release:
+    def __init__(self, seq):
+        self.seq = seq
+        self.version = seq
+
+
+def _follower(latest, served=None, background=True):
+    from yeto.rl.engine.policy_release import PolicyFollower
+
+    f = PolicyFollower.__new__(PolicyFollower)
+    f.releases = _Releases(latest)
+    f.release = served
+    f.background_download = background
+    return f
+
+
+def test_prefetch_starts_the_download_of_a_newer_release_and_reports_when_it_is_there(monkeypatch):
+    calls = []
+    f = _follower(_Release(4), served=_Release(3))
+    results = iter([None, object()])
+    monkeypatch.setattr(type(f), "_fetched", lambda self, latest: calls.append(latest.seq) or next(results))
+    assert f.prefetch() is False and f.prefetch() is True
+    assert calls == [4, 4]
+
+
+def test_prefetch_is_ready_with_nothing_to_fetch_and_false_on_a_failed_download(monkeypatch):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    assert _follower(None).prefetch() is True
+    assert _follower(_Release(3), served=_Release(3)).prefetch() is True
+    assert _follower(_Release(4), served=_Release(3), background=False).prefetch() is True
+    f = _follower(_Release(4), served=_Release(3))
+
+    def fail(self, latest):
+        raise ReleaseNotLoaded("download failed", reason="download_failed", fields={})
+
+    monkeypatch.setattr(type(f), "_fetched", fail)
+    assert f.prefetch() is False

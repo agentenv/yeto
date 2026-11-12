@@ -1176,6 +1176,21 @@ class PolicyFollower:
             return None
         return int(latest.seq)
 
+    def prefetch(self) -> bool:
+        """Start (or poll) the background download of a release newer than the served
+        one; True once it is on local disk, or when there is nothing to fetch (no newer
+        release, no background download). A failed download reads False (the next
+        :meth:`refresh` reports it). Nothing is loaded."""
+        if not self.background_download:
+            return True
+        latest = self.releases.latest()
+        if latest is None or (self.release is not None and latest.seq <= self.release.seq):
+            return True
+        try:
+            return self._fetched(latest) is not None
+        except ReleaseNotLoaded:
+            return False
+
     def refresh(self) -> PolicyRelease | None:
         """The release loaded by this call, or None when there is no new one, when
         the newest one is not complete yet (``incomplete`` says why; the engines

@@ -51,8 +51,9 @@ The rollout id stays the numbering and resume unit:
 Weight switches (``weight_switch``; the default ``auto`` is ``live`` on an
 engine with ``updates_during_generation``, else ``drain``):
 
-* ``drain``: a pending release (read every ``release_poll_s``) stops
-  new groups; the started groups finish (``drain_timeout_s``: then their trials
+* ``drain``: a pending release (read every ``release_poll_s``) whose
+  download finished (``release_ready``; the follower prefetches it in the
+  background meanwhile, the engine keeps generating) stops new groups; the started groups finish (``drain_timeout_s``: then their trials
   are cancelled and lost as ``drain_timeout``), the call returns and the loop
   loads the release before the next call. While a group runs the follower loads
   nothing (``holds_weights``), so every group is of one version.
@@ -364,6 +365,11 @@ class AgenticRound(EngineRound):
         self._retry_events: deque[dict[str, Any]] = deque()
         # the seq of a release newer than the served one (build_engine_sampler: the follower's)
         self.release_pending: Callable[[], int | None] = lambda: None
+        # True once the pending release is on local disk (build_engine_sampler: the
+        # follower's prefetch, which starts its background download): a drain starts
+        # only then, so the engine keeps generating while the release downloads and
+        # the loop loads it as soon as the drain ends
+        self.release_ready: Callable[[], bool] = lambda: True
         # the stream: the loop thread starts and ends trials, the calling thread settles groups
         self._gate: Any = None
         self._queue: deque[_Group] = deque()  # groups with trials not started yet
@@ -384,6 +390,7 @@ class AgenticRound(EngineRound):
         self._drained_seq: int | None = None
         self._pending_seq: int | None = None
         self._release_read = -float("inf")
+        self._pending_ready = False
         self._outcomes_mark: dict[str, int] = {}
         self._last_rollout: int | None = None
 
@@ -610,8 +617,12 @@ class AgenticRound(EngineRound):
         if now - self._release_read >= self.release_poll_s:
             self._release_read = now
             self._pending_seq = self.release_pending()
+            self._pending_ready = (self._pending_seq is not None and self._pending_seq != self._drained_seq
+                                   and bool(self.release_ready()))
         seq = self._pending_seq
-        return None if seq is None or seq == self._drained_seq else int(seq)
+        if seq is None or seq == self._drained_seq or not self._pending_ready:
+            return None
+        return int(seq)
 
     def _wants_work(self) -> bool:
         return self.reclaimed() or (not self._queue and len(self._running) < self.max_in_flight)
