@@ -127,7 +127,7 @@ as a second safeguard for stage-0 gradients, as in the measured run.
 |---|---|---|
 | `MILES_K31_INDEXER_QUERY_CHUNK` | 2048 | 1024 [estimate] |
 | `MILES_K3_ATTN_RES_TOKEN_CHUNK` | 4096 | 2048 [estimate] |
-| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | on | off: a colocated Miles island launched through yeto does not accept it (torch_memory_saver) [estimate] |
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | on | off; yeto accepts it on a full-parameter trainer island (`--rl-sample-role trainer`: no engine, no `--offload-train`) but not on a colocated island (torch_memory_saver) [estimate] |
 | `NCCL_RAS_ENABLE` | 0 | 0 |
 | `OMP_NUM_THREADS` | 8 | 8 |
 | `MILES_MXFP4_QAT_TRITON` | 1 | 1 |

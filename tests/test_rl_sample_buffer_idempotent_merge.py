@@ -9,10 +9,12 @@ this rule) is read with the repeat passed over: never selected, never counted.""
 from __future__ import annotations
 
 import json
+import random
 import threading
 
 import pytest
 
+from yeto.rl.engine.merged_release import BufferLane
 from yeto.rl.engine.object_store import DirectoryObjectStore
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import (
@@ -354,3 +356,107 @@ def test_an_index_merged_out_of_shard_order_is_read_with_every_record(tmp_path):
         (0, "a1"), (1, "a2"), (2, "a0")]
     assert reader.duplicate_merged_records == 1 and reader.unmerged_shard_gaps == 0
     assert reader.shard_positions(4) == {"a": 3}
+
+
+def _jsonl_index(tmp_path, shard_positions, shard="a"):
+    """Write ``index.jsonl`` with the shard's records in the given order of shard positions."""
+    shard_lines = (tmp_path / "sample-buffer" / "shards" / f"{shard}.jsonl").read_text().splitlines()
+    by_pos = {r["pos"]: r for r in map(json.loads, shard_lines)}
+    index = [{**by_pos[shard_pos], "shard": shard, "shard_pos": shard_pos, "pos": pos}
+             for pos, shard_pos in enumerate(shard_positions)]
+    (tmp_path / "sample-buffer" / "index.jsonl").write_text("".join(json.dumps(r) + "\n" for r in index))
+
+
+def test_an_index_whose_shard_positions_go_down_is_read_with_every_record_once(tmp_path, capsys):
+    """Appended at 10, 11, 9, 12: the older ``merge_shards()`` wrote g2 g0 g1 g3. A
+    reader that took every position below the highest one for a repeat selected g2 and
+    g3 only and warned about repeats that are none."""
+    store = CheckpointStore(tmp_path)
+    shard = FileSampleBuffer(store, batch_size=1, index=shard_index("a"))
+    for n, at in enumerate((10.0, 11.0, 9.0, 12.0)):
+        shard.append(SampleIndexEntry(f"g{n}", 0, "", 1, at))
+    _jsonl_index(tmp_path, [2, 0, 1, 3])
+    reader = FileSampleBuffer(store, batch_size=1, create_index=False)
+    assert [s.entry.sample_id for s in reader.select("trainer", 10)] == ["g2", "g0", "g1", "g3"]
+    assert reader.duplicate_merged_records == 0 and reader.unmerged_shard_gaps == 0
+    assert "repeats" not in capsys.readouterr().out
+    assert [reader.shard_positions(c) for c in range(5)] == [{}, {"a": 3}, {"a": 3}, {"a": 3}, {"a": 4}]
+    # the head goes on merging the shard after its highest merged position
+    shard.append(SampleIndexEntry("g4", 0, "", 1, 13.0))
+    assert merge_shards(_Files(tmp_path), ["a"]) == 1
+    assert [s.entry.sample_id for s in reader.select("trainer", 10)] == ["g4"]
+
+
+def test_the_head_merge_continues_after_the_highest_merged_position_not_the_record_count(tmp_path):
+    """An index that repeats two records: by count the head would continue two records
+    too far (a4 and a5 never merged)."""
+    store = CheckpointStore(tmp_path)
+    shard = FileSampleBuffer(store, batch_size=1, index=shard_index("a"))
+    for n in range(6):
+        shard.append(SampleIndexEntry(f"a{n}", 0, "", 1, float(n + 1)))
+    _jsonl_index(tmp_path, [0, 1, 2, 3, 2, 3])
+    assert merge_shards(_Files(tmp_path), ["a"]) == 2
+    reader = FileSampleBuffer(store, batch_size=1, create_index=False)
+    assert [s.entry.sample_id for s in reader.select("trainer", 10)] == ["a0", "a1", "a2", "a3", "a4", "a5"]
+    assert reader.duplicate_merged_records == 2 and merge_shards(_Files(tmp_path), ["a"]) == 0
+
+
+def test_a_merger_restarted_on_an_index_with_a_hole_continues_after_it_and_repeats_nothing(tmp_path):
+    """An index the count-based resume left: a0 a1, then a4 (a2 and a3 passed over for
+    good). The restarted merger continues at a5; the hole is counted, not filled."""
+    objects = DirectoryObjectStore(tmp_path)
+    writers, clock = _writers(objects, ("a",)), [0.0]
+    _add(writers, "a", 6, clock)
+    _write_index(objects, [("a", 0), ("a", 1), ("a", 4)])
+    trainer = open_trainer_buffer(objects, batch_size=1, shards=["a"])
+    assert [sid for _, _, sid in _merged(objects)] == ["a0", "a1", "a4", "a5"]
+    assert trainer.unmerged_shard_gaps == 2 and trainer.duplicate_merged_records == 0
+    _add(writers, "a", 1, clock)
+    again = open_trainer_buffer(objects, batch_size=1, shards=["a"])  # and once more
+    assert [e.sample_id for e in again.entries()] == ["a0", "a1", "a4", "a5", "a6"]
+    assert again.unmerged_shard_gaps == 2 and again.shard_positions(5) == {"a": 7}
+    assert [s.entry.sample_id for s in again.select("trainer", 10)] == ["a0", "a1", "a4", "a5", "a6"]
+
+
+def test_lane_readers_pass_over_a_repeated_position_and_keep_their_lanes(tmp_path):
+    """Synced trainers read disjoint lanes of the index positions. A repeat keeps its
+    position, so the lanes of the records after it do not move; its lane's reader
+    moves its cursor past it and selects nothing for it."""
+    objects = DirectoryObjectStore(tmp_path)
+    writers, clock = _writers(objects, ("a",)), [0.0]
+    _add(writers, "a", 6, clock)
+    _write_index(objects, [("a", 0), ("a", 1), ("a", 2), ("a", 1), ("a", 3), ("a", 4), ("a", 5)])
+    lanes = [FileSampleBuffer(objects, batch_size=1, create_index=False, lane=BufferLane(i, 2)) for i in range(2)]
+    got = [[(s.position, s.entry.sample_id) for s in lane.select(f"t{i}", 10)] for i, lane in enumerate(lanes)]
+    assert got == [[(0, "a0"), (2, "a2"), (4, "a3"), (6, "a5")], [(1, "a1"), (5, "a4")]]  # 3 is the repeat
+    assert [lane.read_cursor for lane in lanes] == [7, 7]
+    assert [lane.duplicate_merged_records for lane in lanes] == [1, 1]
+    assert lanes[1].backlog(0, start=0).samples == 6
+    assert [s.position for s in lanes[1].peek(5)] == []
+    lanes[1].reset_to(2)
+    assert [(s.position, s.entry.sample_id) for s in lanes[1].select("t1", 10)] == [(5, "a4")]
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_shard_positions_of_any_cursor_match_a_scan_of_the_index(tmp_path, seed):
+    """``shard_positions`` is looked up, not scanned: for every cursor it is each shard's
+    highest position below the cursor plus one, in any index (order, repeats, holes)."""
+    rng = random.Random(seed)
+    objects = DirectoryObjectStore(tmp_path)
+    writers, clock = _writers(objects, ("a", "b", "c")), [0.0]
+    for shard in writers:
+        _add(writers, shard, 12, clock)
+    records = [(shard, rng.randrange(12)) for shard in rng.choices("abc", k=40)]
+    _write_index(objects, records)
+    reader = FileSampleBuffer(objects, batch_size=1, create_index=False)
+    for cursor in range(len(records) + 1):
+        want: dict[str, int] = {}
+        for shard, shard_pos in records[:cursor]:
+            want[shard] = max(want.get(shard, 0), shard_pos + 1)
+        assert reader.shard_positions(cursor) == dict(sorted(want.items()))
+    firsts = {record: i for i, record in reversed(list(enumerate(records)))}
+    assert [s.position for s in reader.select("t", 100)] == sorted(firsts.values())
+    assert reader.duplicate_merged_records == len(records) - len(firsts)
+    assert reader.unmerged_shard_gaps == sum(
+        max(p for s, p in records if s == shard) + 1 - len({p for s, p in records if s == shard})
+        for shard in {s for s, _ in records})

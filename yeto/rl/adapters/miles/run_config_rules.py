@@ -46,21 +46,48 @@ def check_global_batch(global_batch: int, data_parallel: int) -> None:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
 
 
-def check_island_env(*, placement: str, env_pairs) -> None:
-    """A colocated island runs Miles' ``--offload-train`` (the adapter
-    forces it), whose torch_memory_saver refuses to start when PyTorch's
-    allocator uses expandable segments (``torch_memory_saver.entrypoint``:
+def island_offloads_trainer(*, placement: str, tuning: str = "lora", sample_role: str = "both",
+                            offload_train: bool = False) -> bool:
+    """Whether the island's Miles argv carries ``--offload-train`` (which loads
+    torch_memory_saver into the trainer actors through ``LD_PRELOAD``).
+
+    Mirrors ``config.translate_run_config``: ``--offload-train`` when the user
+    asks for it (``--rl-offload-train``) or the trainer shares its GPUs with
+    engines (colocated). A full-parameter trainer island (``--tuning full
+    --rl-sample-role trainer``) starts no engine whatever ``--rl-placement``
+    says (``run_config``: a trainer-only fixed partition, Miles
+    ``--debug-train-only`` with ``--no-offload-train``), so it stays resident."""
+    if offload_train:
+        return True
+    if tuning == "full" and sample_role == "trainer":
+        return False
+    return placement == "colocated"
+
+
+def check_island_env(*, placement: str, env_pairs, tuning: str = "lora", sample_role: str = "both",
+                     offload_train: bool = False) -> None:
+    """An island that runs Miles' ``--offload-train`` (:func:`island_offloads_trainer`)
+    loads torch_memory_saver, which refuses to start when PyTorch's allocator
+    uses expandable segments (``torch_memory_saver.entrypoint``:
     "expandable_segments is not supported yet"). Refused before any GPU starts.
+    A resident trainer (no ``--offload-train``) may use expandable segments; on
+    the K3.1 full-parameter trainer they cut the allocator's reserved-minus-allocated
+    gap from about 80 GiB to about 17 GiB per GPU.
     ``env_pairs``: the island's ``KEY=VALUE`` environment options."""
-    if placement != "colocated":
+    if not island_offloads_trainer(placement=placement, tuning=tuning, sample_role=sample_role,
+                                   offload_train=offload_train):
         return
     for item in env_pairs or ():
         key, _, value = str(item).partition("=")
         if key == "PYTORCH_CUDA_ALLOC_CONF" and "expandable_segments:True" in value:
+            why = ("--rl-offload-train offloads" if offload_train
+                   else "a colocated Miles island offloads")
             raise ValueError(
-                "a colocated Miles island offloads the trainer with torch_memory_saver, which "
+                f"{why} the trainer with torch_memory_saver, which "
                 "refuses PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; drop that environment "
-                "option or use --rl-placement fixed-partition")
+                "option, or run the trainer resident: --rl-placement fixed-partition, or a "
+                "full-parameter trainer island (--tuning full --rl-sample-role trainer), "
+                "without --rl-offload-train")
 
 
 def _miles_pin_gap(first: str, feature: str, *, feature_name: str) -> str | None:

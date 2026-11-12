@@ -811,6 +811,10 @@ no ownership record precedes it. So:
   merges the shards, so a process that skipped the check gains nothing
   (`sample_buffer/stale_incarnation_groups`, event `rl_buffer_merge_skipped`
   with `reason: stale_incarnation`, the shard and the owner's epoch);
+- a sampler that cannot read its shard several times in a row (5 by default)
+  writes no group until a read succeeds again; such a group's task goes back
+  to the dispenser uncounted (`release`, like a fenced one), so a store
+  outage does not use up `max_redo`;
 - a fenced process cannot mark its shard as ended either. A shard the pool
   fenced therefore never reads as ended (before, a drained sampler that was
   then fenced could still write its end mark). Nothing in a K3.1 run waits for
@@ -839,7 +843,8 @@ shard and all other shards are trained as usual. A shard position that is
 missing while later ones exist (an object deleted from the bucket by hand or by
 a lifecycle rule) is not skipped: the trainer prints a warning and emits
 `reason: missing_shard_position`, and the shard's later groups wait until the
-object is back.
+object is back. A sampler restarted on a shard with a damaged record passes
+over it the same way instead of failing at its start.
 
 ### 5.3 Resuming training
 
@@ -881,7 +886,22 @@ Mixed versions on one run store (the fence format of section 5.2):
 | old (no trainer generation lease in the store) | new | The samplers and the pool write no ownership record and use the lease record as before. Nothing changes for the old trainer. |
 | new | old, on a run started by old code | Works as before the upgrade (lease record). Restart the samplers on the new code to get the fence above; the dispenser plan of the run stays at its version. |
 | any | old, on a run started by new code | Refused at the sampler's start: `dispense mismatch: version is 2 here, 3 in .../plan.json`. Use the new sampler image. |
-| old, after a new trainer ran on the store | - | Not supported: the old trainer stops with `record out of order` on the first ownership record. Keep the trainer on the new code. |
+| old, after a new trainer ran on the store | - | Not supported, and refused: see "No way back" below. |
+
+**No way back to older trainer code.** Once a shard of the run holds an
+ownership record, code from before ownership records cannot read the run's
+buffer, and it says so instead of misreading it:
+
+| Older code | What it does on such a store |
+|---|---|
+| trainer (and the head's view of the merged index) | Stops at its first read of the merged index: `SampleBufferError: sample buffer: record out of order: {"marker": "shard-ownership", "note": "written by yeto with shard ownership records: code older than them cannot read this buffer", ...}`. It merges and trains nothing, on every restart. The new trainer writes that marker into the merged index before the first group it merges from an owned shard. |
+| sampler on a shard with an ownership record | Stops at its start with the same `record out of order` error, showing the ownership record. With a store dispenser it is refused even earlier: `dispense mismatch: version is 2 here, 3 in .../plan.json`. |
+| the head's count of unmerged shard records (`UnmergedShards`) | `KeyError: 'sample_id'` on the ownership record. Not a clear message; it is not a misread either. |
+| trainer, in the short window after a new sampler joined and before the new trainer merged anything | No marker exists yet. The older trainer copies the shard's records, the ownership record included, into the merged index and then stops with `record out of order` (showing that record). The copied groups were not checked against the ownership rule. The current code reads on from such an index (it passes over the copied record and counts it, `foreign_merged_records`), so going forward again works; do not rely on it. |
+
+The merged group records themselves are unchanged for older readers (two more
+fields, `shard_epoch` and `shard_passed`, that older code ignores). To go back
+to older code, start a new run prefix.
 
 Upgrade order for a running run: trainer first, then the pool (control host),
 then the samplers (the pool's in-place restart or node replacement brings them
