@@ -1178,6 +1178,32 @@ The launcher was alive but produced no output for the silence window.
 Inspect `trainer.log` and the Modal app. Resume with `yeto run up` (section
 5.3). NC nodes are kept, so the restart is quick.
 
+**The tape shows `rl_buffer_damaged_payload_skipped`.**
+The trainer passed over groups whose payload object is missing or is not a
+group (cut short, not JSON, another schema). Each is consumed, not trained,
+and named in the event (`position`, `sample_id`, `payload_ref`, `reason`);
+the metric is `sample_buffer/damaged_payload_groups`. One or two are a damaged
+or deleted object. A payload the store failed to return (a throttle, a 5xx, a
+timeout) is never counted here: that read fails the round and is read again.
+
+**The trainer stopped with `DamagedPayloadLimit`.**
+8 payloads in a row (or 8 that are more than half of what one round read)
+did not decode: not single damaged objects but a systematic cause, usually
+samplers of another code version writing another payload schema, or a
+lifecycle rule deleting payloads. Nothing was consumed; the trainer stops at
+the same position on every restart until the cause is fixed. To pass the
+groups over anyway (their tasks are settled in the dispenser and are not
+generated again), set `YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN` in the trainer's
+environment (`0`: no limit).
+
+**`rl_buffer_exhausted` carries `passed_over`.**
+The last round found no trainable group; `passed_over` counts what it
+consumed without training (`stale`, `stale_payload`, `stale_incarnation`,
+`quarantined`, `dropped_small`, `nonfinite_reward`, `damaged_payload`). The
+same counts end the error text of a round that waited `wait_s` without a new
+group. `stale_payload` are groups whose index record passed the age gate but
+whose payload holds an older policy version: the payload decides.
+
 **`down` reports `NOT verified`.**
 Read `down.log`. Usually a node release is still in progress. Run
 `python -m yeto.launch.nc pool-status --config <pool.json>` and, if nodes are
