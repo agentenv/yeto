@@ -46,7 +46,18 @@ decides that again after every lost create. So two mergers at once (a trainer
 not dead yet and the one that replaces it), or a create whose answer was lost,
 leave every shard record in the index once. An index written before this rule
 can hold a shard record twice: the reader passes over the second one
-(``duplicate_merged_records``), it is never selected.
+(``duplicate_merged_records``), it is never selected. The reader decides that
+by the exact set of ``(shard, shard_pos)`` it has read, so an index that holds a
+shard's records out of their order (the older :func:`merge_shards` sorted a
+batch by ``appended_at`` alone; a sampler clock that stepped back then put a
+later record first) is read with every record once.
+
+Not covered here: a *shard* that holds one group twice. A sampler whose create
+of a shard record was applied but answered as lost writes the group again at
+the next position: same ``sample_id``, two ``shard_pos``. The merge takes them
+for two records. The object store's create must not report such a create as
+lost (``S3ObjectStore.create`` reads the object back after a retried request
+was refused); this merge relies on that.
 
 Sampler islands on several sites (rl-cross-site-sample-store): an object store
 without reliable create-if-absent between hosts (``objects.buffer_shards``, OSS)
@@ -64,6 +75,7 @@ resumes every shard where that cut left it).
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import fcntl
 import heapq
@@ -111,6 +123,37 @@ def _read_all(objects: ObjectStore, keys: list[str]) -> list[bytes | None]:
 
 class SampleBufferError(RuntimeError):
     pass
+
+
+class _SeenPositions:
+    """The positions of one shard a reader found in the merged index: every position
+    below ``prefix``, plus ``above`` (a merged index in shard order keeps ``above``
+    empty). ``high``: the highest one + 1."""
+
+    __slots__ = ("prefix", "above", "high")
+
+    def __init__(self) -> None:
+        self.prefix = 0
+        self.above: set[int] = set()
+        self.high = 0
+
+    def __contains__(self, position: int) -> bool:
+        return position < self.prefix or position in self.above
+
+    def add(self, position: int) -> None:
+        if position == self.prefix:
+            self.prefix += 1
+            while self.prefix in self.above:
+                self.above.discard(self.prefix)
+                self.prefix += 1
+        elif position > self.prefix:
+            self.above.add(position)
+        self.high = max(self.high, position + 1)
+
+    @property
+    def missing(self) -> int:
+        """Positions below ``high`` that were not found."""
+        return self.high - self.prefix - len(self.above)
 
 
 def payload_name(sample_id: str) -> str:
@@ -517,10 +560,13 @@ class FileSampleBuffer:
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
         self._shard_pos_of: list[int | None] = []  # its position in that shard
         self._shard_next: dict[str, int] = {}  # per shard: the highest merged shard position + 1
+        self._shard_seen: dict[str, _SeenPositions] = {}  # per shard: the merged shard positions
+        # per shard: the index positions of its records and its ``_shard_next`` after each
+        # (shard_positions() looks a cursor up in them)
+        self._shard_marks: dict[str, tuple[list[int], list[int]]] = {}
         self._shard_pending: dict[str, list[dict[str, Any]]] = {}  # shard records read, not merged yet
         self._skipped: set[int] = set()  # positions that repeat a merged shard record: never selected
-        self._shard_gaps = 0  # shard records an earlier merger passed over (never merged)
-        self._shard_holes: dict[str, set[int]] = {}  # their shard positions (a later record may fill one)
+        self._gap_warned = False
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
         self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
@@ -628,7 +674,8 @@ class FileSampleBuffer:
             return self._ended
         if record.get("shard") is None:
             return False
-        return int(record["shard_pos"]) < self._shard_next.get(record["shard"], 0)
+        seen = self._shard_seen.get(record["shard"])
+        return seen is not None and int(record["shard_pos"]) in seen
 
     def _absorb(self, records: list[dict[str, Any]]) -> None:
         for record in records:
@@ -639,20 +686,22 @@ class FileSampleBuffer:
                 continue
             shard, shard_pos = record.get("shard"), None
             if shard is not None:
-                merged = self._shard_next.get(shard, 0)
+                seen = self._shard_seen.get(shard)
+                if seen is None:
+                    seen = self._shard_seen[shard] = _SeenPositions()
+                    self._shard_marks[shard] = ([], [])
                 # a merged record written without ``shard_pos`` is the next of its shard
-                shard_pos = merged if record.get("shard_pos") is None else int(record["shard_pos"])
-                if shard_pos in self._shard_holes.get(shard, ()):
-                    # merged out of shard order (an index written by merge_shards() when it
-                    # sorted a batch by appended_at alone): a real record, not a repeat
-                    self._shard_holes[shard].discard(shard_pos)
-                    self._shard_gaps -= 1
-                elif shard_pos < merged:
+                shard_pos = seen.high if record.get("shard_pos") is None else int(record["shard_pos"])
+                if shard_pos in seen:
                     self._skip_duplicate(record, shard, shard_pos)
                 else:
-                    if shard_pos > merged:
-                        self._note_gap(shard, merged, shard_pos)
-                    self._shard_next[shard] = shard_pos + 1
+                    if shard_pos > seen.high:
+                        self._note_gap(shard, seen.high, shard_pos)
+                    seen.add(shard_pos)
+                    self._shard_next[shard] = seen.high
+                positions, highs = self._shard_marks[shard]
+                positions.append(len(self._entries))
+                highs.append(seen.high)
             self._shard_of.append(shard)
             self._shard_pos_of.append(shard_pos)
             self._entries.append(_entry(record))
@@ -668,12 +717,12 @@ class FileSampleBuffer:
         self._skipped.add(len(self._entries))
 
     def _note_gap(self, shard: str, merged: int, shard_pos: int) -> None:
-        if not self._shard_gaps:
+        if not self._gap_warned:
+            self._gap_warned = True
             print(f"[sample-buffer] WARNING: the merged index goes from shard {shard!r} record "
-                  f"{merged - 1} to {shard_pos}: an earlier merger passed over {shard_pos - merged} "
-                  f"record(s) (it counted repeated records); they stay unmerged", flush=True)
-        self._shard_gaps += shard_pos - merged
-        self._shard_holes.setdefault(shard, set()).update(range(merged, shard_pos))
+                  f"{merged - 1} to {shard_pos}: {shard_pos - merged} record(s) of the shard were passed "
+                  f"over (an earlier merger counted repeated records, or merged the shard out of "
+                  f"its order); unless the index holds them further on they stay unmerged", flush=True)
 
     @property
     def duplicate_merged_records(self) -> int:
@@ -683,10 +732,11 @@ class FileSampleBuffer:
 
     @property
     def unmerged_shard_gaps(self) -> int:
-        """The shard records an earlier merger passed over, as far as read (a record
-        merged later, out of its shard's order, is no longer counted)."""
+        """The shard records an earlier merger passed over, as far as read: the shard
+        positions below a shard's highest merged one that the index does not hold (a
+        record merged out of its shard's order counts until it is read)."""
         with self._lock:
-            return self._shard_gaps
+            return sum(seen.missing for seen in self._shard_seen.values())
 
     # ---------------------------------------------------------------- reading
     def refresh(self) -> int:
@@ -759,9 +809,10 @@ class FileSampleBuffer:
             if not 0 <= int(cursor) <= len(self._entries):
                 raise SampleBufferError(f"cursor {cursor} outside the index (0..{len(self._entries)})")
             out: dict[str, int] = {}
-            for shard, shard_pos in zip(self._shard_of[:int(cursor)], self._shard_pos_of[:int(cursor)]):
-                if shard is not None and shard_pos >= out.get(shard, 0):
-                    out[shard] = shard_pos + 1
+            for shard, (positions, highs) in self._shard_marks.items():
+                below = bisect.bisect_left(positions, int(cursor))  # its records below the cursor
+                if below:
+                    out[shard] = highs[below - 1]
             return dict(sorted(out.items()))
 
     def __len__(self) -> int:
@@ -954,9 +1005,11 @@ def merge_shards(files, shards: Iterable[str]) -> int:
     lines = _complete_lines(index)
     if any(r.get("end") for r in lines):
         raise SampleBufferError("merge after the data end")
-    for record in lines:
+    for record in lines:  # each shard continues after its highest merged position
         if record.get("shard") is not None:
-            merged[record["shard"]] += 1
+            shard_pos = record.get("shard_pos")
+            done = merged[record["shard"]]
+            merged[record["shard"]] = max(done, (done if shard_pos is None else int(shard_pos)) + 1)
     per_shard: list[list[dict]] = []
     for shard in shards:
         records = [r for r in _complete_lines(files.read(f"{BUFFER_DIR}/{shard_index(shard)}") or b"")
