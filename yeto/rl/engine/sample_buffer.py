@@ -520,6 +520,7 @@ class FileSampleBuffer:
         self._shard_pending: dict[str, list[dict[str, Any]]] = {}  # shard records read, not merged yet
         self._skipped: set[int] = set()  # positions that repeat a merged shard record: never selected
         self._shard_gaps = 0  # shard records an earlier merger passed over (never merged)
+        self._shard_holes: dict[str, set[int]] = {}  # their shard positions (a later record may fill one)
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
         self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
@@ -641,7 +642,12 @@ class FileSampleBuffer:
                 merged = self._shard_next.get(shard, 0)
                 # a merged record written without ``shard_pos`` is the next of its shard
                 shard_pos = merged if record.get("shard_pos") is None else int(record["shard_pos"])
-                if shard_pos < merged:
+                if shard_pos in self._shard_holes.get(shard, ()):
+                    # merged out of shard order (an index written by merge_shards() when it
+                    # sorted a batch by appended_at alone): a real record, not a repeat
+                    self._shard_holes[shard].discard(shard_pos)
+                    self._shard_gaps -= 1
+                elif shard_pos < merged:
                     self._skip_duplicate(record, shard, shard_pos)
                 else:
                     if shard_pos > merged:
@@ -667,6 +673,7 @@ class FileSampleBuffer:
                   f"{merged - 1} to {shard_pos}: an earlier merger passed over {shard_pos - merged} "
                   f"record(s) (it counted repeated records); they stay unmerged", flush=True)
         self._shard_gaps += shard_pos - merged
+        self._shard_holes.setdefault(shard, set()).update(range(merged, shard_pos))
 
     @property
     def duplicate_merged_records(self) -> int:
@@ -676,7 +683,8 @@ class FileSampleBuffer:
 
     @property
     def unmerged_shard_gaps(self) -> int:
-        """The shard records an earlier merger passed over, as far as read."""
+        """The shard records an earlier merger passed over, as far as read (a record
+        merged later, out of its shard's order, is no longer counted)."""
         with self._lock:
             return self._shard_gaps
 
@@ -934,7 +942,10 @@ def merge_shards(files, shards: Iterable[str]) -> int:
     """Append the new lines of each shard index to ``index.jsonl`` (the caller is the
     only writer of the index). ``files``: store access with ``read(rel)`` /
     ``write(rel, data)`` (``trainer_remote.StoreFiles``). New lines of all shards
-    are merged in their ``appended_at`` order; returns the number merged."""
+    are merged in their ``appended_at`` order, every shard in its own order (a
+    shard whose clock stepped back is not reordered: a reader takes a merged
+    record below its shard's highest merged position for a repeat); returns the
+    number merged."""
     index_rel = f"{BUFFER_DIR}/{INDEX}"
     index = files.read(index_rel) or b""
     end = index.rfind(b"\n")
@@ -946,15 +957,16 @@ def merge_shards(files, shards: Iterable[str]) -> int:
     for record in lines:
         if record.get("shard") is not None:
             merged[record["shard"]] += 1
-    new: list[dict] = []
+    per_shard: list[list[dict]] = []
     for shard in shards:
         records = [r for r in _complete_lines(files.read(f"{BUFFER_DIR}/{shard_index(shard)}") or b"")
                    if not r.get("end")]
-        for shard_pos, record in enumerate(records[merged[shard]:], start=merged[shard]):
-            new.append({**record, "shard": shard, "shard_pos": shard_pos})
+        per_shard.append([{**record, "shard": shard, "shard_pos": shard_pos}
+                          for shard_pos, record in enumerate(records[merged[shard]:], start=merged[shard])])
+    # as FileSampleBuffer._merge_shards: by appended_at, never against a shard's own order
+    new = list(heapq.merge(*per_shard, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"])))
     if not new:
         return 0
-    new.sort(key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"], r["shard_pos"]))
     out = [index]
     for pos, record in enumerate(new, start=len(lines)):
         out.append((json.dumps({**record, "pos": pos}, sort_keys=True) + "\n").encode())
