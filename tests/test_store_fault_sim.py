@@ -68,7 +68,7 @@ LEASE_READS_ARE_VERDICTS = hasattr(IncarnationLease, "unknown")  # a lease that 
 OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a sampler that fails between the buffer append of a group and its ``trained`` settlement
     # (or whose claim expires between its check and its write) leaves the slot to be run again
-    "trained_twice_same_slot": (ONE_GROUP_PER_TASK, 0.7),
+    "trained_twice_same_slot": (ONE_GROUP_PER_TASK, 0.5),
     # a claim taken while ``store_dispense.retire`` lists the ledger is not released by it, and
     # the retired process learns of its marker only at its next scan: it still writes that group
     "retired_writer_group_trained": (PLAN_IDENTITY, 0.25),
@@ -79,6 +79,9 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # (``read_record`` gives None) for no lease, caches that for ``refresh_s`` and trains the
     # fenced incarnation's groups meanwhile (fail-open)
     "stale_incarnation_group_trained": (LEASE_READS_ARE_VERDICTS, 0.05),
+    # until the old incarnation of a second start reads its lease both write the shard; a round
+    # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
+    "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
 }
 # ... and only where a fenced process writes without any check of its own (preset fence-bypass):
 # the lease gate caches the lease for 30 s, and the next incarnation seals what it finds
@@ -243,9 +246,6 @@ def test_a_pool_that_acts_all_the_time_breaks_nothing_but_the_open_findings():
     _assert_holds(_run("pool"), open_findings=OPEN_FINDINGS)
 
 
-@pytest.mark.xfail(not SHARD_OWNERSHIP, strict=False,
-                   reason="open finding: until the old incarnation reads its lease both write the shard; a round "
-                          "id written by both makes the shard unresumable (resume_point: two data cursors)")
 def test_a_second_start_of_a_running_sampler_leaves_its_shard_resumable():
     results = _run("second-start")
     assert sum(r.metrics.get("second_starts", 0) for r in results) > 0

@@ -291,6 +291,43 @@ def _a_restored_trainer_starts_one_before_its_watermark(mp: Any) -> None:
                lambda self, watermark: real(self, max(0, int(watermark) - 1)))
 
 
+def _the_gate_trains_one_entry_past_the_seal(mp: Any) -> None:
+    real = incarnation_lease.IncarnationGate._lease
+
+    def _lease(self, sampler, *, force=False):  # ``ordinal <= sealed`` becomes ``ordinal <= sealed + 1``
+        record = real(self, sampler, force=force)
+        if record and record.get("superseded"):
+            sealed = record.get("sealed") or {}
+            record = dict(record, sealed={str(i): int(sealed.get(str(i), 0)) + 1 for i in record["superseded"]})
+        return record
+
+    mp.setattr(incarnation_lease.IncarnationGate, "_lease", _lease)
+
+
+def _the_merge_takes_a_record_of_another_shard_for_merged(mp: Any) -> None:
+    def _is_merged(self, record):  # keyed by the shard position alone, not by (shard, position)
+        if record.get("end"):
+            return self._ended
+        if record.get("shard") is None:
+            return False
+        return any(int(record["shard_pos"]) in seen for seen in self._shard_seen.values())
+
+    mp.setattr(sample_buffer.FileSampleBuffer, "_is_merged", _is_merged)
+
+
+def _a_restart_resumes_from_another_shard(mp: Any) -> None:
+    import store_sim.actors as actors
+
+    real = actors.resume_point
+
+    def resume_point(entries, sampler):
+        sid = str(sampler)
+        other = f"{sid[:-1]}{(int(sid[-1]) + 1) % 2}" if sid[-1:].isdigit() else sid
+        return real(entries, other)
+
+    mp.setattr(actors, "resume_point", resume_point)
+
+
 @dataclass(frozen=True)
 class Mutation:
     apply: Callable[[Any], None]
@@ -317,12 +354,16 @@ MUTATIONS = [
     Mutation(_a_drain_is_answered_with_claims_still_held, "pool", ("drain_answered_while_holding_a_claim",)),
     # -- fencing: a superseded incarnation's late groups are not trained
     Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE),
+    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE),
     Mutation(_a_new_lease_supersedes_nobody, "process", ("lease_forgot_a_superseded_incarnation",)),
     Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",)),
     # -- the buffer: every shard record merged once, read as itself, consumed once per cut lineage
     Mutation(_the_merge_drops_every_seventh_shard_record, "none", ("shard_record_never_merged", "run_did_not_end")),
     Mutation(_a_restarted_merger_merges_the_last_record_again, "process", ("shard_record_merged_twice",),
              skip="the idempotent merge leaves the repeated record out" if IDEMPOTENT_MERGE else None),
+    Mutation(_the_merge_takes_a_record_of_another_shard_for_merged, "process", ("shard_record_never_merged",),
+             skip=None if IDEMPOTENT_MERGE else "the merge of this tree keeps no merged positions"),
+    Mutation(_a_restart_resumes_from_another_shard, "process", ("shard_left_unresumable",)),
     Mutation(_the_trainer_merges_only_its_first_shard, "none",
              ("slot_settled_trained_but_never_consumed", "shard_record_never_merged", "run_did_not_end")),
     Mutation(_a_restored_trainer_starts_one_past_its_watermark, "process", ("merged_record_never_consumed",)),

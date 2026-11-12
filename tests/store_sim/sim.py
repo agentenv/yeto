@@ -29,12 +29,14 @@ import tempfile
 import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator
 
 from yeto.cloud import s3_store
 from yeto.launch.nc import elastic
 from yeto.launch.pool.data_path import R2DataPath
 from yeto.rl.engine import sample_buffer, store_dispense
+from yeto.rl.engine.sampler_resume import SamplerResumeError, resume_point
 
 from .actors import CUT_KEY, NAMESPACE, TRANSPORT_ERRORS, URI, Blocked, SamplerProc, TrainerProc
 from .fault_s3 import ActorClock, Budget, Crash, FaultConfig, FaultyS3Client, Injector, S3Server, SimClock
@@ -920,6 +922,13 @@ class Simulation:
             source = server.get(f"{sample_buffer.shard_prefix(record['shard'])}{int(record['shard_pos']):012d}.json")
             if source is None or json.loads(source).get("sample_id") != record.get("sample_id"):
                 self.violation("merged_record_is_not_its_shard_record", position=i, sample_id=record.get("sample_id"))
+        # -- every shard stays resumable: a restart reads its rounds back from the merged index
+        rounds = [SimpleNamespace(sampler_round=r.get("sampler_round")) for r in merged if not r.get("end")]
+        for sid in self.shards:
+            try:
+                resume_point(rounds, sid)
+            except SamplerResumeError as error:
+                self.violation("shard_left_unresumable", shard=sid, error=str(error)[:200])
         for sid in self.shards:
             got, at = by_shard.get(sid, []), {int(r["pos"]): r["sample_id"] for r in shard_records[sid]}
             twice = sorted({p for p in got if got.count(p) > 1})
