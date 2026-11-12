@@ -75,6 +75,10 @@ class Member:
     ready_since: float | None = None  # this incarnation's sampler joined at
     ever_ready: bool = False  # a sampler on this node joined once (restarts before that are setup)
     unreachable_since: float | None = None
+    # the last tick the unreachable grace was looked at (a failed probe, or a tick without a
+    # probe): the grace counts only time that ends in a failed probe (None: not known, e.g.
+    # after a pool restart; the next failed probe starts the grace anew)
+    unreachable_seen: float | None = None
     status_fail_since: float | None = None
     alerted: list[str] = field(default_factory=list)  # one-shot events already sent
     predecessor_lost: bool = False  # the shard it continues has no live sampler to wait for
@@ -557,7 +561,7 @@ class IslandPool:
                         self.log(f"pool: task hold of {m.ticket} failed: {error!r}"[:300])
             elif m.paused and m.ticket not in paused:
                 m.paused = False
-                m.unreachable_since = m.status_fail_since = None
+                m.unreachable_since = m.unreachable_seen = m.status_fail_since = None
                 m.tokens_moved_at = None  # no stall verdict from the paused time
                 m.resumed = True  # its sampler may have been stopped by hand: not a crash
                 self._event("manual_resume", ticket=m.ticket, account=m.account, shard=m.shard)
@@ -1025,17 +1029,26 @@ class IslandPool:
                 m.resumed = False  # its sampler outlived the pause: a later exit is a crash
         if probe is not None:
             if probe.node == el.PROBE_UNREACHABLE:
-                m.unreachable_since = m.unreachable_since if m.unreachable_since is not None else now
+                if m.unreachable_since is None or m.unreachable_seen is None:
+                    m.unreachable_since = now
+                m.unreachable_seen = now
             else:
                 if m.unreachable_since is not None:
                     self._event("node_reachable_again", ticket=m.ticket, after_s=round(now - m.unreachable_since))
                     if "blip" in m.alerted:
                         m.alerted.remove("blip")
-                m.unreachable_since = None
+                m.unreachable_since = m.unreachable_seen = None
             if probe.joined and not m.joined:
                 m.joined = True
             self._metrics_seen(m, probe)
             self._vram_seen(m, probe)
+        elif m.unreachable_since is not None and m.unreachable_seen is not None:
+            # not probed this tick (the status call failed, a start runs): the time since the
+            # last look says nothing about the node, so the grace does not run through it.
+            # Else two lone probe failures around such a gap read as one long outage and a
+            # healthy node is fenced and deleted.
+            m.unreachable_since += now - m.unreachable_seen
+            m.unreachable_seen = now
         verdict = el.classify(status, probe, now=now, unreachable_since=m.unreachable_since, cfg=cfg,
                               joined=m.joined if probe is None else (m.joined or probe.joined))
         kind = verdict.kind
@@ -1493,6 +1506,7 @@ class IslandPool:
             pool.members = [Member(**m) for m in doc.get("members", [])]
             for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
                 m.ever_ready = m.ever_ready or m.joined
+                m.unreachable_seen = None  # the pool was down: that time is not part of a grace
             pool.next_shard = doc.get("next_shard", 0)
             pool.stopped = doc.get("stopped")
             pool.finished = doc.get("finished")
