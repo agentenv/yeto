@@ -738,8 +738,10 @@ class BatchReader:
         # (position, decoded group, behavior version, tokens, source, dispense position)
         self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
         # selected entries the incarnation gate could not judge (their lease was unreadable):
-        # (position, selected item), judged again by the next selections; a round's end
-        # (its committed watermark) stays at or before the first of them
+        # (position, selected item), judged again by the next selections. Strict buffer
+        # order: every entry behind the first of them waits too (any shard), so a round's
+        # end (its committed watermark) is exactly that first position and a restore
+        # trains nothing twice; an unreadable lease pauses the training
         self._deferred: list[tuple[int, Any]] = []
         self._nonfinite = 0
         # the items the take under way selected, and those of a take that raised (they
@@ -971,36 +973,42 @@ class BatchReader:
             read_s += self._settle([read for _, read, _ in chosen])
             waiting, self._deferred = self._deferred, []
             again = [item for _, item in waiting]  # judged again first, in buffer order
+            judged_before = {id(item) for item in again}
             kept_before, unidentified_before = len(chosen), self.unidentified_total
             selection: list[list[Any]] = [[]]
 
             def candidates() -> Any:
-                """The deferred items, then (once they are judged) a selection of the
-                groups still missing: one still deferred takes no place in the take."""
+                """The deferred items, then (none still deferred) a selection of the
+                groups still missing. Strict buffer order: once one is deferred (at p),
+                every later one waits too, unjudged, so the round ends exactly at p."""
                 nonlocal select_s
                 for pending in again:
                     if len(chosen) >= groups:  # full: it waits for the next take
                         self._deferred.append((int(pending.position), pending))
                     else:
                         yield pending
-                if len(chosen) < groups:
+                if len(chosen) < groups and not self._deferred:
                     begun = self.clock()
                     selection[0] = self._select(groups - len(chosen))
                     select_s += self.clock() - begun
                     yield from selection[0]
 
             for item in candidates():
+                if self._deferred:  # behind a group whose lease is unreadable: it waits, unjudged
+                    self._deferred.append((int(item.position), item))
+                    deferred_now += 0 if id(item) in judged_before else 1
+                    continue
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
                     continue
-                if not any(item is a for a in again) and self._is_unidentified(item.entry):
+                if id(item) not in judged_before and self._is_unidentified(item.entry):
                     continue
                 verdict = self._gate_verdict(item)
                 if verdict is _DEFER:
-                    deferred_now += 0 if any(item is a for a in again) else 1
+                    deferred_now += 0 if id(item) in judged_before else 1
                     continue
                 if verdict is not None:
                     fenced += 1  # a fenced incarnation's late write: never trained, never read
@@ -1055,6 +1063,7 @@ class BatchReader:
         if self.group_size is not None and chosen:
             skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
                                        "nonfinite": 0}
+            # with a group deferred, nothing behind it is selected: the round is padded
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
                 source_groups, source_tokens, position_sources, skipped)
@@ -1139,7 +1148,7 @@ class BatchReader:
                                                        "quarantined": 0}
         missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
         dropped = 0
-        while missing > 0:
+        while missing > 0 and not self._deferred:  # nothing joins behind a deferred group
             selected = self._select(1)
             if not selected:
                 break
@@ -1154,9 +1163,9 @@ class BatchReader:
             if self._is_unidentified(item.entry):
                 continue
             verdict = self._gate_verdict(item)
-            if verdict is _DEFER:
+            if verdict is _DEFER:  # strict order: nothing behind it joins this round
                 skipped["deferred"] = skipped.get("deferred", 0) + 1
-                continue
+                break
             if verdict is not None:
                 skipped["fenced"] += 1
                 continue

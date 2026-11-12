@@ -47,9 +47,11 @@ be *read* (a timeout, a 5xx, a truncated or garbled body) are told apart
   could not read (it would forget whom it supersedes): it retries, then raises;
 * the gate fails closed: :meth:`IncarnationGate.verdict` raises
   :class:`LeaseUnknown` for an entry whose sampler's lease it cannot read (the
-  reader defers that group and judges it again later; it is neither trained nor
-  counted stale), and a failed read is not cached as "no lease". Reads that keep
-  failing are logged at most every ``warn_s`` seconds.
+  reader defers that group, and in strict buffer order every group behind it,
+  and judges them again later; they are neither trained nor counted stale: the
+  training pauses), and a failed read is not cached as "no lease". Reads that
+  keep failing are logged ("training paused: lease of shard X unreadable since
+  T") at most every ``warn_s`` seconds.
 
 Nothing here talks to a cloud.
 """
@@ -337,7 +339,8 @@ class IncarnationGate:
         self.warn_s = float(warn_s)
         self.monotonic = monotonic
         self._leases: dict[str, tuple[float, dict[str, Any] | None]] = {}
-        # sampler -> (first failure, last failed read, last warning) while its reads fail
+        # sampler -> (first failure, last failed read, last warning, first failure wall time)
+        # while its reads fail
         self._failing: dict[str, list[float]] = {}
         self._seen: Counter[tuple[str, str]] = Counter()  # (sampler, incarnation) over positions < _upto
         self._upto = 0
@@ -355,12 +358,14 @@ class IncarnationGate:
         except LeaseReadError as error:
             self.read_failures += 1
             if failing is None:
-                failing = self._failing[sampler] = [now, now, -float("inf")]
+                failing = self._failing[sampler] = [now, now, -float("inf"), time.time()]
             failing[1] = now
             if now - failing[2] >= self.warn_s:
                 failing[2] = now
-                log.warning("incarnation gate: lease of %s unreadable for %.0f s (%d failed reads); its "
-                            "groups wait in the buffer until it is read: %s", sampler, now - failing[0],
+                since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(failing[3]))
+                log.warning("incarnation gate: training paused: lease of shard %s unreadable since %s "
+                            "(%.0f s, %d failed reads); its groups and every group behind them wait in "
+                            "the buffer until it is read: %s", sampler, since, now - failing[0],
                             self.read_failures, error)
             raise LeaseUnknown(str(error)) from error
         if failing is not None:

@@ -197,44 +197,76 @@ def test_poll_marks_an_unreadable_lease_unknown_and_does_not_fence(tmp_path):
 
 # --------------------------------------------------------------------------- Miles reader
 
-def test_miles_reader_defers_groups_whose_lease_is_unreadable(tmp_path):
-    """Lease unreadable: the stale group of the fenced incarnation is neither trained
-    nor counted stale; the watermark stops before it; once the lease reads again it
-    is judged (stale) by the next take."""
-    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
-
+def _fenced_buffer(tmp_path):
+    """s0: aaaa superseded by bbbb (aaaa's position 0 sealed, 1 written after the claim);
+    s1 has no lease. Positions: 0 s0/aaaa, 1 s0/aaaa (stale), 2 s1, 3 s0/bbbb, 4 s1."""
     root = tmp_path / "store"
     store = CheckpointStore(root)
     writer = FileSampleBuffer(store, batch_size=1)
     IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
-    _write_group(writer, "s0", "aaaa", 0)  # 0: before the claim, sealed
+    _write_group(writer, "s0", "aaaa", 0)
     IncarnationLease(store, "s0", "bbbb", clock=lambda: 0.0).claim(writer.entries())
-    _write_group(writer, "s0", "aaaa", 1)  # 1: the fenced process still writes
-    _write_group(writer, "s1", "xxxx", 0)  # 2: another island, no lease
-    _write_group(writer, "s0", "bbbb", 2)  # 3: the holder
-    _write_group(writer, "s1", "xxxx", 1)  # 4
+    _write_group(writer, "s0", "aaaa", 1)
+    _write_group(writer, "s1", "xxxx", 0)
+    _write_group(writer, "s0", "bbbb", 2)
+    _write_group(writer, "s1", "xxxx", 1)
+    return root, store
+
+
+def _outage_reader(root, store, *, recover_after: int, seen: list | None = None):
+    """A reader whose gate cannot read s0's lease until ``recover_after`` pauses."""
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+
     flaky = FlakyStore(root)
     buffer = FileSampleBuffer(store, batch_size=1)
     gate = IncarnationGate(flaky, buffer.entries, retry_s=0.0, clock_margin_s=0.0)
-    reader = BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0, poll_s=0.0,
-                         incarnation_gate=gate)
-    first = gate.verdict(buffer.entries()[0], 0)  # the lease is read (and cached) once
-    assert first is None
-    gate._leases.clear()  # noqa: SLF001 - as if the cache expired
+    sleeps: list[float] = []
+    reader: list = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if seen is not None:
+            seen.append([position for position, _ in reader[0]._deferred])  # noqa: SLF001
+        if len(sleeps) >= recover_after:
+            flaky.objects.fail = None
+
+    reader.append(BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0,
+                              poll_s=0.5, sleep=sleep, incarnation_gate=gate))
     flaky.objects.fail, flaky.objects.only = TimeoutError("read timeout"), "s0"
+    return reader[0], flaky, sleeps
+
+
+def test_miles_reader_pauses_in_strict_order_while_a_lease_is_unreadable(tmp_path):
+    """s0's lease unreadable: the first s0 group (position 0) is deferred and every group
+    behind it waits too, s1's included (strict order, nothing judged); once the lease
+    reads again they are judged in order: 0 trained (sealed), 1 stale, 2 trained."""
+    root, store = _fenced_buffer(tmp_path)
+    seen: list = []
+    reader, _, sleeps = _outage_reader(root, store, recover_after=3, seen=seen)
     out, report = reader.take(0, 2, current_version=None)
-    # s0's groups wait for their lease; s1's (no lease record) are trained
-    assert [position for position, _ in out] == [2, 4]
-    assert report.stale_incarnation_groups == 0 and report.stale_groups == 0
-    assert report.lease_deferred_groups == 3
-    assert report.metrics()["sample_buffer/lease_deferred_groups"] == 3.0
-    assert report.end == 0  # the round's end never passes a deferred group
-    assert reader.watermark_before(1) == 0
-    flaky.objects.fail = None
-    out, report = reader.take(1, 2, current_version=None)
-    assert [position for position, _ in out] == [0, 3]  # judged again: sealed, holder
-    assert report.lease_deferred_groups == 0 and report.stale_incarnation_groups == 1  # position 1
-    assert reader.watermark_before(2) == 5 and not reader._deferred  # noqa: SLF001
+    assert seen and all(waiting == [0, 1] for waiting in seen)  # nothing behind 0 was trained
+    assert [position for position, _ in out] == [0, 2] and len(sleeps) == 3
+    assert report.stale_incarnation_groups == 1 and report.stale_groups == 0
+    assert report.lease_deferred_groups == 2  # counted once, by the take that deferred them
+    assert report.metrics()["sample_buffer/lease_deferred_groups"] == 2.0
+    assert report.end == 3 and reader.watermark_before(1) == 3 and not reader._deferred  # noqa: SLF001
+
+
+def test_a_restore_after_a_lease_outage_trains_no_group_twice(tmp_path):
+    """Regression: before strict order, round 0 trained s1's [2, 4] past the deferred
+    position 0, committed watermark 0, and a restore trained 2 and 4 again."""
+    root, store = _fenced_buffer(tmp_path)
+    reader, _, _ = _outage_reader(root, store, recover_after=2)
+    out, report = reader.take(0, 2, current_version=None)
+    first = [position for position, _ in out]
+    watermark = reader.watermark_before(1)
+    assert all(position < watermark for position in first) and watermark == report.end
+    restored, _, _ = _outage_reader(root, store, recover_after=0)  # a new trainer process
+    restored.reset(watermark)
+    out, _ = restored.take(1, 2, current_version=None)
+    after = [position for position, _ in out]
+    assert not set(first) & set(after)
+    assert sorted(first + after) == [0, 2, 3, 4]  # every trainable group exactly once (1 is stale)
 
 
 def test_miles_reader_waits_for_a_deferred_group_at_the_data_end(tmp_path):
@@ -266,23 +298,22 @@ def test_miles_reader_waits_for_a_deferred_group_at_the_data_end(tmp_path):
 
 
 def test_reset_forgets_deferred_groups(tmp_path):
-    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+    """A take that ends (here: the trainer stops it) while groups wait: a restore
+    selects them again from its watermark; nothing stays deferred."""
+    root, store = _fenced_buffer(tmp_path)
+    reader, _, _ = _outage_reader(root, store, recover_after=10**9)
 
-    root = tmp_path / "store"
-    store = CheckpointStore(root)
-    writer = FileSampleBuffer(store, batch_size=1)
-    IncarnationLease(store, "s0", "aaaa").claim()
-    _write_group(writer, "s0", "aaaa", 0)
-    _write_group(writer, "s1", "xxxx", 0)
-    flaky = FlakyStore(root)
-    flaky.objects.fail, flaky.objects.only = TimeoutError("read timeout"), "s0"
-    buffer = FileSampleBuffer(store, batch_size=1)
-    reader = BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0, poll_s=0.0,
-                         incarnation_gate=IncarnationGate(flaky, buffer.entries, retry_s=0.0))
-    out, _ = reader.take(0, 1, current_version=None)
-    assert [position for position, _ in out] == [1] and reader._deferred  # noqa: SLF001
+    class Stop(Exception):
+        pass
+
+    def stop(seconds: float) -> None:
+        raise Stop()
+
+    reader.sleep = stop
+    with pytest.raises(Stop):
+        reader.take(0, 2, current_version=None)
     reader.reset(0)
-    assert not reader._deferred  # noqa: SLF001 - selected again from the watermark
+    assert not reader._deferred and not reader._retry  # noqa: SLF001
 
 
 # --------------------------------------------------------------------------- verl feed
@@ -483,35 +514,21 @@ def test_claim_patiently_stops_or_gives_up():
         claim_patiently(IncarnationLease(store, "s", "b"), lambda: [], patience_s=60, monotonic=clock, sleep=sleep)
 
 
-def test_a_failed_take_keeps_the_groups_deferred_before_it(tmp_path):
-    """A take that raises (here: the store fails reading a payload) leaves the groups
-    an earlier take deferred waiting; none is lost."""
-    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+def test_a_take_stopped_while_groups_wait_loses_none_of_them(tmp_path):
+    """A take that raises while groups wait for their lease returned nothing: the next
+    take on the reader judges them again, in order (none lost, none counted stale)."""
+    root, store = _fenced_buffer(tmp_path)
+    reader, flaky, _ = _outage_reader(root, store, recover_after=10**9)
 
-    root = tmp_path / "store"
-    store = CheckpointStore(root)
-    writer = FileSampleBuffer(store, batch_size=1)
-    IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
-    _write_group(writer, "s0", "aaaa", 0)
-    _write_group(writer, "s1", "xxxx", 0)
-    flaky = FlakyStore(root)
-    buffer = FileSampleBuffer(store, batch_size=1)
-    gate = IncarnationGate(flaky, buffer.entries, retry_s=0.0, clock_margin_s=0.0)
-    reader = BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0, poll_s=0.0,
-                         incarnation_gate=gate)
-    flaky.objects.fail, flaky.objects.only = TimeoutError("read timeout"), "s0"
-    out, _ = reader.take(0, 1, current_version=None)
-    assert [p for p, _ in out] == [1] and [p for p, _ in reader._deferred] == [0]  # noqa: SLF001
-    original = reader._settle  # noqa: SLF001
+    class Stop(Exception):
+        pass
 
-    def broken(reads):
-        raise OSError("payload store down")
+    def stop(seconds: float) -> None:
+        raise Stop()
 
-    reader._settle = broken  # noqa: SLF001
+    reader.sleep = stop
+    with pytest.raises(Stop):
+        reader.take(0, 2, current_version=None)
     flaky.objects.fail = None
-    with pytest.raises(OSError):
-        reader.take(1, 1, current_version=None)
-    reader._settle = original  # noqa: SLF001
-    assert [p for p, _ in reader._deferred] == [0]  # noqa: SLF001
-    out, _ = reader.take(1, 1, current_version=None)
-    assert [p for p, _ in out] == [0]
+    out, report = reader.take(0, 2, current_version=None)
+    assert [position for position, _ in out] == [0, 2] and report.stale_incarnation_groups == 1
