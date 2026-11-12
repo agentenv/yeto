@@ -114,7 +114,7 @@ from typing import Any
 
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
-from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, object_size
+from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, is_fatal_store_error, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
@@ -293,6 +293,11 @@ class ReleaseIncomplete(PolicyReleaseError):
 class ReleaseDigestMismatch(ReleaseDeltaError):
     """A full release whose weight files are not the released ones (``file_sha256``);
     the follower treats it like a failed delta rebuild (``PolicyFollower``)."""
+
+
+LATEST_UNREAD = "latest_unread"  # ReleaseNotLoaded.reason: the poll of LATEST failed (no release judged)
+# LATEST was read, but it is no release record
+_DAMAGED_RECORD = (ValueError, TypeError, AttributeError, KeyError, PolicyReleaseError)
 
 
 class ReleaseNotLoaded(PolicyReleaseError):
@@ -744,10 +749,27 @@ class PolicyReleaseStore:
             self._written = latest
             return None
         self._written = None  # until this release is in the store
-        if self._names is None:  # the mount was just reloaded (first release of this process)
-            self._names = self._listed_names()
+        # the mount was just reloaded (first release of this process, or after a failed one)
+        if self._names is None:
+            names = self._listed_names()
+            # LATEST again after the listing (one read per process): a release another
+            # writer published between the first read and the listing is in the listing
+            # but above that read's seq; taken for a partial upload, it would be removed
+            # while LATEST names it
+            with timer.phase("read_latest_s"):
+                latest = self._latest_for_release()
+            if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
+                self._written = latest
+                return None
+        else:
+            names = self._names
+        self._names = None  # until this release is in the store: a failed one lists again
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
+        if name in names:  # a partial upload of a killed or failed attempt (no LATEST names it):
+            # its files are not all replaced by this upload (a staged store's push deletes
+            # only what its own stage uploaded), and a reader downloads every object under it
+            self.store.remove_tree(f"{self.release_dir}/{name}")
         upload, delta = staged, None
         if delta_base is not None and weights == FULL:
             with timer.phase("delta_s"):
@@ -777,16 +799,20 @@ class PolicyReleaseStore:
         with timer.phase("latest_s"):
             self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
                                   f"{self.release_dir}/{LATEST}": text})
-        self._names = [n for n in self._names if n != name] + [name]
+        # a directory at this seq or above is a partial upload no LATEST named (the
+        # store's seq continues from LATEST): oldest, so it never takes a kept place
+        def orphan(n: str) -> bool:
+            return n != name and int(_RELEASE_NAME.fullmatch(n).group(1)) >= seq
+        names = [n for n in names if orphan(n)] + [n for n in names if n != name and not orphan(n)] + [name]
         if delta is not None:
             self._bases[name] = str(delta["base_path"])
         with timer.phase("prune_s"):
-            kept = self._kept_names()
-            for old in self._names:
+            kept = self._kept_names(names)
+            for old in names:
                 if old not in kept:
                     self.store.remove_tree(f"{self.release_dir}/{old}")
                     self._bases.pop(old, None)
-            self._names = [n for n in self._names if n in kept]
+            self._names = [n for n in names if n in kept]
         self._written = record
         self.last_timings = timer.as_dict()
         self.last_visible_at = round(self.clock(), 3)  # LATEST names it
@@ -812,7 +838,7 @@ class PolicyReleaseStore:
                      "base_version": base.release.version, "ratio": round(result.ratio, 6),
                      "files": {n: e.to_dict() for n, e in sorted(result.entries.items())}}
 
-    def _kept_names(self) -> set[str]:
+    def _kept_names(self, names: list[str]) -> set[str]:
         """The newest ``keep`` releases and every base their deltas need.
 
         A base is read from this writer's own deltas (``_bases``) and, for a
@@ -823,7 +849,7 @@ class PolicyReleaseStore:
         island pruned ``r1-v0`` while keeping the delta ``r2-v1``). An unreadable
         record keeps the release rather than dropping a base that may be needed.
         """
-        kept = set(self._names[-self.keep:])
+        kept = set(names[-self.keep:])
         pending = list(kept)
         while pending:
             name = pending.pop()
@@ -850,11 +876,23 @@ class PolicyReleaseStore:
         return base
 
     def _listed_names(self) -> list[str]:
-        """The release directories under the root, in ``seq`` order."""
-        if not self.root.is_dir():
-            return []
-        named = sorted((int(m.group(1)), p.name) for p in self.root.iterdir()
-                       if p.is_dir() and (m := _RELEASE_NAME.fullmatch(p.name)))
+        """The release directories under the root and, for a store with an object
+        API, in the store, in ``seq`` order. A staged store's root does not hold
+        the releases of an earlier process (each upload is evicted from the stage,
+        and a restarted trainer may run on another node): listed from the stage
+        alone, a restarted trainer never pruned them, nor knew a partial upload
+        of a killed one under the name it writes next."""
+        found = set()
+        if self.root.is_dir():
+            found |= {p.name for p in self.root.iterdir() if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)}
+        objects = self.store.objects
+        if objects is not None:
+            prefix = f"{self.release_dir}/"
+            for key in objects.list(prefix):
+                head = key[len(prefix):].split("/", 1)
+                if len(head) == 2 and _RELEASE_NAME.fullmatch(head[0]):
+                    found.add(head[0])
+        named = sorted((int(m.group(1)), name) for name in found if (m := _RELEASE_NAME.fullmatch(name)))
         return [name for _, name in named]
 
     def _latest_without_reload(self) -> PolicyRelease | None:
@@ -1188,6 +1226,7 @@ class PolicyFollower:
         self.max_defer_s = None if max_defer_s is None else float(max_defer_s)
         self._deferred_since: float | None = None  # first hold() deferral of the pending release
         self.last_forced = False  # the last load ignored hold() (deferral bound)
+        self.latest_read_failures = 0  # polls of LATEST the store did not answer
         self.last_deferred_s: float | None = None  # how long the last load was deferred
 
     @contextmanager
@@ -1235,7 +1274,13 @@ class PolicyFollower:
         ready = self._ready_fetch()
         if ready is not None:
             return int(ready.release.seq)
-        latest = self._newest(self.releases.latest())
+        try:
+            latest = self._newest(self.releases.latest())
+        except Exception as error:  # noqa: BLE001 - LATEST not read: unknown now, read again at the next poll
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            return None
         if latest is None or latest.seq <= self._served_seq():
             return None
         return int(latest.seq)
@@ -1263,7 +1308,13 @@ class PolicyFollower:
         ready = self._ready_fetch()
         if ready is not None:
             return int(ready.release.seq)
-        latest = self._newest(self.releases.latest())
+        try:
+            latest = self._newest(self.releases.latest())
+        except Exception as error:  # noqa: BLE001 - LATEST not read: nothing on disk to report; read again at the next poll
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            return False
         if latest is None or latest.seq <= self._served_seq():
             return True
         if self.last_seen is None or latest.seq != self.last_seen.seq:
@@ -1285,8 +1336,19 @@ class PolicyFollower:
         the newest one is not complete yet (``incomplete`` says why; the engines
         keep the release they serve), or when the in-flight rule defers it."""
         timer = PhaseTimer(self.timer)
-        with timer.phase("read_latest_s"):
-            latest = self.releases.latest()
+        try:
+            with timer.phase("read_latest_s"):
+                latest = self.releases.latest()
+        except Exception as error:  # noqa: BLE001 - a poll that failed, not a release that failed
+            # the engines keep the release they serve and the next refresh reads again;
+            # "damaged": the record is there and does not parse (the caller bounds those);
+            # refused credentials / no such bucket are no outage: raised as they are
+            if is_fatal_store_error(error):
+                raise
+            self.latest_read_failures += 1
+            damaged = isinstance(error, _DAMAGED_RECORD) and not isinstance(error, OSError)
+            raise ReleaseNotLoaded(f"the newest release could not be read: {type(error).__name__}: {error}",
+                                   reason=LATEST_UNREAD, fields={"damaged": damaged}) from error
         if latest is None:
             return None
         if self.last_seen is not None and latest.seq < self.last_seen.seq:

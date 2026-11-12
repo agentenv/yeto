@@ -80,7 +80,9 @@ from yeto.rl.engine.merged_release import (
     merges_shards,
 )
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
+from yeto.rl.engine.incarnation_lease import LeaseUnknown
 from yeto.rl.engine.policy_age import age_floor
+from yeto.rl.engine.trainer_lifecycle import Selected
 from yeto.rl.engine.xhw_guard import downweight_group, rollout_stats, source_key
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
@@ -117,6 +119,7 @@ DEFAULT_POLL_S = 2.0
 TRAINER_CONSUMER = "trainer"
 
 _MODULE = "yeto.rl.adapters.miles.buffer_rollout_miles"
+_DEFER = object()  # BatchReader._gate_verdict: the lease could not be read
 ROLLOUT_FUNCTION_PATHS = {
     SAMPLER: f"{_MODULE}.BufferWriterRolloutFn",
     TRAINER: f"{_MODULE}.BufferReaderRolloutFn",
@@ -509,6 +512,10 @@ class TakeReport:
     # groups of a fenced (superseded) sampler incarnation written after its successor
     # claimed the shard's lease (incarnation_lease.IncarnationGate): consumed, never read
     stale_incarnation_groups: int = 0
+    # groups whose sampler's lease could not be read (IncarnationGate fails closed):
+    # neither trained nor consumed; they wait (judged again) for a later selection
+    # (BatchReader._deferred). Counted once, by the take that first deferred them
+    lease_deferred_groups: int = 0
     # groups with fewer samples than the group size (a sampler lost trials) that are
     # trained anyway (their advantages use their own samples only); groups with fewer
     # than MIN_GROUP_SAMPLES (no in-group spread) or more than the group size are
@@ -563,6 +570,7 @@ class TakeReport:
                 "sample_buffer/prefetched_groups": float(self.prefetched),
                 "sample_buffer/xhw_quarantined_groups": float(self.quarantined_groups),
                 "sample_buffer/stale_incarnation_groups": float(self.stale_incarnation_groups),
+                "sample_buffer/lease_deferred_groups": float(self.lease_deferred_groups),
                 "sample_buffer/incomplete_groups": float(self.incomplete_groups),
                 "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
                 "sample_buffer/carried_over_groups": float(self.carried_over_groups),
@@ -690,6 +698,10 @@ class TaskSlots:
         """The group at ``position`` is in the round: it holds its task once the take returns."""
         if key is not None:
             self._pending.setdefault(key, int(position))
+
+    def release(self, position: int) -> None:
+        """The group at ``position`` left the take under way: it holds no task."""
+        self._pending = {key: p for key, p in self._pending.items() if p != int(position)}
 
     def commit(self, end: int) -> None:
         """The take returns its round (the positions below ``end``): its groups hold their tasks."""
@@ -883,6 +895,12 @@ class BatchReader:
         self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None, Any] | None = None
         self.tasks = TaskSlots(buffer, self.gate) if one_group_per_task else None
         self._duplicates: list[dict[str, Any]] = []  # the take's duplicate task groups
+        # selected entries the incarnation gate could not judge (their lease was unreadable):
+        # (position, selected item), judged again by the next selections. Strict buffer
+        # order: every entry behind the first of them waits too (any shard), so a round's
+        # end (its committed watermark) is exactly that first position and a restore
+        # trains nothing twice; an unreadable lease pauses the training
+        self._deferred: list[tuple[int, Any]] = []
         self._nonfinite = 0
         # the items the take under way selected, and those of a take that raised (they
         # come first in the next take: the buffer's read cursor is already past them)
@@ -962,10 +980,17 @@ class BatchReader:
         until = action.get("until_round")
         return action.get("action") == "quarantine" and (until is None or rollout_id < int(until))
 
-    def _duplicate(self, entry: Any, position: int) -> bool:
+    def _duplicate(self, entry: Any, position: int, *, unknown: Any = None) -> Any:
         """Whether an earlier group holds this entry's store-dispenser task; if so the
-        group is recorded as passed over."""
-        first = None if self.tasks is None else self.tasks.first(entry, int(position))
+        group is recorded as passed over. An earlier group's lease that cannot be read
+        (:class:`LeaseUnknown`, asking whether it was fenced) answers ``unknown``, or
+        raises when ``unknown`` is None."""
+        try:
+            first = None if self.tasks is None else self.tasks.first(entry, int(position))
+        except LeaseUnknown:
+            if unknown is None:
+                raise
+            return unknown
         if first is None:
             return False
         earlier, here = first
@@ -1074,7 +1099,7 @@ class BatchReader:
         by the next take on this reader (the class doc)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
-        carried_in = self._carry
+        carried_in, deferred_in = self._carry, list(self._deferred)
         self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
         self._damaged_run = self._decoded_payloads = 0
         self._duplicates = []
@@ -1083,6 +1108,9 @@ class BatchReader:
         except BaseException:
             self._retry = self._taken + self._retry
             self._carry = carried_in
+            # the groups deferred by an earlier take wait again (those this take
+            # selected and deferred are selected again from ``_retry``)
+            self._deferred = deferred_in
             raise
         finally:
             self._taken = []
@@ -1128,30 +1156,77 @@ class BatchReader:
                              versions, source_groups, source_tokens, position_sources)
                 if self.tasks is not None:  # judged when it was carried over: it holds its task now
                     self.tasks.accept(task, position)
-        while len(chosen) < groups:
+        if self._deferred:
+            start = min(start, self._deferred[0][0])
+        deferred_now = 0
+        lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
+        accounts = (decoded, accounted, versions, source_groups, source_tokens, position_sources)
+        while True:
+            if len(chosen) >= groups:
+                # judged again right before the round is handed over: a fence that came
+                # while the take waited for later groups keeps an earlier one out
+                rejected, again_deferred = self._recheck(chosen, accounts, lease_reads)
+                fenced += rejected
+                deferred_now += again_deferred
+                if not rejected and not again_deferred:
+                    break
+                continue
             # the reads of the last selection end before the next refresh (a reload)
             read_s += self._settle([read for _, read, _ in chosen])
-            begun = self.clock()
-            selected = self._select(groups - len(chosen))
-            select_s += self.clock() - begun
+            waiting, self._deferred = self._deferred, []
+            again = [item for _, item in waiting]  # judged again first, in buffer order
+            judged_before = {id(item) for item in again}
             kept_before, unidentified_before = len(chosen), self.unidentified_total
-            for item in selected:
+            selection: list[list[Any]] = [[]]
+
+            def candidates() -> Any:
+                """The deferred items, then (none still deferred) a selection of the
+                groups still missing. Strict buffer order: once one is deferred (at p),
+                every later one waits too, unjudged, so the round ends exactly at p."""
+                nonlocal select_s
+                for pending in again:
+                    if len(chosen) >= groups:  # full: it waits for the next take
+                        self._deferred.append((int(pending.position), pending))
+                    else:
+                        yield pending
+                if len(chosen) < groups and not self._deferred:
+                    begun = self.clock()
+                    selection[0] = self._select(groups - len(chosen))
+                    select_s += self.clock() - begun
+                    yield from selection[0]
+
+            for item in candidates():
+                if self._deferred:  # behind a group whose lease is unreadable: it waits, unjudged
+                    self._deferred.append((int(item.position), item))
+                    deferred_now += 0 if id(item) in judged_before else 1
+                    continue
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
                     continue
+                # judged again too: an item deferred behind another was never judged (and the
+                # check has no effect on an item it once let through)
                 if self._is_unidentified(item.entry):
                     continue
-                if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+                verdict = self._gate_verdict(item)
+                if verdict is _DEFER:
+                    deferred_now += 0 if id(item) in judged_before else 1
+                    continue
+                if verdict is not None:
                     fenced += 1  # a fenced incarnation's late write: never trained, never read
                     continue
                 source = source_key(item.entry.provenance, self._shard_at(item.position))
                 if self._quarantined(source, rollout_id):
                     quarantined += 1
                     continue
-                if self._duplicate(item.entry, item.position):
+                duplicate = self._duplicate(item.entry, item.position, unknown=_DEFER)
+                if duplicate is _DEFER:  # an earlier group's lease is unreadable: it waits (strict order)
+                    self._deferred.append((int(item.position), item))
+                    deferred_now += 0 if id(item) in judged_before else 1
+                    continue
+                if duplicate:
                     continue  # its task is trained from an earlier group: never read
                 source_groups[source] = source_groups.get(source, 0) + 1
                 source_tokens[source] = source_tokens.get(source, 0) + int(item.entry.tokens or 0)
@@ -1164,9 +1239,11 @@ class BatchReader:
                 chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
+            selected = selection[0]
             self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
                                  self.unidentified_total - unidentified_before)
-            if selected:  # decode now: a group that is dropped is replaced by the next selection
+            if selected or len(chosen) > kept_before:  # decode now (a deferred group judged again
+                # included): a group that is dropped is replaced by the next selection
                 read_s += self._settle([read for _, read, _ in chosen])
                 begun = self.clock()
                 dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
@@ -1176,7 +1253,19 @@ class BatchReader:
                 progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
                 continue
+            if self._deferred:
+                # groups wait for their lease (the gate fails closed and warns while it
+                # cannot read it): neither the data end nor the no-new-group timeout
+                # applies to them; they are judged again after the pause
+                self._deferred.sort(key=lambda pending: pending[0])
+                self.sleep(self.poll_s)
+                continue
             if self.buffer.data_ended:
+                rejected, again_deferred = self._recheck(chosen, accounts, lease_reads)
+                fenced += rejected
+                deferred_now += again_deferred
+                if rejected or again_deferred:  # replaced if the buffer holds more; or waits
+                    continue
                 break
             if self.clock() - progress > self.wait_s:
                 raise self._ended(SampleBufferRolloutError(
@@ -1184,14 +1273,16 @@ class BatchReader:
                     f"without a new group (buffer position {self._cursor()})"),
                     stale=stale, stale_incarnation=fenced, quarantined=quarantined, dropped_small=dropped_small)
             self.sleep(self.poll_s)
+        self._deferred.sort(key=lambda pending: pending[0])
         end = self._cursor()
         carried_out = padded = 0
         if self.group_size is not None and chosen:
             skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
                                        "nonfinite": 0}
+            # with a group deferred, nothing behind it is selected: the round is padded
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
-                source_groups, source_tokens, position_sources, skipped)
+                source_groups, source_tokens, position_sources, skipped, lease_reads=lease_reads)
             dropped_small += more_small
             stale += skipped["stale"]
             stale_positions += skipped["stale_positions"]
@@ -1199,6 +1290,11 @@ class BatchReader:
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
+            deferred_now += skipped.get("deferred", 0)
+        if self._deferred:  # the watermark never passes a group the gate could not judge yet
+            self._deferred.sort(key=lambda pending: pending[0])
+            end = min(end, self._deferred[0][0])
+        chosen.sort(key=lambda c: c[0])  # buffer order (a group judged again joins late)
         out = [(position, decoded[position]) for position, _, _ in chosen]
         stale += len(self._stale_payloads)
         stale_positions += [p for p in self._stale_payloads if p is not None]
@@ -1233,7 +1329,8 @@ class BatchReader:
                                source_groups=dict(sorted(source_groups.items())),
                                source_tokens=dict(sorted(source_tokens.items())),
                                position_sources=position_sources, quarantined_groups=quarantined,
-                               stale_incarnation_groups=fenced, incomplete_groups=incomplete,
+                               stale_incarnation_groups=fenced, lease_deferred_groups=deferred_now,
+                               incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
                                damaged_payload_groups=len(damaged), damaged_payloads=damaged,
@@ -1263,7 +1360,8 @@ class BatchReader:
 
     def _fill(self, target: int, end: int, rollout_id: int, floor: int | None, chosen: list, decoded: dict,
               accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
-              position_sources: dict, skipped: dict | None = None) -> tuple[int, int, int, int]:
+              position_sources: dict, skipped: dict | None = None,
+              lease_reads: dict[str, float] | None = None) -> tuple[int, int, int, int]:
         """Top the chosen groups up to ``target`` samples with whole groups selected
         one by one, without waiting (what is not in the buffer yet is padded). The
         first group that would overflow is carried over (``self._carry``) and the
@@ -1271,12 +1369,13 @@ class BatchReader:
         Returns ``(end, carried groups, padded samples, groups dropped as too small)``; the
         groups passed over (too old, a fenced incarnation's, quarantined) are counted in
         ``skipped`` like the main selection counts them; a damaged payload is recorded
-        by :meth:`_group_at`."""
+        by :meth:`_group_at`. A group joins the round as it is judged, so its shard's
+        lease is read again unless the round's recheck read it just now (``lease_reads``)."""
         skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
                                                        "quarantined": 0}
         missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
         dropped = 0
-        while missing > 0:
+        while missing > 0 and not self._deferred:  # nothing joins behind a deferred group
             selected = self._select(1)
             if not selected:
                 break
@@ -1290,14 +1389,23 @@ class BatchReader:
                 continue
             if self._is_unidentified(item.entry):
                 continue
-            if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+            verdict = self._gate_verdict(item, lease_reads)
+            if verdict is _DEFER:  # strict order: nothing behind it joins this round
+                skipped["deferred"] = skipped.get("deferred", 0) + 1
+                break
+            if verdict is not None:
                 skipped["fenced"] += 1
                 continue
             source = source_key(item.entry.provenance, self._shard_at(item.position))
             if self._quarantined(source, rollout_id):
                 skipped["quarantined"] += 1
                 continue
-            if self._duplicate(item.entry, item.position):
+            duplicate = self._duplicate(item.entry, item.position, unknown=_DEFER)
+            if duplicate is _DEFER:  # strict order, as for the gate's own verdict
+                self._deferred.append((int(item.position), item))
+                skipped["deferred"] = skipped.get("deferred", 0) + 1
+                break
+            if duplicate:
                 continue
             self._entry_of[int(item.position)] = item.entry
             group = self._group_at(item.position, self._read(item.entry.payload_ref, inline=True))
@@ -1351,7 +1459,8 @@ class BatchReader:
                 # in buffer order, after the payload checks: an earlier group of this
                 # selection that is trained holds the task; one just dropped does not
                 entry = self._entry_of.get(int(position))
-                if entry is None or not self._duplicate(entry, position):
+                # (judged as no duplicate at its selection: an unreadable lease keeps that)
+                if entry is None or not self._duplicate(entry, position, unknown=False):
                     decoded[position] = group
                     if entry is not None:
                         self._accept(entry, position)
@@ -1364,21 +1473,98 @@ class BatchReader:
             elif sized:
                 nonfinite += 1
             drop.add(position)
-            version, tokens = accounted.pop(int(position))
-            versions[version] -= 1
-            if not versions[version]:
-                del versions[version]
-            source = position_sources.pop(int(position), None)
-            if source is not None:
-                source_groups[source] -= 1
-                source_tokens[source] -= tokens
-                if not source_groups[source]:
-                    del source_groups[source]
-                    source_tokens.pop(source, None)
+            self._unchoose(position, decoded, accounted, versions, source_groups, source_tokens,
+                           position_sources)
         if drop:
             chosen[:] = [c for c in chosen if c[0] not in drop]
         self._nonfinite += nonfinite
         return len(drop) - nonfinite - damaged - duplicate
+
+    def _recheck(self, chosen: list, accounts: tuple, lease_reads: dict[str, float]) -> tuple[int, int]:
+        """Judge the ``chosen`` groups again, each shard's lease read again (at most
+        once per shard while the take does not wait, :meth:`IncarnationGate.recheck`):
+        a group fenced since its selection is dropped (counted stale, its task free:
+        a group this take passed over for that task is judged again); from the first
+        one whose lease is unreadable on, every group waits in ``self._deferred``
+        (strict order), judged again. Returns ``(dropped, deferred)``."""
+        recheck = getattr(self.gate, "recheck", None)
+        if not chosen or not callable(recheck):
+            return 0, 0
+        entries = None
+        items: list[tuple[int, Any]] = []
+        for position, _, _ in chosen:
+            entry = self._entry_of.get(int(position))
+            if entry is None:  # carried over from the last take
+                entries = self.buffer.entries() if entries is None else entries
+                entry = entries[int(position)]
+            items.append((int(position), entry))
+        items.sort(key=lambda pair: pair[0])
+        verdicts = recheck([(entry, position) for position, entry in items], lease_reads)
+        drop: set[int] = set()
+        defer_from = None
+        for (position, entry), verdict in zip(items, verdicts):
+            if isinstance(verdict, LeaseUnknown):
+                defer_from = position
+                break
+            if verdict is not None:
+                drop.add(position)
+        waiting = [] if defer_from is None else [(p, e) for p, e in items if p >= defer_from]
+        removed = drop | {position for position, _ in waiting}
+        # a group passed over by this take because a group now removed held its task is
+        # judged again (the task is free, or waits with the removed group)
+        freed = [d for d in self._duplicates if d["first_trained_here"] and d["first_position"] in removed]
+        if freed:
+            self._duplicates = [d for d in self._duplicates if d not in freed]
+            entries = self.buffer.entries() if entries is None else entries
+            waiting += [(int(d["position"]), entries[int(d["position"])]) for d in freed]
+        for position, entry in waiting:
+            self._deferred.append((position, Selected(position=position, entry=entry)))
+        self._deferred.sort(key=lambda pending: pending[0])
+        if removed:
+            chosen[:] = [c for c in chosen if int(c[0]) not in removed]
+            for position in removed:
+                self._unchoose(position, *accounts)
+                if self.tasks is not None:
+                    self.tasks.release(int(position))
+        return len(drop), len(waiting) - len(freed)
+
+    @staticmethod
+    def _unchoose(position: int, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
+                  source_tokens: dict, position_sources: dict) -> None:
+        """Undo the accounting of a chosen group (it is not in the round)."""
+        decoded.pop(int(position), None)
+        version, tokens = accounted.pop(int(position))
+        versions[version] -= 1
+        if not versions[version]:
+            del versions[version]
+        source = position_sources.pop(int(position), None)
+        if source is not None:
+            source_groups[source] -= 1
+            source_tokens[source] -= tokens
+            if not source_groups[source]:
+                del source_groups[source]
+                source_tokens.pop(source, None)
+
+    def _gate_verdict(self, item: Any, lease_reads: dict[str, float] | None = None) -> Any:
+        """The incarnation gate's verdict on a selected ``item``: None (train it), the
+        stale detail, or :data:`_DEFER` when its lease could not be read (the item is
+        kept in ``self._deferred``, neither trained nor counted stale). With
+        ``lease_reads`` (a group trained without a later recheck) the lease is read
+        again first (:meth:`IncarnationGate.recheck`)."""
+        if self.gate is None:
+            return None
+        recheck = getattr(self.gate, "recheck", None)
+        if lease_reads is not None and callable(recheck):
+            [verdict] = recheck([(item.entry, int(item.position))], lease_reads)
+            if isinstance(verdict, LeaseUnknown):
+                self._deferred.append((int(item.position), item))
+                return _DEFER
+            return verdict
+        try:
+            return self.gate.verdict(item.entry, int(item.position))
+        except LeaseUnknown:
+            self._deferred.append((int(item.position), item))
+            return _DEFER
 
     def _shard_at(self, position: int) -> str | None:
         shard_at = getattr(self.buffer, "shard_at", None)
@@ -1455,6 +1641,7 @@ class BatchReader:
         self._ends.clear()
         self._carry = None  # its position is at or past the watermark: selected again
         self._retry = []  # so are the groups of a take that raised
+        self._deferred = []  # likewise
         if self.tasks is not None:
             self.tasks.reset(int(watermark))
         return int(self.buffer.watermark)

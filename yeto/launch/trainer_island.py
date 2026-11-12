@@ -474,7 +474,15 @@ class SkyTrainerIslands:
                 print(f"[launcher] cancel of the launch of {job.cluster} failed: {error}",
                       flush=True)
             provisioning.join(self.cancel_wait_s)
-        return self._down(job.cluster)
+        down = self._down(job.cluster)
+        if provisioning is not None and provisioning.is_alive():
+            # the launch request outlived the cancel: the cluster may come up
+            # after the down, so the release is not confirmed
+            print(f"[launcher] launch of {job.cluster} still running {self.cancel_wait_s:g} s after "
+                  "its cancel; teardown NOT confirmed (the cluster may still come up: check the "
+                  "cloud and rerun `yeto down`)", flush=True)
+            return False
+        return down
 
     def release_incarnation(self, incarnation: int) -> bool:
         cluster = read_jobs(self.jobs_path).get(str(int(incarnation)))

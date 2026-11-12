@@ -35,6 +35,7 @@ calls ``island.run()``. The process entry (``python -m yeto.rl.engine.engine_sam
 from __future__ import annotations
 
 import math
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -76,6 +77,13 @@ DISPENSE_ATTEMPT_KEY = "dispense_attempt"  # store_dispense.ATTEMPT_KEY (that mo
 
 ROUND_EVENT = "rl_sampler_engine_round"
 START_EVENT = "rl_sampler_start"
+WRITE_DEFERRED_EVENT = "rl_sampler_write_deferred"  # a group write waiting for a store read
+DEFAULT_WRITE_RETRY_S = 5.0
+WRITE_DEFERRED_REPORT_S = 60.0
+# the longest group writes wait for a store that does not answer (spec write_defer_max_s):
+# the read outage a sampler rides out without giving up a task in flight
+DEFAULT_WRITE_DEFER_MAX_S = 600.0
+STORE_UNREAD = "store_unread"  # why a group was not written: the store never said whose the task is
 
 
 @dataclass(frozen=True)
@@ -262,6 +270,17 @@ class EngineRound:
         # Read right before every group write; True = another incarnation
         # holds the island's lease (incarnation_lease), so nothing more is written
         self.write_fenced: Callable[[], bool] = lambda: False
+        # True while write_fenced refuses only because the lease could not be read for too
+        # long (IncarnationLease.unknown): the group then waits (_write_refusal), it is not dropped
+        self.write_unknown: Callable[[], bool] = lambda: False
+        self.write_retry_s = DEFAULT_WRITE_RETRY_S
+        self.write_defer_max_s = DEFAULT_WRITE_DEFER_MAX_S
+        self.sleep: Callable[[float], None] = time.sleep
+        self.monotonic: Callable[[], float] = time.monotonic  # the write wait's clock (injectable)
+        self.deferred_writes = 0  # group writes that waited for a store read
+        # the loop's stop (build_engine_sampler): a group waiting for the store is given up
+        self.should_stop: Callable[[], bool] = lambda: False
+        self._unread_since: float | None = None  # when the store stopped answering the write checks
         # spec drop_zero_variance_groups: a group whose samples all score the same
         # reward carries no GRPO advantage; it is scored, counted and not written
         self.drop_zero_variance = False
@@ -356,6 +375,69 @@ class EngineRound:
         self._write_scored(rollout_id, version, scored, finish=finish, tokens=tokens, record=record,
                            extra=extra)
 
+    def _hold_verdict(self, position: int) -> bool | None:
+        """The prompts' dispenser still gives this island the position: True (also
+        for a source without the check), False, or None when a store ledger could
+        not be read (``StoreDispensedPrompts.hold_verdict``)."""
+        verdict = getattr(self.prompts, "hold_verdict", None)
+        if callable(verdict):
+            answer = verdict(position)
+            return None if answer is None else bool(answer)
+        check = getattr(self.prompts, "still_holds", None)
+        return True if not callable(check) else bool(check(position))
+
+    def _write_refusal(self, spot: int | None) -> str | None:
+        """Right before a group write: None (write it) or why not -- ``reclaimed``
+        (leaving: the replacement owns the shard), ``fenced`` (another incarnation
+        holds the lease), ``dispense_lost`` (the dispenser gave the task out
+        again) or ``store_unread``. While the store cannot say (the lease unread
+        for too long, the claim's state unread) the group is neither written nor
+        dropped: this waits and asks again every ``write_retry_s``, so a read
+        outage costs no trial in flight (their claims are renewed meanwhile, by
+        writes). The wait has two ends besides an answer: the loop was asked to
+        stop, or the store has not answered a write check for ``write_defer_max_s``
+        (counted from the first check it failed, over all groups: once past it,
+        each group asks once). The group is then given up as ``store_unread``:
+        not written, its task released (not counted toward the redo limit) so a
+        sampler that can read takes it, and this sampler goes on."""
+        since = reported = None
+        while True:
+            if self.reclaimed():
+                return "reclaimed"
+            unknown = None
+            if self.write_fenced():
+                if self.write_unknown():
+                    unknown = "lease_unread"
+                elif self.write_fenced():  # asked twice: a fence is sticky, "unread" may have just ended
+                    return "fenced"
+                else:
+                    continue
+            elif spot is not None:
+                held = self._hold_verdict(spot)
+                if held is not None:
+                    self._unread_since = None
+                    return None if held else "dispense_lost"
+                unknown = "claim_unread"
+            else:
+                self._unread_since = None
+                return None
+            now = getattr(self, "monotonic", time.monotonic)()
+            if self._unread_since is None:
+                self._unread_since = now
+            if self.should_stop() or now - self._unread_since >= self.write_defer_max_s:
+                self.emit(WRITE_DEFERRED_EVENT, reason=unknown, dispense_position=spot, given_up=True,
+                          waited_s=round(now - (since or now), 1),
+                          store_unread_s=round(now - self._unread_since, 1))
+                return STORE_UNREAD
+            if since is None:
+                since = now
+                self.deferred_writes += 1
+            if reported is None or now - reported >= WRITE_DEFERRED_REPORT_S:
+                reported = now
+                self.emit(WRITE_DEFERRED_EVENT, reason=unknown, dispense_position=spot,
+                          waited_s=round(now - since, 1))
+            self.sleep(self.write_retry_s)
+
     def _write_group(self, rollout_id: int, item: PromptItem, group: Sequence[Mapping[str, Any]], *,
                      record: Mapping[str, str], last: bool,
                      cursor: Mapping[str, int] | None = None) -> int | None:
@@ -380,12 +462,11 @@ class EngineRound:
         written = 0
         dispensed: list[int] = []
         for position, (item, group) in enumerate(scored):
-            if self.reclaimed() or self.write_fenced():  # leaving: the replacement owns the shard
+            refusal = self._write_refusal(dispense_position(item))
+            if refusal in ("reclaimed", "fenced"):  # leaving: the replacement owns the shard
                 self.dropped_groups += len(scored) - position
                 break
-            held = getattr(self.prompts, "still_holds", None)
-            spot = dispense_position(item)
-            if spot is not None and callable(held) and not held(spot):  # a store ledger gave it out again
+            if refusal is not None:  # a store ledger gave it out again
                 self.dropped_groups += 1
                 continue
             spot = self._write_group(rollout_id, item, group, record=record, last=position == len(scored) - 1)
@@ -511,9 +592,11 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
         follower.hold = engine_round.holds_weights
         engine_round.release_pending = follower.pending_seq
         engine_round.release_ready = follower.prefetch
+        engine_round.weights_state = loader.weights_state
     extra = {} if sleep is None else {"sleep": sleep}
     loop: SamplerLoop
     engine_round.unchecked_in_flight = lambda: loop.unchecked_in_flight
+    engine_round.should_stop = should_stop  # a group waiting for the store is given up on a stop
     loop = SamplerLoop(follower=follower, buffer=buffer, generate=engine_round,
                        num_rollouts=int(config.num_rollouts),
                        max_backlog_groups=int(config.max_backlog_groups), emit=emit,

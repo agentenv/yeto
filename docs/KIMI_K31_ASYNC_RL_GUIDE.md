@@ -749,6 +749,25 @@ shortest-lease one. Two modes, set per run by `elastic.scale_down` in
 In both modes the groups the node wrote before the fence stay in its shard and
 the trainer reads them as usual; a group written after the fence is dropped by
 the trainer's incarnation gate. No task is given out twice and none is lost.
+
+**The gate fails closed, and pauses training.** To judge a group the gate reads
+its shard's incarnation lease (`sample-buffer/leases/<shard>.json`). A lease
+that is absent (no such key) accepts the group. A lease that *cannot be read*
+(a timeout, a 5xx, a reset connection, a truncated body) is no verdict: that
+group is neither trained nor counted stale, and the trainer reads the buffer in
+strict order, so **every group behind it waits too, from every shard**. The
+round then holds only the groups before it, and its committed watermark is
+exactly that group's position, so a restore never trains a group twice. The
+price: one shard whose lease stays unreadable pauses the whole training (the
+samplers keep writing; the groups wait in the buffer). The trainer logs, at
+most once a minute, `incarnation gate: training paused: lease of shard <X>
+unreadable since <T>`, and the next take counts the waiting groups in
+`sample_buffer/lease_deferred_groups`. While it waits, neither the no-new-group
+timeout nor the data end applies, and nothing stops the wait except the lease
+becoming readable again or the trainer process being stopped (the reader has
+no stop or drain signal of its own). A sampler whose previous lease cannot be
+read at its start waits for it (up to 10 minutes, ending early on a reclaim or
+stop) rather than overwrite it.
 No replacement is ordered for a removed node, and the other nodes are not
 touched. A removed node that is evicted, crashes or reaches its lease end
 while it drains is released at once, again with no replacement. The events
@@ -1219,6 +1238,54 @@ helps when it was on before the deletion.
 Do not delete records of tasks that are in flight, and do not delete the
 `claims/` records: the attempt numbers continue from them.
 
+### 5.9 Object store outages
+
+Every island reads and writes the run's bucket. A sampler treats its reads as
+polls and its writes as the work:
+
+- **A read that fails is no verdict.** The incarnation lease, the handoff
+  record, the dispenser ledger, `LATEST.json` and the sampler's own buffer
+  index are read again at the next poll. The sampler keeps the weights it
+  serves and the tasks it holds; nothing is given back to the dispenser. The
+  tape marks the outage: `rl_sampler_store_read_failed` /
+  `rl_sampler_store_read_ok` (`what`: `lease`, `handoff`, `backlog`, `buffer`),
+  `rl_dispense_scan_failed` (`state`: `failed`, `recovered`) and
+  `rl_sampler_release_not_loaded` with `reason: latest_unread`.
+- **A group that is ready during the outage waits.** Before a group is written
+  the sampler reads whether it still holds the task and the shard. While the
+  store does not answer, the group is neither written nor dropped
+  (`rl_sampler_write_deferred`, `reason: claim_unread` or `lease_unread`) and
+  is written once the store answers. Lease renewals are writes, so the claims
+  of the tasks in flight stay alive through an outage of the reads. The wait
+  ends after `write_defer_max_s` without an answer, or when the sampler is
+  asked to stop: the group is then given up (`given_up: true`), its task is
+  released without counting toward `max_redo`, and the sampler goes on.
+- **Only a failed write ends a round.** A group write that fails ends the
+  sampler process as `INFRA_FAILED`; the pool restarts it and the restart
+  settles what was written.
+
+The invariant, checked by `yeto.launch.checks.store_outage_check`
+(`read_outage_problems`): while every read (GET, LIST, HEAD) of the store fails
+for up to **10 minutes** (`max_outage_s`, the check's default; the sampler's
+`write_defer_max_s`) and writes still work, no sampler exits and no task in
+flight is released; afterwards every sampler goes on. The settings behind it:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `write_defer_max_s` (sampler spec) | 600 | The longest a sampler holds finished groups back while the store does not answer whether it still holds their tasks. Past it the waiting groups are given up and their tasks released. Raise it together with `max_outage_s` to ride out longer read outages. |
+| `incarnation_lease.max_unread_s` (sampler spec) | 60 | A sampler that could not read its incarnation lease for this long holds its group writes back until it reads it again (it cannot know whether the pool fenced it). `null`: no bound. Inside this window a fenced sampler whose reads fail can still write a group; the trainer then drops it by the fence's time stamp. |
+| `prompts.dispense.lease_s` (sampler spec) | 900 | An outage of reads **and** writes longer than this lets the claims in flight run out: their tasks are given out again and the groups of the first holder are not written. |
+| `prompts.dispense.scan_s` / `max_scan_s` | 30 / 120 | A failed ledger scan is repeated after this backoff. |
+
+A `LATEST.json` that is present but is not a release record is not an outage:
+the sampler keeps its weights for 120 polls in a row (10 minutes at `poll_s`
+5), then stops, because the trainer rewrites the pointer with every release.
+
+On the trainer, a sampler's incarnation lease that cannot be read keeps the
+lease read last; a lease never read so far is read again every 2 s for up to
+10 minutes before any group of that sampler is trained or dropped.
+
+
 ## 6. Dashboard
 
 `yeto run up` starts `yeto dashboard serve --store <store> --port <port>` on
@@ -1338,6 +1405,7 @@ The monitor in `yeto run up` checks the run every minute:
 | Trainer finished | launcher finished `SUCCEEDED` (exit code 0) | Banner: the sampler pools (every provider) still bill; with `budget.release_nc_on_finish` the full `down`. |
 | Silence backstop | trainer log and `progress_paths` unchanged for `max(4 x --rl-stall-timeout, silence_min)` | Stop the trainer. |
 | First group | no buffer object within `first_group.timeout_s` | Stop before the trainer starts. |
+| Trainer starvation | no new buffer object for `starvation.alert_min` / `stop_min` (see below) | Alert; at `stop_min`, with no healthy sampler, stop the trainer with the STOP flag. |
 | Sandbox containers | count > `sandbox.max_run_containers` (or `max_containers_per_sampler` x billed nodes, if larger) | Warning only. |
 | Scale up | spend + one node hour per new node > `budget.usd`, or a breaker fired | `yeto run scale` refuses; nothing changes. |
 
@@ -1345,6 +1413,52 @@ The monitor in `yeto run up` checks the run every minute:
 (`yeto down <run>`). The NC pool, its nodes and the sandboxes stay up, so a
 resume does not repeat node setup and model pull. The monitor prints which
 nodes still bill and the release command.
+
+**Trainer starvation.** When every sampler is gone (all died, the pool cannot
+replace them, every account is halted) the trainer keeps waiting for groups in
+its buffer reader (with `--rl-trainer-scheduler`, the head keeps waiting for the
+RUN ack) while its GPUs bill. The monitor watches two signals it already has:
+new object keys under the store's `sample-buffer/shards/` (listed every
+`check_s`), and the pool state files (members in `ready`, the pool loop running).
+
+```json
+"starvation": {"alert_min": 30, "stop_min": 120, "unhealthy_min": 10,
+               "check_s": 300, "stop_grace_min": 20}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `alert_min` | 30 | Minutes without a new buffer object before `CRITICAL trainer_starvation_alert` is logged (once per starved stretch; the line names the duration, the healthy / live / paused sampler counts and the pool notes). `0`: no alert. |
+| `stop_min` | 120 | Minutes without a new buffer object before the trainer is stopped, **only** while no sampler is healthy (no ready, unpaused member in a pool whose loop runs) for at least `unhealthy_min`. `0`: never stop. Must be >= `alert_min`. |
+| `unhealthy_min` | 10 | How long the pools must report no healthy sampler before a stop. A short gap (a lease-end handoff) does not count. |
+| `check_s` | 300 | Seconds between two incremental listings of the buffer shards. |
+| `stop_grace_min` | 20 | After the STOP flag, how long the monitor waits for the trainer launcher to exit before `yeto down`. |
+
+What never stops the trainer: a healthy sampler (long agentic trials can go
+an hour without a group), a member paused with `yeto run pause` (in any state),
+pool state that cannot be read (of any pool), and a failed buffer listing; these
+alert only. A replacement under way (unpaused `provisioning` / `starting`
+members within their pool's `elastic.start_timeout_s`) also holds the stop, for
+at most that timeout from the first replacement of the stretch (the alert says
+`recovering: N member(s) starting`). A stop is decided on a fresh listing of the
+buffer. The listing is incremental: one page after the last key seen per known
+shard each `check_s`, and every 6th check the `shard-names/` prefix for new
+shards; any failed request counts as no listing. The incarnation gate's
+fail-closed pause (`incarnation gate: training paused`, a lease that cannot be
+read) is not starvation: the groups are in the buffer and the trainer waits for
+the lease. When the trainer log shows that pause, the alert names it
+(`trainer side: ... fail-closed pause`).
+
+The stop is the budget stop's path: `CRITICAL trainer_starvation_stop`, the
+run's STOP flag (`yeto stop-run <--cluster-prefix>`; with the trainer scheduler
+the trainer drains with a cut, a fixed trainer island keeps its latest round
+cut), then `yeto down <run>` once the launcher exited (or after
+`stop_grace_min`). The sampler pools are kept (with `controller: in_process`,
+`rollout.drain_on_exit` decides, as after every breach). Once a sampler is healthy again,
+`yeto run up --config <run.json>` starts the trainer again and it resumes from
+its latest cut (rounds after that cut are trained again; section 5.3). The
+pool's own state is not touched. `run up` refuses a bad `starvation` section in
+preflight.
 
 **Forced NC release at 1.2x.** After a budget or wall-clock breach, the
 monitor stays up and prints the billing banner on every poll. Once the spend

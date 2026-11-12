@@ -58,7 +58,10 @@ Rules:
   releases the rest of their claims;
 * retire (:func:`retire`, the controller's scale-down / evict): a marker
   ``retired/<holder>/<incarnation>`` plus an immediate ``release`` (reason
-  ``retired``) of every open claim of that process. The retired process sees
+  ``retired``) of every open claim of that process. The marker is written
+  before the claims are listed, and a claim pass that won checks the marker
+  (``StoreLedger.retired_now``), so a claim taken while ``retire`` ran is
+  released by one or the other. The retired process sees
   the marker in its next listing and takes nothing more (fenced); its
   in-flight groups are refused by :meth:`StoreDispensedPrompts.still_holds`;
   any scanning sampler releases a claim of a retired process it still finds;
@@ -82,6 +85,13 @@ Rules:
   :data:`SUPERSEDED_CHECK_EVERY`-th time (three existence checks). A beat on a
   superseded attempt changes nothing: only the latest attempt's beat counts, and
   the group write is gated by :meth:`StoreDispensedPrompts.still_holds`.
+* a failed read is no verdict: a scan whose listing (or a read on its way)
+  fails claims nothing and is repeated at the next scan time
+  (``rl_dispense_scan_failed``), the claims in flight stay; a renewal that cannot
+  read whether its attempt was superseded still writes its beat; the check
+  before a group write that cannot be read answers "unknown"
+  (:meth:`StoreDispensedPrompts.hold_verdict`: the group is neither written nor
+  released, the sampler asks again). Only a failed write ends a round.
 
 This is the reference implementation of the WorkContract
 (:mod:`yeto.rl.engine.work_contract`; conformance cases in
@@ -107,6 +117,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .object_store import is_fatal_store_error
 from .task_dispense import (
     DISPENSE_POSITION_KEY,
     DispenseEnded,
@@ -149,6 +160,7 @@ EXPIRED_EVENT = "rl_dispense_expired"
 LOST_EVENT = "rl_dispense_lost"
 RELEASE_EVENT = "rl_dispense_release"
 RECOVER_EVENT = "rl_dispense_recover"
+SCAN_FAILED_EVENT = "rl_dispense_scan_failed"  # a scan the store did not answer (and the scan after: recovered)
 DRAIN_EVENT = "rl_dispense_drain"
 DRAIN_DIR, DRAINED_DIR = "drain", "drained"
 
@@ -665,6 +677,16 @@ class StoreLedger:
         """This process was retired (as of the latest scan)."""
         return (self.holder, self.incarnation) in self.retired
 
+    def retired_now(self) -> bool:
+        """This process's retire marker is in the store now (one existence check).
+        Asked after a claim pass that won: :func:`retire` writes the marker before
+        it lists the claims, so a claim its listing missed was taken after the
+        marker and this check sees it."""
+        if self.is_retired():
+            return True
+        return bool(self.objects.exists(self.key("retired", _member_part(self.holder),
+                                                 _member_part(str(self.incarnation)))))
+
     def answer_drain(self, seq: str) -> None:
         self.objects.write(drained_key(self.ns, self.holder), self._body(seq=seq))
 
@@ -701,8 +723,9 @@ class StoreLedger:
         cached = self._bodies.get((int(slot), int(attempt)))
         if cached is not None:
             return cached
-        data = self.objects.read(self.key("claims", _pkey(slot), _akey(attempt)))
-        body = json.loads(data) if data else {}
+        # a body that is not a JSON object reads as {} (as status() and retire() read it):
+        # no holder, so no fence verdict; the claim keeps its own slot until its lease runs out
+        body = _json(self.objects, self.key("claims", _pkey(slot), _akey(attempt)))
         if body:
             self._bodies[(int(slot), int(attempt))] = body
         return body
@@ -714,7 +737,11 @@ class StoreLedger:
         when the controller retired the claim's process."""
         if self.lease_of_holder is None and not self.retired:
             return None
-        body = self.claim_body(slot, attempt)
+        try:
+            body = self.claim_body(slot, attempt)
+        except Exception as error:  # noqa: BLE001 - unknown this scan: its expiry still frees it
+            logger.warning("store dispenser: claim %d/%d not read: %r", slot, attempt, error)
+            return None
         holder, inc = body.get("holder"), body.get("incarnation")
         if not holder or inc is None:
             return None
@@ -861,7 +888,9 @@ class StoreDispensedPrompts:
         self._idle = self.scan_s
         self.drawn = 0
         self.stats = {"scans": 0, "claimed": 0, "claim_lost": 0, "trained": 0, "requeued": 0, "released": 0,
-                      "dropped": 0, "lost": 0, "recovered": 0, "not_ready": 0, "capacity_waits": 0}
+                      "dropped": 0, "lost": 0, "recovered": 0, "not_ready": 0, "capacity_waits": 0,
+                      "scans_failed": 0, "hold_checks_failed": 0, "renew_checks_failed": 0}
+        self._scan_failing = 0  # failed scans in a row
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
         if renew:
@@ -1026,8 +1055,31 @@ class StoreDispensedPrompts:
                     self._emit(SETTLE_EVENT, slot=p, state="dropped", task_id=tid, reason=reason)
                 states.setdefault(p, TaskState(p)).done = "dropped"  # type: ignore[union-attr]
 
+    def _scan_failed(self, error: BaseException) -> None:
+        """A scan the store did not answer: nothing claimed, nothing judged, the
+        claims in flight stay; the next scan (``take``'s backoff) reads again.
+        Refused credentials or no such bucket are no outage: raised as they are."""
+        if is_fatal_store_error(error):
+            raise error
+        self.stats["scans_failed"] += 1
+        self._scan_failing += 1
+        logger.warning("store dispenser: scan failed (%d in a row), scanning again later: %r",
+                       self._scan_failing, error)
+        if self._scan_failing == 1:  # one event per outage, one at its end
+            self._emit(SCAN_FAILED_EVENT, state="failed", holding=self.holding(),
+                       error=f"{type(error).__name__}: {error}"[:300])
+
     def _claim(self, want: int) -> tuple[list[int], bool]:
-        states, now = self.ledger.scan()
+        try:
+            states, now = self.ledger.scan()
+        except DispenseError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a failed listing costs this scan, not the sampler
+            self._scan_failed(error)
+            return [], False
+        if self._scan_failing:
+            self._emit(SCAN_FAILED_EVENT, state="recovered", failed_scans=self._scan_failing)
+            self._scan_failing = 0
         self.stats["scans"] += 1
         self._lost_by_scan(states)
         self._settle_unsure(states)
@@ -1064,7 +1116,13 @@ class StoreDispensedPrompts:
                 self.stats["not_ready"] += 1
                 return False
 
-        candidates, ended = self.ledger.candidates(states, now, accept=accept, on_end=self._emit)
+        try:
+            candidates, ended = self.ledger.candidates(states, now, accept=accept, on_end=self._emit)
+        except DispenseError:
+            raise
+        except Exception as error:  # noqa: BLE001 - an attempt it could not end: the next scan ends it
+            self._scan_failed(error)
+            return [], False
         if view is not None and view.host is not None:  # affinity: tasks ready on this sampler's host first
             candidates.sort(key=lambda c: not view.classify(
                 row_task_id(self.rows[self.slots.row(c[0])], self.task_key))[2])
@@ -1075,6 +1133,10 @@ class StoreDispensedPrompts:
             i += 1
             if len(got) >= want:
                 break
+            with self._lock:
+                mine = p in self._held
+            if mine:  # a group of an earlier attempt is still in flight here (lost): it settles first
+                continue
             row = self.slots.row(p)
             task_id = row_task_id(self.rows[row], self.task_key)
             try:
@@ -1108,6 +1170,29 @@ class StoreDispensedPrompts:
                     if rest:
                         k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
                         queue, i = rest[k:] + rest[:k], 0
+        retired = False
+        if got:
+            try:
+                retired = self.ledger.retired_now()
+            except DispenseError:
+                raise
+            except Exception as error:  # noqa: BLE001 - no verdict: the next scan reads the marker
+                if is_fatal_store_error(error):  # refused credentials / no such bucket: no outage
+                    raise
+                logger.warning("store dispenser: retire marker not read after a claim pass: %r", error)
+        if retired:
+            # retired while this pass claimed: :func:`retire` listed the ledger before these
+            # claims and did not release them; give them back at once, write nothing
+            self._retired = True
+            with self._lock:
+                held = [(p, h) for p, h in self._held.items() if not h.lost]
+            for p, h in held:
+                self._mark_lost(p, h, "retired")
+            for p in got:
+                h = self._held[p]
+                if self.ledger.fail(p, h.attempt, "release", reason="retired"):
+                    self._emit(RELEASE_EVENT, slot=p, attempt=h.attempt, reason="retired")
+            return [], False
         return got, ended
 
     def _settle_unsure(self, states: Mapping[int, TaskState]) -> None:
@@ -1260,9 +1345,11 @@ class StoreDispensedPrompts:
             logger.warning("store dispenser: slot %d attempt %d lost (%s)", slot, held.attempt, why)
             self._emit(LOST_EVENT, slot=slot, attempt=held.attempt, reason=why)
 
-    def still_holds(self, slot: int) -> bool:
-        """This process still holds ``slot`` (not fenced, no later attempt, the
-        attempt not ended by another sampler): the group may be written."""
+    def hold_verdict(self, slot: int) -> bool | None:
+        """Whether this process still holds ``slot`` (not fenced, no later attempt,
+        the attempt not ended by another sampler): True, the group may be written;
+        False, it may not; None, the store did not answer (unknown: the group is
+        neither written nor released now, the caller asks again)."""
         with self._lock:
             held = self._held.get(int(slot))
         if held is None or held.lost:
@@ -1270,10 +1357,26 @@ class StoreDispensedPrompts:
         if self._is_fenced():
             self._mark_lost(int(slot), held, "fenced")
             return False
-        if self.ledger.superseded(int(slot), held.attempt):
+        try:
+            superseded = self.ledger.superseded(int(slot), held.attempt)
+        except DispenseError:
+            raise
+        except Exception as error:  # noqa: BLE001 - unknown, not "lost": never a reason to end the sampler
+            if is_fatal_store_error(error):  # ... but a refused credential or a missing bucket is
+                raise
+            self.stats["hold_checks_failed"] += 1
+            logger.warning("store dispenser: slot %d attempt %d: hold check not answered: %r",
+                           slot, held.attempt, error)
+            return None
+        if superseded:
             self._mark_lost(int(slot), held, "superseded")
             return False
         return True
+
+    def still_holds(self, slot: int) -> bool:
+        """The WorkContract's ``still_holds``: :meth:`hold_verdict` with "unknown"
+        read as "do not write" (the claim itself stays as it is)."""
+        return bool(self.hold_verdict(slot))
 
     def _end(self, slot: int, *, done: str | None = None, fail: str | None = None,
              **detail: Any) -> dict[str, Any] | None:
@@ -1349,12 +1452,27 @@ class StoreDispensedPrompts:
         self._renewals += 1
         check = self._renewals % max(1, int(self.superseded_check_every)) == 0
         renewed = 0
+        failed: BaseException | None = None
         for p, h in held:
-            if check and self.ledger.superseded(p, h.attempt):
+            superseded = False
+            if check:
+                try:
+                    superseded = self.ledger.superseded(p, h.attempt)
+                except Exception as error:  # noqa: BLE001 - unknown: renew (a beat of an ended attempt counts for nothing)
+                    if is_fatal_store_error(error):
+                        raise
+                    self.stats["renew_checks_failed"] += 1
+            if superseded:
                 self._mark_lost(p, h, "superseded")
                 continue
-            self.ledger.beat(p, h.attempt)
+            try:
+                self.ledger.beat(p, h.attempt)
+            except Exception as error:  # noqa: BLE001 - the other claims are still renewed
+                failed = failed or error
+                continue
             renewed += 1
+        if failed is not None:  # the renew loop reports it and renews again a period later
+            raise failed
         return renewed
 
     def renew_period(self) -> float:
@@ -1394,23 +1512,37 @@ def retire(objects: Any, namespace: str, holder: str, incarnation: str | None = 
     open claim. Idempotent: a second call releases nothing. It lists ``done/``
     and the claims and failures of the unsettled slots only."""
     ns = namespace.strip("/")
-    if lists_ranges(objects):
-        keys, _now = scan_slots(objects, ns, SettledSlots(), dirs=("claims", "fail"))
-    else:
-        keys, _now = objects.list_meta(ns + "/")
-    states = parse_ledger(keys, ns)
     body = json.dumps({"holder": "controller", "reason": str(reason)}, sort_keys=True).encode()
-    open_claims = []
-    for p, state in sorted(states.items()):
-        a = state.open_attempt()
-        if a is None:
-            continue
-        claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
-        if claim.get("holder") == holder and (incarnation is None or str(claim.get("incarnation")) == str(incarnation)):
-            open_claims.append((p, a, str(claim.get("incarnation"))))
-    incarnations = {str(incarnation)} if incarnation is not None else {inc for _p, _a, inc in open_claims}
-    for inc in sorted(incarnations):
-        objects.create(f"{ns}/retired/{_member_part(holder)}/{_member_part(inc)}", body)
+
+    def mark(incs: Iterable[str]) -> None:
+        for inc in sorted(incs):
+            objects.create(f"{ns}/retired/{_member_part(holder)}/{_member_part(inc)}", body)
+
+    def open_claims_of(incs: set[str] | None) -> list[tuple[int, int, str]]:
+        if lists_ranges(objects):
+            keys, _now = scan_slots(objects, ns, SettledSlots(), dirs=("claims", "fail"))
+        else:
+            keys, _now = objects.list_meta(ns + "/")
+        out = []
+        for p, state in sorted(parse_ledger(keys, ns).items()):
+            a = state.open_attempt()
+            if a is None:
+                continue
+            claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
+            if claim.get("holder") == holder and (incs is None or str(claim.get("incarnation")) in incs):
+                out.append((p, a, str(claim.get("incarnation"))))
+        return out
+
+    # The marker goes first, the listing after it: a claim the listing misses was taken
+    # after the marker, and its claimant sees the marker (``StoreLedger.retired_now``).
+    if incarnation is not None:
+        incarnations = {str(incarnation)}
+        mark(incarnations)
+        open_claims = open_claims_of(incarnations)
+    else:
+        incarnations = {inc for _p, _a, inc in open_claims_of(None)}
+        mark(incarnations)
+        open_claims = open_claims_of(incarnations) if incarnations else []
     released = []
     for p, a, inc in open_claims:
         detail = json.dumps({"holder": "controller", "attempt": a, "reason": "retired", "retire_reason": str(reason),

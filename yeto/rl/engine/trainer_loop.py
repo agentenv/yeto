@@ -20,7 +20,11 @@ batch left) ends the loop too; it is journaled as ``finished`` (no incarnation).
 
 After ``max_consecutive_failures`` failed incarnations in a row (no trained round
 between them) the loop releases the trainer, journals ``gave_up`` and raises
-:class:`TrainerLoopGaveUp`; a trained round resets the count.
+:class:`TrainerLoopGaveUp`; a trained round resets the count only when it reaches a
+version no earlier incarnation of this loop trained. A new incarnation restores the
+newest cut, which can be many rounds old (the cut interval is timed): retraining the
+rounds a failed incarnation already trained and crashing at the same round again is
+no progress, and must not restart trainers without end.
 
 The loop journals each start and stop (kind ``trainer_loop``) in the controller
 journal next to the scheduler state (kind ``trainer_scheduler_state``). After a head
@@ -142,6 +146,7 @@ class TrainerLoop:
         # failed incarnations since the last trained round; at the limit the loop gives up
         self.max_consecutive_failures = int(max_consecutive_failures)
         self.consecutive_failures = 0
+        self._trained_high_water = -1  # highest version a run of this loop trained
 
     # ------------------------------------------------------------ state
     @property
@@ -265,8 +270,9 @@ class TrainerLoop:
         except LifecycleError:
             self._note_failure()
             return
-        if receipt.rounds > 0:
-            self.consecutive_failures = 0  # a trained round: the trainer works
+        if receipt.rounds > 0 and receipt.trained_version > self._trained_high_water:
+            self._trained_high_water = receipt.trained_version
+            self.consecutive_failures = 0  # a new version: the trainer makes progress
         if receipt.data_ended:
             self._stop(LeaveReason.FINISHED)
 

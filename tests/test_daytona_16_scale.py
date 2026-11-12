@@ -429,7 +429,10 @@ def test_sixteen_holders_claim_and_settle_each_task_once(tmp_path):
     assert ops.get("create") == 2 * tasks, ops  # exactly one claim and one settle per task
     assert ops.get("create_412", 0) == lost, ops  # the only conflicts are claims lost to a race
     assert lost <= tasks * (N - 1), ops  # a holder loses a slot's attempt at most once
-    assert not ops.get("read") and not ops.get("write") and not ops.get("exists"), ops  # no re-reads
+    assert not ops.get("read") and not ops.get("write"), ops  # no re-reads
+    # one retire-marker check (StoreLedger.retired_now) per claim pass that won a slot
+    wins = sum(s.stats.get("claimed", 0) for s in samplers)
+    assert ops.get("exists", 0) <= wins, ops
     assert ops.get("list") == sum(s.stats["scans"] for s in samplers), ops  # one listing per scan
 
 

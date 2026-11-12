@@ -227,6 +227,7 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
     # instead of training the whole local buffer again from position 0.
     feed = BufferFeed(buffer, vmap=IdentityVersions, shape=shape,
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
+                      remove_group=lambda uid: actor_call("yeto_remove_group", uid),
                       record=lambda fields: island.append_jsonl(log, fields),
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s,
                       cursor_log=lane_cursor_log(buffer, int(island.learner_id)),
@@ -234,6 +235,7 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
                       # dropped groups and starved-feed warnings as YETO_RL_EVENT records
                       emit=pump_event_printer(int(island.learner_id)))
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
+    island.recheck_kept = feed.recheck_kept  # the round judged again before assembly
     island.start_rollouter = None  # no rollouter: the spot samplers generate
     publisher = RelayPublisher(island, feed)
     pool = RelayRolloutPool(island, lambda: getattr(publisher.driver, "external_policy", None))
