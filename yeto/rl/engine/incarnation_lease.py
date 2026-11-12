@@ -56,8 +56,10 @@ Nothing here talks to a cloud.
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
+import random
 import os
 import threading
 import time
@@ -76,6 +78,39 @@ DEFAULT_CLOCK_MARGIN_S = 60.0
 DEFAULT_RETRY_S = 1.0  # the gate reads a lease that failed again at most this often
 DEFAULT_WARN_S = 60.0  # ... and logs a lease it keeps failing to read at most this often
 CLAIM_READ_ATTEMPTS = 3
+CLAIM_PAUSE_S = 2.0  # the first pause between the claim's reads (doubled after each)
+
+# what a store read raises when it could not read (not: the key is absent). An
+# object store over S3 / R2 raises botocore's own types (ClientError: a 5xx, a
+# 403; BotoCoreError: EndpointConnectionError, ConnectionClosedError,
+# IncompleteReadError) and urllib3's / http.client's, most of them no OSError
+_READ_ERRORS: tuple[type[BaseException], ...] = (OSError, ValueError, http.client.HTTPException)
+try:
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    _READ_ERRORS += (BotoCoreError, ClientError)
+except ImportError:  # pragma: no cover - a store without boto3
+    pass
+try:
+    from urllib3.exceptions import HTTPError as _Urllib3Error
+
+    _READ_ERRORS += (_Urllib3Error,)
+except ImportError:  # pragma: no cover
+    pass
+# the error codes of an absent key (a store that answers with a bare ClientError)
+_ABSENT_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def _error_code(error: BaseException) -> str:
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return ""
+    return str((response.get("Error") or {}).get("Code", ""))
+
+
+def _claim_pause(attempt: int, sleep: Callable[[float], None] | None = None) -> None:
+    """Wait before read ``attempt + 2`` of the previous lease (exponential, jittered)."""
+    (sleep or time.sleep)(random.uniform(0.5, 1.0) * CLAIM_PAUSE_S * 2.0 ** attempt)
 
 log = logging.getLogger(__name__)
 
@@ -104,8 +139,10 @@ def read_record_strict(store: Any, key: str) -> dict[str, Any] | None:
     """The JSON record at ``key`` under the store root (an object store or a
     directory store, after its reload); None only when it is absent. Raises
     :class:`LeaseReadError` when it could not be read: the store raised (a
-    timeout, a 5xx; an object store answers a missing key with None, never an
-    error) or the body is not a JSON object (truncated, garbled)."""
+    timeout, a 5xx, a reset; botocore's types included, :data:`_READ_ERRORS`) or
+    the body is not a JSON object (truncated, garbled). An object store answers a
+    missing key with None; a bare ``ClientError`` naming 404 / NoSuchKey /
+    NotFound is absent too."""
     objects = getattr(store, "objects", None)
     try:
         if objects is not None:
@@ -124,7 +161,9 @@ def read_record_strict(store: Any, key: str) -> dict[str, Any] | None:
         if data is None:
             return None
         doc = json.loads(data)
-    except (OSError, ValueError) as error:
+    except _READ_ERRORS as error:
+        if _error_code(error) in _ABSENT_CODES:
+            return None
         raise LeaseReadError(f"{key}: {type(error).__name__}: {error}") from error
     if not isinstance(doc, dict):
         raise LeaseReadError(f"{key}: not a JSON object ({type(doc).__name__})")
@@ -162,13 +201,15 @@ class IncarnationLease:
     def __init__(self, store: Any, sampler: str, incarnation: str, *,
                  write_check_s: float = DEFAULT_WRITE_CHECK_S,
                  clock: Callable[[], float] = time.time,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] | None = None) -> None:
         self.store = store
         self.sampler = str(sampler)
         self.incarnation = str(incarnation)
         self.write_check_s = float(write_check_s)
         self.clock = clock
         self.monotonic = monotonic
+        self.sleep = sleep  # the claim's pause between its reads (None: time.sleep)
         self.holder: str | None = None  # who the last read named
         self.fenced_by: str | None = None
         self.read_failures = 0
@@ -184,7 +225,7 @@ class IncarnationLease:
     def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = ()) -> dict[str, Any]:
         """Write the lease naming this incarnation (module doc); returns the record.
         A previous lease that cannot be read (:class:`LeaseReadError` after
-        :data:`CLAIM_READ_ATTEMPTS` reads) is not overwritten: the new record would
+        :data:`CLAIM_READ_ATTEMPTS` reads, paused by :func:`_claim_pause`) is not overwritten: the new record would
         forget the incarnations it supersedes, so the error is raised."""
         for attempt in range(CLAIM_READ_ATTEMPTS):
             try:
@@ -193,6 +234,7 @@ class IncarnationLease:
             except LeaseReadError:
                 if attempt + 1 == CLAIM_READ_ATTEMPTS:
                     raise
+                _claim_pause(attempt, self.sleep)
         superseded: list[str] = []
         for inc in [*previous.get("superseded", ()), previous.get("incarnation"), *earlier]:
             if inc is not None and str(inc) != self.incarnation and str(inc) not in superseded:
@@ -240,6 +282,37 @@ class IncarnationLease:
     def detail(self) -> dict[str, Any]:
         return {"fenced": "superseded", "superseded_by": self.fenced_by, "lease_reads": self.reads,
                 "lease_read_failures": self.read_failures}
+
+
+DEFAULT_CLAIM_PATIENCE_S = 600.0
+
+
+def claim_patiently(lease: IncarnationLease, entries: Callable[[], Iterable[Any]], earlier: Iterable[str] = (),
+                    *, patience_s: float = DEFAULT_CLAIM_PATIENCE_S, should_stop: Callable[[], bool] = lambda: False,
+                    monotonic: Callable[[], float] = time.monotonic,
+                    sleep: Callable[[float], None] = time.sleep) -> dict[str, Any] | None:
+    """:meth:`IncarnationLease.claim` for a sampler at its join: a previous lease the
+    store cannot read for a while (an R2 outage) is waited for, up to ``patience_s``
+    seconds, rather than ending the process at once (a sampler that dies at its
+    start is a failed node to the pool). None when ``should_stop`` (a reclaim, a
+    stop) ends the wait; :class:`LeaseReadError` once the patience is spent."""
+    earlier = list(earlier)
+    started = monotonic()
+    attempt = 0
+    while True:
+        try:
+            return lease.claim(entries(), earlier=earlier)
+        except LeaseReadError as error:
+            waited = monotonic() - started
+            if waited >= float(patience_s):
+                raise
+            log.warning("incarnation lease of %s unreadable at the claim (%.0f s): %s", lease.sampler, waited, error)
+        if should_stop():
+            return None
+        sleep(min(30.0, CLAIM_PAUSE_S * 2.0 ** min(attempt, 4)))
+        attempt += 1
+        if should_stop():
+            return None
 
 
 class IncarnationGate:

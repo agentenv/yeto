@@ -25,6 +25,13 @@ from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 
 
+@pytest.fixture(autouse=True)
+def _no_claim_pause(monkeypatch):
+    import yeto.rl.engine.incarnation_lease as incarnation_lease
+
+    monkeypatch.setattr(incarnation_lease, "_claim_pause", lambda attempt, sleep=None: None)
+
+
 class FlakyObjects:
     """An object store over a directory whose reads of ``leases`` keys fail on demand
     (``fail``: raise; ``body``: answer these bytes instead), like a timeout or a 5xx."""
@@ -308,3 +315,203 @@ def test_buffer_feed_waits_for_an_unreadable_lease(tmp_path):
     pulled = feed.pull()
     assert pulled["uid"] == "buf1" and feed.lease_waits == 4  # the late write was dropped, not trained
     assert [r["position"] for r in records if r.get("dropped")] == [0]
+
+
+# --------------------------------------------------------------------------- an S3 / R2 store
+
+class _Body:
+    def __init__(self, data: bytes | None = None, error: BaseException | None = None) -> None:
+        self.data, self.error = data, error
+
+    def read(self) -> bytes:
+        if self.error is not None:
+            raise self.error
+        return self.data or b""
+
+
+class _StubS3:
+    """A boto3 S3 client double: ``get_object`` raises ``error`` (a request-level
+    failure) or answers ``body`` (whose read may raise ``body_error``)."""
+
+    def __init__(self) -> None:
+        from botocore.exceptions import ClientError
+
+        class NoSuchKey(ClientError):
+            pass
+
+        self.exceptions = type("Exceptions", (), {"NoSuchKey": NoSuchKey})
+        self.error: BaseException | None = None
+        self.body: bytes | None = None
+        self.body_error: BaseException | None = None
+        self.calls = 0
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict:  # noqa: N803 - boto3's names
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        if self.body is None and self.body_error is None:
+            raise self.exceptions.NoSuchKey({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": _Body(self.body, self.body_error)}
+
+
+def _client_error(code: str, status: int = 500) -> BaseException:
+    from botocore.exceptions import ClientError
+
+    return ClientError({"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}}, "GetObject")
+
+
+def _s3() -> tuple[_StubS3, object]:
+    from yeto.cloud.s3_store import S3ObjectStore
+
+    client = _StubS3()
+    return client, S3ObjectStore("s3://bucket/run", client=client)
+
+
+def _request_errors() -> list[BaseException]:
+    from botocore.exceptions import ConnectionClosedError, EndpointConnectionError, ReadTimeoutError
+
+    return [_client_error("InternalError", 500), _client_error("SlowDown", 503),
+            _client_error("AccessDenied", 403), EndpointConnectionError(endpoint_url="https://r2"),
+            ReadTimeoutError(endpoint_url="https://r2"), ConnectionClosedError(endpoint_url="https://r2")]
+
+
+@pytest.mark.parametrize("index", range(6))
+def test_strict_read_over_s3_turns_request_errors_into_lease_read_errors(index, monkeypatch):
+    """R2 / boto raise their own exception types (ClientError, BotoCoreError), most
+    of them not OSError: each is an unreadable lease, never an escaping error."""
+    client, store = _s3()
+    client.error = _request_errors()[index]
+    with pytest.raises(LeaseReadError):
+        read_record_strict(store, lease_key("s"))
+    assert read_record(store, lease_key("s")) is None
+
+
+def test_strict_read_over_s3_body_errors_and_truncation(monkeypatch):
+    import http.client
+
+    from botocore.exceptions import IncompleteReadError
+
+    import yeto.cloud.s3_store as s3_store
+
+    monkeypatch.setattr(s3_store, "_read_retry_pause", lambda attempt: None)
+    client, store = _s3()
+    for error in (IncompleteReadError(actual_bytes=3, expected_bytes=9), http.client.IncompleteRead(b"{")):
+        client.body_error = error
+        with pytest.raises(LeaseReadError):
+            read_record_strict(store, lease_key("s"))
+    client.body_error, client.body = None, b'{"incarnation": "aa'  # cut short
+    with pytest.raises(LeaseReadError):
+        read_record_strict(store, lease_key("s"))
+
+
+def test_strict_read_over_s3_absent_answers(monkeypatch):
+    """NoSuchKey (the modeled class) and a bare ClientError naming 404 / NoSuchKey /
+    NotFound are an absent lease (None), not a read error."""
+    client, store = _s3()
+    assert read_record_strict(store, lease_key("s")) is None  # modeled NoSuchKey
+    for code in ("NoSuchKey", "404", "NotFound"):
+        client.error = _client_error(code, 404)
+        assert read_record_strict(store, lease_key("s")) is None
+    client.error = _client_error("NoSuchBucket", 404)  # a wrong bucket is no verdict
+    with pytest.raises(LeaseReadError):
+        read_record_strict(store, lease_key("s"))
+
+
+def test_gate_over_s3_defers_on_a_5xx_instead_of_raising_it(tmp_path):
+    client, store = _s3()
+    client.error = _client_error("InternalError", 500)
+    entries = [_entry("s", "aaaa", 0)]
+    gate = IncarnationGate(store, lambda: entries, retry_s=0.0)
+    with pytest.raises(LeaseUnknown):
+        gate.verdict(entries[0], 0)
+
+
+def test_poll_over_s3_does_not_raise_on_a_5xx():
+    client, store = _s3()
+    lease = IncarnationLease(store, "s", "aaaa")
+    client.error = _client_error("InternalError", 500)
+    assert lease.poll() is False and lease.unknown
+
+
+def test_claim_pauses_between_its_reads_and_then_raises(monkeypatch):
+    """The claim's retries are spaced (a transient 5xx outlasts three reads in a row),
+    and a lease that stays unreadable is not overwritten."""
+    import yeto.rl.engine.incarnation_lease as incarnation_lease
+
+    pauses: list[float] = []
+    monkeypatch.setattr(incarnation_lease, "_claim_pause", lambda attempt, sleep=None: pauses.append(attempt))
+    client, store = _s3()
+    client.error = _client_error("InternalError", 500)
+    with pytest.raises(LeaseReadError):
+        IncarnationLease(store, "s", "bbbb").claim()
+    assert client.calls == incarnation_lease.CLAIM_READ_ATTEMPTS
+    assert len(pauses) == incarnation_lease.CLAIM_READ_ATTEMPTS - 1
+
+
+def test_claim_patiently_waits_out_an_outage_then_claims(tmp_path):
+    from yeto.rl.engine.incarnation_lease import claim_patiently
+
+    store = FlakyStore(tmp_path)
+    store.objects.fail = _client_error("SlowDown", 503)
+    clock, sleeps = Clock(), []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.now += seconds
+        if clock.now > 20:
+            store.objects.fail = None  # the store answers again: the lease is absent
+
+    claimed = claim_patiently(IncarnationLease(store, "s", "bbbb"), lambda: [], patience_s=600,
+                              monotonic=clock, sleep=sleep)
+    assert claimed is not None and claimed["incarnation"] == "bbbb" and sleeps
+    assert read_lease(store, "s")["incarnation"] == "bbbb"
+
+
+def test_claim_patiently_stops_or_gives_up():
+    from yeto.rl.engine.incarnation_lease import claim_patiently
+
+    client, store = _s3()
+    client.error = _client_error("InternalError", 500)
+    clock = Clock()
+
+    def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    assert claim_patiently(IncarnationLease(store, "s", "b"), lambda: [], should_stop=lambda: True,
+                           monotonic=clock, sleep=sleep) is None
+    with pytest.raises(LeaseReadError):
+        claim_patiently(IncarnationLease(store, "s", "b"), lambda: [], patience_s=60, monotonic=clock, sleep=sleep)
+
+
+def test_a_failed_take_keeps_the_groups_deferred_before_it(tmp_path):
+    """A take that raises (here: the store fails reading a payload) leaves the groups
+    an earlier take deferred waiting; none is lost."""
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+
+    root = tmp_path / "store"
+    store = CheckpointStore(root)
+    writer = FileSampleBuffer(store, batch_size=1)
+    IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
+    _write_group(writer, "s0", "aaaa", 0)
+    _write_group(writer, "s1", "xxxx", 0)
+    flaky = FlakyStore(root)
+    buffer = FileSampleBuffer(store, batch_size=1)
+    gate = IncarnationGate(flaky, buffer.entries, retry_s=0.0, clock_margin_s=0.0)
+    reader = BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0, poll_s=0.0,
+                         incarnation_gate=gate)
+    flaky.objects.fail, flaky.objects.only = TimeoutError("read timeout"), "s0"
+    out, _ = reader.take(0, 1, current_version=None)
+    assert [p for p, _ in out] == [1] and [p for p, _ in reader._deferred] == [0]  # noqa: SLF001
+    original = reader._settle  # noqa: SLF001
+
+    def broken(reads):
+        raise OSError("payload store down")
+
+    reader._settle = broken  # noqa: SLF001
+    flaky.objects.fail = None
+    with pytest.raises(OSError):
+        reader.take(1, 1, current_version=None)
+    reader._settle = original  # noqa: SLF001
+    assert [p for p, _ in reader._deferred] == [0]  # noqa: SLF001
+    out, _ = reader.take(1, 1, current_version=None)
+    assert [p for p, _ in out] == [0]
