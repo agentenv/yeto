@@ -400,6 +400,16 @@ def behavior_versions(sample: Mapping[str, Any]) -> list[int]:
     return _sample_versions(sample)
 
 
+def payload_oldest_version(samples: Sequence[Mapping[str, Any]]) -> int | None:
+    """The oldest engine version of any token of a decoded group, as its payload
+    says (what :func:`group_entry_fields` wrote into the index record); None when the
+    payload names no numeric version (nothing to compare)."""
+    try:
+        return min(min(_sample_versions(sample)) for sample in samples)
+    except (SampleBufferRolloutError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def group_entry_fields(samples: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     """``(behavior_version, tokens)`` of a group: the oldest engine version of any
     token, and the response tokens. Every sample must carry per-token behavior

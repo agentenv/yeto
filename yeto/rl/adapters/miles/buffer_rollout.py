@@ -65,6 +65,7 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     encode_group,
     group_entry_fields,
     payload_is_missing,
+    payload_oldest_version,
 )
 from yeto.rl.engine.merged_release import (
     LANE_ENV,
@@ -522,6 +523,10 @@ class TakeReport:
     # payload the store failed to return is not one of them: that take raises
     damaged_payload_groups: int = 0
     damaged_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # of ``stale_groups``: groups whose index record passed the age gate but whose
+    # payload holds an older version, below the floor (the record and the payload
+    # disagree; the tokens trained are the payload's, so the payload decides)
+    stale_payload_groups: int = 0
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
@@ -540,7 +545,8 @@ class TakeReport:
                 "sample_buffer/padded_samples": float(self.padded_samples),
                 "sample_buffer/padded_fraction": float(self.padded_fraction),
                 "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups),
-                "sample_buffer/damaged_payload_groups": float(self.damaged_payload_groups)}
+                "sample_buffer/damaged_payload_groups": float(self.damaged_payload_groups),
+                "sample_buffer/stale_payload_groups": float(self.stale_payload_groups)}
 
 
 def _dispense_position(entry: Any) -> int | None:
@@ -596,7 +602,13 @@ class BatchReader:
     read the store did not answer (a throttle, a 5xx, a timeout) is not: the take
     raises it. A take that raises returned nothing, so the groups it selected are
     kept (``_retry``) and the next take on this reader starts with them: taking
-    again in place loses no group."""
+    again in place loses no group.
+
+    The age gate reads the index record's ``behavior_version`` before the payload
+    is read, and again the payload's own oldest version once it is decoded
+    (:func:`payload_oldest_version`): a record that names a newer version than its
+    payload holds cannot pass an over-age group (it is counted in ``stale_groups``
+    and ``stale_payload_groups``). The second look only ever passes over more."""
 
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
@@ -662,6 +674,10 @@ class BatchReader:
         self._retry: list[Any] = []
         self._entry_of: dict[int, Any] = {}  # position -> index entry of the take's reads
         self._damaged: list[dict[str, Any]] = []  # the take's damaged payloads
+        self._floor: int | None = None  # the take's age floor
+        # dispense positions (None without one) of the take's groups whose payload is
+        # older than the floor although their index record is not
+        self._stale_payloads: list[int | None] = []
 
     def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         self.xhw_actions = {str(k): dict(v) for k, v in (actions or {}).items()}
@@ -704,6 +720,17 @@ class BatchReader:
                               **({} if dispensed is None else {"dispense_position": dispensed})})
         return None
 
+    def _stale_payload(self, position: int, group: Sequence[Mapping[str, Any]]) -> bool:
+        """Whether the decoded payload is older than the take's age floor (its index
+        record was not: the two disagree); if so the group is recorded as stale."""
+        if self._floor is None:
+            return False
+        oldest = payload_oldest_version(group)
+        if oldest is None or oldest >= self._floor:
+            return False
+        self._stale_payloads.append(_dispense_position(self._entry_of.get(int(position))))
+        return True
+
     def _read(self, ref: str, *, inline: bool = False) -> Future:
         if self._pool is None or inline:
             done: Future = Future()
@@ -725,7 +752,7 @@ class BatchReader:
         if int(groups) < 1:
             raise ValueError("groups must be positive")
         carried_in = self._carry
-        self._taken, self._entry_of, self._damaged = [], {}, []
+        self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
         try:
             return self._take(int(rollout_id), int(groups), current_version)
         except BaseException:
@@ -757,6 +784,7 @@ class BatchReader:
         select_s = read_s = decode_s = 0.0
         current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else age_floor(int(current_version), self.max_policy_age)
+        self._floor = floor
         dropped_small = 0
         self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
         carried_in, self._carry = self._carry, None
@@ -834,6 +862,8 @@ class BatchReader:
             self._nonfinite += skipped["nonfinite"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
         out = [(position, decoded[position]) for position, _, _ in chosen]
+        stale += len(self._stale_payloads)
+        stale_positions += [p for p in self._stale_payloads if p is not None]
         nonfinite = self._nonfinite
         damaged = list(self._damaged)
         if not out:
@@ -863,7 +893,8 @@ class BatchReader:
                                stale_incarnation_groups=fenced, incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
-                               damaged_payload_groups=len(damaged), damaged_payloads=damaged)
+                               damaged_payload_groups=len(damaged), damaged_payloads=damaged,
+                               stale_payload_groups=len(self._stale_payloads))
 
     @staticmethod
     def _choose(position: int, group: list, version: int, tokens: int, source: str, chosen: list,
@@ -916,7 +947,7 @@ class BatchReader:
                 continue
             self._entry_of[int(item.position)] = item.entry
             group = self._group_at(item.position, self._read(item.entry.payload_ref, inline=True))
-            if group is None:
+            if group is None or self._stale_payload(item.position, group):
                 continue
             if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
                 dropped += 1
@@ -925,6 +956,9 @@ class BatchReader:
                 skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
                 continue
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
+            oldest = payload_oldest_version(group)
+            if oldest is not None:  # what the next take's age gate compares if this group is carried over
+                version = min(int(version), oldest)
             if len(group) > missing:
                 self._carry = (position, group, version, tokens, source, _dispense_position(item.entry))
                 return position, 1, missing, dropped
@@ -949,12 +983,18 @@ class BatchReader:
         nonfinite = damaged = 0
         for position, read in fresh:
             group = self._group_at(position, read)
+            if group is not None and self._stale_payload(position, group):
+                group, aged = None, True
+            else:
+                aged = False
             sized = group is not None and (
                 self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
             if sized and (self.group_size is None or finite_rewards(group)):
                 decoded[position] = group
                 continue
-            if group is None:
+            if aged:
+                damaged += 1  # not a size drop: counted in the take's stale groups
+            elif group is None:
                 damaged += 1
             elif sized:
                 nonfinite += 1

@@ -339,3 +339,57 @@ def test_driver_tapes_the_damaged_payloads_a_round_passed_over(tmp_path):
     events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
     skipped = [e for e in events if e["event"] == "rl_buffer_damaged_payload_skipped"]
     assert [(e["rollout_id"], e["damaged_groups"], e["payloads"]) for e in skipped] == [(1, 1, [record])]
+
+
+# ------------------------------------------------------------------ a record that disagrees with its payload
+def _claim_version(s3: FaultS3, shard: str, pos: int, version: int) -> None:
+    """The shard's index record at ``pos`` names ``version``; its payload is unchanged."""
+    key = f"sample-buffer/shards/{shard}/{pos:012d}.json"
+    s3.put_json(key, {**s3.json(key), "behavior_version": version})
+
+
+@pytest.mark.parametrize("group_size", [2, None, 4])
+def test_a_record_that_names_a_newer_version_than_its_payload_cannot_pass_an_over_age_group(group_size):
+    """The record says version 9, the payload's tokens are version 1: against
+    version 12 (age 8, floor 4) the group is over age, whatever its record says."""
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 1, version=9) + _fill(s3, "s0", 1, start=1, version=1) + \
+        _fill(s3, "s0", 2, start=2, version=9)
+    _claim_version(s3, "s0", 1, 9)
+    batch_reader = reader(trainer(s3, ("s0",)), group_size=group_size)
+    taken, report = batch_reader.take(0, 2 if group_size != 4 else 1, current_version=12)
+    assert _ids(batch_reader.buffer.entries()[p] for p, _ in taken) == [ids[0], ids[2]]
+    assert (report.stale_groups, report.stale_payload_groups, report.stale_positions) == (1, 1, [101])
+    assert report.dropped_small_groups == 0 and report.damaged_payload_groups == 0
+    assert report.behavior_versions == {9: 2} and sum(report.source_groups.values()) == 2
+    assert report.metrics()["sample_buffer/stale_payload_groups"] == 1.0
+
+
+def test_a_record_that_disagrees_with_a_payload_inside_the_age_window_is_trained():
+    """Only the age gate looks at the payload's version: a disagreement that leaves
+    the group inside the window changes nothing (the accounting follows the record)."""
+    s3 = FaultS3()
+    _fill(s3, "s0", 1, version=5)
+    _claim_version(s3, "s0", 0, 9)
+    taken, report = reader(trainer(s3, ("s0",))).take(0, 1, current_version=12)
+    assert [p for p, _ in taken] == [0] and (report.stale_groups, report.stale_payload_groups) == (0, 0)
+    assert report.behavior_versions == {9: 1}
+
+
+def test_a_carried_group_ages_out_by_its_payloads_version_not_its_records():
+    s3 = FaultS3()
+    writer = GroupWriter(shard_buffer(s3, "s0"), "s0")
+    writer.write(group(0, 9, n=2), group_key="g0")
+    writer.write(group(1, 4, n=3), group_key="g1")  # 2 + 3 > 4: carried over
+    writer.write(group(2, 9, n=3), group_key="g2")
+    _claim_version(s3, "s0", 1, 9)
+    batch_reader = reader(trainer(s3, ("s0",)), group_size=4)
+    taken, report = batch_reader.take(0, 1, current_version=12)  # floor 4
+    assert [p for p, _ in taken] == [0] and report.carried_over_groups == 1
+    taken, report = batch_reader.take(1, 1, current_version=13)  # floor 5: the payload's version 4 is out
+    assert [p for p, _ in taken] == [2] and report.stale_groups == 1
+
+
+def test_a_payload_without_a_numeric_version_is_judged_by_its_record_alone():
+    assert bp.payload_oldest_version([{"index": 0}]) is None and bp.payload_oldest_version([]) is None
+    assert bp.payload_oldest_version(group(0, 3) + group(1, 5)) == 3
