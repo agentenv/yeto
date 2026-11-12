@@ -58,12 +58,14 @@ from typing import Any
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     PAYLOAD_SCHEMA,
     DamagedPayload,
+    DamagedPayloadLimit,
     GroupWriter,
     SampleBufferExhausted,
     SampleBufferRolloutError,
     decode_group,
     encode_group,
     group_entry_fields,
+    passed_over_text,
     payload_is_missing,
     payload_oldest_version,
 )
@@ -88,6 +90,10 @@ SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a s
 WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds without a new group while a round fills
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
+# reader: damaged payloads in a row (or, at least that many, over half of the payloads
+# a take decoded) at which the take raises instead of passing them over; 0: no limit
+MAX_DAMAGED_RUN_ENV = "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN"
+DEFAULT_MAX_DAMAGED_RUN = 8
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
 # Several sampler islands on one shared directory (a Modal Volume): each
 # sampler writes its own shard, the trainer merges these shards (comma list)
@@ -600,7 +606,16 @@ class BatchReader:
     (consumed, counted in ``TakeReport.damaged_payload_groups``, named in
     ``damaged_payloads``) and the round is filled from the groups after it. A
     read the store did not answer (a throttle, a 5xx, a timeout) is not: the take
-    raises it. A take that raises returned nothing, so the groups it selected are
+    raises it. Damage is passed over one object at a time only: ``max_damaged_run``
+    damaged payloads in a row, or that many and more than half of the payloads the
+    take decoded, is a systematic fault (a sampler build that writes another
+    schema, a reader that cannot decode), and the take raises
+    :class:`DamagedPayloadLimit` rather than consume the backlog (the tasks are
+    already settled in the dispenser and would never be generated again). A take
+    that ends without a round (the data ended, no group arrived in time) names what
+    it passed over in its error (``error.passed_over``, and the counts at the end
+    of its text, ``buffer_payload.passed_over_of``) and logs the records.
+    A take that raises returned nothing, so the groups it selected are
     kept (``_retry``) and the next take on this reader starts with them: taking
     again in place loses no group.
 
@@ -616,7 +631,8 @@ class BatchReader:
                  sleep: Callable[[float], None] = time.sleep,
                  cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
-                 incarnation_gate: Any = "auto", group_size: int | None = None) -> None:
+                 incarnation_gate: Any = "auto", group_size: int | None = None,
+                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -634,7 +650,9 @@ class BatchReader:
         A round that falls short selects more whole groups while they fit; the first
         that does not is carried over to the next take (the round's end, hence the
         watermark, stays before it); what is still missing is reported as
-        ``padded_samples`` (:func:`padding_samples` builds them). None: no check."""
+        ``padded_samples`` (:func:`padding_samples` builds them). None: no check.
+        ``max_damaged_run``: the damaged payloads at which a take raises (the class
+        doc); 0: no limit."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -675,6 +693,9 @@ class BatchReader:
         self._entry_of: dict[int, Any] = {}  # position -> index entry of the take's reads
         self._damaged: list[dict[str, Any]] = []  # the take's damaged payloads
         self._floor: int | None = None  # the take's age floor
+        self.max_damaged_run = int(max_damaged_run)
+        self._damaged_run = 0  # damaged payloads in a row, and the payloads decoded, of the take
+        self._decoded_payloads = 0
         # dispense positions (None without one) of the take's groups whose payload is
         # older than the floor although their index record is not
         self._stale_payloads: list[int | None] = []
@@ -707,7 +728,10 @@ class BatchReader:
         entry = self._entry_of.get(int(position))
         ref = getattr(entry, "payload_ref", None)
         try:
-            return decode_group(read.result())
+            group = decode_group(read.result())
+            self._damaged_run = 0
+            self._decoded_payloads += 1
+            return group
         except DamagedPayload as error:
             reason = str(error)
         except Exception as error:  # noqa: BLE001 - only a payload that is gone is passed over
@@ -718,7 +742,32 @@ class BatchReader:
         self._damaged.append({"position": int(position), "sample_id": getattr(entry, "sample_id", None),
                               "payload_ref": ref, "reason": reason,
                               **({} if dispensed is None else {"dispense_position": dispensed})})
+        self._damaged_run += 1
+        limit, damaged = self.max_damaged_run, len(self._damaged)
+        if limit > 0 and (self._damaged_run >= limit
+                          or (damaged >= limit and damaged > self._decoded_payloads)):
+            raise DamagedPayloadLimit(
+                f"{damaged} damaged payloads in this take ({self._damaged_run} in a row, "
+                f"{self._decoded_payloads} decoded), the last at buffer position {int(position)} "
+                f"({getattr(entry, 'sample_id', None)}: {reason}); this is not one damaged object: check the "
+                f"samplers' payload schema against this reader's ({PAYLOAD_SCHEMA}). Nothing was consumed; "
+                f"{MAX_DAMAGED_RUN_ENV} (now {limit}, 0: no limit) sets the bound")
         return None
+
+    def _ended(self, error: SampleBufferRolloutError, **counts: int) -> SampleBufferRolloutError:
+        """``error`` of a take that ends without a round, with what the take passed over:
+        the counts at the end of its text and in ``error.passed_over`` (with the
+        records), and one log line."""
+        counts = {**counts, "stale": counts.get("stale", 0) + len(self._stale_payloads),
+                  "stale_payload": len(self._stale_payloads), "nonfinite_reward": self._nonfinite,
+                  "damaged_payload": len(self._damaged)}
+        counts = {key: int(value) for key, value in counts.items() if value}
+        out = type(error)(f"{error}{passed_over_text(counts)}")
+        out.passed_over = {**counts, "damaged_payloads": list(self._damaged)}
+        if counts:
+            print(f"[sample-buffer] take ended without a round: {json.dumps(out.passed_over, sort_keys=True)}",
+                  flush=True)
+        return out
 
     def _stale_payload(self, position: int, group: Sequence[Mapping[str, Any]]) -> bool:
         """Whether the decoded payload is older than the take's age floor (its index
@@ -753,6 +802,7 @@ class BatchReader:
             raise ValueError("groups must be positive")
         carried_in = self._carry
         self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
+        self._damaged_run = self._decoded_payloads = 0
         try:
             return self._take(int(rollout_id), int(groups), current_version)
         except BaseException:
@@ -842,9 +892,10 @@ class BatchReader:
             if self.buffer.data_ended:
                 break
             if self.clock() - progress > self.wait_s:
-                raise SampleBufferRolloutError(
+                raise self._ended(SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"without a new group (buffer position {self._cursor()})")
+                    f"without a new group (buffer position {self._cursor()})"),
+                    stale=stale, stale_incarnation=fenced, quarantined=quarantined, dropped_small=dropped_small)
             self.sleep(self.poll_s)
         end = self._cursor()
         carried_out = padded = 0
@@ -867,11 +918,12 @@ class BatchReader:
         nonfinite = self._nonfinite
         damaged = list(self._damaged)
         if not out:
-            raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
-                                        f"with no trainable group (position {end}, {stale} passed "
-                                        f"over as too old, {fenced} from fenced incarnations, "
-                                        f"{dropped_small} too small, {nonfinite} without a finite reward, "
-                                        f"{len(damaged)} with a damaged payload)")
+            raise self._ended(SampleBufferExhausted(
+                f"rollout {rollout_id}: the sample buffer ended with no trainable group (position {end}, "
+                f"{stale} passed over as too old, {fenced} from fenced incarnations, {dropped_small} too "
+                f"small, {nonfinite} without a finite reward, {len(damaged)} with a damaged payload)"),
+                stale=stale - len(self._stale_payloads), stale_incarnation=fenced, quarantined=quarantined,
+                dropped_small=dropped_small)
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
             positions_of = getattr(self.buffer, "shard_positions", None)

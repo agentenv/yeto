@@ -393,3 +393,97 @@ def test_a_carried_group_ages_out_by_its_payloads_version_not_its_records():
 def test_a_payload_without_a_numeric_version_is_judged_by_its_record_alone():
     assert bp.payload_oldest_version([{"index": 0}]) is None and bp.payload_oldest_version([]) is None
     assert bp.payload_oldest_version(group(0, 3) + group(1, 5)) == 3
+
+
+# ------------------------------------------------------------------ damage that is not one object
+def _other_schema(s3: FaultS3, sample_ids) -> None:
+    for sample_id in sample_ids:
+        s3.put_json(f"{PAYLOADS}/{sample_id}.bin", {"schema": bp.PAYLOAD_SCHEMA + "-next", "samples": []})
+
+
+@pytest.mark.parametrize("group_size", [2, None, 4])
+def test_payloads_this_reader_cannot_decode_do_not_silently_consume_the_backlog(group_size):
+    """Every payload of a newer sampler build fails to decode here: a systematic
+    fault. The take stops loudly; the watermark stays, on this reader and after a restart."""
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 31)
+    _other_schema(s3, ids[:30])
+    batch_reader = reader(trainer(s3, ("s0",)), group_size=group_size)
+    for _ in range(2):  # taking again in place raises again: nothing was consumed
+        with pytest.raises(br.DamagedPayloadLimit, match="8 in a row"):
+            batch_reader.take(0, 1, current_version=1)
+    assert batch_reader.watermark_before(1) == 0
+    again = reader(trainer(s3, ("s0",)), group_size=group_size)
+    with pytest.raises(br.SampleBufferRolloutError, match="payload schema"):
+        again.take(0, 1, current_version=1)
+
+
+def test_damaged_payloads_spread_over_a_take_stop_it_once_they_are_most_of_what_it_read():
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 24)
+    _other_schema(s3, [sample_id for i, sample_id in enumerate(ids) if i % 3])  # never 8 in a row
+    with pytest.raises(br.DamagedPayloadLimit, match="8 damaged payloads"):
+        reader(trainer(s3, ("s0",))).take(0, 8, current_version=1)
+
+
+def test_fewer_damaged_payloads_than_the_limit_are_passed_over_and_the_limit_can_be_lifted():
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 12)
+    _other_schema(s3, ids[:7])
+    taken, report = reader(trainer(s3, ("s0",))).take(0, 1, current_version=1)
+    assert [p for p, _ in taken] == [7] and report.damaged_payload_groups == 7
+    _other_schema(s3, ids[7:11])
+    with pytest.raises(br.DamagedPayloadLimit):
+        reader(trainer(s3, ("s0",))).take(0, 1, current_version=1)
+    taken, report = reader(trainer(s3, ("s0",)), max_damaged_run=0).take(0, 1, current_version=1)
+    assert [p for p, _ in taken] == [11] and report.damaged_payload_groups == 11
+
+
+# ------------------------------------------------------------------ a take that ends without a round
+def test_a_take_that_ends_on_the_data_end_names_what_it_passed_over(capsys):
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 1, version=1) + _fill(s3, "s0", 2, start=1, version=9)
+    _damage(s3, ids[1], "missing")
+    _claim_version(s3, "s0", 2, 9)
+    key = f"{PAYLOADS}/{ids[2]}.bin"
+    s3.objects[key] = (bp.encode_group(group(2, 1)), s3.now)  # the record says 9, the payload 1
+    shard_buffer(s3, "s0").mark_data_end()
+    with pytest.raises(br.SampleBufferExhausted) as failure:
+        reader(trainer(s3, ("s0",))).take(0, 1, current_version=12)
+    counts = {"stale": 2, "stale_payload": 1, "damaged_payload": 1}
+    assert bp.passed_over_of(str(failure.value)) == counts
+    assert failure.value.passed_over["damaged_payloads"][0]["sample_id"] == ids[1]
+    assert "take ended without a round" in capsys.readouterr().out
+    assert bp.data_end_kind(failure.value) == "buffer_exhausted"
+
+
+def test_a_take_that_waited_in_vain_names_what_it_passed_over():
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 2)
+    _damage(s3, ids[0], "truncated")
+    s3.objects[f"{PAYLOADS}/{ids[1]}.bin"] = (bp.encode_group(group(1, reward=float("nan"))), s3.now)
+    batch_reader = reader(trainer(s3, ("s0",)))
+    clock = iter(range(0, 10_000, 10))
+    batch_reader.clock = lambda: next(clock)
+    with pytest.raises(br.SampleBufferRolloutError, match="without a new group") as failure:
+        batch_reader.take(0, 1, current_version=1)
+    assert not isinstance(failure.value, br.SampleBufferExhausted)
+    assert bp.passed_over_of(str(failure.value)) == {"damaged_payload": 1, "nonfinite_reward": 1}
+
+
+def test_an_error_text_without_the_mark_names_nothing_passed_over():
+    assert bp.passed_over_of("rollout 3: the sample buffer ended") is None
+    assert bp.passed_over_text({"stale": 0}) == ""
+    assert bp.passed_over_of("Wrapped(x" + bp.passed_over_text({"stale": 2}) + ") tail") == {"stale": 2}
+
+
+def test_driver_tapes_what_the_last_take_passed_over_with_the_buffer_exhausted_event(tmp_path):
+    from tests.test_rl_policy_age import _driver
+
+    driver = _driver(tmp_path, 1)
+    driver._emit_data_end(3, br.SampleBufferExhausted("the sample buffer ended" + bp.passed_over_text({"stale": 2})))
+    driver._emit_data_end(4, br.SampleBufferExhausted("the sample buffer ended"))
+    driver.tape.close() if hasattr(getattr(driver, "tape", None), "close") else None
+    events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
+    ended = [e for e in events if e["event"] == "rl_buffer_exhausted"]
+    assert [e.get("passed_over") for e in ended] == [{"stale": 2}, None]

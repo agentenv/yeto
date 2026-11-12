@@ -57,6 +57,36 @@ class DamagedPayload(SampleBufferRolloutError):
     it; a read that failed (the store did not answer) is never this error."""
 
 
+class DamagedPayloadLimit(SampleBufferRolloutError):
+    """Too many damaged payloads in one take: a fault of the reader or of a whole
+    sampler build (another payload schema), not of one object. The take stops
+    instead of consuming the backlog group by group; nothing it selected counts as
+    consumed."""
+
+
+# a take that ends without a round (the data ended, no group arrived in time) names
+# what it passed over at the end of its error text, after this mark, as one JSON object
+PASSED_OVER_MARK = "; passed over "
+
+
+def passed_over_text(counts: Mapping[str, int]) -> str:
+    """The tail of such an error's text ("" when nothing was passed over)."""
+    counts = {key: int(value) for key, value in counts.items() if value}
+    return PASSED_OVER_MARK + json.dumps(counts, sort_keys=True) if counts else ""
+
+
+def passed_over_of(text: str) -> dict[str, int] | None:
+    """The counts :func:`passed_over_text` put into an error's text (None: none)."""
+    _, mark, tail = str(text).rpartition(PASSED_OVER_MARK)
+    if not mark:
+        return None
+    try:
+        counts, _end = json.JSONDecoder().raw_decode(tail)
+    except ValueError:
+        return None
+    return {str(k): int(v) for k, v in counts.items()} if isinstance(counts, dict) else None
+
+
 class SampleBufferExhausted(SampleBufferRolloutError):
     """The samplers ended the buffer and no trainable group is left for the round
     The trainer's run ends normally (FINISHED) before this round; it

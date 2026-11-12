@@ -32,6 +32,8 @@ from .buffer_rollout import (
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
     INCARNATION_ENV,
+    DEFAULT_MAX_DAMAGED_RUN,
+    MAX_DAMAGED_RUN_ENV,
     MAX_POLICY_AGE_ENV,
     POLL_ENV,
     SAMPLER_ID_ENV,
@@ -217,7 +219,8 @@ class _BufferRound:
             max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)),
-            group_size=self.samples_per_group)
+            group_size=self.samples_per_group,
+            max_damaged_run=int(os.environ.get(MAX_DAMAGED_RUN_ENV) or DEFAULT_MAX_DAMAGED_RUN))
         register_reader(self.reader)
         self._tokenizer: Any = None
 

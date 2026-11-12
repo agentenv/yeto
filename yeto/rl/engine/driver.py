@@ -82,7 +82,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec
-from .buffer_payload import data_end_kind
+from .buffer_payload import data_end_kind, passed_over_of
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -2840,7 +2840,10 @@ class IslandDriver:
         kind = data_end_kind(error)
         text = f"{type(error).__name__}: {error}"
         if kind == "buffer_exhausted":
-            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text)
+            # what the reader's last take passed over (it returned no round to report them)
+            passed_over = passed_over_of(text)
+            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text,
+                      **({"passed_over": passed_over} if passed_over else {}))
         else:
             self.emit("rl_data_ended", rollout_id=rollout_id, source=kind, error=text)
         end = getattr(self.sync, "end_on_data", None)
