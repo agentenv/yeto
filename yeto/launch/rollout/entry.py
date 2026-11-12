@@ -113,6 +113,12 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
     if billed and not alive:
         out["warning"] = (f"{len(billed)} island(s) bill with no pool loop alive: "
                           f"python -m yeto.launch.nc pool-stop --config {ref.config}")
+    attention = pool_run.account_attention(cfg)
+    if attention:  # halted accounts, unconfirmed deletes, orders without an outcome (the NC ledger)
+        out["accounts_attention"] = attention
+        kinds = sorted({str(a.get("kind")) for a in attention})
+        note = f"{len(attention)} account matter(s) need an operator ({', '.join(kinds)}): see accounts_attention"
+        out["warning"] = f"{out['warning']}; {note}" if out.get("warning") else note
     return out
 
 

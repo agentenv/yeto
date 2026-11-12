@@ -1087,6 +1087,53 @@ def check_state_file(cfg: dict[str, Any]) -> None:
         check_state_format(doc, state)
 
 
+def account_attention(cfg: dict[str, Any], *, book: Any = None) -> list[dict[str, Any]]:
+    """What an operator must look at on the pool's National Compute accounts, from the
+    ticket ledger (read only, no call to National Compute): a halted account, a delete not
+    confirmed yet, an order without a recorded outcome whose call is over (the account may
+    hold a ticket no ledger row knows). [] for another provider."""
+    if not is_national_compute(cfg):
+        return []
+    try:
+        book = book if book is not None else cli.ledger()
+        accounts = [int(a) for a in cfg.get("accounts") or ()]
+    except Exception as error:  # noqa: BLE001 - reported, never fatal to a status
+        return [{"kind": "ledger_unreadable", "error": repr(error)[:300]}]
+    out: list[dict[str, Any]] = []
+    for account in accounts:
+        try:
+            halt, delete = book.halted(account), book.pending_delete(account)
+            orders = book.pending_orders(account, in_flight=False)
+        except Exception as error:  # noqa: BLE001
+            out.append({"kind": "ledger_unreadable", "account": account, "error": repr(error)[:300]})
+            continue
+        if halt is not None:
+            out.append({"kind": "halted", "account": account, "reason": halt.get("halt"),
+                        "since": _until(halt.get("halted_at")), "expected_ticket": halt.get("expected_ticket"),
+                        "released_ticket": halt.get("released_ticket"),
+                        "action": f"check the account, then: python -m yeto.launch.nc clear-halt --account "
+                                  f"{account} --yes (the pool orders and releases nothing on it until then)"})
+        if delete is not None:
+            out.append({"kind": "delete_unconfirmed", "account": account, "ticket": delete.get("pending_delete"),
+                        "sent": _until(delete.get("sent_at")), "attempts": delete.get("attempts"),
+                        "action": "no other write on the account until that ticket reads ended"})
+        for row in orders:
+            out.append({"kind": "order_without_outcome", "account": account,
+                        "since": _until(row.get("since") or row.get("created_at")),
+                        "observed_ticket": row.get("observed_ticket"),
+                        "action": "an order was sent and its outcome never recorded: the account may hold a "
+                                  "billed ticket no ledger row knows; check it (python -m yeto.launch.nc status "
+                                  f"--account {account})"})
+    return out
+
+
+def print_attention(notes: list[dict[str, Any]]) -> None:
+    for note in notes:
+        what = " ".join(f"{k}={v}" for k, v in note.items() if k not in ("kind", "action") and v is not None)
+        print(f"ATTENTION: {str(note.get('kind')).upper()}: {what}" + (f" -> {note['action']}" if note.get("action")
+                                                                       else ""), file=sys.stderr)
+
+
 def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> int:
     check_state_file(cfg)
     state = cli.pool_state_path(cfg)
@@ -1112,10 +1159,13 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
               "paused": list((scale or {}).get("paused") or []),
               "hold_tasks": list((scale or {}).get("hold_tasks") or []),
               "released_by_hand": sorted((scale or {}).get("manual_released") or {})}
+    attention = account_attention(cfg)
     print(json.dumps({"process": proc, "target": target, "nodes": len(left),
-                      "samplers": f"{len(left)}/{target}", "manual": manual, "scale": scale, "billed": billed,
+                      "samplers": f"{len(left)}/{target}", "accounts_attention": attention,
+                      "manual": manual, "scale": scale, "billed": billed,
                       "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
+    print_attention(attention)
     if left and (proc is None or not proc.get("alive")):
         _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
                                      national=is_national_compute(cfg), kind=provider_kind(cfg)))

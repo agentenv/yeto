@@ -357,6 +357,13 @@ class NcSshOps:
     def run_tickets(self) -> list[tuple[int, str]]:
         return self.provider.run_tickets()
 
+    def slot_halt(self, account: Any) -> dict[str, Any] | None:
+        """The ledger's halt of a National Compute account (None: not halted, or not NC)."""
+        book = getattr(self.provider, "ledger", None)
+        if not isinstance(self.provider, NCProvider) or book is None:
+            return None
+        return book.halted(int(account))
+
     def released_by_us(self, ticket: str) -> bool:
         """The ticket ledger says this tool deleted ``ticket`` (an earlier pool instance)."""
         try:

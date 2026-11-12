@@ -541,6 +541,19 @@ one SSH round trip. Then it acts:
   is retired and its shard continued (stop request), or the sampler is
   restarted in place like a crashed one. If the store does not read, nothing
   is decided (`exit_evidence_unreadable`) until it does.
+- **A halted account.** When a delete of this tool released, or may have
+  released, a ticket that is not its own, the ticket ledger halts the account:
+  every order and delete on it is refused until an operator runs
+  `python -m yeto.launch.nc clear-halt --account N --yes`. The pool leaves a
+  halted account out (`slot_halted`, once) and orders on the other accounts;
+  a refusal by the guard is not a provisioning failure and never opens the
+  breaker. A member on a halted account is kept as it is, still billed
+  (`release_blocked`); the pool releases it once the halt is lifted. With
+  fewer usable accounts than the target it sends `slots_below_target`
+  (critical): the pool runs short and a node at its lease end has no account
+  for its replacement. `pool-status` and `yeto run status` list halted
+  accounts, deletes not confirmed yet and orders without a recorded outcome
+  under `accounts_attention` (and as `ATTENTION:` lines).
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
 - **Only its own tickets.** The pool and the CLI delete, stop and reach a
