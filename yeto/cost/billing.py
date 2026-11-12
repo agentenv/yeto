@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -323,10 +323,26 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
     priced_runs = {str(r.attrs.get("run")) for r in resources if _pool_call_rate(r) is not None}
     rollout_apps = [r for r in apps if r.attrs.get("role") == "rollout" and str(r.attrs.get("run")) in priced_runs]
     rollout_keys = {r.key for r in rollout_apps}
-    covered_until: dict[str, float] = {}
-    for r in rollout_apps:
-        run = str(r.attrs.get("run"))
-        covered_until[run] = max(covered_until.get(run, 0.0), _billed_until(r, rows, now))
+    # a call's own app: the run's newest rollout app deployed before the call started
+    app_billed = sorted((r.created_at, str(r.attrs.get("run")), _billed_until(r, rows, now)) for r in rollout_apps)
+
+    def covered_until(c: Resource) -> float:
+        run, until = str(c.attrs.get("run")), 0.0
+        for created, app_run, billed in app_billed:
+            if app_run == run and created <= c.created_at:
+                until = billed
+        return until
+
+    # a respawn on the same ticket cancels the call before it: that call ends where the next starts
+    next_start: dict[str, float] = {}
+    by_ticket: dict[tuple[str, str], list[Resource]] = {}
+    for r in resources:
+        if _pool_call_rate(r) is not None and r.attrs.get("ticket"):
+            by_ticket.setdefault((str(r.attrs.get("run")), str(r.attrs["ticket"])), []).append(r)
+    for calls in by_ticket.values():
+        calls.sort(key=lambda c: c.created_at)
+        for a, b in zip(calls, calls[1:]):
+            next_start[a.key] = b.created_at
     items: list[ItemCost] = []
     for r in resources:
         if r.kind == "modal_app":
@@ -335,7 +351,9 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
             else:
                 items.append(_modal_app_cost(r, rows, now, rates, tail_by_calls=r.key in rollout_keys))
         elif _pool_call_rate(r) is not None:
-            start = max(r.created_at, covered_until.get(str(r.attrs.get("run")), 0.0))
+            start = max(r.created_at, covered_until(r))
+            if r.key in next_start and (r.released_at is None or r.released_at > next_start[r.key]):
+                r = replace(r, released_at=next_start[r.key])
             items.append(_span_cost(r, start, now, _pool_call_rate(r),
                                     "sampler pool call: estimate after its app's newest billed hour"))
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)

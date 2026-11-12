@@ -454,3 +454,9 @@ def test_a_modal_pools_spend_uses_its_provider_price_not_the_nc_rate(make_run, t
     _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": now - 3600}])
     assert run.node_usd_per_h() == pytest.approx(68.0)
     assert run.spend_usd() == pytest.approx(68.0)
+
+
+def test_an_nc_pool_keeps_the_nc_rate_even_with_a_price_in_its_provider(make_run, tmp_path, monkeypatch):
+    run = make_run(nc_usd_per_h=24)
+    up.Path(run.pool_config).write_text(json.dumps({"shard_base": "s", "provider": {"kind": "nc", "price_usd_h": 3}}))
+    assert run.node_usd_per_h() == pytest.approx(24.0)

@@ -776,3 +776,30 @@ def test_the_guard_stops_on_a_modal_sampler_pool_before_its_billing_arrives(tmp_
                   force_stop=lambda why: None, clock=clock, log=lambda m: None, start=T0)
     g.tick()
     assert stops and "budget" in stops[0]
+
+
+def test_a_respawned_pool_call_stops_counting_when_its_ticket_starts_the_next(tmp_path):
+    # a restart on the same ticket cancels the old call; it must not keep accruing next to the new one
+    p = tmp_path / "r.jsonl"
+    ledger_at(p, T0).created("modal_app", "ap-roll", "yeto-rollout-rp", role="rollout", run="rp")
+    ledger_at(p, T0).created("modal_call", "fc-1", "rollout_sampler", ticket="t1", run="rp",
+                             pool=True, usd_per_hour=68.0)
+    ledger_at(p, T0 + H).created("modal_call", "fc-2", "rollout_sampler", ticket="t1", run="rp",
+                                 pool=True, usd_per_hour=68.0)
+    s = resource_costs(ResourceLedger(p).resources(), T0 + 3 * H, billing=ModalBilling(lambda s, e: []))
+    assert s.total_usd == pytest.approx(3 * 68.0)
+
+
+def test_pool_calls_of_an_earlier_app_count_from_their_own_apps_billing(tmp_path):
+    # the run redeployed its rollout app; the old app's calls after its billed hour still count
+    p = tmp_path / "r.jsonl"
+    ledger_at(p, T0).created("modal_app", "ap-old", "yeto-rollout-rp", role="rollout", run="rp")
+    ledger_at(p, T0).created("modal_call", "fc-1", "rollout_sampler", ticket="t1", run="rp",
+                             pool=True, usd_per_hour=68.0)
+    ledger_at(p, T0 + 3 * H).released("modal_call", "fc-1", "rollout_sampler")
+    ledger_at(p, T0 + 4 * H).created("modal_app", "ap-new", "yeto-rollout-rp", role="rollout", run="rp")
+    ledger_at(p, T0 + 4 * H).created("modal_call", "fc-2", "rollout_sampler", ticket="t2", run="rp",
+                                     pool=True, usd_per_hour=68.0)
+    rows = [BillingRow("ap-old", "yeto-rollout-rp", T0, 68.0)]
+    s = resource_costs(ResourceLedger(p).resources(), T0 + 5 * H, billing=ModalBilling(lambda s, e: rows))
+    assert s.total_usd == pytest.approx(68.0 + 2 * 68.0 + 68.0)

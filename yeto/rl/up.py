@@ -456,7 +456,9 @@ class Run:
             try:
                 from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
 
-                price = pool_price(self.pools[i].load())[0]
+                price, currency = pool_price(self.pools[i].load())
+                if currency == "ucr":  # National Compute: its rate stays budget.nc_usd_per_h
+                    price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
                 price = None
         return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
