@@ -82,7 +82,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec
-from .buffer_payload import data_end_kind
+from .buffer_payload import data_end_kind, passed_over_of
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -476,6 +476,15 @@ BUFFER_FILL_FIELDS = {"buffer_incomplete_groups": "incomplete_groups",
                       "buffer_dropped_small_groups": "dropped_small_groups",
                       "buffer_carried_over_groups": "carried_over_groups",
                       "buffer_padded_samples": "padded_samples"}
+
+
+def _damaged_payloads(batch: Any) -> dict[str, Any] | None:
+    """The fields of ``rl_buffer_damaged_payload_skipped`` for a round whose reader
+    passed over groups with a missing or undecodable payload (None: it did not)."""
+    count = getattr(batch, "buffer_damaged_payload_groups", None)
+    if not count:
+        return None
+    return {"damaged_groups": int(count), "payloads": list(getattr(batch, "buffer_damaged_payloads", None) or ())}
 
 
 def _buffer_fill(batch: Any) -> dict[str, int]:
@@ -1427,6 +1436,8 @@ class IslandDriver:
                       # The dispenser positions of those groups (row runs)
                       **({"stale_positions": positions} if positions else {}),
                       **_buffer_fill(batch))
+        if (damaged := _damaged_payloads(batch)) is not None:
+            self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
         unidentified = getattr(batch, "buffer_unidentified_groups", None)
         if unidentified:
             # Consumed untrained by the reader of a trainer that resumed behind its
@@ -1548,6 +1559,8 @@ class IslandDriver:
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
                       stale_groups=int(stale), max_policy_age=self._max_policy_age(),
                       **_buffer_fill(batch))
+        if (damaged := _damaged_payloads(batch)) is not None:
+            self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             raise PolicyIdentityError(
@@ -2930,7 +2943,10 @@ class IslandDriver:
         kind = data_end_kind(error)
         text = f"{type(error).__name__}: {error}"
         if kind == "buffer_exhausted":
-            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text)
+            # what the reader's last take passed over (it returned no round to report them)
+            passed_over = passed_over_of(text)
+            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text,
+                      **({"passed_over": passed_over} if passed_over else {}))
         else:
             self.emit("rl_data_ended", rollout_id=rollout_id, source=kind, error=text)
         end = getattr(self.sync, "end_on_data", None)

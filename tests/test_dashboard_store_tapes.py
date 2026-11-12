@@ -185,3 +185,151 @@ def test_engine_sampler_upload_off(tmp_path, ports_v1_pin, monkeypatch):
     monkeypatch.setenv("YETO_RL_TAPE_UPLOAD_S", "0")
     assert entry.run(_sampler_spec(tmp_path), resource_sampler=lambda emit: None) == 2
     assert DirectoryObjectStore(tmp_path / "store").list("tapes/") == []
+
+
+# ------------------------------------------------------------ request budget
+class _PagedTapes:
+    """An object store with S3's listing: sorted keys, ``limit`` a request;
+    ``lists`` / ``reads`` count the requests."""
+
+    def __init__(self, paged=True):
+        self.data: dict[str, bytes] = {}
+        self.lists = self.reads = 0
+        if not paged:
+            self.list_page = None
+
+    def add(self, island, inc, seq, *records):
+        self.data[chunk_key(island, inc, seq)] = "".join(json.dumps(r) + "\n" for r in records).encode()
+
+    def read(self, key):
+        self.reads += 1
+        return self.data.get(key)
+
+    def list(self, prefix, *, start_after=""):
+        self.lists += max(1, -(-sum(1 for k in self.data if k.startswith(prefix)) // 1000))
+        return sorted(k for k in self.data if k.startswith(prefix) and k > start_after)
+
+    def list_page(self, prefix, *, start_after="", limit=1000):
+        self.lists += 1
+        keys = sorted(k for k in self.data if k.startswith(prefix) and k > start_after)
+        return keys[:limit], (keys[limit - 1] if len(keys) > limit else None)
+
+
+class _Feed:
+    """A reducer that records what it is fed (the real one's offset rule)."""
+
+    def __init__(self):
+        self.records, self.offsets = [], {}
+
+    def feed(self, rec, *, source, offset):
+        if offset <= self.offsets.get(source, -1):
+            return False
+        self.offsets[source] = offset
+        self.records.append((source, offset, rec))
+        return True
+
+
+def test_a_poll_lists_from_each_tape_last_chunk_not_the_whole_prefix():
+    """A day of a 16-sampler run: 2880 chunks an island. main listed all of tapes/
+    on every poll (one request per 1000 keys, growing for as long as the run)."""
+    objects = _PagedTapes()
+    islands = [f"nc-s{i:02d}" for i in range(16)] + ["trainer"]
+    for island in islands:
+        for seq in range(2880):
+            objects.data[chunk_key(island, "inc1", seq)] = b""
+    objects.add("nc-s03", "inc0", 0, _round("nc-s03", 0, T0))  # a short-lived earlier incarnation
+    tapes, feed = StoreTapes(objects), _Feed()
+    tapes.pump(feed)
+    assert objects.lists == 17 * 2880 // 1000 + 1 and objects.reads == 17 * 2880 + 1  # the first poll reads everything
+    objects.lists = objects.reads = 0
+    assert tapes.pump(feed) == 0
+    assert objects.lists == 17 + 1 and objects.reads == 0  # one jump per long tape; the short one rides along
+    # every island adds a chunk, a node is replaced (new incarnation) and a new island joins
+    for island in islands:
+        objects.add(island, "inc1", 2880, _round(island, 2880, T0))
+    objects.add("nc-s05", "inc2", 0, _round("nc-s05", 0, T0 + 1))
+    objects.add("nc-s99", "a", 0, _round("nc-s99", 0, T0 + 2))
+    objects.lists = objects.reads = 0
+    assert tapes.pump(feed) == 19
+    assert objects.lists == 17 + 1 and objects.reads == 19
+    assert {"store:nc-s05/inc2", "store:nc-s99/a", "store:trainer/inc1"} <= tapes.sources
+    assert len(tapes.cursors) == 20 and tapes.requests == 49 + 18 + 18
+    assert tapes.pump(feed) == 0
+
+
+def test_incremental_listing_feeds_what_a_full_listing_feeds_on_random_uploads():
+    import random
+
+    for seed in range(8):
+        rng = random.Random(seed)
+        paged, plain = _PagedTapes(), _PagedTapes(paged=False)
+        plain.data = paged.data
+        readers = [(StoreTapes(paged, page_keys=rng.choice([1, 2, 5, 50])), _Feed()), (StoreTapes(plain), _Feed())]
+        next_seq: dict[tuple[str, str], int] = {}
+        for step in range(300):
+            tape = (f"s{rng.randrange(5)}", f"i{rng.randrange(3)}")
+            if rng.random() < 0.7:
+                seq = next_seq.get(tape, 0)
+                next_seq[tape] = seq + 1
+                paged.add(*tape, seq, {"event": "x", "tape": tape, "seq": seq}, {"event": "y", "seq": seq})
+            if rng.random() < 0.05:
+                paged.data[f"tapes/stray-{step}.txt"] = b"not a chunk"
+                paged.data[f"tapes/s0/i0/deep/{step:08d}.jsonl"] = b"{}\n"
+            if rng.random() < 0.4:
+                assert len({tapes.pump(feed) for tapes, feed in readers}) == 1
+        for tapes, feed in readers:
+            tapes.pump(feed)
+        assert readers[0][1].records == readers[1][1].records and len(readers[0][1].records) == 2 * sum(next_seq.values())
+        assert readers[0][0].sources == readers[1][0].sources and readers[0][0].errors == 0
+
+
+def test_a_failed_chunk_read_is_listed_again_from_the_tape_cursor():
+    objects = _PagedTapes()
+    for seq in range(4):
+        objects.add("s1", "a", seq, _round("s1", seq, T0 + 30 * seq))
+    read, fail = objects.read, {chunk_key("s1", "a", 2)}
+
+    def flaky(key):
+        if key in fail:
+            fail.clear()
+            raise OSError("timeout")
+        return read(key)
+
+    objects.read = flaky
+    tapes, feed = StoreTapes(objects, page_keys=2), _Feed()
+    assert tapes.pump(feed) == 2 and tapes.errors == 1  # chunks 0 and 1; chunk 3 waits for chunk 2
+    assert tapes.cursors == {"tapes/s1/a/": chunk_key("s1", "a", 1)}
+    assert tapes.pump(feed) == 2 and tapes.cursors == {"tapes/s1/a/": chunk_key("s1", "a", 3)}
+    assert [rec["rollout_id"] for _s, _o, rec in feed.records] == [0, 1, 2, 3]
+
+
+def test_store_polls_are_spaced_by_the_store_interval():
+    objects = _PagedTapes()
+    objects.add("s1", "a", 0, _round("s1", 0, T0))
+    now = [100.0]
+    tapes, feed = StoreTapes(objects, interval_s=10.0, clock=lambda: now[0]), _Feed()
+    assert tapes.pump(feed) == 1 and objects.lists == 1
+    objects.add("s1", "a", 1, _round("s1", 1, T0 + 30))
+    now[0] += 2.0
+    assert tapes.pump(feed) == 0 and objects.lists == 1  # the page polls every 2 s; the store is not asked
+    now[0] += 8.0
+    assert tapes.pump(feed) == 1 and objects.lists == 2
+
+
+def test_directory_and_s3_stores_page_a_listing_the_same_way(tmp_path):
+    from tests.test_rl_object_store import URI, FakeS3
+    from yeto.cloud import s3_store
+
+    class Paged(FakeS3):
+        def list_objects_v2(self, Bucket, Prefix, MaxKeys, StartAfter=""):  # noqa: N803
+            keys = sorted(k for b, k in self.objects if b == Bucket and k.startswith(Prefix) and k > StartAfter)
+            return {"Contents": [{"Key": k} for k in keys[:MaxKeys]], "IsTruncated": len(keys) > MaxKeys}
+
+    for store in (DirectoryObjectStore(tmp_path / "dir"), s3_store.S3ObjectStore(URI, client=Paged())):
+        for seq in range(5):
+            store.write(chunk_key("s1", "a", seq), b"{}\n")
+        first, after = store.list_page("tapes/", limit=2)
+        assert first == [chunk_key("s1", "a", 0), chunk_key("s1", "a", 1)] and after == first[-1]
+        assert store.list_page("tapes/", start_after=chunk_key("s1", "a", 2), limit=2) == (
+            [chunk_key("s1", "a", 3), chunk_key("s1", "a", 4)], None)
+        assert store.list_page("tapes/", start_after=chunk_key("s1", "a", 4)) == ([], None)

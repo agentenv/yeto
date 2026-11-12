@@ -71,8 +71,17 @@ Rules:
   ``drained/<holder>`` with the request's ``seq`` (the pool then fences and
   releases it, so nothing is lost and nothing is given out twice). The request
   key shows up in the scan's listing: no extra request while none is set;
-* request budget: one listing per scan, at most one scan per ``scan_s`` while
-  nothing could be claimed (backing off to ``max_scan_s``).
+* request budget: at most one scan per ``scan_s`` while nothing could be claimed
+  (backing off to ``max_scan_s``). A settled slot never changes again, so a scan
+  lists only the slots it has not seen settled (:meth:`StoreLedger.scan`): four
+  short range listings (``done/``, ``beats/``, ``claims/``, ``fail/`` from the
+  oldest unsettled slot on) plus ``retired/`` and one read of its drain request,
+  whatever the size of the ledger; a process's first scan lists ``done/`` whole.
+  A lease renewal is one write per held slot; whether another sampler took the
+  slot over is read from the scans, and checked by the renewal itself only every
+  :data:`SUPERSEDED_CHECK_EVERY`-th time (three existence checks). A beat on a
+  superseded attempt changes nothing: only the latest attempt's beat counts, and
+  the group write is gated by :meth:`StoreDispensedPrompts.still_holds`.
 
 This is the reference implementation of the WorkContract
 (:mod:`yeto.rl.engine.work_contract`; conformance cases in
@@ -119,6 +128,13 @@ DEFAULT_MAX_REDO = 2
 DEFAULT_SCAN_S = 30.0
 DEFAULT_MAX_SCAN_S = 120.0
 CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
+# A scan lists two unsettled slots in one range when at most this many settled slots
+# lie between them: reading past them (about 3 keys a slot, 1000 keys a request) costs
+# less than the four requests of a range of its own.
+SCAN_MERGE_SLOTS = 1024
+SCAN_DIRS = ("beats", "claims", "fail")  # listed per range after done/ (TaskState's other fields)
+FULL_SCAN_ENV = "YETO_RL_DISPENSE_FULL_SCAN"  # 1: every scan lists the whole namespace (as before)
+SUPERSEDED_CHECK_EVERY = 3  # lease renewals per superseded check of a held slot (about one per lease)
 LEASE_KEY = "dispense_lease_s"  # row metadata: this task's lease
 ATTEMPT_KEY = "dispense_attempt"  # item metadata: the attempt this sampler holds
 COUNTED = ("infra", "expired")  # attempt endings that count toward max_redo
@@ -201,14 +217,18 @@ class DirObjects:
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
 
-    def list_meta(self, prefix: str) -> tuple[list[tuple[str, float]], float]:
+    def list_meta(self, prefix: str, *, start_after: str = "",
+                  end: str = "") -> tuple[list[tuple[str, float]], float]:
         base = self._path(prefix)
         out = []
         if base.exists():
             for path in base.rglob("*"):
                 if path.is_file() and not path.name.startswith("."):
+                    key = path.relative_to(self.root).as_posix()
+                    if key <= start_after or (end and key >= end):
+                        continue
                     try:
-                        out.append((path.relative_to(self.root).as_posix(), path.stat().st_mtime))
+                        out.append((key, path.stat().st_mtime))
                     except FileNotFoundError:
                         continue
         return out, time.time()
@@ -386,6 +406,109 @@ def parse_ledger(keys: Iterable[tuple[str, float]], namespace: str) -> dict[int,
     return states
 
 
+def lists_ranges(objects: Any) -> bool:
+    """``objects.list_meta`` takes ``start_after`` / ``end`` (a range of a prefix)."""
+    import inspect  # noqa: PLC0415
+
+    try:
+        params = inspect.signature(objects.list_meta).parameters
+    except (TypeError, ValueError):
+        return False
+    return "start_after" in params and "end" in params
+
+
+def scan_ranges(open_slots: Sequence[int], top: int,
+                merge: int | None = None) -> list[tuple[int, int | None]]:
+    """The slot ranges ``[lo, hi)`` a scan lists: every slot of ``open_slots`` (the
+    slots below ``top`` not seen settled, ascending) and every slot from ``top`` on
+    (``hi`` None: no upper bound). Neighbours at most ``merge`` slots apart share a
+    range (``merge``: :data:`SCAN_MERGE_SLOTS`)."""
+    merge = SCAN_MERGE_SLOTS if merge is None else int(merge)
+    out: list[tuple[int, int | None]] = []
+    lo = last = None
+    for p in open_slots:
+        if lo is None:
+            lo = last = p
+        elif p - last <= merge:
+            last = p
+        else:
+            out.append((lo, last + 1))
+            lo = last = p
+    if lo is not None and top - last <= merge:
+        return [*out, (lo, None)]
+    if lo is not None:
+        out.append((lo, last + 1))
+    return [*out, (int(top), None)]
+
+
+def list_slots(objects: Any, namespace: str, directory: str,
+               ranges: Sequence[tuple[int, int | None]]) -> tuple[list[tuple[str, float]], float]:
+    """The keys of ``<namespace>/<directory>/`` of the slots in ``ranges`` and the
+    newest server time of the listings. A slot's keys start with its zero-padded
+    number (``_pkey``), so a slot range is a key range."""
+    head = f"{namespace.strip('/')}/{directory}/"
+    keys: list[tuple[str, float]] = []
+    now = 0.0
+    for lo, hi in ranges:
+        got, stamp = objects.list_meta(head, start_after=head + _pkey(lo) if lo > 0 else "",
+                                       end="" if hi is None else head + _pkey(hi))
+        keys += got
+        now = max(now, float(stamp))
+    return keys, now
+
+
+class SettledSlots:
+    """The slots a reader has seen settled. A ``done/`` key is never deleted, so
+    such a slot needs no further listing. ``floor``: every slot below it is
+    settled (their kinds are dropped: memory stays with the unsettled window)."""
+
+    def __init__(self, limit: int | None = None) -> None:
+        self.limit = limit
+        self.floor = 0
+        self.above: dict[int, str] = {}  # settled slots >= floor -> kind
+        self.top = -1  # the highest settled slot
+
+    def __contains__(self, slot: object) -> bool:
+        return isinstance(slot, int) and (0 <= slot < self.floor or slot in self.above)
+
+    def __len__(self) -> int:
+        return self.floor + len(self.above)
+
+    def add(self, slot: int, kind: str) -> None:
+        if slot < self.floor or (self.limit is not None and slot >= self.limit):
+            return
+        self.above[slot] = kind
+        self.top = max(self.top, slot)
+        while self.floor in self.above:
+            del self.above[self.floor]
+            self.floor += 1
+
+    def open_below_top(self) -> list[int]:
+        return [p for p in range(self.floor, self.top + 1) if p not in self.above]
+
+    def ranges(self) -> list[tuple[int, int | None]]:
+        return scan_ranges(self.open_below_top(), self.top + 1)
+
+
+def scan_slots(objects: Any, namespace: str, settled: SettledSlots, *,
+               dirs: Sequence[str] = SCAN_DIRS) -> tuple[list[tuple[str, float]], float]:
+    """The ledger keys of every slot not in ``settled`` (and of settled ones that
+    share a range with them), as range listings: ``done/`` first (new settlements
+    go into ``settled`` and leave the ranges), then ``dirs``. Each slot's keys are
+    listed in one fixed order, ``done/`` before ``fail/`` as in a listing of the
+    whole namespace."""
+    ns = namespace.strip("/")
+    keys, now = list_slots(objects, ns, "done", settled.ranges())
+    for slot, state in parse_ledger(keys, ns).items():
+        if state.done is not None:
+            settled.add(slot, state.done)
+    for directory in dirs:
+        got, stamp = list_slots(objects, ns, directory, settled.ranges())
+        keys += got
+        now = max(now, stamp)
+    return keys, now
+
+
 # -------------------------------------------------------------------- holdout
 
 
@@ -438,7 +561,8 @@ class StoreLedger:
                  incarnation: str, seed: int = 0, passes: int = 1, lease_s: float = DEFAULT_LEASE_S,
                  max_redo: int = DEFAULT_MAX_REDO, holdout_sha256: str | None = None,
                  leases: Sequence[float | None] | None = None, slots: SlotMap | None = None,
-                 lease_of_holder: Callable[[str], str | None] | None = None) -> None:
+                 lease_of_holder: Callable[[str], str | None] | None = None,
+                 full_scan: bool | None = None) -> None:
         if int(passes) < 1:
             raise ValueError("passes must be >= 1")
         self.objects = objects
@@ -456,6 +580,11 @@ class StoreLedger:
         self._bodies: dict[tuple[int, int], dict[str, Any]] = {}  # claim bodies (immutable)
         self.drain_seq: str | None = None  # an open drain request for this holder (last scan)
         self.retired: set[tuple[str, str]] = set()  # retire markers seen by the latest scan
+        if full_scan is None:
+            full_scan = os.environ.get(FULL_SCAN_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+        # range listings need an object API that takes them (a test double may not)
+        self.incremental = not full_scan and lists_ranges(objects)
+        self.settled = SettledSlots(self.limit)  # slots the scans of this process saw settled
 
     def key(self, *parts: str) -> str:
         return "/".join((self.ns, *parts))
@@ -494,19 +623,43 @@ class StoreLedger:
         return theirs
 
     def scan(self) -> tuple[dict[int, TaskState], float]:
-        keys, now = self.objects.list_meta(self.ns + "/")
-        keys = list(keys)
+        """``({slot: state}, server now)``. A slot this process has seen settled is
+        not listed again (module doc, request budget): it is in ``self.settled``
+        and, unless it shares a range with an unsettled slot, not in the states.
+        :meth:`is_settled` answers for both. With ``incremental`` off (or an object
+        API without range listings) the whole namespace is listed, as before."""
         mine = drain_key(self.ns, self.holder)
+        if self.incremental:
+            keys, now = scan_slots(self.objects, self.ns, self.settled)
+            retired, stamp = self.objects.list_meta(self.key("retired") + "/")
+            keys += retired
+            now = max(now, float(stamp))
+            raw = self.objects.read(mine)
+        else:
+            keys, now = self.objects.list_meta(self.ns + "/")
+            keys = list(keys)
+            raw = self.objects.read(mine) if any(k == mine for k, _ in keys) else None
         self.drain_seq = None
-        if any(k == mine for k, _ in keys):
+        if raw:
             try:
-                body = json.loads(self.objects.read(mine) or b"{}")
+                body = json.loads(raw)
             except ValueError:
                 body = {}
-            if body.get("drain"):
+            if isinstance(body, dict) and body.get("drain"):
                 self.drain_seq = str(body.get("seq"))
         self.retired = parse_retired(keys, self.ns)
-        return parse_ledger(keys, self.ns), now
+        states = parse_ledger(keys, self.ns)
+        for slot, state in states.items():
+            if state.done is not None:
+                self.settled.add(slot, state.done)
+            elif slot in self.settled:  # in a listed range, settled by an earlier scan
+                state.done = self.settled.above.get(slot, "trained")
+        return states, now
+
+    def is_settled(self, slot: int, states: Mapping[int, TaskState]) -> bool:
+        """``slot`` is settled, by the states of a scan or by an earlier scan."""
+        state = states.get(slot)
+        return (state is not None and state.done is not None) or int(slot) in self.settled
 
     def is_retired(self) -> bool:
         """This process was retired (as of the latest scan)."""
@@ -587,10 +740,12 @@ class StoreLedger:
         ``max_redo``. ``ended``: every slot is settled."""
         redo: list[tuple[int, int]] = []
         leases: dict[str, str | None] = {}
-        settled = 0
+        settled = len(self.settled)  # seen settled by a scan; the states add the rest
         for p in sorted(states):
             state = states[p]
             if p >= self.limit:
+                continue
+            if p in self.settled:
                 continue
             if state.done is not None:
                 settled += 1
@@ -623,10 +778,13 @@ class StoreLedger:
                 continue
             if accept is None or accept(p):
                 redo.append((p, a + 1))
-        # never claimed: gaps below the frontier first (a claim that raised), then the frontier on
-        frontier = max((p for p, s in states.items() if s.claims), default=-1) + 1
-        fresh = [(p, 0) for p in range(min(frontier, self.limit))
-                 if (p not in states or not states[p].claims) and states.get(p, TaskState(p)).done is None
+        # never claimed: gaps below the frontier first (a claim that raised), then the frontier on.
+        # The frontier is past every claimed and every settled slot: a slot settled without a
+        # claim (``dropped`` by a sandbox gate) is never given out, wherever it lies.
+        frontier = max(max((p for p, s in states.items() if s.claims or s.done is not None), default=-1),
+                       self.settled.top) + 1
+        fresh = [(p, 0) for p in range(self.settled.floor, min(frontier, self.limit))
+                 if (p not in states or not states[p].claims) and not self.is_settled(p, states)
                  and (accept is None or accept(p))]
         fresh_iter = ((p, 0) for p in range(frontier, self.limit) if accept is None or accept(p))
         ended = settled >= self.limit
@@ -694,6 +852,8 @@ class StoreDispensedPrompts:
         holder = getattr(ledger, "holder", "")
         self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
         self._retired = False  # the controller retired this process (a marker in the ledger)
+        self.superseded_check_every = SUPERSEDED_CHECK_EVERY
+        self._renewals = 0
         self._lock = threading.RLock()
         self._next_scan = 0.0
         self._idle = self.scan_s
@@ -731,7 +891,9 @@ class StoreDispensedPrompts:
         """``config`` (``prompts.dispense`` of the spec): ``backend: "store"``,
         ``namespace``, ``seed``, ``passes``, ``lease_s``, ``max_redo``, ``holdout``
         (a path on the sampler) or ``holdout_ids`` (inline), ``require_holdout``,
-        ``mix`` / ``by_label`` / ``labels`` (streams), ``scan_s`` / ``max_scan_s``."""
+        ``mix`` / ``by_label`` / ``labels`` (streams), ``scan_s`` / ``max_scan_s``,
+        ``full_scan`` (true: every scan lists the whole namespace; default: only the
+        unsettled slots, :data:`FULL_SCAN_ENV` overrides the default)."""
         with open(os.path.expanduser(str(path)), encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle if line.strip()]
         count, digest = file_fingerprint(path)
@@ -764,7 +926,8 @@ class StoreDispensedPrompts:
                              seed=seed, passes=passes, lease_s=float(config.get("lease_s", DEFAULT_LEASE_S)),
                              max_redo=int(config.get("max_redo", DEFAULT_MAX_REDO)),
                              holdout_sha256=holdout_sha, leases=leases, slots=slots,
-                             lease_of_holder=lease_of_holder)
+                             lease_of_holder=lease_of_holder,
+                             full_scan=None if config.get("full_scan") is None else bool(config["full_scan"]))
         ledger.open()
         return cls(path, ledger, input_key=input_key, label_key=label_key, groups_per_round=groups_per_round,
                    render=render, task_key=task_key, rows=rows, accept_streams=accept,
@@ -783,7 +946,7 @@ class StoreDispensedPrompts:
         states, _now = self.ledger.scan()
         recovered = released = 0
         for p in sorted(written):
-            if p < self.ledger.limit and states.get(p, TaskState(p)).done is None:
+            if p < self.ledger.limit and not self.ledger.is_settled(p, states):
                 if self.ledger.settle(p, "trained", reason="recovered_from_buffer"):
                     recovered += 1
                     states.setdefault(p, TaskState(p)).done = "trained"
@@ -833,7 +996,8 @@ class StoreDispensedPrompts:
                 continue
             for p in slots:
                 st = states.get(p)
-                if p in self._gate_dropped or (st is not None and (st.done is not None or st.open_attempt() is not None)):
+                if (p in self._gate_dropped or self.ledger.is_settled(p, states)
+                        or (st is not None and st.open_attempt() is not None)):
                     continue
                 if self.accept is not None and not self.accept(p):
                     continue
@@ -846,6 +1010,7 @@ class StoreDispensedPrompts:
     def _claim(self, want: int) -> tuple[list[int], bool]:
         states, now = self.ledger.scan()
         self.stats["scans"] += 1
+        self._lost_by_scan(states)
         if self.ledger.is_retired():
             self._retired = True
             with self._lock:
@@ -922,6 +1087,19 @@ class StoreDispensedPrompts:
                         k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
                         queue, i = rest[k:] + rest[:k], 0
         return got, ended
+
+    def _lost_by_scan(self, states: Mapping[int, TaskState]) -> None:
+        """Mark the held slots the scan shows superseded (a later claim, or the
+        attempt ended ``expired`` / ``release`` by someone else): what
+        ``StoreLedger.superseded`` asks the store, from keys already listed. Those
+        keys are never deleted, so a scan's view cannot report a loss that is not."""
+        with self._lock:
+            held = [(p, h) for p, h in self._held.items() if not h.lost]
+        for p, h in held:
+            state = states.get(p)
+            if state is not None and ((state.latest or 0) > h.attempt
+                                      or state.fails.get(h.attempt) in ("expired", "release")):
+                self._mark_lost(p, h, "superseded")
 
     def _answer_drain(self) -> None:
         seq = self.ledger.drain_seq
@@ -1109,9 +1287,13 @@ class StoreDispensedPrompts:
             for p, h in held:
                 self._mark_lost(p, h, "fenced")
             return 0
+        # A beat on a superseded attempt changes nothing (module doc, request budget), so
+        # the three existence checks run every SUPERSEDED_CHECK_EVERY-th renewal only.
+        self._renewals += 1
+        check = self._renewals % max(1, int(self.superseded_check_every)) == 0
         renewed = 0
         for p, h in held:
-            if self.ledger.superseded(p, h.attempt):
+            if check and self.ledger.superseded(p, h.attempt):
                 self._mark_lost(p, h, "superseded")
                 continue
             self.ledger.beat(p, h.attempt)
@@ -1152,9 +1334,13 @@ def retire(objects: Any, namespace: str, holder: str, incarnation: str | None = 
     open claim of it at once (``release``, reason ``retired``; not counted
     toward ``max_redo``), so the next claim of any sampler takes them.
     ``incarnation=None`` retires every incarnation of ``holder`` that holds an
-    open claim. Idempotent: a second call releases nothing."""
+    open claim. Idempotent: a second call releases nothing. It lists ``done/``
+    and the claims and failures of the unsettled slots only."""
     ns = namespace.strip("/")
-    keys, _now = objects.list_meta(ns + "/")
+    if lists_ranges(objects):
+        keys, _now = scan_slots(objects, ns, SettledSlots(), dirs=("claims", "fail"))
+    else:
+        keys, _now = objects.list_meta(ns + "/")
     states = parse_ledger(keys, ns)
     body = json.dumps({"holder": "controller", "reason": str(reason)}, sort_keys=True).encode()
     open_claims = []
@@ -1191,12 +1377,22 @@ def _json(objects: Any, key: str) -> dict[str, Any]:
     return doc if isinstance(doc, dict) else {}
 
 
-def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = True) -> dict[str, Any]:
+def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = True,
+           settled: bool = True) -> dict[str, Any]:
     """The ledger as a per-task table plus totals. Every task's latest claim body is
     read (task id, row, holder, incarnation: the table's columns); ``details`` also
-    reads the failure and settlement bodies (elapsed time, failure reasons)."""
+    reads the failure and settlement bodies (elapsed time, failure reasons).
+
+    ``settled=False``: the table holds the unsettled tasks only (running, stale,
+    queued); the totals still count every task. The cost is then one listing of
+    ``done/`` plus the keys and claim bodies of the unsettled tasks, instead of
+    every key of the ledger and one read or more per task."""
     ns = namespace.strip("/")
-    keys, now = objects.list_meta(ns + "/")
+    seen = SettledSlots()
+    if not settled and lists_ranges(objects):
+        keys, now = scan_slots(objects, ns, seen)
+    else:
+        keys, now = objects.list_meta(ns + "/")
     plan = _json(objects, f"{ns}/plan.json")
     states = parse_ledger(keys, ns)
     lease = float(plan.get("lease_s", DEFAULT_LEASE_S))
@@ -1212,6 +1408,8 @@ def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = 
         else:
             state = "running" if s.last_seen(a) + lease > now else "stale"
         totals[state] = totals.get(state, 0) + 1
+        if s.done is not None and not settled:
+            continue
         row: dict[str, Any] = {"slot": p, "state": state, "attempts": 0 if a is None else a + 1,
                                "counted_failures": s.counted(),
                                "fails": {str(k): v for k, v in sorted(s.fails.items())},
@@ -1229,7 +1427,8 @@ def status(objects: Any, namespace: str = DEFAULT_NAMESPACE, *, details: bool = 
             row.update(elapsed_s=done.get("elapsed_s"), reason=done.get("reason"), failure_reasons=reasons)
         tasks.append(row)
     limit = int(plan.get("slots") or int(plan.get("rows", 0)) * int(plan.get("passes", 1)))
-    totals["unclaimed"] = max(0, limit - sum(1 for t in tasks if t["attempts"] or t["state"] in DONE_KINDS))
+    touched = sum(1 for s in states.values() if s.claims or s.done is not None)
+    totals["unclaimed"] = max(0, limit - touched)
     totals["slots"] = limit
     totals["ended"] = sum(totals[k] for k in DONE_KINDS) >= limit > 0
     return {"namespace": ns, "plan": plan, "server_time": now, "totals": totals, "tasks": tasks}
@@ -1262,6 +1461,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     st.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     st.add_argument("--log", help="write one JSON line per task here (the dashboard's dispense log)")
     st.add_argument("--json", action="store_true")
+    st.add_argument("--open", action="store_true", dest="open_only",
+                    help="list the unsettled tasks only (running, stale, queued); the totals still count "
+                    "every task. Far fewer requests on a large ledger: no read per settled task")
     st.add_argument("--brief", action="store_true", help="one listing plus each task's latest claim (task id, holder); no settlement or "
                     "failure reads (elapsed_s and failure_reasons are not shown)")
     rt = sub.add_parser("retire", help="retire one sampler process now: release its claims, fence it")
@@ -1281,7 +1483,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 reason=args.reason), sort_keys=True))
         return 0
     try:
-        report = status(_objects_for(args.store), args.namespace, details=not args.brief)
+        report = status(_objects_for(args.store), args.namespace, details=not args.brief,
+                        settled=not args.open_only)
     except Exception as error:  # noqa: BLE001 - a store credential / endpoint error gets its hint
         message = describe_store_error(error, args.store) if args.store.startswith(("s3://", "r2://")) else None
         if message is None:

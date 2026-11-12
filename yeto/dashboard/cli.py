@@ -36,6 +36,9 @@ def add_parser(sub) -> None:
     s.add_argument("--host", default="127.0.0.1", help="loopback address only (0.0.0.0 is refused)")
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--poll", type=float, default=2.0, help="tape follow interval seconds")
+    s.add_argument("--store-poll", type=float, default=10.0, metavar="SECONDS",
+                   help="seconds between two polls of --store (default 10; the islands upload "
+                   "a tape chunk every 30 s, and every poll costs listing requests)")
     s.add_argument("--head", default=None, help="head host name, only used in the printed ssh -L hint")
 
     e = dsub.add_parser("export", help="single self-contained offline HTML")
@@ -74,7 +77,8 @@ def _store(args):
         return None
     from .store_tapes import StoreTapes, open_objects
 
-    return StoreTapes(open_objects(args.store), label="store")
+    return StoreTapes(open_objects(args.store), label="store",
+                      interval_s=float(getattr(args, "store_poll", None) or 0.0))
 
 
 def _attach_compare(reducer, args) -> None:
