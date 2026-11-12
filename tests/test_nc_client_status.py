@@ -53,7 +53,7 @@ def client(run, tmp_path):
 UNTRUSTED = {
     "no output, exit 0": answer(stdout=""),
     "an empty document": answer({}),
-    "an error document on stdout, exit 1": answer({"ok": False, "error": "读取当前订单失败：502"}, code=1),
+    "an error document on stdout, exit 1": answer({"ok": False, "error": "reading the current order failed: 502"}, code=1),
     "an error document, exit 0": answer({"ok": False, "error": "gateway"}),
     "a success without a ticket field": answer({"ok": True, "account": 1}),
     "a ticket that is an error body": answer({"ok": True, "ticket": {"detail": "<html>502</html>"}}),
