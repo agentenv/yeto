@@ -221,7 +221,55 @@ def test_a_scaled_down_node_is_released_only_after_its_fence(tmp_path, monkeypat
     assert len(_ready(pool)) == 1 and len(cloud.kinds("order")) == 2  # no refill, no second victim
 
 
-def test_the_fence_alert_knobs_are_validated():
+def test_a_node_without_a_lease_end_is_released_after_fence_max_hold_s_and_the_fence_stays_owed():
+    clock = Clock()
+    cloud = FlakyFence(clock, ready_after=300, lease_s=10**9)  # a provider without leases
+    pool = _pool(clock, cloud, accounts=(1, 4), fence_max_hold_s=1800)
+    m = _ready_member(pool, clock, cloud)
+    cloud.fence_errors = 10**6
+    _lose(pool, clock, cloud, m)
+    _run(pool, clock, clock.t + 1740)
+    assert m.state == FENCING and not cloud.kinds("drain") and len(cloud.kinds("order")) == 1
+    _run(pool, clock, clock.t + 600)
+    assert m.state == GONE and [e[1] for e in cloud.kinds("drain")] == [m.ticket]
+    assert _names(pool).count("fence_abandoned_node_released") == 1 and m.fence_pending == "node lost"
+    successor = pool.members[-1]
+    assert successor is not m and successor.continues_from == m.ticket and successor.started is None
+    _run(pool, clock, clock.t + 3600)
+    assert successor.started is None and len(cloud.kinds("start")) == 1  # still waiting for the fence
+    cloud.fence_errors = 0
+    _run(pool, clock, clock.t + 1800)
+    assert successor.state == READY and successor.replaces_shard == m.shard and m.fence_pending is None
+    assert _names(pool).count("fence_abandoned_node_released") == 1
+
+
+def test_fence_max_hold_s_null_keeps_the_node_until_the_fence_succeeds():
+    clock = Clock()
+    cloud = FlakyFence(clock, ready_after=300, lease_s=10**9)
+    pool = _pool(clock, cloud, accounts=(1, 4), fence_max_hold_s=None)
+    m = _ready_member(pool, clock, cloud)
+    cloud.fence_errors = 10**6
+    _lose(pool, clock, cloud, m)
+    _run(pool, clock, clock.t + 6 * H)
+    assert m.state == FENCING and not cloud.kinds("drain") and "fence_abandoned_node_released" not in _names(pool)
+
+
+def test_a_fence_that_keeps_failing_sends_its_first_failure_and_every_tenth():
+    clock, cloud, pool, m = _setup(fence_max_hold_s=None)
+    cloud.fence_errors = 10**6
+    _lose(pool, clock, cloud, m)
+    while m.fence_failures < 25:
+        pool.tick()
+        clock.t += 60
+    failed = [e["failures"] for e in pool.events.events if e["event"] == "nc_elastic_fence_failed"]
+    assert failed == [1, 10, 20] and len(cloud.kinds("fence_error")) == 25
+
+
+def test_the_fence_knobs_are_validated():
     assert el.ElasticConfig.from_dict({"fence_alert_failures": 2, "fence_alert_s": 0}).fence_alert_failures == 2
+    assert el.ElasticConfig.from_dict({"fence_max_hold_s": None}).fence_max_hold_s is None
+    assert el.ElasticConfig().fence_max_hold_s == 7200.0
     with pytest.raises(ValueError, match="fence_alert"):
         el.ElasticConfig.from_dict({"fence_alert_failures": 0})
+    with pytest.raises(ValueError, match="fence_max_hold_s"):
+        el.ElasticConfig.from_dict({"fence_max_hold_s": -1})

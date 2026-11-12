@@ -59,6 +59,7 @@ PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "rea
 # a member the pool is retiring whose shard fence has not succeeded yet: its node is kept
 # (not watched, not restarted), nothing of it is handed on, no replacement is ordered
 FENCING = "fencing"
+FENCE_FAILED_EVERY = 10  # a fence that keeps failing: the first failure and every Nth send an event
 
 
 @dataclass
@@ -485,8 +486,9 @@ class IslandPool:
             m.fence_pending = m.fence_pending or why
             m.fence_failures += 1
             m.fence_since = now if m.fence_since is None else m.fence_since
-            self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
-                        failures=m.fence_failures)
+            if m.fence_failures == 1 or m.fence_failures % FENCE_FAILED_EVERY == 0:
+                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                            failures=m.fence_failures)
             if m.fence_failures >= self.ecfg.fence_alert_failures or now - m.fence_since >= self.ecfg.fence_alert_s:
                 if "fence_stuck" not in m.alerted:
                     self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} is NOT fenced after {m.fence_failures} "
@@ -511,8 +513,9 @@ class IslandPool:
     def _retry_fences(self, now: float) -> None:
         """Every fence still owed is tried again. A ``fencing`` member (its node kept) goes on
         with what the fence held back once it succeeds; when its ticket ended or its lease
-        is over meanwhile, its node is released without the fence (it must not stay billed)
-        and the fence stays owed."""
+        is over meanwhile, or the fence has failed for ``fence_max_hold_s`` (a provider
+        without leases would bill the node for good: ``fence_abandoned_node_released``), its
+        node is released without the fence and the fence stays owed."""
         for m in [m for m in self.members if m.fence_pending is not None]:
             if m.state != FENCING:  # its node is released (or being drained): only the fence is owed
                 self._fence(m, m.fence_pending)
@@ -526,6 +529,14 @@ class IslandPool:
                 m.end_reason = status.end_reason
             over = status.state == "ended" or (m.lease_until is not None
                                               and now >= m.lease_until - self.config.end_margin_s)
+            hold = self.ecfg.fence_max_hold_s
+            if not over and hold is not None and m.fence_since is not None and now - m.fence_since >= float(hold):
+                over = True
+                self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} is NOT fenced after "
+                         f"{now - m.fence_since:.0f} s (fence_max_hold_s {float(hold):.0f}): releasing its node; "
+                         "the fence is still tried every tick and nothing continues the shard before it")
+                self._once(m, "fence_abandoned", "fence_abandoned_node_released", why=m.fence_pending,
+                           failures=m.fence_failures, held_s=round(now - m.fence_since))
             if m.fence_then == "scale":
                 if self._fence(m, m.fence_pending) or over:
                     m.fence_then = None
