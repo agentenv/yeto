@@ -1197,6 +1197,74 @@ helps when it was on before the deletion.
 Do not delete records of tasks that are in flight, and do not delete the
 `claims/` records: the attempt numbers continue from them.
 
+### 5.9 Robustness behaviour of the samplers, trainer, store and pool
+
+This section lists what the samplers, the trainer, the object store client and
+the pool now do on their own when a part of the run fails, so you can tell
+expected recovery from a real fault. Each item names its settings, the events
+or metrics to look for and what to do. Where another section already explains
+it in detail, it is linked. Pool events below are shown by their short name;
+on the NC event tape they carry the `nc_elastic_` prefix.
+
+#### Samplers (agentic)
+
+| Behaviour | Settings (default) | Events / metrics | What to do |
+|---|---|---|---|
+| A `drain` weight switch is cut at min(`agentic.drain_timeout_s`, `reload_max_defer_s`). The release is downloaded in the background first (trials keep running), and every drain ends in a load of the release on disk. Trials that ignore the cancel are detached after `abandon_grace_s`. Details: section 3.4. | `reload_max_defer_s` (600; `null` waits indefinitely), `agentic.drain_timeout_s` (unset: the defer limit applies), `agentic.abandon_grace_s` (120) | `rl_agentic_drain` (`timed_out`, `abandoned_trials`, `detached_trials`, `trials_ended_s`, `detached_in_flight`, `waited_s`), `rl_agentic_waiting` (every 60 s while a call waits for a slot), `rl_sampler_release_not_loaded` (`download_failed`) | Keep `drain_timeout_s` <= `reload_max_defer_s`; `pool --dry-run` warns otherwise. Many `abandoned_trials` per drain: the agent tool calls are longer than the cut; raise the cut or release less often (section 3.5). |
+| R3 routing rows of each model call are cut to the trial's training window (first prompt + `max_response_len` - 1 rows) as soon as the call returns, instead of holding the whole context's routing per live trial. The trained `routed_experts` are byte-identical. | none (follows `max_response_len`) | turn records carry `routed_experts_cut` | Nothing. A `TokenAlignmentError` about a short R3 window is a bug report, not a configuration problem. |
+| Release downloads start at a fixed offset inside a spread window per sampler, and a range read the store refuses for its rate lowers the process's concurrent range reads (halved per refusal, one back per 8 successes, up to 6 tries per range). Details: section 5.7. | `YETO_RL_RELEASE_SPREAD_S` (30 on NC samplers, 5 elsewhere; `0` off), `YETO_RL_RELEASE_SPREAD_KEY` (NC: `<run prefix>/<shard>`, else host name) | sampler log `[s3-store] WARNING: ... the store refused a range read for its request rate` | Warnings at every release: lower `YETO_RL_STORE_FILE_CONCURRENCY`. Keep the spread well below the release interval. |
+| The dispenser scan lists only unsettled slots (range listings) instead of the whole ledger; lease renewal is one write per held slot. Details: sections 5.7, 5.8. | `prompts.dispense.full_scan` / `YETO_RL_DISPENSE_FULL_SCAN=1` (off) | - | A `done/` record deleted by hand is seen only by a restarted sampler (section 5.8). |
+
+#### Object store client
+
+| Behaviour | Settings (default) | What it prevents |
+|---|---|---|
+| Explicit SDK retries: `standard` mode, 9 requests per call, 10 s connect and 60 s read timeout (section 5.7). | `YETO_RL_STORE_RETRY_MODE` / `AWS_RETRY_MODE`, `YETO_RL_STORE_MAX_ATTEMPTS` / `AWS_MAX_ATTEMPTS`, `YETO_RL_STORE_CONNECT_TIMEOUT_S`, `YETO_RL_STORE_READ_TIMEOUT_S` | An unreachable endpoint holding one call for minutes, longer than the dispenser lease renewal period. |
+| A conditional create refused on the SDK's own retry (`PreconditionFailed` after a lost answer) reads the object back; equal bytes mean the create succeeded. | none | A group appended twice to a sampler shard, a merged record appended twice, a claim left orphaned until it expires and counts toward `max_redo`. |
+| A whole-object read whose body is cut short is read again (up to 5 tries with jittered backoff). Error answers (403, a 5xx left after the SDK retries) still raise. | none | One reset connection ending the trainer (payload, index record, `LATEST.json`) or a sampler (lease, handoff, claim). |
+| A multipart upload whose complete was applied but not answered is recognised from the part journal (size plus composite SHA-256 or multipart ETag), so a 100-200 GB release file is not uploaded twice. What cannot be proven is uploaded again. | none | Double uploads of release files. |
+| Downloads write to a private partial file (named by host, process and call) and rename; a partial file left by a killed download is removed after an hour by the next download of that target. | none | Cut-short files at the final name; two downloads of one target corrupting each other. |
+
+#### Trainer
+
+| Behaviour | Settings (default) | Events / metrics | What to do |
+|---|---|---|---|
+| A damaged payload (missing, cut short, other schema) is passed over and the round is filled from the groups after it; a failed read (throttle, 5xx, timeout) still raises and the next take starts with the groups it had selected. After decoding, the payload's own policy version is checked against `--rl-max-policy-age` again. A run of damaged payloads stops the trainer with `DamagedPayloadLimit` without consuming anything. | `YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN` (8 in a row, or 8 once more than half of a take; `0`: no limit) | `rl_buffer_damaged_payload_skipped`, `sample_buffer/damaged_payload_groups`, `sample_buffer/stale_payload_groups`, `passed_over` in `rl_buffer_exhausted` | See section 8, "The trainer stops with `DamagedPayloadLimit`". |
+| The shard merge into `sample-buffer/index/` is idempotent by `(shard, shard_pos)`: two mergers (an old trainer not dead yet and its replacement), a lost create answer or a half-failed merge batch never train a group twice. A restarted merger resumes each shard at its highest merged position + 1. | none | `duplicate_merged_records` (repeats already in an index written before this change: passed over, one warning), `unmerged_shard_gaps` (records an earlier merger skipped: reported, left unmerged) | A non-zero `unmerged_shard_gaps` means some groups of a bucket written by older code are not trained; nothing to fix in the running run. |
+| The first-cut mark of a staged `s3://` store is uploaded when it is written, so a trainer that dies while the first round cut uploads restarts at rollout 0 instead of failing with `StoreIntegrityError: ... holds round cuts but no LATEST`. | none | - | Nothing. A bucket written by older code that already fails this way still needs the unmarked `round-cuts/<cut_id>/` objects removed once. |
+| A trainer that resumes above the store's releases (no cut, or a cut older than the newest release) starts at the newest release vK: the earlier ledger is set aside, the buffer is read from the position recorded with vK (no group selected before vK is read again), and a due cut whose ledger lacks the previous round is skipped and counted. Details: section 5.3. | `--rl-ledger-set-aside-before`, `--rl-cut-every`, `--rl-cut-auto-mtbf-s` | `rl_round_cut_behind_releases`, `rl_round_cut_skipped`, `rl_ledger_set_aside`, `rl_buffer_start_position_refused` (falls back to position 0) | Nothing; `rl_buffer_start_position_refused` means some groups may be read again once. |
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is accepted on a full-parameter trainer island (`--rl-sample-role trainer`, no rollout engine); it is still refused on a colocated island with engines and on any island with `--rl-offload-train`, before any GPU starts. Measured: peak reserved memory 251 to 174 GiB on a 16-layer cut model, bit-identical loss, about 8 s more per step. | trainer env | launch check message | Set it for 1M or other tight layouts (section 3.5, section 10.4). |
+
+#### Pool and National Compute
+
+| Behaviour | Settings (default) | Events | What to do |
+|---|---|---|---|
+| A sampler exit 0 ends the pool ("the data ended") only when the run store says so. A handoff record retires the member and a new shard continues; a fence or a `FENCED` leave (also one the pool wrote before it restarted, or an operator's `store_dispense retire`) restarts the sampler in place, counted toward `max_sampler_restarts`; an unreadable store decides nothing that tick. | `max_sampler_restarts` | `sampler_left_fenced`, `sampler_restart` | Nothing. |
+| A failed fence is retried every tick (member state `fencing`, kept across a pool restart); the node is kept and no successor starts on that shard until it succeeds. A node that must go (ticket ended, lease end, pool stop) is released at once and the fence stays owed. | `elastic.fence_order_ahead_s` (300), `elastic.fence_blocked_hold_s` (1800), `elastic.fence_max_hold_s` (7200; `null`: keep until fenced), `elastic.fence_alert_failures` (5), `elastic.fence_alert_s` (600) | `fence_failed` (first and every tenth failure), `fence_stuck` (once) | `fence_stuck`: the store refuses the lease write; check the store credentials and its error rate. |
+| Unreachable grace counts failed probes only; a failed `docker inspect` reads `unknown`, not absent (a ready container must read absent twice before a restart); a `pool-scale` request written during a tick is kept; a stale handoff of an earlier pool no longer stops a new sampler on that shard. | - | - | Nothing. |
+| The pool state file now has `"format": 2`. An older pool cannot read it. | - | - | Before rolling the code back run `python -m yeto.launch.nc pool-state-downgrade --config pool.json` (refuses while the pool runs or a fence is owed; see [NC_POOL.md](NC_POOL.md)). |
+| NC status answers are trusted only when they report the ticket field; any other answer is a control-plane blip and decides nothing. An answer that does not show the expected ticket is read a second time before a lease is called ended. | - | - | Nothing; a release that read an untrusted answer is retried. |
+| The ticket ledger and lease file are written under a cross-process lock through a private temp file. A ledger that cannot be read is an error (`LedgerError`) and is left as it is, instead of being treated as empty. | - | - | `LedgerError`: restore the file from its last good copy or fix it by hand; do not delete it (every ticket in it would lose its ownership proof). |
+| Ticket ownership: the client changes only a ticket whose ledger row was written before the order and holds the id from that order's own answer, or one an operator adopted. A delete re-reads the status first, is refused within the guard of the lease end or preemption, and is journaled until the ticket reads ended. | `YETO_NC_DELETE_GUARD_S` (120) | `order_unrecorded` (with the `adopt` command), `legacy_ledger_rows`, `foreign_ticket_released`, `delete_unconfirmed`, `halt_cleared` | `order_unrecorded`: check the account in the console; if the node is this run's, `python -m yeto.launch.nc adopt --account <id> --ticket <ticket> --yes`, otherwise leave it. |
+| Halt: an account whose delete released, or may have released, another ticket is halted until `clear-halt --account <id> --yes` (a `delete_unconfirmed` halt lifts by itself when that exact ticket reads ended). The pool skips a halted account instead of counting it free, a guard refusal (nothing sent) is not a breaker failure (the slot is held out 10 min and the next slot is ordered in the same tick), and a member on a halted account is kept, not re-drained. A failed ledger read keeps the known halt. | - | `slot_halted`, `slot_halt_cleared`, `slots_below_target` (critical), `release_blocked`, `release_hit_foreign_ticket` (critical); `pool-status` and `yeto run status` list them under `accounts_attention` | Section 2 (Accounts) and [NC_POOL.md, "A halted account"](NC_POOL.md#a-halted-account-clear-halt). Provide spare accounts so a halt does not drop the pool below target. |
+
+#### CI
+
+A newer push to a pull request cancels the CI run of its older head; runs on
+`main` are never cancelled.
+
+### 5.10 Pending changes (not merged yet)
+
+The following changes are open pull requests. They are **not** in `main` and
+none of their behaviour is live; do not rely on it until they are merged.
+
+| PR | Status | Planned behaviour | Operator impact once merged |
+|---|---|---|---|
+| #368 | pending | The trainer trains only the first accepted group of each dispensed task `(dispense_plan, slot)`; later groups of the same task (a stalled holder that wrote after its lease expired, a scan racing a settlement, a retire before settlement) are consumed, not trained, and counted. Entries from older samplers (no `dispense_attempt`) are not judged. | A counter of duplicate task groups; during a rolling sampler upgrade a task written by an old and a new sampler can still be trained twice. |
+| #372 | pending | Test-only and syncer start-up race fixes. | None. |
+| #373 | pending | The trainer's incarnation gate fails closed: a lease that cannot be read (timeout, 5xx, cut-short body) defers the group instead of training it; the read is retried every second, with a warning at most every 60 s. The round end and committed watermark stay before the first deferred group. | **The trainer can wait for a long time** while a lease stays unreadable, instead of crashing; it is bounded only by the warnings. Watch `sample_buffer/lease_deferred_groups` and the trainer log; fix the store access. |
+| #374 | pending | A failed store read never ends a sampler or disarms a fence: lease reads count as "unread" (group writes held back after `max_unread_s`, default 60 s), a failed dispenser listing costs one scan (`rl_dispense_scan_failed`), a group whose hold cannot be checked waits (`rl_sampler_write_deferred`) up to `write_defer_max_s` (default 600 s) and is then given up and its task released, failed `LATEST` reads keep the served weights. | Fewer sampler restarts on store blips; `rl_sampler_write_deferred` shows when writes wait for the store. |
+
 ## 6. Dashboard
 
 `yeto run up` starts `yeto dashboard serve --store <store> --port <port>` on
@@ -1499,6 +1567,22 @@ consumed without training (`stale`, `stale_payload`, `stale_incarnation`,
 same counts end the error text of a round that waited `wait_s` without a new
 group. `stale_payload` are groups whose index record passed the age gate but
 whose payload holds an older policy version: the payload decides.
+
+**Quick reference: store, pool and drain faults.**
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| Sampler idle for minutes at each release; `rl_agentic_drain` shows large `waited_s` | Drain cut too long, or group writes behind | Lower `reload_max_defer_s` / `agentic.drain_timeout_s` (section 3.4); check `trials_ended_s` vs `waited_s` |
+| `rl_agentic_drain` with many `abandoned_trials` / `detached_trials`, fewer trials starting afterwards | Trials blocked in long sandbox tool calls ignore the cancel; detached trials keep their slot until they end | Expected; if constant, raise the cut or release less often (section 3.5) |
+| `rl_sampler_release_not_loaded` `download_failed` | Store refused the download repeatedly | Check `[s3-store] WARNING ... request rate`; lower `YETO_RL_STORE_FILE_CONCURRENCY`, keep `YETO_RL_RELEASE_SPREAD_S` on |
+| Calls fail after about 30-90 s with 503 under load | Store request-rate limit after all SDK retries | Section 5.7: raise `YETO_RL_STORE_MAX_ATTEMPTS` modestly, keep one call below `lease_s / 3` |
+| Trainer start fails with `StoreIntegrityError: ... holds round cuts but no LATEST` | A first cut written by older code died while uploading | Remove the unmarked `round-cuts/<cut_id>/` objects once; current code drops such a cut by itself |
+| Trainer log warns `duplicate_merged_records` or `unmerged_shard_gaps` | Index written before the idempotent merge | Nothing to do; gaps are groups not trained |
+| `fence_stuck` alert | Lease writes to the store fail | Check store credentials and error rate; the node is kept until the fence succeeds or `fence_max_hold_s` |
+| `slot_halted` / `slots_below_target` | A delete may have hit a ticket that is not this run's | Check the account in the console, then `clear-halt --account <id> --yes` (section 2) |
+| `order_unrecorded` | An order's answer was lost, or a node on the account was not ordered by this tool | Adopt only if it is this run's node; otherwise leave it alone |
+| `LedgerError` from an NC command | The ticket ledger file is damaged | Restore or repair it by hand; never delete it |
+| Pool refuses to start, names `pool-state-downgrade` | State file of a newer format than this code | Use the newer code, or downgrade the file with `pool-state-downgrade` before rolling back |
 
 **`down` reports `NOT verified`.**
 Read `down.log`. Usually a node release is still in progress. Run
