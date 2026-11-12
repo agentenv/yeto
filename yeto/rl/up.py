@@ -17,8 +17,10 @@ type, run as a subprocess with the run config's environment:
 7. monitor     budget, wall clock, the trainer launcher's exit (rc != 0 or finished: FAILED),
                and a backstop independent of the launcher: the trainer log / tapes not
                growing for max(4 x --rl-stall-timeout, budget.silence_min) (preflight
-               refuses --rl-stall-timeout 0); the sandbox host's container count of this
-               run is a warning only.
+               refuses --rl-stall-timeout 0); trainer starvation (``yeto.rl.starvation``:
+               no new buffer object for ``starvation.alert_min`` alerts; for ``stop_min``
+               with no healthy sampler stops the trainer through the STOP flag); the
+               sandbox host's container count of this run is a warning only.
 
 The NC sampler pool is never released by an automatic decision of ``up``: a breach (trainer
 failure, budget, wall clock, first-group timeout) stops the trainer only
@@ -262,6 +264,11 @@ class Run:
             _log(f"preflight: {problem}")
             self.mark("preflight", ok=False)
             return False
+        problem = self.starvation_problem()
+        if problem is not None:
+            _log(f"preflight: {problem}")
+            self.mark("preflight", ok=False)
+            return False
         if self.stall_timeout_s() <= 0:
             _log("preflight: --rl-stall-timeout 0 disables the trainer's hang detection; run up refuses it "
                  "(the monitor's silence backstop is 4x this timeout)")
@@ -375,11 +382,7 @@ class Run:
         return head_objects(self.cfg["store"], environ=self.env)
 
     def buffer_objects(self) -> int:
-        try:
-            return sum(1 for _ in self._objects().list("sample-buffer/shards/"))
-        except Exception as error:  # noqa: BLE001
-            _log(f"store list failed: {type(error).__name__}: {error}"[:300])
-            return 0
+        return len(self.buffer_keys() or ())
 
     def wait_first_group(self) -> str | None:
         """None once the store holds a group; else why the wait ended (a breach, the timeout)."""
@@ -812,6 +815,145 @@ class Run:
         self._rollout_stall_warned = bool(why)
         return why
 
+    # -- trainer starvation (yeto.rl.starvation)
+    @property
+    def starvation_config(self) -> Any:
+        from yeto.rl.starvation import StarvationConfig  # noqa: PLC0415
+
+        return StarvationConfig.from_section(self.cfg.get("starvation"))
+
+    def starvation_problem(self) -> str | None:
+        try:
+            self.starvation_config  # noqa: B018 - validates the section
+        except ValueError as error:
+            return str(error)
+        return None
+
+    def buffer_keys(self) -> set[str] | None:
+        """The object keys under ``sample-buffer/shards/`` (None: the listing failed)."""
+        try:
+            return set(self._objects().list("sample-buffer/shards/"))
+        except Exception as error:  # noqa: BLE001
+            _log(f"store list failed: {type(error).__name__}: {error}"[:300])
+            return None
+
+    def sampler_health(self) -> Any:
+        """Ready, unpaused members of the pools whose loop runs (the pool state files and
+        the pool lock / pid file; no provider call). A pool whose loop does not run counts
+        no healthy member: nothing replaces or restarts its samplers."""
+        from yeto.launch.nc import pool_run  # noqa: PLC0415
+        from yeto.rl.starvation import SamplerHealth  # noqa: PLC0415
+
+        healthy = paused = live = 0
+        readable = False
+        notes = []
+        controller = getattr(self, "controller", None)
+        for i, ref in enumerate(self.pools):
+            members = self._members(i)
+            if members is None:
+                notes.append(f"{ref.name}: no state")
+                continue
+            readable = True
+            if controller is not None:
+                driven = not controller.stopped
+            else:
+                try:
+                    proc = pool_run.pool_process(ref.load())
+                except Exception:  # noqa: BLE001 - unknown: taken as running
+                    proc = {"alive": True}
+                driven = bool(proc and proc.get("alive"))
+            alive = [m for m in members if m.get("state") != "gone"]
+            live += len(alive)
+            ready = [m for m in alive if m.get("state") == "ready"]
+            if not driven:
+                notes.append(f"{ref.name}: pool loop not running")
+                continue
+            paused += sum(1 for m in ready if m.get("paused"))
+            healthy += sum(1 for m in ready if not m.get("paused"))
+            halted = [m for m in alive if m.get("config_error")]
+            if halted:
+                notes.append(f"{ref.name}: {len(halted)} member(s) with a config error")
+        return SamplerHealth(healthy if readable else None, paused=paused, live=live, detail="; ".join(notes))
+
+    def trainer_side_cause(self) -> str | None:
+        """What the trainer log says about a pause of its own: the incarnation gate fails
+        closed while a lease is unreadable (groups wait in the buffer, nothing trains)."""
+        log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
+        try:
+            tail = Path(log).read_bytes()[-200_000:].decode("utf-8", "replace") if log else ""
+        except OSError:
+            return None
+        paused = tail.rfind("incarnation gate: training paused")
+        if paused < 0 or tail.rfind("incarnation gate: lease of", paused + 1) > paused:
+            return None
+        line = tail[paused:].splitlines()[0]
+        return f"{line[:300]} (fail-closed pause, not starvation)"
+
+    def starvation_check(self, now: float) -> str | None:
+        """Alert on a starving trainer; the reason to stop it, else None."""
+        from yeto.rl.starvation import ALERT_EVENT, RECOVERED_EVENT, STOP, StarvationWatch  # noqa: PLC0415
+
+        cfg = self.starvation_config
+        if not cfg.enabled:
+            return None
+        watch = getattr(self, "_starvation", None)
+        if watch is None:
+            watch = self._starvation = StarvationWatch(cfg, now)
+            self._starvation_listed: float | None = None
+            self._starvation_keys: set[str] | None = None
+        new_groups = None
+        if self._starvation_listed is None or now - self._starvation_listed >= cfg.check_s:
+            self._starvation_listed = now
+            keys = self.buffer_keys()
+            if keys is not None:  # a key not in the previous listing: a new group (pruned keys do not count)
+                if self._starvation_keys is not None:
+                    new_groups = len(keys - self._starvation_keys)
+                self._starvation_keys = keys
+        verdict = watch.observe(now, new_groups=new_groups, health=self.sampler_health(),
+                                cause=self.trainer_side_cause())
+        if verdict.recovered:
+            _log(f"{RECOVERED_EVENT}: a new group reached the buffer")
+            self.state.pop("starvation", None)
+            self.save()
+        if verdict.new_alert:
+            _log(f"CRITICAL {ALERT_EVENT}: {verdict.reason}")
+            self.state["starvation"] = {"at": _now(), "event": ALERT_EVENT, "starved_min": round(verdict.starved_s / 60),
+                                        "why": verdict.reason}
+            self.save()
+        return verdict.reason if verdict.state == STOP else None
+
+    def trainer_launch_name(self) -> str:
+        """The trainer launch's run name (its ``--cluster-prefix``; the run name without one)."""
+        argv = [str(a) for a in self.cfg["trainer"]["argv"]]
+        for i, a in enumerate(argv):
+            if a == "--cluster-prefix" and i + 1 < len(argv):
+                return argv[i + 1]
+            if a.startswith("--cluster-prefix="):
+                return a.split("=", 1)[1]
+        return self.run
+
+    def starvation_stop(self, why: str, poll_s: float = 30.0) -> None:
+        """Stop a starving trainer the way a budget stop does: the run's STOP flag (``yeto
+        stop-run``: with the trainer scheduler the trainer drains with a cut; a fixed
+        trainer island keeps its latest round cut), then, once the launcher exited or
+        ``stop_grace_min`` passed, :meth:`trainer_down`. The sampler pools stay; ``yeto run
+        up`` of this config resumes the trainer from its latest cut."""
+        from yeto import runs  # noqa: PLC0415
+        from yeto.rl.starvation import STOP_EVENT  # noqa: PLC0415
+
+        _log(f"CRITICAL {STOP_EVENT}: {why}; stopping the trainer (STOP flag, then yeto down)")
+        self.state["starvation"] = {"at": _now(), "event": STOP_EVENT, "why": why}
+        self.save()
+        flag = runs.request_stop(self.trainer_launch_name())
+        _log(f"{STOP_EVENT}: STOP flag written: {flag}")
+        tr = (self.state.get("procs") or {}).get("trainer")
+        deadline = time.time() + self.starvation_config.stop_grace_s
+        while tr and _alive(tr["pid"]) and time.time() < deadline:
+            time.sleep(poll_s)
+        self.trainer_down(f"{STOP_EVENT}: {why}")
+        _log(f"{STOP_EVENT}: once a sampler is healthy again, `yeto run up --config <run.json>` resumes "
+             "the trainer from its latest cut")
+
     def monitor(self, poll_s: float = 60.0) -> None:
         while True:
             self.rollout_stall_alert()
@@ -822,6 +964,11 @@ class Run:
                     self.watch_nc_after_breach(why, poll_s)
                 return
             tr = (self.state.get("procs") or {}).get("trainer")
+            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished"):
+                why = self.starvation_check(time.time())
+                if why:
+                    self.starvation_stop(why)
+                    return
             if tr and not _alive(tr["pid"]) and not self.state.get("trainer_exit_seen"):
                 _log(f"trainer launcher PID {tr['pid']} exited")
                 self.state["trainer_exit_seen"] = _now()

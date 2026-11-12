@@ -1357,6 +1357,7 @@ The monitor in `yeto run up` checks the run every minute:
 | Trainer finished | launcher finished `SUCCEEDED` (exit code 0) | Banner: the sampler pools (every provider) still bill; with `budget.release_nc_on_finish` the full `down`. |
 | Silence backstop | trainer log and `progress_paths` unchanged for `max(4 x --rl-stall-timeout, silence_min)` | Stop the trainer. |
 | First group | no buffer object within `first_group.timeout_s` | Stop before the trainer starts. |
+| Trainer starvation | no new buffer object for `starvation.alert_min` / `stop_min` (see below) | Alert; at `stop_min`, with no healthy sampler, stop the trainer with the STOP flag. |
 | Sandbox containers | count > `sandbox.max_run_containers` (or `max_containers_per_sampler` x billed nodes, if larger) | Warning only. |
 | Scale up | spend + one node hour per new node > `budget.usd`, or a breaker fired | `yeto run scale` refuses; nothing changes. |
 
@@ -1364,6 +1365,45 @@ The monitor in `yeto run up` checks the run every minute:
 (`yeto down <run>`). The NC pool, its nodes and the sandboxes stay up, so a
 resume does not repeat node setup and model pull. The monitor prints which
 nodes still bill and the release command.
+
+**Trainer starvation.** When every sampler is gone (all died, the pool cannot
+replace them, every account is halted) the trainer keeps waiting for groups in
+its buffer reader (with `--rl-trainer-scheduler`, the head keeps waiting for the
+RUN ack) while its GPUs bill. The monitor watches two signals it already has:
+new object keys under the store's `sample-buffer/shards/` (listed every
+`check_s`), and the pool state files (members in `ready`, the pool loop running).
+
+```json
+"starvation": {"alert_min": 30, "stop_min": 120, "unhealthy_min": 10,
+               "check_s": 300, "stop_grace_min": 20}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `alert_min` | 30 | Minutes without a new buffer object before `CRITICAL trainer_starvation_alert` is logged (once per starved stretch; the line names the duration, the healthy / live / paused sampler counts and the pool notes). `0`: no alert. |
+| `stop_min` | 120 | Minutes without a new buffer object before the trainer is stopped, **only** while no sampler is healthy (no ready, unpaused member in a pool whose loop runs) for at least `unhealthy_min`. `0`: never stop. Must be >= `alert_min`. |
+| `unhealthy_min` | 10 | How long the pools must report no healthy sampler before a stop. A short gap (a lease-end handoff) does not count. |
+| `check_s` | 300 | Seconds between two listings of the buffer prefix. |
+| `stop_grace_min` | 20 | After the STOP flag, how long the monitor waits for the trainer launcher to exit before `yeto down`. |
+
+What never stops the trainer: a healthy sampler (long agentic trials can go
+an hour without a group), a ready member paused with `yeto run pause`, and
+pool state that cannot be read; these alert only. The incarnation gate's
+fail-closed pause (`incarnation gate: training paused`, a lease that cannot be
+read) is not starvation: the groups are in the buffer and the trainer waits for
+the lease. When the trainer log shows that pause, the alert names it
+(`trainer side: ... fail-closed pause`).
+
+The stop is the budget stop's path: `CRITICAL trainer_starvation_stop`, the
+run's STOP flag (`yeto stop-run <--cluster-prefix>`; with the trainer scheduler
+the trainer drains with a cut, a fixed trainer island keeps its latest round
+cut), then `yeto down <run>` once the launcher exited (or after
+`stop_grace_min`). The sampler pools are kept (with `controller: in_process`,
+`rollout.drain_on_exit` decides, as after every breach). Once a sampler is healthy again,
+`yeto run up --config <run.json>` starts the trainer again and it resumes from
+its latest cut (rounds after that cut are trained again; section 5.3). The
+pool's own state is not touched. `run up` refuses a bad `starvation` section in
+preflight.
 
 **Forced NC release at 1.2x.** After a budget or wall-clock breach, the
 monitor stays up and prints the billing banner on every poll. Once the spend
