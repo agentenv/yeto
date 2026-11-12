@@ -8,12 +8,15 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
+import nc_fault_sim as sim
 from yeto.launch.nc import cli
 from yeto.launch.nc import client as ncc
+from yeto.launch.nc.provider import NCProvider
 
 
 def answer(doc=None, *, code=0, stdout=None, stderr=""):
@@ -129,8 +132,12 @@ def test_adopt_is_refused_without_an_unrecorded_order_or_for_a_ticket_that_canno
     with pytest.raises(ncc.NcRefused, match="not the account's current open ticket"):
         c.adopt("other")
     nc.ticket = dict(nc.ticket, state="active", granted_at="2020-01-01T00:00:00Z")
-    with pytest.raises(ncc.NcRefused, match="older than the unrecorded order"):
+    with pytest.raises(ncc.NcRefused, match="does not fit the unrecorded order"):
         c.adopt("new1")  # granted long before the order was sent
+    late = datetime.fromtimestamp(time.time() + ncc.ADOPT_QUEUE_MAX_S + 3600, UTC).isoformat()
+    nc.ticket = dict(nc.ticket, granted_at=late)
+    with pytest.raises(ncc.NcRefused, match="does not fit the unrecorded order"):
+        c.adopt("new1")  # granted long after the order: someone else's later order
     nc.ticket = {"id": "new1", "state": "ended", "end_reason": "released"}
     with pytest.raises(ncc.NcRefused, match="not the account's current open ticket"):
         c.adopt("new1")  # no longer open: nothing to release
@@ -140,6 +147,11 @@ def test_adopt_is_refused_without_an_unrecorded_order_or_for_a_ticket_that_canno
     c.ledger.mark_pending(1, call_ended=None, created_at=time.time())  # an order call still in flight
     with pytest.raises(ncc.NcRefused, match="no order of this tool"):
         c.adopt("new1")
+    c.ledger.mark_pending(1, call_ended=time.time())
+    nc.ticket = {"id": "later", "state": "queued"}  # not the ticket this tool saw and reported for the order
+    c.ledger.mark_pending(1, call_ended=time.time() - 2 * ncc.ORDER_PENDING_MAX_S)
+    with pytest.raises(ncc.NcRefused, match="no order of this tool"):
+        c.adopt("later")
 
     c = client(Nc(), tmp_path / "c")
     assert c.create() == "new1"
@@ -316,3 +328,213 @@ def test_the_pools_provider_reports_an_unrecorded_order_in_the_pools_event_file(
     doc = json.loads(line)
     assert (doc["event"], doc["account"], doc["ticket"], doc["run"]) == (
         "nc_elastic_order_unrecorded", 1, "new1", "run-x")
+
+
+# -- only tickets with evidence are touched (over the fault simulator's fake, without faults) -----
+
+def _quiet(tmp_path):
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    return sc, sc.nc, sc.clients[1]
+
+
+def test_a_failed_order_that_placed_nothing_does_not_make_a_later_foreign_ticket_adoptable(tmp_path):
+    """Day 1: an order call fails before the request (nothing placed); the account reads
+    free afterwards. Day 3: someone else orders on the account. The pending order of day
+    1 is closed: their ticket is not reported as ours, cannot be adopted, is not deleted."""
+    sc, nc, c = _quiet(tmp_path)
+    real = nc._create
+    nc._create = lambda argv, account: nc._broken("error_exit", argv)  # failed before the request
+    with pytest.raises(ncc.NcError):
+        c.create(run="run-a")
+    nc._create = real
+    (pending,) = c.ledger.pending_orders(1)
+    assert pending["free_reads"] == 1  # the look right after the failed call: one free read, not closed yet
+    assert c.account_free() and c.ledger.pending_orders(1) == []  # the second in a row closes it
+    sc.clock.advance(2 * 86400)
+    foreign = nc._place(1, "foreign")
+    nc._grant(foreign)
+    assert not c.account_free() and sc.events == []
+    with pytest.raises(ncc.NcRefused, match="no order of this tool"):
+        c.adopt(foreign["id"])
+    with pytest.raises(ncc.NcRefused, match="not created by this tool"):
+        c.delete(foreign["id"])
+    assert sim.violations(nc) == [] and sim.still_open(sc, "foreign") == [foreign["id"]]
+
+
+def test_a_pending_order_that_never_read_free_goes_stale_and_a_late_ticket_cannot_be_adopted(tmp_path):
+    """The order call is cut off and nobody looks at the account for an hour. A ticket
+    first seen then is reported once, without the adopt command, and adopt refuses it."""
+    sc, nc, c = _quiet(tmp_path)
+    real = nc._create
+    nc._create = lambda argv, account: nc._broken("timeout", argv)
+    with pytest.raises(subprocess.TimeoutExpired):
+        c.create(run="run-a")
+    nc._create = real
+    sc.clock.advance(ncc.ORDER_PENDING_MAX_S + 60)
+    foreign = nc._place(1, "foreign")
+    assert not c.account_free() and not c.account_free()
+    ((name, detail),) = sc.events
+    assert name == "order_unrecorded" and detail["stale"] is True and "adopt --account" not in detail["action"]
+    with pytest.raises(ncc.NcRefused, match="no order of this tool"):
+        c.adopt(foreign["id"])
+    with pytest.raises(ncc.NcRefused) as refused:
+        c.create(run="run-a")
+    assert "not recorded" not in str(refused.value) and sim.violations(nc) == []
+
+
+def test_a_free_read_between_two_looks_at_an_unrecorded_ticket_does_not_close_the_order(tmp_path):
+    """One wrong "no order" answer counts one free read; the next answer shows the
+    ticket again and the count starts over."""
+    nc, events = Nc(on_create=timed_out), []
+    c = client(nc, tmp_path, events)
+    with pytest.raises(ncc.NcOrderUnrecorded):
+        c.create(run="run-a")
+    shown = nc.ticket
+    for _ in range(3):
+        nc.ticket = None
+        assert c.account_free()
+        nc.ticket = shown
+        assert not c.account_free()
+    assert c.ledger.pending_orders(1)[0]["observed_ticket"] == "new1"
+    assert c.adopt("new1")["adopted_by"] == "operator"
+
+
+def test_the_node_of_a_ticket_outside_the_ledger_is_not_handed_out(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    foreign = nc._place(1, "foreign")
+    nc._grant(foreign)
+    with pytest.raises(ncc.NcRefused, match="not created by this tool"):
+        c.wait_active(foreign["id"], timeout_s=0, log=lambda line: None)
+    assert c.ledger.load() == []
+
+
+def test_an_answer_without_the_created_field_is_not_recorded(tmp_path):
+    """The order tool answers ok with the account's ticket and no ``created`` field,
+    after a status read that missed the ticket: it does not say this order placed it."""
+    sc, nc, c = _quiet(tmp_path)
+    foreign = nc._place(1, "foreign")
+    real_status, calls = nc._status, []
+
+    def status(argv, account):  # the status read before the order misses the ticket once
+        calls.append(1)
+        return sim._answer({"ok": True, "account": account, "ticket": None}) if len(calls) == 1 \
+            else real_status(argv, account)
+
+    nc._status = status
+    nc._create = lambda argv, account: sim._answer({"ok": True, "account": account, "ticket": nc._view(account)})
+    with pytest.raises(ncc.NcError):
+        c.create(run="run-a")
+    assert not c.ledger.owns(1, foreign["id"]) and c.ledger.open_rows() == []
+
+
+# -- the delete has no ticket id: what guards it ------------------------------------------------
+
+def test_a_delete_is_not_sent_when_the_last_look_before_it_shows_another_ticket(tmp_path):
+    """status: ours, open | ours ends, someone else orders | status again (right before
+    the call): theirs -> no delete."""
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    real_status, calls = nc._status, []
+
+    def status(argv, account):
+        out = real_status(argv, account)
+        calls.append(1)
+        if len(calls) == 1:
+            nc.race(account)
+        return out
+
+    nc._status = status
+    with pytest.raises(ncc.NcError, match="changed between two reads.*no delete sent"):
+        c.delete(mine)
+    assert [w for w in nc.writes if w["op"] == "delete"] == [] and sim.still_open(sc, "foreign") != []
+
+
+@pytest.mark.parametrize("field", ["lease_until", "preempt_at"])
+def test_no_delete_is_sent_while_the_ticket_is_about_to_end_on_its_own(field, tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    nc._grant(nc.tickets[mine])
+    nc.tickets[mine][field] = sc.clock() + 3600
+    sc.clock.advance(3600 - ncc.DELETE_GUARD_S + 10)  # 110 s before it
+    with pytest.raises(ncc.NcReleaseDeferred, match=field):
+        c.delete(mine)
+    assert [w for w in nc.writes if w["op"] == "delete"] == [] and c.ledger.owns(1, mine)
+    if field == "lease_until":  # a lease does not end by itself: past the guard the delete goes out
+        sc.clock.advance(2 * ncc.DELETE_GUARD_S)
+        assert c.delete(mine)["state"] == "ended"
+    else:  # preempted: nothing to delete, the ticket reads ended
+        sc.clock.advance(2 * ncc.DELETE_GUARD_S)
+        nc._due()
+        assert c.delete(mine)["already"] is True
+    assert sim.violations(nc) == []
+
+
+@pytest.mark.parametrize("names_ticket", [True, False])
+def test_a_delete_that_released_someone_elses_ticket_is_reported_and_halts_the_account(names_ticket, tmp_path):
+    """The residual window: between the last status read and nc-manage delete our ticket
+    ends on its own and someone else orders; the delete takes their ticket. The client
+    cannot prevent it; it must notice, report it at once, and stop writing on the account."""
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    real = nc._delete
+    nc.rng.random = lambda: 0.01 if names_ticket else 0.99  # whether the delete answer names the ticket
+
+    def raced(argv, account):
+        nc.race(account)
+        return real(argv, account)
+
+    nc._delete = raced
+    with pytest.raises(ncc.NcForeignTicketReleased, match="halted"):
+        c.delete(mine)
+    nc._delete = real
+    ((name, detail),) = sc.events
+    theirs = nc.current[1]
+    assert (name, detail["ticket"], detail["expected"], detail["severity"]) == (
+        "foreign_ticket_released", theirs, mine, "critical")
+    assert sim.violations(nc) == [] and sim.residual_hits(sc) == {"detected": [theirs], "undetected": []}
+    for call in (lambda: c.create(run="run-a"), lambda: c.delete(mine), lambda: c.adopt("x")):
+        with pytest.raises(ncc.NcHalted, match="clear-halt"):
+            call()
+    assert c.ledger.clear_halt(1) and c.ledger.halted(1) is None
+    assert c.delete(mine)["already"] is True  # ours had ended on its own
+
+
+def test_a_foreign_release_behind_a_lost_delete_answer_is_noticed_at_the_next_release_attempt(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    real = nc._delete
+
+    def raced_and_lost(argv, account):
+        nc.race(account)
+        real(argv, account)
+        raise subprocess.TimeoutExpired(argv, 300)
+
+    nc._delete = raced_and_lost
+    with pytest.raises(subprocess.TimeoutExpired):
+        c.delete(mine)
+    nc._delete = real
+    with pytest.raises(ncc.NcForeignTicketReleased):
+        c.delete(mine)  # the pool's retry
+    assert c.ledger.halted(1)["released_ticket"] == nc.current[1]
+
+
+def test_the_clear_halt_command_shows_the_halt_and_needs_yes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path))
+    assert cli.main(["clear-halt", "--account", "1"]) == 0 and "not halted" in capsys.readouterr().out
+    cli.ledger().halt(1, "a delete meant for ticket a released ticket b", released_ticket="b")
+    assert cli.main(["clear-halt", "--account", "1"]) == 2 and cli.ledger().halted(1) is not None
+    assert '"released_ticket": "b"' in capsys.readouterr().out
+    assert cli.main(["clear-halt", "--account", "1", "--yes"]) == 0 and cli.ledger().halted(1) is None
+    assert cli.ledger().open_rows() == []  # a halt row is no ticket
+
+
+def test_open_rows_of_an_earlier_version_are_listed_once_for_the_operator(tmp_path):
+    events = []
+    ledger = ncc.Ledger(tmp_path / "tickets.json")
+    ledger.add(1, "old-open", run="run-x")  # as the earlier version wrote it: no order
+    ledger.add(1, "old-ended", run="run-x", ended=True)
+    provider = NCProvider([1], "run-x", ledger=ledger, allowed={1}, run=Nc(),
+                          event=lambda name, **detail: events.append((name, detail)))
+    assert provider.order(1) == "new1"
+    assert sorted(provider.run_tickets()) == [(1, "new1"), (1, "old-open")]
+    assert provider.run_tickets() and [(n, d["tickets"]) for n, d in events] == [("legacy_ledger_rows", ["1:old-open"])]

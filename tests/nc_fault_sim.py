@@ -5,21 +5,36 @@ The invariant: this tool changes only tickets it can prove are its own.
 
 * :class:`FaultyNc` stands in for ``nc-query`` / ``nc-manage`` (pass it as ``run=`` to
   :class:`~yeto.launch.nc.client.NcClient`). It keeps the truth - every ticket, who
-  placed it (``client`` through this fake, or ``foreign``: another session's user,
+  placed it (``client`` through this fake, or ``foreign``: another user of the account,
   :meth:`FaultyNc.foreign_step`) - and records every changing call with the ticket it
   hit and whether the ledger held that ticket at that moment.
 * Each answer is drawn at random: normal, empty, an error document, a timeout, an
-  answer without the ticket, one wrong "no order", ``created: false``, someone else's
-  ticket, an answer lost after the call took effect.
-* :func:`violations` lists the changing calls that hit a ticket outside the ledger.
+  answer without the ticket, one wrong "no order", ``created: false``, an answer
+  without ``created``, someone else's ticket, an answer lost after the call took effect.
+* Time is a :class:`SimClock` shared with the ledger and the clients: tickets are
+  granted, get a lease end, are preempted; the scenario jumps hours and days ahead
+  (stale pending orders).
+* :func:`violations` lists the changing calls that hit a ticket outside the ledger, the
+  nodes handed out for such a ticket, and the adoptions of a ticket that someone
+  else placed long after the tool's last order.
 * :func:`settle` ends the faults and lets the tool and then an operator clean up;
   :func:`leaks` lists tickets of the tool that are still open and that nobody was told
   about.
 * :func:`run_scenario` drives one random sequence (a seed) of client calls.
 
+The residual window. ``nc-manage delete`` takes no ticket id: it releases whatever
+ticket the account holds when it runs. The client reads the status right before the
+call, but between that read and the delete the ticket can end on its own and someone
+else can order. The fake models exactly this point: after a status answer it may end
+the tool's ticket and place a foreign one (``race_rate``). If the very next call on
+the account is the delete, the hit is recorded as *residual* (:func:`residual_hits`),
+not as a violation: no client-side check can close it. If the client read the status
+again in between and still deleted, it is a violation. For a residual hit the client
+must notice afterwards and halt the account (``detected``), unless the evidence was
+lost with the delete's answer and overwritten by a later order (``undetected``).
+
 Not simulated: two wrong "no order" answers in a row for one account (the client
-trusts the second read), and another party acting between the status read and the
-``nc-manage delete`` of one release (the order tool's delete takes no ticket id).
+trusts the second read).
 """
 
 from __future__ import annotations
@@ -28,6 +43,7 @@ import json
 import random
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,10 +51,26 @@ from typing import Any
 from yeto.launch.nc import client as ncc
 
 OPEN = ("queued", "active")
+LEASE_S = 4 * 3600.0
 
 
 def _answer(doc: Any = None, *, code: int = 0, stdout: str | None = None, stderr: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=code, stdout=json.dumps(doc) if stdout is None else stdout, stderr=stderr)
+
+
+def _iso(t: float | None) -> str | None:
+    return None if t is None else datetime.fromtimestamp(t, UTC).isoformat()
+
+
+@dataclass
+class SimClock:
+    t: float = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
 
 
 @dataclass
@@ -46,14 +78,18 @@ class FaultyNc:
     ledger_path: Path
     accounts: tuple[int, ...]
     rng: random.Random
+    clock: SimClock = field(default_factory=SimClock)
     faults: bool = True
     fault_rate: float = 0.45
-    tickets: dict[str, dict[str, Any]] = field(default_factory=dict)  # id -> account, by, state, end_reason
+    race_rate: float = 0.04  # after a status answer: the tool's ticket ends, someone else orders
+    tickets: dict[str, dict[str, Any]] = field(default_factory=dict)  # id -> account, by, state, times
     current: dict[int, str | None] = field(default_factory=dict)  # the session's ticket per account
     writes: list[dict[str, Any]] = field(default_factory=list)  # every changing call
-    forbidden: list[str] = field(default_factory=list)  # calls that must never be made
+    forbidden: list[str] = field(default_factory=list)  # things that must never happen
+    last_order_end: dict[int, float] = field(default_factory=dict)  # the client's last order call per account
     n: int = 0
     _flapped: set[int] = field(default_factory=set)
+    _raced: set[int] = field(default_factory=set)  # raced after the account's latest status answer
 
     # -- the truth -----------------------------------------------------------
     def open_ticket(self, account: int) -> dict[str, Any] | None:
@@ -63,9 +99,14 @@ class FaultyNc:
     def _place(self, account: int, by: str) -> dict[str, Any]:
         self.n += 1
         tid = f"{by[0]}{self.n}"
-        self.tickets[tid] = {"id": tid, "account": account, "by": by, "state": "queued", "end_reason": None}
+        self.tickets[tid] = {"id": tid, "account": account, "by": by, "state": "queued", "end_reason": None,
+                             "placed_at": self.clock(), "granted_at": None, "lease_until": None,
+                             "preempt_at": None}
         self.current[account] = tid
         return self.tickets[tid]
+
+    def _grant(self, t: dict[str, Any]) -> None:
+        t.update(state="active", granted_at=self.clock(), lease_until=self.clock() + LEASE_S)
 
     def _in_ledger(self, account: int, tid: str) -> bool:
         try:
@@ -74,9 +115,16 @@ class FaultyNc:
             return False
         return any(r.get("ticket") == tid and r.get("account") == account for r in rows)
 
+    def _due(self) -> None:
+        """Preemptions whose time has come."""
+        for t in self.tickets.values():
+            if t["state"] in OPEN and t["preempt_at"] is not None and self.clock() >= t["preempt_at"]:
+                t.update(state="ended", end_reason="preempted")
+
     def foreign_step(self) -> None:
         """Another user of the account acts: places an order on a free account, ends
-        their own ticket; National Compute grants or preempts a ticket."""
+        their own ticket; National Compute grants a ticket or announces a preemption."""
+        self._due()
         account = self.rng.choice(self.accounts)
         t = self.open_ticket(account)
         roll = self.rng.random()
@@ -84,11 +132,15 @@ class FaultyNc:
             if roll < 0.5:
                 self._place(account, "foreign")
         elif t["state"] == "queued" and roll < 0.6:
-            t["state"] = "active"
+            self._grant(t)
         elif t["by"] == "foreign" and roll < 0.8:
             t.update(state="ended", end_reason="released")
-        elif roll > 0.9:
-            t.update(state="ended", end_reason="preempted")
+        elif t["state"] == "active" and t["preempt_at"] is None and roll > 0.85:
+            t["preempt_at"] = self.clock() + self.rng.choice((30.0, 90.0, 400.0))
+
+    def console_release(self, tid: str) -> None:
+        """A person releases a ticket in the National Compute console."""
+        self.tickets[tid].update(state="ended", end_reason="released", ended_by="console")
 
     # -- the tools -------------------------------------------------------------
     def _view(self, account: int) -> dict[str, Any] | None:
@@ -97,7 +149,9 @@ class FaultyNc:
             return None
         t = self.tickets[tid]
         node = {"public_ip": "192.0.2.9", "ssh_user": "ubuntu", "host_key": "k"} if t["state"] == "active" else None
-        return {"id": tid, "state": t["state"], "end_reason": t["end_reason"], "node": node, "others": []}
+        return {"id": tid, "state": t["state"], "end_reason": t["end_reason"], "node": node,
+                "granted_at": _iso(t["granted_at"]), "lease_until": _iso(t["lease_until"]),
+                "preempt_at": _iso(t["preempt_at"]), "others": []}
 
     def _fault(self, kinds: tuple[str, ...]) -> str:
         if not self.faults or self.rng.random() > self.fault_rate:
@@ -123,6 +177,7 @@ class FaultyNc:
 
     def __call__(self, argv: list[str], **kw: Any) -> SimpleNamespace:
         argv = list(argv)
+        self._due()
         if "--all" in argv:
             self.forbidden.append(" ".join(argv))
         account = int(argv[argv.index("--account") + 1])
@@ -130,13 +185,28 @@ class FaultyNc:
             return self._status(argv, account)
         verb = argv[1]
         if verb == "create":
-            return self._create(argv, account)
+            try:
+                return self._create(argv, account)
+            finally:
+                self.last_order_end[account] = self.clock()
         if verb == "delete":
             return self._delete(argv, account)
         self.forbidden.append(" ".join(argv))
         return _answer({"ok": False, "error": "unknown"}, code=1)
 
+    def race(self, account: int) -> bool:
+        """The residual window: the tool's open ticket on ``account`` ends on its own and
+        someone else orders, after the status answer the client is holding."""
+        t = self.open_ticket(account)
+        if t is None or t["by"] != "client":
+            return False
+        t.update(state="ended", end_reason="expired")
+        self._place(account, "foreign")
+        self._raced.add(account)
+        return True
+
     def _status(self, argv: list[str], account: int) -> SimpleNamespace:
+        self._raced.discard(account)  # the client looks again: whatever it does next, it saw the account as it is
         kind = self._fault((*self.BROKEN, "bad_ticket", "wrong_none"))
         if kind == "wrong_none" and (account in self._flapped or self.current.get(account) is None):
             kind = "normal"
@@ -149,13 +219,16 @@ class FaultyNc:
         if kind == "wrong_none":  # one 404 for an account that has a ticket (never two in a row)
             self._flapped.add(account)
             return _answer({"ok": True, "account": account, "ticket": None})
-        return _answer({"ok": True, "account": account, "balance": {"balance_ucredits": 10**10},
-                        "ticket": self._view(account)})
+        out = _answer({"ok": True, "account": account, "balance": {"balance_ucredits": 10**10},
+                       "ticket": self._view(account)})
+        if self.faults and self.rng.random() < self.race_rate:
+            self.race(account)
+        return out
 
     def _create(self, argv: list[str], account: int) -> SimpleNamespace:
         kind = self._fault((*self.BROKEN, "lost_timeout", "lost_garbage", "lost_exit", "lost_no_ticket",
-                            "raced", "raced_then_fails"))
-        if kind in ("raced", "raced_then_fails") and self.open_ticket(account) is None:
+                            "raced", "raced_then_fails", "raced_no_created"))
+        if kind.startswith("raced") and self.open_ticket(account) is None:
             self._place(account, "foreign")  # someone else ordered right before this call
         if kind == "raced_then_fails":
             return self._broken(self.rng.choice(("timeout", "error_exit", "garbage")), argv)
@@ -163,8 +236,11 @@ class FaultyNc:
             return self._broken(kind, argv)
         found = self.open_ticket(account)
         if found is not None:  # the tool's own check: an open order, none placed
-            return _answer({"ok": True, "account": account, "created": False, "reason": "the account has an open order",
-                            "ticket": self._view(account)})
+            doc = {"ok": True, "account": account, "created": False, "reason": "the account has an open order",
+                   "ticket": self._view(account)}
+            if kind == "raced_no_created":  # an answer that does not say whether it placed the order
+                del doc["created"]
+            return _answer(doc)
         t = self._place(account, "client")
         self.writes.append({"op": "create", "account": account, "ticket": None, "by": None, "in_ledger": None})
         if kind.startswith("lost_"):  # placed; the answer does not come back
@@ -178,26 +254,42 @@ class FaultyNc:
         if kind in self.BROKEN:
             return self._broken(kind, argv)
         t = self.open_ticket(account)
+        lost = kind.startswith("lost_")
         self.writes.append({"op": "delete", "account": account, "ticket": t and t["id"], "by": t and t["by"],
-                            "in_ledger": t is not None and self._in_ledger(account, t["id"])})
+                            "in_ledger": t is not None and self._in_ledger(account, t["id"]),
+                            "residual": t is not None and account in self._raced, "answered": not lost})
+        self._raced.discard(account)
+        released = None
         if t is not None:
             t.update(state="ended", end_reason="released", ended_by="client")
-        if kind.startswith("lost_"):
+            released = {"state": "ended", "end_reason": "released"}
+            if self.rng.random() < 0.5:  # the tool's answer may or may not name the ticket
+                released["id"] = t["id"]
+        if lost:
             return self._broken({"lost_timeout": "timeout", "lost_garbage": "garbage",
                                  "lost_exit": "error_exit"}[kind], argv)
-        return _answer({"ok": True, "account": account, "released": t is not None})
+        return _answer({"ok": True, "account": account, "released": t is not None, "ticket": released})
 
 
 def violations(nc: FaultyNc) -> list[str]:
-    """Changing calls that hit a ticket the ledger did not hold, or that are never allowed."""
-    out = [f"forbidden call: {c}" for c in nc.forbidden]
+    """Changing calls that hit a ticket the ledger did not hold (outside the residual
+    window, see the module doc), and whatever else must never happen."""
+    out = [f"forbidden: {c}" for c in nc.forbidden]
     for w in nc.writes:
-        if w["op"] != "create" and w["ticket"] is not None and not (w["in_ledger"] and w["by"] == "client"):
+        if w["op"] == "create" or w["ticket"] is None or w.get("residual"):
+            continue
+        if not (w["in_ledger"] and w["by"] == "client"):
             out.append(f"{w['op']} hit ticket {w['ticket']} (placed by {w['by']}, in ledger: {w['in_ledger']}) "
                        f"on account {w['account']}")
-    out += [f"foreign ticket {t['id']} was ended by the client" for t in nc.tickets.values()
-            if t["by"] == "foreign" and t.get("ended_by") == "client"]
     return out
+
+
+def residual_hits(sc: Scenario) -> dict[str, list[str]]:
+    """Deletes that released someone else's ticket inside the residual window:
+    ``detected`` (the client halted the account and reported it) and ``undetected``."""
+    reported = {d["ticket"] for name, d in sc.events if name == "foreign_ticket_released"}
+    hits = [w["ticket"] for w in sc.nc.writes if w.get("residual")]
+    return {"detected": [t for t in hits if t in reported], "undetected": [t for t in hits if t not in reported]}
 
 
 @dataclass
@@ -205,16 +297,20 @@ class Scenario:
     nc: FaultyNc
     ledger: ncc.Ledger
     clients: dict[int, ncc.NcClient]
+    clock: SimClock
     events: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     def reported(self) -> set[str]:
+        """Tickets reported as a possible unrecorded order of the tool (adoptable or stale)."""
         return {d["ticket"] for name, d in self.events if name == "order_unrecorded"}
 
 
-def scenario(tmp_path: Path, seed: int, *, accounts: tuple[int, ...] = (1, 4, 5), fault_rate: float = 0.45) -> Scenario:
-    ledger = ncc.Ledger(tmp_path / "tickets.json")
-    nc = FaultyNc(ledger.path, accounts, random.Random(seed), fault_rate=fault_rate)
-    sc = Scenario(nc, ledger, {})
+def scenario(tmp_path: Path, seed: int, *, accounts: tuple[int, ...] = (1, 4, 5), fault_rate: float = 0.45,
+             race_rate: float = 0.04) -> Scenario:
+    clock = SimClock()
+    ledger = ncc.Ledger(tmp_path / "tickets.json", clock=clock)
+    nc = FaultyNc(ledger.path, accounts, random.Random(seed), clock, fault_rate=fault_rate, race_rate=race_rate)
+    sc = Scenario(nc, ledger, {}, clock)
     for a in accounts:
         sc.clients[a] = ncc.NcClient(a, ledger, run=nc, sleep=lambda s: None,
                                      event=lambda name, **detail: sc.events.append((name, detail)))
@@ -224,24 +320,45 @@ def scenario(tmp_path: Path, seed: int, *, accounts: tuple[int, ...] = (1, 4, 5)
 EXPECTED = (ncc.NcError, subprocess.TimeoutExpired)  # what a call may raise under faults
 
 
+def _stale_for(sc: Scenario, t: dict[str, Any]) -> bool:
+    """``t`` was placed so long after the tool's last order call on the account that no
+    pending order can be tied to it."""
+    last = sc.nc.last_order_end.get(t["account"])
+    return last is None or t["placed_at"] > last + ncc.ORDER_PENDING_MAX_S + ncc.ORDER_IN_FLIGHT_S
+
+
 def run_scenario(sc: Scenario, steps: int = 150) -> None:
-    """``steps`` random client calls (order, read, release, release of a ticket that is
-    not in the ledger, look at an account), with the other party acting in between."""
-    rng = sc.nc.rng
+    """``steps`` random client calls (order, read, release, release / wait / adopt of a
+    ticket that is not in the ledger, look at an account), with the other party acting
+    and time passing in between."""
+    rng, nc = sc.nc.rng, sc.nc
     for _ in range(steps):
+        sc.clock.advance(rng.choice((1.0, 5.0, 20.0, 60.0, 60.0, 300.0, 3600.0, 2 * 86400.0)))
         if rng.random() < 0.3:
-            sc.nc.foreign_step()
-        account = rng.choice(sc.nc.accounts)
+            nc.foreign_step()
+        account = rng.choice(nc.accounts)
         c = sc.clients[account]
-        op = rng.choice(("create", "create", "status", "delete", "delete_any", "free", "wait"))
+        op = rng.choice(("create", "create", "status", "delete", "delete_any", "free", "wait", "wait_any",
+                         "adopt_stale"))
         rows = [r for r in sc.ledger.open_rows() if r["account"] == account]
+        shown = nc.current.get(account)
         try:
             if op == "create":
                 c.create(run="run-sim")
             elif op == "free":
                 c.account_free()
-            elif op == "delete_any" and sc.nc.tickets:  # whatever the account shows, in the ledger or not
-                c.delete(rng.choice(sorted(sc.nc.tickets)))
+            elif op == "delete_any" and nc.tickets:  # whatever ticket, in the ledger or not
+                c.delete(shown if shown and rng.random() < 0.7 else rng.choice(sorted(nc.tickets)))
+            elif op == "wait_any" and shown:  # the node of whatever the account shows
+                in_ledger = nc._in_ledger(account, shown)
+                lease = c.wait_active(shown, timeout_s=0, log=lambda line: None)
+                if not in_ledger:
+                    nc.forbidden.append(f"node {lease.ip} of ticket {shown} handed out, in no ledger")
+            elif op == "adopt_stale" and shown:  # a careless operator, long after the tool's last order
+                t = nc.tickets[shown]
+                if t["by"] == "foreign" and t["state"] in OPEN and _stale_for(sc, t):
+                    c.adopt(shown)
+                    nc.forbidden.append(f"foreign ticket {shown} adopted long after the last order")
             elif rows and op == "status":
                 c.ticket_status(rng.choice(rows)["ticket"])
             elif rows and op == "delete":
@@ -254,32 +371,62 @@ def run_scenario(sc: Scenario, steps: int = 150) -> None:
 
 def settle(sc: Scenario, *, operator: bool = True) -> None:
     """The faults end. The tool looks at every account and releases what its ledger
-    holds; then (``operator``) a person adopts each reported ticket that the tool's
-    order did place - they can see that in the console - and releases it."""
+    holds (waiting out a ticket that is about to end on its own); then (``operator``) a
+    person lifts the halts, adopts each reported ticket that the tool's order did
+    place - they can see that in the console - or releases it there, and the tool
+    releases what was adopted."""
     sc.nc.faults = False
-    for account, c in sc.clients.items():
-        c.account_free()
-    for row in sc.ledger.open_rows():
-        try:
-            sc.clients[row["account"]].delete(row["ticket"])
-        except ncc.NcRefused:  # ended, and the account now shows someone else's ticket
-            pass
+    for _ in range(3):
+        for c in sc.clients.values():
+            try:
+                c.account_free()
+            except ncc.NcError:
+                pass
+        deferred = False
+        for row in sc.ledger.open_rows():
+            try:
+                sc.clients[row["account"]].delete(row["ticket"])
+            except ncc.NcReleaseDeferred:
+                deferred = True
+            except ncc.NcError:  # ended behind someone else's order; a halted account; a foreign release
+                pass
+        if not deferred:
+            break
+        sc.clock.advance(2 * ncc.DELETE_GUARD_S + 1)
+        sc.nc._due()
     if not operator:
         return
     for account, c in sc.clients.items():
+        sc.ledger.clear_halt(account)
         t = sc.nc.open_ticket(account)
-        if t is not None and t["by"] == "client" and t["id"] in sc.reported():
-            c.adopt(t["id"])
-            c.delete(t["id"])
+        if t is None or t["by"] != "client":
+            continue
+        if not sc.nc._in_ledger(account, t["id"]):
+            if t["id"] not in sc.reported():
+                continue
+            try:
+                c.adopt(t["id"])
+            except ncc.NcRefused:  # reported as stale: released by hand
+                sc.nc.console_release(t["id"])
+                continue
+        for _ in range(3):
+            try:
+                c.delete(t["id"])
+                break
+            except ncc.NcReleaseDeferred:
+                sc.clock.advance(2 * ncc.DELETE_GUARD_S + 1)
+                sc.nc._due()
 
 
 def leaks(sc: Scenario) -> list[str]:
     """Tickets the tool's orders placed that are still open and were never reported
-    for an operator (after :func:`settle`: every one of them is a silent, billing leak)."""
+    for an operator (after :func:`settle`: every one of them is a silent, billing leak).
+    A ticket on a halted account counts as reported: the halt names the account."""
     return [f"ticket {t['id']} on account {t['account']} is open, in the ledger: "
             f"{sc.nc._in_ledger(t['account'], t['id'])}, reported: {t['id'] in sc.reported()}"
             for t in sc.nc.tickets.values()
-            if t["by"] == "client" and t["state"] in OPEN and t["id"] not in sc.reported()]
+            if t["by"] == "client" and t["state"] in OPEN and t["id"] not in sc.reported()
+            and sc.ledger.halted(t["account"]) is None]
 
 
 def still_open(sc: Scenario, by: str) -> list[str]:

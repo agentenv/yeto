@@ -115,7 +115,7 @@ def test_a_release_that_reads_an_untrusted_status_keeps_the_ticket_open_in_the_l
 
 def test_a_release_reads_a_no_order_answer_again_and_then_deletes_the_active_ticket(tmp_path):
     released = {"id": "abc", "state": "ended", "end_reason": "released", "others": []}
-    run = Script(status_of(None), status_of(ACTIVE), status_of(released))
+    run = Script(status_of(None), status_of(ACTIVE), status_of(ACTIVE), status_of(released))
     c = client(run, tmp_path)
     c.ledger.add(1, "abc", run="run-a")
     result = c.delete("abc")
@@ -135,7 +135,7 @@ def test_a_release_of_a_ticket_the_account_no_longer_holds_is_recorded_as_alread
 def test_one_no_order_answer_after_the_delete_call_does_not_confirm_the_release(tmp_path):
     """delete sent, without effect | status: no order (one wrong answer) | status: active
     -> the ticket still bills; the ledger must not say it ended."""
-    run = Script(status_of(ACTIVE), status_of(None), status_of(ACTIVE))
+    run = Script(status_of(ACTIVE), status_of(ACTIVE), status_of(None), status_of(ACTIVE))
     c = client(run, tmp_path)
     c.ledger.add(1, "abc", run="run-a")
     with pytest.raises(ncc.NcError, match="does not read ended"):
@@ -144,14 +144,14 @@ def test_one_no_order_answer_after_the_delete_call_does_not_confirm_the_release(
 
 
 def test_two_no_order_answers_after_the_delete_call_confirm_the_release(tmp_path):
-    run = Script(status_of(ACTIVE), status_of(None))
+    run = Script(status_of(ACTIVE), status_of(ACTIVE), status_of(None))
     c = client(run, tmp_path)
     c.ledger.add(1, "abc", run="run-a")
     assert c.delete("abc")["state"] == "ended" and c.ledger.run_rows("run-a") == []
 
 
 def test_a_delete_call_the_tool_refused_is_a_failed_release(tmp_path):
-    run = Script(status_of(ACTIVE), status_of(None))
+    run = Script(status_of(ACTIVE))
     run_manage = lambda argv, **kw: (  # noqa: E731
         answer({"ok": False, "error": "gateway"}) if argv[0] == "nc-manage" else run(argv, **kw))
     c = client(run_manage, tmp_path)

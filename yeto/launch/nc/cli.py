@@ -1058,6 +1058,9 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--account", type=int, required=True)
     ad.add_argument("--ticket", required=True)
     ad.add_argument("--yes", action="store_true", help="I checked that this ticket is this tool's order")
+    ch = sub.add_parser("clear-halt", help="lift the halt of an account after a foreign ticket was released")
+    ch.add_argument("--account", type=int, required=True)
+    ch.add_argument("--yes", action="store_true", help="I checked the account and told the ticket's owner")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",
                         description="Run the lease-aware sampler pool in the foreground. Keep it up for the "
                         "whole run: National Compute does not end a lease at lease_until (it stays billed).")
@@ -1193,6 +1196,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"adopt refused: {error}", file=sys.stderr)
             return 1
         print(json.dumps(row, indent=1, default=str))
+        return 0
+    if args.cmd == "clear-halt":
+        halt = ledger().halted(args.account)
+        if halt is None:
+            print(f"account {args.account} is not halted")
+            return 0
+        print(json.dumps(halt, indent=1, default=str))
+        if not args.yes:
+            print("pass --yes to lift the halt once the account was checked")
+            return 2
+        ledger().clear_halt(args.account)
         return 0
     if args.cmd == "down":
         if not args.direct:
