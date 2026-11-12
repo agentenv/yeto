@@ -349,7 +349,8 @@ class RoundCutCheckpoint:
                 # cut and no LATEST; the mark lets a restart drop it and start at 0
                 from yeto.rl.engine.resume import mark_first_cut
 
-                mark_first_cut(self.controller.checkpoint_store, context.cut_id)
+                mark_first_cut(self.controller.checkpoint_store, context.cut_id,
+                               store=getattr(self.controller, "store", None))
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
