@@ -58,12 +58,17 @@ from typing import Any
 # engine sampler island writes the same payloads); re-exported here.
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     PAYLOAD_SCHEMA,
+    DamagedPayload,
+    DamagedPayloadLimit,
     GroupWriter,
     SampleBufferExhausted,
     SampleBufferRolloutError,
     decode_group,
     encode_group,
     group_entry_fields,
+    passed_over_text,
+    payload_is_missing,
+    payload_oldest_version,
 )
 from yeto.rl.engine.merged_release import (
     LANE_ENV,
@@ -86,6 +91,10 @@ SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a s
 WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds without a new group while a round fills
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
+# reader: damaged payloads in a row (or, at least that many, over half of the payloads
+# a take decoded) at which the take raises instead of passing them over; 0: no limit
+MAX_DAMAGED_RUN_ENV = "YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN"
+DEFAULT_MAX_DAMAGED_RUN = 8
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
 # Several sampler islands on one shared directory (a Modal Volume): each
 # sampler writes its own shard, the trainer merges these shards (comma list)
@@ -515,6 +524,16 @@ class TakeReport:
     # groups with a sample whose reward is missing or not finite (a failed reward call):
     # consumed, never trained (one NaN reward makes the whole group's advantages NaN)
     nonfinite_reward_groups: int = 0
+    # groups whose payload is missing or is not a group (cut short, not JSON, another
+    # schema): consumed, never trained; one record each in ``damaged_payloads``
+    # ({"position", "sample_id", "payload_ref", "reason"[, "dispense_position"]}). A
+    # payload the store failed to return is not one of them: that take raises
+    damaged_payload_groups: int = 0
+    damaged_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # of ``stale_groups``: groups whose index record passed the age gate but whose
+    # payload holds an older version, below the floor (the record and the payload
+    # disagree; the tokens trained are the payload's, so the payload decides)
+    stale_payload_groups: int = 0
     # groups inside the policy-age window whose version no record names for a trainer
     # that resumed behind its releases (BatchReader.set_unidentified_gate): consumed,
     # never trained; {version: groups} and their task-dispenser positions
@@ -539,6 +558,8 @@ class TakeReport:
                 "sample_buffer/padded_samples": float(self.padded_samples),
                 "sample_buffer/padded_fraction": float(self.padded_fraction),
                 "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups),
+                "sample_buffer/damaged_payload_groups": float(self.damaged_payload_groups),
+                "sample_buffer/stale_payload_groups": float(self.stale_payload_groups),
                 "sample_buffer/unidentified_policy_groups": float(self.unidentified_policy_groups)}
 
 
@@ -621,7 +642,33 @@ class BatchReader:
     Volume with open files fails. Each payload read holds the store's reader
     guard (``CheckpointStore.hold_reader``), so a reload by another process of
     the container (the driver reading its policy releases) is skipped while a
-    read is open."""
+    read is open.
+
+    Faults of a payload. A payload that does not exist or is not a group (cut
+    short, not JSON, another schema; :class:`DamagedPayload`,
+    :func:`payload_is_missing`) is a fault of the data: reading it again gives
+    the same answer, so the group is passed over like one without a finite reward
+    (consumed, counted in ``TakeReport.damaged_payload_groups``, named in
+    ``damaged_payloads``) and the round is filled from the groups after it. A
+    read the store did not answer (a throttle, a 5xx, a timeout) is not: the take
+    raises it. Damage is passed over one object at a time only: ``max_damaged_run``
+    damaged payloads in a row, or that many and more than half of the payloads the
+    take decoded, is a systematic fault (a sampler build that writes another
+    schema, a reader that cannot decode), and the take raises
+    :class:`DamagedPayloadLimit` rather than consume the backlog (the tasks are
+    already settled in the dispenser and would never be generated again). A take
+    that ends without a round (the data ended, no group arrived in time) names what
+    it passed over in its error (``error.passed_over``, and the counts at the end
+    of its text, ``buffer_payload.passed_over_of``) and logs the records.
+    A take that raises returned nothing, so the groups it selected are
+    kept (``_retry``) and the next take on this reader starts with them: taking
+    again in place loses no group.
+
+    The age gate reads the index record's ``behavior_version`` before the payload
+    is read, and again the payload's own oldest version once it is decoded
+    (:func:`payload_oldest_version`): a record that names a newer version than its
+    payload holds cannot pass an over-age group (it is counted in ``stale_groups``
+    and ``stale_payload_groups``). The second look only ever passes over more."""
 
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
@@ -629,7 +676,8 @@ class BatchReader:
                  sleep: Callable[[float], None] = time.sleep,
                  cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
-                 incarnation_gate: Any = "auto", group_size: int | None = None) -> None:
+                 incarnation_gate: Any = "auto", group_size: int | None = None,
+                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -647,7 +695,9 @@ class BatchReader:
         A round that falls short selects more whole groups while they fit; the first
         that does not is carried over to the next take (the round's end, hence the
         watermark, stays before it); what is still missing is reported as
-        ``padded_samples`` (:func:`padding_samples` builds them). None: no check."""
+        ``padded_samples`` (:func:`padding_samples` builds them). None: no check.
+        ``max_damaged_run``: the damaged payloads at which a take raises (the class
+        doc); 0: no limit."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -681,6 +731,19 @@ class BatchReader:
         # (position, decoded group, behavior version, tokens, source, dispense position)
         self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
         self._nonfinite = 0
+        # the items the take under way selected, and those of a take that raised (they
+        # come first in the next take: the buffer's read cursor is already past them)
+        self._taken: list[Any] = []
+        self._retry: list[Any] = []
+        self._entry_of: dict[int, Any] = {}  # position -> index entry of the take's reads
+        self._damaged: list[dict[str, Any]] = []  # the take's damaged payloads
+        self._floor: int | None = None  # the take's age floor
+        self.max_damaged_run = int(max_damaged_run)
+        self._damaged_run = 0  # damaged payloads in a row, and the payloads decoded, of the take
+        self._decoded_payloads = 0
+        # dispense positions (None without one) of the take's groups whose payload is
+        # older than the floor although their index record is not
+        self._stale_payloads: list[int | None] = []
         # set_unidentified_gate: (start version K, the versions below K a record names)
         self._unidentified_gate: tuple[int, frozenset[int]] | None = None
         self._unidentified: dict[str, Any] = {"versions": {}, "positions": []}
@@ -746,8 +809,79 @@ class BatchReader:
         until = action.get("until_round")
         return action.get("action") == "quarantine" and (until is None or rollout_id < int(until))
 
-    def _read(self, ref: str) -> Future:
-        if self._pool is None:
+    def _select(self, limit: int) -> list[Any]:
+        """The next ``limit`` items: first those a take that raised had selected."""
+        out = self._retry[:max(0, int(limit))]
+        del self._retry[:len(out)]
+        if len(out) < int(limit) and not self._retry:
+            out += self.buffer.select(self.consumer, int(limit) - len(out))
+        self._taken += out
+        return out
+
+    def _cursor(self) -> int:
+        """The position of the next item a take selects."""
+        return int(self._retry[0].position) if self._retry else self.buffer.read_cursor
+
+    def _group_at(self, position: int, read: Future) -> list[dict[str, Any]] | None:
+        """The decoded group of a payload read; None for a payload that is missing or
+        not a group (recorded in ``self._damaged``). A read the store failed raises."""
+        entry = self._entry_of.get(int(position))
+        ref = getattr(entry, "payload_ref", None)
+        try:
+            group = decode_group(read.result())
+            self._damaged_run = 0
+            self._decoded_payloads += 1
+            return group
+        except DamagedPayload as error:
+            reason = str(error)
+        except Exception as error:  # noqa: BLE001 - only a payload that is gone is passed over
+            if ref is None or not payload_is_missing(self.buffer, ref, error):
+                raise
+            reason = "payload is missing"
+        dispensed = _dispense_position(entry)
+        self._damaged.append({"position": int(position), "sample_id": getattr(entry, "sample_id", None),
+                              "payload_ref": ref, "reason": reason,
+                              **({} if dispensed is None else {"dispense_position": dispensed})})
+        self._damaged_run += 1
+        limit, damaged = self.max_damaged_run, len(self._damaged)
+        if limit > 0 and (self._damaged_run >= limit
+                          or (damaged >= limit and damaged > self._decoded_payloads)):
+            raise DamagedPayloadLimit(
+                f"{damaged} damaged payloads in this take ({self._damaged_run} in a row, "
+                f"{self._decoded_payloads} decoded), the last at buffer position {int(position)} "
+                f"({getattr(entry, 'sample_id', None)}: {reason}); this is not one damaged object: check the "
+                f"samplers' payload schema against this reader's ({PAYLOAD_SCHEMA}). Nothing was consumed; "
+                f"{MAX_DAMAGED_RUN_ENV} (now {limit}, 0: no limit) sets the bound")
+        return None
+
+    def _ended(self, error: SampleBufferRolloutError, **counts: int) -> SampleBufferRolloutError:
+        """``error`` of a take that ends without a round, with what the take passed over:
+        the counts at the end of its text and in ``error.passed_over`` (with the
+        records), and one log line."""
+        counts = {**counts, "stale": counts.get("stale", 0) + len(self._stale_payloads),
+                  "stale_payload": len(self._stale_payloads), "nonfinite_reward": self._nonfinite,
+                  "damaged_payload": len(self._damaged)}
+        counts = {key: int(value) for key, value in counts.items() if value}
+        out = type(error)(f"{error}{passed_over_text(counts)}")
+        out.passed_over = {**counts, "damaged_payloads": list(self._damaged)}
+        if counts:
+            print(f"[sample-buffer] take ended without a round: {json.dumps(out.passed_over, sort_keys=True)}",
+                  flush=True)
+        return out
+
+    def _stale_payload(self, position: int, group: Sequence[Mapping[str, Any]]) -> bool:
+        """Whether the decoded payload is older than the take's age floor (its index
+        record was not: the two disagree); if so the group is recorded as stale."""
+        if self._floor is None:
+            return False
+        oldest = payload_oldest_version(group)
+        if oldest is None or oldest >= self._floor:
+            return False
+        self._stale_payloads.append(_dispense_position(self._entry_of.get(int(position))))
+        return True
+
+    def _read(self, ref: str, *, inline: bool = False) -> Future:
+        if self._pool is None or inline:
             done: Future = Future()
             try:
                 done.set_result(self.buffer.read_payload(ref))
@@ -762,15 +896,29 @@ class BatchReader:
         Waits for them while the samplers write: it raises only after ``wait_s``
         seconds in which no new group reached the buffer (a slow round that keeps
         arriving is waited for); after the data end returns what is left (raises
-        when nothing is)."""
+        when nothing is). When it raises, the groups it selected are selected again
+        by the next take on this reader (the class doc)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
-        rollout_id = int(rollout_id)
+        carried_in = self._carry
+        self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
+        self._damaged_run = self._decoded_payloads = 0
+        try:
+            return self._take(int(rollout_id), int(groups), current_version)
+        except BaseException:
+            self._retry = self._taken + self._retry
+            self._carry = carried_in
+            raise
+        finally:
+            self._taken = []
+
+    def _take(self, rollout_id: int, groups: int, current_version: int | None
+              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
         started = progress = self.clock()
         self._stop_prefetching()
         ahead = dict(self._reads)
         self._reads.clear()
-        start = self.buffer.read_cursor
+        start = self._cursor()
         chosen: list[tuple[int, Future, bool]] = []  # (position, read, read ahead)
         versions: dict[int, int] = {}
         stale = 0
@@ -783,9 +931,10 @@ class BatchReader:
         source_groups: dict[str, int] = {}
         source_tokens: dict[str, int] = {}
         position_sources: dict[int, str] = {}
-        select_s = read_s = 0.0
+        select_s = read_s = decode_s = 0.0
         current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else age_floor(int(current_version), self.max_policy_age)
+        self._floor = floor
         dropped_small = 0
         self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
         self._unidentified = {"versions": {}, "positions": []}
@@ -804,7 +953,7 @@ class BatchReader:
             # the reads of the last selection end before the next refresh (a reload)
             read_s += self._settle([read for _, read, _ in chosen])
             begun = self.clock()
-            selected = self.buffer.select(self.consumer, groups - len(chosen))
+            selected = self._select(groups - len(chosen))
             select_s += self.clock() - begun
             kept_before, unidentified_before = len(chosen), self.unidentified_total
             for item in selected:
@@ -828,14 +977,20 @@ class BatchReader:
                 position_sources[int(item.position)] = source
                 ref = item.entry.payload_ref
                 read = ahead.pop(ref, None)
+                if read is not None and read.exception() is not None:
+                    read = None  # the read ahead failed: this take reads (and reports) on its own
+                self._entry_of[int(item.position)] = item.entry
                 chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
             self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
                                  self.unidentified_total - unidentified_before)
-            if self.group_size is not None and selected:
+            if selected:  # decode now: a group that is dropped is replaced by the next selection
+                read_s += self._settle([read for _, read, _ in chosen])
+                begun = self.clock()
                 dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
                                                        source_tokens, position_sources)
+                decode_s += self.clock() - begun
             if selected:
                 progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
@@ -843,11 +998,12 @@ class BatchReader:
             if self.buffer.data_ended:
                 break
             if self.clock() - progress > self.wait_s:
-                raise SampleBufferRolloutError(
+                raise self._ended(SampleBufferRolloutError(
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
-                    f"without a new group (buffer position {self.buffer.read_cursor})")
+                    f"without a new group (buffer position {self._cursor()})"),
+                    stale=stale, stale_incarnation=fenced, quarantined=quarantined, dropped_small=dropped_small)
             self.sleep(self.poll_s)
-        end = self.buffer.read_cursor
+        end = self._cursor()
         carried_out = padded = 0
         if self.group_size is not None and chosen:
             skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
@@ -862,17 +1018,18 @@ class BatchReader:
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
-        read_s += self._settle([read for _, read, _ in chosen])
-        begun = self.clock()
-        out = [(position, decoded[position] if position in decoded else decode_group(read.result()))
-               for position, read, _ in chosen]
-        decode_s = self.clock() - begun
+        out = [(position, decoded[position]) for position, _, _ in chosen]
+        stale += len(self._stale_payloads)
+        stale_positions += [p for p in self._stale_payloads if p is not None]
         nonfinite = self._nonfinite
+        damaged = list(self._damaged)
         if not out:
-            raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
-                                        f"with no trainable group (position {end}, {stale} passed "
-                                        f"over as too old, {fenced} from fenced incarnations, "
-                                        f"{dropped_small} too small, {nonfinite} without a finite reward)")
+            raise self._ended(SampleBufferExhausted(
+                f"rollout {rollout_id}: the sample buffer ended with no trainable group (position {end}, "
+                f"{stale} passed over as too old, {fenced} from fenced incarnations, {dropped_small} too "
+                f"small, {nonfinite} without a finite reward, {len(damaged)} with a damaged payload)"),
+                stale=stale - len(self._stale_payloads), stale_incarnation=fenced, quarantined=quarantined,
+                dropped_small=dropped_small)
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
             positions_of = getattr(self.buffer, "shard_positions", None)
@@ -894,6 +1051,8 @@ class BatchReader:
                                stale_incarnation_groups=fenced, incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
+                               damaged_payload_groups=len(damaged), damaged_payloads=damaged,
+                               stale_payload_groups=len(self._stale_payloads),
                                unidentified_policy_groups=sum(self._unidentified["versions"].values()),
                                unidentified_policy_versions=dict(sorted(self._unidentified["versions"].items())),
                                unidentified_policy_positions=list(self._unidentified["positions"]))
@@ -922,17 +1081,18 @@ class BatchReader:
         round ends at its position, so the watermark never passes it untrained.
         Returns ``(end, carried groups, padded samples, groups dropped as too small)``; the
         groups passed over (too old, a fenced incarnation's, quarantined) are counted in
-        ``skipped`` like the main selection counts them."""
+        ``skipped`` like the main selection counts them; a damaged payload is recorded
+        by :meth:`_group_at`."""
         skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
                                                        "quarantined": 0}
         missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
         dropped = 0
         while missing > 0:
-            selected = self.buffer.select(self.consumer, 1)
+            selected = self._select(1)
             if not selected:
                 break
             item = selected[0]
-            end = self.buffer.read_cursor
+            end = self._cursor()
             if floor is not None and item.entry.behavior_version < floor:
                 skipped["stale"] += 1  # too old: consumed unread, as in the main selection
                 dispensed = _dispense_position(item.entry)
@@ -948,7 +1108,10 @@ class BatchReader:
             if self._quarantined(source, rollout_id):
                 skipped["quarantined"] += 1
                 continue
-            group = decode_group(self.buffer.read_payload(item.entry.payload_ref))
+            self._entry_of[int(item.position)] = item.entry
+            group = self._group_at(item.position, self._read(item.entry.payload_ref, inline=True))
+            if group is None or self._stale_payload(item.position, group):
+                continue
             if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
                 dropped += 1
                 continue
@@ -956,6 +1119,9 @@ class BatchReader:
                 skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
                 continue
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
+            oldest = payload_oldest_version(group)
+            if oldest is not None:  # what the next take's age gate compares if this group is carried over
+                version = min(int(version), oldest)
             if len(group) > missing:
                 self._carry = (position, group, version, tokens, source, _dispense_position(item.entry))
                 return position, 1, missing, dropped
@@ -966,24 +1132,34 @@ class BatchReader:
 
     def _drop_incomplete(self, chosen: list, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
                          source_tokens: dict, position_sources: dict) -> int:
-        """Decode the chosen groups not yet decoded; drop (in place) those whose
-        sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a non-finite
-        reward (:func:`finite_rewards`, counted apart) and undo their accounting.
-        Returns the number dropped for their size. Their positions stay consumed (the
-        cursor moved past them)."""
+        """Decode the chosen groups not yet decoded; drop (in place) those with a
+        damaged payload (:meth:`_group_at`, counted apart) and, with a ``group_size``,
+        those whose sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a
+        non-finite reward (:func:`finite_rewards`, counted apart), and undo their
+        accounting. Returns the number dropped for their size. Their positions stay
+        consumed (the cursor moved past them)."""
         fresh = [(position, read) for position, read, _ in chosen if position not in decoded]
-        low, high = MIN_GROUP_SAMPLES, int(self.group_size)
         if not fresh:
             return 0
         self._settle([read for _, read in fresh])
         drop: set[int] = set()
-        nonfinite = 0
+        nonfinite = damaged = 0
         for position, read in fresh:
-            group = decode_group(read.result())
-            if low <= len(group) <= high and finite_rewards(group):
+            group = self._group_at(position, read)
+            if group is not None and self._stale_payload(position, group):
+                group, aged = None, True
+            else:
+                aged = False
+            sized = group is not None and (
+                self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
+            if sized and (self.group_size is None or finite_rewards(group)):
                 decoded[position] = group
                 continue
-            if low <= len(group) <= high:
+            if aged:
+                damaged += 1  # not a size drop: counted in the take's stale groups
+            elif group is None:
+                damaged += 1
+            elif sized:
                 nonfinite += 1
             drop.add(position)
             version, tokens = accounted.pop(int(position))
@@ -1000,7 +1176,7 @@ class BatchReader:
         if drop:
             chosen[:] = [c for c in chosen if c[0] not in drop]
         self._nonfinite += nonfinite
-        return len(drop) - nonfinite
+        return len(drop) - nonfinite - damaged
 
     def _shard_at(self, position: int) -> str | None:
         shard_at = getattr(self.buffer, "shard_at", None)
@@ -1076,6 +1252,7 @@ class BatchReader:
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
         self._carry = None  # its position is at or past the watermark: selected again
+        self._retry = []  # so are the groups of a take that raised
         return int(self.buffer.watermark)
 
 

@@ -126,11 +126,109 @@ def _read_retry_pause(attempt: int) -> None:
     time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))
 
 
-# botocore's retries of one request (throttling 429 / 503 SlowDown included):
-# "standard" mode backs off exponentially with jitter, so 16 samplers refused at
-# once by the store do not come back in lock step; AWS_RETRY_MODE /
-# AWS_MAX_ATTEMPTS in the environment win
+# A range read the store refused for its request rate, after botocore's own retries
+# (R2: ``503 ServiceUnavailable: Reduce your concurrent request rate for the same
+# object``; S3: ``503 SlowDown``; a 429). The download then lowers the range reads
+# this process runs at once and tries the range again (:class:`RangeGate`), instead
+# of failing the whole file: 16 samplers that pull one release together are 8000
+# concurrent reads, up to 256 on one file.
+THROTTLE_CODES = frozenset({"ServiceUnavailable", "SlowDown", "TooManyRequests", "RequestLimitExceeded",
+                            "Throttling", "ThrottlingException", "RequestThrottled", "503", "429"})
+THROTTLE_STATUS = frozenset({429, 503})
+THROTTLED_READ_ATTEMPTS = 6  # tries of one refused range (each one botocore's 9 requests)
+# The two retry layers multiply: a range refused every time is 6 x 9 = 54 requests and
+# waits at most 6 x 91 s (botocore) + 1 + 2 + 4 + 8 + 16 s (ours) = 577 s before the
+# download fails; ours exist to lower the concurrency (RangeGate), not to retry more.
+# A non-throttle error is never retried here (body errors: RANGE_READ_ATTEMPTS).
+RANGE_RESTORE_READS = 8  # range reads without a refusal per read given back to the limit
+
+
+def is_throttled(error: BaseException) -> bool:
+    """``error`` is the store refusing a request for its rate (a botocore
+    ``ClientError`` by code or HTTP status)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return error_code(error) in THROTTLE_CODES or status in THROTTLE_STATUS
+
+
+class RangeGate:
+    """How many range reads one process runs at once. Unlimited until the store
+    refuses a read for its rate; each refusal halves the reads then in flight
+    (never below one), and every :data:`RANGE_RESTORE_READS` reads without a
+    refusal give one back (the limit is never dropped again: going back to
+    every thread at once would ask for the next refusal). One gate per store
+    object: every file and thread of a download in this process shares it."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.limit: int | None = None  # None: no limit
+        self.active = 0
+        self.peak = 0  # the most reads in flight since the last refusal
+        self.cuts = 0  # refusals that lowered the limit
+        self._good = 0
+
+    def __enter__(self) -> int:
+        """Wait for a free read; the cut it runs under (``refused(started=...)``)."""
+        with self._cond:
+            while self.limit is not None and self.active >= self.limit:
+                self._cond.wait()
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            return self.cuts
+
+    def __exit__(self, *exc: object) -> None:
+        with self._cond:
+            self.active -= 1
+            self._cond.notify()
+
+    def refused(self, started: int | None = None) -> int:
+        """A read was refused: halve what ran at once; the new limit. ``started``
+        (what ``with gate as started`` gave the read): a read started before the latest cut does
+        not cut again. Reads in flight together are refused together (one burst of
+        the store): each halving them again would take 256 reads to a limit of 1."""
+        with self._cond:
+            if started is not None and started != self.cuts and self.limit is not None:
+                return self.limit
+            running = self.peak if self.limit is None else min(self.limit, self.peak)
+            self.limit = max(1, running // 2)
+            self.peak, self._good = self.active, 0
+            self.cuts += 1
+            return self.limit
+
+    def succeeded(self) -> None:
+        with self._cond:
+            if self.limit is None:
+                return
+            self._good += 1
+            if self._good >= RANGE_RESTORE_READS:
+                self._good = 0
+                self.limit += 1
+                self._cond.notify()
+
+
+# botocore's retries of one request. "standard" mode retries a 500 / 502 / 503 / 504
+# and the throttling codes (SlowDown, ...) with full jitter: the wait before retry
+# ``n`` is ``random() * min(2 ** (n - 1), 20)`` s, so 16 samplers refused at once by
+# the store do not come back in lock step. ``max_attempts`` here counts retries (the
+# client config's meaning): 8 retries are 9 requests and 8 waits, 45.5 s on average
+# and 91 s at most (measured against an endpoint that always answers 503: mean 45.8 s,
+# p95 65 s). A client also holds a retry quota (500 units, 5 per retry, refilled by
+# successes): after about 100 retries without a success between them a refused
+# request fails at once (measured: the 14th refused call in a row was not retried).
+# "adaptive" mode adds a client-side rate limit, but only after a throttling *code*
+# (SlowDown, Throttling, ...): R2's ``503 ServiceUnavailable: Reduce your concurrent
+# request rate`` is not one, so it would never slow this client down (measured).
+# :func:`client_config` reads the overrides.
 RETRIES = {"mode": "standard", "max_attempts": 8}
+RETRY_MODES = ("standard", "adaptive", "legacy")
+# Seconds to open a connection / to wait for the next bytes of a response. botocore's
+# 60 s connect timeout times 9 requests keeps one call to an unreachable endpoint
+# busy for 9 minutes, longer than the dispenser's lease renewal period (lease / 3 =
+# 300 s); a TCP + TLS handshake that has not finished in 10 s is retried instead.
+CONNECT_TIMEOUT_S = 10.0
+READ_TIMEOUT_S = 60.0  # botocore's default; a 64 MiB range read is many socket reads
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
@@ -148,12 +246,17 @@ PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts of one file mov
 FILE_CONCURRENCY_ENV = "YETO_RL_STORE_FILE_CONCURRENCY"  # files of one push tier moved in parallel
 MAX_CONNECTIONS_ENV = "YETO_RL_STORE_MAX_CONNECTIONS"  # HTTP connection pool of the client (default: the threads)
 DOWNLOAD_PROCESSES_ENV = "YETO_RL_STORE_DOWNLOAD_PROCESSES"  # processes of a many-file download (read_files)
+CONNECT_TIMEOUT_ENV = "YETO_RL_STORE_CONNECT_TIMEOUT_S"  # seconds to open a connection (default 10)
+READ_TIMEOUT_ENV = "YETO_RL_STORE_READ_TIMEOUT_S"  # seconds without a byte of a response (default 60)
+RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (default) / adaptive / legacy
+MAX_ATTEMPTS_ENV = "YETO_RL_STORE_MAX_ATTEMPTS"  # requests of one call, the first included (default 9)
 PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
 UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
-                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV)
+                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV,
+                CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
 # cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
@@ -519,6 +622,36 @@ def client_pool_size(environ: Mapping[str, str]) -> int:
     return max(BOTOCORE_DEFAULT_POOL, t.file_concurrency * t.concurrency)
 
 
+def _seconds(environ: Mapping[str, str], name: str, default: float) -> float:
+    raw = environ.get(name)
+    value = float(raw) if raw else default
+    if value <= 0:
+        raise ValueError(f"{name}={raw!r}: expected seconds > 0")
+    return value
+
+
+def client_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """The botocore ``Config`` arguments of the store's client: the connection pool
+    (:func:`client_pool_size`), the timeouts (:data:`CONNECT_TIMEOUT_ENV` /
+    :data:`READ_TIMEOUT_ENV`) and the retries (:data:`RETRIES`).
+
+    Retry mode: :data:`RETRY_MODE_ENV`, else ``AWS_RETRY_MODE``, else "standard".
+    Requests of one call (the first included): :data:`MAX_ATTEMPTS_ENV`, else
+    ``AWS_MAX_ATTEMPTS``, else 9. Each is read on its own: ``AWS_MAX_ATTEMPTS`` alone
+    keeps "standard" mode (botocore's own default mode is "legacy")."""
+    mode = environ.get(RETRY_MODE_ENV) or environ.get("AWS_RETRY_MODE") or RETRIES["mode"]
+    if mode not in RETRY_MODES:
+        raise ValueError(f"retry mode {mode!r} ({RETRY_MODE_ENV} / AWS_RETRY_MODE): expected one of {RETRY_MODES}")
+    raw = environ.get(MAX_ATTEMPTS_ENV) or environ.get("AWS_MAX_ATTEMPTS")
+    attempts = int(raw) if raw else int(RETRIES["max_attempts"]) + 1
+    if attempts < 1:
+        raise ValueError(f"{MAX_ATTEMPTS_ENV} / AWS_MAX_ATTEMPTS={raw!r}: expected an integer >= 1")
+    return {"max_pool_connections": client_pool_size(environ),
+            "connect_timeout": _seconds(environ, CONNECT_TIMEOUT_ENV, CONNECT_TIMEOUT_S),
+            "read_timeout": _seconds(environ, READ_TIMEOUT_ENV, READ_TIMEOUT_S),
+            "retries": {"mode": mode, "total_max_attempts": attempts}}
+
+
 def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
     import boto3
     from botocore.config import Config
@@ -540,9 +673,8 @@ def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
         raise ObjectStoreError(missing_credentials_message())
     else:
         session = boto3.session.Session()
-    retries = {} if (environ.get("AWS_RETRY_MODE") or environ.get("AWS_MAX_ATTEMPTS")) else {"retries": dict(RETRIES)}
     return session.client("s3", endpoint_url=store_endpoint(environ), region_name=store_region(environ),
-                          config=Config(max_pool_connections=client_pool_size(environ), **retries))
+                          config=Config(**client_config(environ)))
 
 
 class S3ObjectStore:
@@ -574,6 +706,7 @@ class S3ObjectStore:
         self.client = client
         self.transfer = transfer or TransferSettings()
         self.client_factory = client_factory
+        self.range_gate = RangeGate()  # range reads of this process, lowered when the store refuses
         self.conditional_writes = True
         # set when the endpoint answered a part checksum with NotImplemented
         self.part_checksums_refused = False
@@ -1007,17 +1140,29 @@ class S3ObjectStore:
 
             def fetch(offset: int) -> None:
                 end = min(offset + part, size) - 1
-                for attempt in range(RANGE_READ_ATTEMPTS):
+                attempt = refusals = 0
+                while True:
+                    started = None
                     try:
-                        body = self.client.get_object(Bucket=self.bucket, Key=full, Range=f"bytes={offset}-{end}",
-                                                      **pin)["Body"].read()
+                        with self.range_gate as started:
+                            body = self.client.get_object(Bucket=self.bucket, Key=full,
+                                                          Range=f"bytes={offset}-{end}", **pin)["Body"].read()
                     except RANGE_READ_RETRYABLE:
                         # botocore retries the request, not the streamed body: a stalled
                         # body read of one part would otherwise fail the whole download
-                        if attempt + 1 == RANGE_READ_ATTEMPTS:
+                        attempt += 1
+                        if attempt == RANGE_READ_ATTEMPTS:
                             raise
-                        _read_retry_pause(attempt)
+                        _read_retry_pause(attempt - 1)
                         continue
+                    except Exception as error:  # noqa: BLE001 - a ClientError, by code
+                        refusals += 1
+                        if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
+                            raise
+                        self._range_refused(error, started)
+                        _read_retry_pause(refusals - 1)
+                        continue
+                    self.range_gate.succeeded()
                     break
                 if len(body) != end - offset + 1:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
@@ -1040,6 +1185,15 @@ class S3ObjectStore:
             finally:
                 done.set()
                 marker.join()
+
+    def _range_refused(self, error: BaseException, started: int | None = None) -> None:
+        cuts = self.range_gate.cuts
+        limit = self.range_gate.refused(started)
+        if self.range_gate.cuts == cuts:
+            return  # the burst that lowered the limit already: no new cut, no new warning
+        print(f"[s3-store] WARNING: {self.uri}: the store refused a range read for its request rate "
+              f"({error_code(error) or type(error).__name__}); this process now runs at most {limit} range "
+              f"read(s) at once and raises that again as reads succeed", file=sys.stderr, flush=True)
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
         """Download each ``(key, target)`` like :meth:`read_file`; returns the keys
@@ -1088,23 +1242,49 @@ class S3ObjectStore:
             keys += [item["Key"][strip:] for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
         return keys
 
-    def list_meta(self, prefix: str) -> tuple[list[tuple[str, float]], float]:
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request (``ListObjectsV2``): up to ``limit`` keys after
+        ``start_after`` and the key to continue from (None: that was the last page).
+        A reader that knows which keys it can skip pages through a prefix itself."""
+        strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix), "MaxKeys": int(limit)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        page = self.client.list_objects_v2(**kwargs)
+        contents = page.get("Contents", ())
+        keys = [item["Key"][strip:] for item in contents if not item["Key"].endswith("/")]
+        return keys, (contents[-1]["Key"][strip:] if page.get("IsTruncated") and contents else None)
+
+    def list_meta(self, prefix: str, *, start_after: str = "",
+                  end: str = "") -> tuple[list[tuple[str, float]], float]:
         """``([(key, LastModified epoch s)], server time)`` under ``prefix``: the
         object times and the clock they compare to both come from the server
-        (the ``Date`` header of the listing), never from this host's clock."""
+        (the ``Date`` header of the listing), never from this host's clock.
+
+        ``start_after`` / ``end``: only the keys ``start_after < key < end`` (byte
+        order). The listing starts there (``StartAfter``) and stops at the first
+        page that reaches ``end``, so a short range of a large prefix costs one
+        request, not one per 1000 keys of the prefix."""
         from email.utils import parsedate_to_datetime
 
         strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        stop = self._full(end) if end else None
         out: list[tuple[str, float]] = []
         now: float | None = None
-        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket,
-                                                                          Prefix=self._full(prefix)):
+        for page in self.client.get_paginator("list_objects_v2").paginate(**kwargs):
             date = (page.get("ResponseMetadata") or {}).get("HTTPHeaders", {}).get("date")
             if date:
                 stamp = parsedate_to_datetime(date).timestamp()
                 now = stamp if now is None else max(now, stamp)
+            contents = page.get("Contents", ())
             out += [(item["Key"][strip:], item["LastModified"].timestamp())
-                    for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
+                    for item in contents
+                    if not item["Key"].endswith("/") and (stop is None or item["Key"] < stop)]
+            if stop is not None and contents and contents[-1]["Key"] >= stop:
+                break
         if now is None:  # no Date header: the newest object time is a lower bound of the server clock
             now = max((t for _, t in out), default=0.0)
         return out, now
