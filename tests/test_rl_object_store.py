@@ -865,7 +865,7 @@ def test_a_release_downloads_in_the_background_while_the_engines_generate(tmp_pa
     with follower.generating():  # a round runs while the files arrive
         assert follower.refresh() is None
     gate.set()
-    follower._fetch.done.wait(5)
+    assert follower._fetch.done.wait(5)
     assert follower.refresh().version == 1 and loaded == [1]
     assert follower.last_timings["resolve_s"] >= 0
 
@@ -879,17 +879,22 @@ def test_a_failed_download_keeps_the_served_weights_and_is_tried_again(tmp_path,
                               download_retry_s=60.0, timer=lambda: now[0])
     trainer.release(1, "h1", weights)
     fail["left"] = 1
+    # The gate holds each download until the refresh that started it has
+    # returned: a download that ends inside that refresh is reported (or
+    # loaded) by it, not by the next one.
+    assert follower.refresh() is None and follower.incomplete == "downloading r1-v1"
     gate.set()
-    follower.refresh()
-    follower._fetch.done.wait(5)
+    assert follower._fetch.done.wait(5)
     with pytest.raises(ReleaseNotLoaded) as raised:
         follower.refresh()
     assert raised.value.reason == "download_failed" and follower.version == 0
     assert follower.refresh() is None  # reported once, then waits to retry
     now[0] = 61.0
     assert follower.refresh() is None  # retry window passed: a new download starts next
-    follower.refresh()
-    follower._fetch.done.wait(5)
+    gate.clear()
+    assert follower.refresh() is None and follower.incomplete == "downloading r1-v1"
+    gate.set()
+    assert follower._fetch.done.wait(5)
     assert follower.refresh().version == 1
 
 
