@@ -96,6 +96,10 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
         doc = json.loads(state.read_text()) if state.exists() else {}
     except ValueError:
         doc = {}
+    try:
+        pool_run.check_state_file(cfg)
+    except RuntimeError as error:  # PoolStateFormatError: written by a newer yeto, not read here
+        return dict(out, error=str(error))
     scale_doc = pool_run.read_scale(cfg)
     target = int(scale_doc["target"]) if scale_doc else int(doc.get("target", cfg.get("target", 0)))
     billed = pool_run.billed_members(doc)
@@ -109,6 +113,12 @@ def pool_summary(ref: rollout_pools.PoolRef) -> dict[str, Any]:
     if billed and not alive:
         out["warning"] = (f"{len(billed)} island(s) bill with no pool loop alive: "
                           f"python -m yeto.launch.nc pool-stop --config {ref.config}")
+    attention = pool_run.account_attention(cfg)
+    if attention:  # halted accounts, unconfirmed deletes, orders without an outcome (the NC ledger)
+        out["accounts_attention"] = attention
+        kinds = sorted({str(a.get("kind")) for a in attention})
+        note = f"{len(attention)} account matter(s) need an operator ({', '.join(kinds)}): see accounts_attention"
+        out["warning"] = f"{out['warning']}; {note}" if out.get("warning") else note
     return out
 
 
@@ -133,7 +143,7 @@ def view(refs: list[rollout_pools.PoolRef]) -> Any:
             cfg = ref.load()
             pc = cli.pool_config(cfg, allowed=None)
             pools[ref.name] = IslandPool.restore(cli.pool_state_path(cfg), pc, _NoOps(), log=lambda _m: None)
-        except (OSError, ValueError, KeyError, TypeError) as error:
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:  # incl. a newer state format
             cli._log(f"rollout status: pool {ref.name}: {error}")  # noqa: SLF001
     return RolloutController(pools, drain_on_exit=False, log=lambda _m: None)
 

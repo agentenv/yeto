@@ -247,6 +247,7 @@ def test_start_sampler_runs_setup_and_layers_env_files(tmp_path, monkeypatch):
     run_cmd = calls[-1][-1]
     assert run_cmd.index("nc-0.agentic-setup.env") < run_cmd.index("nc-0.agentic.env")
     assert "PYTHONPATH=/yeto:/work/harbor/site" in run_cmd
+    assert "YETO_RL_RELEASE_SPREAD_KEY=p/nc-0" in run_cmd  # the start spread is per shard, not per host name
     assert "DOCKER_HOST=ssh://yeto-sandbox" in (state / "nc-0.agentic-setup.env").read_text()
 
 
