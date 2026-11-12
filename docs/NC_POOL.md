@@ -218,6 +218,9 @@ idempotent and exit 0; a non-zero exit fails the node start.
 | `max_nodes` | Most billed nodes at once. | `2 x target` (in practice at most one per account) |
 | `max_orders` | Most orders over the whole run. | none |
 | `unreachable_grace_s` | How long probes must fail before a node counts as lost. Shorter failures count as network blips. | `300` |
+| `fence_alert_failures`, `fence_alert_s` | A shard fence that fails is tried again every tick. After this many failures, or this long without success, the pool sends `fence_stuck` once and keeps trying. | `5`, `600` |
+| `fence_order_ahead_s`, `fence_blocked_hold_s` | While a shard's fence is owed, a node to continue the shard is ordered only in the first `fence_order_ahead_s` of the failure. A granted node whose start the fence holds back is released after `fence_blocked_hold_s` (`fence_blocked_node_released`) and ordered again once the fence succeeded. | `300`, `1800` |
+| `fence_max_hold_s` | How long a node is kept (and billed) while its shard fence fails. After that the node is released (`fence_abandoned_node_released`); the fence is still tried and nothing continues the shard before it succeeds. `null`: no limit. | `7200` |
 | `control_plane_alert_s` | How long NC status calls must fail before an alert. The pool never acts on a failed status call alone. | `600` |
 | `stall_s` | A joined sampler whose event tape has not grown for this long counts as crashed. Set it above your longest round. | none (off) |
 | `max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced. Restarts before the node's first join and before a `pool-retry` do not count. | `2` |
@@ -381,6 +384,32 @@ To release a single ticket:
 python -m yeto.launch.nc down --account <account> --ticket <ticket>
 ```
 
+### Upgrading and rolling back yeto: the state file format
+
+The pool state file carries a `format` number. Format 1 (no `format` key) is
+what every yeto before the fence retry writes. Format 2 adds the member state
+`fencing` and a few member fields (the fence still owed, grace and restart
+bookkeeping).
+
+- **Upgrade.** Nothing to do: a newer yeto reads the older file and writes
+  the newer format at its next save.
+- **Rollback.** A yeto that writes format 1 cannot read a format 2 file: it
+  fails on the unknown member fields with a `TypeError`, in `pool` and in
+  `pool-stop` alike. Before you install the older version, stop the pool
+  loop and run, with the newer version:
+
+  ```
+  python -m yeto.launch.nc pool-state-downgrade --config pool.json
+  ```
+
+  It writes the state file as format 1 and keeps the original next to it
+  (`<name>.format2.bak`). It is refused while a pool loop is alive, while a
+  member is `fencing` (wait for the fence, or run `pool-stop` first), and
+  while a shard fence is still owed; `--drop-owed-fences` gives those fences
+  up and prints each shard left unfenced.
+- A yeto that meets a state file of a format newer than its own says so and
+  names this command instead of guessing.
+
 ## What the pool does
 
 On each tick, the pool reads every member's ticket and probes its node with
@@ -394,6 +423,15 @@ one SSH round trip. Then it acts:
 - **Eviction, lost node, overdue lease.** The node's shard is fenced, so a
   node that comes back cannot add groups the trainer would take. The ticket
   is deleted. The next order continues the shard.
+- **A fence that fails.** The fence comes before everything else and is tried
+  again every tick (`fence_failed`, then `fence_stuck`). Until it succeeds the
+  member shows as `fencing`: its node is kept (and billed), nothing is handed
+  on and no replacement is ordered. A node that is gone anyway (ticket ended,
+  lease over, released by a person, `pool-stop`, or kept for
+  `fence_max_hold_s`) is released without the
+  fence; the fence is still tried every tick, and the node that continues the
+  shard is ordered but its sampler starts only after the fence succeeded
+  (`start_waits_for_fence`).
 - **Configuration error.** Before it orders anything, `pool` (and
   `--dry-run`) renders the sampler spec and builds locally every part the
   sampler builds at start: the island config (required keys such as
@@ -409,13 +447,24 @@ one SSH round trip. Then it acts:
   nothing more. The node is kept (and billed) until you fix the config and run
   `pool-retry`, or until its lease end, when it is drained as usual.
 - **Crashed sampler.** The sampler is restarted in place, up to
-  `max_sampler_restarts` times. After that, the node is replaced.
+  `max_sampler_restarts` times. After that, the node is replaced. A
+  `docker inspect` that fails (sudo, dockerd not answering) is not a crash:
+  it counts as a probe that did not reach the node (`unreachable_grace_s`).
+  A ready sampler whose container is reported missing is restarted when the
+  next probe reports the same.
 - **Sampler exits 0: the data ended.** When the store dispenser has settled
   every task, the sampler prints `data ended` and exits 0. The pool treats
   this as the normal end of the run. It does not restart the sampler, does
   not replace the node and places no new order. With `stop_on_finish`
   (default), it drains every node and stops. Without it, the other samplers
   finish their data or go at their lease end, and then the pool stops.
+  A fenced sampler also exits 0, so on `data_path: r2` the pool first reads
+  the run store: with a stop request (handoff record) on the shard, a pool
+  fence on its incarnation lease, or a `FENCED` leave of its newest
+  incarnation, the data has not ended (`sampler_exit_not_data_end`). The node
+  is retired and its shard continued (stop request), or the sampler is
+  restarted in place like a crashed one. If the store does not read, nothing
+  is decided (`exit_evidence_unreadable`) until it does.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
 - **A status answer the pool cannot use.** The pool acts on an NC status
