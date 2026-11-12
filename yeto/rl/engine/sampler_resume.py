@@ -75,6 +75,12 @@ class SamplerRound:
     last: bool = False  # the round's last group
     # the task-dispenser position of the group's row (a sampler with a dispenser)
     dispense_position: int | None = None
+    # the store dispenser's attempt of that task (``store_dispense.ATTEMPT_KEY``); only
+    # a group of the store dispenser has it: there ``dispense_position`` is the slot,
+    # one per task of the run, and the trainer's reader trains one group per slot
+    dispense_attempt: int | None = None
+    # the store dispenser that slot belongs to (``StoreDispensedPrompts.plan_id``)
+    dispense_plan: str | None = None
 
     def record(self) -> dict[str, Any]:
         out = {"sampler": self.sampler, "incarnation": self.incarnation,
@@ -83,6 +89,10 @@ class SamplerRound:
             out["data_cursor"] = {k: int(v) for k, v in self.data_cursor.items()}
         if self.dispense_position is not None:
             out["dispense_position"] = int(self.dispense_position)
+        if self.dispense_attempt is not None:
+            out["dispense_attempt"] = int(self.dispense_attempt)
+        if self.dispense_plan is not None:
+            out["dispense_plan"] = str(self.dispense_plan)
         return out
 
 
@@ -338,7 +348,10 @@ class SamplerMembership:
 class ReclaimWatcher:
     """Polls ``reclaimed()`` on a daemon thread and calls ``on_reclaim()`` once, at
     once: the cloud stops the container a few seconds after its signal (Modal:
-    30 s), while the island's loop may still be inside a round."""
+    30 s), while the island's loop may still be inside a round. A poll that raises
+    (the lease watcher reads the store) is no verdict: it is counted
+    (``poll_failures``) and the next poll reads again, so one failed read never
+    ends the thread."""
 
     def __init__(self, reclaimed: Callable[[], bool], on_reclaim: Callable[[], Any], *,
                  poll_s: float = 0.5, name: str = "sampler-reclaim-watcher") -> None:
@@ -347,6 +360,7 @@ class ReclaimWatcher:
         self.poll_s = float(poll_s)
         self._stop = threading.Event()
         self.fired = threading.Event()
+        self.poll_failures = 0
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
 
     def start(self) -> "ReclaimWatcher":
@@ -358,8 +372,19 @@ class ReclaimWatcher:
         self._thread.join(timeout=5.0)
 
     def _run(self) -> None:
+        failing = False
         while not self._stop.is_set():
-            if self.reclaimed():
+            try:
+                reclaimed = self.reclaimed()
+                failing = False
+            except Exception as error:  # noqa: BLE001 - unknown this time: poll again
+                self.poll_failures += 1
+                if not failing:  # one line per run of failures
+                    print(f"[sampler-island] {self._thread.name}: poll failed, polling again: {error!r}",
+                          flush=True)
+                failing = True
+                reclaimed = False
+            if reclaimed:
                 self.fired.set()
                 try:
                     self.on_reclaim()
@@ -409,9 +434,24 @@ def request_handoff(store: Any, predecessor: str, successor: str, clock: Callabl
                 {"predecessor": predecessor, "successor": successor, "requested_at": clock()})
 
 
-def handoff_requested(store: Any, sampler: str) -> bool:
-    """Whether a successor asked ``sampler`` to stop (its loop starts no new round)."""
-    return _read_record(store, f"{HANDOFF_DIR}/{sampler}.json") is not None
+def handoff_requested(store: Any, sampler: str, *, on_error: Callable[[BaseException], None] | None = None) -> bool:
+    """Whether a successor asked ``sampler`` to stop (its loop starts no new round).
+    The sampler loop polls this before every round: a read that fails is no answer
+    (False now, read again at the next poll; ``on_error(error)`` hears of it), never
+    a reason to stop or to end the sampler. A record that is there but torn counts
+    as a request."""
+    try:
+        return _read_record(store, f"{HANDOFF_DIR}/{sampler}.json") is not None
+    except ValueError:
+        return True
+    except Exception as error:  # noqa: BLE001 - unknown this time
+        from .object_store import is_fatal_store_error  # noqa: PLC0415
+
+        if is_fatal_store_error(error):  # refused credentials, no such bucket: no outage
+            raise
+        if on_error is not None:
+            on_error(error)
+        return False
 
 
 HANDOFF_ASIDE_DIR = "sample-buffer/handoffs-aside"
@@ -460,12 +500,19 @@ def handoff_start(store: Any, predecessor: str, successor: str,
     left: its next round. One still running after ``wait_s`` (or that never wrote a
     member record, e.g. killed hard): one round further, so its round in flight
     cannot repeat prompts (a round's rows are skipped instead)."""
+    def has_left() -> bool:
+        try:
+            return sampler_left(store, predecessor)
+        except Exception as error:  # noqa: BLE001 - unknown this time: not seen leaving, read again
+            print(f"[sampler-island] member records of {predecessor} not read: {error!r}", flush=True)
+            return False
+
     request_handoff(store, predecessor, successor)
     deadline = clock() + float(wait_s)
-    left = sampler_left(store, predecessor)
+    left = has_left()
     while not left and clock() < deadline:
         sleep(poll_s)
-        left = sampler_left(store, predecessor)
+        left = has_left()
     point = resume_point(predecessor_entries(), predecessor)
     start = point.next_rollout_id if left or not point.written_rounds else point.next_rollout_id + 1
     return start, {"predecessor": predecessor, "predecessor_left": left,

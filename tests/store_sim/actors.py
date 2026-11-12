@@ -55,6 +55,11 @@ from yeto.rl.engine.task_dispense import DISPENSE_POSITION_KEY, DispenseEnded, D
 
 from .fault_s3 import ActorClock, Crash, FaultyS3Client
 
+try:  # the sampler entry's claim at its join (it waits out an unreadable previous lease)
+    from yeto.rl.engine.incarnation_lease import claim_patiently
+except ImportError:  # a tree before it
+    claim_patiently = None  # type: ignore[assignment]
+
 try:  # the trainer generation lease, where this tree has it
     from yeto.rl.engine import trainer_lease
 except ImportError:
@@ -215,6 +220,8 @@ class SamplerProc:
         lease_kwargs: dict[str, Any] = {}
         if _accepts(IncarnationLease, "buffer") and not self.legacy:  # shard ownership records are the fence
             lease_kwargs["buffer"] = self.buffer
+        if _accepts(IncarnationLease, "sleep"):  # the claim's pauses between its reads
+            lease_kwargs["sleep"] = self._wait
         self.lease = IncarnationLease(self.store, self.sid, self.incarnation, write_check_s=cfg.write_check_s,
                                       clock=self.clock.time, monotonic=self.clock.monotonic, **lease_kwargs)
         self.follower = PolicyFollower(self.releases, self._load, timer=self.clock.monotonic,
@@ -236,16 +243,26 @@ class SamplerProc:
             self.round = EngineRound(self.engine, writer, reward=lambda item, completion: 0.0, **common)
         if hasattr(self.round, "sleep"):  # a write that waits for a store read: the others go on
             self.round.sleep = self._wait
+            if hasattr(self.round, "monotonic"):
+                self.round.monotonic = self.clock.monotonic  # the write wait runs on simulated time
         self.loop = SamplerLoop(follower=self.follower, buffer=self.buffer, generate=self.round,
                                 num_rollouts=None, max_backlog_groups=1 << 30, emit=self._emit, poll_s=5.0,
                                 sleep=self._block, should_stop=self._should_stop, clock=self.clock.monotonic)
         latest = self.releases.latest()
         self.membership.join(latest_release=None if latest is None else
                              {"seq": latest.seq, "policy_version": latest.version})
-        self.lease.claim(self.buffer.entries(), earlier=self.resume.incarnations)
+        if claim_patiently is not None:  # as the sampler entry claims: an unreadable lease is waited for
+            claimed = claim_patiently(self.lease, self.buffer.entries, self.resume.incarnations,
+                                      should_stop=self._fenced, monotonic=self.clock.monotonic, sleep=self._wait)
+            if claimed is None:
+                self._exit("PREEMPTED", "done")
+                return
+        else:
+            self.lease.claim(self.buffer.entries(), earlier=self.resume.incarnations)
         self.round.write_fenced = self.lease.check_before_write
         if hasattr(self.round, "write_unknown") and hasattr(self.lease, "unknown"):
-            self.round.write_unknown = self.lease.unknown
+            self.round.write_unknown = (self.lease.unread_too_long if hasattr(self.lease, "unread_too_long")
+                                        else lambda: bool(self.lease.unknown))
         self.prompts.fenced = lambda: self.lease.fenced
         self.next_rollout_id = self.resume.next_rollout_id
         self.state = "running"
@@ -448,9 +465,13 @@ class SamplerProc:
                       "sampler_round": {"sampler": self.sid, "incarnation": self.incarnation,
                                         "rollout_id": gen.rollout_id, "last": False, "data_cursor": gen.cursor,
                                         "dispense_position": slot}}
-            plan = getattr(self.prompts.ledger, "plan_id", None)
-            if plan is not None:  # the record fields of a dispenser that names its plan
-                record["sampler_round"].update(dispense_attempt=gen.attempt, dispense_plan=plan)
+            # the store dispenser's fields, as the engine sampler records them (``_round_record``):
+            # the attempt, and the plan of a dispenser that names one (``StoreDispensedPrompts.plan_id``)
+            if gen.attempt is not None:
+                record["sampler_round"]["dispense_attempt"] = gen.attempt
+            plan = getattr(self.prompts, "plan_id", None)
+            if isinstance(plan, str) and plan:
+                record["sampler_round"]["dispense_plan"] = plan
             self._check_begins(gen)
             self.sim.intent(sample_id, self, gen, rogue=True)
             objects.write(f"{sample_buffer.BUFFER_DIR}/{ref}", encode_group(samples))

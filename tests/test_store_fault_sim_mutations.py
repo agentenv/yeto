@@ -181,7 +181,10 @@ def _a_release_carries_a_file_of_the_release_before(mp: Any) -> None:
 
 
 def _the_prune_deletes_every_release(mp: Any) -> None:
-    mp.setattr(policy_release.PolicyReleaseStore, "_kept_names", lambda self: set())
+    # ``_kept_names(names)`` (#377): the releases of the store in prune order, the new one last.
+    # A mutation of the wrong signature raises in the trainer after LATEST is written and is
+    # caught by nothing: keep the arguments of the product method
+    mp.setattr(policy_release.PolicyReleaseStore, "_kept_names", lambda self, names: set())
 
 
 def _a_new_lease_supersedes_nobody(mp: Any) -> None:
@@ -335,6 +338,9 @@ class Mutation:
     red: tuple[str, ...]  # the invariants that name the damage
     config: tuple[tuple[str, Any], ...] = ()
     skip: str | None = None  # why this tree cannot show it
+    # seeds to try (None: SEEDS): a damage that needs a rare interleaving (a fence that lands
+    # while a zombie still writes) shows in few seeds, and which ones moves with any timing change
+    seeds: int | None = None
 
     @property
     def id(self) -> str:
@@ -346,15 +352,18 @@ MUTATIONS = [
     # -- the dispenser: one holder per task, the holder knows when it lost the task
     Mutation(_still_holds_never_sees_a_later_claim, "network", ("group_written_without_its_claim",)),
     Mutation(_a_lost_claim_counts_as_won, "network", ("group_written_without_its_claim",)),
-    Mutation(_a_restart_does_not_settle_what_its_shard_holds, "process", ("restart_left_a_written_slot_unsettled",)),
+    # red on main at 1c1783af in seeds 50, 71, 74, 86, 94, 99, 117 of the first 120 (none of the first 40)
+    Mutation(_a_restart_does_not_settle_what_its_shard_holds, "process", ("restart_left_a_written_slot_unsettled",),
+             seeds=max(SEEDS, 120)),
     Mutation(_an_expired_attempt_gets_no_ending, "network", ("attempt_superseded_without_an_ending",)),
     Mutation(_a_claim_never_expires, "abandon", ("task_of_a_dead_holder_never_taken_over", "run_did_not_end")),
     Mutation(_every_fifth_group_is_reported_written_without_a_write, "none",
              ("slot_settled_trained_without_a_group",)),
     Mutation(_a_drain_is_answered_with_claims_still_held, "pool", ("drain_answered_while_holding_a_claim",)),
     # -- fencing: a superseded incarnation's late groups are not trained
-    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE),
-    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE),
+    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
+    # (the round is judged again before training: the seal's off-by-one shows from seed 130 on)
+    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 240)),
     Mutation(_a_new_lease_supersedes_nobody, "process", ("lease_forgot_a_superseded_incarnation",)),
     Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",)),
     # -- the buffer: every shard record merged once, read as itself, consumed once per cut lineage
@@ -383,8 +392,9 @@ MUTATIONS = [
     Mutation(_a_create_checks_then_writes, "network",
              ("group_written_without_its_claim", "shard_record_nobody_wrote", "trained_group_nobody_wrote")),
     Mutation(_a_cut_body_is_read_as_what_arrived, "network", ("read_returned_bytes_the_key_never_held",)),
+    # red on main at 1c1783af in seeds 42, 81 and 93 of the first 120 (none of the first 40)
     Mutation(_a_failed_multipart_upload_is_reported_done, "upload-heavy",
-             ("latest_release_is_incomplete", "release_files_of_another_version")),
+             ("latest_release_is_incomplete", "release_files_of_another_version"), seeds=max(SEEDS, 120)),
     Mutation(_a_multipart_upload_completes_with_its_first_part_only, "none",
              ("latest_release_is_incomplete", "release_files_of_another_version", "store_left_unreadable")),
     Mutation(_a_restored_trainer_starts_one_before_its_watermark, "process",
@@ -403,7 +413,8 @@ def _config(mutation: Mutation, seed: int) -> SimConfig:
 def test_the_simulation_turns_red_when(mutation: Mutation, monkeypatch, record_property):
     if mutation.skip:
         pytest.skip(mutation.skip)
-    for seed in range(SEEDS):  # the invariant holds on this tree as it is ...
+    seeds = mutation.seeds or SEEDS
+    for seed in range(seeds):  # the invariant holds on this tree as it is ...
         key = (mutation.preset, mutation.config, seed)
         if key not in _baseline:
             _baseline[key] = run_seed(_config(mutation, seed))
@@ -418,5 +429,5 @@ def test_the_simulation_turns_red_when(mutation: Mutation, monkeypatch, record_p
             record_property("first_red_seed", seed)
             print(f"{mutation.id}: red at seed {seed} of preset {mutation.preset}: {sorted(hit)}")
             return
-    pytest.fail(f"{mutation.id}: {SEEDS} seeds of preset {mutation.preset} never violated {mutation.red}",
+    pytest.fail(f"{mutation.id}: {seeds} seeds of preset {mutation.preset} never violated {mutation.red}",
                 pytrace=False)

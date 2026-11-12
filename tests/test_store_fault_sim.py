@@ -16,6 +16,7 @@ moves the window. A failure prints the seed and its trace;
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import random
@@ -27,8 +28,7 @@ from store_sim.fault_s3 import Crash, FaultConfig, FaultyS3Client, Injector, S3S
 from store_sim.sim import Result, SimConfig, run_seed
 from yeto.cloud.s3_store import S3ObjectStore
 from yeto.rl.adapters.miles import buffer_rollout
-from yeto.rl.engine import sample_buffer, store_dispense
-from yeto.rl.engine.incarnation_lease import IncarnationLease
+from yeto.rl.engine import incarnation_lease, sample_buffer, store_dispense
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -64,7 +64,7 @@ CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",")
 # Everything that is not listed here is strict everywhere.
 ONE_GROUP_PER_TASK = hasattr(buffer_rollout, "TaskSlots")  # the reader trains one group per dispensed task
 PLAN_IDENTITY = hasattr(store_dispense.StoreLedger, "plan_id")  # the dispenser names its plan in every record
-LEASE_READS_ARE_VERDICTS = hasattr(IncarnationLease, "unknown")  # a lease that was not read is "unknown"
+GATE_RECHECK = hasattr(incarnation_lease.IncarnationGate, "recheck")  # the round is judged again before training
 OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a sampler that fails between the buffer append of a group and its ``trained`` settlement
     # (or whose claim expires between its check and its write) leaves the slot to be run again
@@ -72,16 +72,24 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a claim taken while ``store_dispense.retire`` lists the ledger is not released by it, and
     # the retired process learns of its marker only at its next scan: it still writes that group
     "retired_writer_group_trained": (PLAN_IDENTITY, 0.25),
-    # ``IncarnationLease.claim`` takes a previous lease it could not read (a timeout is an
-    # OSError to ``read_record``) for no lease: the new record forgets who it supersedes
-    "lease_forgot_a_superseded_incarnation": (LEASE_READS_ARE_VERDICTS, 0.2),
-    # the same root on the trainer's side: ``IncarnationGate`` takes a lease read that failed
-    # (``read_record`` gives None) for no lease, caches that for ``refresh_s`` and trains the
-    # fenced incarnation's groups meanwhile (fail-open)
-    "stale_incarnation_group_trained": (LEASE_READS_ARE_VERDICTS, 0.05),
+    # the gate judges a group when the take selects it, against a lease it caches for
+    # ``refresh_s`` (30 s); the take may then wait for later groups and train it after a fence
+    # the cached lease did not show yet (seen with a partitioned zombie, preset fence-zombie).
+    # The fail-open read (a failed lease read taken for "no lease") is fixed (#373); the take
+    # judges its round again, the leases read again, right before it hands it over (GATE_RECHECK)
+    "stale_incarnation_group_trained": (GATE_RECHECK, 0.05),
     # until the old incarnation of a second start reads its lease both write the shard; a round
     # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
+    # Measured with 100 seeds (YETO_STORE_SIM_FULL=1, main at 1c1783af): preset second-start
+    # shows it in 7 seeds (7, 14, 67, 75, 86, 93, 96), under the ceiling of 0.1 (11 seeds)
     "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
+}
+# A violation that is only the consequence of an open finding in the same seed: kind -> (the
+# finding, what the detail of the violation must name). An unresumable shard makes every restart
+# of its sampler fail on the same SamplerResumeError, and the run ends on the crash-loop budget
+# (seeds 75, 86 and 96 of second-start); a run that does not end for any other reason is strict.
+CONSEQUENCES: dict[str, tuple[str, str]] = {
+    "run_did_not_end": ("shard_left_unresumable", "SamplerResumeError"),
 }
 # ... and only where a fenced process writes without any check of its own (preset fence-bypass):
 # the lease gate caches the lease for 30 s, and the next incarnation seals what it finds
@@ -107,9 +115,9 @@ def _assert_holds(results: list[Result], *, open_findings: dict[str, tuple[bool,
     """No seed violates an invariant; ``open_findings``: the kinds this scenario may
     still show (:data:`OPEN_FINDINGS`), each up to its share of the seeds."""
     allowed = {kind: share for kind, (fixed, share) in (open_findings or {}).items() if not fixed}
-    bad = [r for r in results if set(r.kinds()) - set(allowed)]
+    bad = [r for r in results if _unexplained(r, allowed)]
     if bad:
-        kinds = sorted({k for r in bad for k in r.kinds()} - set(allowed))
+        kinds = sorted({k for r in bad for k in _unexplained(r, allowed)})
         pytest.fail(f"{len(bad)} of {len(results)} seeds violate an invariant ({', '.join(kinds)}); "
                     f"seeds {[r.config.seed for r in bad][:20]}\n" + bad[0].report(), pytrace=False)
     for kind, share in allowed.items():
@@ -118,6 +126,17 @@ def _assert_holds(results: list[Result], *, open_findings: dict[str, tuple[bool,
             pytest.fail(f"{kind} (a known, unfixed finding) shows in {len(seeds)} of {len(results)} seeds, "
                         f"above its ceiling of {share:.0%}: seeds {seeds[:20]}\n"
                         + next(r for r in results if kind in r.violations).report(), pytrace=False)
+
+
+def _unexplained(result: Result, allowed: dict[str, float]) -> set[str]:
+    """The kinds of a seed that neither are allowed open findings nor only their consequence
+    (:data:`CONSEQUENCES`: the cause shows in the same seed and every item names it)."""
+    kinds = set(result.kinds()) - set(allowed)
+    for kind, (cause, names) in CONSEQUENCES.items():
+        if (kind in kinds and cause in allowed and cause in result.violations
+                and all(names in json.dumps(item, default=str) for item in result.violations[kind])):
+            kinds.discard(kind)
+    return kinds
 
 
 def _seeds_with(results: list[Result], kind: str) -> list[int]:
@@ -231,7 +250,9 @@ def test_every_fault_at_once_breaks_nothing_but_the_open_findings():
                    reason="open finding: a slot can be trained twice when its sampler fails between the "
                           "buffer append and the trained settlement (fixed by one group per dispensed task)")
 def test_no_slot_is_trained_twice_under_every_fault_at_once():
-    _assert_holds(_run("all"))
+    # strict on the slot; the other open findings (of other layers) keep their shares
+    _assert_holds(_run("all"), open_findings={kind: finding for kind, finding in OPEN_FINDINGS.items()
+                                              if kind != "trained_twice_same_slot"})
 
 
 def test_the_tasks_of_samplers_that_died_are_taken_over_by_the_others():
