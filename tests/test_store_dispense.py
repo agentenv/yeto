@@ -579,3 +579,59 @@ def test_a_process_does_not_claim_again_a_slot_whose_lost_attempt_it_still_runs(
     worker.written(0, [])  # the lost group settles: slot 0 is no longer held here
     store.now += 91
     assert worker._claim(1)[0] == [0]
+
+
+def test_a_retire_check_the_store_does_not_answer_keeps_the_claims_and_the_sampler(tmp_path):
+    """``retired_now`` after a won claim pass is one existence check: a 5xx there is no
+    verdict. The pass keeps what it claimed (the next scan reads the marker, and
+    ``still_holds`` gates the write) instead of raising out of the claim with the
+    claims taken but handed to nobody."""
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, groups=1)
+    exists = store.exists
+
+    def flaky(key):
+        if "/retired/" in key:
+            raise OSError("503 Service Unavailable")
+        return exists(key)
+
+    store.exists = flaky
+    assert worker.poll(1) == ("items", [0])
+    assert worker.still_holds(0)
+
+
+def test_a_retire_that_fails_after_its_marker_still_frees_the_claims(tmp_path):
+    """The marker is written, the release is not (the controller died, a 5xx): the
+    retired process fences itself at its next scan and another sampler's scan
+    releases the claim it still finds, long before the lease runs out."""
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, groups=1)
+    assert _slots(worker(0)) == [0]
+    create = store.create
+
+    def create_marker_only(key, body):
+        if "/retired/" not in key:
+            raise OSError("503 Service Unavailable")
+        return create(key, body)
+
+    store.create = create_marker_only
+    try:
+        sd.retire(store, "run/dispense", "s0", "i0")
+    except OSError:
+        pass
+    store.create = create
+    assert worker.poll(1) == ("fenced", [])
+    other = _open(path, store, holder="s1", groups=2)
+    assert sorted(_slots(other(0))) == [0, 1]
+
+
+def test_a_new_incarnation_of_a_retired_holder_is_not_fenced_by_the_old_marker(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    old = _open(path, store, groups=1)
+    assert _slots(old(0)) == [0]
+    sd.retire(store, "run/dispense", "s0")  # no incarnation given: the ones holding claims
+    new = _open(path, store, inc="i1", groups=2)
+    assert new.poll(2) == ("items", [0, 1])

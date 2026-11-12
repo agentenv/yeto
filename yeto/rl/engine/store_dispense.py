@@ -1121,7 +1121,13 @@ class StoreDispensedPrompts:
                     if rest:
                         k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
                         queue, i = rest[k:] + rest[:k], 0
-        if got and self.ledger.retired_now():
+        retired = False
+        if got:
+            try:
+                retired = self.ledger.retired_now()
+            except Exception as error:  # noqa: BLE001 - no verdict: the next scan reads the marker
+                logger.warning("store dispenser: retire marker not read after a claim pass: %r", error)
+        if retired:
             # retired while this pass claimed: :func:`retire` listed the ledger before these
             # claims and did not release them; give them back at once, write nothing
             self._retired = True
