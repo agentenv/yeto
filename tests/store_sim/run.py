@@ -83,7 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=1, help="worker processes")
     parser.add_argument("--backend", choices=("fake", "r2"), default="fake")
     parser.add_argument("--r2-prefix", help="with --backend r2: the temporary prefix of the bucket")
-    parser.add_argument("--json", action="store_true", help="print the summary as one JSON object")
+    parser.add_argument("--json", action="store_true",
+                        help="print the summary as one JSON object, on the last line of the output")
+    parser.add_argument("--out", help="also write the summary as JSON to this file")
     parser.add_argument("--trace", type=int, default=40, help="trace lines per violating seed (0: none)")
     parser.add_argument("--show", type=int, default=5, help="violating seeds to print in full")
     args = parser.parse_args(argv)
@@ -108,6 +110,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(result.report(trace=args.trace if shown <= args.show else 0), flush=True)
     summary = {**summarize(results), "faults": args.faults, "samplers": args.samplers, "slots": args.slots,
                "steps": args.steps, "wall_s": round(time.time() - started, 1)}
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, sort_keys=True)
+    sys.stdout.flush()
     print(json.dumps(summary, sort_keys=True) if args.json else json.dumps(summary, indent=1, sort_keys=True))
     return 1 if summary["violating_seeds"] else 0
 

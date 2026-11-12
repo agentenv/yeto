@@ -23,6 +23,7 @@ import collections
 import contextlib
 import json
 import random
+import re
 import shutil
 import tempfile
 import traceback
@@ -34,10 +35,9 @@ from yeto.cloud import s3_store
 from yeto.launch.nc import elastic
 from yeto.launch.pool.data_path import R2DataPath
 from yeto.rl.engine import sample_buffer, store_dispense
-from yeto.rl.engine.buffer_payload import decode_group
 
 from .actors import CUT_KEY, NAMESPACE, TRANSPORT_ERRORS, URI, Blocked, SamplerProc, TrainerProc
-from .fault_s3 import ActorClock, Crash, FaultConfig, FaultyS3Client, Injector, S3Server, SimClock
+from .fault_s3 import ActorClock, Budget, Crash, FaultConfig, FaultyS3Client, Injector, S3Server, SimClock
 
 MERGE_DROPS_FENCED_WRITES = hasattr(sample_buffer, "ShardFenced")
 INDEX_PREFIX = f"{sample_buffer.BUFFER_DIR}/{sample_buffer.INDEX_OBJECTS}/"
@@ -67,6 +67,12 @@ class SimConfig:
     trainer_wait_s: float = 600.0
     part_bytes: int = 96  # multipart part / download range size
     page_size: int = 7  # keys per listing page
+    engine_samplers: int = 1  # the last shards end whole rounds (EngineRound); the others group by group
+    namespace_switch_at: int | None = None  # at this step the operator restarts every sampler on a new
+    # dispenser namespace over the same buffer (more data, another pass)
+    takeover_steps: int = 2500  # fault-free steps for the tasks of dead holders to be taken over
+    max_requests: int = 250_000  # store requests of one run (more: it loops)
+    max_virtual_s: float = 36 * 3600.0  # simulated time of one run
     trainer_lease: bool = True  # the trainer claims a generation (where the tree has trainer_lease)
     legacy_samplers: int = 0  # the first shards run the sampler rules of before shard ownership records
     faults: FaultConfig = field(default_factory=FaultConfig)
@@ -174,6 +180,13 @@ class Simulation:
         self.rng = random.Random(config.seed)
         self.clock = SimClock()
         self.server = S3Server(self.clock, page_size=config.page_size)
+        self.server.max_requests = config.max_requests
+        self.server.deadline = self.clock.now + config.max_virtual_s
+        self.namespace = NAMESPACE  # the dispenser samplers are started with now
+        self.namespaces = [NAMESPACE]
+        self._crash_loop: str | None = None
+        self.lease_holders: dict[str, list[str]] = {}  # shard -> the incarnations its lease named, in order
+        self.abandoned: set[str] = set()  # shards whose sampler died and is not brought back yet
         self._trace: collections.deque[str] = collections.deque(maxlen=50_000)
         self.injector = Injector(self.rng, self.clock, config.faults, self.trace)
         self.injector.preempt = self._preempt
@@ -204,7 +217,8 @@ class Simulation:
         pool = s3_store.S3ObjectStore(URI, client=FaultyS3Client(self.server, "pool", self.injector))
         self.pool_clock = ActorClock(self.clock)
         self.pool_objects = pool
-        self.data_path = R2DataPath(elastic.ObjectRecords(pool), (pool, NAMESPACE), clock=self.pool_clock.time)
+        self.data_path = R2DataPath(elastic.ObjectRecords(pool), (pool, self.namespace),
+                                    clock=self.pool_clock.time)
         self.drains: dict[str, tuple[str, float]] = {}  # sid -> (seq, give up at)
         self.tickets = 0
         self.fenced_shards = 0
@@ -239,50 +253,115 @@ class Simulation:
         self.trace("VIOLATION", kind=kind, **detail)
 
     # -------------------------------------------------------------------- truth
-    def truth_holds(self, slot: int, attempt: int, sid: str, incarnation: str) -> bool:
-        """The ledger, read without faults: this process holds the slot's open attempt."""
-        base = f"{NAMESPACE}/claims/{slot:012d}/"
+    def truth_holds(self, namespace: str, slot: int, attempt: int, sid: str, incarnation: str, *,
+                    settled_counts: bool = True) -> bool:
+        """The ledger, read without faults: this process holds the slot's open attempt.
+        ``settled_counts=False``: a slot that is settled already is still held (the
+        claim itself was not taken away: no later attempt, no ending of this one)."""
+        base = f"{namespace}/claims/{slot:012d}/"
         claims = self.server.keys(base)
         if not claims or int(claims[-1][len(base):]) != attempt:
             return False
         body = json.loads(self.server.get(claims[-1]) or b"{}")
         if body.get("holder") != sid or str(body.get("incarnation")) != incarnation:
             return False
-        return not (self.server.keys(f"{NAMESPACE}/fail/{slot:012d}/{attempt:04d}.")
-                    or self.server.keys(f"{NAMESPACE}/done/{slot:012d}."))
+        return not (self.server.keys(f"{namespace}/fail/{slot:012d}/{attempt:04d}.")
+                    or (settled_counts and self.server.keys(f"{namespace}/done/{slot:012d}.")))
+
+    def truth_open_claims(self, namespace: str, sid: str, incarnation: str) -> list[int]:
+        """The slots whose open attempt this process holds (the ledger, without faults)."""
+        base = f"{namespace}/claims/"
+        latest: dict[int, int] = {}
+        for key in self.server.keys(base):
+            slot, attempt = (int(x) for x in key[len(base):].split("/"))
+            latest[slot] = max(latest.get(slot, -1), attempt)
+        return [slot for slot, attempt in sorted(latest.items())
+                if self.truth_holds(namespace, slot, attempt, sid, incarnation)]
 
     def truth_fenced(self, sid: str, incarnation: str) -> bool:
         """The incarnation lease of the shard names another incarnation."""
         raw = self.server.get(f"sample-buffer/leases/{sid}.json")
         return bool(raw) and str(json.loads(raw).get("incarnation")) != incarnation
 
-    def intent(self, sample_id: str, proc: SamplerProc, gen: Any) -> None:
-        self.intents[sample_id] = {
+    def intent(self, sample_id: str, proc: SamplerProc, gen: Any, *, rogue: bool = False) -> None:
+        """A group is about to be written: what its writer meant and what was true then."""
+        intent = self.intents[sample_id] = {
             "slot": gen.slot, "attempt": gen.attempt, "sampler": proc.sid, "incarnation": proc.incarnation,
-            "version": gen.version, "policy_hash": gen.policy_hash,
-            "owned": self.truth_holds(gen.slot, gen.attempt, proc.sid, proc.incarnation),
+            "namespace": proc.namespace, "version": gen.version, "policy_hash": gen.policy_hash, "rogue": rogue,
+            "owned": self.truth_holds(proc.namespace, gen.slot, gen.attempt, proc.sid, proc.incarnation),
             "fenced": self.truth_fenced(proc.sid, proc.incarnation),
             "retired": (proc.sid, proc.incarnation) in self.fenced_truth}
-        if not self.intents[sample_id]["owned"]:
+        if not gen.owned_at_check and not rogue:
+            # the claim was gone before the sampler began to decide: no check may let this through
+            self.violation("group_written_without_its_claim", sample_id=sample_id, slot=gen.slot,
+                           actor=proc.actor)
+        for name in ("fenced", "retired", "rogue"):
+            if intent[name]:
+                self.metric(f"writes_by_{name}_incarnation" if name != "rogue" else "writes_unchecked")
+        if not intent["owned"]:
             self.metric("writes_without_ownership")
-        if self.intents[sample_id]["fenced"]:
-            self.metric("writes_by_fenced_incarnation")
-        if self.intents[sample_id]["retired"]:
-            self.metric("writes_by_retired_incarnation")
+        lease = self.server.objects.get(f"sample-buffer/leases/{proc.sid}.json")
+        grace = self.config.lease_poll_s + self.config.write_check_s + 60.0
+        if intent["fenced"] and not rogue and lease is not None and self.clock.now - lease.modified > grace:
+            # its watcher and its check before the write both had the time to read the lease
+            self.violation("fenced_incarnation_still_writes", sample_id=sample_id, slot=gen.slot,
+                           actor=proc.actor, fenced_for_s=round(self.clock.now - lease.modified, 1))
+
+    def claimed(self, proc: SamplerProc, gen: Any) -> None:
+        self.metric("claims")
+
+    def loaded(self, proc: SamplerProc, release: Any) -> None:
+        self.metric("release_loads")
+
+    def _check_recovered(self, proc: SamplerProc) -> None:
+        """A sampler started: every task whose group is in its shard is settled in its
+        dispenser (``recover``), so no other sampler runs it again."""
+        ran: set[int] = set()  # the slots of this dispenser with a group in the shard
+        for key in self.server.keys(sample_buffer.shard_prefix(proc.sid)):
+            record = json.loads(self.server.get(key) or b"{}")
+            intent = self.intents.get(record.get("sample_id"))
+            if intent is not None and intent["namespace"] == proc.namespace:
+                ran.add(int(intent["slot"]))
+        for key in self.server.keys(f"{proc.namespace}/done/"):
+            body = json.loads(self.server.get(key) or b"{}")
+            slot = int(key.rsplit("/", 1)[-1].split(".")[0])
+            if (body.get("reason") == "recovered_from_buffer" and body.get("holder") == proc.sid
+                    and str(body.get("incarnation")) == proc.incarnation and slot not in ran):
+                # e.g. the group of the same position of another dispenser over this buffer
+                self.violation("restart_settled_a_task_that_never_ran", namespace=proc.namespace, slot=slot,
+                               actor=proc.actor)
+        for key in self.server.keys(sample_buffer.shard_prefix(proc.sid)):
+            record = json.loads(self.server.get(key) or b"{}")
+            intent = self.intents.get(record.get("sample_id"))
+            if intent is None or intent["namespace"] != proc.namespace or intent["rogue"]:
+                continue
+            if not self.server.keys(f"{proc.namespace}/done/{int(intent['slot']):012d}."):
+                self.violation("restart_left_a_written_slot_unsettled", sample_id=record["sample_id"],
+                               slot=intent["slot"], actor=proc.actor)
 
     def took(self, trainer: TrainerProc, rollout_id: int, groups: list, report: Any, *,
-             start: int = 0, end: int = 0) -> None:
+             start: int = 0, end: int = 0, duplicates: list | None = None) -> None:
+        """``duplicates``: the reader's duplicate-task records of a take that ended
+        without a round (``error.passed_over["duplicate_tasks"]``)."""
         if report is not None:
             start, end = int(report.start), int(report.end)
+            duplicates = getattr(report, "duplicate_tasks", None)
+        # position -> whether the reader itself trained the group it named as the task's first
+        duplicate_at = {int(d["position"]): bool(d.get("first_trained_here", True)) for d in duplicates or ()}
 
         def describe(position: int, group: list | None) -> dict[str, Any]:
             record = json.loads(self.server.get(f"{INDEX_PREFIX}{position:012d}.json") or b"{}")
             out = {"position": position, "sample_id": record.get("sample_id"), "shard": record.get("shard"),
                    "shard_pos": record.get("shard_pos"), "behavior_version": record.get("behavior_version"),
                    "slot": (record.get("sampler_round") or {}).get("dispense_position"),
+                   "namespace": (self.intents.get(record.get("sample_id")) or {}).get("namespace"),
                    "trainer_hash": trainer.hashes.get(int(record.get("behavior_version") or 0))}
             if group is not None:
                 out["payload"] = group[0]["metadata"]["sim"]
+                out["payload_ids"] = sorted({(s["metadata"]["sim"]["sampler"], s["metadata"]["sim"]["incarnation"],
+                                              s["metadata"]["sim"]["slot"]) for s in group})
+            elif position in duplicate_at:  # passed over: an earlier group holds its task
+                out["duplicate"] = "verified" if duplicate_at[position] else "unverified"
             return out
 
         taken = {int(position) for position, _ in groups}
@@ -291,9 +370,44 @@ class Simulation:
         self.takes.append(Take(trainer.number, rollout_id, trainer.zombie, trained, skipped,
                                {"stale": getattr(report, "stale_groups", 0),
                                 "stale_incarnation": getattr(report, "stale_incarnation_groups", 0),
+                                "duplicate_task": len(duplicate_at),
+                                "duplicate_task_unverified": sum(1 for here in duplicate_at.values() if not here),
                                 "passed_over": len(skipped), "start": start, "end": end}))
+        if not MERGE_DROPS_FENCED_WRITES:
+            for group in trained:
+                self._check_gate(trainer, group)
         self.trace("take", actor=trainer.actor, rollout_id=rollout_id, start=start, end=end,
                    trained=[t["sample_id"] for t in trained], skipped=[s["sample_id"] for s in skipped])
+
+    def _check_gate(self, trainer: TrainerProc, group: dict[str, Any]) -> None:
+        """The stale-incarnation rule of ``incarnation_lease`` (module doc), applied to a
+        group the trainer just took, with the shard's lease as the store holds it. Only
+        a lease that has not changed for longer than the gate may cache it counts: the
+        gate has then read this very record."""
+        from yeto.rl.engine import incarnation_lease as il  # noqa: PLC0415
+
+        record = json.loads(self.server.get(f"{INDEX_PREFIX}{group['position']:012d}.json") or b"{}")
+        written_by = record.get("sampler_round") or {}
+        sampler, inc = written_by.get("sampler"), written_by.get("incarnation")
+        stored = self.server.objects.get(il.lease_key(str(sampler)))
+        if sampler is None or inc is None or stored is None:
+            return
+        if self.clock.now - stored.modified <= trainer.reader.gate.refresh_s + 1.0:
+            return
+        lease = json.loads(stored.data)
+        if str(lease.get("incarnation")) == str(inc) or str(inc) not in [str(x) for x in lease.get("superseded", ())]:
+            return
+        ordinal = 0
+        for position in range(int(group["position"]) + 1):
+            other = json.loads(self.server.get(f"{INDEX_PREFIX}{position:012d}.json") or b"{}").get("sampler_round")
+            ordinal += bool(other and other.get("sampler") == sampler and str(other.get("incarnation")) == str(inc))
+        if ordinal <= int((lease.get("sealed") or {}).get(str(inc), 0)):
+            return
+        appended = float(record.get("appended_at") or 0.0)
+        if appended and appended < float(lease.get("claimed_at") or 0.0) - trainer.reader.gate.clock_margin_s:
+            return
+        self.violation("stale_incarnation_group_trained", sample_id=group["sample_id"], slot=group["slot"],
+                       actor=f"{sampler}/{inc}", lease_holder=lease.get("incarnation"))
 
     def restored(self, trainer: TrainerProc, cut: dict[str, Any]) -> None:
         """A trainer starts from ``cut``: the rounds after it are trained again."""
@@ -333,7 +447,10 @@ class Simulation:
                 frame = next((f for f in reversed(traceback.extract_tb(error.__traceback__))
                               if "/yeto/" in f.filename), None)
                 where = "" if frame is None else f" at {Path(frame.filename).name}:{frame.name}"
-                self.errors[f"{proc.kind}: {type(error).__name__}: {str(error)[:110]}{where}"] += 1
+                key = f"{proc.kind}: {type(error).__name__}: {re.sub(r'[0-9]+', 'N', str(error))[:110]}{where}"
+                self.errors[key] += 1
+                if self.errors[key] >= 40:  # the same error again and again: a restart does not help
+                    self._crash_loop = f"{key} x{self.errors[key]}"
             if not self.injector.enabled and type(error).__name__ != "TrainerFenced":
                 self.errors_after_faults.append(f"{proc.actor}: {type(error).__name__}: {str(error)[:160]}")
             self.metric(f"{proc.kind}_exits_on_{'store_error' if transport else 'error'}")
@@ -347,6 +464,8 @@ class Simulation:
             self._stack.pop()
         if proc.state != "running":
             self._left(proc)
+        if self._crash_loop is not None and not self._stack:
+            raise Budget(self._crash_loop)
 
     def _left(self, proc: Any) -> None:
         """A process ended: who starts the next one, and when."""
@@ -381,12 +500,18 @@ class Simulation:
 
     def _start_sampler(self, sid: str) -> None:
         self.incarnations[sid] += 1
+        index = self.shards.index(sid)
         proc = SamplerProc(self, sid, f"i{self.incarnations[sid]}", self.nodes[sid],
-                           legacy=self.shards.index(sid) < self.config.legacy_samplers)
+                           legacy=index < self.config.legacy_samplers,
+                           mode="engine" if index >= len(self.shards) - self.config.engine_samplers else "agentic")
+        if self.server.get(f"sample-buffer/handoffs/{sid}.json"):  # a new pool member on this shard name
+            self._clear_handoff_before_start(sid)
         self.samplers[sid] = proc
         del self.start_at[sid]
         self.trace("sampler_start", actor=proc.actor, node=proc.node)
         self._run(proc, proc.start, crash=self.injector.enabled)
+        if proc.state == "running":
+            self._check_recovered(proc)
 
     def _start_trainer(self) -> None:
         self.trainers += 1
@@ -445,6 +570,7 @@ class Simulation:
         sid = proc.sid
         gone = self.injector.is_partitioned(proc.node)
         kinds = ["retire", "drain", "restart_in_place"] + (["fence_gone"] * 3 if gone else [])
+        kinds += ["second_start"] * 3 if self.config.faults.second_start else []
         kind = self.rng.choice(kinds)
         if kind == "retire":
             ok, _ = self._pool("retire", lambda: store_dispense.retire(
@@ -453,7 +579,7 @@ class Simulation:
                 self.fenced_truth.setdefault((sid, proc.incarnation), self.clock.now)
                 self.trace("pool_retire", actor=proc.actor)
                 self.metric("pool_retire")
-        elif kind == "drain" and sid not in self.drains:
+        elif kind == "drain" and sid not in self.drains and self.fenced_shards < max(0, len(self.shards) - 1):
             seq = f"{self._ticket()}:{self.clock.now:.3f}"
             ok, _ = self._pool("drain", lambda: self.data_path.request_drain(sid, seq))
             if ok:
@@ -465,20 +591,40 @@ class Simulation:
             ok, _ = self._pool("fence_incarnation", lambda: self.data_path.fence_incarnation(sid, self._ticket()))
             if ok:
                 self.fenced_truth.setdefault((sid, proc.incarnation), self.clock.now)
+                self._bypass(proc)
                 proc.killed()
                 self.samplers[sid] = None
                 self.start_at[sid] = self.clock.now + self.rng.uniform(1.0, 10.0)
                 self.trace("pool_restart_in_place", actor=proc.actor)
                 self.metric("pool_restart_in_place")
+        elif kind == "second_start":
+            # a supervisor starts the shard's sampler again while the old process still runs
+            # (taken for dead too early): only the incarnation lease tells the old one
+            self.samplers[sid] = None
+            self.zombies.append(proc)
+            self.start_at[sid] = self.clock.now
+            self.trace("second_start", actor=proc.actor)
+            self.metric("second_starts")
         elif kind == "fence_gone" and self.fenced_shards < max(0, len(self.shards) - 1):
             # the node is taken for gone: fence its shard; a new node takes the shard name
             # later, while the old process may still run behind its partition
             ok, _ = self._pool("fence_shard", lambda: self.data_path.fence_shard(sid, self._ticket()))
             if ok:
                 self.fenced_shards += 1
+                self._bypass(proc)
                 self._replace_node(proc)
                 self.trace("pool_fence_gone", actor=proc.actor)
                 self.metric("pool_fence_gone")
+
+    def _bypass(self, proc: SamplerProc) -> None:
+        """The fenced process writes what it has in flight without any check (``fence_bypass``)."""
+        if self.injector.enabled and self.rng.random() < self.config.faults.fence_bypass:
+            try:
+                proc.rogue_write()
+            except Crash:
+                raise
+            except Exception:  # noqa: BLE001 - its write failed: nothing reached the shard
+                self.metric("unchecked_write_failed")
 
     def _replace_node(self, proc: SamplerProc, *, kill: bool = False) -> None:
         sid = proc.sid
@@ -499,11 +645,15 @@ class Simulation:
                 self._pool("cancel_drain", lambda: self.data_path.cancel_drain(sid))
             return
         ok, answered = self._pool("drain_answered", lambda: self.data_path.drain_answered(sid, seq))
+        if ok and answered and self.truth_open_claims(proc.namespace, sid, proc.incarnation):
+            self.violation("drain_answered_while_holding_a_claim", actor=proc.actor,
+                           slots=self.truth_open_claims(proc.namespace, sid, proc.incarnation))
         if ok and answered:
             # drained: the pool fences the shard and deletes the node
             del self.drains[sid]
             ok, _ = self._pool("fence_shard", lambda: self.data_path.fence_shard(sid, self._ticket()))
             if ok:
+                self.fenced_shards += 1  # its sampler ends the shard when it sees the handoff
                 self._replace_node(proc, kill=True)
                 self.metric("pool_scale_down_after_drain")
                 self.trace("pool_scale_down", actor=proc.actor)
@@ -537,9 +687,6 @@ class Simulation:
         self.steps += 1
         faults = self.config.faults if self.injector.enabled else FaultConfig()
         self.clock.advance(self.rng.uniform(0.05, self.config.dt_max_s))
-        for sid in [s for s, at in self.start_at.items() if at <= self.clock.now and self.samplers[s] is None]:
-            if not self._shard_ended(sid) and self.server.get(f"sample-buffer/handoffs/{sid}.json"):
-                self._clear_handoff_before_start(sid)
         self._due()
         self.trainer_zombies = [(t, until) for t, until in self.trainer_zombies
                                 if t.state == "running" and until > self.steps]
@@ -559,6 +706,18 @@ class Simulation:
                        until=round(self.injector.read_outage[node] - 1_800_000_000.0, 1))
         if faults.control and self.rng.random() < faults.control:
             self._control()
+        if faults.abandon and self.rng.random() < faults.abandon and len(self.abandoned) < len(self.shards) - 1:
+            running = [p for p in self.samplers.values() if p is not None and p.state == "running"
+                       and p not in self._stack and p.inflight]
+            if running:
+                proc = self.rng.choice(running)
+                proc.killed()
+                self.samplers[proc.sid] = None
+                self.abandoned.add(proc.sid)
+                self.metric("samplers_abandoned")
+                self.trace("abandon", actor=proc.actor, holding=sorted(proc.gens))
+        if self.config.namespace_switch_at == self.steps:
+            self._switch_namespace()
         if faults.trainer_restart and self.rng.random() < faults.trainer_restart:
             self._restart_trainer()
         procs = self._procs()
@@ -566,7 +725,40 @@ class Simulation:
             proc = self.rng.choice(procs)
             self._run(proc, self.rng.choice(proc.actions()), crash=True)
             self._check_lost_claims()
+        self._check_leases()
         self._hook("on_step")
+
+    def _switch_namespace(self) -> None:
+        """The operator stops every sampler and starts them on a new dispenser namespace
+        over the same buffer and shards (more data, one more pass)."""
+        self.namespace = f"{NAMESPACE}-{len(self.namespaces) + 1}"
+        self.namespaces.append(self.namespace)
+        self.data_path = R2DataPath(elastic.ObjectRecords(self.pool_objects), (self.pool_objects, self.namespace),
+                                    clock=self.pool_clock.time)
+        self.drains.clear()
+        for sid, proc in self.samplers.items():
+            if proc is not None and proc.state == "running" and proc not in self._stack:
+                proc.killed()
+                self.samplers[sid] = None
+                self.start_at[sid] = self.clock.now + self.rng.uniform(1.0, 10.0)
+        self.trace("namespace_switch", namespace=self.namespace)
+
+    def _check_leases(self) -> None:
+        """Every incarnation that held a shard's lease is superseded in the record of
+        each later holder (the trainer's gate reads nothing else)."""
+        for sid in self.shards:
+            raw = self.server.get(f"sample-buffer/leases/{sid}.json")
+            if raw is None:
+                continue
+            lease = json.loads(raw)
+            holder, history = str(lease.get("incarnation")), self.lease_holders.setdefault(sid, [])
+            if history and history[-1] == holder:
+                continue
+            forgotten = [h for h in history if h != holder and h not in [str(x) for x in lease.get("superseded", ())]]
+            if forgotten:
+                self.violation("lease_forgot_a_superseded_incarnation", shard=sid, holder=holder,
+                               forgotten=forgotten)
+            history.append(holder)
 
     def _check_lost_claims(self) -> None:
         """A claim whose create this sampler's own retry was refused for (PR #354):
@@ -576,8 +768,9 @@ class Simulation:
                 continue
             self._refusals_seen.add(key)
             self.metric("creates_refused_after_own_retry")
-            if not key.startswith(f"{NAMESPACE}/claims/"):
+            if "/claims/" not in key:
                 continue
+            namespace = key.split("/claims/")[0]
             slot, attempt = int(key.split("/")[-2]), int(key.split("/")[-1])
             proc = next((p for p in [*self.samplers.values(), *self.zombies]
                          if p is not None and p.actor == actor), None)
@@ -587,21 +780,49 @@ class Simulation:
                 self.metric("design_loss_claims_unknown_until_expiry")
                 continue
             if (proc is not None and proc.state == "running" and slot not in proc.prompts._held
-                    and self.truth_holds(slot, attempt, proc.sid, proc.incarnation)):
+                    and self.truth_holds(namespace, slot, attempt, proc.sid, proc.incarnation)):
                 self.violation("claim_held_without_the_holder_knowing", key=key, actor=actor, slot=slot)
 
     def done(self) -> bool:
         return self.trainer is not None and self.trainer.state == "done"
 
+    @contextlib.contextmanager
+    def _reads_checked(self) -> Iterator[None]:
+        """Every object read through the store returns a body its key really held
+        (never a cut body taken for the object, never another key's bytes)."""
+        inner = s3_store.S3ObjectStore.read
+        sim = self
+
+        def read(store: Any, key: str) -> bytes | None:
+            data = inner(store, key)
+            if data is not None and isinstance(store.client, FaultyS3Client) \
+                    and not sim.server.ever_held(store._key(key), data):
+                sim.violation("read_returned_bytes_the_key_never_held", key=key, size=len(data))
+            return data
+
+        s3_store.S3ObjectStore.read = read  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            s3_store.S3ObjectStore.read = inner  # type: ignore[method-assign]
+
     def run(self) -> Result:
-        with _patched(self.clock, self.rng):
+        with _patched(self.clock, self.rng), self._reads_checked():
             try:
-                for _ in range(self.config.steps):
-                    if self.done():
-                        break
-                    self.step()
-                self._converge()
-                self.check()
+                try:
+                    for _ in range(self.config.steps):
+                        if self.done():
+                            break
+                        self.step()
+                    self._converge()
+                except Budget as error:
+                    self.injector.enabled = False
+                    self.server.max_requests = self.server.deadline = None
+                    self.violation("run_did_not_end", budget=str(error), **self._stuck())
+                try:
+                    self.check()
+                except Exception as error:  # noqa: BLE001 - what the store holds cannot even be read
+                    self.violation("store_left_unreadable", error=f"{type(error).__name__}: {str(error)[:200]}")
                 self._hook("on_check")
             except Crash as error:  # pragma: no cover - a crash outside any participant
                 self.violation("harness_crash_escaped", error=str(error))
@@ -621,6 +842,18 @@ class Simulation:
         for sid in list(self.drains):
             del self.drains[sid]
             self.data_path.cancel_drain(sid)
+        begun = self.steps
+        if self.abandoned:
+            # nobody brings the dead samplers back yet: their tasks must be taken over anyway
+            while not self._ledger_ended():
+                if self.steps - begun >= self.config.takeover_steps:
+                    totals = store_dispense.status(self.oracle, self.namespace, details=False)["totals"]
+                    self.violation("task_of_a_dead_holder_never_taken_over", ledger=totals,
+                                   abandoned=sorted(self.abandoned))
+                    break
+                self.step()
+            self.metric("takeover_steps", self.steps - begun)
+            self.abandoned.clear()
         for sid in self.shards:  # the pool brings every shard that can still write back
             if self.samplers[sid] is None and sid not in self.start_at:
                 self.start_at[sid] = self.clock.now
@@ -632,24 +865,29 @@ class Simulation:
             self.step()
         self.metric("converge_steps", self.steps - begun)
 
+    def _ledger_ended(self) -> bool:
+        return bool(store_dispense.status(self.oracle, self.namespace, details=False)["totals"]["ended"])
+
     def _stuck(self) -> dict[str, Any]:
-        totals = store_dispense.status(self.oracle, NAMESPACE, details=False)["totals"]
+        totals = store_dispense.status(self.oracle, self.namespace, details=False)["totals"]
         return {"ledger": totals, "exits_with_faults_off": len(self.errors_after_faults),
                 "last_exit": self.errors_after_faults[-1] if self.errors_after_faults else None,
                 "shards_ended": {sid: self._shard_ended(sid) for sid in self.shards},
                 "samplers": {sid: None if p is None else p.state for sid, p in self.samplers.items()},
-                "trainer": None if self.trainer is None else
+                "trainer": None if self.trainer is None or not hasattr(self.trainer, "buffer") else
                 {"state": self.trainer.state, "read": self.trainer.buffer.read_cursor,
                  "index": len(self.trainer.buffer), "ended": self.trainer.buffer.data_ended}}
 
     # -------------------------------------------------------------------- checks
     def check(self) -> None:
-        if "run_did_not_end" in self.violations:
-            return
+        """Compare the store and what the trainer consumed with what was meant. A run
+        that did not end is still checked for what its store shows."""
         server = self.server
+        ended_run = "run_did_not_end" not in self.violations
+        ns_of = lambda sample_id: (self.intents.get(sample_id) or {}).get("namespace")  # noqa: E731
         # -- every shard: each record once
         shard_records: dict[str, list[dict[str, Any]]] = {}
-        groups_of_slot: dict[int, list[str]] = collections.defaultdict(list)
+        groups_of_slot: dict[tuple[Any, int], list[str]] = collections.defaultdict(list)
         for sid in self.shards:
             records = [json.loads(server.get(k)) for k in server.keys(sample_buffer.shard_prefix(sid))]
             records = [r for r in records if "sample_id" in r]  # not the end, not an ownership record
@@ -661,12 +899,16 @@ class Simulation:
                                    positions=[seen[record["sample_id"]], record["pos"]])
                 seen[record["sample_id"]] = record["pos"]
                 slot = (record.get("sampler_round") or {}).get("dispense_position")
-                if slot is not None and record["sample_id"] not in groups_of_slot[int(slot)]:
-                    groups_of_slot[int(slot)].append(record["sample_id"])
+                key = (ns_of(record["sample_id"]), int(slot)) if slot is not None else None
+                if key is not None and record["sample_id"] not in groups_of_slot[key]:
+                    groups_of_slot[key].append(record["sample_id"])
+                if record["sample_id"] not in self.intents:
+                    self.violation("shard_record_nobody_wrote", shard=sid, sample_id=record["sample_id"])
         # -- the merged index: each shard record exactly once, each shard in order
         merged = [json.loads(server.get(k)) for k in server.keys(INDEX_PREFIX)]
         ended = bool(merged) and bool(merged[-1].get("end"))
-        if not ended:
+        shards_ended = all(self._shard_ended(sid) for sid in self.shards)
+        if not ended and ended_run:
             self.violation("merged_index_has_no_end")
         by_shard: dict[str, list[int]] = collections.defaultdict(list)
         for i, record in enumerate(merged):
@@ -675,6 +917,9 @@ class Simulation:
             if record.get("end"):
                 continue
             by_shard[record["shard"]].append(int(record["shard_pos"]))
+            source = server.get(f"{sample_buffer.shard_prefix(record['shard'])}{int(record['shard_pos']):012d}.json")
+            if source is None or json.loads(source).get("sample_id") != record.get("sample_id"):
+                self.violation("merged_record_is_not_its_shard_record", position=i, sample_id=record.get("sample_id"))
         for sid in self.shards:
             got, at = by_shard.get(sid, []), {int(r["pos"]): r["sample_id"] for r in shard_records[sid]}
             twice = sorted({p for p in got if got.count(p) > 1})
@@ -687,9 +932,11 @@ class Simulation:
                        or (self.intents.get(at[p]) or {}).get("retired")] if MERGE_DROPS_FENCED_WRITES else []
             self.metric("design_loss_fenced_writes_left_out_of_the_merge", len(dropped))
             missing = [p for p in missing if p not in dropped]
-            if missing and ended:
-                self.violation("shard_record_never_merged", shard=sid, shard_positions=missing[:10],
-                               sample_id=at[missing[0]])
+            # merged past it (never to be merged), or everything ended without it
+            passed = [p for p in missing if got and p < max(got)]
+            if (missing and (ended or (shards_ended and not ended_run))) or passed:
+                self.violation("shard_record_never_merged", shard=sid, shard_positions=(passed or missing)[:10],
+                               sample_id=at[(passed or missing)[0]])
             if got != sorted(got):
                 self.violation("shard_merged_out_of_order", shard=sid)
         # -- what the trainer consumed (rounds after a restored cut were trained again: by design)
@@ -698,7 +945,7 @@ class Simulation:
         skipped = [g for t in takes for g in t.skipped]
         for name, key in (("sample_id", lambda g: g["sample_id"]),
                           ("record", lambda g: (g["shard"], g["shard_pos"])),
-                          ("slot", lambda g: g["slot"])):
+                          ("slot", lambda g: None if g["slot"] is None else (g["namespace"], g["slot"]))):
             counts = collections.Counter(key(g) for g in trained if key(g) is not None)
             for value, n in counts.items():
                 if n > 1:
@@ -707,56 +954,88 @@ class Simulation:
                                    sample_id=first["sample_id"], slot=first["slot"])
         consumed = {g["position"] for g in trained} | {g["position"] for g in skipped}
         unread = [i for i, r in enumerate(merged) if not r.get("end") and i not in consumed]
-        if unread:
+        if unread and ended_run:
             self.violation("merged_record_never_consumed", positions=unread[:10],
                            sample_id=merged[unread[0]].get("sample_id"))
-        # -- versions and ownership of what was trained
+        # -- what was trained: the payload of that record, the version it was generated with, its writer
         for group in trained:
             intent = self.intents.get(group["sample_id"])
             payload = group["payload"]
             if intent is None:
                 self.violation("trained_group_nobody_wrote", sample_id=group["sample_id"])
                 continue
+            writer = (intent["sampler"], intent["incarnation"], intent["slot"])
+            if group["payload_ids"] != [writer]:
+                self.violation("trained_payload_of_another_group", sample_id=group["sample_id"],
+                               slot=group["slot"], payload=group["payload_ids"])
             if not (int(group["behavior_version"]) == int(payload["version"]) == int(intent["version"])):
                 self.violation("trained_with_another_behavior_version", sample_id=group["sample_id"],
                                index=group["behavior_version"], payload=payload["version"], meant=intent["version"])
-            if intent["fenced"]:
+            if intent["fenced"]:  # its shard's lease named another incarnation when it wrote
                 self.violation("fenced_writer_group_trained", sample_id=group["sample_id"], slot=group["slot"],
-                               actor=f"{intent['sampler']}/{intent['incarnation']}")
+                               actor=f"{intent['sampler']}/{intent['incarnation']}", unchecked=intent["rogue"])
             elif intent["retired"]:  # the pool retired (or fenced) the process before it wrote
                 self.violation("retired_writer_group_trained", sample_id=group["sample_id"], slot=group["slot"],
                                actor=f"{intent['sampler']}/{intent['incarnation']}")
             if intent["policy_hash"] is not None and group["trainer_hash"] not in (None, intent["policy_hash"]):
                 self.metric("design_loss_trained_groups_of_a_rolled_back_lineage")
-        # -- the ledger: every slot settled; a trained slot's group reached the trainer
-        keys, _now = self.oracle.list_meta(NAMESPACE + "/")
-        states = store_dispense.parse_ledger(keys, NAMESPACE)
-        trained_slots = {g["slot"] for g in trained}
-        skipped_slots = {g["slot"] for g in skipped}
-        for slot in range(self.config.slots):
-            done = states[slot].done if slot in states else None
-            if done is None:
-                self.violation("slot_never_settled", slot=slot)
-            elif done != "trained":
-                self.metric(f"design_loss_slots_{done}")
-                if slot in trained_slots:
-                    self.metric("slots_trained_but_settled_otherwise")
-            elif slot in trained_slots:
-                self.metric("slots_trained")
-            elif slot in skipped_slots:
-                self.metric("design_loss_slots_trained_in_ledger_but_passed_over")
-            elif not groups_of_slot.get(slot):
-                self.violation("slot_settled_trained_without_a_group", slot=slot)
-            else:
-                self.violation("slot_settled_trained_but_never_consumed", slot=slot,
-                               sample_id=groups_of_slot[slot][0])
+        # -- the ledgers: every slot of the last one settled; a trained slot's group reached the
+        # trainer; an attempt that was followed by another one has its ending on record
+        trained_slots = {(g["namespace"], g["slot"]) for g in trained}
+        skipped_slots = {(g["namespace"], g["slot"]) for g in skipped}
+        for namespace in self.namespaces:
+            keys, _now = self.oracle.list_meta(namespace + "/")
+            states = store_dispense.parse_ledger(keys, namespace)
+            for slot in range(self.config.slots):
+                state = states.get(slot)
+                done = None if state is None else state.done
+                at = (namespace, slot)
+                for attempt in sorted(state.claims if state is not None else ()):
+                    if attempt != state.latest and attempt not in state.fails:
+                        self.violation("attempt_superseded_without_an_ending", namespace=namespace, slot=slot,
+                                       attempt=attempt)
+                if done is None:
+                    if namespace == self.namespace and ended_run:
+                        self.violation("slot_never_settled", slot=slot)
+                elif done != "trained":
+                    self.metric(f"design_loss_slots_{done}")
+                    if at in trained_slots:
+                        self.metric("slots_trained_but_settled_otherwise")
+                elif at in trained_slots:
+                    self.metric("slots_trained")
+                elif at in skipped_slots:
+                    # settled trained, never trained: every group of the slot was passed over
+                    self.metric("design_loss_slots_trained_in_ledger_but_passed_over")
+                    reasons = {g.get("duplicate") for g in skipped if (g["namespace"], g["slot"]) == at}
+                    if "unverified" in reasons:
+                        # the reader's accepted limit: after a restart it took a first group below
+                        # the watermark as trained (the earlier process had passed it over), and
+                        # passed its replacement over. Trained zero times, never twice.
+                        self.metric("design_loss_slots_untrained_by_an_unverified_duplicate_verdict")
+                    elif "verified" in reasons:
+                        # the reader named a first group it trained itself, yet no take that
+                        # counts trained the slot: not the accepted limit
+                        self.violation("slot_untrained_though_its_duplicate_named_a_trained_group", slot=slot)
+                elif not groups_of_slot.get(at):
+                    self.violation("slot_settled_trained_without_a_group", namespace=namespace, slot=slot)
+                elif ended_run and not all((self.intents.get(i) or {}).get("fenced") or
+                                           (self.intents.get(i) or {}).get("retired")
+                                           for i in groups_of_slot[at]):
+                    self.violation("slot_settled_trained_but_never_consumed", slot=slot,
+                                   sample_id=groups_of_slot[at][0])
+                else:
+                    self.metric("design_loss_slots_trained_in_ledger_but_left_out")
         self.metric("design_loss_groups_passed_over", sum(t.report["passed_over"] for t in takes))
         self.metric("design_loss_groups_stale_policy_age", sum(t.report["stale"] for t in takes))
         self.metric("design_loss_groups_stale_incarnation", sum(t.report["stale_incarnation"] for t in takes))
+        self.metric("design_loss_groups_duplicate_task", sum(t.report["duplicate_task"] for t in takes))
+        self.metric("design_loss_groups_duplicate_task_unverified",
+                    sum(t.report["duplicate_task_unverified"] for t in takes))
         self.metric("groups_trained", len(trained))
         self.metric("groups_written", sum(len(r) for r in shard_records.values()))
         self.metric("trainer_rounds_rolled_back", sum(1 for t in self.takes if t.rolled_back and not t.zombie))
-        # -- storage: releases the trainer should have pruned
+        # -- the releases: what LATEST names is whole; what the trainer should have pruned
+        self._check_latest_release()
         names = {k.split("/")[1] for k in server.keys("policy-releases/") if k.count("/") >= 2}
         self.metric("release_dirs_left", len(names))
         if len(names) > self.config.keep_releases:
@@ -764,6 +1043,23 @@ class Simulation:
         for name, count in self.injector.counts.items():
             self.metric(f"fault_{name}", count)
         self.metric("store_requests", server.requests)
+
+    def _check_latest_release(self) -> None:
+        """The release a new sampler would load now has every file its record lists."""
+        from yeto.rl.engine.policy_release import PolicyReleaseStore  # noqa: PLC0415
+
+        store = s3_store.S3Store(self.tmp / "mount" / "oracle", URI, environ={},
+                                 client=FaultyS3Client(self.server, "oracle"))
+        releases = PolicyReleaseStore(store, cache_dir=self.tmp / "cache" / "oracle")
+        latest = releases.latest()
+        if latest is None or latest.files is None:
+            return
+        for name, size in latest.files.items():
+            data = self.server.get(f"{releases.release_dir}/{latest.path}/{name}")
+            if data is None or len(data) != int(size):
+                self.violation("latest_release_is_incomplete", seq=latest.seq, path=latest.path, file=name,
+                               stored=None if data is None else len(data), recorded=size)
+                return
 
 
 def run_seed(config: SimConfig, *, keep_dir: bool = False) -> Result:
