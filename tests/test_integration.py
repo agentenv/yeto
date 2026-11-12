@@ -242,6 +242,83 @@ class ToyLearner(threading.Thread):
         self.client.close()
 
 
+class LockstepLearner(ToyLearner):
+    """A :class:`ToyLearner` whose pushes do not depend on how the threads
+    are scheduled: after each broadcast of a fragment it trains that fragment
+    for exactly ``ROUND_STEPS`` inner steps (plain gradient steps on
+    ``||w - target||^2``) and then leaves it alone; it answers a PULL only
+    with those steps done, and once per broadcast.
+
+    A ToyLearner trains for as long as its thread runs between two rounds, and
+    a learner's merge weight grows with its local steps
+    (``c_tokens**2 / c_steps``), so the learner whose thread gets more CPU
+    pulls the merged parameters toward its own target. Two LockstepLearners
+    push the same amount of work every round. The loop itself still runs
+    (and counts a local step) every 5 ms: the syncer paces its rounds on the
+    local step rate the pushes report."""
+
+    ROUND_STEPS = 2
+    STEP = 0.1  # lr 0.05 on the gradient 2 (w - target)
+
+    def _run(self):
+        self.client.start()
+        if self.learner_id == 0:
+            for fid, frag in enumerate(self.layout.fragments):
+                self.client.send_init(fid, pack_fragment(frag, self.params, bulk_dtype(self.dtype)))
+        targets = dict(zip(self.params, torch.split(self.target, [p.numel() for p in self.params.values()])))
+        fragments = self.layout.fragments
+        steps_total = 0
+        trained = [0] * len(fragments)  # inner steps on the fragment since its last broadcast
+        versions = [0] * len(fragments)
+        answered: list[int | None] = [None] * len(fragments)  # the version the last push was based on
+        pending = []
+        t0 = time.monotonic()
+        while True:
+            if time.monotonic() - t0 > 60:
+                raise TimeoutError("no final manifest within 60s")
+            self.client.check_health()
+            if self.client.finalizing.is_set():
+                manifest, broadcasts = self.client.wait_for_final_fragments(timeout=10)
+                for update in broadcasts:
+                    frag = fragments[update.fragment_id]
+                    apply_fragment(frag, unpack_fragment(frag, update.data, DTYPE_F32), self.params)
+                self.client.acknowledge_finalization(manifest, timeout=10)
+                self.final_manifest = manifest
+                self.saved = {k: v.detach().clone() for k, v in self.params.items()}
+                break
+            stepped = {k: v + self.STEP * (targets[k] - v) for k, v in self.params.items()}
+            for fid, frag in enumerate(fragments):
+                if self.anchors[fid] is not None and trained[fid] < self.ROUND_STEPS:
+                    apply_fragment(frag, fragment_flat(frag, stepped), self.params)
+                    trained[fid] += 1
+            steps_total += 1
+            for bc in self.client.drain_updates():
+                self.normal_broadcasts += 1
+                frag = fragments[bc.fragment_id]
+                flat_new = unpack_fragment(frag, bc.data, bulk_dtype(self.dtype))
+                self.anchors[bc.fragment_id] = flat_new.clone()
+                apply_fragment(frag, flat_new, self.params)
+                trained[bc.fragment_id] = 0
+                versions[bc.fragment_id] = bc.version
+                self.synced = {k: v.detach().clone() for k, v in self.params.items()}
+            pending.extend(self.client.drain_pulls())
+            still = []
+            for pull in pending:
+                fid = pull.fragment_id
+                # A PULL can overtake the broadcast that closed the fragment's
+                # previous round: it is answered on the new base only.
+                if trained[fid] < self.ROUND_STEPS or answered[fid] == versions[fid]:
+                    still.append(pull)
+                    continue
+                delta = fragment_flat(fragments[fid], self.params) - self.anchors[fid]
+                self.client.push_fragment(fid, pull.global_step, pull.round_attempt, versions[fid], steps_total,
+                                          self.ROUND_STEPS, self.ROUND_STEPS * 128, pack_tensor(delta, self.dtype))
+                answered[fid] = versions[fid]
+            pending = still
+            time.sleep(0.005)
+        self.client.close()
+
+
 @pytest.mark.timeout(180)
 def test_learner_budget_restart_freezes_exactly_and_marks_complete_checkpoint(tmp_path):
     binary = build_syncer()
@@ -410,8 +487,8 @@ def test_two_learners_converge_to_mean():
         t_a = torch.randn(DIM + DIM // 4)
         t_b = -t_a  # mean target = 0
         learners = [
-            ToyLearner(0, port, t_a, layout),
-            ToyLearner(1, port, t_b, layout),
+            LockstepLearner(0, port, t_a, layout),
+            LockstepLearner(1, port, t_b, layout),
         ]
         for l in learners:
             l.start()
@@ -424,10 +501,11 @@ def test_two_learners_converge_to_mean():
         assert rc == 0, "syncer exited nonzero"
 
         # After merging, both learners' post-broadcast fragments came
-        # from the same global params; with opposite targets, the merged
-        # motion cancels and the synced state stays near 0. Check the last
-        # broadcast state stayed much closer to the consensus (0) than to
-        # either learner's own target.
+        # from the same global params; with opposite targets and the same
+        # local work per round (LockstepLearner), the merged motion cancels
+        # and the synced state stays near 0. Check the last broadcast state
+        # stayed much closer to the consensus (0) than to either learner's
+        # own target.
         for l in learners:
             assert l.synced, "learner never received a broadcast"
             flat = torch.cat([p.reshape(-1) for p in l.synced.values()])
@@ -436,6 +514,7 @@ def test_two_learners_converge_to_mean():
             assert dist_to_own_target > 0.5 * l.target.norm(), (
                 "learner collapsed to its own target; merging had no effect"
             )
+            assert flat.norm() < 0.5 * l.target.norm(), "the synced state left the consensus"
     finally:
         if proc.poll() is None:
             proc.kill()
