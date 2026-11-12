@@ -1065,6 +1065,130 @@ manual operation. `pool-status` shows who set the target (`manual.target_source`
 `manual`, `auto`, `manual_release` or `config`) and when
 (`manual.manual_at`).
 
+### 5.7 Object store requests, retries and limits
+
+Every island talks to the run's bucket with one S3 client. This section says how
+many requests a run sends, what happens when the store refuses one, and which
+settings change that.
+
+**What a refusal looks like.** R2 limits concurrent requests. Under load it
+answers `503 ServiceUnavailable: Reduce your concurrent request rate for the same
+object` (seen on `ListObjectsV2` while other clients wrote and deleted keys under
+the same prefix). The client retries by itself; the island sees an error only when
+every retry was refused.
+
+**Retries and timeouts (defaults).**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Retry mode | `standard` | Retries 500 / 502 / 503 / 504, connection errors and throttling codes. The wait before retry *n* is `random() * min(2^(n-1), 20)` seconds, so islands refused together do not return together. |
+| Requests per call | 9 (the first plus 8 retries) | 8 waits: 45 s on average, 91 s at most. Measured against an endpoint that refuses everything: 26 to 42 s of wall time per call. |
+| Connect timeout | 10 s | A connection that is not open after 10 s is retried. |
+| Read timeout | 60 s | Longest silence inside a response. |
+| Connection pool | file concurrency x part concurrency (128) | One connection per transfer thread. |
+
+Each client also has a retry quota: about 100 retries without a success in
+between use it up, and a refused request then fails at once until successes
+refill it. In a long refusal storm expect errors after seconds, not after 91 s.
+
+`adaptive` mode adds a client-side rate limit, but it starts only after a
+throttling error *code* such as `SlowDown`. R2's `503 ServiceUnavailable` is not
+one, so `adaptive` does not slow a client down for it. Keep `standard`.
+
+To change the defaults, set these in the environment of the launcher (they are
+copied to every island with the other store settings) or in the pool's store env
+file:
+
+| Variable | Effect |
+|---|---|
+| `YETO_RL_STORE_MAX_ATTEMPTS` (or `AWS_MAX_ATTEMPTS`) | Requests per call, the first included. `12` waits up to 151 s. |
+| `YETO_RL_STORE_RETRY_MODE` (or `AWS_RETRY_MODE`) | `standard`, `adaptive` or `legacy`. |
+| `YETO_RL_STORE_CONNECT_TIMEOUT_S`, `YETO_RL_STORE_READ_TIMEOUT_S` | The two timeouts, in seconds. |
+| `YETO_RL_STORE_MAX_CONNECTIONS` | Connection pool size. |
+| `YETO_RL_STORE_PART_CONCURRENCY`, `YETO_RL_STORE_FILE_CONCURRENCY`, `YETO_RL_STORE_DOWNLOAD_PROCESSES`, `YETO_RL_STORE_PART_MB` | Parallelism of large transfers (policy releases). |
+
+The `YETO_RL_STORE_*` name wins over the `AWS_*` name. Each variable is read on
+its own: `AWS_MAX_ATTEMPTS` alone keeps `standard` mode.
+
+Keep one call shorter than a third of the dispenser lease (`lease_s / 3`, 300 s
+by default): a sampler renews its tasks one request at a time, and a renewal
+round that takes longer than the lease loses the tasks to other samplers.
+
+**Policy release downloads.** A release is 100 to 200 GB, read as 64 MiB ranges.
+An NC sampler reads with 8 processes x 4 files x 16 ranges (512 concurrent
+requests, about 1.4 GB/s on an MI355X node), so 16 samplers that pick up the same
+release at once send about 8000 concurrent range reads, up to 256 of them on one
+file. Two things keep that from failing a download:
+
+- *Start spread.* Each sampler waits a fixed part of `YETO_RL_RELEASE_SPREAD_S`
+  seconds before it starts a release download (30 on NC samplers, 5 elsewhere).
+  The part is derived from the sampler's host name
+  (`YETO_RL_RELEASE_SPREAD_KEY` overrides it), so it is the same at every release
+  and two samplers keep their distance. The samplers still overlap for most of a
+  download; the spread only keeps them from opening all their reads in the same
+  second. It delays the release on a sampler by up to the spread, so keep it
+  well below the trainer's release interval (for example 30 s against a release
+  every few minutes); otherwise the last sampler serves one more version behind.
+- *Automatic slow-down.* When the store refuses a range read for its request
+  rate (`503 ServiceUnavailable`, `503 SlowDown`, `429`) after the client's own
+  retries, the download halves the number of range reads that process runs at
+  once, waits (1 to 30 s, with jitter) and reads the range again, up to 6 times.
+  Each 8 reads without a refusal give one read back. The sampler log shows
+  `[s3-store] WARNING: ... the store refused a range read for its request rate`.
+  A download fails only when one range is refused 6 times in a row.
+
+If those warnings come at every release, lower `YETO_RL_STORE_FILE_CONCURRENCY`
+(32 on NC samplers): the download slows down in proportion, and each file still
+has at most 16 reads per sampler.
+
+**How many requests a run sends.** With 16 samplers and about 100,000 tasks in 24
+hours:
+
+| Source | Requests per hour | Notes |
+|---|---|---|
+| Dispenser scans | about 10,000 `LIST`, 2,000 `GET` | 5 listings and 1 read per scan, a scan per sampler every 30 s at most. Independent of the ledger's size. |
+| Lease renewals | 12 `PUT` and 12 `HEAD` per task in flight | One write per task every `lease_s / 3`. |
+| Claims and settlements | about 8,500 `PUT`, 12,500 `HEAD` | Per task: one claim, one settlement, three checks before its group is written. |
+| Tape upload | 120 `PUT` per island | One chunk every 30 s (`YETO_RL_TAPE_UPLOAD_S`). |
+| Dashboard | about 6,500 `LIST` | One poll of the store every 10 s (`--store-poll`), one listing per island tape. |
+
+A scan lists only the tasks that are not settled yet. It costs more when old
+unsettled tasks lie far behind the newest ones: 4 more listings for each such
+group, and up to a listing of the whole ledger (one request per 1000 keys) when
+unsettled tasks are spread over all of it, for example tasks whose sandbox is
+never ready or a task label that no sampler serves.
+`python -m yeto.rl.engine.store_dispense status --open` shows the unsettled tasks
+with far fewer requests than the full table.
+
+Set `prompts.dispense.full_scan` to `true` in the sampler spec (or
+`YETO_RL_DISPENSE_FULL_SCAN=1` on a sampler) to make every scan list the whole
+ledger again; use it only to rule the range scan out while debugging.
+
+### 5.8 Re-running tasks that are already settled
+
+The dispenser never hands out a settled task again. To re-run one by hand, delete
+its settlement record `<namespace>/done/<slot, 12 digits>.<kind>` from the store
+(`<namespace>` is `prompts.dispense.namespace`, by default `task-dispense`; the
+slot is in `store_dispense status`).
+
+A running sampler does not notice the deletion. Each sampler remembers which
+tasks it has seen settled and does not list them again (section 5.7), so the
+task is handed out only by a sampler process that started after the deletion.
+Restart the samplers that should take it (pause the node with `--hold-tasks`,
+wait for its trials to finish, stop its sampler container, then resume: section
+5.6); a restarted sampler lists every settlement once. It finds the task's last
+claim without a settlement, ends that attempt as `expired` once its lease has run
+out, and hands the task out again. The expiry counts toward `max_redo`: a task
+that had already used its retries is settled `exhausted` instead of re-run.
+
+With `full_scan` on (section 5.7) every scan lists the whole ledger, and a
+running sampler sees the deletion at its next scan, at most `max_scan_s` (120 s)
+later. Turning `full_scan` on needs a restart of the sampler as well, so it only
+helps when it was on before the deletion.
+
+Do not delete records of tasks that are in flight, and do not delete the
+`claims/` records: the attempt numbers continue from them.
+
 ## 6. Dashboard
 
 `yeto run up` starts `yeto dashboard serve --store <store> --port <port>` on
