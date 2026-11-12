@@ -117,3 +117,63 @@ def test_restarts_that_never_progress_retire_the_node():
     assert "engine_stall_loop" in _names(pool) and m.state == GONE
     assert cloud.kinds("fence") and cloud.tickets[m.ticket]["state"] == "ended"
     assert pool.members[-1].replaces_shard == m.shard  # the slot goes to a new node
+
+
+class _FlakyRestart(MetricsCloud):
+    """``fail_restarts``: that many in-place restarts fail on a transient error first."""
+
+    fail_restarts = 0
+
+    def restart(self, m, shards):
+        if self.fail_restarts:
+            self.fail_restarts -= 1
+            raise RuntimeError("ssh exit 255: Connection reset by peer")
+        super().restart(m, shards)
+
+
+def _stall_with_a_failed_restart(**elastic_kw):
+    clock = Clock()
+    cloud = _FlakyRestart(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=2, accounts=(1, 4), **elastic_kw)
+    _run(pool, clock, clock.t + 1800)
+    first, second = [m for m in pool.members if m.state == READY]
+    for m in (first, second):
+        cloud.eng(m.ticket).update(running=8, rate=5000.0)
+    _run(pool, clock, clock.t + 5 * MIN)
+    cloud.eng(first.ticket).update(running=8, queued=3, rate=0.0)  # one engine stalls
+    cloud.fail_restarts = 1  # ... and its restart hits one ssh error: the old sampler stays
+    _run(pool, clock, clock.t + 12 * MIN)
+    assert cloud.fenced_incarnations == [first.ticket] and "start_failed" in _names(pool)
+    assert first.fenced_for_restart and not cloud.kinds("restart")
+    # the old sampler reads the pool's fence on its lease and leaves FENCED: exit code 0
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    return clock, cloud, pool, first, second
+
+
+def test_a_sampler_fenced_for_a_restart_that_exits_0_is_restarted_not_the_end_of_the_data():
+    """exit 0 of the incarnation the pool itself fenced is that fence, not the data end:
+    the shard's sampler is started again and the other samplers keep running."""
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart()
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished is None and pool.stopped is None
+    assert "sampler_left_fenced" in _names(pool) and "sampler_finished" not in _names(pool)
+    assert len(cloud.kinds("restart")) == 1 and not first.fenced_for_restart
+    assert second.state == READY and not cloud.kinds("drain")
+    cloud.eng(first.ticket).update(rate=5000.0)
+    _run(pool, clock, clock.t + 15 * MIN)
+    assert first.state == READY and len(pool.members) == 2
+
+
+def test_a_fenced_sampler_that_cannot_be_restarted_is_replaced():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart(max_sampler_restarts=2)
+    cloud.fail_restarts = 99
+    _run(pool, clock, clock.t + 10 * MIN)
+    assert pool.finished is None and pool.stopped is None and second.state == READY
+    assert first.state == GONE and pool.members[-1].replaces_shard == first.shard
+
+
+def test_exit_0_without_a_fence_still_ends_the_pool():
+    clock, cloud, pool, m = _setup()
+    cloud.tickets[m.ticket].update(sampler="exited", exit=0)
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert pool.finished and "sampler_finished" in _names(pool)
