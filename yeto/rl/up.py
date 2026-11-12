@@ -963,6 +963,66 @@ class Run:
         line = tail[paused:].splitlines()[0]
         return f"{line[:300]} (fail-closed pause, not starvation)"
 
+    # -- the data end (every sampler pool finished)
+    def pools_data_ended(self) -> bool:
+        """Every sampler pool finished (a sampler exited 0 on the end of the data:
+        ``IslandPool.finished``) and holds no member that is not gone: no sampler of
+        this run runs or will start, so no shard gets another group."""
+        if not self.pools:
+            return False
+        for i in range(len(self.pools)):
+            doc = self.pool_doc(i)
+            if not doc or not doc.get("finished"):
+                return False
+            if any(m.get("state") != "gone" for m in doc.get("members") or ()):
+                return False
+        return True
+
+    def data_end_shards(self) -> list[str]:
+        """The shards whose end the trainer waits for: its ``--rl-buffer-shards`` (every
+        shard index the pools may have used), else the shards the store names."""
+        named = self._trainer_flag("--rl-buffer-shards")
+        if named is not None:
+            return [s for s in named.split(",") if s]
+        from yeto.rl.engine.sample_buffer import shard_names  # noqa: PLC0415
+
+        return list(shard_names(self._objects()))
+
+    def seal_data_end(self) -> bool:
+        """Once every pool finished, end every shard the trainer reads that did not end.
+
+        A sampler writes its shard's end record only when it ends on the data end (or
+        hands its shard off); a shard whose sampler was fenced, lost or replaced, and a
+        shard index of ``--rl-buffer-shards`` no node ever took, never ends, so the
+        trainer's merged index never ends and the trainer waits for groups that cannot
+        come (the starvation stop then ends it as a failure). No writer of these shards
+        is left (every member is gone), so the end record (the format a sampler writes)
+        is safe here. True once every shard ended (``state["data_ended"]``)."""
+        if self.state.get("data_ended"):
+            return True
+        if not self.pools_data_ended():
+            return False
+        from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+        sealed = []
+        try:
+            objects = self._objects()
+            for shard in self.data_end_shards():
+                writer = FileSampleBuffer(objects, batch_size=1, index=shard_index(shard))
+                if not writer.data_ended:
+                    writer.mark_data_end()
+                    sealed.append(shard)
+        except Exception as error:  # noqa: BLE001 - tried again next poll
+            _log(f"data end: could not end the buffer shards: {type(error).__name__}: {error}"[:300])
+            return False
+        _log(f"data end: every sampler pool finished; ended {len(sealed)} shard(s) no sampler ended "
+             f"({', '.join(sealed[:8])}{' ...' if len(sealed) > 8 else ''}); the trainer trains the full "
+             "batches left and finishes")
+        self.state["data_ended"] = {"at": _now(), "sealed": sealed}
+        self.state.pop("starvation", None)
+        self.save()
+        return True
+
     def starvation_check(self, now: float) -> str | None:
         """Alert on a starving trainer; the reason to stop it, else None."""
         from yeto.rl.starvation import ALERT_EVENT, RECOVERED_EVENT, STOP, StarvationWatch  # noqa: PLC0415
@@ -1042,7 +1102,10 @@ class Run:
                     self.watch_nc_after_breach(why, poll_s)
                 return
             tr = (self.state.get("procs") or {}).get("trainer")
-            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished"):
+            # the data ended: no new group is the normal end, not starvation (the trainer
+            # finishes on the ended shards; its own stall timeout still bounds a hang)
+            ended = self.seal_data_end()
+            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished") and not ended:
                 why = self.starvation_check(time.time())
                 if why:
                     self.starvation_stop(why)

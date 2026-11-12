@@ -400,3 +400,84 @@ def test_the_alert_names_the_recovery_and_holds_no_stop():
     h = st.SamplerHealth(0, live=1, recovering=2, recover_s=3600)
     v = w.observe(60 * MIN, new_groups=0, health=h)
     assert v.state == st.ALERT and "recovering: 2 member(s) starting" in v.reason and "no stop" in v.reason
+
+
+# -- the data end: every pool finished, the shards no sampler ended are ended
+def _data_end_run(run_up, tmp_path, monkeypatch, *, finished=True, members=None):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    run = run_up(members=[])
+    run.cfg["trainer"]["argv"] += ["--rl-buffer-shards", "s-0,s-1,s-2,s-3"]
+    doc = {"members": members if members is not None else [{"ticket": "a", "state": "gone"},
+                                                           {"ticket": "b", "state": "gone"}]}
+    if finished:
+        doc["finished"] = "sampler s-0 finished (exit 0)"
+    (tmp_path / "nc" / "pool-s.json").write_text(json.dumps(doc))
+    objects = DirectoryObjectStore(tmp_path / "store")
+    run._objects = lambda: objects
+    return run, objects
+
+
+def _write_groups(objects, shard, n, *, end):
+    from yeto.rl.engine.buffer_payload import encode_group
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index
+    from yeto.rl.engine.trainer_lifecycle import SampleIndexEntry
+
+    writer = FileSampleBuffer(objects, batch_size=1, index=shard_index(shard))
+    for i in range(n):
+        ref = writer.write_payload(f"{shard}-{i}", encode_group([{"i": i}]))
+        writer.append(SampleIndexEntry(f"{shard}-{i}", 1, ref, 8, float(i + 1)))
+    if end:
+        writer.mark_data_end()
+
+
+def test_a_finished_pool_ends_the_shards_no_sampler_ended(run_up, tmp_path, monkeypatch):
+    """s-0 ended on the data end, s-1 was fenced (no end record), s-2 / s-3 were never
+    ordered: without the seal the trainer's merged index never ends."""
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    _write_groups(objects, "s-0", 3, end=True)
+    _write_groups(objects, "s-1", 2, end=False)
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True,
+                               expected_shards=["s-0", "s-1", "s-2", "s-3"])
+    assert not trainer.data_ended  # the defect: the data end never reaches the trainer
+    assert run.seal_data_end()
+    trainer.refresh()
+    assert trainer.data_ended and len(trainer) == 5  # every group kept, then the end
+    assert sorted(run.state["data_ended"]["sealed"]) == ["s-1", "s-2", "s-3"]
+    assert run.seal_data_end()  # idempotent: nothing written twice
+
+
+@pytest.mark.parametrize("finished,members", [(False, None), (True, [{"ticket": "a", "state": "ready"}]),
+                                              (True, [{"ticket": "a", "state": "draining"}])])
+def test_no_seal_while_a_pool_is_not_finished_or_holds_a_member(run_up, tmp_path, monkeypatch,
+                                                                finished, members):
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch, finished=finished, members=members)
+    _write_groups(objects, "s-1", 2, end=False)
+    assert not run.seal_data_end()
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=["s-1"])
+    assert not trainer.data_ended and "data_ended" not in run.state
+
+
+def test_the_data_end_is_no_starvation(run_up, tmp_path, monkeypatch, capsys):
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    _write_groups(objects, "s-0", 1, end=True)
+    monkeypatch.setattr(up, "_alive", lambda pid: run.clock.t < t0 + 300 * MIN)
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    monkeypatch.setattr(run, "breach", lambda trainer=True: None)
+    monkeypatch.setattr(run, "rollout_stall_alert", lambda: None)
+    monkeypatch.setattr(run, "on_trainer_finished", lambda: True)
+    run.trainer_down = lambda why: pytest.fail(f"trainer stopped: {why}")
+    t0 = run.clock.t
+
+    def sleep(s):
+        run.clock.t += s
+        if run.clock.t >= t0 + 300 * MIN:
+            run.state["trainer_finished"] = "now"
+    monkeypatch.setattr(up.time, "sleep", sleep)
+    run.monitor(poll_s=60)
+    out = capsys.readouterr().out
+    assert "trainer_starvation" not in out and "data end: every sampler pool finished" in out
