@@ -126,6 +126,7 @@ class Member:
     start_retries: int = 0
     start_retry_at: float | None = None
     vram_alerts_seen: int = 0  # the sampler's high-VRAM alerts already reported (probe)
+    absent_seen: bool = False  # the last probe of its ready sampler found no container
 
 
 class PoolOps(Protocol):
@@ -1145,6 +1146,7 @@ class IslandPool:
         probe = self._probe(m) if status.state == "active" else None
         if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
             self._note_progress(m, probe, now)
+            m.absent_seen = False
             if m.state == READY:
                 m.resumed = False  # its sampler outlived the pause: a later exit is a crash
         if probe is not None:
@@ -1231,6 +1233,12 @@ class IslandPool:
                 self.stop(f"sampler {m.shard} finished (exit 0)")
             return
         if kind == el.CRASHED:
+            if m.state == READY and probe is not None and probe.sampler == "absent" and not m.absent_seen:
+                # a restart removes the container first: one reading that it is not there
+                # (a ready sampler's container does not go by itself) waits for a second one
+                m.absent_seen = True
+                return
+            m.absent_seen = False
             self._crashed(m, now, verdict.detail)
             return
         if kind == el.CONFIG_ERROR:

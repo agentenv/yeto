@@ -55,7 +55,8 @@ PROBE_OK, PROBE_UNREACHABLE, PROBE_CRASHED, PROBE_STARTING = "ok", "unreachable"
 
 @dataclass(frozen=True)
 class Probe:
-    """One look at the node (one ssh round trip). ``node``: ``ok`` / ``unreachable``;
+    """One look at the node (one ssh round trip). ``node``: ``ok`` / ``unreachable`` (it
+    did not answer, or its container state did not read: ``status=unknown``);
     ``sampler``: ``running`` / ``exited`` / ``absent``; ``exit_code`` of an exited
     container; ``joined``: the sampler wrote its JOIN (engine up, first round on its
     way); ``progress_age_s``: seconds since its event tape last grew (None: unknown).
@@ -87,6 +88,8 @@ class Probe:
                     key, _, value = part.partition("=")
                     doc[key] = value
         status = doc.get("status", "absent")
+        if status == "unknown":  # the state command failed (sudo, dockerd): no reading of the sampler
+            return cls(node="unreachable")
         sampler = "running" if status == "running" else ("absent" if status == "absent" else "exited")
         code = doc.get("exit")
         age = doc.get("age")
