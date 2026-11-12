@@ -91,6 +91,9 @@ same state dir write:
 
 - `tickets.json`, the **ticket ledger**: one row for each ticket this tool
   created. `down`, `pool-stop` and the patrol release only tickets in it.
+  An order is written to it before it is sent, as a row with
+  `"ticket": null` (a *pending order*). The ticket id is filled in from the
+  order's own answer, and from nowhere else.
 - `leases.json`: the address and lease end of each granted node.
 
 Each change is one read-modify-write under a lock (`tickets.lock`,
@@ -362,6 +365,42 @@ them by id and confirms each one reads `ended`. It never uses `--all` and
 never touches another run's or another person's ticket. Exit code 0 means
 every node is released. Exit code 1 prints the banner with the tickets left.
 
+### An unrecorded order: `adopt`
+
+```
+python -m yeto.launch.nc adopt --account <account> --ticket <ticket> --yes
+```
+
+Use it after an `nc_elastic_order_unrecorded` event, or after an order that
+failed with `ticket <id> may be that order ... not recorded`. The account
+shows an open ticket, the ledger has a pending order of this tool on that
+account, and nothing ties the two together. National Compute reports no
+order time for a ticket, so only a person can decide:
+
+1. Open the ticket in the National Compute console. Check that it was placed
+   at the time of the event and that nobody else ordered on the account.
+2. If it is this tool's order, run `adopt`. The pending order becomes the
+   ticket's row (`adopted_by: "operator"`, with the run tag of the order). A
+   running pool's patrol then finds it as an open ticket of the run that no
+   member owns: it takes the node in as a member, or releases it when the pool
+   is stopping or has `release_orphans`. `pool-stop` releases it too. Without
+   a pool, release it with `down --account <account> --ticket <ticket>`.
+3. If it is someone else's ticket, leave it. If it is nobody's, release it in
+   the console.
+
+`adopt` refuses when the ledger has no pending order of the account, when the
+ticket is not the account's current open ticket, when it is already in the
+ledger, when it is the ticket the account showed before the order, or when it
+was granted more than 5 minutes before the order was sent. Without `--yes` it
+only prints what it would do. It never deletes anything.
+
+A pending order is kept until a later order on the same account succeeds
+(the account was free then, so nothing of the earlier order is open). The
+ledger keeps one pending row per account: `created_at` is the last order
+sent, `since` the first one without a recorded outcome, `call_ended` when the
+failed call returned (absent: the process died inside the call), `error` its
+error, and `observed_ticket` the unrecorded ticket last reported.
+
 ### Retry after a configuration error: `pool-retry`
 
 ```
@@ -418,6 +457,22 @@ one SSH round trip. Then it acts:
   finish their data or go at their lease end, and then the pool stops.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
+- **Only its own tickets.** The pool and the CLI delete, stop and reach a
+  ticket only when the ledger proves it is theirs: the row was written before
+  the order was sent and holds the ticket id from that order's answer, or an
+  operator adopted the ticket (`adopted_by: "operator"`). Any other ticket on
+  the account is only read and reported.
+- **An order whose answer was lost.** If the order call fails (a timeout,
+  output that cannot be parsed, an error after the request), National Compute
+  may still have placed the order. The pool does not guess. The pending order
+  stays in the ledger, and when the account then shows an open ticket that no
+  ledger row holds, the pool emits `order_unrecorded` (with the account and
+  the ticket id) once, and the order fails with `not recorded`. That ticket is
+  **billing and nobody will release it**: the pool places no further order on
+  the account and never deletes the ticket. See
+  [`adopt`](#an-unrecorded-order-adopt). When the order tool answers
+  `created: false` (someone else's order is on the account), nothing is
+  recorded either.
 - **A status answer the pool cannot use.** The pool acts on an NC status
   answer only when the order tool succeeded (exit 0) and the answer has a
   `ticket` field that is `null` (the account has no order) or a ticket with a
@@ -434,7 +489,7 @@ one SSH round trip. Then it acts:
 Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
 `sampler_restart`, `sampler_crash_loop`, `sampler_finished`,
-`order_refused`, `breaker_open` and `pool_stopped`.
+`order_refused`, `order_unrecorded`, `breaker_open` and `pool_stopped`.
 
 Each sampler writes its event tape as `<stem>.<incarnation>.jsonl` (from the
 spec's `event_tape`), one file per incarnation. To read the tapes in the
