@@ -147,3 +147,85 @@ def test_launch_refuses_expandable_segments_on_a_colocated_island():
     plan = _plan("modal:1x2xh100", "--rollout-num-gpus-per-engine", "2",
                  "--modal-env", "PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512")
     assert plan["island_requests"][0]["placement"]["placement"] == "colocated"
+
+
+def test_launch_allows_expandable_segments_on_a_full_parameter_trainer_island():
+    # --rl-sample-role trainer: no engine on the island, the trainer stays resident
+    # (--debug-train-only --no-offload-train), so torch_memory_saver is not loaded
+    alloc = ("--modal-env", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+    trainer = ("--rl-sample-role", "trainer", "--rl-checkpoint-store", "modal-volume://gef-colo/run-a",
+               "--rl-max-policy-age", "2", "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json")
+    plan = _plan("modal:1x2xh100", *trainer, *alloc)
+    assert plan["island_requests"][0]["placement"]["placement"] == "colocated"  # the flag default
+    assert "--rl-offload-train" not in _island_tokens(plan)
+    # an explicit trainer offload loads torch_memory_saver again
+    with pytest.raises(ValueError, match="--rl-offload-train offloads"):
+        _plan("modal:1x2xh100", *trainer, "--rl-offload-train", *alloc)
+    assert "--rl-offload-train" in _island_tokens(_plan("modal:1x2xh100", *trainer, "--rl-offload-train"))
+
+
+def test_island_env_rule_follows_the_trainer_offload():
+    from yeto.rl.adapters.miles.run_config_rules import check_island_env, island_offloads_trainer
+
+    es = ["OMP_NUM_THREADS=8", "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"]
+    # engines on the trainer GPUs: --offload-train is forced, expandable segments refused
+    with pytest.raises(ValueError, match="colocated Miles island offloads"):
+        check_island_env(placement="colocated", env_pairs=es)
+    with pytest.raises(ValueError, match="expandable_segments"):
+        check_island_env(placement="colocated", env_pairs=es, tuning="full", sample_role="both")
+    # a full-parameter trainer island starts no engine and stays resident
+    check_island_env(placement="colocated", env_pairs=es, tuning="full", sample_role="trainer")
+    check_island_env(placement="fixed-partition", env_pairs=es, tuning="full", sample_role="trainer")
+    # ... unless the trainer offload is asked for (also on a fixed partition)
+    for placement in ("colocated", "fixed-partition"):
+        with pytest.raises(ValueError, match="--rl-offload-train offloads"):
+            check_island_env(placement=placement, env_pairs=es, tuning="full",
+                             sample_role="trainer", offload_train=True)
+    # a LoRA trainer island keeps the colocated form on one GPU: unchanged
+    with pytest.raises(ValueError, match="expandable_segments"):
+        check_island_env(placement="colocated", env_pairs=es, tuning="lora", sample_role="trainer")
+    # no expandable segments: nothing to refuse
+    for kwargs in ({}, {"tuning": "full", "sample_role": "trainer"}, {"offload_train": True}):
+        check_island_env(placement="colocated", env_pairs=["OMP_NUM_THREADS=8"], **kwargs)
+        check_island_env(placement="colocated", env_pairs=None, **kwargs)
+        check_island_env(placement="colocated",
+                         env_pairs=["PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512"], **kwargs)
+    assert island_offloads_trainer(placement="colocated")
+    assert not island_offloads_trainer(placement="fixed-partition")
+    assert island_offloads_trainer(placement="fixed-partition", offload_train=True)
+    assert not island_offloads_trainer(placement="colocated", tuning="full", sample_role="trainer")
+
+
+def test_full_parameter_trainer_island_argv_stays_resident_unless_offload_is_asked(tmp_path, monkeypatch):
+    """The argv side of ``island_offloads_trainer``: a full-parameter trainer island
+    is a trainer-only fixed partition whatever ``--rl-placement`` says."""
+    from test_rl_miles_adapter_config import make_config, sub
+    from test_rl_sampler_island import _full_config, _tolerant
+
+    monkeypatch.setattr(miles_config, "full_parameter_dp_replica_gap", lambda: None)
+
+    def argv(offload: bool) -> list[str]:
+        cfg = sub(_full_config("trainer"), "serving", offload_train=offload)
+        cfg = sub(cfg, "parallel", dedicated_rollout_gpus=0,
+                  visible_gpus_per_node=make_config().parallel.actor_num_gpus_per_node)
+        assert miles_config.placement_request(cfg).trainer_only
+        return list(miles_config.translate_run_config(cfg, _tolerant(), max_policy_age=1).argv)
+
+    resident = argv(False)
+    assert "--debug-train-only" in resident and "--colocate" not in resident
+    assert "--no-offload-train" in resident and "--offload-train" not in resident
+    offloaded = argv(True)
+    assert "--debug-train-only" in offloaded and "--offload-train" in offloaded
+    assert "--no-offload-train" not in offloaded
+
+    # the island entry resolves --rl-sample-role trainer to that placement
+    monkeypatch.setattr(run_config, "_resolve_ref_load", lambda a, model_path: str(model_path))
+    for placement in ("colocated", "fixed-partition"):
+        args = island_entry.parse_args(_full_island(tmp_path, "1") + [
+            "--rl-sample-role", "trainer", "--rl-placement", placement])
+        rc = run_config.resolve_rl_run_config(
+            args, model_path=str(tmp_path / "model"), rollout_model_path=None,
+            prompt_path=str(tmp_path / "prompts.jsonl"), eval_prompt_path=None, provider=_provider(),
+            target_modules=[], yeto_policy_sync=False)
+        assert not rc.parallel.colocated and rc.parallel.dedicated_rollout_gpus == 0
+        assert not rc.serving.offload_train
