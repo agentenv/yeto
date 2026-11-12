@@ -749,6 +749,25 @@ shortest-lease one. Two modes, set per run by `elastic.scale_down` in
 In both modes the groups the node wrote before the fence stay in its shard and
 the trainer reads them as usual; a group written after the fence is dropped by
 the trainer's incarnation gate. No task is given out twice and none is lost.
+
+**The gate fails closed, and pauses training.** To judge a group the gate reads
+its shard's incarnation lease (`sample-buffer/leases/<shard>.json`). A lease
+that is absent (no such key) accepts the group. A lease that *cannot be read*
+(a timeout, a 5xx, a reset connection, a truncated body) is no verdict: that
+group is neither trained nor counted stale, and the trainer reads the buffer in
+strict order, so **every group behind it waits too, from every shard**. The
+round then holds only the groups before it, and its committed watermark is
+exactly that group's position, so a restore never trains a group twice. The
+price: one shard whose lease stays unreadable pauses the whole training (the
+samplers keep writing; the groups wait in the buffer). The trainer logs, at
+most once a minute, `incarnation gate: training paused: lease of shard <X>
+unreadable since <T>`, and the next take counts the waiting groups in
+`sample_buffer/lease_deferred_groups`. While it waits, neither the no-new-group
+timeout nor the data end applies, and nothing stops the wait except the lease
+becoming readable again or the trainer process being stopped (the reader has
+no stop or drain signal of its own). A sampler whose previous lease cannot be
+read at its start waits for it (up to 10 minutes, ending early on a reclaim or
+stop) rather than overwrite it.
 No replacement is ordered for a removed node, and the other nodes are not
 touched. A removed node that is evicted, crashes or reaches its lease end
 while it drains is released at once, again with no replacement. The events
@@ -1218,6 +1237,54 @@ helps when it was on before the deletion.
 
 Do not delete records of tasks that are in flight, and do not delete the
 `claims/` records: the attempt numbers continue from them.
+
+### 5.9 Object store outages
+
+Every island reads and writes the run's bucket. A sampler treats its reads as
+polls and its writes as the work:
+
+- **A read that fails is no verdict.** The incarnation lease, the handoff
+  record, the dispenser ledger, `LATEST.json` and the sampler's own buffer
+  index are read again at the next poll. The sampler keeps the weights it
+  serves and the tasks it holds; nothing is given back to the dispenser. The
+  tape marks the outage: `rl_sampler_store_read_failed` /
+  `rl_sampler_store_read_ok` (`what`: `lease`, `handoff`, `backlog`, `buffer`),
+  `rl_dispense_scan_failed` (`state`: `failed`, `recovered`) and
+  `rl_sampler_release_not_loaded` with `reason: latest_unread`.
+- **A group that is ready during the outage waits.** Before a group is written
+  the sampler reads whether it still holds the task and the shard. While the
+  store does not answer, the group is neither written nor dropped
+  (`rl_sampler_write_deferred`, `reason: claim_unread` or `lease_unread`) and
+  is written once the store answers. Lease renewals are writes, so the claims
+  of the tasks in flight stay alive through an outage of the reads. The wait
+  ends after `write_defer_max_s` without an answer, or when the sampler is
+  asked to stop: the group is then given up (`given_up: true`), its task is
+  released without counting toward `max_redo`, and the sampler goes on.
+- **Only a failed write ends a round.** A group write that fails ends the
+  sampler process as `INFRA_FAILED`; the pool restarts it and the restart
+  settles what was written.
+
+The invariant, checked by `yeto.launch.checks.store_outage_check`
+(`read_outage_problems`): while every read (GET, LIST, HEAD) of the store fails
+for up to **10 minutes** (`max_outage_s`, the check's default; the sampler's
+`write_defer_max_s`) and writes still work, no sampler exits and no task in
+flight is released; afterwards every sampler goes on. The settings behind it:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `write_defer_max_s` (sampler spec) | 600 | The longest a sampler holds finished groups back while the store does not answer whether it still holds their tasks. Past it the waiting groups are given up and their tasks released. Raise it together with `max_outage_s` to ride out longer read outages. |
+| `incarnation_lease.max_unread_s` (sampler spec) | 60 | A sampler that could not read its incarnation lease for this long holds its group writes back until it reads it again (it cannot know whether the pool fenced it). `null`: no bound. Inside this window a fenced sampler whose reads fail can still write a group; the trainer then drops it by the fence's time stamp. |
+| `prompts.dispense.lease_s` (sampler spec) | 900 | An outage of reads **and** writes longer than this lets the claims in flight run out: their tasks are given out again and the groups of the first holder are not written. |
+| `prompts.dispense.scan_s` / `max_scan_s` | 30 / 120 | A failed ledger scan is repeated after this backoff. |
+
+A `LATEST.json` that is present but is not a release record is not an outage:
+the sampler keeps its weights for 120 polls in a row (10 minutes at `poll_s`
+5), then stops, because the trainer rewrites the pointer with every release.
+
+On the trainer, a sampler's incarnation lease that cannot be read keeps the
+lease read last; a lease never read so far is read again every 2 s for up to
+10 minutes before any group of that sampler is trained or dropped.
+
 
 ## 6. Dashboard
 

@@ -335,6 +335,9 @@ class Mutation:
     red: tuple[str, ...]  # the invariants that name the damage
     config: tuple[tuple[str, Any], ...] = ()
     skip: str | None = None  # why this tree cannot show it
+    # seeds to try (None: SEEDS): a damage that needs a rare interleaving (a fence that lands
+    # while a zombie still writes) shows in few seeds, and which ones moves with any timing change
+    seeds: int | None = None
 
     @property
     def id(self) -> str:
@@ -353,8 +356,8 @@ MUTATIONS = [
              ("slot_settled_trained_without_a_group",)),
     Mutation(_a_drain_is_answered_with_claims_still_held, "pool", ("drain_answered_while_holding_a_claim",)),
     # -- fencing: a superseded incarnation's late groups are not trained
-    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE),
-    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE),
+    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
+    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
     Mutation(_a_new_lease_supersedes_nobody, "process", ("lease_forgot_a_superseded_incarnation",)),
     Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",)),
     # -- the buffer: every shard record merged once, read as itself, consumed once per cut lineage
@@ -403,7 +406,8 @@ def _config(mutation: Mutation, seed: int) -> SimConfig:
 def test_the_simulation_turns_red_when(mutation: Mutation, monkeypatch, record_property):
     if mutation.skip:
         pytest.skip(mutation.skip)
-    for seed in range(SEEDS):  # the invariant holds on this tree as it is ...
+    seeds = mutation.seeds or SEEDS
+    for seed in range(seeds):  # the invariant holds on this tree as it is ...
         key = (mutation.preset, mutation.config, seed)
         if key not in _baseline:
             _baseline[key] = run_seed(_config(mutation, seed))
@@ -418,5 +422,5 @@ def test_the_simulation_turns_red_when(mutation: Mutation, monkeypatch, record_p
             record_property("first_red_seed", seed)
             print(f"{mutation.id}: red at seed {seed} of preset {mutation.preset}: {sorted(hit)}")
             return
-    pytest.fail(f"{mutation.id}: {SEEDS} seeds of preset {mutation.preset} never violated {mutation.red}",
+    pytest.fail(f"{mutation.id}: {seeds} seeds of preset {mutation.preset} never violated {mutation.red}",
                 pytrace=False)
