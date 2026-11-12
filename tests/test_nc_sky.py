@@ -706,3 +706,69 @@ def test_relay_directory_is_configurable_and_checked(monkeypatch):
         tunnel.relay_start_command([])
     monkeypatch.delenv("YETO_NC_RELAY_DIR")
     assert tunnel.DEFAULT_RELAY_DIR + "/relay.mjs" in tunnel.relay_start_command([])
+
+
+def _run_pull_body_with_aws(tmp_path, cmd, aws_ls):
+    """The pull body with a fake ``aws`` whose ``s3 ls`` runs ``aws_ls`` (shell)."""
+    import os
+    import shlex
+    import subprocess
+
+    body = shlex.split(cmd)[-1].replace("/models", str(tmp_path / "models"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "aws"
+    fake.write_text(f'#!/bin/sh\ncase "$2" in ls) {aws_ls};; cp) echo "cp $4" >> {tmp_path / "cp.log"};; esac\n')
+    fake.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", R2_BUCKET="bkt", AWS_ENDPOINT_URL="http://x")
+    return subprocess.run(["sh", "-c", body], env=env, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.parametrize("aws_ls", ["echo 'An error occurred (AccessDenied)' >&2; exit 255", "true"])
+def test_ssh_pull_refused_or_empty_listing_is_a_failed_pull(tmp_path, aws_ls):
+    """A refused listing (credentials, endpoint) or an empty one (wrong src_key) copied
+    nothing: the pull fails instead of printing ``done`` (a pipeline exits with xargs'
+    status, and ``xargs -r`` on no input exits 0), so the sampler is not started on an
+    empty model directory."""
+    from yeto.launch.nc import cli
+    from yeto.launch.nc import ssh_sampler as ss
+
+    proc = _run_pull_body_with_aws(tmp_path, ss.pull_model_command("models/K", "/mnt/nvme/models/M"), aws_ls)
+    assert proc.returncode != 0
+    assert "YETO_NC_PULL done" not in proc.stdout and "YETO_NC_PULL fail" in proc.stdout
+    assert not (tmp_path / "cp.log").exists()
+    assert cli.pull_ended_without_done(f"exited {proc.returncode}\n{proc.stdout}")
+
+
+def test_pull_status_over_without_done():
+    """Any exit of the pull container without ``done`` (not only codes 1xx), a vanished
+    container, or a nonzero exit of the current no-docker attempt ends the wait at once;
+    a running pull and the lines of an earlier attempt in an appended log do not."""
+    from yeto.launch.nc import cli
+
+    over = ["exited 255\nYETO_NC_PULL start x jobs=16", "exited 2\n", "exited 3\n", "absent",
+            "YETO_NC_PULL start a\nxargs: sh: exited with status 255; aborting\nYETO_NC_PULL exit 124",
+            "running 0\nYETO_NC_PULL start a\nYETO_NC_PULL fail models/K/x"]
+    for status in over:
+        assert cli.pull_ended_without_done(status), status
+    going = ["running 0\nYETO_NC_PULL start a jobs=16\n1.2T /mnt/nvme/models/M", "",
+             "YETO_NC_PULL fail models/K/x\nYETO_NC_PULL exit 124\nYETO_NC_PULL start b"]
+    for status in going:
+        assert not cli.pull_ended_without_done(status), status
+
+
+def test_pull_waits_end_on_a_container_exit_without_done(monkeypatch):
+    """``_pull`` raises on the first status of an exited pull container instead of
+    polling the billed node until ``timeout_s``."""
+    from yeto.launch.nc import cli
+    from yeto.launch.nc import ssh_sampler as ss
+
+    ops = cli.NcSshOps.__new__(cli.NcSshOps)
+    ops.cfg, ops._run, ops._route = {"r2_env_file": "/dev/null"}, None, None
+    monkeypatch.setattr(ss, "pull_model", lambda *a, **k: ss.PULL_CONTAINER)
+    statuses = iter(["running 0\nYETO_NC_PULL start", "exited 255\nYETO_NC_PULL start"])
+    monkeypatch.setattr(ss, "pull_status", lambda *a, **k: next(statuses))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    lease = type("L", (), {"ticket": "t1"})()
+    with pytest.raises(cli.NcError, match="model pull failed"):
+        ops._pull(lease, {"src_key": "models/K", "timeout_s": 3600, "poll_s": 1})

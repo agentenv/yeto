@@ -412,3 +412,29 @@ def test_trainer_side_cause_names_a_fatal_store_exit(run_up, tmp_path):
                    f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied): ...\n")
     cause = run.trainer_side_cause()
     assert "AccessDenied" in cause and "trainer exits" in cause and "fail-closed pause" not in cause
+
+
+def test_a_starvation_stop_downs_the_trainer_by_its_launch_name(run_up, monkeypatch):
+    """End to end: starvation -> STOP flag -> the real ``trainer_down`` runs
+    ``yeto down <--cluster-prefix>`` (not the run config's ``run``); the pool is kept."""
+    from yeto import runs
+
+    run = run_up(members=[{"ticket": "a", "state": "ready"}], keys={"k0"})
+    monkeypatch.setattr(up, "_alive", lambda pid: not runs.stop_flag_path("r1-trainer").exists())
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    monkeypatch.setattr(run, "breach", lambda trainer=True: None)
+    monkeypatch.setattr(run, "rollout_stall_alert", lambda: None)
+    t0, real_sleep = run.clock.t, run.clock.sleep
+
+    def sleep(s):
+        real_sleep(s)
+        if run.clock.t - t0 >= 40 * MIN:  # the samplers die
+            run.set_members([{"ticket": "a", "state": "gone"}])
+        assert run.clock.t - t0 < 24 * 60 * MIN, "no starvation stop"
+
+    monkeypatch.setattr(up.time, "sleep", sleep)
+    run.monitor(poll_s=60)
+    assert runs.stop_flag_path("r1-trainer").exists() and not runs.stop_flag_path("r1").exists()
+    downs = [argv[-2:] for argv in run.calls if "down" in argv]
+    assert downs == [["down", "r1-trainer"]]
+    assert not any("pool-stop" in argv for argv in run.calls)

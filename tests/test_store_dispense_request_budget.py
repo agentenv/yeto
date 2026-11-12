@@ -361,7 +361,8 @@ def test_retire_and_open_status_list_done_and_the_unsettled_slots_only(tmp_path)
     store.ops.clear()
     out = sd.retire(store, NS, "s1", reason="test")
     assert out["released"] == 20 and out["slots"] == list(range(SLOTS + 1, SLOTS + 40, 2))
-    assert store.ops["list"] <= SLOTS // PAGE + 3
+    # every incarnation: one listing finds them, a second after their markers releases the claims
+    assert store.ops["list"] <= 2 * (SLOTS // PAGE + 3)
     assert sd.retire(store, NS, "s1", reason="test")["released"] == 0
 
 

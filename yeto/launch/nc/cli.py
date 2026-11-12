@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -163,6 +164,20 @@ def reach(lease: NodeLease) -> str:
         raise NcError(f"ssh {alias} never answered")
     _log(f"ssh {alias} ok")
     return alias
+
+
+def pull_ended_without_done(status: str) -> bool:
+    """The pull status says the pull is over but not done: a ``YETO_NC_PULL fail`` line
+    of the current attempt, the pull container exited (any code; ``done`` is its last
+    line) or is gone (``absent``: docker restarted,
+    removed), or the no-docker route logged a nonzero ``YETO_NC_PULL exit``. Waiting
+    for ``done`` then only bills the node until ``timeout_s``."""
+    first = status.splitlines()[0].strip() if status.strip() else ""
+    if first == "absent" or re.match(r"exited \d+$", first):
+        return True
+    current = status.rsplit("YETO_NC_PULL start", 1)[-1]  # an appended log keeps earlier attempts
+    return "YETO_NC_PULL fail" in current or any(
+        code != "0" for code in re.findall(r"YETO_NC_PULL exit (\d+)", current))
 
 
 def attach_ssh(lease: NodeLease) -> str:
@@ -539,7 +554,7 @@ class NcSshOps:
                       else ssh_sampler.pull_status(lease, run=self._run))
             if "YETO_NC_PULL done" in status:
                 return
-            if "YETO_NC_PULL fail" in status or status.startswith("exited 1"):
+            if pull_ended_without_done(status):
                 raise NcError(f"model pull failed on {lease.ticket}: {status[-300:]}")
             time.sleep(float(pull.get("poll_s", 30)))
         raise NcError(f"model pull on {lease.ticket} not done in {pull.get('timeout_s', 3600)}s")

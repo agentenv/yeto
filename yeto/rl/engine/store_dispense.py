@@ -58,7 +58,10 @@ Rules:
   releases the rest of their claims;
 * retire (:func:`retire`, the controller's scale-down / evict): a marker
   ``retired/<holder>/<incarnation>`` plus an immediate ``release`` (reason
-  ``retired``) of every open claim of that process. The retired process sees
+  ``retired``) of every open claim of that process. The marker is written
+  before the claims are listed, and a claim pass that won checks the marker
+  (``StoreLedger.retired_now``), so a claim taken while ``retire`` ran is
+  released by one or the other. The retired process sees
   the marker in its next listing and takes nothing more (fenced); its
   in-flight groups are refused by :meth:`StoreDispensedPrompts.still_holds`;
   any scanning sampler releases a claim of a retired process it still finds;
@@ -674,6 +677,16 @@ class StoreLedger:
         """This process was retired (as of the latest scan)."""
         return (self.holder, self.incarnation) in self.retired
 
+    def retired_now(self) -> bool:
+        """This process's retire marker is in the store now (one existence check).
+        Asked after a claim pass that won: :func:`retire` writes the marker before
+        it lists the claims, so a claim its listing missed was taken after the
+        marker and this check sees it."""
+        if self.is_retired():
+            return True
+        return bool(self.objects.exists(self.key("retired", _member_part(self.holder),
+                                                 _member_part(str(self.incarnation)))))
+
     def answer_drain(self, seq: str) -> None:
         self.objects.write(drained_key(self.ns, self.holder), self._body(seq=seq))
 
@@ -863,6 +876,8 @@ class StoreDispensedPrompts:
         self._drain_seen: str | None = None  # the drain request already reported / answered
         self._drain_answered: str | None = None
         self._held: dict[int, _Held] = {}
+        # claims whose create raised (a timeout): the store may hold them for this process
+        self._unsure: dict[int, int] = {}
         holder = getattr(ledger, "holder", "")
         self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
         self._retired = False  # the controller retired this process (a marker in the ledger)
@@ -1067,6 +1082,7 @@ class StoreDispensedPrompts:
             self._scan_failing = 0
         self.stats["scans"] += 1
         self._lost_by_scan(states)
+        self._settle_unsure(states)
         if self.ledger.is_retired():
             self._retired = True
             with self._lock:
@@ -1129,6 +1145,8 @@ class StoreDispensedPrompts:
                 raise
             except Exception as error:  # noqa: BLE001 - the slot stays a gap; the next scan retries it
                 logger.warning("store dispenser: claim of slot %d failed: %r", p, error)
+                with self._lock:  # the create may have been applied, its answer lost
+                    self._unsure[p] = attempt
                 break
             if won:
                 with self._lock:
@@ -1152,7 +1170,65 @@ class StoreDispensedPrompts:
                     if rest:
                         k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
                         queue, i = rest[k:] + rest[:k], 0
+        retired = False
+        if got:
+            try:
+                retired = self.ledger.retired_now()
+            except DispenseError:
+                raise
+            except Exception as error:  # noqa: BLE001 - no verdict: the next scan reads the marker
+                if is_fatal_store_error(error):  # refused credentials / no such bucket: no outage
+                    raise
+                logger.warning("store dispenser: retire marker not read after a claim pass: %r", error)
+        if retired:
+            # retired while this pass claimed: :func:`retire` listed the ledger before these
+            # claims and did not release them; give them back at once, write nothing
+            self._retired = True
+            with self._lock:
+                held = [(p, h) for p, h in self._held.items() if not h.lost]
+            for p, h in held:
+                self._mark_lost(p, h, "retired")
+            for p in got:
+                h = self._held[p]
+                if self.ledger.fail(p, h.attempt, "release", reason="retired"):
+                    self._emit(RELEASE_EVENT, slot=p, attempt=h.attempt, reason="retired")
+            return [], False
         return got, ended
+
+    def _settle_unsure(self, states: Mapping[int, TaskState]) -> None:
+        """Read back the claims whose create raised: one this process wrote is
+        released at once (no trial runs for it), one that is missing or another's
+        is forgotten. An unreadable one stays unsure (a drain is not answered).
+        An attempt the scan shows ended (``expired`` past the lease: counted toward
+        ``max_redo``), superseded or settled is forgotten unread: a ``release`` of it
+        would only undo that count."""
+        with self._lock:
+            unsure = sorted(self._unsure.items())
+        for p, attempt in unsure:
+            state = states.get(p)
+            if self.ledger.is_settled(p, states) or (state is not None and (
+                    attempt in state.fails or (state.latest is not None and state.latest > attempt))):
+                with self._lock:
+                    self._unsure.pop(p, None)
+                continue
+            try:
+                raw = self.ledger.objects.read(self.ledger.key("claims", _pkey(p), _akey(attempt)))
+                try:
+                    body = json.loads(raw) if raw else {}
+                except ValueError:  # not a claim body of this process
+                    body = {}
+                if (isinstance(body, dict) and body.get("holder") == self.ledger.holder
+                        and str(body.get("incarnation")) == str(self.ledger.incarnation)):
+                    if self.ledger.fail(p, attempt, "release", reason="claim_answer_lost"):
+                        self.stats["released"] += 1
+                        self._emit(RELEASE_EVENT, slot=p, attempt=attempt, reason="claim_answer_lost")
+            except DispenseError:  # the store cannot dispense at all: as in the claim pass
+                raise
+            except Exception as error:  # noqa: BLE001 - asked again at the next scan
+                logger.warning("store dispenser: claim %d/%d not read back: %r", p, attempt, error)
+                continue
+            with self._lock:
+                self._unsure.pop(p, None)
 
     def _lost_by_scan(self, states: Mapping[int, TaskState]) -> None:
         """Mark the held slots the scan shows superseded (a later claim, or the
@@ -1169,7 +1245,7 @@ class StoreDispensedPrompts:
 
     def _answer_drain(self) -> None:
         seq = self.ledger.drain_seq
-        if seq is None or self.holding() or self._drain_answered == seq:
+        if seq is None or self.holding() or self._unsure or self._drain_answered == seq:
             return
         try:
             self.ledger.answer_drain(seq)
@@ -1436,23 +1512,37 @@ def retire(objects: Any, namespace: str, holder: str, incarnation: str | None = 
     open claim. Idempotent: a second call releases nothing. It lists ``done/``
     and the claims and failures of the unsettled slots only."""
     ns = namespace.strip("/")
-    if lists_ranges(objects):
-        keys, _now = scan_slots(objects, ns, SettledSlots(), dirs=("claims", "fail"))
-    else:
-        keys, _now = objects.list_meta(ns + "/")
-    states = parse_ledger(keys, ns)
     body = json.dumps({"holder": "controller", "reason": str(reason)}, sort_keys=True).encode()
-    open_claims = []
-    for p, state in sorted(states.items()):
-        a = state.open_attempt()
-        if a is None:
-            continue
-        claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
-        if claim.get("holder") == holder and (incarnation is None or str(claim.get("incarnation")) == str(incarnation)):
-            open_claims.append((p, a, str(claim.get("incarnation"))))
-    incarnations = {str(incarnation)} if incarnation is not None else {inc for _p, _a, inc in open_claims}
-    for inc in sorted(incarnations):
-        objects.create(f"{ns}/retired/{_member_part(holder)}/{_member_part(inc)}", body)
+
+    def mark(incs: Iterable[str]) -> None:
+        for inc in sorted(incs):
+            objects.create(f"{ns}/retired/{_member_part(holder)}/{_member_part(inc)}", body)
+
+    def open_claims_of(incs: set[str] | None) -> list[tuple[int, int, str]]:
+        if lists_ranges(objects):
+            keys, _now = scan_slots(objects, ns, SettledSlots(), dirs=("claims", "fail"))
+        else:
+            keys, _now = objects.list_meta(ns + "/")
+        out = []
+        for p, state in sorted(parse_ledger(keys, ns).items()):
+            a = state.open_attempt()
+            if a is None:
+                continue
+            claim = _json(objects, f"{ns}/claims/{_pkey(p)}/{_akey(a)}")
+            if claim.get("holder") == holder and (incs is None or str(claim.get("incarnation")) in incs):
+                out.append((p, a, str(claim.get("incarnation"))))
+        return out
+
+    # The marker goes first, the listing after it: a claim the listing misses was taken
+    # after the marker, and its claimant sees the marker (``StoreLedger.retired_now``).
+    if incarnation is not None:
+        incarnations = {str(incarnation)}
+        mark(incarnations)
+        open_claims = open_claims_of(incarnations)
+    else:
+        incarnations = {inc for _p, _a, inc in open_claims_of(None)}
+        mark(incarnations)
+        open_claims = open_claims_of(incarnations) if incarnations else []
     released = []
     for p, a, inc in open_claims:
         detail = json.dumps({"holder": "controller", "attempt": a, "reason": "retired", "retire_reason": str(reason),
