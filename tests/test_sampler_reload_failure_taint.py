@@ -157,3 +157,70 @@ def test_build_engine_sampler_wires_the_loader_weights_state_into_a_streaming_ro
         assert island.round.weights_state() == (True, 0)
     finally:
         island.round.close()
+
+
+def test_live_a_group_started_during_a_load_that_succeeds_is_written(tmp_path):
+    """A live load pauses the engine and continues: a trial that starts while it runs
+    generates on the new, checked weights. Only a load that fails taints it."""
+    harness = Harness({"b": 0.0})
+    engine = FakeEngine()
+    engine.start(None, 0)
+    loader = _loader(engine, [])
+    loader.start(None, 0)
+    rnd, engine, events = _round(tmp_path / "buf", harness, Prompts({0: ["b"]}), engine=engine, live=True)
+    rnd.weights_state = loader.weights_state
+    rnd.release_pending = lambda: 9
+    entered, go = threading.Event(), threading.Event()
+    real = engine.load
+
+    def slow_load(directory, version):
+        entered.set()
+        go.wait(5)
+        return real(directory, version)
+
+    engine.load = slow_load
+    release, directory = _release(tmp_path, 1)
+    worker = threading.Thread(target=loader, args=(release, directory))
+    try:
+        worker.start()
+        assert entered.wait(5) and not loader.ready  # the load is in progress
+        rnd(0)
+        _wait(lambda: len(harness.started) == 2)
+        go.set()
+        worker.join(5)
+        assert loader.ready and engine.served_version() == 1
+        rnd.flush()
+    finally:
+        go.set()
+        rnd.close()
+    (group,) = [f for n, f in events if n == GROUP_EVENT]
+    assert group["dropped_reason"] is None and group["written"]
+    assert len(_entries(tmp_path / "buf")[0]) == 1
+
+
+def test_a_group_whose_later_trial_starts_after_a_failure_is_not_written(tmp_path):
+    """Only the first trial is started before the failed load; the second starts after
+    it, before the restart: the group must be dropped."""
+    harness = Harness({"b": 0.0})
+    harness.gates["a"] = threading.Event()
+    engine = FakeEngine()
+    engine.start(None, 0)
+    loader = _loader(engine, [])
+    loader.start(None, 0)
+    rnd, engine, events = _round(tmp_path / "buf", harness, Prompts({0: ["a"]}), engine=engine, max_in_flight=1)
+    rnd.weights_state = loader.weights_state
+    try:
+        caller = threading.Thread(target=rnd, args=(0,))  # max_in_flight 1: blocks until a slot frees
+        caller.start()
+        _wait(lambda: len(harness.started) == 1)
+        engine.fail_load = "boom"
+        release, directory = _release(tmp_path, 1)
+        with pytest.raises(ReleaseNotLoaded):
+            loader(release, directory)
+        loader(release, directory)  # restart succeeds before the group ends
+        harness.gates["a"].set()
+        caller.join(10)
+        rnd.flush()
+    finally:
+        rnd.close()
+    assert not _entries(tmp_path / "buf")[0]

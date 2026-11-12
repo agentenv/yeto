@@ -263,7 +263,7 @@ class _Group:
     retry_reasons: list[str] = dataclasses.field(default_factory=list)
     abandoned: bool = False  # a drain timed out on it: no slot of it runs again
     # failed engine loads counted when its first trial started (AgenticRound.weights_state);
-    # None: a trial of it started while the engine held unchecked weights
+    # None: a trial of it started while a failed load awaited its restart
     weights_mark: int | None = 0
 
     def __post_init__(self) -> None:
@@ -390,7 +390,7 @@ class AgenticRound(EngineRound):
         # then for that release (the follower loads it even when a newer one was
         # published meanwhile).
         self.release_ready: Callable[[], int | bool] = lambda: True
-        # (ready, failed loads): whether the engine holds checked weights and how many loads
+        # (clean, failed loads): False while a failed load awaits its restart, and how many loads
         # failed after touching it (build_engine_sampler: the loader's). A group whose trials
         # ran across such a failure is not written: a forced or live load that failed part
         # way leaves served_version at the old version while the weights are neither release.

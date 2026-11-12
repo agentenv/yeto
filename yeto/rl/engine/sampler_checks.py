@@ -465,9 +465,15 @@ class PortReleaseLoader:
         self.emit(LOAD_CHECKED_EVENT, policy_version=version, **self.last_load)
 
     def weights_state(self) -> tuple[bool, int]:
-        """(``ready``, ``unchecked_loads``): a streaming round drops a group whose trials
-        ran across a load that failed after touching the engine (``AgenticRound.weights_state``)."""
-        return self.ready, self.unchecked_loads
+        """(clean, ``unchecked_loads``): a streaming round drops a group whose trials
+        ran across a load that failed after touching the engine (``AgenticRound.weights_state``).
+        clean is False only while a failed load awaits its restart: a load in progress is not
+        a taint (a live engine pauses its trials and continues on the new checked weights;
+        should it fail, ``unchecked_loads`` moves and the groups that ran across it are dropped)."""
+        # the count first: _fail sets _restart before it counts, so a reader on another
+        # thread that races a failure sees either the old count (compared at settle) or the taint
+        failed = self.unchecked_loads
+        return not self._restart, failed
 
     def loaded_fields(self) -> dict[str, Any]:
         """Extra fields of ``rl_sampler_policy_loaded`` (``SamplerLoop.loaded_fields``)."""
