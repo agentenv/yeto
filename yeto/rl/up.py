@@ -1014,6 +1014,8 @@ class Run:
             return True
         if not self.pools_data_ended():
             return False
+        if not self.dispense_settled():
+            return False
         from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
 
         sealed = []
@@ -1034,6 +1036,42 @@ class Run:
         self.state.pop("starvation", None)
         self.save()
         return True
+
+    def dispense_settled(self) -> bool:
+        """The run's finite data is settled: every pool's store dispenser
+        (``store_dispense.status``) counts every slot trained / exhausted / dropped
+        (``totals["ended"]``), none queued, running, stale or unclaimed. A pool finished
+        with tasks left (a sampler ended early, the rest went at their lease end) is no
+        data end: a CRITICAL ``data_end_incomplete`` is logged (once per count) and the
+        starvation watch stays on. A status that does not read: not settled."""
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        left, pools = 0, []
+        try:
+            objects = store_dispense.ledger_objects(self._objects())
+            for i in range(len(self.pools)):
+                cfg = self.pools[i].load()
+                ns = str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
+                totals = store_dispense.status(objects, ns, details=False, settled=False)["totals"]
+                if not totals.get("ended"):
+                    n = sum(int(totals.get(k) or 0) for k in ("queued", "running", "stale", "unclaimed"))
+                    left += n if n else 1  # no plan / no slots: not known to be settled
+                    pools.append({"pool": self.pools[i].name, "namespace": ns, "totals": totals,
+                                  "finished": (self.pool_doc(i) or {}).get("finished")})
+        except Exception as error:  # noqa: BLE001 - asked again next poll
+            _log(f"data end: the dispenser status did not read ({type(error).__name__}: {error}"[:300]
+                 + "): not sealed")
+            return False
+        if not left:
+            self.state.pop("data_end_incomplete", None)
+            return True
+        if (self.state.get("data_end_incomplete") or {}).get("left") != left:
+            _log(f"CRITICAL data_end_incomplete: every sampler pool finished but {left} task(s) are not "
+                 f"sampled ({json.dumps(pools, sort_keys=True)[:600]}): check why the pool finished; "
+                 "`yeto run up` starts the pool again (the trainer's starvation watch stays on)")
+            self.state["data_end_incomplete"] = {"at": _now(), "left": left, "pools": pools}
+            self.save()
+        return False
 
     def starvation_check(self, now: float) -> str | None:
         """Alert on a starving trainer; the reason to stop it, else None."""

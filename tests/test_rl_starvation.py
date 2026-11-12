@@ -415,7 +415,18 @@ def _data_end_run(run_up, tmp_path, monkeypatch, *, finished=True, members=None)
     (tmp_path / "nc" / "pool-s.json").write_text(json.dumps(doc))
     objects = DirectoryObjectStore(tmp_path / "store")
     run._objects = lambda: objects
+    _dispense(objects, slots=2, settled=2)
     return run, objects
+
+
+def _dispense(objects, *, slots, settled):
+    """The store dispenser's ledger: ``slots`` tasks, the first ``settled`` trained."""
+    from yeto.rl.engine import store_dispense as sd
+
+    ledger = sd.ledger_objects(objects)
+    ledger.write("task-dispense/plan.json", json.dumps({"slots": slots, "rows": slots}).encode())
+    for p in range(settled):
+        ledger.write(f"task-dispense/done/{sd._pkey(p)}.trained", b"{}")
 
 
 def _write_groups(objects, shard, n, *, end):
@@ -545,3 +556,55 @@ def test_no_seal_when_a_pool_writes_another_store(run_up, tmp_path, monkeypatch)
     (tmp_path / "pool.json").write_text(json.dumps({"shard_base": "s", "run_prefix": "r1",
                                                     "r2_env_file": str(env)}))
     assert run.seal_data_end()
+
+
+def test_no_seal_while_the_dispenser_holds_tasks(run_up, tmp_path, monkeypatch, capsys):
+    """The pool finished (one sampler ended early, the rest went at their lease end) but
+    tasks are left: no data end, a CRITICAL alert (once), the starvation watch stays on."""
+    from yeto.rl.engine import store_dispense as sd
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    _dispense(objects, slots=5, settled=2)
+    assert not run.seal_data_end() and not run.seal_data_end()
+    out = capsys.readouterr().out
+    assert out.count("CRITICAL data_end_incomplete") == 1 and "3 task(s) are not sampled" in out
+    assert "`yeto run up`" in out and run.state["data_end_incomplete"]["left"] == 3
+    assert "data_ended" not in run.state and not objects.list("sample-buffer/")
+    for p in range(2, 5):  # the pool came back and sampled the rest: sealed now
+        sd.ledger_objects(objects).write(f"task-dispense/done/{sd._pkey(p)}.trained", b"{}")
+    assert run.seal_data_end() and "data_end_incomplete" not in run.state
+
+
+def test_no_seal_without_a_dispenser_plan(run_up, tmp_path, monkeypatch):
+    import shutil
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    shutil.rmtree(tmp_path / "store" / "task-dispense")
+    assert not run.seal_data_end() and "data_ended" not in run.state
+
+
+def test_no_seal_when_the_dispenser_status_fails(run_up, tmp_path, monkeypatch, capsys):
+    from yeto.rl.engine import store_dispense as sd
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+
+    def fail(*a, **k):
+        raise OSError("listing failed")
+    monkeypatch.setattr(sd, "status", fail)
+    assert not run.seal_data_end() and "data_ended" not in run.state
+    assert "did not read" in capsys.readouterr().out and not objects.list("sample-buffer/")
+
+
+def test_the_starvation_watch_stays_on_with_tasks_left(run_up, tmp_path, monkeypatch, capsys):
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    _dispense(objects, slots=5, settled=2)
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    monkeypatch.setattr(run, "breach", lambda trainer=True: None)
+    monkeypatch.setattr(run, "rollout_stall_alert", lambda: None)
+    checked = []
+    monkeypatch.setattr(run, "starvation_check", lambda now: checked.append(now) or "starved")
+    monkeypatch.setattr(run, "starvation_stop", lambda why: run.state.update(trainer_finished="stopped"))
+    monkeypatch.setattr(run, "on_trainer_finished", lambda: True)
+    run.monitor(poll_s=60)
+    assert checked and "data_ended" not in run.state
