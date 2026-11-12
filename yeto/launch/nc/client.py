@@ -218,12 +218,35 @@ class NcClient:
             doc = json.loads(text[text.index("{"):]) if "{" in text else {}
         except ValueError as exc:
             raise NcError(f"{argv[0]}: unparseable output (exit {out.returncode})") from exc
-        if out.returncode != 0 and not doc:
-            raise NcError(f"{argv[0]} exit {out.returncode}: {(out.stderr or '')[-300:]}")
+        if out.returncode != 0:  # a failed call decides nothing, whatever it printed
+            detail = doc.get("error") or (out.stderr or "")[-300:]
+            raise NcError(f"{argv[0]} exit {out.returncode}: {detail}")
         return doc
 
     def status(self) -> dict[str, Any]:
-        return self._call([*_tool("query"), "status", "--account", str(self.account)])
+        """The account's status, only when the answer can be acted on: the tool
+        succeeded and the answer names the ticket of this session - ``"ticket":
+        null`` (no order) or a ticket with a state. Anything else (no output, an
+        error document, no ``ticket`` field, a ticket without a state) raises: it
+        says nothing about the ticket, and is never read as "no open ticket"."""
+        doc = self._call([*_tool("query"), "status", "--account", str(self.account)])
+        ticket = doc.get("ticket")
+        if doc.get("ok", True) is not True or "ticket" not in doc or not (
+                ticket is None or (isinstance(ticket, dict) and isinstance(ticket.get("state"), str))):
+            raise NcError(f"{_tool('query')[0]} status: account {self.account}: the answer does not report "
+                          f"the ticket (keys {sorted(doc)[:8]}, error {str(doc.get('error'))[:200]!r})")
+        return doc
+
+    def _current(self, expect: str) -> dict[str, Any]:
+        """The account's current ticket ({}: none). An answer that does not show
+        ``expect`` is read once more before anyone concludes that ``expect`` is
+        gone: one wrong "no order" answer must not retire a node or close a ticket
+        in the ledger."""
+        for _ in range(2):
+            current = self.status().get("ticket") or {}
+            if current.get("id") == expect:
+                break
+        return current
 
     def balance(self) -> int | None:
         bal = (self.status().get("balance") or {}).get("balance_ucredits")
@@ -238,10 +261,12 @@ class NcClient:
     def ticket_status(self, ticket: str) -> LeaseStatus:
         """``ticket`` as a :class:`~.elastic.LeaseStatus`. The account's current
         ticket is the only one the tool reports; another id (or none) means ``ticket``
-        ended (one open order per account). A failed call raises."""
+        ended (one open order per account), once two answers in a row say so. A failed
+        call, or an answer that does not report the ticket, raises (the pool reads
+        that as a control-plane blip and decides nothing on it)."""
         from ..pool.status import LeaseStatus  # noqa: PLC0415
 
-        t = self.status().get("ticket") or {}
+        t = self._current(ticket)
         if t.get("id") != ticket:
             return LeaseStatus("ended", end_reason=None)
         state = t.get("state")
@@ -320,8 +345,7 @@ class NcClient:
     def _delete(self, ticket: str) -> dict[str, Any]:
         if not self.ledger.owns(self.account, ticket):
             raise NcRefused(f"ticket {ticket} on account {self.account} was not created by this tool")
-        st = self.status()
-        current = st.get("ticket") or {}
+        current = self._current(ticket)
         if current.get("id") != ticket:
             if current.get("id") is None or current.get("state") not in OPEN_STATES:
                 self.ledger.mark(ticket, ended=True)
@@ -332,9 +356,13 @@ class NcClient:
             self.ledger.mark(ticket, ended=True)
             return {"ticket": ticket, "state": current.get("state"), "already": True}
         doc = self._call([*_tool("manage"), "delete", "--account", str(self.account), "--yes"])
+        if doc.get("ok") is False:
+            raise NcError(f"ticket {ticket}: delete failed: {doc.get('error') or doc}")
+        absent = 0  # "no order" answers in a row: one alone does not confirm the release
         for _ in range(12):
             t = self.status().get("ticket") or {}
-            if t.get("id") in (None, ticket) and t.get("state") not in OPEN_STATES:
+            absent = absent + 1 if t.get("id") is None else 0
+            if (t.get("id") == ticket or absent >= 2) and t.get("state") not in OPEN_STATES:
                 self.ledger.mark(ticket, ended=True, ended_at=t.get("ended_at"), end_reason=t.get("end_reason"))
                 return {"ticket": ticket, "state": t.get("state", "ended"), "ended_at": t.get("ended_at"),
                         "end_reason": t.get("end_reason"), "released": doc.get("released")}
