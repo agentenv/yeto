@@ -70,6 +70,11 @@ OPEN_FINDINGS: dict[str, tuple[bool, float]] = {
     # a claim taken while ``store_dispense.retire`` lists the ledger is not released by it, and
     # the retired process learns of its marker only at its next scan: it still writes that group
     "retired_writer_group_trained": (PLAN_IDENTITY, 0.25),
+    # the gate judges a group when the take selects it, against a lease it caches for
+    # ``refresh_s`` (30 s); the take may then wait for later groups and train it after a fence
+    # the cached lease did not show yet (seen with a partitioned zombie, preset fence-zombie).
+    # The fail-open read (a failed lease read taken for "no lease") is fixed (#373)
+    "stale_incarnation_group_trained": (False, 0.05),
     # until the old incarnation of a second start reads its lease both write the shard; a round
     # id written by both leaves the shard unresumable (resume_point: two data cursors / last groups)
     "shard_left_unresumable": (SHARD_OWNERSHIP, 0.1),
