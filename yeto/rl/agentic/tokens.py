@@ -101,7 +101,13 @@ def join_turns(turns: Sequence[TokenTurn], *, max_response_len: int | None = Non
         top = (numpy.concatenate(top_ids)[:len(ids)], numpy.concatenate(top_vals)[:len(ids)])
     routed = None
     if with_r3:  # the last turn's rows cover the whole stream (len(stream) - 1)
-        routed = turns[-1].routed_experts[:len(prompt) + len(ids) - 1]
+        rows = turns[-1].routed_experts
+        end = len(prompt) + len(ids) - 1
+        if len(rows) < end:  # a recorder's window shorter than the sample (fail closed)
+            raise TokenAlignmentError(f"the last turn keeps {len(rows)} routed-expert rows; the sample "
+                                      f"needs {end}")
+        # a copy when shorter: a slice is a view that would keep every row alive
+        routed = rows[:end].copy() if len(rows) > end and hasattr(rows, "copy") else rows[:end]
     return TokenSegments(
         prompt_ids=tuple(prompt),
         response_ids=tuple(ids),
