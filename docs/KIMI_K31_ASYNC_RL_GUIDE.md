@@ -446,6 +446,7 @@ The full trainer command, with comments for every flag, is in
 | `--rl-checkpoint-store` | Where round cuts and the ledger are kept; enables resume across launches. |
 | `--rl-cut-every N` | Keep a round cut every `N` rounds (plus the last round). See also `--rl-cut-keep`, `--rl-cut-auto-mtbf-s`. |
 | `--rl-release-every N` | Release every N-th policy version to the samplers (default 1). Needs `--rl-max-policy-age >= N`. |
+| `--rl-release-skip-busy` | Skip a release while the previous upload is still in flight (latest wins; the trainer never waits for an upload). Needs staged releases (no `--rl-release-inline`) and `--rl-max-policy-age >= 3`. See section 3.5. |
 | `--rl-stall-timeout` | Trainer hang detection in seconds. `yeto run up` refuses `0`. |
 | `--rl-stop-after-rounds N` | Stop after N rounds with a final cut. |
 
@@ -512,6 +513,10 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
 | `max_backlog_groups` | Groups a sampler may hold ahead of the trainer before it pauses. |
 | `reload_max_defer_s` | Longest time, in seconds, a downloaded policy release may wait for running agentic trials before the sampler loads it anyway (default 600; `null` waits indefinitely). A forced load is reported as `rl_sampler_policy_loaded` with `forced: true` and `deferred_s`; trials that span the switch are excluded from training (lost as `served_by_other_version`, or aborted when the switch falls inside a model call) and counted in `rl_agentic_group`. |
+| `agentic.weight_switch` | How an agentic sampler switches weights: `drain` (default on engines without live updates) stops starting new trials, waits for the running ones, then loads the release; `live` loads into the running engine. |
+| `agentic.drain_timeout_s` | Longest a `drain` switch waits on running trials before it cancels them (lost as `drain_timeout`). The effective limit is min(`agentic.drain_timeout_s`, `reload_max_defer_s`): with `reload_max_defer_s` 600 and `drain_timeout_s` 3600, a drain ends after 600 s. A larger `drain_timeout_s` (or none) is reported as a warning by `pool --dry-run` and at sampler start (not for a spec that resolves to `live`). **Behaviour change:** a drain-mode spec without `drain_timeout_s` used to wait for its trials to end by themselves; it is now cut at `reload_max_defer_s` (default 600 s) and the trials still running are cancelled and lost. Set `reload_max_defer_s: null` (and no `drain_timeout_s`) to keep the old wait. Must be a number >= 0 or `null`. Keep it at or below `reload_max_defer_s`: while a drain waits the engine starts no new trial, and one trial running into an hour-long agent timeout otherwise idles the node for that hour. |
+| `agentic.abandon_grace_s` | After a drain's timeout cancels its trials, the longest wait (default 120 s) for a trial that does not honour the cancel, for example one blocked in a long sandbox tool call. It is then counted lost (`drain_timeout`), detached, the drain ends and the release loads; its late result is dropped and its recorder session is closed (no further model output); its sandbox is left to the trial's own teardown. A detached trial keeps its sandbox and its concurrency slot until it ends by itself (at most its agent timeout): until then that many fewer new trials start; `agentic.detached_in_flight` in `rl_sampler_engine_round` and `detached_in_flight` in `rl_agentic_drain` count them. A number >= 0 (`null` is refused). |
+| Release pickup in drain mode | The sampler downloads a new release in the background as soon as `LATEST` changes and keeps starting trials meanwhile; the drain starts once the release is on disk. The drain is for the release that is on disk, and it always ends in a load of that release: a newer release published during the drain is downloaded, drained for and loaded afterwards (releases published faster than a drain do not starve the sampler; it stays behind by at most the releases of one drain). The cut and the detach are timers, so writing groups does not delay them: the last trial ends at most min(`agentic.drain_timeout_s`, `reload_max_defer_s`) + `abandon_grace_s` (only if a trial ignores the cancel) after the drain began (`trials_ended_s` of `rl_agentic_drain`). The groups that ended are written before the drain ends and the release loads, so a sampler that dies in the load loses nothing it finished; `waited_s` is `trials_ended_s` plus the time to write what was still unwritten. From `LATEST` to loaded takes about download + `waited_s` + load. A call that waits (every slot busy or held by detached trials) writes `rl_agentic_waiting` every 60 s. A failed download is reported as `rl_sampler_release_not_loaded` (`download_failed`) and retried; a release of another weight scheme is not downloaded. |
 | `prompts.groups_per_round` | Groups a sampler produces per round. |
 | `reward`, `reward_kind` | Reward function import path and kind. |
 | `agentic.*` | Agentic trial settings: `max_in_flight`, `turn_max_tokens`, `max_response_len`, `infra_retries`, `task_defaults`, `setup` (sandbox, tunnel, tasks), `envs` ([SANDBOX_HOSTS.md](SANDBOX_HOSTS.md)). |
@@ -546,6 +551,88 @@ cache on every rank and measures again. If there is still not enough room, it
 reloads each layer in smaller chunks of experts. If not even one expert fits,
 it reloads by restarting the server. `memory_guard` in the
 `rl_sampler_policy_loaded` event records which path was taken.
+
+### 3.5 1M context, concurrency and release cadence
+
+Measured on one 8 x MI355X sampler (TP8, `--gpu-memory-utilization` 0.84,
+`max_model_len` 1048576, R3, top-128 log-probs, fp32 head) with a fixed
+Terminal-Bench set of 8 tasks x 8 trials. Each item is marked *measured* or
+*not verified*.
+
+**Context limits.** `agentic.max_prompt_len` and `agentic.max_response_len`
+only cut the training sample written to the buffer: a sample whose first-turn
+prompt is longer than `max_prompt_len` is ABORTED, and a response is cut at
+`max_response_len` (later turns are not trained on). They do not limit a
+running trial; only `engine.server.max_model_len` does, so a trial can reach
+1M with both set to 16384 (*measured*). For 1M training (*not verified* end to
+end), set `max_prompt_len` to the real first-turn bound and `max_response_len`
+to `max_model_len - max_prompt_len`, and raise the trainer's `--seq-len` and
+`--rollout-max-response-len` to match.
+
+**Cost of 1M requests** (*measured*):
+
+| Item | Value |
+|---|---|
+| One 1.04M-token request | 201-250 s (prefill about 180 s), KV 42-52% |
+| KV capacity at gmu 0.84 | 2,550,775 tokens: about 2 full-length 1M requests at once (2: KV 82%, no preemption; a 3rd queues) |
+| R3 payload per turn | the routing of the whole context, about 3.9 GB at 1.04M tokens (0.96 GB at 250k); a 30-turn trial growing to 1M moves about 60 GB (estimated) |
+| Other trials on the node during a 1M prefill | request e2e 11.5 -> 61 s (about 5x), ITL 29 -> 121 ms, generation 357 -> 145 tok/s |
+| `/metrics` | blocked while the API server serializes a GB-sized reply; the pool reports `engine_metrics_unreadable`, which is not by itself a stall |
+
+**Concurrency** (`agentic.max_in_flight`, *measured*, 64 trials per level):
+
+| `max_in_flight` | Done | trial/h | Trial wall mean / p90 s | ITL ms | KV peak | VRAM peak GiB |
+|---|---|---|---|---|---|---|
+| 20 | 64/64 | 137.8 | 360 / 866 | 26.5 | 10% | 264.2 |
+| 32 | 63/64 | 141.9 | 476 / 980 | 32.6 | 15% | 256.4 |
+| 48 | 53/64 | >= 182 (lower bound) | 405 / 589 | 40.5 | 25% | 267.3 |
+
+The limit is ITL growing with the decode batch and long-tail trials, not KV
+and not the sandbox host (CPU <= 14% busy); about two thirds of trial time is
+tool execution. Recommended: 48; use 32 when 1M-long trials are mixed in or
+per-trial latency matters. Keep `max_num_seqs` >= `max_in_flight`.
+
+**One weight switch in drain mode** (*measured* under full load at 48 in
+flight, `drain_timeout_s` 300): `LATEST` seen after about 8 s; the release is
+prefetched in the background for 138 s while trials keep starting; once it is
+on disk (`release_ready`) the drain starts and is cut at
+min(`agentic.drain_timeout_s`, `reload_max_defer_s`); cancelled trials that
+ignore the cancel are detached after `abandon_grace_s` (120 s). The drain took
+498 s (10 trials abandoned, 0 detached), then the in-place load 50 s (engine
+pause 8.1 s), VRAM peak 267.2 GiB. That run predates two changes that are
+covered by tests only (*not measured on hardware*): the cut and the detach
+are timers that group writes no longer delay (in that run the writes ran
+about 160 s behind and the cut was issued at about 404 s instead of 300 s);
+and a release published during a drain no longer cancels that drain's load. **Each release costs a sampler about 9-12
+minutes of useful time**, and concurrency falls off during the drain.
+
+**Release cadence.** If the release interval is under about an hour, that
+loss is above 15%. A sampler loads at most one release per drain, so with
+releases more frequent than a drain plus a load (about 8-10 minutes here) it
+skips the ones published meanwhile and serves weights up to one drain old;
+releasing more often than that buys nothing on a drain-mode sampler. `--rl-release-every N` (needs `--rl-max-policy-age >= N`)
+or `--rl-release-skip-busy` (needs `--rl-max-policy-age >= 3`; the lag is
+about ceil(upload_s / step_s) + ceil(download_s / step_s) + backlog groups /
+groups per step versions, so a 12-20 minute K3.1 upload over ~200 s steps is
+4-6 versions alone) release less often; both need `--rl-sample-role trainer`
+on the Miles backend. Skipped versions are reported as
+`rl_policy_release_skipped`. Raise `--rl-max-policy-age` with them and watch
+`rl_buffer_stale_skipped` and KL (throughput gain *not verified*).
+
+**4 h lease.** An NC node is released at its 4 h lease end. A pool with only
+one account has no replacement and the node is simply gone (*measured*). For
+anything longer than 4 h minus 10 minutes, list replacement accounts
+(`replace_lead_s` orders ahead); the dry run must not print
+`replacement accounts: none`.
+
+**Trainer at 1M.** A full-parameter trainer at 1M needs
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`: without it reserved
+memory exceeds allocated by 73-89 GiB and 1M does not fit within PP3. With
+it, 32 or 64 experts fit on PP2 x TP8 x CP4 = 64 GPUs and 128 experts want 96
+GPUs or 64 GPUs with activation offload (measured on 4- and 16-layer cut
+models, extrapolated to 93 layers; full 1M training *not verified*). The
+launcher allows expandable segments on a full-parameter trainer island
+(#353). See also section 10.4.
 
 ## 4. Launch
 
