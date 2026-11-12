@@ -118,6 +118,8 @@ class PoolOps(Protocol):
     # optional (``getattr``): probe(member) -> el.Probe; restart(member, shards); fence(member);
     # fence_incarnation(member) (lease only, no handoff: a stalled engine restarted in place);
     # run_tickets() -> [(account, ticket)] open tickets of this run in the ledger;
+    # exit_evidence(member) -> what the run's store says about a sampler that ended with
+    # exit 0 (R2DataPath.exit_evidence; None: this data path keeps no such record);
     # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
     # drained(member) -> bool (it holds no task claim any more), cancel_drain(member)
 
@@ -1087,6 +1089,8 @@ class IslandPool:
                 self._retire(m, "handed off", lost=False)
             return
         if kind == el.FINISHED:
+            if self._exit_zero_not_data_end(m, now):
+                return
             self._event("sampler_finished", ticket=m.ticket, shard=m.shard)
             # a normal end (the data ended): no restart, no replacement node, no new order
             self.finished = self.finished or f"sampler {m.shard} finished (exit 0)"
@@ -1279,6 +1283,48 @@ class IslandPool:
         self._event("sampler_crash_loop", ticket=m.ticket, shard=m.shard, restarts=m.restarts, detail=detail)
         self._fail(now, f"sampler on {m.ticket} crash loop")
         self._retire(m, "sampler crash loop", lost=False)
+
+    def _exit_zero_not_data_end(self, m: Member, now: float) -> bool:
+        """A sampler ended with exit 0: before that is read as the end of the data, ask the
+        run's store why it ended (``ops.exit_evidence``; ops without it: False, as before).
+        A sampler that obeys a stop request (handoff record) or leaves FENCED (its lease
+        taken by a pool fence, its dispenser member retired by an operator) ends cleanly
+        too, and this pool may not know it asked: its fence is written to the store before
+        its state is saved. True: handled here, the data has not ended.
+
+        * a stop request naming a live member's shard: that member continues the shard;
+        * any other stop request (a pool fence): the node is retired as fenced and the
+          next order continues its shard;
+        * no stop request, the lease held by a pool fence or the newest incarnation left
+          FENCED: the sampler is restarted in place like a crashed one (counted toward
+          ``max_sampler_restarts``; past it the node is replaced);
+        * the store did not read: nothing is decided this tick."""
+        read = getattr(self.ops, "exit_evidence", None)
+        if read is None:
+            return False
+        try:
+            seen = read(m)
+        except Exception as error:  # noqa: BLE001 - never end the pool on a store that did not read
+            self._once(m, "exit_evidence", "exit_evidence_unreadable", error=repr(error)[:300])
+            return True
+        if "exit_evidence" in m.alerted:
+            m.alerted.remove("exit_evidence")
+        if not seen:
+            return False
+        successor = seen.get("handoff")
+        fenced = bool(seen.get("pool_fenced")) or seen.get("leave") == "FENCED"
+        if successor is None and not fenced:
+            return False
+        self._event("sampler_exit_not_data_end", ticket=m.ticket, account=m.account, shard=m.shard,
+                    handoff=successor, lease=seen.get("lease"), leave=seen.get("leave"))
+        if successor is not None:
+            if any(s is not m and s.state != GONE and s.shard == successor for s in self.members):
+                m.handed_off = True  # the next tick takes it as handed off
+            else:
+                self._retire(m, "fenced", lost=False)
+            return True
+        self._crashed(m, now, f"sampler left fenced (exit 0): lease {seen.get('lease')}, leave {seen.get('leave')}")
+        return True
 
     def _vram_seen(self, m: Member, probe: el.Probe) -> None:
         """A new high-VRAM alert on the sampler's tape (``rl_sampler_vram_high``)

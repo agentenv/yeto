@@ -416,6 +416,13 @@ one SSH round trip. Then it acts:
   not replace the node and places no new order. With `stop_on_finish`
   (default), it drains every node and stops. Without it, the other samplers
   finish their data or go at their lease end, and then the pool stops.
+  A fenced sampler also exits 0, so on `data_path: r2` the pool first reads
+  the run store: with a stop request (handoff record) on the shard, a pool
+  fence on its incarnation lease, or a `FENCED` leave of its newest
+  incarnation, the data has not ended (`sampler_exit_not_data_end`). The node
+  is retired and its shard continued (stop request), or the sampler is
+  restarted in place like a crashed one. If the store does not read, nothing
+  is decided (`exit_evidence_unreadable`) until it does.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
 - **A status answer the pool cannot use.** The pool acts on an NC status

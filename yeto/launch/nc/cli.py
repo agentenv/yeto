@@ -446,6 +446,10 @@ class NcSshOps:
         clear = getattr(self.data_path(), "clear_stale_handoff", None)  # the syncer path keeps no handoff record
         return None if clear is None else clear(m.shard, keep=keep)
 
+    def exit_evidence(self, m: Member) -> Any:
+        read = getattr(self.data_path(), "exit_evidence", None)  # the syncer path has no such record
+        return None if read is None else read(m.shard)
+
     def data_path(self) -> Any:
         """The work contract's data path of this pool (:func:`pool_data_path`)."""
         return pool_data_path(self.cfg, self._fence_store,
