@@ -13,8 +13,7 @@ trainer (the plain behavior version as the group's policy token,
 ``rollout_meta_hook.group_record``). A launch on a new state dir is a new
 container; a launch on the state dir of an earlier one is an in-place restart.
 
-Still red (xfail, strict, until the timeline identity lands): groups of a version
-released after the cut and pruned since. The rest are regression tests:
+Regression tests: groups of a version released after the cut and pruned since,
 the cut at the first safe point after such a relaunch, a relaunch without a cut
 over the earlier ledger, and one in a new container.
 """
@@ -100,8 +99,15 @@ class _BufferPool(FakeRolloutPool):
             groups.append(GroupMetadata(
                 f"g{samples[0]['group_index']}", tuple(f"s{s['index']}" for s in samples),
                 str(behavior), 0.5, 0.5, int(tokens), policy_versions=(int(behavior),)))
-        return RolloutBatchHandle(rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object(),
-                                  buffer_stale_groups=report.stale_groups, data_cursor=self.data_cursor())
+        return RolloutBatchHandle(
+            rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object(),
+            buffer_stale_groups=report.stale_groups, data_cursor=self.data_cursor(),
+            # buffer_rollout_miles._unidentified_metadata -> MilesRolloutPool._batch_of
+            buffer_unidentified_groups=report.unidentified_policy_groups or None,
+            buffer_unidentified_versions=[[v, n] for v, n in report.unidentified_policy_versions.items()] or None)
+
+    def set_unidentified_policy_gate(self, start_version, known_versions):  # MilesRolloutPool: in the executor
+        self.reader.set_unidentified_gate(start_version, known_versions)
 
     # MilesRolloutPool reports and seeks the executor's data source; a buffer trainer
     # draws no prompts, so the position never moves
@@ -272,30 +278,84 @@ def _pruned_release_run(tmp_path, *, cut_at, dies_at, age):
     return samplers
 
 
-PRUNED_RELEASE = pytest.mark.xfail(strict=True, raises=PolicyIdentityError,
-                            reason="a pruned release inside the policy-age window: needs the timeline identity")
+def _unidentified(launch):
+    """version -> groups the launch passed over as of a version no record names."""
+    out: dict[int, int] = {}
+    for event in _events(launch, "rl_buffer_unidentified_policy_skipped"):
+        for version, groups in event["versions"]:
+            out[version] = out.get(version, 0) + groups
+    return out
 
 
-@pytest.mark.parametrize("cut_at, dies_at, age", [
-    pytest.param(4, 7, 8, marks=PRUNED_RELEASE, id="K-M=3,age=8"),
-    pytest.param(4, 7, 2, marks=PRUNED_RELEASE, id="K-M=3,age=2"),   # the K3.1 example limit: v5 = K - 2
-    pytest.param(4, 6, 2, marks=PRUNED_RELEASE, id="K-M=2,age=2"),   # v4 = K - 2: the cut's own version
-    pytest.param(4, 5, 2, id="K-M=1,age=2"),                  # v4 = K - 1: still in the store
-    pytest.param(4, 7, 1, id="K-M=3,age=1"),                  # window = {K-1}: older groups are over-age
+@pytest.mark.parametrize("cut_at, dies_at, age, unidentified", [
+    pytest.param(4, 7, 8, {4: GROUPS, 5: GROUPS}, id="K-M=3,age=8"),
+    pytest.param(4, 7, 2, {5: GROUPS}, id="K-M=3,age=2"),  # the K3.1 example limit; v4 is over-age
+    pytest.param(4, 6, 2, {4: GROUPS}, id="K-M=2,age=2"),  # v4 = K - 2: the cut's own version
+    pytest.param(4, 5, 2, {}, id="K-M=1,age=2"),           # v4 = K - 1: still in the store
+    pytest.param(4, 7, 1, {}, id="K-M=3,age=1"),           # window = {K-1}: older groups are over-age
 ])
-def test_a_relaunch_behind_the_releases_trains_the_groups_inside_the_policy_age_window(
-        tmp_path, cut_at, dies_at, age):
-    """Wanted: the relaunch trains every replayed group whose version is inside the
-    policy-age window, as the run would have without the interruption."""
+def test_a_relaunch_behind_the_releases_passes_over_the_groups_of_pruned_releases(
+        tmp_path, cut_at, dies_at, age, unidentified):
+    """Cut M, releases up to vK, killed. The relaunch restores cut M, continues the
+    account at vK and replays the buffer from cut M's watermark; the store names
+    vK-1 only. A replayed group of a version in [K - max_policy_age, K - 2] has no
+    record left. It used to stop the trainer (PolicyIdentityError "not a published
+    policy"), and every relaunch after it on the same group. It is now consumed
+    untrained and counted; the rounds go on with the groups that have an identity."""
     samplers = _pruned_release_run(tmp_path, cut_at=cut_at, dies_at=dies_at, age=age)
     launch = _launch(tmp_path, "launch2", samplers, age=age, every=1000, rounds=3)
-    outcome = _run(launch)
-    if isinstance(outcome, Exception):
-        raise outcome
-    assert outcome == "finished"
+    assert _run_or_raise(launch) == "finished"
+    [gate] = _events(launch, "rl_buffer_unidentified_policy_gate")
+    assert (gate["start_version"], gate["known_versions"]) == (dies_at, [dies_at - 1])
+    assert _unidentified(launch) == unidentified
     trained = _trained(launch)
     assert sorted(trained) == [dies_at, dies_at + 1, dies_at + 2]
-    assert all(rid - v <= age for rid, versions in trained.items() for v in versions)
+    assert all(dies_at - 1 <= v and rid - v <= age for rid, versions in trained.items() for v in versions)
+    passed_over = {g for g, v in samplers.versions.items() if v in unidentified}
+    assert not passed_over & {g for groups in _trained_groups(launch).values() for g in groups}
+    assert bool(passed_over) == bool(unidentified)
+    # The relaunch ended with a cut at its newest release, and a backlog behind it.
+    # The next launch resumes from that cut; the backlog holds groups of versions
+    # its store pruned meanwhile, which stopped it the same way.
+    again = _launch(tmp_path, "launch3", samplers, age=age, every=1000, rounds=1)
+    assert _run_or_raise(again) == "finished"
+    assert _events(again, "rl_resume")[0]["rollout_id"] == dies_at + 3
+
+
+def test_an_unpublished_version_is_still_an_identity_error(tmp_path):
+    """The gate is for versions below the start version of a trainer that resumed
+    behind its releases. A group that names a version nothing published stops the
+    trainer as before: in a run that starts here, and in such a relaunch for a
+    version from its start version on."""
+    def forged(samplers, version):
+        g = samplers.written
+        samplers.writer.write([sample(2 * g, g, version), sample(2 * g + 1, g, version)], group_key=f"g{g}")
+        samplers.written += 1
+
+    (tmp_path / "a").mkdir()
+    fresh = _Samplers(CheckpointStore(tmp_path / "a" / "store"))
+    forged(fresh, 1)  # the run starts at v0: nothing published v1
+    launch = _launch(tmp_path / "a", "launch1", fresh, age=2, every=1000, rounds=1)
+    with pytest.raises(PolicyIdentityError):
+        _run_or_raise(launch)
+    assert _events(launch, "rl_buffer_unidentified_policy_gate") == []
+
+    (tmp_path / "b").mkdir()
+    samplers = _pruned_release_run(tmp_path / "b", cut_at=4, dies_at=7, age=8)
+    forged(samplers, 99)  # above the relaunch's start version v7
+    relaunch = _launch(tmp_path / "b", "launch2", samplers, age=8, every=1000, rounds=6)
+    with pytest.raises(PolicyIdentityError, match="=99 "):
+        _run_or_raise(relaunch)
+
+
+def test_a_resume_from_the_newest_cut_passes_nothing_over_when_every_version_is_named(tmp_path):
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    first = _launch(tmp_path, "launch1", samplers, age=1, every=1000, rounds=3)
+    assert _run_or_raise(first) == "finished"  # the final cut at 3 = the newest release
+    second = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run_or_raise(second) == "finished"
+    assert _events(second, "rl_buffer_unidentified_policy_gate")[0]["known_versions"] == [2]
+    assert _unidentified(second) == {}
 
 
 # ------------------------------------------------------------------------------------------

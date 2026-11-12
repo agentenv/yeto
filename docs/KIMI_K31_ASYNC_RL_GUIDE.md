@@ -818,14 +818,33 @@ continue when it joins.
   A release record written by an earlier yeto has no `buffer_trained`. Its
   `buffer_selected` is the trainer's read position when the upload of the
   release ended, which can lie past groups `vK` never trained, so it is not
-  used: the launch reads the buffer from the start. Groups older than
-  `--rl-max-policy-age` versions are passed over (`rl_buffer_stale_skipped`);
-  the groups inside the window, at most the groups of the last
-  `--rl-max-policy-age` + 1 versions, are trained a second time. This happens
-  once: the first release of the new launch records `buffer_trained`.
-  Known limit of that replay: with `--rl-max-policy-age` 2 or more it can
-  reach a group of a version whose release was already pruned (the store
-  keeps the newest two), and the trainer stops with `not a published policy`.
+  used: the launch reads the buffer from the start. Of the groups it reads
+  again:
+  - groups older than `--rl-max-policy-age` versions are passed over as stale
+    (`rl_buffer_stale_skipped`);
+  - groups inside the window of a version whose release is no longer in the
+    store are passed over as unidentified (next item);
+  - groups of `vK-1` and `vK` (the two releases the store keeps) are trained.
+    Those the stopped trainer had already trained are trained a second time:
+    at most the groups of two versions.
+  This happens once: after the new launch has released one policy, the newest
+  record has `buffer_trained` and the fallback is not taken again.
+- **Groups without a policy identity after a resume.** A relaunched trainer
+  starts at `vK` and reads the buffer on from an earlier position (a cut's
+  watermark, `buffer_trained`, or the start). The store keeps the newest two
+  releases, so a group inside the `--rl-max-policy-age` window can be of a
+  version below `K` that no record names any more. The trainer cannot tell
+  which weights generated it: it consumes the group without training it and
+  counts it (`rl_buffer_unidentified_policy_skipped` per round, with the
+  versions; `sample_buffer/unidentified_policy_groups`; the dashboard's
+  trainer totals; `trainer_buffer` in `yeto run status`). Only versions below
+  the start version `K` of a relaunched trainer are treated this way. A group
+  of a version from `K` on that was never published, or a label with another
+  hash, still stops the trainer with `not a published policy`.
+  When the reader reads groups and keeps none 3 selections in a row
+  (`YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS`), it logs a warning and emits
+  `rl_buffer_unidentified_policy_starved`; it keeps waiting for groups of a
+  release the store names.
 - **Behind the releases.** When the latest cut is older than the newest
   release, the trainer restores the cut and continues the version numbers at
   the newest release (`rl_round_cut_behind_releases`). It keeps no cut before

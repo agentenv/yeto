@@ -83,14 +83,19 @@ LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # held for the next round, loss-free padding samples (BatchReader group_size)
 BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
                     "buffer_carried_over_groups", "buffer_padded_samples")
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
+# buffer_unidentified_groups: groups of a version no record names, passed over by a
+# trainer that resumed behind its releases (BatchReader.set_unidentified_gate)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted", *BUFFER_FILL_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
-ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
+# buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:
+# their task-dispenser positions as row runs
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions", "buffer_unidentified_versions",
+                                      "buffer_unidentified_positions"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
