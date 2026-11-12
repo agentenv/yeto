@@ -943,7 +943,8 @@ def test_nc_tools_are_configurable_and_never_assume_a_home_install(monkeypatch):
                                  "tool_dir": "/opt/nc/tool", "node_bin": "/opt/node/bin/node"})
         assert t.manage == ("/opt/nc/bin/manage", "--quiet") and tunnel.tool_dir() == "/opt/nc/tool"
         seen = []
-        _client(lambda argv, **kw: seen.append(argv) or SimpleNamespace(returncode=0, stdout="{}", stderr="")).status()
+        _client(lambda argv, **kw: seen.append(argv) or SimpleNamespace(
+            returncode=0, stdout='{"ok": true, "ticket": null}', stderr="")).status()
         assert seen[-1][:2] == ["/opt/nc/bin/query", "status"]
         with pytest.raises(ValueError, match="unknown keys"):
             ncc.configure_tools({"path": "x"})
