@@ -174,9 +174,6 @@ def is_transient_start_error(error: BaseException) -> bool:
 START_RETRIES = 3  # transient start failures retried in place before the node is retired
 START_RETRY_S = 30.0  # first retry delay; doubled for every further retry
 
-
-FENCE_SUCCESSOR_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: a pool fence's handoff
-
 SLOW_TICK_S = 60.0  # a tick longer than this is logged
 CONTROL_POLL_S = 1.0  # the loop's wait between ticks checks the control file this often
 
@@ -1216,13 +1213,17 @@ class IslandPool:
         that shard that no member of this pool wrote is left from an earlier run
         attempt that used the same shard name (a fenced shard of a failed pool); it
         would stop the new sampler at once. Such a record is set aside by the ops
-        (``clear_stale_handoff``, the run's store only); one naming a live shard or a
-        fence of a ticket of this pool stays."""
+        (``clear_stale_handoff``, the run's store only). The only request that stays is
+        one of a live member this pool started to continue ``m.shard`` (its sampler
+        wrote it). A record that names another shard this pool holds (the earlier
+        attempt numbered its shards the same way) or a pool fence (a member this pool
+        fenced is drained, never started again; a fence of the same ticket is left
+        from the pool that held it before it was adopted) is stale."""
         clear = getattr(self.ops, "clear_stale_handoff", None)
         if clear is None or not m.shard:
             return
-        keep = {s.shard for s in self.members if s.state != GONE and s.shard and s.shard != m.shard}
-        keep |= {f"{FENCE_SUCCESSOR_PREFIX}{s.ticket}" for s in self.members}
+        keep = {s.shard for s in self.members if s is not m and s.state != GONE and s.shard
+                and s.started is not None and s.replaces_shard == m.shard}
         try:
             record = clear(m, keep)
         except Exception as error:  # noqa: BLE001 - the sampler then reports the handoff itself
