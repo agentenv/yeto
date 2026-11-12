@@ -524,3 +524,58 @@ def test_a_draining_sampler_claims_nothing_new_finishes_its_claims_and_answers(t
     assert len(tasks) == 6 and all(t["state"] == "trained" for t in tasks.values())
     assert tasks[0]["holder"] == tasks[1]["holder"] == "nc-0"
     assert {tasks[i]["holder"] for i in range(2, 6)} == {"nc-1"}
+
+
+# ------------------------------------------------- retire racing a claim pass
+def test_retire_writes_its_marker_before_it_lists_the_claims(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, groups=1)
+    assert _slots(worker(0)) == [0]
+    marker = "run/dispense/retired/s0/i0"
+    seen = []
+    listing = store.list_meta
+
+    def list_meta(prefix, **kw):
+        seen.append(store.exists(marker))
+        return listing(prefix, **kw)
+
+    store.list_meta = list_meta
+    assert sd.retire(store, "run/dispense", "s0", "i0")["slots"] == [0]
+    assert seen and all(seen)
+
+
+def test_a_claim_taken_while_retire_runs_is_released_by_its_claimant(tmp_path):
+    """The sampler scans (no marker yet), ``retire`` lists the claims and writes its
+    marker, then the sampler claims: retire released nothing, the claim pass that won
+    sees the marker, gives the claim back and the process writes nothing."""
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, groups=1)
+    claim = worker.ledger.claim
+    retired = {}
+
+    def claim_after_retire(slot, attempt, **detail):
+        if not retired:
+            retired.update(sd.retire(store, "run/dispense", "s0", "i0"))
+        return claim(slot, attempt, **detail)
+
+    worker.ledger.claim = claim_after_retire
+    assert worker.poll(1) == ("fenced", [])
+    assert retired["released"] == 0  # its listing came before the claim
+    assert not worker.still_holds(0)
+    other = _open(path, store, holder="s1", groups=2)
+    assert sorted(_slots(other(0))) == [0, 1]  # released at once, not after the lease
+
+
+def test_a_process_does_not_claim_again_a_slot_whose_lost_attempt_it_still_runs(tmp_path):
+    store = FakeObjects()
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, groups=1)
+    assert _slots(worker(0)) == [0]
+    store.now += 91  # no renewal: attempt 0 runs out while its group is still generating here
+    got, _ended = worker._claim(1)
+    assert got == [1]  # slot 0 goes to another sampler, not to a second attempt here
+    worker.written(0, [])  # the lost group settles: slot 0 is no longer held here
+    store.now += 91
+    assert worker._claim(1)[0] == [0]
