@@ -203,3 +203,65 @@ def test_the_ops_pass_the_exit_evidence_of_the_data_path_and_none_without_one(tm
     assert ProviderPoolOps(SimpleNamespace(), fencer=fencer).exit_evidence(m) == {"shard": "nc-x-0"}
     plain = SimpleNamespace(fence_shard=None, fence_incarnation=None)
     assert not hasattr(ProviderPoolOps(SimpleNamespace(), fencer=plain), "exit_evidence")
+
+
+# -- the real engine sampler: what an operator retire leaves in the store ------------
+
+RETIRE_ENV = "YETO_TEST_RETIRE_STATE"
+
+
+def retiring_reward(item, completion) -> float:
+    """At call ``retire_at`` an operator retires the sampler
+    (``python -m yeto.rl.engine.store_dispense retire --holder <shard>``)."""
+    import json
+    import os
+    from pathlib import Path
+
+    from yeto.rl.engine import store_dispense as sd
+
+    path = Path(os.environ[RETIRE_ENV])
+    state = json.loads(path.read_text())
+    state["n"] += 1
+    if state["n"] == state["retire_at"]:
+        state["retired"] = sd.retire(sd.DirObjects(state["store"]), "task-dispense", state["holder"],
+                                     reason="operator")
+    path.write_text(json.dumps(state))
+    return 0.5
+
+
+def test_a_real_sampler_an_operator_retires_exits_zero_fenced_and_the_pool_restarts_it(tmp_path, monkeypatch):
+    import json
+
+    from tests.test_stage1_gaps import _sampler_spec
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.resume import CheckpointStore
+
+    clock, cloud, pool, first, second = _two_ready()
+    store = tmp_path / "store"
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"n": 0, "retire_at": 3, "store": str(store), "holder": first.shard}))
+    monkeypatch.setenv(RETIRE_ENV, str(state))
+    spec = _sampler_spec(tmp_path, sampler_id=first.shard, num_rollouts=50,
+                         reward="tests.test_nc_pool_exit_evidence:retiring_reward")
+    (tmp_path / "prompts.jsonl").write_text("".join(
+        json.dumps({"q": f"question {i}", "a": str(i), "metadata": {"task_id": f"t{i}"}}) + "\n" for i in range(40)))
+    spec["prompts"] = {**spec["prompts"], "dispense": {"backend": "store", "namespace": "task-dispense",
+                                                    "scan_s": 0.05, "max_scan_s": 0.05}}
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    # the sampler process: it is retired while it runs, leaves FENCED and ends with exit code 0
+    assert entry.main(["--spec", str(path)]) == 0
+    assert json.loads(state.read_text())["retired"]["released"] >= 1
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")
+    events = [json.loads(line) for line in tape.read_text().splitlines()]
+    (leave,) = [e for e in events if e["event"] == "rl_sampler_leave"]
+    assert leave["reason"] == "FENCED" and leave["fenced"] in ("retired", "dispenser")
+    assert leave["rounds"] < 50  # the data did not end
+    # what the pool reads from the run's store: no handoff, the sampler's own lease, a FENCED leave
+    seen = R2DataPath(CheckpointStore(store)).exit_evidence(first.shard)
+    assert seen["handoff"] is None and not seen["pool_fenced"] and seen["leave"] == "FENCED"
+    assert seen["lease"] == seen["incarnation"] == leave["incarnation"]
+    cloud.exit_evidence = lambda m: R2DataPath(CheckpointStore(store)).exit_evidence(m.shard)
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    pool.tick()
+    assert not pool.finished and not pool.stopped and [e[1] for e in cloud.kinds("restart")] == [first.ticket]
