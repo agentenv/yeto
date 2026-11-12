@@ -84,6 +84,35 @@ depends on how it stopped:
 The pool refuses to start a second loop on a pool whose loop is still
 running.
 
+### The state files
+
+The state dir holds two files that the pool and every manual command on the
+same state dir write:
+
+- `tickets.json`, the **ticket ledger**: one row for each ticket this tool
+  created. `down`, `pool-stop` and the patrol release only tickets in it.
+- `leases.json`: the address and lease end of each granted node.
+
+Each change is one read-modify-write under a lock (`tickets.lock`,
+`leases.lock`), so the pool and a manual command can run on the same state dir
+at once and no row is lost. Each write goes to a temporary file of its own,
+which then replaces the old file. Both files are mode `0600`. Leave the
+`.lock` files in place.
+
+A ledger that exists but cannot be read (not JSON, or not a list of ticket
+rows) is an error. It is never taken for an empty ledger. Every command that
+needs the ledger fails with `ticket ledger <path>: ...`, and the file is left
+as it is. The tickets in it may still be billing. To recover:
+
+1. Stop the pool loop if it runs (it cannot release anything meanwhile).
+2. Copy `tickets.json` aside, then repair it by hand. It is a JSON list of
+   rows; each row needs `account` and `ticket`, and `run` for the pool to find
+   it. Mark a ticket that has ended with `"ended": true`.
+3. If it cannot be repaired, read the open tickets from
+   `pool-<shard_base>.json` and the NC console, and release them in the
+   console. Then move the broken file away. The next order starts a new
+   ledger.
+
 The trainer has the same requirement: a no-sync trainer runs with
 `--controller local`, so its control loop also lives on your host for the
 whole run.
@@ -389,6 +418,18 @@ one SSH round trip. Then it acts:
   finish their data or go at their lease end, and then the pool stops.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
+- **A status answer the pool cannot use.** The pool acts on an NC status
+  answer only when the order tool succeeded (exit 0) and the answer has a
+  `ticket` field that is `null` (the account has no order) or a ticket with a
+  `state`. A failed call, no output, an error document, an answer without a
+  `ticket` field and a ticket without a `state` all count as a failed status
+  call: nothing is decided on it, a release in progress fails and is retried,
+  and after `control_plane_alert_s` the pool alerts. A valid answer that does
+  not show the member's ticket (no order, or another ticket id) is read a
+  second time. The lease counts as ended, and a release records the ticket as
+  already ended, only when both answers agree. After a delete, the release is
+  confirmed when the ticket reads `ended`, or when two answers in a row show no
+  order. A delete call the tool refused is a failed release.
 
 Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
