@@ -934,6 +934,23 @@ class StoreDispensedPrompts:
                    scan_s=float(config.get("scan_s", DEFAULT_SCAN_S)),
                    max_scan_s=float(config.get("max_scan_s", DEFAULT_MAX_SCAN_S)), gate=gate, **kwargs)
 
+    @property
+    def plan_id(self) -> str:
+        """The identity of this dispenser: ``<namespace>:<sha256 of the plan.json bytes,
+        16 hex digits>``. Slot numbers mean something only next to it: a dispenser under
+        another namespace (any other plan needs one) numbers its slots from 0 again.
+        The engine sampler writes it into each group's round record
+        (``dispense_plan``); the trainer's reader trains one group per (plan, slot).
+        A minimal implementation, to be aligned with the one of branch
+        k31/written-group-not-redispensed (same name, same value)."""
+        cached = getattr(self, "_plan_id", None)
+        if cached is None:
+            raw = self.ledger.objects.read(self.ledger.key("plan.json"))
+            if raw is None:
+                raise DispenseError(f"{self.ledger.key('plan.json')} is missing: the dispenser has no plan")
+            cached = self._plan_id = f"{self.ledger.ns}:{hashlib.sha256(raw).hexdigest()[:16]}"
+        return cached
+
     def recover(self, entries: Iterable[Any] = ()) -> dict[str, int]:
         """Restart: settle ``trained`` the slots this sampler's buffer ``entries``
         hold (written by an earlier incarnation, not yet settled), then release

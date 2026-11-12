@@ -971,6 +971,28 @@ records the old and new pack with your reason. To resume deliberately on the
 pinned pack, use `--rl-code-pack-keep` instead. For algorithm changes,
 Recommended practice: start a new run (another `--cluster-prefix`).
 
+**Upgrading the samplers: drain the old ones first.** The trainer trains one
+group per dispensed task (`rl_buffer_duplicate_task_skipped`, section 8). It
+recognises a task by two fields the sampler writes into each group's index
+record, `dispense_attempt` and `dispense_plan`. Samplers on code from before
+these fields write groups without them, and such a group is not judged: if an
+old sampler and a new one both write a group of the same task (the old one
+stalled or was retired with the group written but not settled, and the task
+was given out again), both groups are trained. So do not run old and new
+samplers side by side longer than needed:
+
+1. Scale the old samplers down with `drain` (section 5.1): each claims no new
+   task, finishes its trials in flight, writes and settles their groups, and
+   is then fenced and stopped. Wait for `nc_elastic_scaled_down` with outcome
+   `drained` for every node; a `drain timeout` or `fenced` outcome means that
+   node's open tasks were released and will be generated again.
+2. Start the samplers on the new code in one step.
+
+Groups already in the buffer from the old samplers are trained as before;
+they are only not protected against a second group of the same task. The
+trainer may be upgraded before or after the samplers: it reads records with
+and without the fields.
+
 ### 5.5 Stopping
 
 ```
@@ -1495,10 +1517,28 @@ the next systematic fault stops the trainer again.
 **`rl_buffer_exhausted` carries `passed_over`.**
 The last round found no trainable group; `passed_over` counts what it
 consumed without training (`stale`, `stale_payload`, `stale_incarnation`,
-`quarantined`, `dropped_small`, `nonfinite_reward`, `damaged_payload`). The
+`quarantined`, `dropped_small`, `nonfinite_reward`, `damaged_payload`,
+`duplicate_task`). The
 same counts end the error text of a round that waited `wait_s` without a new
 group. `stale_payload` are groups whose index record passed the age gate but
 whose payload holds an older policy version: the payload decides.
+
+**The tape shows `rl_buffer_duplicate_task_skipped`.**
+Two groups of one store-dispenser task reached the buffer (a sampler stalled
+past its dispense lease and wrote after another sampler had taken the task
+over, or a written group was not yet settled when its node was retired). The
+trainer trains the first group of a task, in buffer order, that it accepts for
+training and passes over the later ones; each is named in the event (`slot`,
+`plan`, both positions and sample ids) and counted in
+`sample_buffer/duplicate_task_groups`. A task is a slot of one dispenser
+namespace (`plan` is the namespace and a digest of its plan), so the same data
+dispensed again under another namespace is trained again. Occasional events
+need no action. `unverified_groups` counts the verdicts whose first group lies
+below the watermark a restarted trainer resumed from: the trainer takes such a
+group as trained, though the earlier process may have passed it over (too old,
+too small, a damaged payload). In that case the task is trained zero times,
+never twice. `YETO_SAMPLE_BUFFER_ONE_GROUP_PER_TASK=0` in the trainer's
+environment turns the rule off.
 
 **`down` reports `NOT verified`.**
 Read `down.log`. Usually a node release is still in progress. Run
