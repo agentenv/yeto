@@ -117,7 +117,10 @@ def sampler_env(run_prefix: str) -> dict[str, str]:
             "YETO_RL_STORE_S3_CREDENTIALS": "aws-env", "YETO_NC_RUN_PREFIX": run_prefix,
             # release download: 8 processes x 4 files x 16 parts took a 207 GB K3.1 release
             # in 144 s (1.43 GB/s mean, 5.2 GB/s 5-second peak) on an MI355X node
-            "YETO_RL_STORE_DOWNLOAD_PROCESSES": "8", "YETO_RL_STORE_FILE_CONCURRENCY": "32"}
+            "YETO_RL_STORE_DOWNLOAD_PROCESSES": "8", "YETO_RL_STORE_FILE_CONCURRENCY": "32",
+            # each node starts a release download at its own fixed point of 30 s: 16 nodes do not
+            # send their first 512 range reads each in the same second (policy_release.download_delay_s)
+            "YETO_RL_RELEASE_SPREAD_S": "30"}
 
 
 # OpenSSH reads ~/.ssh of the passwd entry, not $HOME: an agentic env file that sets

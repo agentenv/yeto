@@ -1118,11 +1118,28 @@ round that takes longer than the lease loses the tasks to other samplers.
 An NC sampler reads with 8 processes x 4 files x 16 ranges (512 concurrent
 requests, about 1.4 GB/s on an MI355X node), so 16 samplers that pick up the same
 release at once send about 8000 concurrent range reads, up to 256 of them on one
-file. A range that fails is retried 5 times with jitter on top of the client's
-own retries. If the samplers' logs show `ServiceUnavailable` during a release,
-lower `YETO_RL_STORE_FILE_CONCURRENCY` (32 on NC samplers) first: the download
-slows down in proportion, the number of concurrent requests per file stays at 16
-per sampler.
+file. Two things keep that from failing a download:
+
+- *Start spread.* Each sampler waits a fixed part of `YETO_RL_RELEASE_SPREAD_S`
+  seconds before it starts a release download (30 on NC samplers, 5 elsewhere).
+  The part is derived from the sampler's host name
+  (`YETO_RL_RELEASE_SPREAD_KEY` overrides it), so it is the same at every release
+  and two samplers keep their distance. The samplers still overlap for most of a
+  download; the spread only keeps them from opening all their reads in the same
+  second. It delays the release on a sampler by up to the spread, so keep it
+  well below the trainer's release interval (for example 30 s against a release
+  every few minutes); otherwise the last sampler serves one more version behind.
+- *Automatic slow-down.* When the store refuses a range read for its request
+  rate (`503 ServiceUnavailable`, `503 SlowDown`, `429`) after the client's own
+  retries, the download halves the number of range reads that process runs at
+  once, waits (1 to 30 s, with jitter) and reads the range again, up to 6 times.
+  Each 8 reads without a refusal give one read back. The sampler log shows
+  `[s3-store] WARNING: ... the store refused a range read for its request rate`.
+  A download fails only when one range is refused 6 times in a row.
+
+If those warnings come at every release, lower `YETO_RL_STORE_FILE_CONCURRENCY`
+(32 on NC samplers): the download slows down in proportion, and each file still
+has at most 16 reads per sampler.
 
 **How many requests a run sends.** With 16 samplers and about 100,000 tasks in 24
 hours:
@@ -1146,6 +1163,31 @@ with far fewer requests than the full table.
 Set `prompts.dispense.full_scan` to `true` in the sampler spec (or
 `YETO_RL_DISPENSE_FULL_SCAN=1` on a sampler) to make every scan list the whole
 ledger again; use it only to rule the range scan out while debugging.
+
+### 5.8 Re-running tasks that are already settled
+
+The dispenser never hands out a settled task again. To re-run one by hand, delete
+its settlement record `<namespace>/done/<slot, 12 digits>.<kind>` from the store
+(`<namespace>` is `prompts.dispense.namespace`, by default `task-dispense`; the
+slot is in `store_dispense status`).
+
+A running sampler does not notice the deletion. Each sampler remembers which
+tasks it has seen settled and does not list them again (section 5.7), so the
+task is handed out only by a sampler process that started after the deletion.
+Restart the samplers that should take it (pause the node with `--hold-tasks`,
+wait for its trials to finish, stop its sampler container, then resume: section
+5.6); a restarted sampler lists every settlement once. It finds the task's last
+claim without a settlement, ends that attempt as `expired` once its lease has run
+out, and hands the task out again. The expiry counts toward `max_redo`: a task
+that had already used its retries is settled `exhausted` instead of re-run.
+
+With `full_scan` on (section 5.7) every scan lists the whole ledger, and a
+running sampler sees the deletion at its next scan, at most `max_scan_s` (120 s)
+later. Turning `full_scan` on needs a restart of the sampler as well, so it only
+helps when it was on before the deletion.
+
+Do not delete records of tasks that are in flight, and do not delete the
+`claims/` records: the attempt numbers continue from them.
 
 ## 6. Dashboard
 

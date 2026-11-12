@@ -126,6 +126,78 @@ def _read_retry_pause(attempt: int) -> None:
     time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))
 
 
+# A range read the store refused for its request rate, after botocore's own retries
+# (R2: ``503 ServiceUnavailable: Reduce your concurrent request rate for the same
+# object``; S3: ``503 SlowDown``; a 429). The download then lowers the range reads
+# this process runs at once and tries the range again (:class:`RangeGate`), instead
+# of failing the whole file: 16 samplers that pull one release together are 8000
+# concurrent reads, up to 256 on one file.
+THROTTLE_CODES = frozenset({"ServiceUnavailable", "SlowDown", "TooManyRequests", "RequestLimitExceeded",
+                            "Throttling", "ThrottlingException", "RequestThrottled", "503", "429"})
+THROTTLE_STATUS = frozenset({429, 503})
+THROTTLED_READ_ATTEMPTS = 6  # tries of one refused range (each one botocore's 9 requests)
+RANGE_RESTORE_READS = 8  # range reads without a refusal per read given back to the limit
+
+
+def is_throttled(error: BaseException) -> bool:
+    """``error`` is the store refusing a request for its rate (a botocore
+    ``ClientError`` by code or HTTP status)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return error_code(error) in THROTTLE_CODES or status in THROTTLE_STATUS
+
+
+class RangeGate:
+    """How many range reads one process runs at once. Unlimited until the store
+    refuses a read for its rate; each refusal halves the reads then in flight
+    (never below one), and every :data:`RANGE_RESTORE_READS` reads without a
+    refusal give one back (the limit is never dropped again: going back to
+    every thread at once would ask for the next refusal). One gate per store
+    object: every file and thread of a download in this process shares it."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.limit: int | None = None  # None: no limit
+        self.active = 0
+        self.peak = 0  # the most reads in flight since the last refusal
+        self.cuts = 0  # refusals that lowered the limit
+        self._good = 0
+
+    def __enter__(self) -> "RangeGate":
+        with self._cond:
+            while self.limit is not None and self.active >= self.limit:
+                self._cond.wait()
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        with self._cond:
+            self.active -= 1
+            self._cond.notify()
+
+    def refused(self) -> int:
+        """A read was refused: halve what ran at once; the new limit."""
+        with self._cond:
+            running = self.peak if self.limit is None else min(self.limit, self.peak)
+            self.limit = max(1, running // 2)
+            self.peak, self._good = self.active, 0
+            self.cuts += 1
+            return self.limit
+
+    def succeeded(self) -> None:
+        with self._cond:
+            if self.limit is None:
+                return
+            self._good += 1
+            if self._good >= RANGE_RESTORE_READS:
+                self._good = 0
+                self.limit += 1
+                self._cond.notify()
+
+
 # botocore's retries of one request. "standard" mode retries a 500 / 502 / 503 / 504
 # and the throttling codes (SlowDown, ...) with full jitter: the wait before retry
 # ``n`` is ``random() * min(2 ** (n - 1), 20)`` s, so 16 samplers refused at once by
@@ -624,6 +696,7 @@ class S3ObjectStore:
         self.client = client
         self.transfer = transfer or TransferSettings()
         self.client_factory = client_factory
+        self.range_gate = RangeGate()  # range reads of this process, lowered when the store refuses
         self.conditional_writes = True
         # set when the endpoint answered a part checksum with NotImplemented
         self.part_checksums_refused = False
@@ -1057,17 +1130,28 @@ class S3ObjectStore:
 
             def fetch(offset: int) -> None:
                 end = min(offset + part, size) - 1
-                for attempt in range(RANGE_READ_ATTEMPTS):
+                attempt = refusals = 0
+                while True:
                     try:
-                        body = self.client.get_object(Bucket=self.bucket, Key=full, Range=f"bytes={offset}-{end}",
-                                                      **pin)["Body"].read()
+                        with self.range_gate:
+                            body = self.client.get_object(Bucket=self.bucket, Key=full,
+                                                          Range=f"bytes={offset}-{end}", **pin)["Body"].read()
                     except RANGE_READ_RETRYABLE:
                         # botocore retries the request, not the streamed body: a stalled
                         # body read of one part would otherwise fail the whole download
-                        if attempt + 1 == RANGE_READ_ATTEMPTS:
+                        attempt += 1
+                        if attempt == RANGE_READ_ATTEMPTS:
                             raise
-                        _read_retry_pause(attempt)
+                        _read_retry_pause(attempt - 1)
                         continue
+                    except Exception as error:  # noqa: BLE001 - a ClientError, by code
+                        refusals += 1
+                        if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
+                            raise
+                        self._range_refused(error)
+                        _read_retry_pause(refusals - 1)
+                        continue
+                    self.range_gate.succeeded()
                     break
                 if len(body) != end - offset + 1:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
@@ -1090,6 +1174,12 @@ class S3ObjectStore:
             finally:
                 done.set()
                 marker.join()
+
+    def _range_refused(self, error: BaseException) -> None:
+        limit = self.range_gate.refused()
+        print(f"[s3-store] WARNING: {self.uri}: the store refused a range read for its request rate "
+              f"({error_code(error) or type(error).__name__}); this process now runs at most {limit} range "
+              f"read(s) at once and raises that again as reads succeed", file=sys.stderr, flush=True)
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
         """Download each ``(key, target)`` like :meth:`read_file`; returns the keys

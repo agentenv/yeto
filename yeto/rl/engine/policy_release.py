@@ -1020,10 +1020,34 @@ class FollowerCounters:
 
 
 DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
-# a background download starts after a random 0..DOWNLOAD_SPREAD_S delay: samplers that see
-# the same LATEST together do not open their range reads on the store in the same second
+# A background download starts after a delay of 0..DOWNLOAD_SPREAD_S: samplers that see
+# the same LATEST together do not open their range reads on the store in the same second.
+# The delay is fixed per sampler (:func:`download_delay_s`), so two samplers keep their
+# distance at every release. It postpones the release on that sampler by at most the
+# spread: keep the spread well below the trainer's release interval, or a sampler stays
+# one more version behind (the number of versions behind stays bounded either way: the
+# delay is the same constant for every release, and only the newest release is fetched).
 DOWNLOAD_SPREAD_S = 5.0
+DOWNLOAD_SPREAD_ENV = "YETO_RL_RELEASE_SPREAD_S"  # the spread in seconds (0: no delay)
+DOWNLOAD_SPREAD_KEY_ENV = "YETO_RL_RELEASE_SPREAD_KEY"  # what tells this sampler apart (default: the host name)
 DOWNLOAD_WAIT_S = 5.0  # refresh waits this long for a download it starts before going on
+
+
+def download_delay_s(environ: Mapping[str, str] | None = None) -> float:
+    """This sampler's delay before a background download: a fixed point of
+    ``0..spread`` taken from its key (:data:`DOWNLOAD_SPREAD_KEY_ENV`, else the
+    host name), ``spread`` from :data:`DOWNLOAD_SPREAD_ENV`, else
+    :data:`DOWNLOAD_SPREAD_S`."""
+    import socket  # noqa: PLC0415
+
+    env = os.environ if environ is None else environ
+    raw = env.get(DOWNLOAD_SPREAD_ENV)
+    spread = max(0.0, float(raw)) if raw not in (None, "") else float(DOWNLOAD_SPREAD_S)
+    if spread <= 0:
+        return 0.0
+    key = env.get(DOWNLOAD_SPREAD_KEY_ENV) or socket.gethostname()
+    point = int.from_bytes(hashlib.sha256(str(key).encode("utf-8", "replace")).digest()[:8], "big") / 2 ** 64
+    return spread * point
 
 
 def _download_failed(release: PolicyRelease, error: BaseException, served: int) -> ReleaseNotLoaded:
@@ -1048,7 +1072,7 @@ class _Fetch:
 
     def start(self, releases: "PolicyReleaseStore", *, from_store: bool, timer: Callable[[], float]) -> None:
         def run() -> None:
-            time.sleep(random.uniform(0.0, DOWNLOAD_SPREAD_S))
+            time.sleep(download_delay_s())
             began = timer()
             try:
                 self.directory = releases.resolve(self.release, from_store=from_store)
