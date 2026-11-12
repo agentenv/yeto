@@ -110,7 +110,7 @@ class FaultyNc:
         if kind == "empty":
             return _answer(stdout="")
         if kind == "error_exit":
-            return _answer(code=1, stdout="", stderr='{"ok":false,"error":"读取当前订单失败：502"}')
+            return _answer(code=1, stdout="", stderr='{"ok":false,"error":"reading the current order failed: 502"}')
         if kind == "error_json":
             return _answer({"ok": False, "error": "gateway"})
         if kind == "garbage":
@@ -163,7 +163,7 @@ class FaultyNc:
             return self._broken(kind, argv)
         found = self.open_ticket(account)
         if found is not None:  # the tool's own check: an open order, none placed
-            return _answer({"ok": True, "account": account, "created": False, "reason": "账号已有未结束订单",
+            return _answer({"ok": True, "account": account, "created": False, "reason": "the account has an open order",
                             "ticket": self._view(account)})
         t = self._place(account, "client")
         self.writes.append({"op": "create", "account": account, "ticket": None, "by": None, "in_ledger": None})

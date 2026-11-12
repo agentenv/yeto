@@ -161,10 +161,10 @@ def test_the_adopt_command_needs_yes_and_records_the_operator(tmp_path, monkeypa
 
 
 def test_a_failed_order_that_placed_nothing_raises_and_does_not_block_the_next_order(tmp_path):
-    refused = answer(code=1, stdout="", stderr='{"ok":false,"error":"余额不足"}')
+    refused = answer(code=1, stdout="", stderr='{"ok":false,"error":"insufficient balance"}')
     nc, events = Nc(places=False, on_create=lambda nc: refused), []
     c = client(nc, tmp_path, events)
-    with pytest.raises(ncc.NcError, match="余额不足"):
+    with pytest.raises(ncc.NcError, match="insufficient balance"):
         c.create(run="run-a")
     assert c.ledger.open_rows() == [] and c.ledger.run_rows("run-a") == [] and events == []
     assert c.account_free() is True
@@ -178,7 +178,7 @@ def test_a_ticket_the_tool_found_instead_of_ordering_is_not_taken_into_the_ledge
     answers ``created: false`` with their ticket. It is not ours to record or delete."""
     def found(nc):
         nc.ticket = {"id": "theirs", "state": "active"}
-        return answer({"ok": True, "created": False, "reason": "已有未结束订单", "ticket": dict(nc.ticket)})
+        return answer({"ok": True, "created": False, "reason": "an open order exists", "ticket": dict(nc.ticket)})
 
     events = []
     c = client(Nc(places=False, on_create=found), tmp_path, events)
