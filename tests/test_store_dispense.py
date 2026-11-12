@@ -45,10 +45,11 @@ class FakeObjects:
         self.requests += 1
         return key in self.data
 
-    def list_meta(self, prefix):
+    def list_meta(self, prefix, *, start_after="", end=""):
         self.requests += 1
         with self.lock:
-            return [(k, t) for k, (_, t) in self.data.items() if k.startswith(prefix)], self.now
+            return [(k, t) for k, (_, t) in self.data.items()
+                    if k.startswith(prefix) and k > start_after and (not end or k < end)], self.now
 
 
 def _rows(n, *, label=None, source=None):
