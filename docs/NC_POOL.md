@@ -389,6 +389,16 @@ one SSH round trip. Then it acts:
   finish their data or go at their lease end, and then the pool stops.
 - **Stray tickets.** A patrol deletes any open ticket of this run that no
   live member owns.
+- **A status answer the pool cannot use.** The pool acts on an NC status
+  answer only when the order tool succeeded (exit 0) and the answer has a
+  `ticket` field that is `null` (the account has no order) or a ticket with a
+  `state`. A failed call, no output, an error document, an answer without a
+  `ticket` field and a ticket without a `state` all count as a failed status
+  call: nothing is decided on it, a release in progress fails and is retried,
+  and after `control_plane_alert_s` the pool alerts. A valid answer that does
+  not show the member's ticket (no order, or another ticket id) is read a
+  second time. The lease counts as ended, and a release records the ticket as
+  already ended, only when both answers agree.
 
 Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
