@@ -151,6 +151,10 @@ class ElasticConfig:
 
     unreachable_grace_s: float = 300.0
     control_plane_alert_s: float = 600.0
+    # a shard fence that fails is tried again every tick; after this many failures or this
+    # long without success the pool sends ``fence_stuck`` (once) and keeps trying
+    fence_alert_failures: int = 5
+    fence_alert_s: float = 600.0
     stall_s: float | None = None
     engine_stall_s: float | None = 600.0
     # the engine server's port on the node (its /metrics): "spec" reads the sampler spec's
@@ -216,6 +220,8 @@ class ElasticConfig:
             raise ValueError("elastic config: manual_hold_s must be >= 0")
         if float(cfg.scale_drain_timeout_s) < 0:
             raise ValueError("elastic config: scale_drain_timeout_s must be >= 0")
+        if int(cfg.fence_alert_failures) < 1 or float(cfg.fence_alert_s) < 0:
+            raise ValueError("elastic config: fence_alert_failures must be >= 1 and fence_alert_s >= 0")
         if cfg.breaker_failures < 1 or cfg.breaker_max_trips < 1:
             raise ValueError("elastic config: breaker_failures and breaker_max_trips must be >= 1")
         return cfg

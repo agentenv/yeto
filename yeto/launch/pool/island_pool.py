@@ -17,7 +17,12 @@ the National Compute lease pool and keeps every behaviour of it:
   sampler and a failed status call apart;
 * a gone member is retired: its shard is fenced (the work contract releases its
   claims at once), its machine is released and confirmed ended, and its data
-  slot and shard go to a pending handoff that the next order continues;
+  slot and shard go to a pending handoff that the next order continues. The
+  fence comes first: while it fails the member stays ``fencing`` (the fence is
+  tried again every tick; its machine is kept, nothing is handed on, no
+  replacement is ordered). A machine that is gone anyway (its ticket ended, its
+  lease is over, the pool stops) is released without the fence, but no sampler
+  that continues the shard starts before the fence succeeded;
 * a crashed sampler on a reachable node is restarted in place; a stalled engine
   is fenced (incarnation only) and restarted in place;
 * orders are gated by a circuit breaker, a budget (run spend, billed nodes,
@@ -51,6 +56,9 @@ LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compu
 METRICS_MISS_ALERT = 3  # probes in a row without engine /metrics before an event
 PROGRESS_SLACK_S = 5.0  # tape age jitter (probe latency, whole seconds) that is not growth
 PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "ready", "draining", "gone"
+# a member the pool is retiring whose shard fence has not succeeded yet: its node is kept
+# (not watched, not restarted), nothing of it is handed on, no replacement is ordered
+FENCING = "fencing"
 
 
 @dataclass
@@ -80,6 +88,14 @@ class Member:
     predecessor_lost: bool = False  # the shard it continues has no live sampler to wait for
     predecessor_retired: bool = False  # at its start the pool had already retired that shard's sampler
     handed_off: bool = False  # a successor that continues this shard started (its sampler stops)
+    # a fence of its shard that has not succeeded yet (why it was asked for): tried again every
+    # tick, also after its node was released; no sampler that continues it starts before
+    fence_pending: str | None = None
+    fence_then: str | None = None  # what the fence holds back: "retire" / "scale" (None: nothing)
+    fence_lost: bool = False  # the retire it holds back takes the shard's sampler for lost
+    fence_failures: int = 0
+    fence_since: float | None = None  # the first failure
+    continues_from: str | None = None  # ticket of the member whose slot / shard this one took over
     end_reason: str | None = None
     drain_error: str | None = None
     config_error: str | None = None  # its sampler refused the config: kept as is until pool-retry
@@ -372,8 +388,9 @@ class IslandPool:
             slot, continues, lost = handoff.get("data_slot"), handoff.get("shard"), bool(handoff.get("lost"))
         else:
             slot, continues, lost = self._free_slot(), None, False
+        origin = replaces.ticket if replaces else None if handoff is None else handoff.get("from")
         member = Member(account, ticket, shard, created=now, replaces=replaces.ticket if replaces else None,
-                        data_slot=slot, replaces_shard=continues, predecessor_lost=lost)
+                        data_slot=slot, replaces_shard=continues, predecessor_lost=lost, continues_from=origin)
         if replaces:
             replaces.replaced_by = ticket
         self.members.append(member)
@@ -453,31 +470,98 @@ class IslandPool:
                 m.replaces = None
         return True
 
-    def _fence(self, m: Member, why: str) -> None:
+    def _fence(self, m: Member, why: str) -> bool:
+        """Fence the shard of ``m`` (every step of the fence is idempotent). False: it failed;
+        the member keeps ``fence_pending`` and the fence is tried again every tick
+        (:meth:`_retry_fences`), with ``fence_stuck`` once it failed ``fence_alert_failures``
+        times or for ``fence_alert_s``. True: fenced, or nothing to fence (never started)."""
         fence = getattr(self.ops, "fence", None)
         if fence is None or m.started is None:
-            return
+            return True
         try:
             fence(m)
-            self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why)
-        except Exception as error:  # noqa: BLE001 - the trainer's age filter is the second line
-            self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+        except Exception as error:  # noqa: BLE001 - a fence is a safety step: owed until it succeeds
+            now = self.clock()
+            m.fence_pending = m.fence_pending or why
+            m.fence_failures += 1
+            m.fence_since = now if m.fence_since is None else m.fence_since
+            self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                        failures=m.fence_failures)
+            if m.fence_failures >= self.ecfg.fence_alert_failures or now - m.fence_since >= self.ecfg.fence_alert_s:
+                if "fence_stuck" not in m.alerted:
+                    self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} is NOT fenced after {m.fence_failures} "
+                             f"attempt(s) in {now - m.fence_since:.0f} s ({error!r}); nothing continues it until "
+                             "the fence succeeds (tried again every tick)"[:400])
+                self._once(m, "fence_stuck", "fence_stuck", why=m.fence_pending, failures=m.fence_failures,
+                           for_s=round(now - m.fence_since), state=m.state, error=repr(error)[:300])
+            return False
+        detail = {"after_failures": m.fence_failures} if m.fence_failures else {}
+        self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why, **detail)
+        m.fence_pending, m.fence_failures, m.fence_since = None, 0, None
+        if "fence_stuck" in m.alerted:
+            m.alerted.remove("fence_stuck")
+        return True
 
-    def _retire(self, m: Member, why: str, *, lost: bool) -> None:
-        """A member that will not sample again: fence, release, hand its slot on."""
+    def _fence_blocker(self, m: Member) -> Member | None:
+        """The member whose slot / shard ``m`` took over and whose fence is still owed."""
+        origins = {t for t in (m.continues_from, m.replaces) if t}
+        return next((p for p in self.members if p is not m and p.fence_pending is not None
+                     and p.ticket in origins), None)
+
+    def _retry_fences(self, now: float) -> None:
+        """Every fence still owed is tried again. A ``fencing`` member (its node kept) goes on
+        with what the fence held back once it succeeds; when its ticket ended or its lease
+        is over meanwhile, its node is released without the fence (it must not stay billed)
+        and the fence stays owed."""
+        for m in [m for m in self.members if m.fence_pending is not None]:
+            if m.state != FENCING:  # its node is released (or being drained): only the fence is owed
+                self._fence(m, m.fence_pending)
+                continue
+            status = self._status(m, now)
+            if status.state in ("active", "ended"):
+                self._charge(m, now)
+            if status.state == "active" and el.effective_end(status) is not None:
+                m.lease_until = el.effective_end(status)
+            if status.state == "ended":
+                m.end_reason = status.end_reason
+            over = status.state == "ended" or (m.lease_until is not None
+                                              and now >= m.lease_until - self.config.end_margin_s)
+            if m.fence_then == "scale":
+                if self._fence(m, m.fence_pending) or over:
+                    m.fence_then = None
+                    self._drain(m, "scale down")
+            else:
+                self._retire(m, m.fence_pending, lost=m.fence_lost, must_release=over)
+
+    def _retire(self, m: Member, why: str, *, lost: bool, must_release: bool = False) -> None:
+        """A member that will not sample again: fence, release, hand its slot on. The fence
+        comes first: while it fails the member stays ``fencing`` and nothing else happens.
+        ``must_release``: its node is gone or must not stay billed (its ticket ended, its
+        lease is over): released even when the fence failed; the fence stays owed and
+        whatever continues the shard starts only after it (:meth:`_fence_blocker`)."""
         if m.retiring_since is not None:  # a scale-down victim: nothing is handed on
-            self._finish_retire(m, self.clock(), outcome=why)
+            self._finish_retire(m, self.clock(), outcome=why, must_release=must_release)
             return
-        self._fence(m, why)
+        if m.state != FENCING:
+            lost = lost or m.state != READY
+        if not self._fence(m, why) and not must_release:
+            if m.state != FENCING:
+                self.log(f"pool: {m.ticket} (shard {m.shard}) stays until its shard is fenced ({why})")
+            m.state, m.fence_then, m.fence_lost = FENCING, "retire", lost
+            return
+        m.fence_then = None
         successor = next((s for s in self.members if s.state != GONE and s.replaces == m.ticket), None)
         if successor is not None:  # its replacement is on the way: it continues m's shard
-            successor.predecessor_lost = successor.predecessor_lost or lost or m.state != READY
+            successor.predecessor_lost = successor.predecessor_lost or lost
+            successor.continues_from = m.ticket
         else:
             if m.joined:
                 continues = m.shard
             else:  # wrote nothing: continue what it was meant to continue
                 continues = m.replaces_shard
-            handoff = {"data_slot": m.data_slot, "shard": continues, "lost": True, "from": m.ticket}
+            # a member that never started hands on the origin of what it took over (a fence owed there)
+            origin = m.ticket if m.started is not None else (m.continues_from or m.ticket)
+            handoff = {"data_slot": m.data_slot, "shard": continues, "lost": True, "from": origin}
             if m.replaces:  # its predecessor is still live: re-plan that member's replacement
                 for p in self.members:
                     if p.ticket == m.replaces and p.state != GONE:
@@ -599,7 +683,7 @@ class IslandPool:
     def counted(self) -> list[Member]:
         """The members that count against the target, as the fill step counts them (a
         member whose replacement is ready does not; one draining does not)."""
-        return [m for m in self.live() if m.state != DRAINING and m.retiring_since is None
+        return [m for m in self.live() if m.state not in (DRAINING, FENCING) and m.retiring_since is None
                 and not (m.replaced_by and m.state == READY)]
 
     def retiring(self) -> list[Member]:
@@ -646,7 +730,7 @@ class IslandPool:
             self.shrink -= len(victims)
             mode = self.scale_mode or self.ecfg.scale_down
             for m in victims:
-                if m.state in (GONE, DRAINING):
+                if m.state in (GONE, DRAINING, FENCING):
                     continue
                 if mode == "drain" and m.state != READY:
                     # a replacement not ready yet: it goes now, the ready node it replaces drains
@@ -742,9 +826,12 @@ class IslandPool:
             m.retiring_since = None
             self._event("scale_drain_cancelled", ticket=m.ticket, shard=m.shard, target=self.config.target)
 
-    def _finish_retire(self, m: Member, now: float, *, outcome: str, alone: bool = False) -> None:
+    def _finish_retire(self, m: Member, now: float, *, outcome: str, alone: bool = False,
+                       must_release: bool = False) -> None:
         """Fence and drain (release, delete, ended) ``m`` and its linked members that are not
-        draining on their own (``alone``: ``m`` only); event ``scaled_down``."""
+        draining on their own (``alone``: ``m`` only); event ``scaled_down``. A member whose
+        fence failed stays ``fencing`` and is drained once it succeeds (``must_release``: its
+        ticket ended or its lease is over; it is drained now and the fence stays owed)."""
         waited = None if m.retiring_since is None else round(now - m.retiring_since)
         group = [m] if alone else [m] + [x for x in self._linked(m)[1:] if x.retiring_since is None]
         if self.config.data_slots is not None and (m.data_slot is not None or m.joined):
@@ -754,9 +841,12 @@ class IslandPool:
             self._event("slot_paused", ticket=m.ticket, shard=m.shard, data_slot=m.data_slot)
         for x in group:
             x.retiring_since = None
-            self._fence(x, "scale down")
             x.replaced_by = None
             x.end_reason = "scaled down"
+            if not self._fence(x, "scale down") and not must_release:
+                x.state, x.fence_then, x.fence_lost = FENCING, "scale", False
+                continue
+            x.fence_then = None
             self._drain(x, "scale down")
         ended = None
         if m.state == GONE:
@@ -828,6 +918,7 @@ class IslandPool:
 
         for m in [m for m in self.members if m.state == DRAINING]:
             self._drain(m, "retry")
+        self._retry_fences(now)
         self._reassert_drains()
 
         self._prefetch()
@@ -845,14 +936,14 @@ class IslandPool:
         by_ticket = {m.ticket: m for m in self.members}
         for m in self.live():
             if m.state == READY and m.replaces and by_ticket.get(m.replaces) \
-                    and by_ticket[m.replaces].state not in (GONE, DRAINING):
+                    and by_ticket[m.replaces].state not in (GONE, DRAINING, FENCING):
                 self._drain(by_ticket[m.replaces], f"replacement {m.ticket} ready")
                 m.replaces = None
         for m in self.live():
             if m.state != DRAINING and not m.paused and m.lease_until is not None \
                     and now >= m.lease_until - self.config.end_margin_s:
                 if m.retiring_since is not None:
-                    self._finish_retire(m, now, outcome="lease end")
+                    self._finish_retire(m, now, outcome="lease end", must_release=True)
                     continue
                 if m.replaced_by is None or by_ticket.get(m.replaced_by) is None \
                         or by_ticket[m.replaced_by].state != READY:
@@ -931,7 +1022,7 @@ class IslandPool:
                 if p.ticket == m.replaces and p.state != GONE:
                     p.replaced_by = None
         m.retiring_since = m.retiring_since or now
-        self._finish_retire(m, now, outcome="released by a person", alone=True)
+        self._finish_retire(m, now, outcome="released by a person", alone=True, must_release=True)
 
     def _watch_kept(self, m: Member, now: float) -> None:
         """A member kept after a configuration error: its lease end and its ticket's
@@ -1062,13 +1153,13 @@ class IslandPool:
                 self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
             elif m.state == PROVISIONING:  # never granted (e.g. lost in provisioning)
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
-            self._retire(m, kind, lost=True)
+            self._retire(m, kind, lost=True, must_release=True)  # its ticket ended: nothing to keep
             if kind == el.BALANCE:
                 self.stop("a ticket ended for the balance")
             return
         if kind == el.OVERDUE:
             self._event("lease_overdue", ticket=m.ticket, account=m.account, shard=m.shard, detail=verdict.detail)
-            self._retire(m, "overdue", lost=False)
+            self._retire(m, "overdue", lost=False, must_release=True)  # billed past its lease
             return
         if kind == el.LOST:
             self._event("node_lost", ticket=m.ticket, account=m.account, shard=m.shard, detail=verdict.detail)
@@ -1107,6 +1198,16 @@ class IslandPool:
         if m.state == PROVISIONING:
             if status.state == "active" and m.start_retry_at is not None and now < m.start_retry_at:
                 return  # a transient start failure: the retry waits out its backoff
+            blocker = self._fence_blocker(m) if status.state == "active" else None
+            if blocker is not None:
+                # the shard it continues is not fenced yet: its old sampler may still write
+                # and hold its claims. The start waits for the fence.
+                self._once(m, "fence_wait", "start_waits_for_fence", predecessor=blocker.ticket,
+                           predecessor_shard=blocker.shard)
+                return
+            if status.state == "active" and "fence_wait" in m.alerted:
+                m.alerted.remove("fence_wait")
+                m.created = now  # the start timeout counts from here, not from the wait
             if status.state == "active":  # a provider without leases (sky) has no lease_until
                 m.start_retry_at = None
                 self._clear_stale_handoff(m)
@@ -1465,11 +1566,21 @@ class IslandPool:
         self.stop(why)
         for _ in range(attempts - 1):
             left = self.live()
-            if not left:
+            owed = [m for m in self.members if m.fence_pending is not None]
+            if not left and not owed:
                 break
             sleep(wait_s)
             for m in left:
                 self._drain(m, "stop retry")
+            for m in owed:  # the nodes go anyway; the fences are tried again
+                self._fence(m, m.fence_pending)
+        for m in self.members:
+            if m.fence_pending is not None:
+                self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} was NOT fenced ({m.fence_failures} "
+                         "attempts); its node is released")
+                self._once(m, "fence_stuck", "fence_stuck", why=m.fence_pending, failures=m.fence_failures,
+                           for_s=None if m.fence_since is None else round(self.clock() - m.fence_since),
+                           state=m.state)
         self._patrol(self.clock())
         return self.live()
 

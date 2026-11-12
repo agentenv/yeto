@@ -189,6 +189,7 @@ idempotent and exit 0; a non-zero exit fails the node start.
 | `max_nodes` | Most billed nodes at once. | `2 x target` (in practice at most one per account) |
 | `max_orders` | Most orders over the whole run. | none |
 | `unreachable_grace_s` | How long probes must fail before a node counts as lost. Shorter failures count as network blips. | `300` |
+| `fence_alert_failures`, `fence_alert_s` | A shard fence that fails is tried again every tick. After this many failures, or this long without success, the pool sends `fence_stuck` once and keeps trying. | `5`, `600` |
 | `control_plane_alert_s` | How long NC status calls must fail before an alert. The pool never acts on a failed status call alone. | `600` |
 | `stall_s` | A joined sampler whose event tape has not grown for this long counts as crashed. Set it above your longest round. | none (off) |
 | `max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced. Restarts before the node's first join and before a `pool-retry` do not count. | `2` |
@@ -365,6 +366,14 @@ one SSH round trip. Then it acts:
 - **Eviction, lost node, overdue lease.** The node's shard is fenced, so a
   node that comes back cannot add groups the trainer would take. The ticket
   is deleted. The next order continues the shard.
+- **A fence that fails.** The fence comes before everything else and is tried
+  again every tick (`fence_failed`, then `fence_stuck`). Until it succeeds the
+  member shows as `fencing`: its node is kept (and billed), nothing is handed
+  on and no replacement is ordered. A node that is gone anyway (ticket ended,
+  lease over, released by a person, `pool-stop`) is released without the
+  fence; the fence is still tried every tick, and the node that continues the
+  shard is ordered but its sampler starts only after the fence succeeded
+  (`start_waits_for_fence`).
 - **Configuration error.** Before it orders anything, `pool` (and
   `--dry-run`) renders the sampler spec and builds locally every part the
   sampler builds at start: the island config (required keys such as
