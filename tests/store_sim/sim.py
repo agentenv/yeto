@@ -249,6 +249,13 @@ class Simulation:
 
     def truth_fenced(self, sid: str, incarnation: str) -> bool:
         """The incarnation lease of the shard names another incarnation."""
+        owner = None
+        for key in self.server.keys(sample_buffer.shard_prefix(sid)):
+            record = json.loads(self.server.get(key) or b"{}")
+            if record.get("owner"):
+                owner = record["owner"]["incarnation"]
+        if owner is not None:  # the shard's ownership records decide
+            return owner != incarnation
         raw = self.server.get(f"sample-buffer/leases/{sid}.json")
         return bool(raw) and str(json.loads(raw).get("incarnation")) != incarnation
 
@@ -388,8 +395,14 @@ class Simulation:
         self._run(self.trainer, self.trainer.start, crash=self.injector.enabled)
 
     def _shard_ended(self, sid: str) -> bool:
-        keys = self.server.keys(sample_buffer.shard_prefix(sid))
-        return bool(keys) and bool(json.loads(self.server.get(keys[-1]) or b"{}").get("end"))
+        owner, ended = None, False
+        for key in self.server.keys(sample_buffer.shard_prefix(sid)):
+            record = json.loads(self.server.get(key) or b"{}")
+            if record.get("owner"):
+                owner = record["owner"]["incarnation"]
+            elif record.get("end") and (owner is None or record.get("incarnation") == owner):
+                ended = True
+        return ended
 
     def _due(self) -> None:
         now = self.clock.now
@@ -644,8 +657,17 @@ class Simulation:
         shard_records: dict[str, list[dict[str, Any]]] = {}
         groups_of_slot: dict[int, list[str]] = collections.defaultdict(list)
         for sid in self.shards:
-            records = [json.loads(server.get(k)) for k in server.keys(sample_buffer.shard_prefix(sid))]
-            records = [r for r in records if not r.get("end")]
+            records, owner = [], None
+            for raw_record in [json.loads(server.get(k)) for k in server.keys(sample_buffer.shard_prefix(sid))]:
+                if raw_record.get("owner"):
+                    owner = raw_record["owner"]["incarnation"]
+                    self.metric("shard_owner_records")
+                elif not raw_record.get("end"):
+                    inc = (raw_record.get("sampler_round") or {}).get("incarnation")
+                    raw_record["_valid"] = owner is None or inc == owner
+                    if not raw_record["_valid"]:
+                        self.metric("void_shard_records_of_fenced_writers")
+                    records.append(raw_record)
             shard_records[sid] = records
             seen: dict[str, int] = {}
             for record in records:
@@ -665,19 +687,25 @@ class Simulation:
         for i, record in enumerate(merged):
             if int(record["pos"]) != i:
                 self.violation("merged_index_position_gap", position=i, record_pos=record["pos"])
-            if record.get("end"):
+            if record.get("end") or record.get("marker"):
                 continue
             by_shard[record["shard"]].append(int(record["shard_pos"]))
         for sid in self.shards:
-            got, want = by_shard.get(sid, []), list(range(len(shard_records[sid])))
+            got = by_shard.get(sid, [])
+            by_pos = {int(r["pos"]): r for r in shard_records[sid]}
+            want = sorted(p for p, r in by_pos.items() if r["_valid"])
             twice = sorted({p for p in got if got.count(p) > 1})
             if twice:
                 self.violation("shard_record_merged_twice", shard=sid, shard_positions=twice[:10],
-                               sample_id=shard_records[sid][twice[0]]["sample_id"] if twice[0] < len(want) else None)
+                               sample_id=by_pos.get(twice[0], {}).get("sample_id"))
+            void = sorted(set(got) - set(want))
+            if void:
+                self.violation("void_shard_record_merged", shard=sid, shard_positions=void[:10],
+                               sample_id=by_pos.get(void[0], {}).get("sample_id"))
             missing = sorted(set(want) - set(got))
             if missing and ended:
                 self.violation("shard_record_never_merged", shard=sid, shard_positions=missing[:10],
-                               sample_id=shard_records[sid][missing[0]]["sample_id"])
+                               sample_id=by_pos[missing[0]]["sample_id"])
             if got != sorted(got):
                 self.violation("shard_merged_out_of_order", shard=sid)
         # -- what the trainer consumed (rounds after a restored cut were trained again: by design)
@@ -694,7 +722,7 @@ class Simulation:
                     self.violation(f"trained_twice_same_{name}", value=value, times=n,
                                    sample_id=first["sample_id"], slot=first["slot"])
         consumed = {g["position"] for g in trained} | {g["position"] for g in skipped}
-        unread = [i for i, r in enumerate(merged) if not r.get("end") and i not in consumed]
+        unread = [i for i, r in enumerate(merged) if not r.get("end") and not r.get("marker") and i not in consumed]
         if unread:
             self.violation("merged_record_never_consumed", positions=unread[:10],
                            sample_id=merged[unread[0]].get("sample_id"))
@@ -742,7 +770,7 @@ class Simulation:
         self.metric("design_loss_groups_stale_policy_age", sum(t.report["stale"] for t in takes))
         self.metric("design_loss_groups_stale_incarnation", sum(t.report["stale_incarnation"] for t in takes))
         self.metric("groups_trained", len(trained))
-        self.metric("groups_written", sum(len(r) for r in shard_records.values()))
+        self.metric("groups_written", sum(1 for records in shard_records.values() for r in records if r["_valid"]))
         self.metric("trainer_rounds_rolled_back", sum(1 for t in self.takes if t.rolled_back and not t.zombie))
         # -- storage: releases the trainer should have pruned
         names = {k.split("/")[1] for k in server.keys("policy-releases/") if k.count("/") >= 2}

@@ -17,6 +17,8 @@ trainer resets to.
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 import shutil
@@ -32,6 +34,8 @@ from yeto.rl.engine.buffer_payload import GroupWriter
 from yeto.rl.engine.incarnation_lease import IncarnationGate, IncarnationLease, read_lease
 from yeto.rl.engine.policy_release import PolicyFollower, PolicyReleaseStore, ReleaseNotLoaded
 from yeto.rl.engine.rollout_data_path import r2_classes
+from yeto.rl.engine.sample_buffer import ShardFenced  # noqa: E402
+from yeto.rl.engine.trainer_lease import TrainerLease  # noqa: E402
 from yeto.rl.engine.sample_buffer import open_trainer_buffer, shard_index
 from yeto.rl.engine.sampler_resume import (
     RoundGuard,
@@ -132,7 +136,7 @@ class SamplerProc:
         self.membership = SamplerMembership(self.store, self.sid, self.incarnation, self.resume, self._emit,
                                             clock=self.clock.time)
         self.lease = IncarnationLease(self.store, self.sid, self.incarnation, write_check_s=cfg.write_check_s,
-                                      clock=self.clock.time, monotonic=self.clock.monotonic)
+                                      clock=self.clock.time, monotonic=self.clock.monotonic, buffer=self.buffer)
         self.follower = PolicyFollower(self.releases, self._load, timer=self.clock.monotonic,
                                        wall=self.clock.time, max_defer_s=cfg.reload_max_defer_s)
         self.follower.hold = lambda: bool(self.inflight)
@@ -230,7 +234,11 @@ class SamplerProc:
             return
         except DispenseEnded:
             self.buffer.refresh()
-            self.buffer.mark_data_end()
+            try:
+                self.buffer.mark_data_end()
+            except ShardFenced:
+                self._exit("FENCED", "fenced")
+                return
             self._stop(finished=True)
             return
         if not items:
@@ -273,12 +281,17 @@ class SamplerProc:
                         "rollout_log_probs": [0.0], "reward": float(j), "metadata": meta} for j in range(2)]
             record = SamplerRound(self.sid, self.incarnation, gen.rollout_id, data_cursor=gen.cursor,
                                   last=last, dispense_position=slot).record()
-            self.writer.write(samples, group_key=f"{self.incarnation}-r{gen.rollout_id}-{gen.prompt_id}",
-                              sampler_round=record)
-            self.guard.written(gen.rollout_id)
-            self.written += 1
-            self.sim.trace("write", actor=self.actor, slot=slot, sample_id=sample_id, version=gen.version)
-        else:
+            try:
+                self.writer.write(samples, group_key=f"{self.incarnation}-r{gen.rollout_id}-{gen.prompt_id}",
+                                  sampler_round=record)
+            except ShardFenced:
+                reason = "fenced"
+                self.sim.intents.pop(sample_id, None)
+            else:
+                self.guard.written(gen.rollout_id)
+                self.written += 1
+                self.sim.trace("write", actor=self.actor, slot=slot, sample_id=sample_id, version=gen.version)
+        if reason is not None:
             self.sim.metric(f"group_dropped_{reason}")
             self.sim.trace("drop", actor=self.actor, slot=slot, reason=reason)
         requeue = [slot] if reason == "below_min_samples" else []
@@ -288,8 +301,13 @@ class SamplerProc:
     # --------------------------------------------------------------------- exit
     def _stop(self, finished: bool = False) -> None:
         """The loop returned: the tail of ``_run_on``."""
-        if handoff_requested(self.store, self.sid) and not self.buffer.data_ended:
-            self.buffer.mark_data_end()
+        if not self.lease.fenced:
+            self.lease.poll()
+        if handoff_requested(self.store, self.sid) and not self.buffer.data_ended and not self.lease.fenced:
+            try:
+                self.buffer.mark_data_end()
+            except ShardFenced:
+                pass
         if self.lease.fenced:
             self._exit("FENCED", "fenced")
         else:
@@ -352,9 +370,12 @@ class TrainerProc:
     def start(self) -> None:
         sim, cfg = self.sim, self.sim.config
         self.store = make_store(sim, self.actor, self.node, stage=sim.tmp / "stage" / f"t{self.number}")
+        if os.environ.get("SIM_OWNED", "1") == "1":  # a trainer that reads shard ownership records
+            TrainerLease.claim(self.store.objects, incarnation=f"t{self.number}")
         self.buffer = open_trainer_buffer(self.store, batch_size=cfg.groups_per_step, shards=sim.shards,
                                           clock=self.clock.time)
-        gate = IncarnationGate(self.store, self.buffer.entries, monotonic=self.clock.monotonic)
+        gate = IncarnationGate(self.store, self.buffer.entries, monotonic=self.clock.monotonic,
+                               owner_epoch=self.buffer.shard_epoch_at)
         self.reader = BatchReader(self.buffer, max_policy_age=cfg.max_policy_age, wait_s=cfg.trainer_wait_s,
                                   poll_s=2.0, clock=self.clock.monotonic, sleep=self._sleep, read_workers=1,
                                   prefetch=False, incarnation_gate=gate)
