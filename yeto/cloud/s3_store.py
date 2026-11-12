@@ -169,22 +169,28 @@ class RangeGate:
         self.cuts = 0  # refusals that lowered the limit
         self._good = 0
 
-    def __enter__(self) -> "RangeGate":
+    def __enter__(self) -> int:
+        """Wait for a free read; the cut it runs under (``refused(started=...)``)."""
         with self._cond:
             while self.limit is not None and self.active >= self.limit:
                 self._cond.wait()
             self.active += 1
             self.peak = max(self.peak, self.active)
-        return self
+            return self.cuts
 
     def __exit__(self, *exc: object) -> None:
         with self._cond:
             self.active -= 1
             self._cond.notify()
 
-    def refused(self) -> int:
-        """A read was refused: halve what ran at once; the new limit."""
+    def refused(self, started: int | None = None) -> int:
+        """A read was refused: halve what ran at once; the new limit. ``started``
+        (what ``with gate as started`` gave the read): a read started before the latest cut does
+        not cut again. Reads in flight together are refused together (one burst of
+        the store): each halving them again would take 256 reads to a limit of 1."""
         with self._cond:
+            if started is not None and started != self.cuts and self.limit is not None:
+                return self.limit
             running = self.peak if self.limit is None else min(self.limit, self.peak)
             self.limit = max(1, running // 2)
             self.peak, self._good = self.active, 0
@@ -1136,8 +1142,9 @@ class S3ObjectStore:
                 end = min(offset + part, size) - 1
                 attempt = refusals = 0
                 while True:
+                    started = None
                     try:
-                        with self.range_gate:
+                        with self.range_gate as started:
                             body = self.client.get_object(Bucket=self.bucket, Key=full,
                                                           Range=f"bytes={offset}-{end}", **pin)["Body"].read()
                     except RANGE_READ_RETRYABLE:
@@ -1152,7 +1159,7 @@ class S3ObjectStore:
                         refusals += 1
                         if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
                             raise
-                        self._range_refused(error)
+                        self._range_refused(error, started)
                         _read_retry_pause(refusals - 1)
                         continue
                     self.range_gate.succeeded()
@@ -1179,8 +1186,11 @@ class S3ObjectStore:
                 done.set()
                 marker.join()
 
-    def _range_refused(self, error: BaseException) -> None:
-        limit = self.range_gate.refused()
+    def _range_refused(self, error: BaseException, started: int | None = None) -> None:
+        cuts = self.range_gate.cuts
+        limit = self.range_gate.refused(started)
+        if self.range_gate.cuts == cuts:
+            return  # the burst that lowered the limit already: no new cut, no new warning
         print(f"[s3-store] WARNING: {self.uri}: the store refused a range read for its request rate "
               f"({error_code(error) or type(error).__name__}); this process now runs at most {limit} range "
               f"read(s) at once and raises that again as reads succeed", file=sys.stderr, flush=True)

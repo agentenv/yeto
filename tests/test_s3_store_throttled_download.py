@@ -139,3 +139,27 @@ def test_the_retry_layers_of_a_refused_range_stay_bounded(tmp_path, monkeypatch)
     ranges, rest = divmod(s3.refused, tries)
     assert ranges in (1, 2) and rest == 0 and retries["total_max_attempts"] * tries == 54
     assert botocore_worst == 91 and tries * botocore_worst + sum(pauses) / ranges == 577
+
+
+def test_reads_refused_in_one_burst_halve_the_limit_once():
+    """64 reads in flight together, all refused: one halving (32), not one per
+    refusal (64 -> 1, then 8 good reads per read given back)."""
+    import threading
+
+    gate = s3_store.RangeGate()
+    barrier = threading.Barrier(64)
+
+    def read() -> None:
+        with gate as started:
+            barrier.wait()
+        gate.refused(started)
+
+    threads = [threading.Thread(target=read) for _ in range(64)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert gate.limit == 32 and gate.cuts == 1
+    with gate as started:  # a read started under the new limit cuts again
+        pass
+    assert gate.refused(started) == 16 and gate.cuts == 2
