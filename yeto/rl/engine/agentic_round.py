@@ -87,6 +87,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import dataclasses
+import logging
 import re
 import statistics
 import threading
@@ -97,10 +98,12 @@ from typing import Any
 
 from .buffer_payload import (ENGINE_META, ROLLOUT_ROUTED_EXPERTS, ROLLOUT_TOP_LOGPROBS, ROLLOUT_TOP_LOGPROBS_IDS,
                              TOP_LOGPROBS_DTYPE, TOP_LOGPROBS_IDS_DTYPE, routed_experts_uint16)
-from .engine_sampler import ROUND_EVENT, EngineRound, PromptItem, dispense_position, unique_prompt_ids
+from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, ROUND_EVENT, EngineRound, PromptItem, dispense_position,
+                             unique_prompt_ids)
 from .policy_versions import engine_weight_version
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
 
+logger = logging.getLogger(__name__)
 AGENT_TASK_KEY = "agent_task"
 LOST_VERSION = "served_by_other_version"
 def resolve_weight_switch(switch: str, engine: Any) -> str:
@@ -850,6 +853,44 @@ class AgenticRound(EngineRound):
 
 
 # ----------------------------------------------------------------------------- spec
+def reload_max_defer_s(spec: Mapping[str, Any]) -> float | None:
+    """The spec's ``reload_max_defer_s`` as the sampler reads it (absent: the default;
+    ``null``: no bound)."""
+    if "reload_max_defer_s" in spec and spec["reload_max_defer_s"] is None:
+        return None
+    return float(spec.get("reload_max_defer_s", DEFAULT_RELOAD_MAX_DEFER_S))
+
+
+def effective_drain_timeout(drain_timeout_s: float | None, max_defer_s: float | None) -> float | None:
+    """The longest a ``drain`` weight switch waits on running trials:
+    min(``agentic.drain_timeout_s``, ``reload_max_defer_s``), either one unset
+    (None) meaning no bound from it. In drain mode the follower defers nothing
+    itself (the drain holds the weights), so ``reload_max_defer_s`` bounds a
+    release's wait only through this limit; without it a drain waited for its
+    slowest trial (an agent timeout of an hour) with the engine idle."""
+    bounds = [float(v) for v in (drain_timeout_s, max_defer_s) if v is not None]
+    return min(bounds) if bounds else None
+
+
+def drain_timeout_warning(spec: Mapping[str, Any]) -> str | None:
+    """A warning for a drain-mode spec whose ``agentic.drain_timeout_s`` (or no
+    ``drain_timeout_s``) exceeds ``reload_max_defer_s``: the drain is cut at
+    ``reload_max_defer_s`` (:func:`effective_drain_timeout`)."""
+    section = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else None
+    if section is None or str(section.get("weight_switch", "auto")) == "live":
+        return None
+    cap = reload_max_defer_s(spec)
+    if cap is None:
+        return None
+    drain = section.get("drain_timeout_s")
+    if drain is not None and float(drain) <= cap:
+        return None
+    shown = "unset (no bound)" if drain is None else f"{float(drain):g} s"
+    return (f"agentic.drain_timeout_s is {shown}, above reload_max_defer_s {cap:g} s: a drain-mode weight switch "
+            f"waits at most {cap:g} s on running trials, then cancels them (lost as drain_timeout); set "
+            f"drain_timeout_s <= reload_max_defer_s to make that explicit")
+
+
 def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, str]) -> Callable[..., AgenticRound]:
     """``make_round`` of :func:`~.engine_sampler.build_engine_sampler` from the
     spec's ``agentic`` section (``engine_sampler_entry``):
@@ -864,7 +905,10 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     * ``max_in_flight``: concurrent trials; ``min_samples`` (default 2);
     * ``weight_switch``: ``auto`` (default: ``live`` on a live-update engine,
       else ``drain``), ``drain`` or ``live``; ``drain_timeout_s``
-      (default None: no cap beyond each trial's budget);
+      (default None); in drain mode the drain is cut at
+      min(``drain_timeout_s``, the spec's ``reload_max_defer_s``)
+      (:func:`effective_drain_timeout`; a larger ``drain_timeout_s`` is logged
+      as a warning);
     * ``proxy``: ``{"host", "port"}`` of the records proxy; the public base and
       the path secret come from ``YETO_RECORDS_PROXY_PUBLIC_BASE`` and
       ``YETO_RECORDS_PROXY_SECRET_FILE`` (the Modal tunnel, written in the container);
@@ -903,6 +947,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         max_response_len = int(section["max_response_len"])
         switch = str(section.get("weight_switch", "auto"))
         drain_timeout_s = None if section.get("drain_timeout_s") is None else float(section["drain_timeout_s"])
+        max_defer_s = reload_max_defer_s(spec)
         infra_retries = int(section.get("infra_retries", DEFAULT_INFRA_RETRIES))
     except (KeyError, TypeError, ValueError) as exc:
         raise HarnessConfigError(f"spec agentic section: bad or missing {exc}") from exc
@@ -938,6 +983,11 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         if slots is not None and slots.limit < max_in_flight:
             raise HarnessConfigError(f"agentic.max_in_flight {max_in_flight} exceeds the {defaults['provider']} "
                                      f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
+    if switch == "drain":
+        warning = drain_timeout_warning(spec)
+        if warning is not None:
+            logger.warning(warning)
+        drain_timeout_s = effective_drain_timeout(drain_timeout_s, max_defer_s)
     loop = LoopThread(workers=max_in_flight + 8)
 
     def make(engine_: Any, writer: Any, **kwargs: Any) -> AgenticRound:

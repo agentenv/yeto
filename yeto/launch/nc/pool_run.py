@@ -386,6 +386,11 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                   f"buffer_shards {spec.get('buffer_shards')})")
             from yeto.launch import agentic_setup  # noqa: PLC0415
 
+            from yeto.rl.engine.agentic_round import drain_timeout_warning  # noqa: PLC0415
+
+            warning = drain_timeout_warning(spec)
+            if warning is not None:
+                notes.append(warning)
             setup_lines, setup_problems = agentic_setup.dry_run_report(spec, base_dir=Path(cfg["spec"]).parent)
             for line in setup_lines:
                 print(f"agentic.setup: {line}")
