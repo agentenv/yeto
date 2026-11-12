@@ -39,6 +39,15 @@ appends the new shard lines to ``index.jsonl`` (:func:`merge_shards`). The
 merged line keeps ``shard`` and ``shard_pos``, so a restarted merger continues
 where the index ends.
 
+The merge is idempotent (:meth:`FileSampleBuffer._merge_shards`): a merged
+record is identified by ``(shard, shard_pos)``, the merger appends only the
+shard records above the highest merged ``shard_pos`` of their shard, and it
+decides that again after every lost create. So two mergers at once (a trainer
+not dead yet and the one that replaces it), or a create whose answer was lost,
+leave every shard record in the index once. An index written before this rule
+can hold a shard record twice: the reader passes over the second one
+(``duplicate_merged_records``), it is never selected.
+
 Sampler islands on several sites (rl-cross-site-sample-store): an object store
 without reliable create-if-absent between hosts (``objects.buffer_shards``, OSS)
 gives each sampler island its own shard, ``shards/<shard>/<pos>.json`` (one
@@ -319,7 +328,9 @@ class ObjectIndex:
         """Append a batch: one ``read_new`` (one LIST), then the records' create-if-absent
         writes in position order, without a LIST or a read-back between them.
         ``make(done)``: the records not created yet (``done`` of the batch are), with
-        their positions from the index length. Each created record is the next
+        their positions from the index length; it is called again after every lost
+        create, when ``absorb`` has taken the other writer's records (a merger leaves
+        out the ones that writer appended too). Each created record is the next
         position, so no reader sees a gap; a lost create (another writer took that
         position) stops the run, the other writer's records are read and the rest is
         made again at the new positions - the same outcome as one ``append`` per
@@ -393,19 +404,18 @@ class UnmergedShards:
     trainer scheduler on, a stopped trainer merges nothing, so without this view
     the head would never see a backlog and never start the trainer again.
     :meth:`pending` reads every shard by object key (never writes) and returns
-    the records at or above the merged count of their shard."""
+    the records at or above the merged position of their shard."""
 
     def __init__(self, objects: ObjectStore) -> None:
         self.objects = objects
         self._readers: dict[str, ObjectIndex] = {}
-        self._records: dict[str, list[SampleIndexEntry]] = {}
-        self._dropped: dict[str, int] = {}  # records already merged and forgotten here
+        self._records: dict[str, list[tuple[int, SampleIndexEntry]]] = {}  # (shard position, entry)
         self._ended: set[str] = set()
 
     def pending(self, merged: dict[str, int]) -> tuple[list[SampleIndexEntry], bool]:
         """(records not merged yet, every named shard has ended). ``merged``: the
-        merged records per shard (:meth:`FileSampleBuffer.shard_positions` of
-        the index length)."""
+        merged position per shard (:meth:`FileSampleBuffer.shard_positions` of
+        the index length): the shard records below it are merged."""
         names = shard_names(self.objects)
         for shard in names:
             if shard in self._ended:  # its end record is its last: no LIST per poll for it (a spot
@@ -413,18 +423,18 @@ class UnmergedShards:
             reader = self._readers.get(shard)
             if reader is None:
                 reader = self._readers[shard] = ObjectIndex(self.objects, prefix=shard_prefix(shard))
-                self._records[shard], self._dropped[shard] = [], 0
+                self._records[shard] = []
             for record in reader.read_new():
                 if record.get("end"):
                     self._ended.add(shard)
                 else:
-                    self._records[shard].append(_entry(record))
+                    self._records[shard].append((int(record["pos"]), _entry(record)))
         out: list[SampleIndexEntry] = []
         for shard, records in self._records.items():
-            done = max(0, int(merged.get(shard, 0)) - self._dropped[shard])
-            del records[:done]
-            self._dropped[shard] += done
-            out.extend(records)
+            below = int(merged.get(shard, 0))
+            done = next((i for i, (pos, _) in enumerate(records) if pos >= below), len(records))
+            del records[:done]  # merged: forgotten here
+            out.extend(entry for _, entry in records)
         return out, bool(names) and self._ended >= set(names)
 
 
@@ -505,6 +515,11 @@ class FileSampleBuffer:
         self._expected_shards = (None if expected_shards is None
                                  else frozenset(_shard_name(s) for s in expected_shards))
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
+        self._shard_pos_of: list[int | None] = []  # its position in that shard
+        self._shard_next: dict[str, int] = {}  # per shard: the highest merged shard position + 1
+        self._shard_pending: dict[str, list[dict[str, Any]]] = {}  # shard records read, not merged yet
+        self._skipped: set[int] = set()  # positions that repeat a merged shard record: never selected
+        self._shard_gaps = 0  # shard records an earlier merger passed over (never merged)
         self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
         self._foreign_shards: set[str] = set()  # shards seen but not expected (skipped)
@@ -577,24 +592,42 @@ class FileSampleBuffer:
 
     def _write_records(self, records: list[dict[str, Any]]) -> None:
         """Append ``records`` (without ``pos``) at the next positions: one write on
-        a shared directory, one object per record on an object store."""
-        def make() -> list[dict]:
+        a shared directory, one object per record on an object store. Idempotent
+        for merged shard records (with ``shard`` and ``shard_pos``) and the ``end``
+        record: the records to write are decided after the index was read (again
+        after every lost create), and one the index already holds is left out -
+        another merger appended it, or this one did and lost the answer."""
+        written: set[int] = set()  # of ``records``: created by this call
+        offered: list[int] = []  # the ones the last ``rest`` returned, ``counted`` created before it
+        counted = 0
+
+        def rest(done: int = 0) -> list[dict]:
+            nonlocal offered, counted
+            written.update(offered[:done - counted])
+            counted = done
+            offered = [i for i, record in enumerate(records)
+                       if i not in written and not self._is_merged(record)]
             if self._ended:
-                raise SampleBufferError("append after the data end")
+                if offered:
+                    raise SampleBufferError("append after the data end")
+                return []
             start = len(self._entries)
-            return [{**record, "pos": start + i} for i, record in enumerate(records)]
+            return [{**records[i], "pos": start + n} for n, i in enumerate(offered)]
 
         with self._lock:
             if isinstance(self.index, JsonlIndex):
-                self.index.append_many(self._absorb, make)
-                return
-            def rest(done: int) -> list[dict]:  # an object store: create-if-absent per record
-                if self._ended:
-                    raise SampleBufferError("append after the data end")
-                start = len(self._entries)
-                return [{**record, "pos": start + i} for i, record in enumerate(records[done:])]
+                self.index.append_many(self._absorb, rest)
+            else:  # an object store: create-if-absent per record
+                self.index.append_batch(self._absorb, rest)
 
-            self.index.append_batch(self._absorb, rest)
+    def _is_merged(self, record: Mapping[str, Any]) -> bool:
+        """Whether the index already holds this merged shard record (or, for the
+        ``end`` record, has ended). A record of no shard is never taken for merged."""
+        if record.get("end"):
+            return self._ended
+        if record.get("shard") is None:
+            return False
+        return int(record["shard_pos"]) < self._shard_next.get(record["shard"], 0)
 
     def _absorb(self, records: list[dict[str, Any]]) -> None:
         for record in records:
@@ -603,8 +636,49 @@ class FileSampleBuffer:
             if record.get("end"):
                 self._ended = True
                 continue
-            self._shard_of.append(record.get("shard"))
+            shard, shard_pos = record.get("shard"), None
+            if shard is not None:
+                merged = self._shard_next.get(shard, 0)
+                # a merged record written without ``shard_pos`` is the next of its shard
+                shard_pos = merged if record.get("shard_pos") is None else int(record["shard_pos"])
+                if shard_pos < merged:
+                    self._skip_duplicate(record, shard, shard_pos)
+                else:
+                    if shard_pos > merged:
+                        self._note_gap(shard, merged, shard_pos)
+                    self._shard_next[shard] = shard_pos + 1
+            self._shard_of.append(shard)
+            self._shard_pos_of.append(shard_pos)
             self._entries.append(_entry(record))
+
+    def _skip_duplicate(self, record: Mapping[str, Any], shard: str, shard_pos: int) -> None:
+        """The index holds this shard record a second time (two mergers, or a lost
+        create answer, before the merge was idempotent): its position stays in the
+        index, but it is never selected."""
+        if not self._skipped:
+            print(f"[sample-buffer] WARNING: merged index position {record['pos']} repeats shard "
+                  f"{shard!r} record {shard_pos} ({record.get('sample_id')!r}), merged before: "
+                  f"repeated records are passed over, not trained twice", flush=True)
+        self._skipped.add(len(self._entries))
+
+    def _note_gap(self, shard: str, merged: int, shard_pos: int) -> None:
+        if not self._shard_gaps:
+            print(f"[sample-buffer] WARNING: the merged index goes from shard {shard!r} record "
+                  f"{merged - 1} to {shard_pos}: an earlier merger passed over {shard_pos - merged} "
+                  f"record(s) (it counted repeated records); they stay unmerged", flush=True)
+        self._shard_gaps += shard_pos - merged
+
+    @property
+    def duplicate_merged_records(self) -> int:
+        """The merged records read so far that repeat an earlier one (passed over)."""
+        with self._lock:
+            return len(self._skipped)
+
+    @property
+    def unmerged_shard_gaps(self) -> int:
+        """The shard records an earlier merger passed over, as far as read."""
+        with self._lock:
+            return self._shard_gaps
 
     # ---------------------------------------------------------------- reading
     def refresh(self) -> int:
@@ -630,14 +704,19 @@ class FileSampleBuffer:
                 continue
             reader = self._shard_readers.get(shard)
             if reader is None:  # first seen here: skip what an earlier merger merged
-                done = sum(1 for s in self._shard_of if s == shard)
-                reader = self._shard_readers[shard] = self.index.shard_reader(shard, done)
-            records = []
+                reader = self._shard_readers[shard] = self.index.shard_reader(
+                    shard, self._shard_next.get(shard, 0))
+            # What was read stays pending until the index holds it: a merge that fails
+            # half way (a store error) is finished by the next refresh, and a record
+            # another merger appended meanwhile is dropped here, not merged again.
+            merged = self._shard_next.get(shard, 0)
+            records = [r for r in self._shard_pending.get(shard, ()) if r["shard_pos"] >= merged]
             for record in reader.read_new():
                 if record.get("end"):
                     self._shards_ended.add(shard)
-                else:
+                elif int(record["pos"]) >= merged:
                     records.append({**record, "shard": shard, "shard_pos": int(record["pos"])})
+            self._shard_pending[shard] = records
             new.append(records)
         if self._ended:
             if first := next((r for records in new for r in records), None):
@@ -645,14 +724,17 @@ class FileSampleBuffer:
             return
         # Interleave by appended_at but keep every shard in its own order: the merged
         # records of a shard must stay a prefix of it, because a restarted merger
-        # resumes each shard after its merged count (a clock step back would
-        # otherwise merge a later record first, then skip the earlier one).
+        # resumes each shard after its highest merged position (a clock step back
+        # would otherwise merge a later record first, then skip the earlier one).
         merged = list(heapq.merge(*new, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"])))
         expected = set(self._shard_readers) if self._expected_shards is None else self._expected_shards
         if expected and self._shards_ended >= expected:
             merged.append({"schema": SCHEMA, "end": True})
         if merged:
             self._write_records(merged)
+            for shard, records in self._shard_pending.items():
+                done = self._shard_next.get(shard, 0)
+                self._shard_pending[shard] = [r for r in records if r["shard_pos"] >= done]
 
     def shard_at(self, position: int) -> str | None:
         """The sampler shard of merged position ``position`` (None: no merged shards)."""
@@ -660,13 +742,19 @@ class FileSampleBuffer:
             return self._shard_of[int(position)] if 0 <= int(position) < len(self._shard_of) else None
 
     def shard_positions(self, cursor: int) -> dict[str, int]:
-        """{shard: records of that shard below merged position ``cursor``}: the
+        """{shard: that shard's position below merged position ``cursor``}: the
         per-shard form of a consumed watermark or read cursor ({} for a buffer
-        without merged shards)."""
+        without merged shards). A shard's position is its highest ``shard_pos``
+        below ``cursor`` plus one - the number of its records there, unless the
+        index repeats one (not counted twice)."""
         with self._lock:
             if not 0 <= int(cursor) <= len(self._entries):
                 raise SampleBufferError(f"cursor {cursor} outside the index (0..{len(self._entries)})")
-            return dict(sorted(Counter(s for s in self._shard_of[:int(cursor)] if s is not None).items()))
+            out: dict[str, int] = {}
+            for shard, shard_pos in zip(self._shard_of[:int(cursor)], self._shard_pos_of[:int(cursor)]):
+                if shard is not None and shard_pos >= out.get(shard, 0):
+                    out[shard] = shard_pos + 1
+            return dict(sorted(out.items()))
 
     def __len__(self) -> int:
         with self._lock:
@@ -709,14 +797,20 @@ class FileSampleBuffer:
             elif consumer != self._consumer:
                 raise SampleBufferError(f"buffer is read by {self._consumer!r}, not {consumer!r}")
             self.refresh()
-            out: list[Selected] = []
-            pos = self._read
-            while len(out) < max(0, int(limit)) and pos < len(self._entries):
-                if self.lane is None or self.lane.owns(pos):
-                    out.append(Selected(pos, self._entries[pos]))
-                pos += 1
-            self._read = pos
+            out, self._read = self._next_entries(limit)
             return out
+
+    def _next_entries(self, limit: int) -> tuple[list[Selected], int]:
+        """(the next ``limit`` entries from the read cursor, the cursor after them).
+        A position of another lane, or one that repeats a merged shard record, is
+        passed over: the cursor moves past it, it is not returned."""
+        out: list[Selected] = []
+        pos = self._read
+        while len(out) < max(0, int(limit)) and pos < len(self._entries):
+            if (self.lane is None or self.lane.owns(pos)) and pos not in self._skipped:
+                out.append(Selected(pos, self._entries[pos]))
+            pos += 1
+        return out, pos
 
     def peek(self, limit: int) -> list[Selected]:
         """The entries :meth:`select` would return next (after a refresh), without
@@ -724,13 +818,7 @@ class FileSampleBuffer:
         payloads)."""
         with self._lock:
             self.refresh()
-            out: list[Selected] = []
-            pos = self._read
-            while len(out) < max(0, int(limit)) and pos < len(self._entries):
-                if self.lane is None or self.lane.owns(pos):
-                    out.append(Selected(pos, self._entries[pos]))
-                pos += 1
-            return out
+            return self._next_entries(limit)[0]
 
     def commit_consumed(self, cursor: int) -> None:
         """Every sample below ``cursor`` is trained; the next cut records it."""
@@ -748,7 +836,10 @@ class FileSampleBuffer:
         shard records not merged yet (their end counts as the data end)."""
         with self._lock:
             self.refresh()
-            pending = self._entries[self._read if start is None else max(0, int(start)):]
+            first = self._read if start is None else max(0, int(start))
+            pending = self._entries[first:]
+            if self._skipped:  # a repeated merged record is no backlog: nobody trains on it
+                pending = [e for pos, e in enumerate(pending, start=first) if pos not in self._skipped]
             ended = self._ended
             if unmerged is not None:
                 extra, shards_ended = unmerged.pending(self.shard_positions(len(self._entries)))
