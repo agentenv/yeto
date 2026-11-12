@@ -1190,7 +1190,9 @@ class BatchReader:
                     if position is not None:
                         stale_positions.append(position)
                     continue
-                if id(item) not in judged_before and self._is_unidentified(item.entry):
+                # judged again too: an item deferred behind another was never judged (and the
+                # check has no effect on an item it once let through)
+                if self._is_unidentified(item.entry):
                     continue
                 verdict = self._gate_verdict(item)
                 if verdict is _DEFER:

@@ -269,6 +269,21 @@ def test_a_restore_after_a_lease_outage_trains_no_group_twice(tmp_path):
     assert sorted(first + after) == [0, 2, 3, 4]  # every trainable group exactly once (1 is stale)
 
 
+def test_a_group_waiting_behind_a_deferred_one_is_checked_for_an_unidentified_policy(tmp_path):
+    """Strict order: position 2 (s1) waits unjudged behind the deferred 0; once the
+    lease reads again it is judged in full, the unidentified-policy check included."""
+    root, store = _fenced_buffer(tmp_path)
+    reader, _, _ = _outage_reader(root, store, recover_after=2)
+
+    def unidentified(entry):
+        record = entry.sampler_round or {}
+        return record.get("sampler") == "s1" and record.get("rollout_id") == 0  # position 2
+
+    reader._is_unidentified = unidentified  # noqa: SLF001
+    out, _ = reader.take(0, 3, current_version=None)
+    assert [position for position, _ in out] == [0, 3, 4]
+
+
 def test_miles_reader_waits_for_a_deferred_group_at_the_data_end(tmp_path):
     """The only group left waits for its lease (no exhaustion, no stale count) and
     is trained once the lease reads again."""
