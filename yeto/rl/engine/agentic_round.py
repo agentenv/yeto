@@ -262,6 +262,9 @@ class _Group:
     retries: list[int] = dataclasses.field(default_factory=list)  # infra retries per slot
     retry_reasons: list[str] = dataclasses.field(default_factory=list)
     abandoned: bool = False  # a drain timed out on it: no slot of it runs again
+    # failed engine loads counted when its first trial started (AgenticRound.weights_state);
+    # None: a trial of it started while the engine held unchecked weights
+    weights_mark: int | None = 0
 
     def __post_init__(self) -> None:
         n = len(self.sessions)
@@ -387,6 +390,11 @@ class AgenticRound(EngineRound):
         # then for that release (the follower loads it even when a newer one was
         # published meanwhile).
         self.release_ready: Callable[[], int | bool] = lambda: True
+        # (ready, failed loads): whether the engine holds checked weights and how many loads
+        # failed after touching it (build_engine_sampler: the loader's). A group whose trials
+        # ran across such a failure is not written: a forced or live load that failed part
+        # way leaves served_version at the old version while the weights are neither release.
+        self.weights_state: Callable[[], tuple[bool, int]] = lambda: (True, 0)
         # the stream: the loop thread starts and ends trials, the calling thread settles groups
         self._gate: Any = None
         self._queue: deque[_Group] = deque()  # groups with trials not started yet
@@ -520,9 +528,13 @@ class AgenticRound(EngineRound):
         if not group.pending:
             self._queue.remove(group)
         now = self.clock()
+        ready, failed = self.weights_state()
         if group.started_at is None:
             group.started_at, group.busy_at_start, group.drain_at_start = now, self._busy_now(), self._drain_now()
             self._open_started += 1
+            group.weights_mark = failed if ready else None
+        elif not ready:
+            group.weights_mark = None
         version = self.engine.served_version()
         group.start_versions[j] = version
         if group.version is None:
@@ -703,6 +715,11 @@ class AgenticRound(EngineRound):
             return None
         return int(seq)
 
+    def _ran_on_unchecked(self, group: _Group) -> bool:
+        """A load failed after touching the engine while ``group``'s trials ran, or one
+        of them started on unchecked weights (``weights_state``)."""
+        return group.weights_mark is None or self.weights_state()[1] != group.weights_mark
+
     def _wants_work(self) -> bool:
         return self.reclaimed() or (not self._queue and len(self._running) < self.max_in_flight)
 
@@ -865,8 +882,8 @@ class AgenticRound(EngineRound):
         if len(kept) < self.min_samples:
             reason = "below_min_samples"
             tally.small += 1
-        elif self.live and self.unchecked_in_flight():  # tokens of weights that failed a check
-            reason = "unchecked_weights_in_flight"
+        elif (self.live and self.unchecked_in_flight()) or self._ran_on_unchecked(group):
+            reason = "unchecked_weights_in_flight"  # tokens of weights that failed a load or check
         else:  # reclaimed / fenced / dispense_lost; waits while the store cannot say (EngineRound)
             reason = self._write_refusal(group.spot)
         if reason is not None and reason != "below_min_samples":

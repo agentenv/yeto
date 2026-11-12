@@ -326,6 +326,7 @@ class PortReleaseLoader:
         self.ready = False  # True after a load whose checks all passed
         self.failures = 0
         self._restart = False  # a failed load or check left the engine in an unknown state
+        self.unchecked_loads = 0  # loads or checks that failed after touching the engine (lifetime)
         self.last_load: dict[str, Any] | None = None  # reload_mode, pause_s, checks
 
     @property
@@ -397,6 +398,7 @@ class PortReleaseLoader:
         """A load or check failed: the engine holds unchecked weights, so it stops serving."""
         self.ready = False
         self._restart = True
+        self.unchecked_loads += 1
         self._count_failure(version, step, detail, engine_touched=True)
         raise ReleaseNotLoaded(f"v{version}: {step} failed: {str(detail)[:300]}",
                                reason=f"check_failed:{step}")
@@ -461,6 +463,11 @@ class PortReleaseLoader:
                           "load_and_check_s": round(self.clock() - started, 3),
                           "scheme": self.scheme, "checks": results, **dict(report.detail)}
         self.emit(LOAD_CHECKED_EVENT, policy_version=version, **self.last_load)
+
+    def weights_state(self) -> tuple[bool, int]:
+        """(``ready``, ``unchecked_loads``): a streaming round drops a group whose trials
+        ran across a load that failed after touching the engine (``AgenticRound.weights_state``)."""
+        return self.ready, self.unchecked_loads
 
     def loaded_fields(self) -> dict[str, Any]:
         """Extra fields of ``rl_sampler_policy_loaded`` (``SamplerLoop.loaded_fields``)."""

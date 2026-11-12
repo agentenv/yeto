@@ -592,6 +592,7 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
         follower.hold = engine_round.holds_weights
         engine_round.release_pending = follower.pending_seq
         engine_round.release_ready = follower.prefetch
+        engine_round.weights_state = loader.weights_state
     extra = {} if sleep is None else {"sleep": sleep}
     loop: SamplerLoop
     engine_round.unchecked_in_flight = lambda: loop.unchecked_in_flight
