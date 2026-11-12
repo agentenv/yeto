@@ -811,7 +811,13 @@ no ownership record precedes it. So:
   merges the shards, so a process that skipped the check gains nothing
   (`sample_buffer/stale_incarnation_groups`, event `rl_buffer_merge_skipped`
   with `reason: stale_incarnation`, the shard and the owner's epoch);
-- a fenced process cannot mark its shard as ended either;
+- a fenced process cannot mark its shard as ended either. A shard the pool
+  fenced therefore never reads as ended (before, a drained sampler that was
+  then fenced could still write its end mark). Nothing in a K3.1 run waits for
+  that: the trainer is started with the list of shard names
+  (`--rl-buffer-shards`), and the names not in use never end, so the buffer's
+  "every shard has ended" state is not reached by scaling down. The run ends
+  by the trainer's own step count and `yeto run down`;
 - no clock takes part: the control host's and the nodes' clocks may differ by
   any amount. `claimed_at` is information only.
 

@@ -20,6 +20,7 @@ from yeto.rl.engine.sample_buffer import (
     FileSampleBuffer,
     ObjectIndex,
     UnmergedShards,
+    merge_shards,
     open_trainer_buffer,
     shard_index,
 )
@@ -298,3 +299,58 @@ def test_two_mergers_on_a_shared_directory_leave_every_record_once(tmp_path):
     restarted = open_trainer_buffer(store, batch_size=1, shards=SHARDS)
     assert len(restarted) == 6 and restarted.shard_positions(6) == {"a": 4, "b": 2}
     assert restarted.duplicate_merged_records == 0
+
+
+class _Files:
+    """Store access of the convertible pool's head (``trainer_remote.StoreFiles``)."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def read(self, rel):
+        path = self.root / rel
+        return path.read_bytes() if path.exists() else None
+
+    def write(self, rel, data):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
+def _clock_stepped_back(tmp_path):
+    store = CheckpointStore(tmp_path)
+    shard = FileSampleBuffer(store, batch_size=1, index=shard_index("a"))
+    shard.append(SampleIndexEntry("a0", 0, "", 1, 100.0))
+    shard.append(SampleIndexEntry("a1", 0, "", 1, 50.0))  # the sampler's wall clock stepped back
+    shard.append(SampleIndexEntry("a2", 0, "", 1, 60.0))
+    return store
+
+
+def test_the_head_merge_keeps_a_shard_in_its_own_order_when_its_clock_stepped_back(tmp_path):
+    """``merge_shards()`` sorted one batch by ``appended_at`` across and inside the
+    shards: the later record went in first, and a reader that takes a record below
+    its shard's highest merged position for a repeat never selected the earlier one."""
+    store = _clock_stepped_back(tmp_path)
+    assert merge_shards(_Files(tmp_path), ["a"]) == 3
+    lines = [json.loads(line) for line in (tmp_path / "sample-buffer" / "index.jsonl").read_text().splitlines()]
+    assert [(r["shard_pos"], r["sample_id"]) for r in lines] == [(0, "a0"), (1, "a1"), (2, "a2")]
+    reader = FileSampleBuffer(store, batch_size=1, create_index=False)
+    assert [s.entry.sample_id for s in reader.select("trainer", 10)] == ["a0", "a1", "a2"]
+    assert reader.duplicate_merged_records == 0 and reader.unmerged_shard_gaps == 0
+
+
+def test_an_index_merged_out_of_shard_order_is_read_with_every_record(tmp_path):
+    """An index the older ``merge_shards()`` wrote: a1 a2 a0. The record that fills a
+    position passed over earlier is a real record; a true repeat is still passed over."""
+    store = _clock_stepped_back(tmp_path)
+    shard_lines = (tmp_path / "sample-buffer" / "shards" / "a.jsonl").read_text().splitlines()
+    by_pos = {r["pos"]: r for r in map(json.loads, shard_lines)}
+    order = [1, 2, 0, 2]  # as sorted by appended_at, then a2 once more (a repeat)
+    index = [{**by_pos[shard_pos], "shard": "a", "shard_pos": shard_pos, "pos": pos}
+             for pos, shard_pos in enumerate(order)]
+    (tmp_path / "sample-buffer" / "index.jsonl").write_text("".join(json.dumps(r) + "\n" for r in index))
+    reader = FileSampleBuffer(store, batch_size=1, create_index=False)
+    assert [(s.position, s.entry.sample_id) for s in reader.select("trainer", 10)] == [
+        (0, "a1"), (1, "a2"), (2, "a0")]
+    assert reader.duplicate_merged_records == 1 and reader.unmerged_shard_gaps == 0
+    assert reader.shard_positions(4) == {"a": 3}
