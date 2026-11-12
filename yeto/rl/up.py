@@ -51,7 +51,8 @@ Run config (JSON; paths may use ``~``)::
                 "silence_min": 30, "release_nc_on_breach": false}}
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
-whose process is alive is not started again.
+whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
+that dies with its process); an in-process ``up`` removes a STOP flag an earlier stop left.
 
 ``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
 changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
@@ -65,6 +66,7 @@ finds the pool holding T); ``yeto rollout scale`` is the same command.
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -82,6 +84,8 @@ STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 FORCE_FACTOR = 1.2
 _FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already reported
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
+# ``yeto launch --cluster-prefix`` default (yeto.cli): the trainer's run name without the flag
+LAUNCH_DEFAULT_NAME = "yeto"
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
 
@@ -183,6 +187,29 @@ class Run:
     def mark(self, step: str, **fields: Any) -> None:
         self.state.setdefault("steps", {})[step] = {"at": _now(), **fields}
         self.save()
+
+    def lock_up(self) -> int | None:
+        """Hold ``up.lock`` of the run for the life of this process: a second ``yeto run up``
+        of the same run while one still runs would start a second monitor (two breakers,
+        two starvation stops) and both rewrite ``state.json`` from their own copy. An
+        ``flock`` dies with its process, so a crashed ``up`` leaves no stale lock. None:
+        the lock is ours; else the PID of the ``up`` that holds it (0: unknown)."""
+        if getattr(self, "_up_lock", None) is not None:
+            return None
+        fh = open(self.dir / "up.lock", "a+")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            text = fh.read().strip()
+            fh.close()
+            return int(text) if text.isdigit() else 0
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+        self._up_lock = fh
+        return None
 
     # -- processes
     def _cmd(self, argv: list[str], *, log: str, timeout: float | None = None) -> int:
@@ -314,6 +341,10 @@ class Run:
 
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("YETO_NC_", "NC_"))})
         if self.in_process:
+            flag = self.dir / "STOP"
+            if flag.exists():  # left by an earlier stop: the new controller would drain every pool at once
+                _log(f"removing the STOP flag {flag} an earlier stop left: this run up drives the pools again")
+                flag.unlink(missing_ok=True)
             self.start_controller()
             self.state.setdefault("t0", time.time())
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
@@ -426,7 +457,8 @@ class Run:
         names the trainer's GPU, so its cost is priced), the cost bar's cap
         (``budget.usd``) and an optional price table (``dashboard.prices``)."""
         dash = self.cfg.get("dashboard") or {}
-        argv = ["--store", self.cfg["store"], "--run", self.run]
+        # the launcher writes its records under ~/.yeto/runs/<its --cluster-prefix>
+        argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name()]
         usd = (self.cfg.get("budget") or {}).get("usd")
         if usd:
             argv += ["--budget", str(usd)]
@@ -628,7 +660,7 @@ class Run:
             done = FINISHED.findall(tail)
             if done and done[-1][0] == "SUCCEEDED" and done[-1][1] == "0":
                 self.state["trainer_finished"] = self.state.get("trainer_finished") or _now()
-            if not done and not _worker_alive(self.run):  # a killed log streamer: the worker may still run
+            if not done and not _worker_alive(self.trainer_launch_name()):  # a killed log streamer: the worker may still run
                 why = "trainer: launcher exited without a result"
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
@@ -796,7 +828,7 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        self._cmd(self.yeto("down", self.run), log="down.log", timeout=900)
+        self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
         stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
         _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
@@ -1001,14 +1033,16 @@ class Run:
         return verdict.reason if verdict.state == STOP else None
 
     def trainer_launch_name(self) -> str:
-        """The trainer launch's run name (its ``--cluster-prefix``; the run name without one)."""
+        """The trainer launch's run name: its ``--cluster-prefix`` (``yeto launch`` names the
+        run ``yeto`` without one). ``yeto down`` / the STOP flag / the worker check use it."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
-        for i, a in enumerate(argv):
+        name = LAUNCH_DEFAULT_NAME
+        for i, a in enumerate(argv):  # argparse: the last one wins
             if a == "--cluster-prefix" and i + 1 < len(argv):
-                return argv[i + 1]
-            if a.startswith("--cluster-prefix="):
-                return a.split("=", 1)[1]
-        return self.run
+                name = argv[i + 1]
+            elif a.startswith("--cluster-prefix="):
+                name = a.split("=", 1)[1]
+        return name
 
     def starvation_stop(self, why: str, poll_s: float = 30.0) -> None:
         """Stop a starving trainer the way a budget stop does: the run's STOP flag (``yeto
@@ -1122,7 +1156,7 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        ok &= self._cmd(self.yeto("down", self.run), log="down.log", timeout=900) == 0
+        ok &= self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) == 0
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) == 0
         if self.envs:
@@ -1395,6 +1429,11 @@ def main(args: Any) -> int:
     if run.in_process and args.no_monitor:
         _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
              "(or set controller: subprocess)")
+        return 2
+    holder = run.lock_up()
+    if holder is not None:
+        _log(f"another `yeto run up` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
+             "nothing started; it already drives this run")
         return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
