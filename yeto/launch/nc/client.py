@@ -356,9 +356,13 @@ class NcClient:
             self.ledger.mark(ticket, ended=True)
             return {"ticket": ticket, "state": current.get("state"), "already": True}
         doc = self._call([*_tool("manage"), "delete", "--account", str(self.account), "--yes"])
+        if doc.get("ok") is False:
+            raise NcError(f"ticket {ticket}: delete failed: {doc.get('error') or doc}")
+        absent = 0  # "no order" answers in a row: one alone does not confirm the release
         for _ in range(12):
             t = self.status().get("ticket") or {}
-            if t.get("id") in (None, ticket) and t.get("state") not in OPEN_STATES:
+            absent = absent + 1 if t.get("id") is None else 0
+            if (t.get("id") == ticket or absent >= 2) and t.get("state") not in OPEN_STATES:
                 self.ledger.mark(ticket, ended=True, ended_at=t.get("ended_at"), end_reason=t.get("end_reason"))
                 return {"ticket": ticket, "state": t.get("state", "ended"), "ended_at": t.get("ended_at"),
                         "end_reason": t.get("end_reason"), "released": doc.get("released")}

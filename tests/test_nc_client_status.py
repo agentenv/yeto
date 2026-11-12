@@ -130,3 +130,32 @@ def test_a_release_of_a_ticket_the_account_no_longer_holds_is_recorded_as_alread
     c.ledger.add(1, "abc", run="run-a")
     assert c.delete("abc")["already"] is True
     assert c.ledger.run_rows("run-a") == [] and run.manage == []
+
+
+def test_one_no_order_answer_after_the_delete_call_does_not_confirm_the_release(tmp_path):
+    """delete sent, without effect | status: no order (one wrong answer) | status: active
+    -> the ticket still bills; the ledger must not say it ended."""
+    run = Script(status_of(ACTIVE), status_of(None), status_of(ACTIVE))
+    c = client(run, tmp_path)
+    c.ledger.add(1, "abc", run="run-a")
+    with pytest.raises(ncc.NcError, match="does not read ended"):
+        c.delete("abc")
+    assert [r["ticket"] for r in c.ledger.run_rows("run-a")] == ["abc"]
+
+
+def test_two_no_order_answers_after_the_delete_call_confirm_the_release(tmp_path):
+    run = Script(status_of(ACTIVE), status_of(None))
+    c = client(run, tmp_path)
+    c.ledger.add(1, "abc", run="run-a")
+    assert c.delete("abc")["state"] == "ended" and c.ledger.run_rows("run-a") == []
+
+
+def test_a_delete_call_the_tool_refused_is_a_failed_release(tmp_path):
+    run = Script(status_of(ACTIVE), status_of(None))
+    run_manage = lambda argv, **kw: (  # noqa: E731
+        answer({"ok": False, "error": "gateway"}) if argv[0] == "nc-manage" else run(argv, **kw))
+    c = client(run_manage, tmp_path)
+    c.ledger.add(1, "abc", run="run-a")
+    with pytest.raises(ncc.NcError, match="gateway"):
+        c.delete("abc")
+    assert [r["ticket"] for r in c.ledger.run_rows("run-a")] == ["abc"]
