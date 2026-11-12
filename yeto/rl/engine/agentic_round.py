@@ -867,12 +867,8 @@ class AgenticRound(EngineRound):
             tally.small += 1
         elif self.live and self.unchecked_in_flight():  # tokens of weights that failed a check
             reason = "unchecked_weights_in_flight"
-        elif self.reclaimed():  # leaving: the replacement owns the shard from now on
-            reason = "reclaimed"
-        elif self.write_fenced():  # a newer incarnation holds the lease
-            reason = "fenced"
-        elif group.spot is not None and not self._still_holds(group.spot):  # the dispenser gave it out again
-            reason = "dispense_lost"
+        else:  # reclaimed / fenced / dispense_lost; waits while the store cannot say (EngineRound)
+            reason = self._write_refusal(group.spot)
         if reason is not None and reason != "below_min_samples":
             self.dropped_groups += 1
             tally.dropped += 1
@@ -917,12 +913,6 @@ class AgenticRound(EngineRound):
                   drain_wait_s=group.drain_s, weight_switch=self.weight_switch,
                   infra_retries=list(group.retries), retry_reasons=list(group.retry_reasons),
                   retried_trials=len(group.retry_reasons), lost_trials=sum(lost.values()))
-
-    def _still_holds(self, position: int) -> bool:
-        """The prompts' dispenser still gives this island the position (a store
-        ledger: no later attempt was claimed); True for a source without the check."""
-        check = getattr(self.prompts, "still_holds", None)
-        return True if not callable(check) else bool(check(position))
 
     def _outcomes(self) -> dict[str, int]:
         """The admission counters: totals since the last round event, in flight now."""

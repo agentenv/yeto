@@ -43,6 +43,17 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 and ``deferred_s`` (how long the in-flight rule deferred it) and ``forced``
 True when the follower's deferral bound (``max_defer_s``) loaded it.
 
+Store reads of the loop are polls: the newest release (``LATEST``), the
+buffer's own index (the backlog, the round's group count). One that fails is no
+verdict and never ends the island: the served weights stay
+(``rl_sampler_release_not_loaded``, reason ``latest_unread``; a ``LATEST`` that is
+there but is no release record, ``damaged``, ends the island after
+``max_damaged_latest_reads`` reads in a row: the trainer rewrites it with every
+release, so one that stays damaged is not an outage), a round is not
+admitted while the backlog is unknown, and ``rl_sampler_store_read_failed`` /
+``rl_sampler_store_read_ok`` mark the outage on the tape; the next poll reads
+again. Only a failed group write ends a round.
+
 After the last round it calls ``generate.flush()`` when the round has one (a
 streaming agentic round writes the groups still in flight) and marks the data end, so the trainer stops after reading
 the rest. ``num_rollouts`` None: no last round; the loop generates until
@@ -61,11 +72,14 @@ from contextlib import contextmanager
 from typing import Any
 
 from .merged_release import fastest_lane_read
-from .policy_release import PolicyFollower, ReleaseNotLoaded
-from .sample_buffer import buffer_dir, read_read_position
+from .policy_release import LATEST_UNREAD, PolicyFollower, ReleaseNotLoaded
+from .sample_buffer import SampleBufferError, buffer_dir, read_read_position
 from .task_dispense import DispenseEnded, DispenseFencedEnd
 
 DEFAULT_POLL_S = 5.0
+READ_FAILED_EVENT = "rl_sampler_store_read_failed"  # a store poll of the loop failed (first of an outage)
+READ_OK_EVENT = "rl_sampler_store_read_ok"  # ... and the first one that worked again
+DEFAULT_MAX_DAMAGED_LATEST_READS = 120  # reads in a row of a LATEST that does not parse (10 min at poll_s 5)
 
 
 def heartbeat_read(beat: Mapping[str, Any], seen: Any, shard: str | None, read: int) -> int:
@@ -140,6 +154,31 @@ class SamplerLoop:
         # so the NC pool's stall check (elastic stall_s) never takes a paused sampler for a
         # crashed one and restarts or replaces it while the trainer is away
         self.heartbeat_s = WAIT_HEARTBEAT_S
+        self.read_failures = 0  # store polls of the loop that failed
+        self.max_damaged_latest_reads = DEFAULT_MAX_DAMAGED_LATEST_READS
+        self._damaged_latest = 0  # in a row
+        self._read_failing: dict[str, tuple[float, int]] = {}  # what -> (since, failures) of an outage
+
+    def _read(self, what: str, read: Callable[[], Any], default: Any = None) -> Any:
+        """``read()``, a poll of the store (module doc): ``default`` when it fails.
+        A verdict about the buffer's content (``SampleBufferError``) is not a failed
+        read and is raised."""
+        try:
+            value = read()
+        except SampleBufferError:
+            raise
+        except Exception as error:  # noqa: BLE001 - unknown this time: the next poll reads again
+            self.read_failures += 1
+            since, failures = self._read_failing.get(what, (time.monotonic(), 0))
+            self._read_failing[what] = (since, failures + 1)
+            if not failures:
+                self.emit(READ_FAILED_EVENT, what=what, error=f"{type(error).__name__}: {error}"[:300])
+            return default
+        if what in self._read_failing:
+            since, failures = self._read_failing.pop(what)
+            self.emit(READ_OK_EVENT, what=what, failed_reads=failures,
+                      outage_s=round(time.monotonic() - since, 1))
+        return value
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -176,6 +215,11 @@ class SamplerLoop:
         try:
             loaded = self.follower.refresh()
         except ReleaseNotLoaded as error:
+            unread = error.reason == LATEST_UNREAD
+            self.read_failures += int(unread)
+            self._damaged_latest = self._damaged_latest + 1 if unread and error.fields.get("damaged") else 0
+            if self._damaged_latest >= self.max_damaged_latest_reads:
+                raise
             seen = self.follower.last_seen
             mark = (None if seen is None else seen.seq, error.reason, tuple(sorted(error.fields.items())))
             if mark != self._not_loaded:  # one event per release, cause and fields, not per poll
@@ -184,6 +228,9 @@ class SamplerLoop:
                           detail=str(error)[:300], policy_version=self.follower.version,
                           **error.fields)
             return
+        self._damaged_latest = 0
+        if self._not_loaded is not None and self._not_loaded[1] == LATEST_UNREAD:
+            self._not_loaded = None  # read again: a later outage is reported anew
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
@@ -230,6 +277,7 @@ class SamplerLoop:
         """True when the round may start; False when asked to stop while waiting."""
         waiting_since = None
         waiting_policy_since = None
+        unread_since = None
         beat = [time.monotonic()]
 
         def heartbeat(reason: str, since: float, **fields: Any) -> None:
@@ -258,7 +306,15 @@ class SamplerLoop:
                           waited_s=round(time.monotonic() - waiting_policy_since, 3),
                           policy_version=self.follower.version)
                 waiting_policy_since = None
-            backlog = self.backlog()
+            backlog = self._read("backlog", self.backlog)
+            if backlog is None:  # the buffer was not read: no round starts on an unknown backlog
+                if unread_since is None:
+                    unread_since = time.monotonic()
+                heartbeat("store_unread", unread_since)
+                if self.should_stop():
+                    return False
+                self.sleep(self.poll_s)
+                continue
             if backlog < self.max_backlog_groups:
                 if waiting_since is not None:
                     self.emit("rl_sampler_admitted", rollout_id=rollout_id, backlog_groups=backlog,
@@ -307,7 +363,7 @@ class SamplerLoop:
                 print(f"[engine-sampler] data ended: {error}", flush=True)
                 self.emit("rl_sampler_data_ended", rollout_id=rollout_id, rounds=done, detail=str(error)[:200])
                 break
-            self.buffer.refresh()
+            self._read("buffer", self.buffer.refresh)  # the round's groups are written; this only counts them
             generate_s = self.clock() - started
             self.emit("rl_sampler_round", rollout_id=rollout_id, policy_version=version,
                       version_lag=lag, releases=self.follower.counters.to_dict(),
@@ -320,7 +376,7 @@ class SamplerLoop:
         if callable(flush):  # groups of a streaming round still in flight
             with self.follower.generating(), self._live_refresh():
                 flush()
-            self.buffer.refresh()
+            self._read("buffer", self.buffer.refresh)
         self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done

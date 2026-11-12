@@ -35,10 +35,27 @@ it is among the first ``sealed[incarnation]`` entries of that incarnation in
 buffer order, or its ``appended_at`` is older than ``claimed_at`` minus a clock
 margin. Entries of the holder, of an incarnation the lease does not know (a
 newer one whose lease has not reached the trainer yet), and entries without a
-round record are accepted. No lease: everything is accepted (older runs).
+round record are accepted. No lease: everything is accepted (older runs). A
+lease read that fails is not "no lease": the gate keeps the lease it read last
+and reads again at the next verdict; a sampler whose lease it never read is
+read again (``unread_retry_s`` apart, for at most ``unread_wait_s``) before any
+of its entries gets a verdict, then :class:`LeaseUnreadable` is raised (nothing
+of a possibly fenced incarnation is let through on a failed read).
 
 A read failure never fences (fail open on the sampler; the gate is the second
-line). Nothing here talks to a cloud.
+line): the watcher and the write check count it and read again at their next
+turn. Two bounds on that: a lease that could not be read for ``max_unread_s``
+(default 60 s, two watcher polls) no longer allows a group write
+(:meth:`IncarnationLease.check_before_write` refuses until a read succeeds
+again: an incarnation that cannot know whether it was fenced does not write).
+Inside that window a fenced incarnation whose reads fail can still write; only
+the gate's clock comparison drops those groups. This is the weak point of a
+fence that is a record the writer must read; a shard ownership record that the
+write itself is conditioned on removes it. And
+:meth:`IncarnationLease.claim` never writes over a lease it could not read (the
+new record would name nothing ``superseded`` and the gate would train what the
+fenced incarnation writes afterwards): it reads again a few times, then raises
+:class:`LeaseUnreadable`. Nothing here talks to a cloud.
 """
 
 from __future__ import annotations
@@ -59,6 +76,16 @@ STALE_REASON = "stale_incarnation"
 DEFAULT_POLL_S = 30.0
 DEFAULT_WRITE_CHECK_S = 1.0
 DEFAULT_CLOCK_MARGIN_S = 60.0
+DEFAULT_MAX_UNREAD_S = 60.0  # a lease unread for longer allows no group write (two watcher polls)
+CLAIM_READ_TRIES = 4  # reads of the previous lease before a claim gives up
+CLAIM_READ_BACKOFF_S = 0.5  # doubled after every failed read
+GATE_UNREAD_RETRY_S = 2.0  # the trainer's gate: a lease never read so far is read again this often
+GATE_UNREAD_WAIT_S = 600.0  # ... for at most this long, then LeaseUnreadable
+
+
+class LeaseUnreadable(RuntimeError):
+    """The lease record could not be read (a store error or a torn record), which
+    is not the same as "there is no lease"."""
 
 
 def lease_key(sampler: str) -> str:
@@ -71,27 +98,42 @@ def _put(store: Any, key: str, record: Mapping[str, Any]) -> None:
     _put_record(store, key, dict(record))
 
 
+def _load(store: Any, key: str) -> dict[str, Any] | None:
+    objects = getattr(store, "objects", None)
+    if objects is not None:
+        data = objects.read(key)
+    elif callable(getattr(store, "read", None)):  # a bare ObjectStore
+        data = store.read(key)
+    else:
+        reload = getattr(store, "reload", None)
+        if callable(reload):
+            reload()
+        path = Path(store.root) / key
+        data = path.read_bytes() if path.exists() else None
+    if data is None:
+        return None
+    doc = json.loads(data)
+    return doc if isinstance(doc, dict) else None
+
+
 def read_record(store: Any, key: str) -> dict[str, Any] | None:
     """The JSON record at ``key`` under the store root (an object store or a
     directory store, after its reload), None when absent or unreadable."""
-    objects = getattr(store, "objects", None)
     try:
-        if objects is not None:
-            data = objects.read(key)
-        elif callable(getattr(store, "read", None)):  # a bare ObjectStore
-            data = store.read(key)
-        else:
-            reload = getattr(store, "reload", None)
-            if callable(reload):
-                reload()
-            path = Path(store.root) / key
-            data = path.read_bytes() if path.exists() else None
-        if data is None:
-            return None
-        doc = json.loads(data)
-        return doc if isinstance(doc, dict) else None
+        return _load(store, key)
     except (OSError, ValueError):
         return None
+
+
+def load_record(store: Any, key: str) -> dict[str, Any] | None:
+    """:func:`read_record` that tells "absent" (None) from "could not be read"
+    (:class:`LeaseUnreadable`, whatever the store raised: an S3 client's errors
+    are not ``OSError`` subclasses: a 5xx after its retries, an expired credential, no
+    route to the endpoint, a body cut short)."""
+    try:
+        return _load(store, key)
+    except Exception as error:  # noqa: BLE001 - any store error is "unread", never "absent"
+        raise LeaseUnreadable(f"{key}: {type(error).__name__}: {error}") from error
 
 
 def read_lease(store: Any, sampler: str) -> dict[str, Any] | None:
@@ -114,27 +156,52 @@ class IncarnationLease:
     def __init__(self, store: Any, sampler: str, incarnation: str, *,
                  write_check_s: float = DEFAULT_WRITE_CHECK_S,
                  clock: Callable[[], float] = time.time,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic,
+                 max_unread_s: float | None = DEFAULT_MAX_UNREAD_S) -> None:
+        """``max_unread_s``: the longest the lease may stay unread before a group
+        write is refused (module doc); None: no bound."""
         self.store = store
         self.sampler = str(sampler)
         self.incarnation = str(incarnation)
         self.write_check_s = float(write_check_s)
+        self.max_unread_s = None if max_unread_s is None else float(max_unread_s)
         self.clock = clock
         self.monotonic = monotonic
         self.holder: str | None = None  # who the last read named
         self.fenced_by: str | None = None
         self.read_failures = 0
         self.reads = 0
+        self.unread_refusals = 0  # group writes refused because the lease stayed unread
         self._checked_at = -float("inf")
+        self._read_at: float | None = None  # the last time the lease was read (or written by claim)
         self._lock = threading.Lock()
 
     @property
     def fenced(self) -> bool:
         return self.fenced_by is not None
 
-    def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = ()) -> dict[str, Any]:
-        """Write the lease naming this incarnation (module doc); returns the record."""
-        previous = read_lease(self.store, self.sampler) or {}
+    def _previous(self, tries: int, sleep: Callable[[float], None]) -> dict[str, Any]:
+        """The lease a claim replaces ({}: none). Never {} for one that could not be read."""
+        delay = CLAIM_READ_BACKOFF_S
+        for attempt in range(max(1, int(tries))):
+            try:
+                return load_record(self.store, lease_key(self.sampler)) or {}
+            except LeaseUnreadable as error:
+                self.read_failures += 1
+                if attempt + 1 >= max(1, int(tries)):
+                    raise LeaseUnreadable(
+                        f"lease of {self.sampler} not claimed for {self.incarnation}: the previous lease "
+                        f"could not be read in {attempt + 1} tries ({error})") from error
+                sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")
+
+    def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = (), *,
+              read_tries: int = CLAIM_READ_TRIES, sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
+        """Write the lease naming this incarnation (module doc); returns the record.
+        :class:`LeaseUnreadable` when the previous lease could not be read in
+        ``read_tries`` reads: nothing is written then."""
+        previous = self._previous(read_tries, sleep)
         superseded: list[str] = []
         for inc in [*previous.get("superseded", ()), previous.get("incarnation"), *earlier]:
             if inc is not None and str(inc) != self.incarnation and str(inc) not in superseded:
@@ -148,6 +215,7 @@ class IncarnationLease:
                   "superseded": superseded, "sealed": sealed}
         _put(self.store, lease_key(self.sampler), record)
         self.holder = self.incarnation
+        self._read_at = self.monotonic()
         return record
 
     def poll(self) -> bool:
@@ -157,27 +225,50 @@ class IncarnationLease:
             if self.fenced_by is not None:
                 return True
             self.reads += 1
-            lease = read_lease(self.store, self.sampler)
+            try:
+                lease = load_record(self.store, lease_key(self.sampler))
+            except LeaseUnreadable:
+                lease = None
             if lease is None:
                 self.read_failures += 1
                 return False
+            self._read_at = self._checked_at
             self.holder = str(lease.get("incarnation"))
             if self.holder != self.incarnation:
                 self.fenced_by = self.holder
             return self.fenced_by is not None
 
+    def unread_s(self) -> float:
+        """Seconds since the lease was last read (0.0 before the first read or claim)."""
+        return 0.0 if self._read_at is None else max(0.0, self.monotonic() - self._read_at)
+
+    def unknown(self) -> bool:
+        """Not known to be fenced, but the lease stayed unread for longer than
+        ``max_unread_s``: this incarnation cannot tell whether it still holds it."""
+        return (self.fenced_by is None and self.max_unread_s is not None
+                and self.unread_s() > self.max_unread_s)
+
     def check_before_write(self) -> bool:
         """Before a group write: the cached verdict when read in the last
-        ``write_check_s`` seconds, else a fresh :meth:`poll`."""
+        ``write_check_s`` seconds, else a fresh :meth:`poll`. True: do not write
+        (fenced, sticky; or :meth:`unknown`, until a read succeeds again)."""
         if self.fenced_by is not None:
             return True
-        if self.monotonic() - self._checked_at < self.write_check_s:
-            return False
-        return self.poll()
+        if self.monotonic() - self._checked_at >= self.write_check_s and self.poll():
+            return True
+        if self.unknown():
+            self.unread_refusals += 1
+            return True
+        return False
 
     def detail(self) -> dict[str, Any]:
         return {"fenced": "superseded", "superseded_by": self.fenced_by, "lease_reads": self.reads,
                 "lease_read_failures": self.read_failures}
+
+    def health(self) -> dict[str, Any]:
+        """The read counters (the sampler's ``rl_sampler_store_read_failed`` / ``_ok`` events, ``what: lease``)."""
+        return {"lease_reads": self.reads, "lease_read_failures": self.read_failures,
+                "lease_unread_s": round(self.unread_s(), 1), "lease_unread_refusals": self.unread_refusals}
 
 
 class IncarnationGate:
@@ -185,16 +276,23 @@ class IncarnationGate:
 
     ``entries()``: the reader's entries in buffer order (``FileSampleBuffer.entries``);
     ``refresh_s``: how often the leases are read again (an unknown incarnation
-    forces a read at most that often too)."""
+    forces a read at most that often too). ``unread_retry_s`` / ``unread_wait_s``:
+    a lease never read so far is read again that often, for at most that long
+    (module doc)."""
 
     def __init__(self, store: Any, entries: Callable[[], list[Any]], *, refresh_s: float = 30.0,
                  clock_margin_s: float = DEFAULT_CLOCK_MARGIN_S,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic,
+                 unread_retry_s: float = GATE_UNREAD_RETRY_S, unread_wait_s: float = GATE_UNREAD_WAIT_S,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.store = store
         self.entries = entries
         self.refresh_s = float(refresh_s)
         self.clock_margin_s = float(clock_margin_s)
         self.monotonic = monotonic
+        self.unread_retry_s, self.unread_wait_s = float(unread_retry_s), float(unread_wait_s)
+        self.sleep = sleep
+        self.read_failures = 0
         self._leases: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._seen: Counter[tuple[str, str]] = Counter()  # (sampler, incarnation) over positions < _upto
         self._upto = 0
@@ -204,7 +302,22 @@ class IncarnationGate:
         now = self.monotonic()
         cached = self._leases.get(sampler)
         if cached is None or now - cached[0] >= self.refresh_s or (force and now - cached[0] >= 1.0):
-            cached = (now, read_lease(self.store, sampler))
+            waited = 0.0
+            while True:
+                try:
+                    cached = (now, load_record(self.store, lease_key(sampler)))
+                    break
+                except LeaseUnreadable as error:
+                    self.read_failures += 1
+                    if cached is not None:  # the lease read last stands; read again unread_retry_s later
+                        self._leases[sampler] = (now - max(0.0, self.refresh_s - self.unread_retry_s), cached[1])
+                        return cached[1]
+                    if waited >= self.unread_wait_s:
+                        raise LeaseUnreadable(f"lease of {sampler} not read in {waited:.0f} s; its entries "
+                                              f"get no verdict on an unread lease ({error})") from error
+                    self.sleep(self.unread_retry_s)
+                    waited += self.unread_retry_s
+                    now = self.monotonic()
             self._leases[sampler] = cached
         return cached[1]
 
