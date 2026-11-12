@@ -1320,6 +1320,54 @@ The launcher was alive but produced no output for the silence window.
 Inspect `trainer.log` and the Modal app. Resume with `yeto run up` (section
 5.3). NC nodes are kept, so the restart is quick.
 
+**The tape shows `rl_buffer_damaged_payload_skipped`.**
+The trainer passed over groups whose payload object is missing or is not a
+group (cut short, not JSON, another schema). Each is consumed, not trained,
+and named in the event (`position`, `sample_id`, `payload_ref`, `reason`);
+the metric is `sample_buffer/damaged_payload_groups`. One or two are a damaged
+or deleted object. A payload the store failed to return (a throttle, a 5xx, a
+timeout) is never counted here: that read fails the round and is read again.
+
+**The trainer stopped with `DamagedPayloadLimit`.**
+*What you see.* The trainer's round fails with `DamagedPayloadLimit: N damaged
+payloads in this take (...)`, and it fails again at the same buffer position
+after every restart or resume. The limit is 8 damaged payloads in a row, or 8
+once they are more than half of the payloads the round decoded (default;
+`YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN`). Nothing was consumed: the watermark has
+not moved past these groups.
+
+*What it means.* Single damaged or deleted payloads are passed over and
+counted (`rl_buffer_damaged_payload_skipped`, above). This many together is a
+systematic cause: samplers of another code version writing another payload
+schema, a lifecycle or cleanup rule deleting `sample-buffer/payloads/`, or a
+trainer image that cannot decode what the samplers write.
+
+*How to look.* The error text names the last buffer position, its
+`sample_id` and the reason (`payload is missing`, `payload schema ... != ...`,
+`payload does not decode: ...`). Earlier rounds' events
+(`rl_buffer_damaged_payload_skipped`) and the trainer log name each group with
+its `position`, `sample_id`, `payload_ref` and `reason`. Look at those objects
+in the bucket under `sample-buffer/<payload_ref>`: whether they exist, their
+size, and the `schema` field of their JSON. A `sample_id` starts with the
+sampler's id and incarnation, which tells you which samplers wrote them.
+
+*What to do.* Fix the cause (bring the samplers and the trainer to the same
+code pack, section 5.4; remove the rule that deletes payloads) and resume. If
+the groups are lost for good and you want the run to go on without them, set
+`YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN` in the trainer's environment to a number
+above the damaged run, or to `0` for no limit, and resume. Passing them over
+means these tasks are not trained: they are already settled in the dispenser
+and are not generated again in this run. Set the variable back afterwards, so
+the next systematic fault stops the trainer again.
+
+**`rl_buffer_exhausted` carries `passed_over`.**
+The last round found no trainable group; `passed_over` counts what it
+consumed without training (`stale`, `stale_payload`, `stale_incarnation`,
+`quarantined`, `dropped_small`, `nonfinite_reward`, `damaged_payload`). The
+same counts end the error text of a round that waited `wait_s` without a new
+group. `stale_payload` are groups whose index record passed the age gate but
+whose payload holds an older policy version: the payload decides.
+
 **`down` reports `NOT verified`.**
 Read `down.log`. Usually a node release is still in progress. Run
 `python -m yeto.launch.nc pool-status --config <pool.json>` and, if nodes are
