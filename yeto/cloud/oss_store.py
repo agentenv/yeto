@@ -96,7 +96,7 @@ class OssObjectStore(S3ObjectStore):
             return True
         except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
             if self._code(error) in ("FileAlreadyExists", "PreconditionFailed"):
-                return False
+                return self._created_by_retry(error, key, data)
             if self._code(error) != "NotImplemented":
                 raise
             self.conditional_writes = False

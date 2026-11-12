@@ -459,7 +459,8 @@ class S3ObjectStore:
     ``create`` is a conditional put (``If-None-Match: *``). An endpoint that does
     not implement it answers ``NotImplemented``; the store then checks for the key
     and puts, which is safe only while one writer appends (the sample buffer's
-    current limit: one sampler island).
+    current limit: one sampler island). A refused create that the SDK had sent
+    more than once may be this writer's own (:meth:`_created_by_retry`).
 
     ``buffer_shards``: the sample buffer must not rely on ``create`` between
     writers on several hosts; each sampler island then writes its own shard
@@ -510,7 +511,7 @@ class S3ObjectStore:
             except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
                 code = self._code(error)
                 if code in _CREATE_LOST:
-                    return False
+                    return self._created_by_retry(error, key, data)
                 if code != "NotImplemented":
                     raise
                 self.conditional_writes = False
@@ -518,6 +519,24 @@ class S3ObjectStore:
             return False
         self.write(key, data)
         return True
+
+    def _created_by_retry(self, error: Exception, key: str, data: bytes) -> bool:
+        """Whether a conditional put refused as "the key exists" created the key itself.
+
+        The SDK sends a request again when its answer does not arrive (a read
+        timeout, a reset connection, a 5xx after the store applied the put). The
+        first send then created the object and the retry is refused, like a create
+        that lost to another writer (measured on R2: ``PreconditionFailed`` with
+        ``RetryAttempts`` 1, the object holding this writer's bytes). Taken for a
+        loss, a buffer writer appended its record a second time at the next
+        position and a dispenser claim stayed held by a sampler that did not know
+        it. So a refusal that follows a retry reads the object back: the same bytes
+        are this create (every record of this store names its writer or is the same
+        for every writer). A refusal on the first send costs no extra request."""
+        meta = getattr(error, "response", {}).get("ResponseMetadata") or {}
+        if not int(meta.get("RetryAttempts") or 0):
+            return False
+        return self.read(key) == bytes(data)
 
     def exists(self, key: str) -> bool:
         try:
