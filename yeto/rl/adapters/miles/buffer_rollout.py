@@ -1282,7 +1282,7 @@ class BatchReader:
             # with a group deferred, nothing behind it is selected: the round is padded
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
-                source_groups, source_tokens, position_sources, skipped)
+                source_groups, source_tokens, position_sources, skipped, lease_reads=lease_reads)
             dropped_small += more_small
             stale += skipped["stale"]
             stale_positions += skipped["stale_positions"]
@@ -1360,7 +1360,8 @@ class BatchReader:
 
     def _fill(self, target: int, end: int, rollout_id: int, floor: int | None, chosen: list, decoded: dict,
               accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
-              position_sources: dict, skipped: dict | None = None) -> tuple[int, int, int, int]:
+              position_sources: dict, skipped: dict | None = None,
+              lease_reads: dict[str, float] | None = None) -> tuple[int, int, int, int]:
         """Top the chosen groups up to ``target`` samples with whole groups selected
         one by one, without waiting (what is not in the buffer yet is padded). The
         first group that would overflow is carried over (``self._carry``) and the
@@ -1368,7 +1369,8 @@ class BatchReader:
         Returns ``(end, carried groups, padded samples, groups dropped as too small)``; the
         groups passed over (too old, a fenced incarnation's, quarantined) are counted in
         ``skipped`` like the main selection counts them; a damaged payload is recorded
-        by :meth:`_group_at`."""
+        by :meth:`_group_at`. A group joins the round as it is judged, so its shard's
+        lease is read again unless the round's recheck read it just now (``lease_reads``)."""
         skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
                                                        "quarantined": 0}
         missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
@@ -1387,7 +1389,7 @@ class BatchReader:
                 continue
             if self._is_unidentified(item.entry):
                 continue
-            verdict = self._gate_verdict(item)
+            verdict = self._gate_verdict(item, lease_reads)
             if verdict is _DEFER:  # strict order: nothing behind it joins this round
                 skipped["deferred"] = skipped.get("deferred", 0) + 1
                 break
@@ -1543,12 +1545,21 @@ class BatchReader:
                 del source_groups[source]
                 source_tokens.pop(source, None)
 
-    def _gate_verdict(self, item: Any) -> Any:
+    def _gate_verdict(self, item: Any, lease_reads: dict[str, float] | None = None) -> Any:
         """The incarnation gate's verdict on a selected ``item``: None (train it), the
         stale detail, or :data:`_DEFER` when its lease could not be read (the item is
-        kept in ``self._deferred``, neither trained nor counted stale)."""
+        kept in ``self._deferred``, neither trained nor counted stale). With
+        ``lease_reads`` (a group trained without a later recheck) the lease is read
+        again first (:meth:`IncarnationGate.recheck`)."""
         if self.gate is None:
             return None
+        recheck = getattr(self.gate, "recheck", None)
+        if lease_reads is not None and callable(recheck):
+            [verdict] = recheck([(item.entry, int(item.position))], lease_reads)
+            if isinstance(verdict, LeaseUnknown):
+                self._deferred.append((int(item.position), item))
+                return _DEFER
+            return verdict
         try:
             return self.gate.verdict(item.entry, int(item.position))
         except LeaseUnknown:

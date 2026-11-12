@@ -171,3 +171,43 @@ def test_gate_recheck_reads_once_per_shard_and_defers_an_unreadable_one(tmp_path
     assert isinstance(unknown, LeaseUnknown)
     with pytest.raises(LeaseUnknown):  # an older cached read does not answer while the reads fail
         gate.verdict(entries[0], 0)
+
+
+def test_a_fill_group_of_a_shard_the_recheck_did_not_read_is_judged_on_a_fresh_read(tmp_path):
+    """The round (s1) is short of samples; the fill tops it up with s0's group, whose
+    lease the gate cached before bbbb fenced aaaa. The fill reads s0's lease again:
+    the group is fenced, not trained against the cached lease."""
+    root, store, writer = _store(tmp_path)
+    IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
+    _write_group(writer, "s1", "xxxx", 0)          # pos 0: the round's group
+    reader, flaky, gate = _reader(root, store, lambda count, flaky: None)
+    gate._lease("s0")                                 # cached: aaaa holds s0
+    IncarnationLease(store, "s0", "bbbb", clock=lambda: 0.0).claim()  # fence, seals nothing
+    _write_group(writer, "s0", "aaaa", 0)          # pos 1: a zombie's late group
+    reader.group_size = 4
+    out, report = reader.take(0, 1, current_version=None)
+    assert [p for p, _ in out] == [0], (out, report)
+    assert report.stale_incarnation_groups == 1
+
+
+def test_a_group_deferred_at_the_recheck_and_then_read_holds_its_task(tmp_path):
+    """The recheck cannot read s0: 0 waits and its duplicate 1 is judged again behind it;
+    the lease reads again, aaaa is not fenced: 0 trains slot 7 once, 1 stays a duplicate."""
+    root, store, writer = _store(tmp_path)
+    IncarnationLease(store, "s0", "aaaa", clock=lambda: 0.0).claim()
+    _write_task(writer, "s0", "aaaa", 0, slot=7, attempt=0)
+    _write_task(writer, "s1", "xxxx", 0, slot=7, attempt=1)
+
+    def on_sleep(count, flaky):
+        if count == 1:
+            _write_task(writer, "s1", "xxxx", 1, slot=8, attempt=0)
+            flaky.objects.fail, flaky.objects.only = TimeoutError("read timeout"), "s0"
+        if count == 3:
+            flaky.objects.fail = None
+
+    reader, _, _ = _reader(root, store, on_sleep)
+    out, report = reader.take(0, 2, current_version=None)
+    assert [p for p, _ in out] == [0, 2]
+    assert report.duplicate_task_groups == 1 and report.stale_incarnation_groups == 0
+    assert reader.tasks.owner == {("plan", 7): 0, ("plan", 8): 2}
+    assert report.end == 3 and not reader._deferred
