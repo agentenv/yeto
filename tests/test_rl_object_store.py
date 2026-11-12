@@ -46,6 +46,7 @@ class FakeS3:
         self.uploads: dict[str, dict[int, bytes]] = {}
         self.upload_checksum: dict[str, str | None] = {}
         self.checksums: dict[tuple[str, str], str | None] = {}
+        self.multipart_etags: dict[tuple[str, str], str] = {}  # S3, R2: MD5 of the part MD5s, "-<parts>"
         self.created = 0
         self.calls: list[str] = []
 
@@ -55,11 +56,14 @@ class FakeS3:
 
         return '"' + hashlib.md5(data).hexdigest() + '"'
 
+    def object_etag(self, Bucket, Key) -> str:
+        return self.multipart_etags.get((Bucket, Key)) or self.etag(self.objects[(Bucket, Key)])
+
     def get_object(self, Bucket, Key, Range=None, IfMatch=None):
         if (Bucket, Key) not in self.objects:
             raise self.exceptions.NoSuchKey(Key)
         data = self.objects[(Bucket, Key)]
-        if IfMatch is not None and IfMatch != self.etag(data):
+        if IfMatch is not None and IfMatch != self.object_etag(Bucket, Key):
             raise _error("PreconditionFailed", "GetObject")
         if Range is not None:
             first, last = (int(x) for x in Range.removeprefix("bytes=").split("-"))
@@ -85,13 +89,14 @@ class FakeS3:
                 raise _error("BadDigest", "PutObject")
             self.objects[(Bucket, Key)] = bytes(Body)
             self.checksums[(Bucket, Key)] = ChecksumSHA256
+            self.multipart_etags.pop((Bucket, Key), None)
             self.calls.append("put_object")
 
     def head_object(self, Bucket, Key, ChecksumMode=None):
         if (Bucket, Key) not in self.objects:
             raise _error("404", "HeadObject")
         data = self.objects[(Bucket, Key)]
-        out = {"ContentLength": len(data), "ETag": self.etag(data)}
+        out = {"ContentLength": len(data), "ETag": self.object_etag(Bucket, Key)}
         if ChecksumMode == "ENABLED" and self.checksums.get((Bucket, Key)):
             out["ChecksumSHA256"] = self.checksums[(Bucket, Key)]
         return out
@@ -100,6 +105,7 @@ class FakeS3:
         with self.lock:
             self.objects.pop((Bucket, Key), None)
             self.checksums.pop((Bucket, Key), None)
+            self.multipart_etags.pop((Bucket, Key), None)
 
     def create_multipart_upload(self, Bucket, Key, ChecksumAlgorithm=None):
         with self.lock:
@@ -149,6 +155,8 @@ class FakeS3:
             checksum = base64.b64encode(hashlib.sha256(raw).digest()).decode() + f"-{len(numbers)}"
         self.objects[(Bucket, Key)] = b"".join(parts[n] for n in numbers)
         self.checksums[(Bucket, Key)] = checksum
+        md5s = b"".join(hashlib.md5(parts[n]).digest() for n in numbers)
+        self.multipart_etags[(Bucket, Key)] = f'"{hashlib.md5(md5s).hexdigest()}-{len(numbers)}"'
         self.calls.append("complete_multipart_upload")
 
     def abort_multipart_upload(self, Bucket, Key, UploadId):
@@ -613,6 +621,94 @@ def test_staged_s3_store_carries_snapshots_and_cuts_between_hosts(tmp_path):
     assert (second.store.root / ROUND_CUTS / "r000001-x" / "shard-0.pt").read_bytes() == b"w" * 100
 
 
+def test_a_first_cut_that_died_while_uploading_is_dropped_by_the_next_container(tmp_path):
+    """A staged store: the ranks upload the shards of the store's first cut long before
+    the commit that names it. A trainer that dies meanwhile leaves shards and no LATEST;
+    the first-cut mark is in the object store too, so the next container (an empty
+    stage) drops them and starts at rollout 0 instead of refusing every start."""
+    from yeto.rl.engine import resume as rs
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def store(host):
+        return store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / host)}, client=s3)
+
+    first = store("container-1")
+    rs.ResumeController(state_dir=tmp_path / "state-1", store=first)
+    rs.mark_first_cut(first.root, "r000004-x", store=first)
+    shard = first.root / rs.ROUND_CUTS / "r000004-x" / "rank-0.pt"
+    shard.parent.mkdir(parents=True)
+    shard.write_bytes(b"w" * 100)
+    first.push_local_file(f"{rs.ROUND_CUTS}/r000004-x/rank-0.pt")  # the rank's own upload; then the trainer dies
+    assert ("bkt", "runs/a/round-cuts/r000004-x.first-cut-in-progress") in s3.objects
+
+    second = rs.ResumeController(state_dir=tmp_path / "state-2", store=store("container-2"))
+    assert second.restored is None
+    assert second.discarded_first_cut == ["round-cuts/r000004-x", "round-cuts/r000004-x.first-cut-in-progress"]
+    assert not [key for _, key in s3.objects if "round-cuts" in key]
+    # an unmarked cut without LATEST is still refused
+    s3.objects[("bkt", "runs/a/round-cuts/r000008-y/rank-0.pt")] = b"w"
+    with pytest.raises(rs.StoreIntegrityError, match="no LATEST"):
+        rs.ResumeController(state_dir=tmp_path / "state-3", store=store("container-3"))
+
+
+def test_a_discard_of_a_first_cut_that_dies_while_deleting_is_finished_by_the_next_start(tmp_path):
+    """The mark is the last object of an unfinished first cut to leave the store: a
+    discard cut short (a failed delete, a killed container) can be done again."""
+    from yeto.rl.engine import resume as rs
+
+    class DeleteDies(FakeS3):
+        die_after: int | None = None
+
+        def delete_object(self, Bucket, Key):
+            if self.die_after is not None:
+                if self.die_after == 0:
+                    raise _error("InternalError", "DeleteObject")
+                self.die_after -= 1
+            return super().delete_object(Bucket=Bucket, Key=Key)
+
+    s3 = DeleteDies()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def store(host):
+        return store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / host)}, client=s3)
+
+    first = store("container-1")
+    rs.ResumeController(state_dir=tmp_path / "state-1", store=first)
+    rs.mark_first_cut(first.root, "r000004-x", store=first)
+    for rank in range(3):
+        shard = first.root / rs.ROUND_CUTS / "r000004-x" / f"rank-{rank}.pt"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        shard.write_bytes(b"w" * 100)
+        first.push_local_file(f"{rs.ROUND_CUTS}/r000004-x/rank-{rank}.pt")
+    s3.die_after = 1
+    with pytest.raises(ClientError):
+        rs.ResumeController(state_dir=tmp_path / "state-2", store=store("container-2"))
+    assert ("bkt", "runs/a/round-cuts/r000004-x.first-cut-in-progress") in s3.objects
+    s3.die_after = None
+    third = rs.ResumeController(state_dir=tmp_path / "state-3", store=store("container-3"))
+    assert third.discarded_first_cut and not [key for _, key in s3.objects if "round-cuts" in key]
+
+
+def test_the_first_cut_mark_leaves_the_object_store_with_the_first_commit(tmp_path):
+    from yeto.rl.engine import resume as rs
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI, s3_store.STAGE_ENV: str(tmp_path / "stage")}
+    staged = store_for(tmp_path / "mount", environ=env, client=s3)
+    ctl = rs.ResumeController(state_dir=tmp_path / "state", store=staged)
+    rs.mark_first_cut(staged.root, "r000001-x", store=staged)
+    cut = staged.root / rs.ROUND_CUTS / "r000001-x"
+    cut.mkdir(parents=True)
+    (cut / "shard-0.pt").write_bytes(b"w" * 100)
+    (ctl.state_dir / "round-cut.json").write_text(json.dumps({"cut_id": "r000001-x", "next_rollout_id": 1}))
+    assert ctl.sync_checkpoint_store("round_cut")
+    keys = sorted(key for _, key in s3.objects)
+    assert "runs/a/LATEST" in keys and "runs/a/round-cuts/r000001-x/shard-0.pt" in keys
+    assert not [key for key in keys if key.endswith(rs.FIRST_CUT_MARK)]
+
+
 def test_a_stalled_range_read_is_retried_not_fatal(tmp_path, monkeypatch):
     from botocore.exceptions import ReadTimeoutError
 
@@ -865,7 +961,7 @@ def test_a_release_downloads_in_the_background_while_the_engines_generate(tmp_pa
     with follower.generating():  # a round runs while the files arrive
         assert follower.refresh() is None
     gate.set()
-    follower._fetch.done.wait(5)
+    assert follower._fetch.done.wait(5)
     assert follower.refresh().version == 1 and loaded == [1]
     assert follower.last_timings["resolve_s"] >= 0
 
@@ -879,17 +975,22 @@ def test_a_failed_download_keeps_the_served_weights_and_is_tried_again(tmp_path,
                               download_retry_s=60.0, timer=lambda: now[0])
     trainer.release(1, "h1", weights)
     fail["left"] = 1
+    # The gate holds each download until the refresh that started it has
+    # returned: a download that ends inside that refresh is reported (or
+    # loaded) by it, not by the next one.
+    assert follower.refresh() is None and follower.incomplete == "downloading r1-v1"
     gate.set()
-    follower.refresh()
-    follower._fetch.done.wait(5)
+    assert follower._fetch.done.wait(5)
     with pytest.raises(ReleaseNotLoaded) as raised:
         follower.refresh()
     assert raised.value.reason == "download_failed" and follower.version == 0
     assert follower.refresh() is None  # reported once, then waits to retry
     now[0] = 61.0
     assert follower.refresh() is None  # retry window passed: a new download starts next
-    follower.refresh()
-    follower._fetch.done.wait(5)
+    gate.clear()
+    assert follower.refresh() is None and follower.incomplete == "downloading r1-v1"
+    gate.set()
+    assert follower._fetch.done.wait(5)
     assert follower.refresh().version == 1
 
 
@@ -1044,3 +1145,356 @@ def test_read_files_from_an_unguarded_script_runs_the_script_once(tmp_path):
     assert (tmp_path / "runs").read_text() == "run\n"
     assert (tmp_path / "b").read_bytes() == b"2" * 9
     assert len(set((tmp_path / "s3" / "pids").read_text().split())) == 2
+
+
+# ---------------------------------------------------------------- whole-object reads and downloads under faults
+class CutBodies(FakeS3):
+    """Whole-object GETs whose body read fails: ``cut`` errors, one per GET, raised
+    by ``read()`` after the request itself was answered (what botocore never
+    retries). ``before_get``: called before each GET (a writer acting meanwhile)."""
+
+    def __init__(self, cut=(), before_get=None):
+        super().__init__()
+        self.cut = list(cut)
+        self.before_get = before_get
+
+    def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+        if self.before_get is not None:
+            self.before_get(self)
+        out = super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+        if Range is None and self.cut:
+            error = self.cut.pop(0)
+
+            def cut_short(_self):
+                raise error
+
+            return {"Body": type("Body", (), {"read": cut_short})()}
+        return out
+
+
+def _reset():
+    from botocore.exceptions import ResponseStreamingError
+
+    return ResponseStreamingError(error="connection reset by peer")
+
+
+def test_a_whole_object_read_whose_body_is_cut_short_is_read_again(monkeypatch):
+    from botocore.exceptions import ReadTimeoutError
+    from urllib3.exceptions import ProtocolError
+
+    monkeypatch.setattr(s3_store.time, "sleep", lambda s: None)
+    s3 = CutBodies(cut=[_reset(), ReadTimeoutError(endpoint_url="r2"), ProtocolError("IncompleteRead"),
+                        ConnectionResetError(104, "reset")])
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    objects.write("sample-buffer/payloads/g0.bin", b"group")
+    assert objects.read("sample-buffer/payloads/g0.bin") == b"group"
+    assert s3.calls.count("get_object") == 5 and not s3.cut
+
+
+def test_a_whole_object_read_that_stays_cut_short_raises_the_error_after_a_bounded_number_of_tries(monkeypatch):
+    from botocore.exceptions import ResponseStreamingError
+
+    pauses = []
+    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    s3 = CutBodies(cut=[_reset() for _ in range(50)])
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    objects.write("LATEST.json", b"{}")
+    with pytest.raises(ResponseStreamingError):
+        objects.read("LATEST.json")
+    assert s3.calls.count("get_object") == s3_store.RANGE_READ_ATTEMPTS
+    assert len(pauses) == s3_store.RANGE_READ_ATTEMPTS - 1 and all(0 < p <= 30.0 for p in pauses)
+
+
+def test_a_whole_object_read_the_store_refuses_is_not_sent_again(monkeypatch):
+    """403 / a 503 left after the SDK's retries: an answer, not a broken body."""
+    monkeypatch.setattr(s3_store.time, "sleep", lambda s: pytest.fail("no retry of an error answer"))
+    for code in ("AccessDenied", "ExpiredToken", "ServiceUnavailable"):
+        gets = []
+
+        class Refusing(FakeS3):
+            def get_object(self, **kw):
+                gets.append(kw["Key"])
+                raise _error(code, "GetObject")
+
+        with pytest.raises(ClientError, match=code):
+            s3_store.S3ObjectStore(URI, client=Refusing()).read("k")
+        assert len(gets) == 1
+
+    class Broken(FakeS3):  # a body that fails with something that is no transfer error
+        def get_object(self, **kw):
+            gets.append(kw["Key"])
+            return {"Body": type("Body", (), {"read": lambda self: 1 / 0})()}
+
+    gets = []
+    with pytest.raises(ZeroDivisionError):
+        s3_store.S3ObjectStore(URI, client=Broken()).read("k")
+    assert len(gets) == 1
+
+
+def test_an_object_deleted_or_replaced_while_its_read_is_tried_again_is_read_as_it_is_now(monkeypatch):
+    monkeypatch.setattr(s3_store.time, "sleep", lambda s: None)
+    assert s3_store.S3ObjectStore(URI, client=CutBodies()).read("never-written") is None
+
+    def prune(s3):  # between the cut-short GET and the next one
+        if s3.calls.count("get_object") == 1:
+            s3.objects.clear()
+
+    s3 = CutBodies(cut=[_reset()], before_get=prune)
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    objects.write("leases/s0.json", b"old")
+    assert objects.read("leases/s0.json") is None
+
+    def rewrite(s3):
+        if s3.calls.count("get_object") == 1:
+            s3.objects[("bkt", "runs/a/LATEST.json")] = b"new"
+
+    s3 = CutBodies(cut=[_reset()], before_get=rewrite)
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    objects.write("LATEST.json", b"old")
+    assert objects.read("LATEST.json") == b"new"
+
+
+def test_a_small_download_cut_short_by_a_broken_body_is_read_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(s3_store.time, "sleep", lambda s: None)
+    s3 = CutBodies(cut=[_reset()])
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    objects.write("policy-releases/v1/RELEASE.json", b"{}")
+    assert objects.read_file("policy-releases/v1/RELEASE.json", tmp_path / "r") and (tmp_path / "r").read_bytes() == b"{}"
+
+
+def _partials(directory):
+    return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+
+def test_a_small_download_that_dies_while_writing_leaves_the_file_that_was_there(tmp_path, monkeypatch):
+    """The file at the final name is whole: the previous one until the new one is."""
+    from pathlib import Path
+
+    objects = s3_store.S3ObjectStore(URI, client=FakeS3())
+    objects.write("LATEST.json", b"new pointer")
+    target = tmp_path / "LATEST.json"
+    target.write_bytes(b"old pointer")
+    real = Path.write_bytes
+
+    def dies(self, data):
+        real(self, data[:3])  # the disk filled up / the process was killed here
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_bytes", dies)
+    with pytest.raises(OSError):
+        objects.read_file("LATEST.json", target)
+    monkeypatch.undo()
+    assert target.read_bytes() == b"old pointer" and _partials(tmp_path) == []
+    assert objects.read_file("LATEST.json", target) and target.read_bytes() == b"new pointer"
+    assert _partials(tmp_path) == []
+
+
+def test_two_downloads_of_one_target_do_not_write_into_each_others_file(tmp_path):
+    """A second download starts (and finishes) while the first is between two ranges:
+    with one shared partial file it truncated the first one's bytes and renamed the
+    file away under it."""
+    part = s3_store.MIN_PART_BYTES
+    data = bytes(range(256)) * (2 * part // 256)
+    transfer = s3_store.TransferSettings(part_bytes=part, concurrency=1)
+    target = tmp_path / "model.safetensors"
+    state = {"ranges": 0}
+
+    class Interleaved(FakeS3):
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+            out = super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+            if Range is not None:
+                state["ranges"] += 1
+                if state["ranges"] == 2:  # the first download holds range 1; another process downloads it all
+                    assert s3_store.S3ObjectStore(URI, client=self, transfer=transfer).read_file("big", target)
+                    assert target.read_bytes() == data
+            return out
+
+    s3 = Interleaved()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=transfer)
+    s3.objects[("bkt", objects._key("big"))] = data
+    assert objects.read_file("big", target)
+    assert target.read_bytes() == data and state["ranges"] == 4 and _partials(tmp_path) == []
+
+
+def test_a_failed_large_download_leaves_no_file(tmp_path):
+    part = s3_store.MIN_PART_BYTES
+    data = bytes(range(256)) * (2 * part // 256)
+    target = tmp_path / "model.safetensors"
+
+    class Replaced(FakeS3):
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+            if Range is not None and not Range.startswith("bytes=0-"):
+                raise _error("PreconditionFailed", "GetObject")  # the object was replaced midway
+            return super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+
+    s3 = Replaced()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+    s3.objects[("bkt", objects._key("big"))] = data
+    with pytest.raises(ClientError):
+        objects.read_file("big", target)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _leftovers(tmp_path, target):
+    """``left(owner, idle_s)``: a download file of ``target`` last written ``idle_s`` ago."""
+    import os
+    import time
+
+    def left(owner, idle_s=0.0, name=target.name):
+        path = tmp_path / f"{name}.{owner}{s3_store.DOWNLOAD_SUFFIX}"
+        assert not path.exists()
+        path.write_bytes(b"x")
+        at = time.time() - idle_s
+        os.utime(path, (at, at))
+        return path
+
+    return left
+
+
+def _download(tmp_path, target, size):
+    part = s3_store.MIN_PART_BYTES
+    data = b"{}" if size == "small" else bytes(range(256)) * (2 * part // 256)
+    s3 = FakeS3()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+    s3.objects[("bkt", objects._key("big"))] = data
+    assert objects.read_file("big", target) and target.read_bytes() == data
+
+
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_a_download_removes_what_killed_downloads_of_its_target_left_and_no_live_ones_file(tmp_path, size, monkeypatch):
+    import os
+
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: "boot:4026531836")  # as on Linux
+    target = tmp_path / "model.safetensors"
+    left, host = _leftovers(tmp_path, target), s3_store._host_token()
+    grace, unknown, stale = s3_store.DEAD_PARTIAL_GRACE_S, s3_store.UNKNOWN_PARTIAL_S, s3_store.STALE_PARTIAL_S
+    assert s3_store.PARTIAL_HEARTBEAT_S * 4 <= grace < unknown < stale
+    gone = [left(f"{host}-{_dead_pid()}-00000001", grace + 5),  # its process is gone
+            left(f"{host}-{os.getpid()}-00000002", grace + 5),  # an earlier process that had this pid
+            left("ffffffff-1-00000003", unknown + 5),  # another host's or container's
+            left("4242-00000004", unknown + 5),  # a name of another format
+            left(f"{host}-{os.getppid()}-00000005", stale + 5)]  # a live pid that is no download any more
+    kept = [left(f"{host}-{_dead_pid()}-00000011", 5),  # "gone" by its name, written 5 s ago: another
+            left(f"{host}-{os.getpid()}-00000012", 5),  # container with the same name and pids writes it
+            left(f"{host}-{os.getppid()}-00000013", unknown + 5),  # a live process
+            left("ffffffff-1-00000014", grace + 5),  # another host's, within the longer window
+            left("4242-00000015", grace + 5),
+            left(f"{host}-{_dead_pid()}-00000016", stale + 5, name="other.bin"),  # of another target
+            tmp_path / (target.name + ".json")]
+    kept[-1].write_bytes(b"x")  # no download file
+    mine = s3_store.S3ObjectStore._partial(target)  # another thread of this process downloads the target
+    left(os.path.basename(mine)[len(target.name) + 1:-len(s3_store.DOWNLOAD_SUFFIX)], stale + 5)
+    try:
+        _download(tmp_path, target, size)
+        assert not [p.name for p in gone if p.exists()]
+        assert all(p.exists() for p in kept) and os.path.exists(mine)
+    finally:
+        s3_store.S3ObjectStore._release_partial(mine)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([target.name, *(p.name for p in kept)])
+    assert not s3_store._LIVE_PARTIALS
+
+
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_where_the_pid_namespace_cannot_be_read_a_pid_in_a_name_removes_nothing(tmp_path, size, monkeypatch):
+    """No /proc (macOS), or two containers that share a host name: only the time
+    since the last write decides."""
+    import os
+
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: None)
+    target = tmp_path / "model.safetensors"
+    left, host = _leftovers(tmp_path, target), s3_store._host_token()
+    grace, unknown = s3_store.DEAD_PARTIAL_GRACE_S, s3_store.UNKNOWN_PARTIAL_S
+    kept = [left(f"{host}-{_dead_pid()}-00000001", grace + 5), left(f"{host}-{os.getpid()}-00000002", grace + 5)]
+    gone = [left(f"{host}-{_dead_pid()}-00000003", unknown + 5), left(f"{host}-{os.getpid()}-00000004", unknown + 5)]
+    _download(tmp_path, target, size)
+    assert all(p.exists() for p in kept) and not [p.name for p in gone if p.exists()]
+
+
+def test_the_host_token_tells_two_pid_namespaces_of_one_host_name_apart(monkeypatch):
+    tokens = set()
+    for namespace in ("boot:1", "boot:2", "other-boot:1", None):
+        monkeypatch.setattr(s3_store, "_pid_namespace", lambda: namespace)
+        tokens.add(s3_store._host_token())
+    assert len(tokens) == 4 and all(len(t) == 8 and "-" not in t for t in tokens)
+
+
+def test_a_large_download_marks_its_file_while_a_part_is_on_its_way(tmp_path, monkeypatch):
+    """One part can take longer to arrive than the windows above: the file is
+    written only when a part is whole, so the download marks it in between."""
+    import os
+    import time
+
+    monkeypatch.setattr(s3_store, "PARTIAL_HEARTBEAT_S", 0.02)
+    part = s3_store.MIN_PART_BYTES
+    data = bytes(range(256)) * (2 * part // 256)
+    target = tmp_path / "model.safetensors"
+    seen = []
+
+    class Slow(FakeS3):
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+            if Range is not None and not seen:
+                (partial,) = [p for p in tmp_path.iterdir() if p.name.endswith(s3_store.DOWNLOAD_SUFFIX)]
+                long_ago = time.time() - 10_000
+                os.utime(partial, (long_ago, long_ago))
+                deadline = time.time() + 10
+                while partial.stat().st_mtime < long_ago + 1 and time.time() < deadline:
+                    time.sleep(0.01)  # the part is still on its way
+                seen.append(time.time() - partial.stat().st_mtime)
+            return super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+
+    s3 = Slow()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part, concurrency=1))
+    s3.objects[("bkt", objects._key("big"))] = data
+    assert objects.read_file("big", target) and target.read_bytes() == data
+    assert seen and seen[0] < 60 and [p.name for p in tmp_path.iterdir()] == [target.name]
+    import threading
+
+    assert not [t for t in threading.enumerate() if t.name == "yeto-get-mark"]
+
+
+def test_a_release_download_cut_off_again_and_again_does_not_pile_up_download_files(tmp_path, monkeypatch):
+    """A sampler whose prefetch is killed part way, many times: each try leaves one
+    file of a dead process, and a later try removes it."""
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: "boot:4026531836")
+    target = tmp_path / "model.safetensors"
+    left = _leftovers(tmp_path, target)
+    for n in range(3):
+        left(f"{s3_store._host_token()}-{_dead_pid()}-0000000{n}", s3_store.DEAD_PARTIAL_GRACE_S + 5)
+        _download(tmp_path, target, "large")
+        assert [p.name for p in tmp_path.iterdir()] == [target.name]
+
+
+def _connection_errors():
+    from botocore.exceptions import ConnectionClosedError, EndpointConnectionError, ReadTimeoutError
+
+    return [ReadTimeoutError(endpoint_url="https://store"), ConnectionClosedError(endpoint_url="https://store"),
+            EndpointConnectionError(endpoint_url="https://store"), ConnectionResetError(104, "reset")]
+
+
+@pytest.mark.parametrize("call", ["read", "create", "exists", "size", "checksum", "write", "delete"])
+def test_a_connection_error_is_raised_as_it_is_and_never_read_as_a_missing_object(call):
+    """botocore's connection errors carry ``response = None``: looking for an error
+    code in it raised AttributeError in place of the error."""
+    for error in _connection_errors():
+        class Unreachable(FakeS3):
+            def _down(self, *args, **kwargs):
+                raise error
+
+            get_object = put_object = head_object = delete_object = _down
+
+        objects = s3_store.S3ObjectStore(URI, client=Unreachable())
+        args = ("k", b"1") if call in ("create", "write") else ("k",)
+        with pytest.raises(type(error)) as raised:
+            getattr(objects, call)(*args)
+        assert raised.value is error
+        assert s3_store.error_code(error) == "" and s3_store.describe_store_error(error, URI, {}) is not False
+    assert s3_store.error_code(_error("NoSuchKey", "GetObject")) == "NoSuchKey"

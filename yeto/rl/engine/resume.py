@@ -577,16 +577,29 @@ def first_cut_mark(store_root: Path, cut_id: str) -> Path:
     return Path(store_root) / ROUND_CUTS / f"{cut_id}{FIRST_CUT_MARK}"
 
 
-def mark_first_cut(store_root: Path, cut_id: str) -> Path:
+def mark_first_cut(store_root: Path, cut_id: str, store: Any = None) -> Path:
     """Written (fsynced) before the store's first round cut starts its shards, so a
     run that dies before that cut's LATEST is committed can tell its files from the
-    cuts of an unfinished store (:func:`discard_unfinished_first_cut`)."""
+    cuts of an unfinished store (:func:`discard_unfinished_first_cut`).
+
+    ``store``: the checkpoint store. One that stages its files on this node's disk
+    (a staged ``s3://`` store, ``push_local_file``) uploads the mark now: the ranks
+    upload their shards themselves while the cut is written, long before the
+    commit that would carry the mark, and the next container starts with an empty
+    stage. Without the mark in the object store it found shards and no LATEST and
+    refused every start. A failed upload is logged; the cut goes on."""
     mark = first_cut_mark(store_root, cut_id)
     mark.parent.mkdir(parents=True, exist_ok=True)
     with open(mark, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"cut_id": cut_id}))
         fh.flush()
         os.fsync(fh.fileno())
+    push = getattr(store, "push_local_file", None)
+    if callable(push):
+        try:
+            push(mark.relative_to(Path(store_root)).as_posix())
+        except Exception as exc:  # noqa: BLE001 - the cut itself does not depend on the mark
+            logging.getLogger(__name__).warning("first-cut mark of %s not uploaded: %r", cut_id, exc)
     return mark
 
 
@@ -777,6 +790,14 @@ class ResumeController:
             if discarded is None:
                 raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
                                           "start over at rollout 0 on top of an unfinished store")
+            # a staged store: the cut's objects go first, its mark with the commit below.
+            # A discard that dies in between leaves the mark, so the next start can
+            # finish it (a push deletes in key order, which would take the mark first)
+            remote = getattr(store, "delete_remote_tree", None)
+            if callable(remote):
+                for rel in discarded:
+                    if not rel.endswith(FIRST_CUT_MARK):
+                        remote(rel)
             store.commit()
             self.discarded_first_cut = discarded
             # the run starts at 0: a local state dir of the dead run (its pointer may
@@ -872,9 +893,9 @@ class ResumeController:
     def _prune(self) -> list[str]:
         """Housekeeping once a new LATEST is committed: old snapshots and cuts, and the
         first-cut marks (the first cut is committed now; the next commit drops them)."""
-        clear_first_cut_marks(self.store.root)
+        marks = clear_first_cut_marks(self.store.root)
         deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
-        if deleted:
+        if deleted or marks:  # an uploaded mark (mark_first_cut) leaves the object store with this commit
             self.store.commit()
             # a staged store's push deletes what this node uploaded; the shards ranks on
             # other nodes uploaded themselves (cut.push_shard_from_rank) go by prefix

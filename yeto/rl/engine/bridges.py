@@ -171,6 +171,9 @@ class RoundCutHooks:
 class LocalOnlySync(RoundCutHooks):
     """Train-only island: the local result is the next policy."""
 
+    # the next launch restores the newest round cut (a synced island only writes its cuts)
+    resumes_from_round_cuts = True
+
     def __init__(self, num_rollout: int) -> None:
         if num_rollout < 1:
             raise ValueError("num_rollout must be positive")
@@ -187,6 +190,10 @@ class LocalOnlySync(RoundCutHooks):
         # The version the island's account continues at
         # (:meth:`resume_at`); 0 = this process starts the account at v0.
         self.resumed_at = 0
+        # Set by :meth:`start`: the account continues above the store's releases
+        # (:meth:`resume_at`) and no round cut was restored, so the island holds the
+        # weights its process loaded and nothing an earlier launch trained.
+        self.continues_releases_without_cut = False
 
     def resume_at(self, version: int, *, behind_round_cuts: bool = False) -> None:
         """Continue the version account at ``version`` K instead
@@ -211,6 +218,7 @@ class LocalOnlySync(RoundCutHooks):
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
         rollout_id = self.resumed_at if resumed is None else int(resumed["next_rollout_id"])
+        self.continues_releases_without_cut = resumed is None and self.resumed_at > 0
         if resumed is not None and self.resumed_at > rollout_id:
             # The store already holds releases up to vK above this round cut (they were
             # released after the cut). Retraining from the cut and naming its rounds
