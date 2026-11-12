@@ -446,7 +446,12 @@ class IslandPool:
         now = self.clock()
         balance = self.ops.balance()
         if balance is not None and balance < self.config.order_floor():
-            self.log(f"pool: balance {balance} < order floor {self.config.order_floor()}: not ordering")
+            refused = f"balance below the order floor {self.config.order_floor()}"
+            if refused != self._refused:  # once per change, not every tick (the balance moves)
+                self.log(f"pool: balance {balance} < order floor {self.config.order_floor()}: not ordering")
+                self._event("order_refused", why=refused, balance=balance,
+                            replaces=replaces.ticket if replaces else None)
+            self._refused = refused
             return None
         refused = self._gate(now)
         if refused:
@@ -1168,8 +1173,20 @@ class IslandPool:
                 if m.retiring_since is not None:
                     self._finish_retire(m, now, outcome="lease end", must_release=True)
                     continue
-                if m.replaced_by is None or by_ticket.get(m.replaced_by) is None \
-                        or by_ticket[m.replaced_by].state != READY:
+                successor = by_ticket.get(m.replaced_by) if m.replaced_by else None
+                if successor is None or successor.state != READY:
+                    # make-before-break did not make it: the slot samples nothing until a
+                    # successor is up, and no sampler of the shard answers a handoff, so
+                    # the shard is fenced (its claims go back at once; a successor not
+                    # started yet waits for the fence, as after an eviction)
+                    self._once(m, "lease_end_gap", "lease_end_without_ready_replacement", level="alert",
+                               lease_until=m.lease_until, replacement=successor.ticket if successor else None,
+                               replacement_state=successor.state if successor else None,
+                               refused=self._refused or self._no_account)
+                    # only a successor whose sampler is starting asks for the handoff; one that
+                    # failed meanwhile (fencing, draining, gone) answers nothing: fence then too
+                    if successor is None or successor.state != STARTING or successor.started is None:
+                        self._fence(m, "lease end")
                     self._handoff_slot(m)
                 self._drain(m, "lease end")
 
