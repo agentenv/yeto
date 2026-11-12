@@ -722,3 +722,19 @@ def test_open_rows_of_an_earlier_version_are_listed_once_for_the_operator(tmp_pa
     assert provider.order(1) == "new1"
     assert sorted(provider.run_tickets()) == [(1, "new1"), (1, "old-open")]
     assert provider.run_tickets() and [(n, d["tickets"]) for n, d in events] == [("legacy_ledger_rows", ["1:old-open"])]
+
+
+def test_a_pending_delete_row_without_a_phase_is_a_sent_delete(tmp_path):
+    """A row written before the phases existed was written right before the call:
+    it is judged like a sent delete, never dropped as an intent."""
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0)
+    nc, c = sc.nc, sc.clients[1]
+    mine = c.create(run="run-a")
+    rows = json.loads(sc.ledger.path.read_text())
+    rows.append({"account": 1, "ticket": None, "pending_delete": mine, "sent_at": 1.0, "attempts": 1, "absent": 0})
+    sc.ledger.path.write_text(json.dumps(rows))
+    nc.tickets[mine].update(state="ended", end_reason="expired")
+    nc._place(1, "foreign")
+    with pytest.raises(ncc.NcError):
+        c.status()
+    assert sc.ledger.halted(1) is not None

@@ -421,7 +421,7 @@ class Ledger:
 
     def pending_delete(self, account: int, *, sent_only: bool = False) -> dict[str, Any] | None:
         return next((r for r in self.load() if r.get("pending_delete") and r["account"] == account
-                     and (not sent_only or r.get("phase") == "sent")), None)
+                     and (not sent_only or r.get("phase", "sent") == "sent")), None)
 
     def begin_delete(self, account: int, ticket: str) -> None:
         """Phase ``intent`` (a row already ``sent`` for the same ticket stays ``sent``)."""
@@ -464,7 +464,7 @@ class Ledger:
         with state_file_lock(self.path):
             rows = self.load()
             gone = [r for r in rows if r.get("pending_delete") and r["account"] == account
-                    and (not only_intent or r.get("phase") != "sent")]
+                    and (not only_intent or r.get("phase", "sent") != "sent")]
             if not gone:
                 return
             rows = [r for r in rows if r not in gone]
@@ -597,7 +597,7 @@ class NcClient:
         if pending is None:
             return
         expected = pending["pending_delete"]
-        if pending.get("phase") != "sent":
+        if pending.get("phase", "sent") != "sent":  # a row without a phase: written before the call, so sent
             if t.get("id") != expected or t.get("state") not in OPEN_STATES:
                 self.ledger.end_delete(self.account, only_intent=True)
             return
