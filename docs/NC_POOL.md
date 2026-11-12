@@ -600,7 +600,8 @@ one SSH round trip. Then it acts:
   halted account out (`slot_halted`, once) and orders on the other accounts;
   a refusal by the guard is not a provisioning failure and never opens the
   breaker. A member on a halted account is kept as it is, still billed
-  (`release_blocked`); the pool releases it once the halt is lifted. With
+  (`release_blocked`); the pool releases it once the halt is lifted, and
+  lets it go at once when its ticket has ended anyway (nothing to delete). With
   fewer usable accounts than the target it sends `slots_below_target`
   (critical): the pool runs short and a node at its lease end has no account
   for its replacement. `pool-status` and `yeto run status` list halted

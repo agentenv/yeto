@@ -1102,13 +1102,14 @@ def account_attention(cfg: dict[str, Any], *, book: Any = None) -> list[dict[str
     out: list[dict[str, Any]] = []
     for account in accounts:
         try:
-            halt, delete = book.halted(account), book.pending_delete(account)
+            halt, delete = book.halted(account), book.pending_delete(account, sent_only=True)
             orders = book.pending_orders(account, in_flight=False)
         except Exception as error:  # noqa: BLE001
             out.append({"kind": "ledger_unreadable", "account": account, "error": repr(error)[:300]})
             continue
         if halt is not None:
-            out.append({"kind": "halted", "account": account, "reason": halt.get("halt"),
+            out.append({"kind": "halted", "account": account, "halt_kind": halt.get("kind"),
+                        "reason": halt.get("halt"),
                         "since": _until(halt.get("halted_at")), "expected_ticket": halt.get("expected_ticket"),
                         "released_ticket": halt.get("released_ticket"),
                         "action": f"check the account, then: python -m yeto.launch.nc clear-halt --account "

@@ -6,6 +6,7 @@ account is kept until an operator lifts the halt, and the halt is shown."""
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -202,6 +203,8 @@ def test_pool_status_and_the_run_status_show_halted_accounts_unconfirmed_deletes
     book = cli.ledger()
     book.halt(1, "what a delete released is not known", expected_ticket="tA")
     book.begin_delete(4, "tD")
+    assert pool_run.account_attention(cfg)[1:] == []  # a delete only intended is nothing to look at
+    book.send_delete(4)  # sent: unconfirmed until tD reads ended
     order = book.begin_order(5, before=None)
     rows = book.load()
     for row in rows:  # the order call ended without an outcome; the account then showed a ticket
@@ -222,3 +225,164 @@ def test_pool_status_and_the_run_status_show_halted_accounts_unconfirmed_deletes
     assert len(summary["accounts_attention"]) == 3 and "halted" in summary["warning"]
     assert entry.status([PoolRef("nc", config_path)]) == 1  # a warning: the status exits 1
     assert '"accounts_attention"' in capsys.readouterr().out
+
+
+# -- the real National Compute client, ledger and provider under the pool --------------
+
+class _SimProvider(NCProvider):
+    """The real provider; its clients talk to the simulated order tools and never sleep."""
+
+    def client(self, account, *, ordering=False):
+        return ncc.NcClient(account, self.ledger, run=self._run, sleep=lambda s: None, event=self.event,
+                            allowed_accounts=self.allowed if ordering else None)
+
+
+class _SimOps(cli.NcSshOps):
+    """``NcSshOps`` as the pool runs it: supply, release and the halt read are the real
+    code over the real ledger; only the node (ssh, docker, the run store) is faked."""
+
+    start_in_background = False
+
+    def __init__(self, cfg, provider, nc, clock):
+        super().__init__(cfg, run=lambda argv, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+                         provider=provider)
+        self.nc, self.clock, self.sampler, self.fenced = nc, clock, {}, []
+
+    def poll(self, m):
+        t = self.nc.tickets.get(m.ticket)
+        if t is not None and t["state"] == "queued":
+            self.nc._grant(t)  # noqa: SLF001 - National Compute grants the order
+        return self.provider.status(m.account, m.ticket)
+
+    def start(self, m, shards):
+        self.sampler[m.ticket] = {"state": "running", "exit": None}
+
+    restart = start
+
+    def probe(self, m):
+        from yeto.launch.pool import status as el
+
+        s = self.sampler.get(m.ticket, {"state": "absent", "exit": None})
+        return el.Probe(node="ok", sampler=s["state"], exit_code=s["exit"], joined=s["state"] == "running")
+
+    def fence(self, m):
+        self.fenced.append(m.ticket)
+
+    fence_incarnation = fence
+
+    def clear_stale_handoff(self, m, keep):
+        return None
+
+
+def _sim_pool(tmp_path, *, target=2, accounts=(1, 4, 5), **elastic_cfg):
+    import random
+
+    from nc_fault_sim import FaultyNc
+
+    clock = Clock(1_000_000.0)
+    book = ncc.Ledger(tunnel.state_dir() / "tickets.json", clock=clock)
+    nc = FaultyNc(book.path, tuple(accounts), random.Random(7), clock, faults=False, fault_rate=0.0, race_rate=0.0,
+                  vanish_rate=0.0)
+    nc.halted = lambda account: book.halted(account) is not None
+    seen = []
+    def tools(argv, **kw):  # ``nc.window``: the residual window opens right before that account's delete
+        if list(argv)[:2] == ["nc-manage", "delete"] and int(argv[argv.index("--account") + 1]) in nc.window:
+            nc.window.discard(int(argv[argv.index("--account") + 1]))
+            assert nc.race(int(argv[argv.index("--account") + 1]))
+        return nc(argv, **kw)
+
+    nc.window = set()
+    provider = _SimProvider(list(accounts), "run-a", ledger=book, allowed=set(accounts), run=tools,
+                            event=lambda name, **detail: seen.append((name, detail)))
+    cfg, _path = _cfg(tmp_path, accounts=list(accounts), target=target)
+    ops = _SimOps(cfg, provider, nc, clock)
+    pool = _pool(clock, ops, target=target, accounts=accounts, **elastic_cfg)
+    return clock, nc, book, ops, pool, seen
+
+
+def test_with_the_real_client_an_account_halted_by_a_delete_that_hit_a_foreign_ticket_costs_one_account(tmp_path):
+    """Three accounts, target 2. The release of the node on account 1 lands in the window
+    no client check can close (its ticket ends, someone else orders, the delete releases
+    their ticket): the client halts account 1. The pool goes on with the other two."""
+    clock, nc, book, ops, pool, seen = _sim_pool(tmp_path, max_sampler_restarts=0)
+    _run(pool, clock, clock.t + 600)
+    first, second = pool.members
+    assert (first.account, second.account) == (1, 4) and first.state == second.state == READY
+    nc.window.add(1)  # after the client's last status read, right before its delete lands
+    ops.sampler[first.ticket] = {"state": "exited", "exit": 1}  # the crash retires the node on account 1
+    pool.tick()
+    assert not nc.window
+    halt = book.halted(1)
+    assert halt is not None and halt["kind"] in ("foreign_ticket_released", "delete_unconfirmed")
+    assert halt["expected_ticket"] == first.ticket
+    assert {name for name, _ in seen} & {"foreign_ticket_released", "delete_unconfirmed"}  # the client's own report
+    _run(pool, clock, clock.t + 3 * H)
+    ready = [m for m in pool.members if m.state == READY]
+    assert len(ready) == 2 and {m.account for m in ready} == {4, 5}
+    assert not pool.breaker.failures and not pool.breaker.trips and "breaker_open" not in _names(pool)
+    assert "order_failed" not in _names(pool) and len(_events(pool, "slot_halted")) == 1
+    assert _events(pool, "slot_halted")[0]["account"] == 1
+    assert len(_events(pool, "release_hit_foreign_ticket")) <= 1
+    assert not nc.forbidden  # no order and no delete was ever sent on the halted account
+    writes_on_1 = [w for w in nc.writes if w["account"] == 1]
+    assert [w["op"] for w in writes_on_1] == ["create", "delete"]  # nothing after the delete that halted it
+    assert [n["kind"] for n in pool_run.account_attention(ops.cfg, book=book)] == ["halted"]
+    assert book.clear_halt(1)  # the operator checked and lifted the halt
+    _run(pool, clock, clock.t + 600)
+    assert "slot_halt_cleared" in _names(pool)
+
+
+def test_with_the_real_client_three_accounts_one_halted_from_the_start_fill_the_target(tmp_path):
+    clock, nc, book, ops, pool, seen = _sim_pool(tmp_path)
+    book.halt(1, "what a delete released is not known", kind="delete_unconfirmed", expected_ticket="c0")
+    _run(pool, clock, clock.t + 3 * H)
+    ready = [m for m in pool.members if m.state == READY]
+    assert len(ready) == 2 and {m.account for m in ready} == {4, 5}
+    assert not pool.breaker.failures and "order_failed" not in _names(pool) and not nc.forbidden
+    assert not [w for w in nc.writes if w["account"] == 1] and len(_events(pool, "slot_halted")) == 1
+    assert "slots_below_target" not in _names(pool)
+
+
+def test_with_the_real_client_an_ended_ticket_on_a_halted_account_is_not_kept_draining(tmp_path):
+    clock, nc, book, ops, pool, seen = _sim_pool(tmp_path)
+    _run(pool, clock, clock.t + 600)
+    first, second = pool.members
+    assert first.account == 1 and first.state == READY
+    book.halt(1, "what a delete released is not known", kind="delete_unconfirmed", expected_ticket="c0")
+    nc.tickets[first.ticket].update(state="ended", end_reason="preempted")  # the platform took the node back
+    _run(pool, clock, clock.t + 2 * H)
+    assert first.state == GONE and "evicted" in _names(pool)  # nothing to delete: not kept as draining
+    assert "drain_failed" not in _names(pool) and "release_blocked" not in _names(pool)
+    assert not [w for w in nc.writes if w["account"] == 1 and w["op"] == "delete"] and not nc.forbidden
+    ready = [m for m in pool.members if m.state == READY]
+    assert {m.account for m in ready} == {4, 5} and ready[-1].replaces_shard == first.shard
+    assert not pool.breaker.failures
+
+
+def test_an_ended_ticket_whose_release_the_guard_refuses_is_released_at_once():
+    clock = Clock()
+    cloud = GuardedCloud(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.halted.add(1)
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    assert m.state == GONE and _events(pool, "released")[-1]["ended_already"] is True
+    assert "release_blocked" not in _names(pool) and "drain_failed" not in _names(pool)
+
+
+def test_a_member_kept_for_a_halted_account_goes_once_its_ticket_ends():
+    clock = Clock()
+    cloud = GuardedCloud(clock, tells=True, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4))
+    _run(pool, clock, 1800)
+    (m,) = [x for x in pool.members if x.state == READY]
+    cloud.halted.add(1)
+    cloud.tickets[m.ticket].update(sampler="exited", exit=1)
+    pool.config.elastic.max_sampler_restarts = 0
+    _run(pool, clock, clock.t + 600)
+    assert m.state == DRAINING
+    cloud.tickets[m.ticket].update(state="ended", reason="expired")  # its lease ran out
+    pool.tick()
+    assert m.state == GONE and len(cloud.kinds("drain_refused")) == 1

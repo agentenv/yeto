@@ -582,15 +582,23 @@ class IslandPool:
         if member.ticket in self._drain_hold:
             # its slot is halted: a release is refused until an operator lifts the halt. Asked
             # again when the ops say it is lifted (ops that cannot tell: after SLOT_RETRY_S).
-            if self._slot_halt(member.account) is not None:
-                return False
-            if getattr(self.ops, "slot_halt", None) is None and self._drain_hold[member.ticket] > now:
+            held = self._slot_halt(member.account) is not None or (
+                getattr(self.ops, "slot_halt", None) is None and self._drain_hold[member.ticket] > now)
+            if held and self._ticket_ended(member):  # it ended meanwhile: nothing left to release
+                self._released(member, why, ended_already=True)
+                return True
+            if held:
                 return False
         self._drain_hold.pop(member.ticket, None)
         try:
             self.ops.drain(member)
         except Exception as error:  # noqa: BLE001
             member.drain_error = repr(error)[:300]
+            if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS) and self._ticket_ended(member):
+                # nothing to delete: the ticket ended on its own (evicted, expired, released
+                # in the console). The guard's refusal does not keep the member.
+                self._released(member, why, ended_already=True)
+                return True
             if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
                 self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
                 return False
@@ -613,18 +621,32 @@ class IslandPool:
             self._event("drain_failed", ticket=member.ticket, account=member.account, why=why,
                         error=member.drain_error)
             return False
+        self._released(member, why)
+        return True
+
+    def _ticket_ended(self, member: Member) -> bool:
+        """The provider reports the member's ticket ended (a failed read: not known, False)."""
+        try:
+            return el.LeaseStatus.of(self.ops.poll(member)).state == "ended"
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _released(self, member: Member, why: str, *, ended_already: bool = False) -> None:
         self._charge(member, self.clock())
         member.state = GONE
         member.drain_error = None
+        self._drain_hold.pop(member.ticket, None)
+        if ended_already:  # no delete was sent and none is: the patrol does not ask for one either
+            self._drain_hold[member.ticket] = float("inf")
         for key in ("release_deferred", "release_blocked", "release_ownership"):
             if key in member.alerted:
                 member.alerted.remove(key)
+        detail = {"ended_already": True} if ended_already else {}
         self._event("released", ticket=member.ticket, account=member.account, why=why,
-                    spent_ucr=round(self.budget.spent_ucr))
+                    spent_ucr=round(self.budget.spent_ucr), **detail)
         for m in self.members:  # a replacement that lost its predecessor is a plain member now
             if m.replaces == member.ticket:
                 m.replaces = None
-        return True
 
     def _fence(self, m: Member, why: str) -> bool:
         """Fence the shard of ``m`` (every step of the fence is idempotent). False: it failed;
@@ -1842,11 +1864,24 @@ class IslandPool:
                 owned.add(str(ticket))
                 continue
             stray = Member(account, str(ticket), shard="", state=DRAINING, created=now)
+            if str(ticket) in self._drain_hold:
+                # a release its slot's guard refused: not asked for every tick. Nothing to
+                # release once the ticket ended (the ledger row is the provider's to close).
+                if self._drain_hold[str(ticket)] == float("inf") or self._drain_hold[str(ticket)] > now \
+                        or self._slot_halt(account) is not None:
+                    continue
             self._event("orphan_lease", ticket=ticket, account=account)
             try:
                 self.ops.drain(stray)
+                self._drain_hold.pop(str(ticket), None)
                 self._event("released", ticket=ticket, account=account, why="orphan")
             except Exception as error:  # noqa: BLE001
+                if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS + OWNERSHIP_ERRORS):
+                    ended = self._ticket_ended(stray)
+                    self._drain_hold[str(ticket)] = float("inf") if ended else now + SLOT_RETRY_S
+                    self._event("orphan_release_refused", ticket=ticket, account=account, ended=ended,
+                                error=str(error)[:300], retry_in_s=None if ended else SLOT_RETRY_S)
+                    continue
                 self._event("drain_failed", ticket=ticket, account=account, why="orphan", error=repr(error)[:300])
 
     def _adopt(self, account: Any, ticket: str, now: float) -> Member:
