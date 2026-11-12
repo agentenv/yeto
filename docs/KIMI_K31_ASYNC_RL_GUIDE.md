@@ -749,6 +749,25 @@ shortest-lease one. Two modes, set per run by `elastic.scale_down` in
 In both modes the groups the node wrote before the fence stay in its shard and
 the trainer reads them as usual; a group written after the fence is dropped by
 the trainer's incarnation gate. No task is given out twice and none is lost.
+
+**The gate fails closed, and pauses training.** To judge a group the gate reads
+its shard's incarnation lease (`sample-buffer/leases/<shard>.json`). A lease
+that is absent (no such key) accepts the group. A lease that *cannot be read*
+(a timeout, a 5xx, a reset connection, a truncated body) is no verdict: that
+group is neither trained nor counted stale, and the trainer reads the buffer in
+strict order, so **every group behind it waits too, from every shard**. The
+round then holds only the groups before it, and its committed watermark is
+exactly that group's position, so a restore never trains a group twice. The
+price: one shard whose lease stays unreadable pauses the whole training (the
+samplers keep writing; the groups wait in the buffer). The trainer logs, at
+most once a minute, `incarnation gate: training paused: lease of shard <X>
+unreadable since <T>`, and the next take counts the waiting groups in
+`sample_buffer/lease_deferred_groups`. While it waits, neither the no-new-group
+timeout nor the data end applies, and nothing stops the wait except the lease
+becoming readable again or the trainer process being stopped (the reader has
+no stop or drain signal of its own). A sampler whose previous lease cannot be
+read at its start waits for it (up to 10 minutes, ending early on a reclaim or
+stop) rather than overwrite it.
 No replacement is ordered for a removed node, and the other nodes are not
 touched. A removed node that is evicted, crashes or reaches its lease end
 while it drains is released at once, again with no replacement. The events

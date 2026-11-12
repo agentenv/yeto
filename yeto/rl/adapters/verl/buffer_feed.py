@@ -271,6 +271,7 @@ def print_feed_event(event: str, **fields: Any) -> None:
 from yeto.rl.engine.incarnation_lease import (  # noqa: E402
     INCARNATION_FENCE_ENV,
     LEASE_ROOT_ENV,
+    LeaseUnknown,
     default_incarnation_gate,
 )
 
@@ -334,6 +335,7 @@ class BufferFeed:
         self.sleep = sleep
         self._last: _Pulled | None = None
         self.pulled_positions: list[int] = []
+        self.lease_waits = 0  # pauses for a lease the gate could not read
         self.cursor_log = cursor_log
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
@@ -367,6 +369,20 @@ class BufferFeed:
                                       f"(read position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
 
+    def _gate_verdict(self, item: Any) -> str | None:
+        """The incarnation gate's verdict on ``item``. While its lease cannot be read
+        (:class:`LeaseUnknown`: the gate fails closed and logs, rate limited) the
+        group is neither trained nor dropped: the feed reads one position after the
+        other, so it waits and asks again."""
+        if self.gate is None:
+            return None
+        while True:
+            try:
+                return self.gate.verdict(item.entry, int(item.position))
+            except LeaseUnknown:
+                self.lease_waits += 1
+                self.sleep(self.poll_s)
+
     def _local(self, version: int) -> int | None:
         if self.merged is not None:
             local = self.merged.local(version)
@@ -385,7 +401,7 @@ class BufferFeed:
             item = self._next()
             if item is None:
                 return None
-            stale = None if self.gate is None else self.gate.verdict(item.entry, int(item.position))
+            stale = self._gate_verdict(item)
             if stale is not None:  # never trained, never read
                 self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
                              "kept": False, "dropped": STALE_REASON, "detail": stale,
