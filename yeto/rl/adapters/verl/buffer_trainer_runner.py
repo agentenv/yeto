@@ -83,6 +83,15 @@ class _YetoBufferTrainerMixin(_YetoTrainerMixin):
                                              epoch=0, rollout_status={}))
         return len(self._yeto_kept)
 
+    def yeto_remove_group(self, uid: str) -> int:
+        """Take a kept group back out of the round before it is assembled (fenced since
+        it was kept: ``BufferFeed.recheck_kept``)."""
+        kept = getattr(self, "_yeto_kept", None) or []
+        self._yeto_kept = [s for s in kept if str(s.sample_id) != str(uid)]
+        if len(self._yeto_kept) != len(kept) - 1:
+            raise RuntimeError(f"group {uid}: {len(kept) - len(self._yeto_kept)} kept groups removed, expected 1")
+        return len(self._yeto_kept)
+
     def yeto_param_version(self) -> int:
         return int(self.current_param_version)
 
