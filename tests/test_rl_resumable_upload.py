@@ -286,3 +286,141 @@ def test_a_not_implemented_failure_without_checksums_is_raised(tmp_path):
 
     with pytest.raises(Exception, match="NotImplemented"):
         _objects(Refusing(), part_checksum=False).write_file(KEY, _source(tmp_path))
+
+
+# ---------------------------------------------------------------- a complete whose answer was lost
+class LostComplete(FakeS3):
+    """The first CompleteMultipartUpload raises ``error``: after it took effect
+    (``applied``, the answer lost on the way back) or instead of it. A complete of an
+    upload the store does not hold any more is ``NoSuchUpload``, as on S3 and R2."""
+
+    def __init__(self, error, *, applied=True):
+        super().__init__()
+        self.error = error
+        self.applied = applied
+
+    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload):
+        if UploadId not in self.uploads:
+            raise _error("NoSuchUpload", "CompleteMultipartUpload")
+        if self.error is None:
+            return super().complete_multipart_upload(Bucket, Key, UploadId, MultipartUpload)
+        error, self.error = self.error, None
+        if self.applied:
+            super().complete_multipart_upload(Bucket, Key, UploadId, MultipartUpload)
+        raise error
+
+
+# what the caller sees: the SDK's retries of a 5xx used up, or (measured on R2) the
+# SDK's own second send of a complete whose first answer timed out
+LOST_ANSWERS = {"retries exhausted": lambda: _error("ServiceUnavailable", "CompleteMultipartUpload"),
+                "the sdk's retry found the upload gone": lambda: _error("NoSuchUpload", "CompleteMultipartUpload")}
+
+
+@pytest.mark.parametrize("answer", sorted(LOST_ANSWERS))
+@pytest.mark.parametrize("part_checksum", [False, True])  # False: R2 (the multipart ETag is the proof)
+def test_a_completed_upload_whose_answer_was_lost_is_not_uploaded_again(tmp_path, answer, part_checksum):
+    fake, source = LostComplete(LOST_ANSWERS[answer]()), _source(tmp_path)
+    returned = _objects(fake, part_checksum=part_checksum).write_file(KEY, source)
+    assert fake.calls.count("upload_part") == 4 and fake.calls.count("create_multipart_upload") == 1
+    assert fake.calls.count("complete_multipart_upload") == 1
+    assert fake.objects[_full(KEY)] == source.read_bytes()
+    assert returned == (fake.checksums[_full(KEY)] if part_checksum else None)
+    assert not _journal(source).exists() and fake.uploads == {}
+
+
+@pytest.mark.parametrize("part_checksum", [False, True])
+def test_a_completed_upload_whose_answer_was_lost_still_ends_as_the_whole_object(tmp_path, part_checksum):
+    fake, source = LostComplete(_error("ServiceUnavailable", "CompleteMultipartUpload")), _source(tmp_path)
+    _objects(fake, part_checksum=part_checksum).write_file(KEY, source)
+    assert fake.objects[_full(KEY)] == source.read_bytes()
+
+
+@pytest.mark.parametrize("part_checksum", [False, True])
+def test_the_last_try_of_an_upload_also_recognises_its_lost_complete(tmp_path, part_checksum):
+    fake, source = LostComplete(_error("ServiceUnavailable", "CompleteMultipartUpload")), _source(tmp_path)
+    _objects(fake, part_checksum=part_checksum, upload_attempts=1).write_file(KEY, source)
+    assert fake.calls.count("upload_part") == 4 and not _journal(source).exists()
+
+
+def test_a_process_killed_between_the_complete_and_its_answer_does_not_upload_again(tmp_path):
+    class Killed(BaseException):
+        pass
+
+    fake, source = LostComplete(Killed()), _source(tmp_path)
+    with pytest.raises(Killed):
+        _objects(fake, part_checksum=False).write_file(KEY, source)
+    assert _journal(source).exists() and fake.objects[_full(KEY)] == source.read_bytes()
+    fake.calls.clear()
+    _objects(fake, part_checksum=False).write_file(KEY, source)  # the restarted process
+    assert "upload_part" not in fake.calls and "create_multipart_upload" not in fake.calls
+    assert not _journal(source).exists() and fake.objects[_full(KEY)] == source.read_bytes()
+
+
+@pytest.mark.parametrize("part_checksum", [False, True])
+@pytest.mark.parametrize("left", ["nothing", "another object of the same size", "the same bytes as one put"])
+def test_an_upload_that_is_gone_without_its_object_is_uploaded_again(tmp_path, left, part_checksum):
+    """Aborted or expired after its last part, not completed: whatever the key holds
+    is not this upload unless its ETag / composite checksum says so."""
+    fake, source = LostComplete(_error("InternalError", "CompleteMultipartUpload"), applied=False), _source(tmp_path)
+    real = fake.complete_multipart_upload
+
+    def complete(**kw):
+        try:
+            return real(**kw)
+        except Exception:
+            fake.uploads.clear()  # aborted by someone else / expired by a lifecycle rule
+            data = source.read_bytes()
+            if left == "another object of the same size":
+                fake.put_object(Bucket=kw["Bucket"], Key=kw["Key"], Body=b"\0" * len(data))
+            elif left == "the same bytes as one put":  # cannot be told from this upload's parts: sent again
+                fake.put_object(Bucket=kw["Bucket"], Key=kw["Key"], Body=data)
+            raise
+
+    fake.complete_multipart_upload = complete
+    _objects(fake, part_checksum=part_checksum).write_file(KEY, source)
+    assert fake.calls.count("upload_part") == 8 and fake.calls.count("create_multipart_upload") == 2
+    assert fake.objects[_full(KEY)] == source.read_bytes() and not _journal(source).exists()
+
+
+def test_a_still_failing_store_after_the_last_try_raises_the_upload_error_and_keeps_the_journal(tmp_path):
+    fake, source = LostComplete(_error("InternalError", "CompleteMultipartUpload"), applied=False), _source(tmp_path)
+
+    def list_parts(**kw):
+        raise _error("ServiceUnavailable", "ListParts")
+
+    fake.list_parts = list_parts
+    with pytest.raises(Exception, match="InternalError"):
+        _objects(fake, upload_attempts=1).write_file(KEY, source)
+    assert _journal(source).exists() and "u0" in fake.uploads
+
+
+def test_the_multipart_etag_is_the_md5_of_the_part_md5s_and_only_of_md5s():
+    import hashlib
+
+    bodies = [b"a" * 10, b"b" * 10, b"tail"]
+    etags = [FakeS3.etag(b) for b in bodies]
+    expected = hashlib.md5(b"".join(hashlib.md5(b).digest() for b in bodies)).hexdigest() + "-3"
+    assert s3_store.multipart_etag(etags) == s3_store.multipart_etag([e.strip('"') for e in etags]) == expected
+    assert s3_store.multipart_etag([FakeS3.etag(b"one")]).endswith("-1")
+    # an SSE-KMS / OSS style ETag is no MD5: nothing can be derived, so nothing is confirmed
+    for odd in ([], [None], ['"abc"'], [etags[0], '"' + "z" * 32 + '"'], [etags[0], '"0123-2"']):
+        assert s3_store.multipart_etag(odd) is None
+
+
+@pytest.mark.parametrize("part_checksum", [False, True])
+def test_a_part_cut_off_by_a_closed_connection_is_sent_again_like_any_failed_part(tmp_path, part_checksum):
+    from botocore.exceptions import ConnectionClosedError
+
+    class Closing(FakeS3):
+        closed = False
+
+        def upload_part(self, **kw):
+            if kw["PartNumber"] == 2 and not self.closed:
+                self.closed = True
+                raise ConnectionClosedError(endpoint_url="https://store")  # its ``response`` is None
+            return super().upload_part(**kw)
+
+    fake, source = Closing(), _source(tmp_path)
+    _objects(fake, part_checksum=part_checksum).write_file(KEY, source)
+    assert fake.calls.count("upload_part") == 4 and fake.calls.count("create_multipart_upload") == 1
+    assert fake.objects[_full(KEY)] == source.read_bytes()
