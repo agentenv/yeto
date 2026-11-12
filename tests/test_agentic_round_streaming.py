@@ -242,7 +242,7 @@ def test_a_drain_past_its_timeout_cancels_the_running_trials(tmp_path):
         (drain,) = [f for n, f in events if n == DRAIN_EVENT]
         assert drain["timed_out"] and drain["abandoned_trials"] == N and drain["detached_trials"] == 0
         assert not _entries(tmp_path)[0]
-        rnd.flush()  # the abandoned group is settled after the drain (after the loop's load)
+        rnd.flush()
     finally:
         rnd.close()
     (group,) = [f for n, f in events if n == GROUP_EVENT and f["prompt_id"] == "a"]
@@ -862,6 +862,36 @@ def test_a_detached_trial_keeps_its_slot_until_it_ends(tmp_path):
     assert max(held) <= N + 1, held
 
 
+def test_a_call_that_waits_on_detached_trials_keeps_the_event_tape_moving(tmp_path, monkeypatch):
+    from yeto.rl.engine import agentic_round
+
+    monkeypatch.setattr(agentic_round, "WAIT_BEAT_S", 0.02)
+    harness = StubbornHarness({"b": 0.0})
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), max_in_flight=N,
+                                 drain_timeout_s=0.02, abandon_grace_s=0.02)
+    rnd.release_pending = lambda: pending["seq"]
+    release = threading.Timer(0.02, lambda: pending.update(seq=3))  # rnd(0) waits: a holds every slot
+    release.start()
+    try:
+        rnd(0)  # returns once the drain detached a's trials and ended
+        assert len(rnd._detached) == N
+        call = threading.Thread(target=rnd, args=(1,), daemon=True)  # no slot for b: the call waits
+        call.start()
+        waits = lambda: [f for n, f in events if n == agentic_round.WAIT_EVENT and f["detached_in_flight"] == N]  # noqa: E731
+        assert _wait(lambda: len(waits()) >= 2)
+        assert call.is_alive() and waits()[-1]["in_flight"] == 0 and waits()[-1]["queued_groups"] == 1
+        harness.release.set()  # the stuck trials end: b runs, the call returns
+        call.join(5)
+        assert not call.is_alive()
+        rnd.flush()
+    finally:
+        release.cancel()
+        harness.release.set()
+        rnd.close()
+    assert {f["prompt_id"]: f["written"] for n, f in events if n == GROUP_EVENT} == {"a": False, "b": True}
+
+
 def test_close_cancels_detached_trials_and_takes_their_errors(tmp_path, recwarn, caplog):
     import gc
     import logging
@@ -888,7 +918,7 @@ def test_close_cancels_detached_trials_and_takes_their_errors(tmp_path, recwarn,
     assert not [r for r in caplog.records if "never retrieved" in r.getMessage() or "destroyed" in r.getMessage()]
 
 
-def test_the_drain_ends_before_the_backlog_of_groups_is_written(tmp_path):
+def test_slow_group_writes_do_not_delay_the_cut_and_are_done_before_the_load(tmp_path):
     import yeto.rl.agentic  # noqa: F401  (imported before the threads race on it)
     import yeto.rl.harness.harbor.trial  # noqa: F401
 
@@ -905,11 +935,9 @@ def test_the_drain_ends_before_the_backlog_of_groups_is_written(tmp_path):
                                  drain_timeout_s=cut, abandon_grace_s=grace, max_in_flight=16)
     rnd.release_pending = lambda: pending["seq"]
     settle = rnd._settle
-    settled_in_drain = []
 
     def slow_settle(group, tally):
         time.sleep(write)  # e.g. writing a group of 1M-token rows
-        settled_in_drain.append(group.item.prompt_id)
         return settle(group, tally)
 
     rnd._settle = slow_settle
@@ -918,25 +946,44 @@ def test_the_drain_ends_before_the_backlog_of_groups_is_written(tmp_path):
         time.sleep(0.05)
         pending["seq"] = 3  # due while b, c, d still run (they end before the cut); a is stuck
         rnd(1)
+        names = [n for n, _ in events]
         (drain,) = [f for n, f in events if n == DRAIN_EVENT]
-        in_drain = list(settled_in_drain)
-        # at most the cut + the grace + the one write in progress (+ scheduling slack);
-        # before, the three groups were written first: 3 x write = 1.5 s and more
-        assert drain["waited_s"] <= cut + grace + write + 0.4, drain
+        # the cut and the detach are on time whatever the writes take (before: the cut
+        # waited for the write in progress, 0.7 s and more)
+        assert drain["trials_ended_s"] <= cut + grace + 0.25, drain
         assert drain["timed_out"] and drain["detached_trials"] == N
-        assert drain["unsettled_groups"] >= 2 and not rnd.holds_weights()
-        engine.load(Path("r1"), 1)  # the loop's load, before the backlog is written
-        rnd(2)
-        rnd.flush()
+        # every group that ended is written before the drain ends (before the load) ...
+        assert names.index(DRAIN_EVENT) > max(i for i, n in enumerate(names) if n == GROUP_EVENT)
+        assert not rnd._finished and drain["waited_s"] >= drain["trials_ended_s"] + 3 * write - 0.1
     finally:
         harness.release.set()
-        rnd.close()
-    assert len(in_drain) <= 2
+        rnd.close()  # ... so a sampler that dies in the load has lost none of them
     groups = {f["prompt_id"]: f for n, f in events if n == GROUP_EVENT}
-    # nothing is lost or relabelled by settling after the load: the version the trials ran on
     assert all(groups[p]["written"] and groups[p]["versions"] == [0, 0] for p in "bcd")
     assert not groups["a"]["written"] and groups["a"]["lost"] == {LOST_DRAIN: N}
-    assert sum(1 for f in groups.values() if f["written"]) == len(_entries(tmp_path)[0])
+    assert len(_entries(tmp_path)[0]) == 3
+
+
+def test_groups_are_written_when_every_call_finds_a_new_release_ready(tmp_path):
+    harness = Harness({p: 0.0 for p in "abcdef"})
+    rnd, engine, events = _round(tmp_path, harness, Prompts({i: [p] for i, p in enumerate("abcdef")}))
+    seq = {"ready": None}
+    rnd.release_pending = lambda: seq["ready"]
+    rnd.release_ready = lambda: seq["ready"]
+    try:
+        rnd(0)
+        assert _wait(lambda: len(rnd._finished) == 1 or any(n == GROUP_EVENT for n, _ in events))
+        for call in range(1, 6):  # a small release is on disk again at every call
+            seq["ready"] = call
+            rnd(call)
+            engine.load(Path(f"r{call}"), call)  # the loop's load after each drain
+            assert not rnd._finished  # nothing waits in memory across the load
+        rnd.flush()
+    finally:
+        rnd.close()
+    assert [f["seq"] for n, f in events if n == DRAIN_EVENT] == [1, 2, 3, 4, 5]
+    written = [f["prompt_id"] for n, f in events if n == GROUP_EVENT and f["written"]]
+    assert sorted(written) == list("abcdef") and len(_entries(tmp_path)[0]) == 6
 
 
 def test_a_drain_whose_trials_all_end_is_not_reported_timed_out(tmp_path):

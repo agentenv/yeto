@@ -4,6 +4,8 @@ waited 2684 s on one agent-timeout trial with the engine idle)."""
 from __future__ import annotations
 
 import threading
+import time
+from pathlib import Path
 
 import pytest
 
@@ -80,12 +82,61 @@ def test_a_bad_drain_setting_is_a_config_error(section):
         ar.drain_settings({"agentic": section}, drain=True)
 
 
-def test_round_factory_builds_the_round_from_the_drain_settings():
-    import inspect
+def _factory_world(monkeypatch):
+    """round_factory with its heavy parts (tokenizer, records proxy, Harbor) replaced."""
+    from yeto.rl.harness import chat_templates, harbor
+    from yeto.rl.harness.gateway import proxy, recorder
 
-    source = inspect.getsource(ar.round_factory)
-    assert 'drain_settings(spec, drain=switch == "drain")' in source
-    assert "drain_timeout_s=drain_timeout_s" in source and "abandon_grace_s=abandon_grace_s" in source
+    monkeypatch.setattr(chat_templates.ChatTemplate, "load", classmethod(lambda cls, *a, **k: object()))
+    monkeypatch.setattr(proxy, "RecordsProxy", lambda *a, **k: object())
+    monkeypatch.setattr(recorder, "ProxyTokenRecorder", lambda *a, **k: object())
+    monkeypatch.setattr(harbor, "HarborHarness", lambda *a, **k: object())
+    monkeypatch.setattr(harbor.HarborSettings, "from_env", classmethod(lambda cls: harbor.HarborSettings(tasks_dir=Path("tasks"))))
+
+
+def _built(spec, tmp_path, *, live=False):
+    from yeto.rl.adapters.sampler_engines.fake import FakeEngine
+    from yeto.rl.engine.buffer_payload import GroupWriter
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+    from yeto.rl.engine.sampler_engine import Provenance, SamplingParams
+
+    engine = FakeEngine()
+    engine.start(None, 0)
+    engine.updates_during_generation = live
+    spec = {"sampling": {}, **spec, "agentic": {"turn_max_tokens": 8, "template": "t", "max_in_flight": 2,
+                                                "max_response_len": 16, **spec.get("agentic", {})}}
+    make = ar.round_factory(spec, engine, {})
+    sampling = SamplingParams(max_tokens=8, n=2)
+    rnd = make(engine, GroupWriter(FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1), "s"),
+               prompts=lambda rollout_id: [], sampling=sampling, emit=lambda name, **fields: None,
+               provenance=Provenance.of(engine.identity, sampler_id="s", sampling=sampling))
+    try:
+        return rnd.weight_switch, rnd.drain_timeout_s, rnd.abandon_grace_s
+    finally:
+        rnd.close()
+
+
+@pytest.mark.parametrize(("spec", "live", "want"), [
+    ({"reload_max_defer_s": 300, "agentic": {"drain_timeout_s": 3600}}, False, ("drain", 300.0, ar.ABANDON_GRACE_S)),
+    ({"agentic": {"abandon_grace_s": 7}}, False, ("drain", DEFAULT_RELOAD_MAX_DEFER_S, 7.0)),
+    ({"reload_max_defer_s": None, "agentic": {}}, False, ("drain", None, ar.ABANDON_GRACE_S)),
+    ({"reload_max_defer_s": 300, "agentic": {"drain_timeout_s": 3600}}, True, ("live", 3600.0, ar.ABANDON_GRACE_S))])
+def test_round_factory_builds_the_round_with_the_spec_drain_settings(monkeypatch, tmp_path, spec, live, want):
+    _factory_world(monkeypatch)
+    assert _built(spec, tmp_path, live=live) == want
+
+
+@pytest.mark.parametrize("spec", [
+    {"agentic": {"abandon_grace_s": None}}, {"agentic": {"abandon_grace_s": -1}},
+    {"agentic": {"drain_timeout_s": "x"}}, {"reload_max_defer_s": "soon", "agentic": {}},
+    {"reload_max_defer_s": 0, "agentic": {}}])
+def test_round_factory_refuses_bad_drain_settings(monkeypatch, tmp_path, spec):
+    from yeto.rl.agentic import HarnessConfigError
+
+    _factory_world(monkeypatch)
+    with pytest.raises(HarnessConfigError, match="abandon_grace_s|drain_timeout_s|reload_max_defer_s"):
+        _built(spec, tmp_path)
 
 
 # ---------------------------------------------------------------------- PolicyFollower.prefetch (real follower)
@@ -239,7 +290,11 @@ def test_a_stale_latest_does_not_restart_the_download(tmp_path, monkeypatch):
     r4 = store.publish(4)
     store.gates[5] = threading.Event()
     store.publish(5)
-    assert follower.prefetch() is False and store.resolved == [5]  # r5 downloads
+    assert follower.prefetch() is False  # r5 downloads
+    deadline = time.time() + 10
+    while not store.resolved and time.time() < deadline:  # its thread has started
+        time.sleep(0.001)
+    assert store.resolved == [5]
     store.read = r4  # stale reads of LATEST (an eventually consistent store): r4, also unloaded
     for _ in range(3):
         assert follower.prefetch() is False and follower.pending_seq() == 5
