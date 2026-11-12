@@ -936,13 +936,20 @@ class Run:
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails
-        closed while a lease is unreadable (groups wait in the buffer, nothing trains)."""
+        closed while a lease is unreadable (groups wait in the buffer, nothing trains), or
+        it ended the trainer on a store refusal no retry changes (credentials, bucket)."""
         log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
         try:
             tail = Path(log).read_bytes()[-200_000:].decode("utf-8", "replace") if log else ""
         except OSError:
             return None
+        from yeto.rl.engine.incarnation_lease import FATAL_MARK  # noqa: PLC0415
+
         paused = tail.rfind("incarnation gate: training paused")
+        fatal = tail.rfind(FATAL_MARK)
+        if fatal >= 0 and fatal > paused:
+            line = tail[fatal:].splitlines()[0]
+            return f"{line[:400]} (the trainer exits on it: not starvation, not a gate pause)"
         if paused < 0 or tail.rfind("incarnation gate: lease of", paused + 1) > paused:
             return None
         line = tail[paused:].splitlines()[0]
