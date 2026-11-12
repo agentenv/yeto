@@ -845,6 +845,10 @@ continue when it joins.
   (`YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS`), it logs a warning and emits
   `rl_buffer_unidentified_policy_starved`; it keeps waiting for groups of a
   release the store names.
+  Scope: the resume behavior of this section (`buffer_trained`, the batch
+  ledger moved aside, groups without a policy identity passed over, no cut
+  before the first trained round) is the Miles trainer's, the one this guide
+  runs. A verl buffer trainer does not have it.
 - **Behind the releases.** When the latest cut is older than the newest
   release, the trainer restores the cut and continues the version numbers at
   the newest release (`rl_round_cut_behind_releases`). It keeps no cut before
