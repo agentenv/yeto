@@ -227,6 +227,85 @@ def test_s3_create_raises_other_errors():
         s3_store.S3ObjectStore(URI, client=s3).create("k", b"1")
 
 
+class _LostAnswerS3(FakeS3):
+    """``lose(n)``: the n-th conditional put from now is applied, but its answer is
+    lost; the SDK sends it again and reports that send's refusal (``RetryAttempts`` 1),
+    as R2 and botocore do. ``taken_by``: another writer's bytes land first instead."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lose: int | None = None
+        self.taken_by: bytes | None = None
+
+    def lose(self, nth: int = 1) -> None:
+        self._lose = int(nth)
+
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None, ChecksumSHA256=None):
+        if IfNoneMatch is not None and self._lose is not None:
+            self._lose -= 1
+            if not self._lose:
+                self._lose = None
+                first = Body if self.taken_by is None else self.taken_by
+                super().put_object(Bucket=Bucket, Key=Key, Body=first, IfNoneMatch=IfNoneMatch)
+                raise ClientError({"Error": {"Code": "PreconditionFailed", "Message": "exists"},
+                                   "ResponseMetadata": {"HTTPStatusCode": 412, "RetryAttempts": 1}}, "PutObject")
+        return super().put_object(Bucket=Bucket, Key=Key, Body=Body, IfNoneMatch=IfNoneMatch,
+                                  ChecksumSHA256=ChecksumSHA256)
+
+
+def test_a_create_refused_on_its_own_retry_is_this_writers_create():
+    """A conditional put whose answer was lost is sent again by the SDK and refused:
+    the object is this writer's, so the create succeeded."""
+    s3 = _LostAnswerS3()
+    store = s3_store.S3ObjectStore(URI, client=s3)
+    s3.lose()
+    assert store.create("k", b"mine") and store.read("k") == b"mine"
+    # a retry refused because another writer got there first is still a loss
+    s3.lose()
+    s3.taken_by = b"theirs"
+    assert not store.create("k2", b"mine") and store.read("k2") == b"theirs"
+    # a refusal on the first send is a loss, decided without reading the object
+    s3.calls.clear()
+    assert not store.create("k", b"mine") and "get_object" not in s3.calls
+
+
+def test_a_lost_create_answer_appends_no_record_twice():
+    """Sampler shard and trainer merge: the record whose create answer was lost is
+    in the index once, and a restarted merger resumes every shard where it stopped."""
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer, shard_index
+
+    s3 = _LostAnswerS3()
+    objects = s3_store.S3ObjectStore(URI, client=s3)
+    shard = FileSampleBuffer(objects, batch_size=1, index=shard_index("s-0"))
+    _add(shard, "g0", 0)
+    s3.lose()
+    _add(shard, "g1", 0)
+    _add(shard, "g2", 0)
+    assert [e.sample_id for e in shard.entries()] == ["g0", "g1", "g2"]
+    s3.lose(2)  # the merged index's second record
+    trainer = open_trainer_buffer(objects, batch_size=1, shards=["s-0"])
+    assert [e.sample_id for e in trainer.entries()] == ["g0", "g1", "g2"]
+    _add(shard, "g3", 0)
+    restarted = open_trainer_buffer(objects, batch_size=1, shards=["s-0"])
+    assert [e.sample_id for e in restarted.entries()] == ["g0", "g1", "g2", "g3"]
+
+
+def test_a_lost_claim_answer_keeps_the_claim_with_its_sampler():
+    """Store dispenser: the sampler whose claim answer was lost holds the slot (it
+    renews and settles it) instead of leaving it to expire toward ``max_redo``."""
+    from yeto.rl.engine.store_dispense import StoreLedger
+
+    s3 = _LostAnswerS3()
+    ledger = StoreLedger(s3_store.S3ObjectStore(URI, client=s3), "task-dispense", rows=4, fingerprint=b"f",
+                         holder="s-0", incarnation="i1")
+    ledger.open()
+    s3.lose()
+    assert ledger.claim(0, 0)
+    other = StoreLedger(s3_store.S3ObjectStore(URI, client=s3), "task-dispense", rows=4, fingerprint=b"f",
+                        holder="s-1", incarnation="i1")
+    assert not other.claim(0, 0)
+
+
 def test_directory_store_skips_staged_files(tmp_path):
     store = DirectoryObjectStore(tmp_path)
     (tmp_path / "a").mkdir()
