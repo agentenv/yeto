@@ -59,6 +59,27 @@ class ObjectStore(Protocol):
     def delete(self, key: str) -> None: ...
 
 
+# Store answers that no retry changes: the credentials or the bucket are wrong (an
+# expired *session* token is left out: a credential provider may refresh it)
+FATAL_STORE_CODES = frozenset({"AccessDenied", "403", "401", "Unauthorized", "InvalidAccessKeyId",
+                               "SignatureDoesNotMatch", "NoSuchBucket", "InvalidBucketName", "AllAccessDisabled",
+                               "AccountProblem"})
+FATAL_STORE_ERRORS = frozenset({"NoCredentialsError", "PartialCredentialsError", "ProfileNotFound"})
+
+
+def is_fatal_store_error(error: BaseException) -> bool:
+    """Whether a failed store request is a configuration error (refused
+    credentials, no such bucket, no credentials at all) rather than an outage: a
+    poll that fails this way is not read again, it ends the process (it would
+    fail the same way forever while looking alive)."""
+    if type(error).__name__ in FATAL_STORE_ERRORS:
+        return True
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return False
+    return str((response.get("Error") or {}).get("Code", "")) in FATAL_STORE_CODES
+
+
 def upload_file(objects: ObjectStore, key: str, path: str | os.PathLike[str]) -> None:
     """Write the file at ``path`` as object ``key``."""
     write_file = getattr(objects, "write_file", None)
@@ -172,6 +193,12 @@ class DirectoryObjectStore:
         keys = (p.relative_to(self.root).as_posix() for p in base.rglob("*")
                 if p.is_file() and not p.name.endswith(TMP_SUFFIX))
         return sorted(k for k in keys if k.startswith(prefix) and k > start_after)
+
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request: up to ``limit`` keys after ``start_after`` and the key
+        to continue from (None: that was the last page)."""
+        keys = self.list(prefix, start_after=start_after)
+        return keys[:limit], (keys[limit - 1] if len(keys) > limit else None)
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)

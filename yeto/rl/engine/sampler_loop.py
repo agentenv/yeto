@@ -72,6 +72,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from .merged_release import fastest_lane_read
+from .object_store import is_fatal_store_error
 from .policy_release import LATEST_UNREAD, PolicyFollower, ReleaseNotLoaded
 from .sample_buffer import SampleBufferError, buffer_dir, read_read_position
 from .task_dispense import DispenseEnded, DispenseFencedEnd
@@ -80,6 +81,13 @@ DEFAULT_POLL_S = 5.0
 READ_FAILED_EVENT = "rl_sampler_store_read_failed"  # a store poll of the loop failed (first of an outage)
 READ_OK_EVENT = "rl_sampler_store_read_ok"  # ... and the first one that worked again
 DEFAULT_MAX_DAMAGED_LATEST_READS = 120  # reads in a row of a LATEST that does not parse (10 min at poll_s 5)
+# the longest one poll of the loop may keep failing before the island ends on it: past the
+# read outage it rides out (DEFAULT_WRITE_DEFER_MAX_S, 10 min), well short of "forever"
+DEFAULT_MAX_READ_OUTAGE_S = 1800.0
+
+
+class StoreReadOutage(RuntimeError):
+    """A poll of the loop failed for longer than ``max_read_outage_s``."""
 
 
 def heartbeat_read(beat: Mapping[str, Any], seen: Any, shard: str | None, read: int) -> int:
@@ -158,6 +166,16 @@ class SamplerLoop:
         self.max_damaged_latest_reads = DEFAULT_MAX_DAMAGED_LATEST_READS
         self._damaged_latest = 0  # in a row
         self._read_failing: dict[str, tuple[float, int]] = {}  # what -> (since, failures) of an outage
+        self.max_read_outage_s: float | None = DEFAULT_MAX_READ_OUTAGE_S  # None: no bound
+        self._latest_unread_since: float | None = None
+
+    def _outage_bound(self, what: str, since: float, failures: int, error: BaseException) -> None:
+        """Raise when ``what`` has failed for longer than ``max_read_outage_s``."""
+        bound = getattr(self, "max_read_outage_s", DEFAULT_MAX_READ_OUTAGE_S)
+        if bound is not None and self.clock() - since > bound:
+            raise StoreReadOutage(f"store read {what!r} failed {failures} times over "
+                                  f"{self.clock() - since:.0f} s (max_read_outage_s {bound:.0f}): "
+                                  f"{type(error).__name__}: {error}"[:500]) from error
 
     def _read(self, what: str, read: Callable[[], Any], default: Any = None) -> Any:
         """``read()``, a poll of the store (module doc): ``default`` when it fails.
@@ -168,16 +186,19 @@ class SamplerLoop:
         except SampleBufferError:
             raise
         except Exception as error:  # noqa: BLE001 - unknown this time: the next poll reads again
+            if is_fatal_store_error(error):  # refused credentials, no such bucket: no outage
+                raise
             self.read_failures += 1
-            since, failures = self._read_failing.get(what, (time.monotonic(), 0))
+            since, failures = self._read_failing.get(what, (self.clock(), 0))
             self._read_failing[what] = (since, failures + 1)
             if not failures:
                 self.emit(READ_FAILED_EVENT, what=what, error=f"{type(error).__name__}: {error}"[:300])
+            self._outage_bound(what, since, failures + 1, error)
             return default
         if what in self._read_failing:
             since, failures = self._read_failing.pop(what)
             self.emit(READ_OK_EVENT, what=what, failed_reads=failures,
-                      outage_s=round(time.monotonic() - since, 1))
+                      outage_s=round(self.clock() - since, 1))
         return value
 
     def backlog(self) -> int:
@@ -216,10 +237,17 @@ class SamplerLoop:
             loaded = self.follower.refresh()
         except ReleaseNotLoaded as error:
             unread = error.reason == LATEST_UNREAD
+            if not unread:
+                self._latest_unread_since = None
             self.read_failures += int(unread)
             self._damaged_latest = self._damaged_latest + 1 if unread and error.fields.get("damaged") else 0
             if self._damaged_latest >= self.max_damaged_latest_reads:
                 raise
+            if unread:  # the served weights stay, but not for ever on a store that never answers
+                if getattr(self, "_latest_unread_since", None) is None:
+                    self._latest_unread_since = self.clock()
+                self._outage_bound("latest", self._latest_unread_since, self.follower.latest_read_failures,
+                                   error)
             seen = self.follower.last_seen
             mark = (None if seen is None else seen.seq, error.reason, tuple(sorted(error.fields.items())))
             if mark != self._not_loaded:  # one event per release, cause and fields, not per poll
@@ -229,6 +257,7 @@ class SamplerLoop:
                           **error.fields)
             return
         self._damaged_latest = 0
+        self._latest_unread_since = None
         if self._not_loaded is not None and self._not_loaded[1] == LATEST_UNREAD:
             self._not_loaded = None  # read again: a later outage is reported anew
         if loaded is not None:

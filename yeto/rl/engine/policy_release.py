@@ -114,7 +114,7 @@ from typing import Any
 
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
-from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, object_size
+from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, is_fatal_store_error, object_size
 from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
@@ -1025,10 +1025,34 @@ class FollowerCounters:
 
 
 DOWNLOAD_RETRY_S = 60.0  # a failed background download is tried again after this
-# a background download starts after a random 0..DOWNLOAD_SPREAD_S delay: samplers that see
-# the same LATEST together do not open their range reads on the store in the same second
+# A background download starts after a delay of 0..DOWNLOAD_SPREAD_S: samplers that see
+# the same LATEST together do not open their range reads on the store in the same second.
+# The delay is fixed per sampler (:func:`download_delay_s`), so two samplers keep their
+# distance at every release. It postpones the release on that sampler by at most the
+# spread: keep the spread well below the trainer's release interval, or a sampler stays
+# one more version behind (the number of versions behind stays bounded either way: the
+# delay is the same constant for every release, and only the newest release is fetched).
 DOWNLOAD_SPREAD_S = 5.0
+DOWNLOAD_SPREAD_ENV = "YETO_RL_RELEASE_SPREAD_S"  # the spread in seconds (0: no delay)
+DOWNLOAD_SPREAD_KEY_ENV = "YETO_RL_RELEASE_SPREAD_KEY"  # what tells this sampler apart (default: the host name)
 DOWNLOAD_WAIT_S = 5.0  # refresh waits this long for a download it starts before going on
+
+
+def download_delay_s(environ: Mapping[str, str] | None = None) -> float:
+    """This sampler's delay before a background download: a fixed point of
+    ``0..spread`` taken from its key (:data:`DOWNLOAD_SPREAD_KEY_ENV`, else the
+    host name), ``spread`` from :data:`DOWNLOAD_SPREAD_ENV`, else
+    :data:`DOWNLOAD_SPREAD_S`."""
+    import socket  # noqa: PLC0415
+
+    env = os.environ if environ is None else environ
+    raw = env.get(DOWNLOAD_SPREAD_ENV)
+    spread = max(0.0, float(raw)) if raw not in (None, "") else float(DOWNLOAD_SPREAD_S)
+    if spread <= 0:
+        return 0.0
+    key = env.get(DOWNLOAD_SPREAD_KEY_ENV) or socket.gethostname()
+    point = int.from_bytes(hashlib.sha256(str(key).encode("utf-8", "replace")).digest()[:8], "big") / 2 ** 64
+    return spread * point
 
 
 def _download_failed(release: PolicyRelease, error: BaseException, served: int) -> ReleaseNotLoaded:
@@ -1053,7 +1077,7 @@ class _Fetch:
 
     def start(self, releases: "PolicyReleaseStore", *, from_store: bool, timer: Callable[[], float]) -> None:
         def run() -> None:
-            time.sleep(random.uniform(0.0, DOWNLOAD_SPREAD_S))
+            time.sleep(download_delay_s())
             began = timer()
             try:
                 self.directory = releases.resolve(self.release, from_store=from_store)
@@ -1219,7 +1243,9 @@ class PolicyFollower:
             return int(ready.release.seq)
         try:
             latest = self._newest(self.releases.latest())
-        except Exception:  # noqa: BLE001 - LATEST not read: unknown now, read again at the next poll
+        except Exception as error:  # noqa: BLE001 - LATEST not read: unknown now, read again at the next poll
+            if is_fatal_store_error(error):
+                raise
             self.latest_read_failures += 1
             return None
         if latest is None or latest.seq <= self._served_seq():
@@ -1251,7 +1277,9 @@ class PolicyFollower:
             return int(ready.release.seq)
         try:
             latest = self._newest(self.releases.latest())
-        except Exception:  # noqa: BLE001 - LATEST not read: nothing on disk to report; read again at the next poll
+        except Exception as error:  # noqa: BLE001 - LATEST not read: nothing on disk to report; read again at the next poll
+            if is_fatal_store_error(error):
+                raise
             self.latest_read_failures += 1
             return False
         if latest is None or latest.seq <= self._served_seq():
@@ -1280,7 +1308,10 @@ class PolicyFollower:
                 latest = self.releases.latest()
         except Exception as error:  # noqa: BLE001 - a poll that failed, not a release that failed
             # the engines keep the release they serve and the next refresh reads again;
-            # "damaged": the record is there and does not parse (the caller bounds those)
+            # "damaged": the record is there and does not parse (the caller bounds those);
+            # refused credentials / no such bucket are no outage: raised as they are
+            if is_fatal_store_error(error):
+                raise
             self.latest_read_failures += 1
             damaged = isinstance(error, _DAMAGED_RECORD) and not isinstance(error, OSError)
             raise ReleaseNotLoaded(f"the newest release could not be read: {type(error).__name__}: {error}",

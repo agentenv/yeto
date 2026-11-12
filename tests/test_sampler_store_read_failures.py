@@ -429,6 +429,7 @@ def test_a_renewal_that_cannot_read_whether_it_was_superseded_still_writes_its_b
     """Renewals are writes: an outage of the reads does not let a claim run out."""
     s3, objects = _world()
     a = _sampler(objects, "s-0", "i1", lease_s=90.0)
+    a.superseded_check_every = 1  # every renewal reads whether it was superseded
     assert a.take(2) == [0, 1]
     for _ in range(4):  # every read of the outage fails; 160 s is longer than the lease
         s3.now += 40.0
@@ -810,3 +811,113 @@ def test_a_prefetch_whose_read_of_latest_fails_reports_nothing_on_disk_and_reads
     s3.fail("get_object", unavailable("GetObject"), key="policy-releases/LATEST.json")
     assert follower.prefetch() is False and follower.latest_read_failures == 1
     assert follower.prefetch() is True  # read again: no release yet, nothing to fetch
+
+
+def test_a_slot_whose_earlier_attempt_is_still_in_flight_here_is_not_claimed_again_by_this_process():
+    """A sampler that outlives a read outage can find its own attempt expired while the
+    group of that attempt is still in flight; claiming the slot again would overwrite the
+    held record (the old group then counts as the new attempt's, or keeps the slot held
+    forever). It settles first; the slot is claimable again after."""
+    s3, objects = _world()
+    a = _sampler(objects, "s-0", "i1", lease_s=90.0)
+    assert a.take(1) == [0]
+    s3.now += 200.0  # no renewal reached the store: attempt 0 expired
+    assert a.take(1) == [1]
+    assert a._held[0].attempt == 0  # the record of the attempt in flight is kept
+    a.written(0, [], keep=[1])  # the old group settles (not written): the lost slot is let go
+    assert 0 not in a._held
+    assert a.take(1) == [0] and a._held[0].attempt == 1
+
+
+# ============================================ a configuration error is no outage
+def refused(code: str = "AccessDenied", op: str = "Op") -> ClientError:
+    status = 404 if code == "NoSuchBucket" else 403
+    return ClientError({"Error": {"Code": code, "Message": code},
+                        "ResponseMetadata": {"HTTPStatusCode": status, "RetryAttempts": 0}}, op)
+
+
+def test_configuration_errors_are_told_from_outages():
+    from yeto.rl.engine.object_store import is_fatal_store_error
+
+    assert is_fatal_store_error(refused("AccessDenied")) and is_fatal_store_error(refused("NoSuchBucket"))
+    assert is_fatal_store_error(refused("403")) and is_fatal_store_error(refused("InvalidAccessKeyId"))
+    assert not is_fatal_store_error(unavailable()) and not is_fatal_store_error(expired_token())
+    assert not is_fatal_store_error(EndpointConnectionError(endpoint_url="https://store"))
+    assert not is_fatal_store_error(ValueError("torn")) and not is_fatal_store_error(OSError("eio"))
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "NoSuchBucket"])
+def test_a_latest_the_store_refuses_ends_the_sampler_at_once(tmp_path, code):
+    s3, objects = _world()
+    rounds: list[int] = []
+    loop = _loop(objects, tmp_path, rounds, [], num_rollouts=6)
+    for _ in range(6):
+        s3.fail("get_object", refused(code, "GetObject"), key="policy-releases/LATEST.json")
+    with pytest.raises(ClientError, match=code):
+        loop.run()
+    assert rounds == []
+
+
+def test_a_buffer_the_store_refuses_ends_the_sampler_instead_of_waiting_for_ever(tmp_path):
+    s3, objects = _world()
+    rounds: list[int] = []
+    loop = _loop(objects, tmp_path, rounds, [], num_rollouts=1)
+    for _ in range(50):
+        s3.fail("list", refused("AccessDenied", "ListObjectsV2"), key="sample-buffer/shards/s-0/")
+    with pytest.raises(ClientError, match="AccessDenied"):
+        loop.run()
+    assert rounds == []
+
+
+def test_a_poll_that_keeps_failing_past_the_bound_ends_the_sampler(tmp_path):
+    from yeto.rl.engine.sampler_loop import StoreReadOutage
+
+    s3, objects = _world()
+    now = [0.0]
+    rounds: list[int] = []
+
+    def sleep(s):
+        now[0] += s
+
+    loop = _loop(objects, tmp_path, rounds, [], num_rollouts=1)
+    loop.clock, loop.sleep, loop.max_read_outage_s = (lambda: now[0]), sleep, 60.0
+    for _ in range(1000):
+        s3.fail("list", unavailable("ListObjectsV2"), key="sample-buffer/shards/s-0/")
+    with pytest.raises(StoreReadOutage, match="backlog"):
+        loop.run()
+    assert rounds == [] and 60.0 < now[0] <= 60.0 + 2 * loop.poll_s
+
+
+def test_a_latest_unread_past_the_bound_ends_the_sampler(tmp_path):
+    from yeto.rl.engine.sampler_loop import StoreReadOutage
+
+    s3, objects = _world()
+    now = [0.0]
+    rounds: list[int] = []
+
+    def generate(rollout_id):
+        rounds.append(rollout_id)
+        now[0] += 30.0
+
+    loop = _loop(objects, tmp_path, rounds, [], num_rollouts=None)
+    loop.generate, loop.clock, loop.max_read_outage_s = generate, (lambda: now[0]), 100.0
+    for _ in range(1000):
+        s3.fail("get_object", unavailable("GetObject"), key="policy-releases/LATEST.json")
+    with pytest.raises(StoreReadOutage, match="latest"):
+        loop.run()
+    assert 3 <= len(rounds) <= 5  # it rode out the bound on its served weights, then ended
+
+
+def test_a_scan_the_store_refuses_ends_the_dispenser():
+    s3, objects = _world()
+    a = _sampler(objects, "s-0", "i1")
+    s3.fail("list", refused("AccessDenied", "ListObjectsV2"), key=f"{NS}/")
+    with pytest.raises(ClientError, match="AccessDenied"):
+        a.take(1)
+
+
+def test_a_handoff_read_the_store_refuses_is_raised():
+    s3, objects = _world()
+    with pytest.raises(ClientError, match="NoSuchBucket"):
+        s3.fail("get_object", refused("NoSuchBucket", "GetObject"), key="sample-buffer/handoffs/")
+        handoff_requested(SimpleNamespace(objects=objects, root="/unused"), "s-0")

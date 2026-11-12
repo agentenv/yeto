@@ -129,6 +129,11 @@ class RolloutBatchHandle:
     buffer_dropped_small_groups: int | None = None
     buffer_carried_over_groups: int | None = None
     buffer_padded_samples: int | None = None
+    # Groups the reader passed over because their payload is missing or is not a
+    # group (consumed, never trained), and one record per group (position,
+    # sample_id, payload_ref, reason; at most the reader's cap); None = none
+    buffer_damaged_payload_groups: int | None = None
+    buffer_damaged_payloads: list[dict[str, Any]] | None = None
     # Summed non-generation (tool) time of the rollout's
     # samples; None = not reported.
     tool_wait_seconds: float | None = None

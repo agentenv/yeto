@@ -435,6 +435,10 @@ def handoff_requested(store: Any, sampler: str, *, on_error: Callable[[BaseExcep
     except ValueError:
         return True
     except Exception as error:  # noqa: BLE001 - unknown this time
+        from .object_store import is_fatal_store_error  # noqa: PLC0415
+
+        if is_fatal_store_error(error):  # refused credentials, no such bucket: no outage
+            raise
         if on_error is not None:
             on_error(error)
         return False
