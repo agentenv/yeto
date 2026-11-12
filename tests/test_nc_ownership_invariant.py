@@ -7,8 +7,10 @@ from __future__ import annotations
 import pytest
 
 import nc_fault_sim as sim
+from yeto.launch.nc import client as ncc
 
 SEEDS = range(60)
+HEAVY_SEEDS = range(30)  # under sim.WINDOW_HEAVY: the residual window is hit in most of them
 
 
 def _untouched_foreign(sc):
@@ -18,16 +20,69 @@ def _untouched_foreign(sc):
             if t["by"] == "foreign" and t.get("ended_by") == "client" and t["id"] not in residual]
 
 
-@pytest.mark.parametrize("seed", SEEDS)
-def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledger(seed, tmp_path):
-    sc = sim.scenario(tmp_path, seed)
+def _problems(tmp_path, seed, config):
+    """One scenario, up to the point where the faults are over and the client has
+    looked at every account again: every breach of the standing invariants."""
+    sc = sim.scenario(tmp_path, seed, **config)
     sim.run_scenario(sc, steps=150)
-    assert sim.check_invariants(sc) == []
-
+    problems = sim.check_invariants(sc)
     sim.settle(sc, operator=False)
     # writes on tickets outside the ledger: 0; residual hits unnoticed with the account writable: 0
-    assert sim.check_invariants(sc) == [] and _untouched_foreign(sc) == []
-    assert sim.leaks(sc) == []  # what is still open of ours was reported (order_unrecorded, or a halt)
+    return sc, problems + sim.check_invariants(sc, settled=True) + _untouched_foreign(sc) + sim.leaks(sc)
+
+
+@pytest.mark.parametrize("seed", HEAVY_SEEDS)
+def test_a_delete_that_took_a_foreign_ticket_always_ends_in_a_halted_account(seed, tmp_path):
+    """The halt state machine under fire: in this setting most runs have a delete that
+    lands in the residual window. Each one must end named and halted, or halted as
+    unconfirmed; none unnoticed, none unjudged, no write on a halted account."""
+    sc, problems = _problems(tmp_path, seed, sim.WINDOW_HEAVY)
+    assert problems == []
+    sim.settle(sc)
+    assert sim.check_invariants(sc) == [] and sim.still_open(sc, "client") == []
+
+
+def test_the_window_heavy_runs_do_hit_the_residual_window(tmp_path):
+    hits = {"detected": 0, "unconfirmed": 0, "pending": 0, "undetected": 0}
+    for seed in HEAVY_SEEDS:
+        sc, _ = _problems(tmp_path / str(seed), seed, sim.WINDOW_HEAVY)
+        for kind, tickets in sim.residual_outcomes(sc).items():
+            hits[kind] += len(tickets)
+    print("residual hits:", hits)
+    assert hits["detected"] >= 8 and hits["unconfirmed"] >= 2 and hits["pending"] == hits["undetected"] == 0, hits
+
+
+# Each mutation removes one part of what keeps the client off other people's tickets.
+# The invariant runs must turn red on it; a part whose removal they do not notice is
+# a part they do not test. (seeds: the pinned ones where the clean client is green)
+MUTATIONS = {
+    "a halt is never written": (ncc.Ledger, "halt", lambda self, account, reason, **fields: None),
+    "a halt is not enforced": (ncc.NcClient, "_refuse_halted", lambda self: None),
+    "a pending delete is never judged": (ncc.NcClient, "_judge_delete", lambda self, t: None),
+    "a delete is sent into an announced end": (ncc.NcClient, "_ending_soon", lambda self, ticket, current: None),
+}
+PINNED = [(sim.WINDOW_HEAVY, seed) for seed in (0, 1, 6, 13)] + [({}, seed) for seed in (2, 20, 42)]
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_the_invariant_runs_turn_red_when_a_guard_is_removed(name, tmp_path, monkeypatch):
+    for i, (config, seed) in enumerate(PINNED):
+        assert _problems(tmp_path / f"clean{i}", seed, config)[1] == []
+    owner, attr, mutant = MUTATIONS[name]
+    monkeypatch.setattr(owner, attr, mutant)
+    red = []
+    for i, (config, seed) in enumerate(PINNED):
+        try:
+            red += _problems(tmp_path / f"mutant{i}", seed, config)[1]
+        except Exception as error:  # noqa: BLE001 - a mutant may also break the run itself
+            red.append(repr(error))
+    assert red, f"the invariant runs do not notice: {name}"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledger(seed, tmp_path):
+    sc, problems = _problems(tmp_path, seed, {})
+    assert problems == []  # what is still open of ours was reported (order_unrecorded, or a halt)
     foreign = sim.still_open(sc, "foreign")
 
     sim.settle(sc)  # the operator lifts halts, adopts or releases what was reported; the tool releases the rest

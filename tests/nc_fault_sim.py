@@ -38,6 +38,12 @@ or while the delete is still on record as unconfirmed (``pending``). Anything el
 ``undetected`` and must not occur. A released ticket may vanish from the status at
 once (``vanish_rate``), so that the evidence is never visible.
 
+Two more things the fake holds against the client: a changing call on an account
+that is halted in the ledger, and a delete sent within ``DELETE_GUARD_S`` of the
+ticket's announced end (``preempt_at`` / ``lease_until``) - there the fake lets the
+ticket end and someone else order just before the delete lands, which is what the
+guard exists for; that hit is a violation, not a residual one.
+
 Not simulated: two wrong "no order" answers in a row for one account (the client
 trusts the second read).
 """
@@ -91,6 +97,7 @@ class FaultyNc:
     creates_after_residual: int = 0  # orders placed on an account whose residual hit is not accounted for
     _unaccounted: dict[int, int] = field(default_factory=dict)  # account -> index in writes of its residual hit
     accounted: Any = None  # accounted(account) -> bool: the client has halted / still records the delete
+    halted: Any = None  # halted(account) -> bool: the ledger holds a halt for the account
     tickets: dict[str, dict[str, Any]] = field(default_factory=dict)  # id -> account, by, state, times
     current: dict[int, str | None] = field(default_factory=dict)  # the session's ticket per account
     writes: list[dict[str, Any]] = field(default_factory=list)  # every changing call
@@ -250,6 +257,8 @@ class FaultyNc:
             if kind == "raced_no_created":  # an answer that does not say whether it placed the order
                 del doc["created"]
             return _answer(doc)
+        if self.halted and self.halted(account):
+            self.forbidden.append(f"order placed on halted account {account}")
         if account in self._unaccounted and not (self.accounted and self.accounted(account)):
             self.creates_after_residual += 1  # the client went on writing without knowing what it had released
         t = self._place(account, "client")
@@ -264,7 +273,15 @@ class FaultyNc:
         kind = self._fault((*self.BROKEN, "lost_timeout", "lost_garbage", "lost_exit"))
         if kind in self.BROKEN:
             return self._broken(kind, argv)
+        if self.halted and self.halted(account):
+            self.forbidden.append(f"delete sent on halted account {account}")
         t = self.open_ticket(account)
+        if t is not None and t["by"] == "client" and any(
+                at is not None and abs(at - self.clock()) <= ncc.DELETE_GUARD_S
+                for at in (t["preempt_at"], t["lease_until"])):
+            t.update(state="ended", end_reason="expired")  # it ended as announced; someone ordered at once
+            t = self._place(account, "foreign")
+            self._raced.discard(account)  # not residual: the client knew the end was near
         lost = kind.startswith("lost_")
         self.writes.append({"op": "delete", "account": account, "ticket": t and t["id"], "by": t and t["by"],
                             "in_ledger": t is not None and self._in_ledger(account, t["id"]),
@@ -310,8 +327,10 @@ def residual_outcomes(sc: Scenario) -> dict[str, list[str]]:
     * ``pending``: the delete is still on record as unconfirmed (no trusted status
       since); the account takes no other write;
     * ``undetected``: none of these - the client does not know and may go on writing."""
-    named = {d["ticket"] for name, d in sc.events if name == "foreign_ticket_released"}
-    unconfirmed = {(d["account"], d["expected"]) for name, d in sc.events if name == "delete_unconfirmed"}
+    # (an event counts only if the account was halted when it was emitted)
+    named = {d["ticket"] for name, d in sc.events if name == "foreign_ticket_released" and d.get("halted")}
+    unconfirmed = {(d["account"], d["expected"]) for name, d in sc.events
+                   if name == "delete_unconfirmed" and d.get("halted")}
     out: dict[str, list[str]] = {"detected": [], "unconfirmed": [], "pending": [], "undetected": []}
     for w in sc.nc.writes:
         if not w.get("residual"):
@@ -328,18 +347,24 @@ def residual_outcomes(sc: Scenario) -> dict[str, list[str]]:
     return out
 
 
-def check_invariants(sc: Scenario) -> list[str]:
+def check_invariants(sc: Scenario, *, settled: bool = False) -> list[str]:
     """The two standing invariants, for a test or a simulation that runs the client
     over :class:`FaultyNc` (call it at any point; an empty list is a pass):
 
     1. no changing call hit a ticket outside the ledger, no node of such a ticket was
-       handed out, no foreign ticket was adopted late (:func:`violations`);
+       handed out, no foreign ticket was adopted late, no changing call was sent on
+       a halted account or into an announced end (:func:`violations`);
     2. no delete that took someone else's ticket in the residual window went
        unnoticed with the account still writable (:func:`residual_outcomes`), and no
-       order was placed on an account before such a hit was accounted for."""
+       order was placed on an account before such a hit was accounted for.
+
+    ``settled``: the faults are over and the client has read every account again
+    (:func:`settle`); by then every residual hit must have been judged (none ``pending``)."""
     out = violations(sc.nc)
-    out += [f"residual hit on ticket {t} is undetected and the account is writable"
-            for t in residual_outcomes(sc)["undetected"]]
+    outcomes = residual_outcomes(sc)
+    out += [f"residual hit on ticket {t} is undetected and the account is writable" for t in outcomes["undetected"]]
+    if settled:
+        out += [f"residual hit on ticket {t} was never judged" for t in outcomes["pending"]]
     if sc.nc.creates_after_residual:
         out.append(f"{sc.nc.creates_after_residual} order(s) placed on an account with an unaccounted residual hit")
     return out
@@ -373,11 +398,22 @@ def scenario(tmp_path: Path, seed: int, *, accounts: tuple[int, ...] = (1, 4, 5)
     nc = FaultyNc(ledger.path, accounts, random.Random(seed), clock, fault_rate=fault_rate, race_rate=race_rate,
                   vanish_rate=vanish_rate)
     nc.accounted = lambda account: ledger.halted(account) is not None or ledger.pending_delete(account) is not None
+    nc.halted = lambda account: ledger.halted(account) is not None
     sc = Scenario(nc, ledger, {}, clock)
+
+    def event(name: str, **detail: Any) -> None:
+        if "account" in detail:  # what the ledger says at the moment of the report
+            detail["halted"] = ledger.halted(detail["account"]) is not None
+        sc.events.append((name, detail))
+
     for a in accounts:
-        sc.clients[a] = ncc.NcClient(a, ledger, run=nc, sleep=lambda s: None,
-                                     event=lambda name, **detail: sc.events.append((name, detail)))
+        sc.clients[a] = ncc.NcClient(a, ledger, run=nc, sleep=lambda s: None, event=event)
     return sc
+
+
+# A setting in which the residual window is hit in almost every run (few other faults,
+# so that the client gets as far as sending deletes): what the halt logic is tested on.
+WINDOW_HEAVY = {"fault_rate": 0.15, "race_rate": 0.35, "vanish_rate": 0.3}
 
 
 EXPECTED = (ncc.NcError, subprocess.TimeoutExpired)  # what a call may raise under faults

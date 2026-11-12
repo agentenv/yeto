@@ -462,6 +462,30 @@ What to do:
 3. Run `clear-halt --account <account> --yes`. The pool uses the account
    again at its next tick.
 
+**Which halts to expect.** A `delete_unconfirmed` halt after a normal release
+needs two things at once: the delete's answer does not name the ticket, and
+the ended ticket is never shown by a status read afterwards. How often
+National Compute does that is not measured. It is expected to be rare, by
+inference from a small sample: in the ticket ledgers of earlier runs on one
+control host, all 19 tickets this tool released had read back as `ended`,
+`released` (19 of 19; no larger sample exists). In the first days of a run,
+read the fields of each `delete_unconfirmed` event (they are in the halt row
+too) to see which case it was:
+
+| Field | Values |
+|---|---|
+| `delete_answer` | `received`: the delete answered ok, without a ticket id. `none (<error>)`: the call failed or its answer was lost. `unknown`: the process ended inside the call. |
+| `seen` | `no_order`: the status shows no ticket. `other_ticket`: it shows `seen_ticket` in `seen_state`. |
+| `delete_attempts`, `delete_sent_at` | How many times the delete was sent for this ticket, and when first. |
+
+Many halts with `delete_answer: received` and `seen: no_order` would mean
+that National Compute stops showing a released ticket at once; report that,
+it is what a `--ticket` argument of the order tool would fix.
+
+While an account is halted (or a delete sent on it is still unconfirmed), it
+does not count as free: the pool orders on its other accounts and says so
+once (`account_unavailable`).
+
 Until then the pool has one account less. With no spare account, a node of
 the pool that reaches its lease end is not replaced. See
 [Before you start](#before-you-start) for how many accounts to provide.
@@ -544,8 +568,10 @@ one SSH round trip. Then it acts:
   delete the pool reads the account twice, the second time right before the
   call, and sends the delete only if both show its own ticket, open. The
   delete is written to the ledger before it is sent (a row with
-  `pending_delete`) and stays there until the account shows that ticket
-  `ended`. Every later status read of the account, by any command and however
+  `pending_delete`; `phase` is `intent` until the call is about to start,
+  then `sent`) and stays there until the account shows that ticket
+  `ended` (the ticket's row then gets `release_confirmed_by`). A record
+  still at `intent` means no delete was sent; it is dropped without a halt. Every later status read of the account, by any command and however
   much later, settles it; until then the account takes no other write. It sends
   no delete within 120 s (`YETO_NC_DELETE_GUARD_S`) of the ticket's
   `lease_until` or `preempt_at`: the release fails with `no delete sent now`
@@ -569,7 +595,8 @@ Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
 `sampler_restart`, `sampler_crash_loop`, `sampler_finished`,
 `order_refused`, `order_unrecorded`, `foreign_ticket_released`,
-`delete_unconfirmed`, `legacy_ledger_rows`, `breaker_open` and `pool_stopped`.
+`delete_unconfirmed`, `halt_cleared`, `account_unavailable`,
+`legacy_ledger_rows`, `breaker_open` and `pool_stopped`.
 
 Each sampler writes its event tape as `<stem>.<incarnation>.jsonl` (from the
 spec's `event_tape`), one file per incarnation. To read the tapes in the

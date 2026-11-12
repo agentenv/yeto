@@ -588,7 +588,8 @@ def test_a_delete_whose_ticket_is_gone_without_reading_ended_halts_the_account(t
     with pytest.raises(subprocess.TimeoutExpired):
         _lost_delete(sc, nc, c, race=False)
     nc.current[1] = None  # the released ticket is no longer shown at all
-    assert c.account_free() is True and c.ledger.halted(1) is None  # one "no order" answer decides nothing
+    assert c.account_free() is False and c.ledger.halted(1) is None  # one "no order" answer decides nothing
+    assert sc.events[-1][0] == "account_unavailable"  # free at National Compute, closed to this tool
     with pytest.raises(ncc.NcDeleteUnconfirmed, match="no order"):
         c.create(run="run-a")  # the second one in a row, read before the order
     assert c.ledger.halted(1) is not None and sum(w["op"] == "create" for w in nc.writes) == 1
@@ -621,12 +622,14 @@ def test_a_halt_for_an_unconfirmed_delete_lifts_only_when_that_very_ticket_reads
     c.account_free()
     with pytest.raises(ncc.NcDeleteUnconfirmed):
         c.account_free()
-    assert c.ledger.halted(1)["kind"] == "delete_unconfirmed"
+    halt = c.ledger.halted(1)
+    assert (halt["kind"], halt["delete_answer"], halt["seen"]) == (
+        "delete_unconfirmed", "none (TimeoutExpired)", "no_order")
     sc.clock.advance(30 * 86400)
-    assert c.account_free() and c.ledger.halted(1) is not None  # a month of "no order" lifts nothing
+    assert not c.account_free() and c.ledger.halted(1) is not None  # a month of "no order" lifts nothing
     other = nc._place(1, "foreign")
     other.update(state="ended", end_reason="released")
-    assert c.account_free() and c.ledger.halted(1) is not None  # nor does another ticket that reads released
+    assert not c.account_free() and c.ledger.halted(1) is not None  # nor another ticket that reads released
     nc.current[1] = shown  # the status shows our ticket again: ended, released
     assert c.account_free() and c.ledger.halted(1) is None
     name, detail = sc.events[-1]
@@ -646,7 +649,67 @@ def test_a_halt_for_a_released_foreign_ticket_is_never_lifted_by_a_status_read(t
     assert "released ticket" in detail["reason"] and "clear-halt --account 1 --yes" in detail["action"]
     nc.current[1] = mine  # even our own ticket reading ended changes nothing: someone's node was taken
     sc.clock.advance(30 * 86400)
-    assert c.account_free() and c.ledger.halted(1) is not None
+    assert not c.account_free() and c.ledger.halted(1) is not None
+
+
+def test_a_halted_account_does_not_read_free_and_says_so_once(tmp_path):
+    """A halted account has no ticket at National Compute. If it read free, the pool
+    would pick it for every order, fail on the halt each time, and never reach the
+    other accounts."""
+    sc, nc, c = _quiet(tmp_path)
+    assert c.account_free() is True
+    c.ledger.halt(1, "a delete meant for ticket a released ticket b", kind="foreign_ticket_released")
+    assert c.account_free() is False and c.account_free() is False
+    assert [(n, d["account"]) for n, d in sc.events] == [("account_unavailable", 1)]
+    assert "clear-halt --account 1" in sc.events[0][1]["action"] and "halted" in sc.events[0][1]["why"]
+    provider = NCProvider([1, 4], "run-a", ledger=c.ledger, allowed={1, 4}, run=nc)
+    assert provider.account_free(1) is False and provider.account_free(4) is True
+    c.ledger.clear_halt(1)
+    assert c.account_free() is True
+
+
+def test_a_delete_written_down_but_never_sent_is_dropped_without_a_halt(tmp_path):
+    """The process ends between the record and the call (phase ``intent``). Later the
+    ticket ends on its own and someone else orders. No delete was ever sent: the next
+    status read drops the record; nothing is halted."""
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    c.ledger.begin_delete(1, mine)  # written; the process dies before the call
+    assert c.ledger.pending_delete(1)["phase"] == "intent" and c.ledger.pending_delete(1, sent_only=True) is None
+    assert c.ticket_status(mine).state == "waiting" and c.ledger.pending_delete(1) is not None  # still open
+    nc.tickets[mine].update(state="ended", end_reason="expired")
+    nc._place(1, "foreign")
+    assert c.account_free() is False  # their open ticket
+    assert c.ledger.pending_delete(1) is None and c.ledger.halted(1) is None and sc.events == []
+    assert sim.violations(nc) == []
+
+
+def test_a_delete_attempt_that_sends_nothing_leaves_no_record(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    nc._grant(nc.tickets[mine])
+    nc.tickets[mine]["preempt_at"] = sc.clock() + 60
+    real_status, calls = nc._status, []
+
+    def status(argv, account):  # the first read is before the notice; the last look sees it
+        calls.append(1)
+        if len(calls) == 1:
+            doc = dict(nc._view(account), preempt_at=None)
+            return sim._answer({"ok": True, "account": account, "ticket": doc})
+        return real_status(argv, account)
+
+    nc._status = status
+    with pytest.raises(ncc.NcReleaseDeferred):
+        c.delete(mine)
+    assert c.ledger.pending_delete(1) is None and [w for w in nc.writes if w["op"] == "delete"] == []
+
+
+def test_a_confirmed_release_leaves_how_it_was_confirmed_on_the_tickets_row(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    assert c.delete(mine)["state"] == "ended"
+    (row,) = c.ledger.load()
+    assert row["release_confirmed_by"] in ("ticket_read_ended", "delete_answer") and row["ended"] is True
 
 
 def test_open_rows_of_an_earlier_version_are_listed_once_for_the_operator(tmp_path):
