@@ -13,8 +13,10 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
 * response width: spec ``agentic.max_response_len`` (or ``sampling.max_tokens``)
   vs trainer ``--rollout-max-response-len``: the buffer reader does not cut a
   longer response to the trainer's width;
-* row width: the sampler's prompt cap + response cap vs the trainer's
-  ``--seq-len`` (the memory plan of the island);
+* row width (agentic specs): ``agentic.max_prompt_len`` + ``agentic.max_response_len``
+  vs the trainer's ``--seq-len`` (the memory plan of the island). A plain spec's
+  ``max_prompt_tokens`` cuts no prompt (only the engine capacity check reads it), so
+  it bounds no row and is not compared;
 * routing replay (R3): a trainer with ``--use-rollout-routing-replay`` (always on
   in the ``kimi_k31`` recipe) needs ``rollout_fields.routed_experts`` in the spec;
 * expert selection: the sha256 of ``--rl-expert-selection`` vs the spec's
@@ -141,6 +143,12 @@ def length_problems(args: Any, spec: dict[str, Any]) -> list[str]:
                         f"{width}: the trainer would get responses longer than its row width (the buffer "
                         f"reader does not cut them); lower {r_name} or raise --rollout-max-response-len")
     seq = max(int(getattr(args, "seq_len", 0) or 0), width)  # yeto launch raises --seq-len to the response
+    # Only the agentic caps bound a row (a longer first prompt is ABORTED, the response is
+    # cut). A plain spec's max_prompt_tokens is only the engine capacity claim
+    # (max_tokens + max_prompt_tokens <= max_model_len; no prompt is cut or dropped at it),
+    # often set to max_model_len - max_tokens: it says nothing about the rows.
+    if not p_name.startswith("agentic."):
+        return problems
     if response is not None and prompt is not None and seq and prompt + response > seq:
         problems.append(f"the sampler spec's {p_name} {prompt} + {r_name} {response} = {prompt + response} > "
                         f"the trainer's --seq-len {seq}: the island is planned for shorter rows than the "

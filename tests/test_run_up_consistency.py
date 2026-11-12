@@ -109,6 +109,16 @@ def test_a_response_wider_than_the_trainer_row_is_refused(setup):
     _refused(setup.make(), "sampling.max_tokens 16384 > the trainer's --rollout-max-response-len 12288")
 
 
+def test_a_plain_spec_max_prompt_tokens_is_no_row_bound(setup):
+    """A plain spec's max_prompt_tokens cuts no prompt (only the engine capacity check
+    reads it; often max_model_len - max_tokens): a large one is no row mismatch."""
+    setup.spec["engine"]["server"]["max_model_len"] = 262144
+    setup.spec["max_prompt_tokens"] = 262144 - 8192
+    run = setup.make()
+    assert run.consistency_problem() is None
+    assert run.preflight() is True
+
+
 def test_agentic_caps_are_compared_to_the_trainer(setup):
     setup.spec["agentic"] = {"max_response_len": 32768, "max_prompt_len": 4096}
     problem = _refused(setup.make(), "agentic.max_response_len 32768 > the trainer's --rollout-max-response-len")
