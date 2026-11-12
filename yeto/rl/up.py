@@ -837,14 +837,59 @@ class Run:
             _log(f"store list failed: {type(error).__name__}: {error}"[:300])
             return None
 
-    def sampler_health(self) -> Any:
+    SHARD_SCAN_EVERY = 6  # incremental checks between two scans of ``shard-names/`` (new shards)
+
+    def buffer_new_groups(self) -> int | None:
+        """Objects written to the buffer shards since the previous call (None: a listing
+        failed, or this was the first call: the baseline). Incremental: one page after
+        the last key seen per known shard; every ``SHARD_SCAN_EVERY`` calls, the shard
+        names, and a new shard's keys once."""
+        from yeto.rl.engine.sample_buffer import BUFFER_DIR, SHARD_NAMES, shard_prefix  # noqa: PLC0415
+
+        last: dict[str, str] | None = getattr(self, "_shard_last", None)
+        baseline = last is None
+        last = {} if last is None else last
+        calls = getattr(self, "_shard_calls", 0)
+        self._shard_calls = calls + 1
+        found = 0
+        try:
+            objects = self._objects()
+            if baseline or calls % self.SHARD_SCAN_EVERY == 0:
+                names_prefix = f"{BUFFER_DIR}/{SHARD_NAMES}/"
+                for key in objects.list(names_prefix):
+                    shard = key[len(names_prefix):]
+                    if shard and shard not in last:
+                        keys = objects.list(shard_prefix(shard))
+                        last[shard] = max(keys) if keys else ""
+                        found += 0 if baseline else len(keys)
+            for shard, after in list(last.items()):
+                prefix = shard_prefix(shard)
+                if hasattr(objects, "list_page"):
+                    keys, _more = objects.list_page(prefix, start_after=after or "", limit=1000)
+                else:
+                    keys = objects.list(prefix, start_after=after or "")
+                if keys:
+                    last[shard] = max(keys)
+                    found += 0 if baseline else len(keys)
+        except Exception as error:  # noqa: BLE001
+            _log(f"store list failed: {type(error).__name__}: {error}"[:300])
+            self._shard_last = None if baseline else last  # a failed baseline is taken again
+            return None
+        self._shard_last = last
+        return None if baseline else found
+
+    def sampler_health(self, now: float | None = None) -> Any:
         """Ready, unpaused members of the pools whose loop runs (the pool state files and
         the pool lock / pid file; no provider call). A pool whose loop does not run counts
         no healthy member: nothing replaces or restarts its samplers."""
         from yeto.launch.nc import pool_run  # noqa: PLC0415
         from yeto.rl.starvation import SamplerHealth  # noqa: PLC0415
 
-        healthy = paused = live = 0
+        from yeto.launch.pool.status import ElasticConfig  # noqa: PLC0415
+
+        now = time.time() if now is None else now
+        healthy = paused = live = recovering = 0
+        recover_s = 0.0
         readable = False
         unreadable = False
         notes = []
@@ -872,12 +917,22 @@ class Run:
                 notes.append(f"{ref.name}: pool loop not running")
                 continue
             healthy += sum(1 for m in ready if not m.get("paused"))
+            try:
+                timeout = float(ElasticConfig.from_dict(ref.load().get("elastic")).start_timeout_s)
+            except Exception:  # noqa: BLE001
+                timeout = float(ElasticConfig().start_timeout_s)
+            starting = [m for m in alive if m.get("state") in ("provisioning", "starting") and not m.get("paused")
+                        and not m.get("config_error") and now - float(m.get("created") or 0.0) <= timeout]
+            if starting:
+                recovering += len(starting)
+                recover_s = max(recover_s, timeout)
             halted = [m for m in alive if m.get("config_error")]
             if halted:
                 notes.append(f"{ref.name}: {len(halted)} member(s) with a config error")
         if not readable or (unreadable and healthy == 0):  # an unread pool may hold the healthy ones
             return SamplerHealth(None, paused=paused, live=live, detail="; ".join(notes))
-        return SamplerHealth(healthy, paused=paused, live=live, detail="; ".join(notes))
+        return SamplerHealth(healthy, paused=paused, live=live, detail="; ".join(notes),
+                             recovering=recovering, recover_s=recover_s)
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails
@@ -904,23 +959,16 @@ class Run:
         if watch is None:
             watch = self._starvation = StarvationWatch(cfg, now)
             self._starvation_listed: float | None = None
-            self._starvation_keys: set[str] | None = None
             self._starvation_list_ok = False
         def listing() -> int | None:
             self._starvation_listed = now
-            keys = self.buffer_keys()
-            self._starvation_list_ok = keys is not None
-            if keys is None:
-                return None
-            found = None  # a key not in the previous listing: a new group (pruned keys do not count)
-            if self._starvation_keys is not None:
-                found = len(keys - self._starvation_keys)
-            self._starvation_keys = keys
+            found = self.buffer_new_groups()
+            self._starvation_list_ok = found is not None
             return found
 
         listed_now = self._starvation_listed is None or now - self._starvation_listed >= cfg.check_s
         new_groups = listing() if listed_now else None
-        health, cause = self.sampler_health(), self.trainer_side_cause()
+        health, cause = self.sampler_health(now), self.trainer_side_cause()
         verdict = watch.observe(now, new_groups=new_groups, health=health, cause=cause,
                                 listed=getattr(self, "_starvation_list_ok", False))
         if verdict.state == STOP and not listed_now:  # a stop is decided on a fresh listing only

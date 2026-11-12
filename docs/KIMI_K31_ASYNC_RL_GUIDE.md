@@ -1383,13 +1383,19 @@ new object keys under the store's `sample-buffer/shards/` (listed every
 | `alert_min` | 30 | Minutes without a new buffer object before `CRITICAL trainer_starvation_alert` is logged (once per starved stretch; the line names the duration, the healthy / live / paused sampler counts and the pool notes). `0`: no alert. |
 | `stop_min` | 120 | Minutes without a new buffer object before the trainer is stopped, **only** while no sampler is healthy (no ready, unpaused member in a pool whose loop runs) for at least `unhealthy_min`. `0`: never stop. Must be >= `alert_min`. |
 | `unhealthy_min` | 10 | How long the pools must report no healthy sampler before a stop. A short gap (a lease-end handoff) does not count. |
-| `check_s` | 300 | Seconds between two listings of the buffer prefix. |
+| `check_s` | 300 | Seconds between two incremental listings of the buffer shards. |
 | `stop_grace_min` | 20 | After the STOP flag, how long the monitor waits for the trainer launcher to exit before `yeto down`. |
 
 What never stops the trainer: a healthy sampler (long agentic trials can go
 an hour without a group), a member paused with `yeto run pause` (in any state),
 pool state that cannot be read (of any pool), and a failed buffer listing; these
-alert only. A stop is decided on a fresh listing of the buffer. The incarnation gate's
+alert only. A replacement under way (unpaused `provisioning` / `starting`
+members within their pool's `elastic.start_timeout_s`) also holds the stop, for
+at most that timeout from the first replacement of the stretch (the alert says
+`recovering: N member(s) starting`). A stop is decided on a fresh listing of the
+buffer. The listing is incremental: one page after the last key seen per known
+shard each `check_s`, and every 6th check the `shard-names/` prefix for new
+shards; any failed request counts as no listing. The incarnation gate's
 fail-closed pause (`incarnation gate: training paused`, a lease that cannot be
 read) is not starvation: the groups are in the buffer and the trainer waits for
 the lease. When the trainer log shows that pause, the alert names it

@@ -17,7 +17,9 @@ Verdicts, both measured from the last new group (or the start of the watch):
 * ``stop`` after ``stop_s`` without a new group **and** no healthy sampler for at
   least ``unhealthy_s`` (no member ready, or no pool loop driving one). A ready but
   paused member (``yeto run pause``, in any state) is an operator's choice: no stop while
-  one is paused. Pool state that cannot be read (any pool's) and a failed buffer listing
+  one is paused. A replacement under way (unpaused provisioning / starting members within
+  their pool's ``elastic.start_timeout_s``, for at most that long without a healthy
+  sampler) holds the stop too. Pool state that cannot be read (any pool's) and a failed buffer listing
   are no evidence either way: no stop.
 
 ``0`` turns a verdict off. Neutral: no store, no pool, no clock of its own.
@@ -88,11 +90,17 @@ class SamplerHealth:
     paused: int = 0
     live: int = 0
     detail: str = ""
+    # unpaused provisioning / starting members of running pools still within their pool's
+    # ``elastic.start_timeout_s`` (a replacement under way), and the longest such timeout
+    recovering: int = 0
+    recover_s: float = 0.0
 
     def phrase(self) -> str:
         if self.healthy is None:
             return f"sampler pools: state unreadable{'; ' + self.detail if self.detail else ''}"
         text = f"{self.healthy} healthy sampler(s), {self.live} live member(s), {self.paused} paused"
+        if self.recovering:
+            text += f", recovering: {self.recovering} member(s) starting"
         return text + (f" ({self.detail})" if self.detail else "")
 
 
@@ -110,6 +118,7 @@ class StarvationWatch:
         self.config = config
         self.since = float(now)  # last new group (or the watch start)
         self.unhealthy_since: float | None = None
+        self.recovering_since: float | None = None  # replacements seen through this unhealthy stretch
         self.alerted = False
 
     def observe(self, now: float, *, new_groups: int | None, health: SamplerHealth,
@@ -136,7 +145,17 @@ class StarvationWatch:
             reason += f"; trainer side: {cause}"
         if not listed:
             reason += "; the latest buffer listing failed"
-        if (listed and cfg.stop_s > 0 and starved >= cfg.stop_s and health.healthy == 0 and health.paused == 0
+        # a replacement under way holds the stop for at most the pool's start timeout from the
+        # first replacement of this stretch (a pool that orders again and again is stuck)
+        if health.healthy == 0 and health.recovering:
+            if self.recovering_since is None:
+                self.recovering_since = now
+        elif health.healthy != 0:
+            self.recovering_since = None
+        recovering = bool(health.recovering and self.recovering_since is not None
+                          and now - self.recovering_since < health.recover_s)
+        if (listed and not recovering and cfg.stop_s > 0 and starved >= cfg.stop_s and health.healthy == 0
+                and health.paused == 0
                 and self.unhealthy_since is not None and now - self.unhealthy_since >= cfg.unhealthy_s):
             return Verdict(STOP, starved, reason + f" (stop after {cfg.stop_s / 60:.0f} min with no "
                            f"healthy sampler for {(now - self.unhealthy_since) / 60:.0f} min)",
@@ -145,9 +164,9 @@ class StarvationWatch:
             new = not self.alerted
             self.alerted = True
             why = ""
-            if cfg.stop_s > 0 and listed and health.healthy == 0 and health.paused == 0:
+            if cfg.stop_s > 0 and listed and not recovering and health.healthy == 0 and health.paused == 0:
                 why = f" (the trainer is stopped at {cfg.stop_s / 60:.0f} min if no sampler recovers)"
             elif cfg.stop_s > 0:
-                why = " (no stop: a sampler is healthy or paused, or the pool state is unreadable)"
+                why = " (no stop: a sampler is healthy, paused or starting, or the pool state or the buffer listing is unreadable)"
             return Verdict(ALERT, starved, reason + why, new_alert=new, recovered=recovered)
         return Verdict(OK, starved, reason, recovered=recovered)
