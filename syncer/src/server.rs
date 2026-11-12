@@ -415,15 +415,32 @@ struct ReaderGate {
     /// reader may start after that).
     state: Mutex<(usize, bool)>,
     active: tokio::sync::watch::Sender<usize>,
+    /// The control connection has queued this generation's `Event::Hello`.
+    /// The group is in the registry a moment before that; a data stream
+    /// that read an INIT_PARAMS in between would queue its `Event::Init`
+    /// ahead of the HELLO, and the coordinator stops on "INIT before HELLO".
+    hello_queued: std::sync::atomic::AtomicBool,
 }
 
 impl Default for ReaderGate {
     fn default() -> Self {
-        Self { state: Mutex::new((0, false)), active: tokio::sync::watch::channel(0).0 }
+        Self {
+            state: Mutex::new((0, false)),
+            active: tokio::sync::watch::channel(0).0,
+            hello_queued: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 }
 
 impl ReaderGate {
+    fn hello_queued(&self) -> bool {
+        self.hello_queued.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn mark_hello_queued(&self) {
+        self.hello_queued.store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Admit one data-stream reader; None once the control connection closed.
     fn enter(self: &Arc<Self>) -> Option<ReaderGuard> {
         let mut state = self.state.lock().unwrap();
@@ -2734,6 +2751,8 @@ async fn handle_connection(
                 })
                 .await
                 .ok();
+            // Only now may this generation's data streams queue events.
+            group.readers.mark_hello_queued();
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
             registry.lock().unwrap().unregister(member);
             // A data stream may still be reading this generation's last PUSH
@@ -2759,14 +2778,16 @@ async fn handle_connection(
             let learner_id = member.learner_id;
             let generation = member.generation;
             let subscriber = crate::subscriber::is_subscriber_id(learner_id);
-            // The control socket's HELLO may still be in flight; wait for it.
+            // The control socket's HELLO may still be in flight; wait for it
+            // (for a learner: until its Event::Hello is queued, so no event
+            // of this stream can reach the coordinator before it).
             let mut group = None;
             for _ in 0..200 {
                 group = if subscriber {
                     let hub = registry.lock().unwrap().subscribers.clone();
                     hub.and_then(|hub| hub.group(member))
                 } else {
-                    registry.lock().unwrap().groups.get(&member).cloned()
+                    registry.lock().unwrap().groups.get(&member).cloned().filter(|g| g.readers.hello_queued())
                 };
                 if group.is_some() {
                     break;
