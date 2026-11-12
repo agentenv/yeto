@@ -234,7 +234,7 @@ def test_elastic_config_refuses_unknown_and_bad_values():
 # -- eviction, expiry, renewal ------------------------------------------------
 
 def test_eviction_fences_releases_and_replacement_continues_the_shard():
-    clock, cloud = Clock(), None
+    clock = Clock()
     cloud = Cloud(clock)
     pool = _pool(clock, cloud, target=2, accounts=(1, 4, 5), data_slots=2)
     _run(pool, clock, 1800)
@@ -1227,3 +1227,45 @@ def test_a_handoff_from_this_pools_own_member_or_fence_is_kept():
     assert set_aside_handoff(store, "nc-3") is None  # no record: nothing to do
     assert set_aside_handoff(store, "nc-0", keep={"nc-9"})["successor"] == "nc-1"
     assert not handoff_requested(store, "nc-0") and handoff_requested(store, "nc-2")
+
+
+# -- lease-end handover without a ready replacement ------------------------------
+
+def test_lease_end_without_ready_replacement_alerts_and_keeps_the_started_successor_handoff():
+    """The replacement never comes up: the old node still goes at its lease end, but with
+    an alert (a capacity gap), and the shard is not fenced under a successor that already
+    asked for the handoff."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, start_timeout_s=99 * H)
+    m = _ready_member(pool, clock, cloud)
+    cloud.ready_after = 99 * H
+    _run(pool, clock, m.lease_until + 600)
+    assert m.state == GONE
+    gap = [e for e in pool.events.events if e["event"].endswith("lease_end_without_ready_replacement")]
+    assert len(gap) == 1 and gap[0]["replacement"] == m.replaced_by and gap[0]["replacement_state"] == "starting"
+    assert not [e for e in cloud.kinds("fence") if e[1] == m.ticket]  # the started successor's handoff stays
+
+
+def test_lease_end_with_no_replacement_fences_the_shard_and_alerts():
+    """No replacement could be ordered (balance below the order floor): the refusal is an
+    event, and the node drained at its lease end is fenced first (its claims go back at
+    once, the next order continues the shard)."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud)
+    m = _ready_member(pool, clock, cloud)
+    cloud.bal = pool.config.order_floor() - 1
+    _run(pool, clock, m.lease_until + 600)
+    refused = [e for e in pool.events.events if e["event"].endswith("order_refused")]
+    assert len(refused) == 1 and "order floor" in refused[0]["why"] and refused[0]["replaces"] == m.ticket
+    gap = [e for e in pool.events.events if e["event"].endswith("lease_end_without_ready_replacement")]
+    assert len(gap) == 1 and gap[0]["replacement"] is None
+    fences = [e for e in cloud.kinds("fence") if e[1] == m.ticket]
+    drains = [e for e in cloud.kinds("drain") if e[1] == m.ticket]
+    assert fences and drains and fences[0][3] <= drains[0][2]
+    assert pool.pending and pool.pending[0]["shard"] == m.shard and pool.pending[0]["from"] == m.ticket
+    cloud.bal = 10**10  # money back: the next order continues the fenced shard
+    _run(pool, clock, clock.t + 600)
+    new = [x for x in pool.members if x.ticket != m.ticket]
+    assert new and new[0].replaces_shard == m.shard
