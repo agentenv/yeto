@@ -84,10 +84,14 @@ LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
                     "buffer_carried_over_groups", "buffer_padded_samples")
 # buffer_damaged_payload_groups: groups the reader passed over because their payload
-# is missing or is not a group (consumed, not trained)
+# is missing or is not a group; buffer_duplicate_task_groups: because an earlier group
+# of the buffer holds their store-dispenser task (both consumed, not trained);
+# buffer_duplicate_task_unverified_groups: of those, the ones whose earlier group this
+# trainer process did not judge itself (below a restored watermark)
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted",
-                                 "buffer_damaged_payload_groups", *BUFFER_FILL_KEYS})
+                                 "buffer_damaged_payload_groups", "buffer_duplicate_task_groups",
+                                 "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
@@ -95,8 +99,10 @@ ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_sta
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
 ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
 # buffer_damaged_payloads: one record per such group ({"position", "sample_id",
-# "payload_ref", "reason"[, "dispense_position"]}; BatchReader's TakeReport)
-ROUND_METADATA_RECORD_KEYS = frozenset({"buffer_damaged_payloads"})
+# "payload_ref", "reason"[, "dispense_position"]}); buffer_duplicate_tasks: ({"slot",
+# "position", "sample_id", "first_position", "first_sample_id", "first_trained_here"
+# [, "plan", "attempt"]}); BatchReader's TakeReport
+ROUND_METADATA_RECORD_KEYS = frozenset({"buffer_damaged_payloads", "buffer_duplicate_tasks"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
