@@ -1,6 +1,6 @@
 """Request budget of the store dispenser (``yeto.rl.engine.store_dispense``): a scan
 lists the unsettled slots only, with the same result as a listing of the whole
-namespace."""
+namespace; a lease renewal is one write per held slot."""
 
 from __future__ import annotations
 
@@ -363,6 +363,44 @@ def test_retire_and_open_status_list_done_and_the_unsettled_slots_only(tmp_path)
     assert out["released"] == 20 and out["slots"] == list(range(SLOTS + 1, SLOTS + 40, 2))
     assert store.ops["list"] <= SLOTS // PAGE + 3
     assert sd.retire(store, NS, "s1", reason="test")["released"] == 0
+
+
+# ----------------------------------------------------------------- renewals
+def test_a_lease_renewal_is_one_write_per_held_slot_and_checks_takeover_every_third_time(tmp_path):
+    path = _write(tmp_path, _rows(8))
+    store = PagedObjects()
+    worker = _open(path, store, groups=4)
+    held = _slots(worker(0))
+    store.ops.clear()
+    assert [worker.renew() for _ in range(sd.SUPERSEDED_CHECK_EVERY)] == [4] * sd.SUPERSEDED_CHECK_EVERY
+    # main: 3 existence checks and a write per slot per renewal (36 + 12 here)
+    assert dict(store.ops) == {"put": 4 * sd.SUPERSEDED_CHECK_EVERY, "head": 4 * 3}
+    # another sampler ends one attempt and takes the slot over
+    other = _ledger(store, 8, holder="s1")
+    assert other.fail(held[0], 0, "expired") and other.claim(held[0], 1)
+    assert worker.renew() == 4 and worker.renew() == 4  # unseen: the beats change nothing
+    states, now = other.scan()
+    assert states[held[0]].latest == 1 and states[held[0]].last_seen(1) == store.data[f"{NS}/claims/{held[0]:012d}/0001"][1]
+    assert worker.renew() == 3 and worker.stats["lost"] == 1  # the third renewal checks
+    assert not worker.still_holds(held[0]) and worker.still_holds(held[1])
+
+
+def test_a_scan_marks_a_taken_over_slot_lost_without_asking_the_store(tmp_path):
+    path = _write(tmp_path, _rows(8))
+    store = PagedObjects()
+    events = []
+    worker = _open(path, store, groups=2, emit=lambda event, **fields: events.append((event, fields)))
+    held = _slots(worker(0))
+    other = _ledger(store, 8, holder="s1")
+    assert other.fail(held[0], 0, "release", reason="fenced")
+    store.ops.clear()
+    worker.poll(0)
+    assert store.ops["head"] == 0 and worker.stats["lost"] == 1
+    assert [f for e, f in events if e == sd.LOST_EVENT] == [
+        {"backend": "store", "namespace": NS, "slot": held[0], "attempt": 0, "reason": "superseded"}]
+    store.ops.clear()
+    assert not worker.still_holds(held[0]) and store.ops["head"] == 0  # already known
+    assert worker.renew() == 1  # only the slot it still holds
 
 
 def test_full_scan_switch_lists_the_whole_namespace(tmp_path, monkeypatch):

@@ -77,6 +77,11 @@ Rules:
   short range listings (``done/``, ``beats/``, ``claims/``, ``fail/`` from the
   oldest unsettled slot on) plus ``retired/`` and one read of its drain request,
   whatever the size of the ledger; a process's first scan lists ``done/`` whole.
+  A lease renewal is one write per held slot; whether another sampler took the
+  slot over is read from the scans, and checked by the renewal itself only every
+  :data:`SUPERSEDED_CHECK_EVERY`-th time (three existence checks). A beat on a
+  superseded attempt changes nothing: only the latest attempt's beat counts, and
+  the group write is gated by :meth:`StoreDispensedPrompts.still_holds`.
 
 This is the reference implementation of the WorkContract
 (:mod:`yeto.rl.engine.work_contract`; conformance cases in
@@ -129,6 +134,7 @@ CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candid
 SCAN_MERGE_SLOTS = 1024
 SCAN_DIRS = ("beats", "claims", "fail")  # listed per range after done/ (TaskState's other fields)
 FULL_SCAN_ENV = "YETO_RL_DISPENSE_FULL_SCAN"  # 1: every scan lists the whole namespace (as before)
+SUPERSEDED_CHECK_EVERY = 3  # lease renewals per superseded check of a held slot (about one per lease)
 LEASE_KEY = "dispense_lease_s"  # row metadata: this task's lease
 ATTEMPT_KEY = "dispense_attempt"  # item metadata: the attempt this sampler holds
 COUNTED = ("infra", "expired")  # attempt endings that count toward max_redo
@@ -846,6 +852,8 @@ class StoreDispensedPrompts:
         holder = getattr(ledger, "holder", "")
         self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
         self._retired = False  # the controller retired this process (a marker in the ledger)
+        self.superseded_check_every = SUPERSEDED_CHECK_EVERY
+        self._renewals = 0
         self._lock = threading.RLock()
         self._next_scan = 0.0
         self._idle = self.scan_s
@@ -1002,6 +1010,7 @@ class StoreDispensedPrompts:
     def _claim(self, want: int) -> tuple[list[int], bool]:
         states, now = self.ledger.scan()
         self.stats["scans"] += 1
+        self._lost_by_scan(states)
         if self.ledger.is_retired():
             self._retired = True
             with self._lock:
@@ -1078,6 +1087,19 @@ class StoreDispensedPrompts:
                         k = self._stagger % min(len(rest), CLAIM_STAGGER_SLOTS)
                         queue, i = rest[k:] + rest[:k], 0
         return got, ended
+
+    def _lost_by_scan(self, states: Mapping[int, TaskState]) -> None:
+        """Mark the held slots the scan shows superseded (a later claim, or the
+        attempt ended ``expired`` / ``release`` by someone else): what
+        ``StoreLedger.superseded`` asks the store, from keys already listed. Those
+        keys are never deleted, so a scan's view cannot report a loss that is not."""
+        with self._lock:
+            held = [(p, h) for p, h in self._held.items() if not h.lost]
+        for p, h in held:
+            state = states.get(p)
+            if state is not None and ((state.latest or 0) > h.attempt
+                                      or state.fails.get(h.attempt) in ("expired", "release")):
+                self._mark_lost(p, h, "superseded")
 
     def _answer_drain(self) -> None:
         seq = self.ledger.drain_seq
@@ -1265,9 +1287,13 @@ class StoreDispensedPrompts:
             for p, h in held:
                 self._mark_lost(p, h, "fenced")
             return 0
+        # A beat on a superseded attempt changes nothing (module doc, request budget), so
+        # the three existence checks run every SUPERSEDED_CHECK_EVERY-th renewal only.
+        self._renewals += 1
+        check = self._renewals % max(1, int(self.superseded_check_every)) == 0
         renewed = 0
         for p, h in held:
-            if self.ledger.superseded(p, h.attempt):
+            if check and self.ledger.superseded(p, h.attempt):
                 self._mark_lost(p, h, "superseded")
                 continue
             self.ledger.beat(p, h.attempt)

@@ -171,7 +171,7 @@ Samplers also record dispenser events on their event tape:
   (the usual case), 4 more for each group of old unsettled tasks far behind, and at worst one
   request per 1000 keys of the ledger when unsettled tasks are spread over all of it. The first
   scan of a process lists every settlement once. A held task costs one renewal write every
-  `lease_s / 3` with three existence checks, plus three checks before its
+  `lease_s / 3` and three existence checks every third renewal, plus three checks before its
   group is written. `status --open` lists only the unsettled tasks and reads only their claims.
 - **Expired holders.** An expired holder that is still alive (cut off from the bucket for longer
   than the lease) may write its group in the short window before it notices it lost the task. The
