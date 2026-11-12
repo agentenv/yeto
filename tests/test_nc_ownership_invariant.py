@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 
 import nc_fault_sim as sim
-from yeto.launch.nc import client as ncc
 
 SEEDS = range(60)
 
@@ -27,6 +26,8 @@ def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledge
 
     sim.settle(sc, operator=False)
     assert sim.violations(sc.nc) == [] and _untouched_foreign(sc) == []
+    # a delete that took someone else's ticket in the residual window never goes unnoticed
+    assert sim.residual_outcomes(sc)["undetected"] == [] and sc.nc.creates_after_residual == 0
     assert sim.leaks(sc) == []  # what is still open of ours was reported (order_unrecorded, or a halt)
     foreign = sim.still_open(sc, "foreign")
 
@@ -37,10 +38,11 @@ def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledge
 
 def test_the_scenarios_reach_the_cases_the_invariant_is_about(tmp_path):
     """The random runs are not vacuous: orders, releases, lost answers that left a
-    ticket, reports, other people's tickets, refusals for tickets outside the ledger,
-    deferred releases and the residual window all occur across the seeds."""
+    ticket, reports, other people's tickets, the residual window and each way the
+    client accounts for it all occur across the seeds."""
     seen = {"created": 0, "deleted": 0, "reported": 0, "stale_reports": 0, "foreign": 0, "recorded": 0,
-            "residual_detected": 0, "residual_undetected": 0, "halts": 0}
+            "residual_detected": 0, "residual_unconfirmed": 0, "residual_pending": 0, "residual_undetected": 0,
+            "false_halts": 0}
     for seed in SEEDS:
         sc = sim.scenario(tmp_path / str(seed), seed)
         sim.run_scenario(sc, steps=150)
@@ -51,16 +53,14 @@ def test_the_scenarios_reach_the_cases_the_invariant_is_about(tmp_path):
         seen["stale_reports"] += sum(1 for name, d in sc.events if name == "order_unrecorded" and d.get("stale"))
         seen["foreign"] += sum(t["by"] == "foreign" for t in sc.nc.tickets.values())
         seen["recorded"] += sum(1 for r in sc.ledger.load() if r.get("ticket"))
-        hits = sim.residual_hits(sc)
-        seen["residual_detected"] += len(hits["detected"])
-        seen["residual_undetected"] += len(hits["undetected"])
-        seen["halts"] += sum(1 for r in sc.ledger.load() if r.get("halt"))
+        for kind, hits in sim.residual_outcomes(sc).items():
+            seen[f"residual_{kind}"] += len(hits)
+        seen["false_halts"] += sim.false_halts(sc)
     print("scenario coverage:", seen)
     for key in ("created", "deleted", "reported", "foreign", "recorded"):
         assert seen[key] >= 30, seen
     assert seen["stale_reports"] >= 1 and seen["residual_detected"] >= 1, seen
-    # every residual hit whose evidence was still on the account was noticed
-    assert seen["residual_detected"] >= seen["residual_undetected"], seen
+    assert seen["residual_undetected"] == 0, seen
 
 
 def test_the_check_catches_a_delete_of_a_ticket_that_is_not_in_the_ledger(tmp_path):
@@ -87,5 +87,17 @@ def test_a_delete_after_another_look_at_the_account_is_a_violation_not_a_residua
     assert sc.nc.race(1)
     sc.nc(["nc-query", "status", "--account", "1"])  # the client could see the foreign ticket here
     sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])
-    assert len(sim.violations(sc.nc)) == 1 and sim.residual_hits(sc) == {"detected": [], "undetected": []}
-    assert ncc.NcForeignTicketReleased  # (what the client raises when it notices a residual hit)
+    assert len(sim.violations(sc.nc)) == 1
+    assert sim.residual_outcomes(sc) == {"detected": [], "unconfirmed": [], "pending": [], "undetected": []}
+
+
+def test_the_check_catches_a_client_that_goes_on_after_a_residual_hit_it_did_not_notice(tmp_path):
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    c = sc.clients[1]
+    c.create(run="run-a")
+    assert sc.nc.race(1)
+    sc.nc(["nc-manage", "delete", "--account", "1", "--yes"])  # a client without the pending-delete record
+    assert len(sim.residual_outcomes(sc)["undetected"]) == 1
+    sc.nc.current[1] = None
+    sc.nc(["nc-manage", "create", "--account", "1", "--model", "mi355x", "--yes"])
+    assert sc.nc.creates_after_residual == 1

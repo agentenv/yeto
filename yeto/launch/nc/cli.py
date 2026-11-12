@@ -1058,7 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--account", type=int, required=True)
     ad.add_argument("--ticket", required=True)
     ad.add_argument("--yes", action="store_true", help="I checked that this ticket is this tool's order")
-    ch = sub.add_parser("clear-halt", help="lift the halt of an account after a foreign ticket was released")
+    ch = sub.add_parser("clear-halt", help="lift the halt of an account (a delete hit, or may have hit, a foreign ticket)")
     ch.add_argument("--account", type=int, required=True)
     ch.add_argument("--yes", action="store_true", help="I checked the account and told the ticket's owner")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",

@@ -333,7 +333,7 @@ def test_the_pools_provider_reports_an_unrecorded_order_in_the_pools_event_file(
 # -- only tickets with evidence are touched (over the fault simulator's fake, without faults) -----
 
 def _quiet(tmp_path):
-    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0)
+    sc = sim.scenario(tmp_path, 0, fault_rate=0.0, race_rate=0.0, vanish_rate=0.0)
     return sc, sc.nc, sc.clients[1]
 
 
@@ -491,7 +491,7 @@ def test_a_delete_that_released_someone_elses_ticket_is_reported_and_halts_the_a
     theirs = nc.current[1]
     assert (name, detail["ticket"], detail["expected"], detail["severity"]) == (
         "foreign_ticket_released", theirs, mine, "critical")
-    assert sim.violations(nc) == [] and sim.residual_hits(sc) == {"detected": [theirs], "undetected": []}
+    assert sim.violations(nc) == [] and sim.residual_outcomes(sc)["detected"] == [theirs]
     for call in (lambda: c.create(run="run-a"), lambda: c.delete(mine), lambda: c.adopt("x")):
         with pytest.raises(ncc.NcHalted, match="clear-halt"):
             call()
@@ -499,23 +499,99 @@ def test_a_delete_that_released_someone_elses_ticket_is_reported_and_halts_the_a
     assert c.delete(mine)["already"] is True  # ours had ended on its own
 
 
-def test_a_foreign_release_behind_a_lost_delete_answer_is_noticed_at_the_next_release_attempt(tmp_path):
-    sc, nc, c = _quiet(tmp_path)
+def _lost_delete(sc, nc, c, *, race=True, status_down=True):
+    """Our ticket; a delete whose answer is lost (``race``: it took someone else's
+    ticket); ``status_down``: no status can be read right after it either."""
     mine = c.create(run="run-a")
-    real = nc._delete
+    real_delete, real_status = nc._delete, nc._status
 
-    def raced_and_lost(argv, account):
-        nc.race(account)
-        real(argv, account)
+    def lost(argv, account):
+        if race:
+            nc.race(account)
+        real_delete(argv, account)
+        if status_down:
+            nc._status = lambda argv, account: nc._broken("error_exit", argv)
         raise subprocess.TimeoutExpired(argv, 300)
 
-    nc._delete = raced_and_lost
+    nc._delete = lost
+    try:
+        c.delete(mine)
+    finally:
+        nc._delete, nc._status = real_delete, real_status
+    return mine
+
+
+def test_a_foreign_release_behind_a_lost_delete_answer_is_noticed_right_after_the_call(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    with pytest.raises(ncc.NcForeignTicketReleased):
+        _lost_delete(sc, nc, c, status_down=False)
+    assert c.ledger.halted(1)["released_ticket"] == nc.current[1] and c.ledger.pending_delete(1) is None
+
+
+@pytest.mark.parametrize("path", ["poll", "account_free", "create", "delete"])
+def test_an_unconfirmed_delete_is_settled_by_the_next_status_read_on_any_path_however_late(path, tmp_path):
+    """delete sent, answer lost, no status readable | days pass | the next trusted status
+    read - whoever asks - shows another ticket released: the account is halted."""
+    sc, nc, c = _quiet(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        mine = _lost_delete(sc, nc, c)
+    (mine,) = [r["ticket"] for r in c.ledger.open_rows()]
+    pending = c.ledger.pending_delete(1)
+    assert (pending["pending_delete"], pending["attempts"]) == (mine, 1) and c.ledger.halted(1) is None
+    sc.clock.advance(3 * 86400)
+    look = {"poll": lambda: c.ticket_status(mine), "account_free": c.account_free,
+            "create": lambda: c.create(run="run-a"), "delete": lambda: c.delete(mine)}[path]
+    with pytest.raises(ncc.NcForeignTicketReleased):
+        look()
+    theirs = nc.current[1]
+    assert c.ledger.halted(1)["released_ticket"] == theirs and c.ledger.pending_delete(1) is None
+    assert [(n, d["ticket"]) for n, d in sc.events] == [("foreign_ticket_released", theirs)]
+    assert sim.residual_outcomes(sc)["detected"] == [theirs] and nc.creates_after_residual == 0
+
+
+def test_an_unconfirmed_delete_refuses_every_other_write_until_its_ticket_reads_ended(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    mine = c.create(run="run-a")
+    nc._grant(nc.tickets[mine])
+    real = nc._delete
+    nc._delete = lambda argv, account: nc._broken("timeout", argv)  # lost before the request: no effect
     with pytest.raises(subprocess.TimeoutExpired):
         c.delete(mine)
     nc._delete = real
-    with pytest.raises(ncc.NcForeignTicketReleased):
-        c.delete(mine)  # the pool's retry
-    assert c.ledger.halted(1)["released_ticket"] == nc.current[1]
+    assert c.ledger.pending_delete(1)["pending_delete"] == mine
+    assert c.ticket_status(mine).state == "active" and c.ledger.pending_delete(1) is not None  # still open
+    c.ledger.add(1, "other", run="run-a")
+    with pytest.raises(ncc.NcRefused, match="not confirmed yet"):
+        c.delete("other")
+    assert c.delete(mine)["state"] == "ended"  # the same delete again is the one write allowed
+    assert c.ledger.pending_delete(1) is None and c.ledger.halted(1) is None
+    assert sim.violations(nc) == []
+
+
+def test_a_delete_whose_ticket_is_gone_without_reading_ended_halts_the_account(tmp_path):
+    """The delete's answer is lost; later the account shows a new, open ticket (or
+    nothing). Ours may have been released by the delete - or a ticket in between that
+    can no longer be seen. Nobody can tell: the account is halted for a person to check."""
+    sc, nc, c = _quiet(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        _lost_delete(sc, nc, c, race=False)
+    (mine,) = [r["ticket"] for r in c.ledger.open_rows()]
+    later = nc._place(1, "foreign")
+    with pytest.raises(ncc.NcDeleteUnconfirmed, match=later["id"]):
+        c.account_free()
+    ((name, detail),) = sc.events
+    assert (name, detail["expected"], detail["severity"]) == ("delete_unconfirmed", mine, "critical")
+    with pytest.raises(ncc.NcHalted):
+        c.create(run="run-a")
+
+    sc, nc, c = _quiet(tmp_path / "b")
+    with pytest.raises(subprocess.TimeoutExpired):
+        _lost_delete(sc, nc, c, race=False)
+    nc.current[1] = None  # the released ticket is no longer shown at all
+    assert c.account_free() is True and c.ledger.halted(1) is None  # one "no order" answer decides nothing
+    with pytest.raises(ncc.NcDeleteUnconfirmed, match="no order"):
+        c.create(run="run-a")  # the second one in a row, read before the order
+    assert c.ledger.halted(1) is not None and sum(w["op"] == "create" for w in nc.writes) == 1
 
 
 def test_the_clear_halt_command_shows_the_halt_and_needs_yes(tmp_path, monkeypatch, capsys):

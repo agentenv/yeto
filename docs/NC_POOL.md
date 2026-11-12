@@ -426,14 +426,17 @@ inside the call; the call then counts as over 6 minutes after `created_at`),
 python -m yeto.launch.nc clear-halt --account <account> [--yes]
 ```
 
-If a delete of this tool released a ticket that was not its own (see
-[Known limitations](#known-limitations)), the pool emits
-`nc_elastic_foreign_ticket_released` (`severity: critical`, with the ticket
-released and the one expected) and writes a halt for the account into the
-ledger. While the halt is there, every order, delete and adopt on the account
-is refused, by the pool and by the CLI. Tell the owner of the released ticket,
-check the account in the console, then lift the halt with `--yes`. Without
-`--yes` the command prints the halt.
+The pool halts an account, by a halt row in the ledger, in two cases (see
+[Known limitations](#known-limitations)):
+
+| Event (`severity: critical`) | What happened |
+|---|---|
+| `nc_elastic_foreign_ticket_released` (`ticket`, `expected`) | A delete of this tool released `ticket`, which is not its own. Tell its owner. |
+| `nc_elastic_delete_unconfirmed` (`expected`, `delete_sent_at`) | A delete meant for `expected` was sent, and that ticket is gone from the account without ever reading `ended`. The pool cannot tell what the delete released. Usually it was `expected`; check in the console which ticket of the account was released around `delete_sent_at`. |
+
+While the halt is there, every order, delete and adopt on the account is
+refused, by the pool and by the CLI. Check the account in the console, then
+lift the halt with `--yes`. Without `--yes` the command prints the halt.
 
 ### Retry after a configuration error: `pool-retry`
 
@@ -511,7 +514,11 @@ one SSH round trip. Then it acts:
 - **Releasing a node.** The order tool's delete takes no ticket id: it
   releases whatever ticket the account holds when it runs. So before each
   delete the pool reads the account twice, the second time right before the
-  call, and sends the delete only if both show its own ticket, open. It sends
+  call, and sends the delete only if both show its own ticket, open. The
+  delete is written to the ledger before it is sent (a row with
+  `pending_delete`) and stays there until the account shows that ticket
+  `ended`. Every later status read of the account, by any command and however
+  much later, settles it; until then the account takes no other write. It sends
   no delete within 120 s (`YETO_NC_DELETE_GUARD_S`) of the ticket's
   `lease_until` or `preempt_at`: the release fails with `no delete sent now`
   and is retried after that point. Keep `end_margin_s` well above this guard
@@ -534,7 +541,7 @@ Each decision is an `nc_elastic_*` event, for example `ordered`,
 `member_ready`, `released`, `evicted`, `node_lost`, `lease_overdue`,
 `sampler_restart`, `sampler_crash_loop`, `sampler_finished`,
 `order_refused`, `order_unrecorded`, `foreign_ticket_released`,
-`legacy_ledger_rows`, `breaker_open` and `pool_stopped`.
+`delete_unconfirmed`, `legacy_ledger_rows`, `breaker_open` and `pool_stopped`.
 
 Each sampler writes its event tape as `<stem>.<incarnation>.jsonl` (from the
 spec's `event_tape`), one file per incarnation. To read the tapes in the
@@ -559,16 +566,23 @@ yeto dashboard export --tapes <tapes-dir>
   preemption, but one window is left: between that last read and the delete,
   the pool's ticket ends on its own (an unannounced preemption, a release in
   the console) *and* another user of the account places an order. The delete
-  then releases their ticket. The pool cannot prevent this. It notices it
-  (the delete's answer or the next status names another ticket as released),
-  emits `foreign_ticket_released` and halts the account. If the delete's
-  answer was lost as well, it is noticed at the next release attempt within 15
-  minutes; after that it is not.
+  then releases their ticket. The pool cannot prevent this. What it does:
+  - If the account then shows another ticket as `releasing` or released, the
+    pool names it (`foreign_ticket_released`) and halts the account.
+  - If the released ticket is no longer shown (the account shows no order, or
+    a newer ticket), the pool only knows that its delete was never confirmed
+    on its own ticket. It halts the account all the same
+    (`delete_unconfirmed`). This also happens, rarely, after a normal release:
+    the delete's answer did not name the ticket and the ended ticket was never
+    shown. A halt for a person to check is the price of never writing on
+    without knowing.
+  - Either way the pool places no order on the account in between.
+
   *Suggested change to the order tool:* give `nc-manage delete` a
   `--ticket <id>` argument that calls the release-by-id endpoint the tool
   already wraps (`release(ticketId)` in `tool/core.mjs`), and have it refuse
   when the id is not the session's ticket. The pool would then pass the id and
-  this window closes.
+  this window, and the halts above, go away.
 - **A queued ticket has no time.** National Compute reports `granted_at` for
   an active ticket and no order time at all. An unrecorded order whose ticket
   is still queued cannot be checked against the time of the order, so
