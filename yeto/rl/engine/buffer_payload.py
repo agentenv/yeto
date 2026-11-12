@@ -51,6 +51,12 @@ class SampleBufferRolloutError(RuntimeError):
     pass
 
 
+class DamagedPayload(SampleBufferRolloutError):
+    """The stored bytes of one payload are not a group (:func:`decode_group`). A
+    fault of the data, not of the read: a reader passes the group over and counts
+    it; a read that failed (the store did not answer) is never this error."""
+
+
 class SampleBufferExhausted(SampleBufferRolloutError):
     """The samplers ended the buffer and no trainable group is left for the round
     The trainer's run ends normally (FINISHED) before this round; it
@@ -334,10 +340,41 @@ def encode_group(samples: Sequence[Mapping[str, Any]]) -> bytes:
 
 
 def decode_group(data: bytes) -> list[dict[str, Any]]:
-    record = json.loads(data, object_hook=_decode_hook)
+    """The samples of one payload. Bytes that are not a payload (not JSON, cut
+    short, not an object, another schema, ``samples`` not a list of objects) raise
+    :class:`DamagedPayload`: the fault is in the stored bytes, so reading them
+    again gives the same answer."""
+    try:
+        record = json.loads(data, object_hook=_decode_hook)
+    except (ValueError, KeyError, TypeError) as error:  # not JSON, not UTF-8, a broken array record
+        raise DamagedPayload(f"payload does not decode: {type(error).__name__}: {str(error)[:200]}") from error
+    if not isinstance(record, Mapping):
+        raise DamagedPayload(f"payload is a {type(record).__name__}, not an object")
     if record.get("schema") != PAYLOAD_SCHEMA:
-        raise SampleBufferRolloutError(f"payload schema {record.get('schema')!r} != {PAYLOAD_SCHEMA}")
-    return list(record["samples"])
+        raise DamagedPayload(f"payload schema {record.get('schema')!r} != {PAYLOAD_SCHEMA}")
+    samples = record.get("samples")
+    if not isinstance(samples, list) or not all(isinstance(sample, Mapping) for sample in samples):
+        raise DamagedPayload("payload samples are not a list of objects")
+    return list(samples)
+
+
+def payload_is_missing(buffer: Any, ref: str, error: BaseException) -> bool:
+    """Whether a failed payload read means the payload does not exist (a fault of
+    the data: its index record outlived it), as opposed to a store that did not
+    answer (a throttle, a 5xx, a timeout, a refused credential), which must stay an
+    error. Only the buffer's own answer counts: ``read_payload`` raised
+    ``SampleBufferError`` (an object store answered "no such key") or
+    ``FileNotFoundError`` (a shared directory), and a second, independent look
+    (``has_payload``) also says it is absent. If that look fails too it raises:
+    a store in trouble is never read as a missing payload."""
+    from .sample_buffer import SampleBufferError  # noqa: PLC0415 - sample_buffer is the heavier module
+
+    if not isinstance(error, (SampleBufferError, FileNotFoundError)):
+        return False
+    has_payload = getattr(getattr(buffer, "index", None), "has_payload", None)
+    if not callable(has_payload):
+        return isinstance(error, SampleBufferError) and "is missing" in str(error)
+    return not has_payload(ref)
 
 
 def _sample_versions(sample: Mapping[str, Any]) -> list[int]:

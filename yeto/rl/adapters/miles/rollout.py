@@ -564,6 +564,14 @@ def handle_from_metadata(
             int(payload["buffer_xhw_downweighted"]) if "buffer_xhw_downweighted" in payload else None
         ),
         **{key: int(payload[key]) if key in payload else None for key in BUFFER_FILL_KEYS},
+        buffer_damaged_payload_groups=(
+            int(payload["buffer_damaged_payload_groups"])
+            if "buffer_damaged_payload_groups" in payload else None
+        ),
+        buffer_damaged_payloads=(
+            [dict(record) for record in payload["buffer_damaged_payloads"]]
+            if payload.get("buffer_damaged_payloads") else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
