@@ -239,13 +239,14 @@ def test_a_drain_past_its_timeout_cancels_the_running_trials(tmp_path):
         pending["seq"] = 3
         rnd(1)
         assert not rnd.holds_weights()
+        (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+        assert drain["timed_out"] and drain["abandoned_trials"] == N and drain["detached_trials"] == 0
+        assert not _entries(tmp_path)[0]
+        rnd.flush()  # the abandoned group is settled after the drain (after the loop's load)
     finally:
         rnd.close()
-    (drain,) = [f for n, f in events if n == DRAIN_EVENT]
-    assert drain["timed_out"] and drain["abandoned_trials"] == N
-    (group,) = [f for n, f in events if n == GROUP_EVENT]
-    assert group["prompt_id"] == "a" and not group["written"] and group["lost"] == {LOST_DRAIN: N}
-    assert not _entries(tmp_path)[0]
+    (group,) = [f for n, f in events if n == GROUP_EVENT and f["prompt_id"] == "a"]
+    assert not group["written"] and group["lost"] == {LOST_DRAIN: N}
 
 
 # ---------------------------------------------------------------------- live
@@ -770,6 +771,7 @@ class StubbornHarness(Harness):
         super().__init__(*args, **kwargs)
         self.release = threading.Event()
         self.cancels = 0
+        self.fail = False  # the stuck trial ends with an error once released
 
     async def run(self, task, endpoint):
         if "-a-" not in task.trajectory_id:
@@ -780,7 +782,16 @@ class StubbornHarness(Harness):
                 await asyncio.sleep(0.005)
             except asyncio.CancelledError:
                 self.cancels += 1
+        if self.fail:
+            raise RuntimeError("sandbox gone")
         return TrialVerdict(rewards={"reward": 1.0})
+
+
+def _wait(condition, timeout=5.0):
+    deadline = time.time() + timeout
+    while not condition() and time.time() < deadline:
+        time.sleep(0.005)
+    return condition()
 
 
 def test_a_drain_stops_waiting_for_cancelled_trials_that_do_not_end(tmp_path):
@@ -789,28 +800,95 @@ def test_a_drain_stops_waiting_for_cancelled_trials_that_do_not_end(tmp_path):
     rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), drain_timeout_s=0.05,
                                  abandon_grace_s=0.05)
     rnd.release_pending = lambda: pending["seq"]
+    closed = []
+    close = rnd.recorder.close
+
+    async def record_close(session):
+        closed.append(session)
+        return await close(session)
+
+    rnd.recorder.close = record_close
     try:
         rnd(0)
         pending["seq"] = 3
         t0 = time.time()
         rnd(1)  # returns although trial a never honours the cancel
-        assert time.time() - t0 < 5 and harness.cancels >= 1
+        assert time.time() - t0 < 5 and harness.cancels >= N
         assert not rnd.holds_weights()
-        harness.release.set()  # the stuck trial ends later: its result is dropped
-        deadline = time.time() + 5
-        while rnd._detached and time.time() < deadline:
-            time.sleep(0.01)
-        assert not rnd._detached and rnd.detached_total == N
+        (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+        assert drain["timed_out"] and drain["abandoned_trials"] == N and drain["detached_trials"] == N
+        assert drain["detached_in_flight"] == N
+        # the detached trials' recorder sessions are closed: no model output from the next weights
+        assert _wait(lambda: len(closed) == N) and all("-a-" in c for c in closed)
+        harness.release.set()  # the stuck trials end later: their results are dropped
+        assert _wait(lambda: not rnd._detached) and rnd.detached_total == N
+        rnd.flush()
     finally:
         harness.release.set()
         rnd.close()
-    (drain,) = [f for n, f in events if n == DRAIN_EVENT]
-    assert drain["timed_out"] and drain["detached_trials"] == N
-    (group,) = [f for n, f in events if n == GROUP_EVENT]
-    assert group["prompt_id"] == "a" and not group["written"] and group["lost"] == {LOST_DRAIN: N}
+    (group,) = [f for n, f in events if n == GROUP_EVENT and f["prompt_id"] == "a"]
+    assert not group["written"] and group["lost"] == {LOST_DRAIN: N}
+    # the late results were not written: only b's group is in the buffer
+    assert len(_entries(tmp_path)[0]) == sum(1 for n, f in events if n == GROUP_EVENT and f["written"]) == 1
 
 
-def test_a_backlog_of_slow_settles_does_not_stretch_the_drain(tmp_path):
+def test_a_detached_trial_keeps_its_slot_until_it_ends(tmp_path):
+    held = []
+    harness = StubbornHarness({"b": 0.05, "c": 0.0},
+                              on_start=lambda prompt: held.append(len(rnd._running) + len(rnd._detached)))
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"], 3: ["c"]}), max_in_flight=N + 1,
+                                 drain_timeout_s=0.05, abandon_grace_s=0.05)
+    rnd.release_pending = lambda: pending["seq"]
+    try:
+        rnd(0)
+        pending["seq"] = 3
+        rnd(1)  # the drain detaches a's N trials: they still hold N of the N + 1 slots
+        assert len(rnd._detached) == N
+        (last,) = [f for n, f in events if n == ROUND_EVENT][-1:]
+        assert last["agentic"]["in_flight"] == 0 and last["agentic"]["detached_in_flight"] == N
+        rnd(2)  # b's trials run one at a time in the one free slot
+        assert _wait(lambda: len([t for t in harness.started if "-b-" in t]) == N and not rnd._running)
+        assert held and max(held) <= N + 1, held  # never more trials started than slots
+        harness.release.set()  # the stuck trials end: their slots are free again
+        assert _wait(lambda: not rnd._detached)
+        rnd(3)
+        rnd.flush()
+    finally:
+        harness.release.set()
+        rnd.close()
+    written = {f["prompt_id"]: f["written"] for n, f in events if n == GROUP_EVENT}
+    assert written == {"a": False, "b": True, "c": True}
+    assert max(held) <= N + 1, held
+
+
+def test_close_cancels_detached_trials_and_takes_their_errors(tmp_path, recwarn, caplog):
+    import gc
+    import logging
+
+    harness = StubbornHarness({"b": 0.0})
+    harness.fail = True
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), drain_timeout_s=0.05,
+                                 abandon_grace_s=0.05)
+    rnd.release_pending = lambda: pending["seq"]
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        try:
+            rnd(0)
+            pending["seq"] = 3
+            rnd(1)
+            detached = list(rnd._detached)
+            assert len(detached) == N
+            harness.release.set()  # they end with an error while the island closes
+        finally:
+            rnd.close()
+        assert all(t.done() for t in detached)
+        del detached
+        gc.collect()
+    assert not [r for r in caplog.records if "never retrieved" in r.getMessage() or "destroyed" in r.getMessage()]
+
+
+def test_the_drain_ends_before_the_backlog_of_groups_is_written(tmp_path):
     import yeto.rl.agentic  # noqa: F401  (imported before the threads race on it)
     import yeto.rl.harness.harbor.trial  # noqa: F401
 
@@ -820,31 +898,154 @@ def test_a_backlog_of_slow_settles_does_not_stretch_the_drain(tmp_path):
                 await asyncio.sleep(0.2)
             return await super().run(task, endpoint)
 
+    cut, grace, write = 0.25, 0.05, 0.5
     harness = SlowHarness({"b": 0.0, "c": 0.0, "d": 0.0, "e": 0.0})
     pending = {"seq": None}
     rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a", "b", "c", "d"], 1: ["e"]}),
-                                 drain_timeout_s=0.25, abandon_grace_s=0.05, max_in_flight=16)
+                                 drain_timeout_s=cut, abandon_grace_s=grace, max_in_flight=16)
     rnd.release_pending = lambda: pending["seq"]
-    order = []
-    settle, abandon = rnd._settle, rnd._abandon
+    settle = rnd._settle
+    settled_in_drain = []
 
     def slow_settle(group, tally):
-        time.sleep(0.3)  # e.g. writing a group of 1M-token rows
-        order.append("settle")
+        time.sleep(write)  # e.g. writing a group of 1M-token rows
+        settled_in_drain.append(group.item.prompt_id)
         return settle(group, tally)
 
-    def record_abandon():
-        order.append("abandon")
-        return abandon()
-
-    rnd._settle, rnd._abandon = slow_settle, record_abandon
+    rnd._settle = slow_settle
     try:
         rnd(0)
         time.sleep(0.05)
-        pending["seq"] = 3  # due while b, c, d still run; a is stuck
+        pending["seq"] = 3  # due while b, c, d still run (they end before the cut); a is stuck
         rnd(1)
+        (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+        in_drain = list(settled_in_drain)
+        # at most the cut + the grace + the one write in progress (+ scheduling slack);
+        # before, the three groups were written first: 3 x write = 1.5 s and more
+        assert drain["waited_s"] <= cut + grace + write + 0.4, drain
+        assert drain["timed_out"] and drain["detached_trials"] == N
+        assert drain["unsettled_groups"] >= 2 and not rnd.holds_weights()
+        engine.load(Path("r1"), 1)  # the loop's load, before the backlog is written
+        rnd(2)
+        rnd.flush()
     finally:
         harness.release.set()
         rnd.close()
-    # b, c, d end together after the drain began; the drain is cut after one settle, not after all three
-    assert "abandon" in order and order.index("abandon") <= 1 and order.count("settle") >= 3, order
+    assert len(in_drain) <= 2
+    groups = {f["prompt_id"]: f for n, f in events if n == GROUP_EVENT}
+    # nothing is lost or relabelled by settling after the load: the version the trials ran on
+    assert all(groups[p]["written"] and groups[p]["versions"] == [0, 0] for p in "bcd")
+    assert not groups["a"]["written"] and groups["a"]["lost"] == {LOST_DRAIN: N}
+    assert sum(1 for f in groups.values() if f["written"]) == len(_entries(tmp_path)[0])
+
+
+def test_a_drain_whose_trials_all_end_is_not_reported_timed_out(tmp_path):
+    harness = Harness({"a": 0.02, "b": 0.0})
+    pending = {"seq": None}
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), drain_timeout_s=0.1,
+                                 abandon_grace_s=0.0)
+    rnd.release_pending = lambda: pending["seq"]
+    settle = rnd._settle
+
+    def slow_settle(group, tally):
+        time.sleep(0.3)  # longer than the cut and the grace: neither may fire once no trial runs
+        return settle(group, tally)
+
+    rnd._settle = slow_settle
+    try:
+        rnd(0)
+        pending["seq"] = 3
+        rnd(1)
+        time.sleep(0.2)  # past the cut: its timer must not act on the ended drain
+        rnd.flush()
+    finally:
+        rnd.close()
+    (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+    assert not drain["timed_out"] and drain["abandoned_trials"] == 0 and drain["detached_trials"] == 0
+    group = next(f for n, f in events if n == GROUP_EVENT and f["prompt_id"] == "a")
+    assert group["written"] and group["lost"] == {}
+
+
+def test_the_drain_is_for_the_release_that_is_on_disk(tmp_path):
+    harness = Harness({"a": 0.0, "b": 0.0, "c": 0.0})
+    rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"], 2: ["c"]}))
+    state = {"pending": None, "ready": False}
+    rnd.release_pending = lambda: state["pending"]
+    rnd.release_ready = lambda: state["ready"]
+    try:
+        rnd(0)
+        state.update(pending=5, ready=False)  # r5 is published but still downloading
+        rnd(1)
+        assert not [f for n, f in events if n == DRAIN_EVENT]
+        state.update(pending=6, ready=5)  # r5 is on disk; r6 was published meanwhile
+        rnd(2)
+        (drain,) = [f for n, f in events if n == DRAIN_EVENT]
+        assert drain["seq"] == 5
+        state.update(pending=6, ready=6)  # after the load of r5: r6 is drained for next
+        rnd(3)
+        assert [f["seq"] for n, f in events if n == DRAIN_EVENT] == [5, 6]
+        rnd.flush()
+    finally:
+        rnd.close()
+
+
+def test_a_release_published_during_the_drain_leaves_the_drain_its_load(tmp_path):
+    """The round and a real PolicyFollower wired as build_engine_sampler wires them:
+    r1 is on disk, the drain for it runs, r2 is published meanwhile. The drain's load
+    is r1 (before: the refresh dropped r1, started on r2 and loaded nothing)."""
+    from yeto.rl.engine.policy_release import PolicyRelease
+
+    class Store:
+        newest = None
+        resolved: list[int] = []
+
+        def publish(self, seq):
+            self.newest = PolicyRelease(seq=seq, version=seq, policy_hash=f"h{seq}", path=f"r{seq}-v{seq}")
+
+        def latest(self):
+            return self.newest
+
+        def resolve(self, release, *, from_store=False):
+            self.resolved.append(release.seq)
+            (tmp_path / release.path).mkdir(exist_ok=True)
+            return tmp_path / release.path
+
+    harness = Harness({"b": 0.0, "c": 0.0})
+    harness.gates["a"] = threading.Event()
+    rnd, engine, events = _round(tmp_path / "buffer", harness, Prompts({0: ["a"], 1: ["b"], 2: ["c"]}))
+    store, loaded = Store(), []
+
+    def load(release, directory):
+        engine.load(directory, release.version)
+        loaded.append(release.seq)
+
+    follower = PolicyFollower(store, load, background_download=True)
+    follower.hold = rnd.holds_weights
+    rnd.release_pending = follower.pending_seq
+    rnd.release_ready = follower.prefetch
+    try:
+        rnd(0)
+        store.publish(1)
+        call = threading.Thread(target=rnd, args=(1,), daemon=True)
+        call.start()
+        assert _wait(lambda: rnd._paused)  # r1 is on disk: draining for it
+        assert follower.refresh() is None  # the trials hold the weights
+        store.publish(2)  # the trainer releases again while a still runs
+        harness.gates["a"].set()
+        call.join(5)
+        assert not call.is_alive()
+        release = follower.refresh()  # the loop's load after the drain
+        assert release is not None and release.seq == 1 and engine.served_version() == 1
+        rnd(2)  # r2: fetched, drained for (b runs on v1 first or is held back), loaded next
+        assert _wait(lambda: not rnd.holds_weights())
+        release = follower.refresh()
+        assert release is not None and release.seq == 2
+        rnd.flush()
+    finally:
+        harness.gates["a"].set()
+        rnd.close()
+    assert loaded == [1, 2] and store.resolved == [1, 2]
+    assert [f["seq"] for n, f in events if n == DRAIN_EVENT] == [1, 2]
+    groups = {f["prompt_id"]: f for n, f in events if n == GROUP_EVENT}
+    assert groups["a"]["written"] and groups["a"]["versions"] == [0, 0]
+    assert all(g["written"] and g["versions"][0] == g["versions"][1] for g in groups.values())

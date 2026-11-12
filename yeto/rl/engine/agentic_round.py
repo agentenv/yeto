@@ -122,6 +122,7 @@ GROUP_EVENT = "rl_agentic_group"
 # end before the drain stops waiting for it (a trial blocked in a sandbox tool call can
 # ignore the cancel until its own agent timeout, an hour, with the engine idle)
 ABANDON_GRACE_S = 120.0
+CLOSE_WAIT_S = 2.0  # close(): the longest wait for the cancelled trials to end
 RETRY_EVENT = "rl_agentic_trial_retry"
 LOST_EVENT = "rl_agentic_trial_lost"  # one token_alignment loss: error, call, token window, trial_dir
 DEFAULT_INFRA_RETRIES = 2  # per trial slot (spec agentic.infra_retries)
@@ -361,6 +362,7 @@ class AgenticRound(EngineRound):
         self.drain_timeout_s = None if drain_timeout_s is None else float(drain_timeout_s)
         self.abandon_grace_s = float(abandon_grace_s)
         self._detached: set[asyncio.Task] = set()  # cancelled trials the drain stopped waiting for
+        self._closing: set[asyncio.Task] = set()  # recorder sessions of detached trials being closed
         self.detached_total = 0
         self.release_poll_s = float(release_poll_s)
         self.wait_s = float(wait_s)
@@ -377,7 +379,10 @@ class AgenticRound(EngineRound):
         # follower's prefetch, which starts its background download): a drain starts
         # only then, so the engine keeps generating while the release downloads and
         # the loop loads it as soon as the drain ends
-        self.release_ready: Callable[[], bool] = lambda: True
+        # May return the seq of the release that is ready instead of True: the drain is
+        # then for that release (the follower loads it even when a newer one was
+        # published meanwhile).
+        self.release_ready: Callable[[], int | bool] = lambda: True
         # the stream: the loop thread starts and ends trials, the calling thread settles groups
         self._gate: Any = None
         self._queue: deque[_Group] = deque()  # groups with trials not started yet
@@ -390,9 +395,11 @@ class AgenticRound(EngineRound):
         self.session_collisions = 0  # trials lost to a recorder session id already open
         self._open_started = 0  # groups with a trial started and one not ended
         self._drain_started: float | None = None  # drain state (calling thread)
+        self._drain_cut_at: float | None = None  # when the drain's timeout cancelled its trials
         self._drain_abandoned = 0
-        self._drain_abandoned_at: float | None = None
         self._drain_detached = 0
+        self._drain_id = 0
+        self._drain_timer: asyncio.TimerHandle | None = None  # loop thread
         self._paused = False  # draining: no new group starts
         self._cancel_reason = LOST_DRAIN
         self._busy, self._busy_mark = 0.0, clock()  # trial-seconds in flight
@@ -418,6 +425,7 @@ class AgenticRound(EngineRound):
         try:
             try:
                 self._on_loop(self._cancel_all, "closed")
+                self.loop.run(self._wait_cancelled(CLOSE_WAIT_S))
             except Exception:  # noqa: BLE001 - the loop may be gone already
                 pass
             from yeto.rl.harness.harbor.boat_pool import close_pools_now
@@ -486,7 +494,8 @@ class AgenticRound(EngineRound):
     def _fill(self) -> None:
         """Start queued trials up to ``max_in_flight``: the rest of a started group
         always, a new group unless draining or reclaimed."""
-        while len(self._running) < self.max_in_flight and self._error is None:
+        # a detached trial still holds its admission slot and its sandbox until it ends
+        while len(self._running) + len(self._detached) < self.max_in_flight and self._error is None:
             fresh = not self._paused and not self.reclaimed()
             group = next((g for g in self._queue if g.started_at is not None or fresh), None)
             if group is None:
@@ -528,6 +537,10 @@ class AgenticRound(EngineRound):
         self._tick()
         if task in self._detached:  # already counted lost by the drain (_detach_running)
             self._detached.discard(task)
+            if not task.cancelled():
+                task.exception()  # retrieved: its result or error is dropped
+            self._fill()  # its slot is free again
+            self._wake.set()
             return
         group, j = self._running.pop(task)
         if task.cancelled():
@@ -628,15 +641,37 @@ class AgenticRound(EngineRound):
             group.results[j] = _Lost(LOST_DRAIN)
             self._ended(group, 1)
             detached += 1
+            # Not cancelled a second time: that could interrupt a sandbox teardown the first
+            # cancel started. Its model calls end here: it gets no tokens from the weights loaded next
+            closing = self.loop.loop.create_task(self._close_session(group.sessions[j]))
+            self._closing.add(closing)
+            closing.add_done_callback(self._closing.discard)
         self.detached_total += detached
         self._wake.set()
         return detached
 
+    async def _close_session(self, session: str) -> None:
+        try:
+            await self.recorder.close(session)
+        except Exception:  # noqa: BLE001 - best effort: the session may be closed already
+            pass
+
     def _cancel_all(self, reason: str) -> None:
         self._cancel_reason = reason
         self._queue.clear()
-        for task in list(self._running):
+        self._disarm()
+        for task in [*self._running, *self._detached]:
             task.cancel()
+
+    async def _wait_cancelled(self, timeout_s: float) -> None:
+        """Give the cancelled trials (running and detached) up to ``timeout_s`` to
+        end, and retrieve the errors of the detached ones (loop thread)."""
+        tasks = [*self._running, *self._detached, *self._closing]
+        if tasks:
+            await asyncio.wait(tasks, timeout=timeout_s)
+        for task in list(self._detached):
+            if task.done() and not task.cancelled():
+                task.exception()
 
     # ------------------------------------------------------------------ the stream (calling thread)
     def _raise(self) -> None:
@@ -650,8 +685,13 @@ class AgenticRound(EngineRound):
         if now - self._release_read >= self.release_poll_s:
             self._release_read = now
             self._pending_seq = self.release_pending()
-            self._pending_ready = (self._pending_seq is not None and self._pending_seq != self._drained_seq
-                                   and bool(self.release_ready()))
+            self._pending_ready = False
+            if self._pending_seq is not None and self._pending_seq != self._drained_seq:
+                ready = self.release_ready()
+                self._pending_ready = ready is not False and ready is not None
+                if self._pending_ready and not isinstance(ready, bool):  # the seq that is on disk
+                    self._pending_seq = int(ready)
+                    self._pending_ready = self._pending_seq != self._drained_seq
         seq = self._pending_seq
         if seq is None or seq == self._drained_seq or not self._pending_ready:
             return None
@@ -667,19 +707,22 @@ class AgenticRound(EngineRound):
             self._wake.clear()
             while self._retry_events:
                 self.emit(RETRY_EVENT, **self._retry_events.popleft())
-            while self._finished:
+            if self._paused and self._error is None:
+                # No trial runs: the drain ends here, before the groups that ended are
+                # settled, so the loop loads the release now. They are settled by the
+                # next call (after the load): a group's version labels come from
+                # ``group.version`` and its turns, not from the time it is settled.
+                if self._open_started == 0:
+                    self._end_drain()
+                    return
+            if self._finished:
                 self._settle(self._finished.popleft(), tally)
-                self._drain_deadlines()  # a settle can take a while: keep the drain bound
+                continue  # one group per pass: the drain's end is read between two settles
             self._raise()
             if self._paused:
-                if self._drain_started is None:
-                    self._drain_started = self.clock()
-                if self._open_started == 0 or self.reclaimed():
-                    self._end_drain(self.clock() - self._drain_started, self._drain_abandoned,
-                                    self._drain_detached)
+                if self.reclaimed():
+                    self._end_drain()
                     return
-                if self._drain_deadlines():
-                    continue
             elif final:
                 if not self._unsettled or self.reclaimed():
                     return
@@ -692,46 +735,64 @@ class AgenticRound(EngineRound):
                     return
             self._wake.wait(self.wait_s)
 
-    def _drain_deadlines(self) -> bool:
-        """Abandon a drain past ``drain_timeout_s`` and detach its cancelled
-        trials ``abandon_grace_s`` later, timed from the drain's start (also
-        between settles, so a backlog of groups to write does not stretch the
-        drain); True when it acted."""
-        if not self._paused or self._drain_started is None:
-            return False
-        now = self.clock()
-        if (not self._drain_abandoned and self.drain_timeout_s is not None
-                and now - self._drain_started >= self.drain_timeout_s):
-            self._drain_abandoned = max(1, self._on_loop(self._abandon))
-            self._drain_abandoned_at = self.clock()
-            return True
-        if (self._drain_abandoned_at is not None and not self._drain_detached
-                and now - self._drain_abandoned_at >= self.abandon_grace_s):
-            self._drain_detached = max(1, self._on_loop(self._detach_running))
-            return True
-        return False
+    # The drain's deadlines run as timers on the loop thread, so a slow settle on the
+    # calling thread (writing a group of long rows takes tens of seconds) delays neither.
+    def _arm_cut(self, drain_id: int) -> None:
+        self._disarm()
+        self._drain_timer = self.loop.loop.call_later(float(self.drain_timeout_s), self._cut, drain_id)
+
+    def _disarm(self) -> None:
+        if self._drain_timer is not None:
+            self._drain_timer.cancel()
+            self._drain_timer = None
+
+    def _cut(self, drain_id: int) -> None:
+        """``drain_timeout_s`` after the drain began: cancel the trials still running."""
+        self._drain_timer = None
+        if drain_id != self._drain_id or not self._paused or self._open_started == 0:
+            return  # the drain is over (every trial ended by itself): nothing was cut
+        self._drain_abandoned = self._abandon()
+        self._drain_cut_at = self.clock()
+        if self._open_started > 0:
+            self._drain_timer = self.loop.loop.call_later(self.abandon_grace_s, self._detach, drain_id)
+
+    def _detach(self, drain_id: int) -> None:
+        """``abandon_grace_s`` after the cut: stop waiting for the trials that ignored it."""
+        self._drain_timer = None
+        if drain_id != self._drain_id or not self._paused or self._open_started == 0:
+            return
+        self._drain_detached = self._detach_running()
 
     def _begin_drain(self, seq: int) -> None:
         self._drain_seq = seq
         self._drain_since = self.clock()
-        self._drain_started = self._drain_since
-        self._drain_abandoned = 0
-        self._drain_abandoned_at = None
-        self._drain_detached = 0
         self._drain_in_flight = len(self._running)
+        self._drain_started = self._drain_since
+        self._drain_cut_at = None
+        self._drain_abandoned = 0
+        self._drain_detached = 0
+        self._drain_id += 1
         self._paused = True
+        if self.drain_timeout_s is not None:
+            self._on_loop(self._arm_cut, self._drain_id)
 
-    def _end_drain(self, waited: float, abandoned: int, detached: int = 0) -> None:
+    def _end_drain(self) -> None:
         """No trial runs: the loop may load the pending release. New groups stay
-        paused until the next call (after the loop's load)."""
+        paused until the next call (after the loop's load). ``timed_out``: the
+        drain reached its timeout with trials still running (they were cancelled)."""
+        self._on_loop(self._disarm)
+        now = self.clock()
+        waited = now - (self._drain_started if self._drain_started is not None else now)
         if self._drain_since is not None:
-            self._drain_total += self.clock() - self._drain_since
+            self._drain_total += now - self._drain_since
         self._drain_since = None
         self._drained_seq = self._drain_seq
         self._drain_started = None
         self.emit(DRAIN_EVENT, seq=self._drain_seq, policy_version=self.engine.served_version(),
                   waited_s=round(waited, 3), in_flight=self._drain_in_flight,
-                  timed_out=bool(abandoned), abandoned_trials=int(abandoned), detached_trials=int(detached))
+                  timed_out=self._drain_cut_at is not None, abandoned_trials=int(self._drain_abandoned),
+                  detached_trials=int(self._drain_detached), unsettled_groups=len(self._finished),
+                  detached_in_flight=len(self._detached))
 
     def _settle(self, group: _Group, tally: _Tally) -> None:
         """Filter, score and write one group whose trials all ended (module doc)."""
@@ -859,6 +920,8 @@ class AgenticRound(EngineRound):
                    "policy_tokens_mean": round(statistics.fmean(tally.lengths), 1) if tally.lengths else None,
                    "lost_total": dict(sorted(self.lost.items())), "trials_total": self.trials,
                    "weight_switch": self.weight_switch, "in_flight": len(self._running),
+                   # cancelled trials a drain stopped waiting for: each holds a slot and a sandbox
+                   "detached_in_flight": len(self._detached), "detached_total": self.detached_total,
                    "in_flight_utilization": round((self._busy_now() - busy) / (span * self.max_in_flight), 4)
                    if span > 0 else None,
                    "drain_wait_s": round(self._drain_now() - drain, 3),
@@ -938,12 +1001,61 @@ def effective_drain_timeout(drain_timeout_s: float | None, max_defer_s: float | 
     return min(bounds) if bounds else None
 
 
-def drain_timeout_warning(spec: Mapping[str, Any]) -> str | None:
-    """A warning for a drain-mode spec whose ``agentic.drain_timeout_s`` (or no
-    ``drain_timeout_s``) exceeds ``reload_max_defer_s``: the drain is cut at
-    ``reload_max_defer_s`` (:func:`effective_drain_timeout`)."""
+def drain_settings(spec: Mapping[str, Any], *, drain: bool) -> tuple[float | None, float]:
+    """``(drain_timeout_s, abandon_grace_s)`` of the round built from ``spec``
+    (:func:`round_factory`). ``drain``: the weight switch resolved to ``drain``;
+    the cut is then min(``agentic.drain_timeout_s``, ``reload_max_defer_s``)
+    (:func:`effective_drain_timeout`), else ``agentic.drain_timeout_s`` as written
+    (a live round never drains). A value that is not a finite number >= 0
+    (``abandon_grace_s``: also ``null``) is a :class:`HarnessConfigError`."""
+    from yeto.rl.agentic import HarnessConfigError
+
+    section = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else {}
+
+    def number(key: str, default: float | None, *, nullable: bool) -> float | None:
+        value = section.get(key, default)
+        if value is None and nullable:
+            return None
+        try:
+            number_ = None if isinstance(value, bool) else float(value)
+        except (TypeError, ValueError):
+            number_ = None
+        if number_ is None or not 0 <= number_ < float("inf"):
+            raise HarnessConfigError(f"spec agentic.{key} must be a number >= 0"
+                                     f"{' or null' if nullable else ''}, got {value!r}")
+        return number_
+
+    cut = number("drain_timeout_s", None, nullable=True)
+    grace = number("abandon_grace_s", ABANDON_GRACE_S, nullable=False)
+    assert grace is not None
+    if drain:
+        cut = effective_drain_timeout(cut, reload_max_defer_s(spec))
+    return cut, grace
+
+
+def spec_live_engine(spec: Mapping[str, Any]) -> bool:
+    """Whether the spec's engine updates its weights during a generation, read from
+    the spec alone (``engine.options.live_update``; the engine itself declares it
+    with ``updates_during_generation``)."""
+    engine = spec.get("engine") if isinstance(spec.get("engine"), Mapping) else {}
+    options = engine.get("options") if isinstance(engine.get("options"), Mapping) else {}
+    return options.get("live_update") is True
+
+
+def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None = None) -> str | None:
+    """A warning for a spec that resolves to the ``drain`` weight switch and whose
+    ``agentic.drain_timeout_s`` (or no ``drain_timeout_s``) exceeds
+    ``reload_max_defer_s``: the drain is cut at ``reload_max_defer_s``
+    (:func:`effective_drain_timeout`). ``weight_switch: auto`` resolves as the
+    sampler does (:func:`resolve_weight_switch`): ``live`` on a live-update engine
+    (``live_engine``; None: read from the spec, :func:`spec_live_engine`), so
+    such a spec gets no warning."""
     section = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else None
-    if section is None or str(section.get("weight_switch", "auto")) == "live":
+    if section is None:
+        return None
+    switch = str(section.get("weight_switch", "auto"))
+    live = spec_live_engine(spec) if live_engine is None else bool(live_engine)
+    if switch == "live" or (switch == "auto" and live):
         return None
     cap = reload_max_defer_s(spec)
     if cap is None:
@@ -977,9 +1089,16 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
       as a warning); ``abandon_grace_s`` (default 120): after the drain's
       timeout cancelled its trials, the longest wait for one that ignores the
       cancel (blocked in a sandbox tool call) before it is counted lost and
-      the drain ends. Both deadlines run from the drain's start and are also
-      checked between settles, so a drain lasts at most the cut + the grace +
-      the write of one group;
+      the drain ends (>= 0). Both deadlines are timers of the trials' loop
+      (a group being written does not delay them), and the drain ends as soon
+      as no trial runs, before the groups that ended are written (the next
+      call writes them, after the load): the drain event's ``waited_s`` is at
+      most the cut + the grace + the write of the one group in progress.
+      A detached trial keeps its admission slot and its sandbox until it ends
+      by itself (at most its agent timeout): until then that many fewer new
+      trials start (``agentic.detached_in_flight`` in the round event). Its
+      recorder session is closed, so it gets no further model output; its
+      sandbox is left to the trial's own teardown;
     * ``proxy``: ``{"host", "port"}`` of the records proxy; the public base and
       the path secret come from ``YETO_RECORDS_PROXY_PUBLIC_BASE`` and
       ``YETO_RECORDS_PROXY_SECRET_FILE`` (the Modal tunnel, written in the container);
@@ -1017,8 +1136,6 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         max_in_flight = int(section["max_in_flight"])
         max_response_len = int(section["max_response_len"])
         switch = str(section.get("weight_switch", "auto"))
-        drain_timeout_s = None if section.get("drain_timeout_s") is None else float(section["drain_timeout_s"])
-        max_defer_s = reload_max_defer_s(spec)
         infra_retries = int(section.get("infra_retries", DEFAULT_INFRA_RETRIES))
     except (KeyError, TypeError, ValueError) as exc:
         raise HarnessConfigError(f"spec agentic section: bad or missing {exc}") from exc
@@ -1055,10 +1172,10 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
             raise HarnessConfigError(f"agentic.max_in_flight {max_in_flight} exceeds the {defaults['provider']} "
                                      f"sandbox cap {slots.limit} (HARBOR_MAX_SANDBOXES)")
     if switch == "drain":
-        warning = drain_timeout_warning(spec)
+        warning = drain_timeout_warning(spec, live_engine=False)
         if warning is not None:
             logger.warning(warning)
-        drain_timeout_s = effective_drain_timeout(drain_timeout_s, max_defer_s)
+    drain_timeout_s, abandon_grace_s = drain_settings(spec, drain=switch == "drain")
     loop = LoopThread(workers=max_in_flight + 8)
 
     def make(engine_: Any, writer: Any, **kwargs: Any) -> AgenticRound:
@@ -1069,7 +1186,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                             min_samples=int(section.get("min_samples", 2)), task_defaults=defaults,
                             sampling_params={"temperature": signed["temperature"], "top_p": signed["top_p"]},
                             weight_switch=switch, drain_timeout_s=drain_timeout_s, loop=loop,
-                            abandon_grace_s=float(section.get("abandon_grace_s", ABANDON_GRACE_S)),
+                            abandon_grace_s=abandon_grace_s,
                             infra_retries=infra_retries, **kwargs)
 
     return make
