@@ -821,6 +821,28 @@ records the old and new pack with your reason. To resume deliberately on the
 pinned pack, use `--rl-code-pack-keep` instead. For algorithm changes,
 Recommended practice: start a new run (another `--cluster-prefix`).
 
+**Upgrading the samplers: drain the old ones first.** The trainer trains one
+group per dispensed task (`rl_buffer_duplicate_task_skipped`, section 8). It
+recognises a task by two fields the sampler writes into each group's index
+record, `dispense_attempt` and `dispense_plan`. Samplers on code from before
+these fields write groups without them, and such a group is not judged: if an
+old sampler and a new one both write a group of the same task (the old one
+stalled or was retired with the group written but not settled, and the task
+was given out again), both groups are trained. So do not run old and new
+samplers side by side longer than needed:
+
+1. Scale the old samplers down with `drain` (section 5.1): each claims no new
+   task, finishes its trials in flight, writes and settles their groups, and
+   is then fenced and stopped. Wait for `nc_elastic_scaled_down` with outcome
+   `drained` for every node; a `drain timeout` or `fenced` outcome means that
+   node's open tasks were released and will be generated again.
+2. Start the samplers on the new code in one step.
+
+Groups already in the buffer from the old samplers are trained as before;
+they are only not protected against a second group of the same task. The
+trainer may be upgraded before or after the samplers: it reads records with
+and without the fields.
+
 ### 5.5 Stopping
 
 ```
