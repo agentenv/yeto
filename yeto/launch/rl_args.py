@@ -1009,12 +1009,15 @@ def _prepare_rl_args(
         _rl_backend_module(args, "run_config_rules"), "check_host_sync_free", None)
     if callable(host_sync_free_check):
         host_sync_free_check(bool(getattr(args, "rl_host_sync_free", True)))
-    # Island environment options the backend's colocated placement cannot run
+    # Island environment options an offloaded trainer cannot run
     env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_island_env", None)
     if callable(env_check):
         for iargs in rl_island_placement_args(args):
             env_check(placement=getattr(iargs, "rl_placement", "colocated"),
-                      env_pairs=getattr(args, "modal_env", None) or ())
+                      env_pairs=getattr(args, "modal_env", None) or (),
+                      tuning=args.tuning,
+                      sample_role=getattr(iargs, "rl_sample_role", None) or "both",
+                      offload_train=bool(getattr(iargs, "rl_offload_train", False)))
     # A backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):
