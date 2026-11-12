@@ -75,6 +75,7 @@ from yeto.rl.engine.merged_release import (
     merges_shards,
 )
 from yeto.rl.engine.data_split import DATA_ROW_KEY, DataSlot  # noqa: F401 - DATA_ROW_KEY re-exported
+from yeto.rl.engine.incarnation_lease import LeaseUnknown
 from yeto.rl.engine.policy_age import age_floor
 from yeto.rl.engine.xhw_guard import downweight_group, rollout_stats, source_key
 
@@ -106,6 +107,7 @@ DEFAULT_POLL_S = 2.0
 TRAINER_CONSUMER = "trainer"
 
 _MODULE = "yeto.rl.adapters.miles.buffer_rollout_miles"
+_DEFER = object()  # BatchReader._gate_verdict: the lease could not be read
 ROLLOUT_FUNCTION_PATHS = {
     SAMPLER: f"{_MODULE}.BufferWriterRolloutFn",
     TRAINER: f"{_MODULE}.BufferReaderRolloutFn",
@@ -498,6 +500,10 @@ class TakeReport:
     # groups of a fenced (superseded) sampler incarnation written after its successor
     # claimed the shard's lease (incarnation_lease.IncarnationGate): consumed, never read
     stale_incarnation_groups: int = 0
+    # groups whose sampler's lease could not be read (IncarnationGate fails closed):
+    # neither trained nor consumed; they wait (judged again) for a later selection
+    # (BatchReader._deferred). Counted once, by the take that first deferred them
+    lease_deferred_groups: int = 0
     # groups with fewer samples than the group size (a sampler lost trials) that are
     # trained anyway (their advantages use their own samples only); groups with fewer
     # than MIN_GROUP_SAMPLES (no in-group spread) or more than the group size are
@@ -533,6 +539,7 @@ class TakeReport:
                 "sample_buffer/prefetched_groups": float(self.prefetched),
                 "sample_buffer/xhw_quarantined_groups": float(self.quarantined_groups),
                 "sample_buffer/stale_incarnation_groups": float(self.stale_incarnation_groups),
+                "sample_buffer/lease_deferred_groups": float(self.lease_deferred_groups),
                 "sample_buffer/incomplete_groups": float(self.incomplete_groups),
                 "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
                 "sample_buffer/carried_over_groups": float(self.carried_over_groups),
@@ -680,6 +687,10 @@ class BatchReader:
         # a whole group selected by a take that did not fit its round:
         # (position, decoded group, behavior version, tokens, source, dispense position)
         self._carry: tuple[int, list[dict[str, Any]], int, int, str, int | None] | None = None
+        # selected entries the incarnation gate could not judge (their lease was unreadable):
+        # (position, selected item), judged again by the next selections; a round's end
+        # (its committed watermark) stays at or before the first of them
+        self._deferred: list[tuple[int, Any]] = []
         self._nonfinite = 0
         # set_unidentified_gate: (start version K, the versions below K a record names)
         self._unidentified_gate: tuple[int, frozenset[int]] | None = None
@@ -800,23 +811,46 @@ class BatchReader:
             else:
                 self._choose(position, group, version, tokens, source, chosen, decoded, accounted,
                              versions, source_groups, source_tokens, position_sources)
+        if self._deferred:
+            start = min(start, self._deferred[0][0])
+        deferred_now = 0
         while len(chosen) < groups:
             # the reads of the last selection end before the next refresh (a reload)
             read_s += self._settle([read for _, read, _ in chosen])
-            begun = self.clock()
-            selected = self.buffer.select(self.consumer, groups - len(chosen))
-            select_s += self.clock() - begun
+            waiting, self._deferred = self._deferred, []
+            again = [item for _, item in waiting]  # judged again first, in buffer order
             kept_before, unidentified_before = len(chosen), self.unidentified_total
-            for item in selected:
+            selection: list[list[Any]] = [[]]
+
+            def candidates() -> Any:
+                """The deferred items, then (once they are judged) a selection of the
+                groups still missing: one still deferred takes no place in the take."""
+                nonlocal select_s
+                for pending in again:
+                    if len(chosen) >= groups:  # full: it waits for the next take
+                        self._deferred.append((int(pending.position), pending))
+                    else:
+                        yield pending
+                if len(chosen) < groups:
+                    begun = self.clock()
+                    selection[0] = self.buffer.select(self.consumer, groups - len(chosen))
+                    select_s += self.clock() - begun
+                    yield from selection[0]
+
+            for item in candidates():
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
                     continue
-                if self._is_unidentified(item.entry):
+                if not any(item is a for a in again) and self._is_unidentified(item.entry):
                     continue
-                if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+                verdict = self._gate_verdict(item)
+                if verdict is _DEFER:
+                    deferred_now += 0 if any(item is a for a in again) else 1
+                    continue
+                if verdict is not None:
                     fenced += 1  # a fenced incarnation's late write: never trained, never read
                     continue
                 source = source_key(item.entry.provenance, self._shard_at(item.position))
@@ -831,6 +865,7 @@ class BatchReader:
                 chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
+            selected = selection[0]
             self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
                                  self.unidentified_total - unidentified_before)
             if self.group_size is not None and selected:
@@ -840,6 +875,13 @@ class BatchReader:
                 progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
                 continue
+            if self._deferred:
+                # groups wait for their lease (the gate fails closed and warns while it
+                # cannot read it): neither the data end nor the no-new-group timeout
+                # applies to them; they are judged again after the pause
+                self._deferred.sort(key=lambda pending: pending[0])
+                self.sleep(self.poll_s)
+                continue
             if self.buffer.data_ended:
                 break
             if self.clock() - progress > self.wait_s:
@@ -847,6 +889,7 @@ class BatchReader:
                     f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
                     f"without a new group (buffer position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
+        self._deferred.sort(key=lambda pending: pending[0])
         end = self.buffer.read_cursor
         carried_out = padded = 0
         if self.group_size is not None and chosen:
@@ -862,6 +905,10 @@ class BatchReader:
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
+            deferred_now += skipped.get("deferred", 0)
+        if self._deferred:  # the watermark never passes a group the gate could not judge yet
+            self._deferred.sort(key=lambda pending: pending[0])
+            end = min(end, self._deferred[0][0])
         read_s += self._settle([read for _, read, _ in chosen])
         begun = self.clock()
         out = [(position, decoded[position] if position in decoded else decode_group(read.result()))
@@ -891,7 +938,8 @@ class BatchReader:
                                source_groups=dict(sorted(source_groups.items())),
                                source_tokens=dict(sorted(source_tokens.items())),
                                position_sources=position_sources, quarantined_groups=quarantined,
-                               stale_incarnation_groups=fenced, incomplete_groups=incomplete,
+                               stale_incarnation_groups=fenced, lease_deferred_groups=deferred_now,
+                               incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
                                unidentified_policy_groups=sum(self._unidentified["versions"].values()),
@@ -941,7 +989,11 @@ class BatchReader:
                 continue
             if self._is_unidentified(item.entry):
                 continue
-            if self.gate is not None and self.gate.verdict(item.entry, int(item.position)) is not None:
+            verdict = self._gate_verdict(item)
+            if verdict is _DEFER:
+                skipped["deferred"] = skipped.get("deferred", 0) + 1
+                continue
+            if verdict is not None:
                 skipped["fenced"] += 1
                 continue
             source = source_key(item.entry.provenance, self._shard_at(item.position))
@@ -1001,6 +1053,18 @@ class BatchReader:
             chosen[:] = [c for c in chosen if c[0] not in drop]
         self._nonfinite += nonfinite
         return len(drop) - nonfinite
+
+    def _gate_verdict(self, item: Any) -> Any:
+        """The incarnation gate's verdict on a selected ``item``: None (train it), the
+        stale detail, or :data:`_DEFER` when its lease could not be read (the item is
+        kept in ``self._deferred``, neither trained nor counted stale)."""
+        if self.gate is None:
+            return None
+        try:
+            return self.gate.verdict(item.entry, int(item.position))
+        except LeaseUnknown:
+            self._deferred.append((int(item.position), item))
+            return _DEFER
 
     def _shard_at(self, position: int) -> str | None:
         shard_at = getattr(self.buffer, "shard_at", None)
@@ -1076,6 +1140,7 @@ class BatchReader:
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
         self._carry = None  # its position is at or past the watermark: selected again
+        self._deferred = []  # likewise
         return int(self.buffer.watermark)
 
 
