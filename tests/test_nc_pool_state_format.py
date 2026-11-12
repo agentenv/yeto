@@ -164,3 +164,65 @@ def test_pool_status_called_directly_refuses_a_newer_state_file(tmp_path):
     with pytest.raises(island_pool.PoolStateFormatError, match="format 3"):
         pool_run.pool_status(cfg, config_path)
     assert issubclass(island_pool.PoolStateFormatError, RuntimeError)
+
+
+# -- every other reader of the state file ---------------------------------------------
+
+def test_nc_down_of_a_ticket_refuses_when_a_pool_state_is_of_a_newer_format(tmp_path, capsys, monkeypatch):
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    pool_run.pid_path(cfg).write_text(json.dumps({"pid": 1, "host": "h", "config": config_path}))
+    monkeypatch.setattr(cli, "down", lambda *a: pytest.fail("the ticket may be a pool member: not deleted"))
+    before = state.read_text()
+    assert cli.main(["down", "--account", "1", "--ticket", m.ticket]) == 2
+    out = capsys.readouterr()
+    assert out.out == "" and out.err.count("\n") == 1 and "Traceback" not in out.err
+    assert out.err.startswith("down: refused, nothing changed: pool state") and "format 3" in out.err
+    assert state.read_text() == before and not pool_run.scale_path(cfg).exists()
+    deleted = []
+    monkeypatch.setattr(cli, "down", lambda account, ticket: deleted.append(ticket))
+    assert cli.main(["down", "--account", "1", "--ticket", m.ticket, "--direct"]) == 0  # the stated way around
+    assert deleted == [m.ticket]
+
+
+@pytest.mark.parametrize("call", [
+    lambda cfg, path: pool_run.scale_pool(cfg, path, 2),
+    lambda cfg, path: pool_run.pause_pool(cfg, path, ["t1"]),
+    lambda cfg, path: pool_run.retry_pool(cfg, path),
+    lambda cfg, path: pool_run.stop_pool(cfg, path, wait_s=0),
+    lambda cfg, path: pool_run.down_member("t1"),
+])
+def test_the_pool_functions_other_tools_call_refuse_a_newer_state_file(tmp_path, call):
+    """``yeto run scale / pause`` call these without the pool CLI."""
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    pool_run.pid_path(cfg).write_text(json.dumps({"pid": 1, "host": "h", "config": config_path}))
+    before = state.read_text()
+    with pytest.raises(island_pool.PoolStateFormatError, match="format 3"):
+        call(cfg, config_path)
+    assert state.read_text() == before and not pool_run.scale_path(cfg).exists()
+
+
+def test_the_rollout_status_names_a_newer_state_file_instead_of_reading_it(tmp_path):
+    from yeto.launch.rollout import entry
+    from yeto.launch.rollout.pools import PoolRef
+
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    summary = entry.pool_summary(PoolRef("nc", config_path))
+    assert "format 3" in summary["error"] and "pool-state-downgrade" in summary["error"]
+    assert "billed" not in summary and "target" not in summary
+
+
+def test_yeto_run_does_not_read_a_newer_state_file_and_says_so_once(tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from yeto.rl import up
+
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    run = SimpleNamespace(pools=[SimpleNamespace(load=lambda: cfg)], _nc_dir=lambda: state.parent)
+    up._FORMAT_WARNED.clear()  # noqa: SLF001
+    assert up.Run.pool_doc(run) is None and up.Run.pool_doc(run) is None
+    err = capsys.readouterr().err
+    assert err.count("WARNING") == 1 and "format 3" in err and "not shown" in err
+    doc = json.loads(state.read_text())
+    doc["format"] = island_pool.STATE_FORMAT
+    state.write_text(json.dumps(doc))
+    assert up.Run.pool_doc(run)["members"][0]["ticket"] == m.ticket

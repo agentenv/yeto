@@ -78,6 +78,7 @@ STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 # a budget / wall-clock breach stops the trainer only; the NC pool is released by force
 # once the spend (or the wall time) passes this multiple of the budget
 FORCE_FACTOR = 1.2
+_FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already reported
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
@@ -482,9 +483,22 @@ class Run:
         """The state file of pool ``i`` (None: no readable state)."""
         try:
             pool_cfg = self.pools[i].load()
-            return json.loads((self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json").read_text())
+            path = self._nc_dir() / f"pool-{pool_cfg['shard_base']}.json"
+            doc = json.loads(path.read_text())
         except Exception:  # noqa: BLE001
             return None
+        from yeto.launch.pool.island_pool import PoolStateFormatError, check_state_format  # noqa: PLC0415
+
+        try:
+            if isinstance(doc, dict):
+                check_state_format(doc, path)
+        except PoolStateFormatError as error:  # written by a newer yeto: not read, and said so once
+            if str(path) not in _FORMAT_WARNED:
+                _FORMAT_WARNED.add(str(path))
+                print(f"[yeto run] WARNING: {error}; this pool's members, spend and target are not shown",
+                      file=sys.stderr)
+            return None
+        return doc
 
     def _members(self, i: int) -> list[dict[str, Any]] | None:
         doc = self.pool_doc(i)

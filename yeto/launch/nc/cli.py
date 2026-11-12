@@ -1187,7 +1187,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.direct:
             from . import pool_run  # noqa: PLC0415
 
-            rc = pool_run.down_member(args.ticket, mode=args.mode)
+            from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+
+            try:
+                rc = pool_run.down_member(args.ticket, mode=args.mode)
+            except PoolStateFormatError as error:  # the ticket may be a pool's member: not deleted
+                print(f"down: refused, nothing changed: {error} (--direct deletes the ticket without asking "
+                      "any pool)", file=sys.stderr)
+                return 2
             if rc is not None:
                 return rc
         down(args.account, args.ticket)

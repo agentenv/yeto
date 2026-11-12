@@ -641,6 +641,7 @@ def pool_cfg_of(config_path: str) -> dict[str, Any]:
 def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     """``pool-retry --config F``: after a configuration error, restart the sampler on
     the same node(s) with the fixed config (checked here first)."""
+    check_state_file(cfg)
     try:
         cli.pool_config(cfg, allowed=None)
         if cfg.get("route", "ssh") == "ssh":
@@ -814,6 +815,7 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
     ``elastic.manual_hold_s`` after a manual one (manual operations take priority).
     The control file keeps the manual entries (paused tickets, released tickets) and
     the tickets of an earlier request the loop has not applied yet."""
+    check_state_file(cfg)
     retire = list(retire or []) + list(remove or [])
     if mode is not None and mode not in island_status.SCALE_DOWN_MODES:
         print(f"pool-scale: refused: mode {mode!r} is not one of {list(island_status.SCALE_DOWN_MODES)}")
@@ -897,6 +899,7 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
     """``pool-pause --ticket T [--hold-tasks]`` / ``pool-resume --ticket T``: recorded in the
     control file; the running loop applies it within about a second (and after a restart). A paused
     member gets no automatic action and counts toward the target."""
+    check_state_file(cfg)
     name = "pool-resume" if resume else "pool-pause"
     state = cli.pool_state_path(cfg)
     path = scale_path(cfg)
@@ -948,7 +951,8 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
 
 def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
     """The pool (config, config path, member) whose state holds ``ticket`` as a live
-    member, from the pid files of the state dir (they name the pool config)."""
+    member, from the pid files of the state dir (they name the pool config). Raises
+    ``PoolStateFormatError`` on a pool state of a newer format."""
     for pid in sorted(tunnel.state_dir().glob("pool-*.pid")):
         try:
             config_path = json.loads(pid.read_text())["config"]
@@ -956,6 +960,7 @@ def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | 
             doc = json.loads(cli.pool_state_path(cfg).read_text())
         except (OSError, ValueError, KeyError, TypeError):
             continue
+        check_state_file(cfg)  # a newer format: whether the ticket is a member cannot be told
         for m in billed_members(doc):
             if m.get("ticket") == ticket:
                 return cfg, config_path, m
@@ -1006,6 +1011,7 @@ def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
 def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, poll_s: float = 5.0,
               sleep=None, ops=None) -> int:
     """Release every node the pool created (``pool-stop --config F``)."""
+    check_state_file(cfg)
     sleep = sleep or time.sleep
     cli.pool_config(cfg, allowed=None)  # releasing needs no ordering rights
     state = cli.pool_state_path(cfg)
