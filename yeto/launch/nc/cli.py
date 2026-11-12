@@ -357,6 +357,13 @@ class NcSshOps:
     def run_tickets(self) -> list[tuple[int, str]]:
         return self.provider.run_tickets()
 
+    def slot_halt(self, account: Any) -> dict[str, Any] | None:
+        """The ledger's halt of a National Compute account (None: not halted, or not NC)."""
+        book = getattr(self.provider, "ledger", None)
+        if not isinstance(self.provider, NCProvider) or book is None:
+            return None
+        return book.halted(int(account))
+
     def released_by_us(self, ticket: str) -> bool:
         """The ticket ledger says this tool deleted ``ticket`` (an earlier pool instance)."""
         try:
@@ -1237,7 +1244,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.direct:
             from . import pool_run  # noqa: PLC0415
 
-            rc = pool_run.down_member(args.ticket, mode=args.mode)
+            from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+
+            try:
+                rc = pool_run.down_member(args.ticket, mode=args.mode)
+            except PoolStateFormatError as error:  # the ticket may be a pool's member: not deleted
+                print(f"down: refused, nothing changed: {error} (--direct deletes the ticket without asking "
+                      "any pool)", file=sys.stderr)
+                return 2
             if rc is not None:
                 return rc
         down(args.account, args.ticket)

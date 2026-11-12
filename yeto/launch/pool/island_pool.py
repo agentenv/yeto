@@ -59,6 +59,20 @@ PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "rea
 # a member the pool is retiring whose shard fence has not succeeded yet: its node is kept
 # (not watched, not restarted), nothing of it is handed on, no replacement is ordered
 FENCING = "fencing"
+# What a provider's guard raises, told by class name (the pool imports no provider):
+# a refusal sent nothing to the provider and is no provisioning failure; a halted slot
+# (National Compute: the account, until an operator's ``clear-halt``) is skipped
+REFUSED_ERRORS = ("NcRefused",)
+HALTED_ERRORS = ("NcHalted",)
+DEFERRED_ERRORS = ("NcReleaseDeferred",)  # the ticket ends on its own shortly: no delete now
+OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delete hit, or may have hit, a foreign ticket
+SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this long
+
+
+def error_is(error: BaseException, names: tuple[str, ...]) -> bool:
+    return any(c.__name__ in names for c in type(error).__mro__)
+
+
 FENCE_FAILED_EVERY = 10  # a fence that keeps failing: the first failure and every Nth send an event
 
 
@@ -151,6 +165,7 @@ class PoolOps(Protocol):
     # optional (``getattr``): probe(member) -> el.Probe; restart(member, shards); fence(member);
     # fence_incarnation(member) (lease only, no handoff: a stalled engine restarted in place);
     # run_tickets() -> [(account, ticket)] open tickets of this run in the ledger;
+    # slot_halt(account) -> why the slot takes no order / release now (None: it does);
     # exit_evidence(member) -> what the run's store says about a sampler that ended with
     # exit 0 (R2DataPath.exit_evidence; None: this data path keeps no such record);
     # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
@@ -229,6 +244,11 @@ class IslandPool:
     breaker: el.Breaker = field(default_factory=el.Breaker)
     budget: el.Budget = field(default_factory=el.Budget)
     _refused: str | None = None
+    _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
+    _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
+    _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
+    _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
+    _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _executor: Any = None
     state_path: Path | None = None  # saved right after every order
@@ -327,12 +347,82 @@ class IslandPool:
                 return f"{index}/{count}"
         raise RuntimeError(f"pool: every one of the {count} data slots is held; target exceeds data_slots")
 
+    def _slot_halt(self, account: Any) -> dict[str, Any] | None:
+        """Why the provider takes no order or release on the slot (``ops.slot_halt``), None
+        when it does or when the ops cannot tell. A failed read is no evidence the halt was
+        lifted: the slot keeps the halt it is known to have (None if none is known)."""
+        read = getattr(self.ops, "slot_halt", None)
+        if read is None:
+            return None
+        try:
+            halt = read(account)
+        except Exception as error:  # noqa: BLE001 - an order on it is refused by the guard anyway
+            self.log(f"pool: halt state of {self.config.slot_name} {account} unreadable: {error!r}"[:300])
+            return self._slot_halts.get(account)
+        return dict(halt) if halt else None
+
+    def _note_halt(self, account: Any, halt: dict[str, Any]) -> None:
+        """A halted slot: one alert, and the slot is left out until the halt is lifted."""
+        if account in self._slot_halts:
+            return
+        self._slot_halts[account] = halt
+        name = self.config.slot_name
+        self.log(f"pool: WARNING: {name} {account} is HALTED ({halt.get('halt')}): the pool orders and releases "
+                 f"nothing on it until an operator lifts the halt"[:400])
+        self._event("slot_halted", level="alert", account=account, reason=str(halt.get("halt"))[:300],
+                    expected_ticket=halt.get("expected_ticket"), released_ticket=halt.get("released_ticket"),
+                    members=[m.ticket for m in self.live() if m.account == account],
+                    action=f"check the {name} (which ticket was released, whose it is), then lift the halt: "
+                           f"python -m yeto.launch.nc clear-halt --account {account} --yes")
+
+    def _halt_lifted(self, account: Any) -> None:
+        if self._slot_halts.pop(account, None) is not None:
+            self._slot_hold.pop(account, None)
+            self._event("slot_halt_cleared", account=account)
+
     def _free_account(self) -> int | None:
+        now = self.clock()
         busy = {m.account for m in self.live()}
+        can_tell = getattr(self.ops, "slot_halt", None) is not None
         for account in self.config.accounts:
-            if account not in busy and self.ops.account_free(account):
+            halt = self._slot_halt(account)
+            if halt is not None:
+                self._note_halt(account, halt)
+                continue
+            if can_tell:
+                self._halt_lifted(account)
+            if account in busy or self._slot_hold.get(account, 0.0) > now:
+                continue
+            if self.ops.account_free(account):
                 return account
         return None
+
+    def _guard_refused(self, account: Any, error: BaseException, now: float) -> None:
+        """The provider's guard refused an order on the slot (nothing was sent): no
+        provisioning failure. The slot is left out for ``SLOT_RETRY_S``."""
+        self._slot_hold[account] = now + SLOT_RETRY_S
+        if error_is(error, HALTED_ERRORS):
+            self._note_halt(account, {"halt": str(error)[:300]})
+        else:
+            self._event("order_refused_by_guard", account=account, error=repr(error)[:300], retry_in_s=SLOT_RETRY_S)
+
+    def _slots_short(self) -> None:
+        """Halted slots leave fewer usable slots than the target: a higher alert (a
+        replacement has no free slot, so a lease end leaves a gap)."""
+        halted = sorted(self._slot_halts, key=str)
+        usable = len(self.config.accounts) - len(halted)
+        key = tuple(halted) if halted and usable < self.config.target else None
+        if key is not None and key != self._short:
+            name = self.config.slot_name
+            self.log(f"pool: CRITICAL: {usable} usable {name}(s) for target {self.config.target} "
+                     f"({name}s {halted} halted): the pool runs short")
+            self._event("slots_below_target", level="critical", usable=usable, target=self.config.target,
+                        halted=halted, slot_name=name,
+                        detail=(f"{usable} usable {name}(s) for target {self.config.target}: the pool cannot hold "
+                                f"its target, and a node at its lease end has no free {name} for its replacement "
+                                "(a gap in sampling)"),
+                        action="lift the halt(s) once checked (clear-halt), add slots, or lower the target")
+        self._short = key
 
     def _gate(self, now: float) -> str | None:
         """Why no order may be placed now (breaker, budget), None when one may."""
@@ -369,6 +459,8 @@ class IslandPool:
         if account is None:
             refused = (f"no free slot: {len(self.live())} of {len(self.config.accounts)} slots (the pool's "
                        f"'{self.config.slot_name}s') hold a machine of this pool (one per slot), target {self.config.target}")
+            if self._slot_halts:
+                refused += f"; halted (clear-halt needed): {sorted(self._slot_halts, key=str)}"
             if refused != self._no_account:  # once per change, not every tick
                 self._event("order_refused", why=refused)
             self._no_account = refused
@@ -395,16 +487,26 @@ class IslandPool:
             self._refused = refused
             return None
         shard = f"{self.config.shard_base}-{self.next_shard}"
-        try:
-            ticket = self.ops.order(account)
-        except Exception as error:  # noqa: BLE001 - an order failure is counted, never fatal
-            self._event("order_failed", account=account, error=repr(error)[:300])
-            fallback = getattr(self.ops, "has_fallback_offer", None)
-            if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
-                self._event("offer_failed", account=account)
+        ticket = None
+        while ticket is None:
+            try:
+                ticket = self.ops.order(account)
+            except Exception as error:  # noqa: BLE001 - an order failure is counted, never fatal
+                if error_is(error, REFUSED_ERRORS):  # a guard: nothing was sent; the next slot is tried
+                    self._guard_refused(account, error, now)
+                    account = self._free_account()
+                    if account is None:
+                        return None
+                    continue
+                self._event("order_failed", account=account, error=repr(error)[:300])
+                fallback = getattr(self.ops, "has_fallback_offer", None)
+                if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
+                    self._event("offer_failed", account=account)
+                    return None
+                self._fail(now, f"order on {self.config.slot_name} {account}")
                 return None
-            self._fail(now, f"order on {self.config.slot_name} {account}")
-            return None
+        if account in self._slot_halts and getattr(self.ops, "slot_halt", None) is None:
+            self._halt_lifted(account)  # ops that cannot tell: an order went through again
         self.next_shard += 1
         self.budget.orders += 1
         if handoff is not None:
@@ -480,22 +582,81 @@ class IslandPool:
         if member.state != DRAINING:
             self.log(f"pool: draining {member.ticket} ({why})")
             member.state = DRAINING
+        now = self.clock()
+        if member.ticket in self._drain_hold:
+            # its release was refused: a halted slot is asked again when the ops say the halt
+            # is lifted (ops that cannot tell: after SLOT_RETRY_S); any other guard refusal
+            # (an unconfirmed delete, ...) after SLOT_RETRY_S, not every tick
+            on_lift = member.ticket in self._drain_on_halt and getattr(self.ops, "slot_halt", None) is not None
+            held = self._slot_halt(member.account) is not None or (
+                not on_lift and self._drain_hold[member.ticket] > now)
+            if held and self._ticket_ended(member):  # it ended meanwhile: nothing left to release
+                self._released(member, why, ended_already=True)
+                return True
+            if held:
+                return False
+        self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
         try:
             self.ops.drain(member)
         except Exception as error:  # noqa: BLE001
             member.drain_error = repr(error)[:300]
+            if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS) and self._ticket_ended(member):
+                # nothing to delete: the ticket ended on its own (evicted, expired, released
+                # in the console). The guard's refusal does not keep the member.
+                self._released(member, why, ended_already=True)
+                return True
+            if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
+                self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
+                return False
+            if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
+                self._drain_hold[member.ticket] = now + SLOT_RETRY_S
+                action = (f"check the {self.config.slot_name}, then: python -m yeto.launch.nc clear-halt "
+                          f"--account {member.account} --yes; the pool then releases {member.ticket}")
+                if error_is(error, OWNERSHIP_ERRORS):
+                    self.log(f"pool: CRITICAL: releasing {member.ticket}: {error}"[:400])
+                    self._once(member, "release_ownership", "release_hit_foreign_ticket", level="critical", why=why,
+                               kind=type(error).__name__, error=str(error)[:300], action=action)
+                    self._note_halt(member.account, {"halt": str(error)[:300], "expected_ticket": member.ticket})
+                    self._drain_on_halt.add(member.ticket)
+                else:
+                    if error_is(error, HALTED_ERRORS):
+                        self._note_halt(member.account, {"halt": str(error)[:300]})
+                        self._drain_on_halt.add(member.ticket)
+                    self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
+                               error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=action,
+                               detail="the member is kept as it is (still billed) until the release is allowed")
+                return False
             self._event("drain_failed", ticket=member.ticket, account=member.account, why=why,
                         error=member.drain_error)
             return False
+        self._released(member, why)
+        return True
+
+    def _ticket_ended(self, member: Member) -> bool:
+        """The provider reports the member's ticket ended (a failed read: not known, False)."""
+        try:
+            return el.LeaseStatus.of(self.ops.poll(member)).state == "ended"
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _released(self, member: Member, why: str, *, ended_already: bool = False) -> None:
         self._charge(member, self.clock())
         member.state = GONE
         member.drain_error = None
+        self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
+        if ended_already:  # no delete was sent and none is: the patrol does not ask for one either
+            self._drain_hold[member.ticket] = float("inf")
+        for key in ("release_deferred", "release_blocked", "release_ownership"):
+            if key in member.alerted:
+                member.alerted.remove(key)
+        detail = {"ended_already": True} if ended_already else {}
         self._event("released", ticket=member.ticket, account=member.account, why=why,
-                    spent_ucr=round(self.budget.spent_ucr))
+                    spent_ucr=round(self.budget.spent_ucr), **detail)
         for m in self.members:  # a replacement that lost its predecessor is a plain member now
             if m.replaces == member.ticket:
                 m.replaces = None
-        return True
 
     def _fence(self, m: Member, why: str) -> bool:
         """Fence the shard of ``m`` (every step of the fence is idempotent). False: it failed;
@@ -1025,6 +1186,12 @@ class IslandPool:
         # adopt this run's unowned tickets before ordering (a restarted pool must not order
         # a second node for a target its adopted node already fills)
         self._patrol(now)
+        for account in self.config.accounts:  # halted slots are seen (and alerted) without an order
+            halt = self._slot_halt(account)
+            if halt is not None:
+                self._note_halt(account, halt)
+            elif getattr(self.ops, "slot_halt", None) is not None:
+                self._halt_lifted(account)  # lifted while no order was due: a later halt alerts again
 
         # replacements for members close to their lease end
         for m in self.live():
@@ -1033,10 +1200,13 @@ class IslandPool:
                 self._order(replaces=m)
 
         # fill up to target (members waiting for a replacement count until they go)
+        # (a member whose release its halted slot refuses may stay for hours: it fills no place)
         while len([m for m in self.live() if m.retiring_since is None
-                   and not (m.replaced_by and m.state == READY)]) < self.config.target:
+                   and not (m.replaced_by and m.state == READY)
+                   and not (m.state == DRAINING and m.ticket in self._drain_hold)]) < self.config.target:
             if self._order() is None:
                 break
+        self._slots_short()
         if self.breaker.tripped and not self.live():
             self.stop("breaker tripped and no member left")
 
@@ -1706,11 +1876,24 @@ class IslandPool:
                 owned.add(str(ticket))
                 continue
             stray = Member(account, str(ticket), shard="", state=DRAINING, created=now)
+            if str(ticket) in self._drain_hold:
+                # a release its slot's guard refused: not asked for every tick. Nothing to
+                # release once the ticket ended (the ledger row is the provider's to close).
+                if self._drain_hold[str(ticket)] == float("inf") or self._drain_hold[str(ticket)] > now \
+                        or self._slot_halt(account) is not None:
+                    continue
             self._event("orphan_lease", ticket=ticket, account=account)
             try:
                 self.ops.drain(stray)
+                self._drain_hold.pop(str(ticket), None)
                 self._event("released", ticket=ticket, account=account, why="orphan")
             except Exception as error:  # noqa: BLE001
+                if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS + OWNERSHIP_ERRORS):
+                    ended = self._ticket_ended(stray)
+                    self._drain_hold[str(ticket)] = float("inf") if ended else now + SLOT_RETRY_S
+                    self._event("orphan_release_refused", ticket=ticket, account=account, ended=ended,
+                                error=str(error)[:300], retry_in_s=None if ended else SLOT_RETRY_S)
+                    continue
                 self._event("drain_failed", ticket=ticket, account=account, why="orphan", error=repr(error)[:300])
 
     def _adopt(self, account: Any, ticket: str, now: float) -> Member:

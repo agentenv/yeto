@@ -56,7 +56,7 @@ POOL_STOPPED = "nc_elastic_pool_stopped"
 POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
              "by", "usd_per_h", "end_reason", "replaces", "continues_shard", "max_frac", "alerts",
-             "retry_in_s", "successor")
+             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
