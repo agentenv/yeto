@@ -74,3 +74,34 @@ def test_the_handoff_of_this_pools_own_replacement_is_kept_at_a_pool_retry():
     assert m.config_error is not None and pool.halted
     assert pool.retry() == [m.ticket]
     assert handoff_requested(cloud.store, m.shard) and not _aside(cloud, m.shard)
+
+
+# -- the real engine sampler: what a stale stop request does to a new sampler ---------
+
+def test_a_real_sampler_started_on_a_stale_handoff_exits_zero_at_once_and_the_pool_sets_it_aside_first(tmp_path):
+    from tests.test_stage1_gaps import _sampler_spec
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index
+
+    store = CheckpointStore(tmp_path / "store")
+    request_handoff(store, "nc-0", "nc-2")  # left by an earlier attempt of the run
+
+    spec = _sampler_spec(tmp_path, sampler_id="nc-0", num_rollouts=2, buffer_shards=["nc-0", "nc-2"])
+    path = tmp_path / "spec.json"
+    path.write_text(json.dumps(spec))
+    # the new sampler obeys the stale request: no round, its shard marked ended, exit code 0
+    code = entry.main(["--spec", str(path)])
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")
+    leave = next(e for e in map(json.loads, tape.read_text().splitlines()) if e["event"] == "rl_sampler_leave")
+    assert code == 0 and leave["rounds"] == 0 and leave["reason"] == "FINISHED"
+    shard = FileSampleBuffer(store, batch_size=1, index=shard_index("nc-0"), create_index=False)
+    assert shard.data_ended and len(shard) == 0
+    # what the pool does before the start on that shard name: nc-2 does not continue nc-0 in this pool
+    clock = Clock()
+    cloud = CloudWithHandoffs(clock)
+    cloud.store = store
+    pool = _pool(clock, cloud, target=3, accounts=(1, 4, 5))
+    _run(pool, clock, 180)
+    assert [m.shard for m in pool.members] == ["nc-0", "nc-1", "nc-2"] and pool.members[0].started is not None
+    assert not handoff_requested(store, "nc-0") and "stale_handoff_set_aside" in _names(pool)
