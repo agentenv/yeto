@@ -849,6 +849,8 @@ class StoreDispensedPrompts:
         self._drain_seen: str | None = None  # the drain request already reported / answered
         self._drain_answered: str | None = None
         self._held: dict[int, _Held] = {}
+        # claims whose create raised (a timeout): the store may hold them for this process
+        self._unsure: dict[int, int] = {}
         holder = getattr(ledger, "holder", "")
         self._stagger = int.from_bytes(hashlib.sha256(str(holder).encode()).digest()[:4], "big")
         self._retired = False  # the controller retired this process (a marker in the ledger)
@@ -1028,6 +1030,7 @@ class StoreDispensedPrompts:
         states, now = self.ledger.scan()
         self.stats["scans"] += 1
         self._lost_by_scan(states)
+        self._settle_unsure()
         if self.ledger.is_retired():
             self._retired = True
             with self._lock:
@@ -1080,6 +1083,8 @@ class StoreDispensedPrompts:
                 raise
             except Exception as error:  # noqa: BLE001 - the slot stays a gap; the next scan retries it
                 logger.warning("store dispenser: claim of slot %d failed: %r", p, error)
+                with self._lock:  # the create may have been applied, its answer lost
+                    self._unsure[p] = attempt
                 break
             if won:
                 with self._lock:
@@ -1105,6 +1110,30 @@ class StoreDispensedPrompts:
                         queue, i = rest[k:] + rest[:k], 0
         return got, ended
 
+    def _settle_unsure(self) -> None:
+        """Read back the claims whose create raised: one this process wrote is
+        released at once (no trial runs for it), one that is missing or another's
+        is forgotten. An unreadable one stays unsure (a drain is not answered)."""
+        with self._lock:
+            unsure = sorted(self._unsure.items())
+        for p, attempt in unsure:
+            try:
+                raw = self.ledger.objects.read(self.ledger.key("claims", _pkey(p), _akey(attempt)))
+                try:
+                    body = json.loads(raw) if raw else {}
+                except ValueError:  # not a claim body of this process
+                    body = {}
+                if (isinstance(body, dict) and body.get("holder") == self.ledger.holder
+                        and str(body.get("incarnation")) == str(self.ledger.incarnation)):
+                    if self.ledger.fail(p, attempt, "release", reason="claim_answer_lost"):
+                        self.stats["released"] += 1
+                        self._emit(RELEASE_EVENT, slot=p, attempt=attempt, reason="claim_answer_lost")
+            except Exception as error:  # noqa: BLE001 - asked again at the next scan
+                logger.warning("store dispenser: claim %d/%d not read back: %r", p, attempt, error)
+                continue
+            with self._lock:
+                self._unsure.pop(p, None)
+
     def _lost_by_scan(self, states: Mapping[int, TaskState]) -> None:
         """Mark the held slots the scan shows superseded (a later claim, or the
         attempt ended ``expired`` / ``release`` by someone else): what
@@ -1120,7 +1149,7 @@ class StoreDispensedPrompts:
 
     def _answer_drain(self) -> None:
         seq = self.ledger.drain_seq
-        if seq is None or self.holding() or self._drain_answered == seq:
+        if seq is None or self.holding() or self._unsure or self._drain_answered == seq:
             return
         try:
             self.ledger.answer_drain(seq)
