@@ -526,6 +526,104 @@ def test_a_draining_sampler_claims_nothing_new_finishes_its_claims_and_answers(t
     assert {tasks[i]["holder"] for i in range(2, 6)} == {"nc-1"}
 
 
+# ------------------------------------------- a claim whose create answer was lost
+class LostAnswerObjects(FakeObjects):
+    """The create of ``lose`` is applied, then its answer is lost (a read timeout
+    after the SDK's retries): the caller sees an error, the store holds the claim."""
+
+    def __init__(self, lose):
+        super().__init__()
+        self.lose = set(lose)
+
+    def create(self, key, data):
+        won = super().create(key, data)
+        if key in self.lose:
+            self.lose.discard(key)
+            raise TimeoutError("read timeout")
+        return won
+
+
+def test_a_claim_whose_create_answer_was_lost_is_released_before_the_drain_is_answered(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000001/0000"})
+    path = _write(tmp_path, _rows(4))
+    clock = Clock(store)
+    worker = _open(path, store, holder="nc-0", groups=2, clock=clock)
+    got, _ended = worker._claim(2)
+    assert got == [0]  # slot 1's create raised: not held here, yet in the store
+    assert "run/dispense/claims/000000000001/0000" in store.data
+    seq = sd.request_drain(store, "run/dispense", "nc-0")
+    worker.written(0, [0])
+    worker._claim(1)
+    # answered only once the store holds no claim of this process: slot 1 was given back
+    assert sd.drain_answered(store, "run/dispense", "nc-0", seq)
+    assert "run/dispense/fail/000000000001/0000.release" in store.data
+    sd.request_drain(store, "run/dispense", "nc-0", on=False)
+    other = _open(path, store, holder="nc-1", groups=3)
+    assert 1 in _slots(other(0))  # free at once, not after the lease
+
+
+def test_an_unreadable_lost_claim_holds_the_drain_answer(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, holder="nc-0", groups=1)
+    assert worker._claim(1)[0] == []
+    seq = sd.request_drain(store, "run/dispense", "nc-0")
+    read = store.read
+    store.read = lambda key: (_ for _ in ()).throw(TimeoutError("x")) if "/claims/" in key else read(key)
+    worker._claim(1)
+    assert not sd.drain_answered(store, "run/dispense", "nc-0", seq)
+    store.read = read
+    worker._claim(1)
+    assert sd.drain_answered(store, "run/dispense", "nc-0", seq)
+
+
+def test_a_lost_claim_read_back_after_its_expiry_is_not_released_over_the_expiry(tmp_path):
+    # the read back failed past the lease: a scan ended the attempt ``expired`` (counted
+    # toward max_redo); a later ``release`` of the same attempt would undo that count
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    clock = Clock(store)
+    worker = _open(path, store, holder="nc-0", groups=1, clock=clock)
+    assert worker._claim(1)[0] == []
+    read = store.read
+    store.read = lambda key: (_ for _ in ()).throw(TimeoutError("x")) if "/claims/" in key else read(key)
+    clock.sleep(200)  # past the 90 s lease
+    other = _open(path, store, holder="nc-1", groups=1)
+    other(0)  # ends attempt 0 expired, claims attempt 1
+    assert "run/dispense/fail/000000000000/0000.expired" in store.data
+    store.read = read
+    worker._claim(1)
+    assert "run/dispense/fail/000000000000/0000.release" not in store.data
+    assert not worker._unsure
+    states, _ = worker.ledger.scan()
+    assert states[0].counted() == 1
+
+
+def test_a_lost_claim_of_an_earlier_attempt_never_ends_the_slots_later_claim(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    clock = Clock(store)
+    worker = _open(path, store, holder="nc-0", groups=1, clock=clock)
+    assert worker._claim(1)[0] == []
+    worker._claim(1)
+    assert "run/dispense/fail/000000000000/0000.release" in store.data
+    got, _ = worker._claim(1)
+    assert got == [0] and worker._held[0].attempt == 1
+    worker._claim(1)  # nothing unsure left: attempt 1 is not touched
+    assert not any(k.startswith("run/dispense/fail/000000000000/0001") for k in store.data)
+    assert worker._held[0].attempt == 1 and 0 not in worker._unsure
+
+
+def test_a_store_without_exclusive_create_is_fatal_in_the_read_back_too(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, holder="nc-0", groups=1)
+    assert worker._claim(1)[0] == []
+    store.conditional_writes = False
+    with pytest.raises(sd.DispenseError):
+        worker._settle_unsure(worker.ledger.scan()[0])
+
+
 # ------------------------------------------------- retire racing a claim pass
 def test_retire_writes_its_marker_before_it_lists_the_claims(tmp_path):
     store = FakeObjects()
