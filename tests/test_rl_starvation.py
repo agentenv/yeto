@@ -481,3 +481,67 @@ def test_the_data_end_is_no_starvation(run_up, tmp_path, monkeypatch, capsys):
     run.monitor(poll_s=60)
     out = capsys.readouterr().out
     assert "trainer_starvation" not in out and "data end: every sampler pool finished" in out
+
+
+def test_no_seal_when_a_pool_writes_through_the_syncer(run_up, tmp_path, monkeypatch):
+    """A syncer data path: the trainer reads the relay, not the store's shards. An end
+    record in the store reaches no trainer, and the seal must not switch the starvation
+    watch off."""
+    import dataclasses
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    run.pools = [dataclasses.replace(run.pools[0], data_path="syncer")]
+    assert not run.seal_data_end()
+    assert "data_ended" not in run.state and not objects.list("sample-buffer/")
+
+
+def test_the_sealed_shards_parse_like_the_trainer(run_up, tmp_path, monkeypatch):
+    """The trainer strips the names of --rl-buffer-shards: "s-0, s-1" names s-1, not "_s-1"."""
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    run.cfg["trainer"]["argv"] += ["--rl-buffer-shards", "s-0, s-1"]
+    assert run.seal_data_end()
+    assert sorted(run.state["data_ended"]["sealed"]) == ["s-0", "s-1"]
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True, expected_shards=["s-0", "s-1"])
+    trainer.refresh()
+    assert trainer.data_ended
+
+
+def test_a_half_written_pool_state_is_no_data_end(run_up, tmp_path, monkeypatch):
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    (tmp_path / "nc" / "pool-s.json").write_text('{"finished": "x", "members": [')
+    assert not run.seal_data_end() and "data_ended" not in run.state
+
+
+def test_a_group_after_the_seal_fails_the_writer_not_the_trainer(run_up, tmp_path, monkeypatch):
+    """A writer left behind after the seal: its append is refused at the writer (the
+    end record holds its position), the trainer's merged index stays consistent."""
+    from yeto.rl.engine.buffer_payload import encode_group
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, SampleBufferError, shard_index
+    from yeto.rl.engine.trainer_lifecycle import SampleIndexEntry
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    zombie = FileSampleBuffer(objects, batch_size=1, index=shard_index("s-1"))  # opened before the seal
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True,
+                               expected_shards=["s-0", "s-1", "s-2", "s-3"])
+    assert run.seal_data_end()
+    ref = zombie.write_payload("late", encode_group([{"i": 0}]))
+    with pytest.raises(SampleBufferError, match="after the data end"):
+        zombie.append(SampleIndexEntry("late", 1, ref, 8, 1.0))
+    trainer.refresh()
+    assert trainer.data_ended and len(trainer) == 0
+
+
+def test_no_seal_when_a_pool_writes_another_store(run_up, tmp_path, monkeypatch):
+    """Samplers that write a synced trainer's substore (<store>/trainer0): an end record
+    in the run's store reaches no trainer."""
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    env = tmp_path / "r2.env"
+    env.write_text("R2_BUCKET=b\n")
+    (tmp_path / "pool.json").write_text(json.dumps({"shard_base": "s", "run_prefix": "r1/trainer0",
+                                                    "r2_env_file": str(env)}))
+    assert not run.seal_data_end() and "data_ended" not in run.state
+    (tmp_path / "pool.json").write_text(json.dumps({"shard_base": "s", "run_prefix": "r1",
+                                                    "r2_env_file": str(env)}))
+    assert run.seal_data_end()

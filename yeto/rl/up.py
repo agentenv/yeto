@@ -967,10 +967,22 @@ class Run:
     def pools_data_ended(self) -> bool:
         """Every sampler pool finished (a sampler exited 0 on the end of the data:
         ``IslandPool.finished``) and holds no member that is not gone: no sampler of
-        this run runs or will start, so no shard gets another group."""
+        this run runs or will start, so no shard gets another group. Only pools whose
+        samplers write the run's store (``data_path`` r2, no other store): an end
+        record the trainer does not read would only switch the starvation watch off."""
         if not self.pools:
             return False
+        from yeto.rl.up_consistency import _norm_store, pool_store  # noqa: PLC0415
+
         for i in range(len(self.pools)):
+            if self.pools[i].data_path != "r2":
+                return False  # its samplers write through the syncer relay: the trainer reads no store shard
+            try:
+                written = pool_store(self.pools[i].load())
+            except Exception:  # noqa: BLE001
+                return False
+            if written is not None and written != _norm_store(self.cfg["store"]):
+                return False  # its samplers write another store (a synced trainer's substore): not sealed here
             doc = self.pool_doc(i)
             if not doc or not doc.get("finished"):
                 return False
@@ -983,7 +995,7 @@ class Run:
         shard index the pools may have used), else the shards the store names."""
         named = self._trainer_flag("--rl-buffer-shards")
         if named is not None:
-            return [s for s in named.split(",") if s]
+            return [s.strip() for s in named.split(",") if s.strip()]  # as the trainer reads it
         from yeto.rl.engine.sample_buffer import shard_names  # noqa: PLC0415
 
         return list(shard_names(self._objects()))
