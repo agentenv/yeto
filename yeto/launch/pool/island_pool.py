@@ -348,7 +348,8 @@ class IslandPool:
 
     def _slot_halt(self, account: Any) -> dict[str, Any] | None:
         """Why the provider takes no order or release on the slot (``ops.slot_halt``), None
-        when it does, when the ops cannot tell or when the read failed."""
+        when it does or when the ops cannot tell. A failed read is no evidence the halt was
+        lifted: the slot keeps the halt it is known to have (None if none is known)."""
         read = getattr(self.ops, "slot_halt", None)
         if read is None:
             return None
@@ -356,7 +357,7 @@ class IslandPool:
             halt = read(account)
         except Exception as error:  # noqa: BLE001 - an order on it is refused by the guard anyway
             self.log(f"pool: halt state of {self.config.slot_name} {account} unreadable: {error!r}"[:300])
-            return None
+            return self._slot_halts.get(account)
         return dict(halt) if halt else None
 
     def _note_halt(self, account: Any, halt: dict[str, Any]) -> None:

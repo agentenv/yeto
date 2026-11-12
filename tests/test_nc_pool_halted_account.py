@@ -386,3 +386,25 @@ def test_a_member_kept_for_a_halted_account_goes_once_its_ticket_ends():
     cloud.tickets[m.ticket].update(state="ended", reason="expired")  # its lease ran out
     pool.tick()
     assert m.state == GONE and len(cloud.kinds("drain_refused")) == 1
+
+
+def test_an_unreadable_ledger_does_not_lift_a_known_halt():
+    clock = Clock()
+    cloud = GuardedCloud(clock, halted={1}, tells=True, ready_after=300)
+    pool = _pool(clock, cloud, target=2, accounts=(1, 4))
+    _run(pool, clock, 1 * H)
+    assert len(_events(pool, "slot_halted")) == 1
+    read = cloud.slot_halt
+
+    def unreadable(account):
+        raise OSError("ledger locked")
+
+    cloud.slot_halt = unreadable
+    _run(pool, clock, clock.t + 1 * H)
+    assert "slot_halt_cleared" not in _names(pool) and not cloud.kinds("refused")
+    assert len(_events(pool, "slot_halted")) == 1 and len(_events(pool, "slots_below_target")) == 1
+    cloud.slot_halt = read
+    cloud.halted.clear()  # the operator ran clear-halt
+    _run(pool, clock, clock.t + 2 * H)
+    assert "slot_halt_cleared" in _names(pool)
+    assert len([m for m in pool.members if m.state == READY]) == 2 and not pool.breaker.failures
