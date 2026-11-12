@@ -1187,14 +1187,36 @@ or deleted object. A payload the store failed to return (a throttle, a 5xx, a
 timeout) is never counted here: that read fails the round and is read again.
 
 **The trainer stopped with `DamagedPayloadLimit`.**
-8 payloads in a row (or 8 that are more than half of what one round read)
-did not decode: not single damaged objects but a systematic cause, usually
-samplers of another code version writing another payload schema, or a
-lifecycle rule deleting payloads. Nothing was consumed; the trainer stops at
-the same position on every restart until the cause is fixed. To pass the
-groups over anyway (their tasks are settled in the dispenser and are not
-generated again), set `YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN` in the trainer's
-environment (`0`: no limit).
+*What you see.* The trainer's round fails with `DamagedPayloadLimit: N damaged
+payloads in this take (...)`, and it fails again at the same buffer position
+after every restart or resume. The limit is 8 damaged payloads in a row, or 8
+once they are more than half of the payloads the round decoded (default;
+`YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN`). Nothing was consumed: the watermark has
+not moved past these groups.
+
+*What it means.* Single damaged or deleted payloads are passed over and
+counted (`rl_buffer_damaged_payload_skipped`, above). This many together is a
+systematic cause: samplers of another code version writing another payload
+schema, a lifecycle or cleanup rule deleting `sample-buffer/payloads/`, or a
+trainer image that cannot decode what the samplers write.
+
+*How to look.* The error text names the last buffer position, its
+`sample_id` and the reason (`payload is missing`, `payload schema ... != ...`,
+`payload does not decode: ...`). Earlier rounds' events
+(`rl_buffer_damaged_payload_skipped`) and the trainer log name each group with
+its `position`, `sample_id`, `payload_ref` and `reason`. Look at those objects
+in the bucket under `sample-buffer/<payload_ref>`: whether they exist, their
+size, and the `schema` field of their JSON. A `sample_id` starts with the
+sampler's id and incarnation, which tells you which samplers wrote them.
+
+*What to do.* Fix the cause (bring the samplers and the trainer to the same
+code pack, section 5.4; remove the rule that deletes payloads) and resume. If
+the groups are lost for good and you want the run to go on without them, set
+`YETO_SAMPLE_BUFFER_MAX_DAMAGED_RUN` in the trainer's environment to a number
+above the damaged run, or to `0` for no limit, and resume. Passing them over
+means these tasks are not trained: they are already settled in the dispenser
+and are not generated again in this run. Set the variable back afterwards, so
+the next systematic fault stops the trainer again.
 
 **`rl_buffer_exhausted` carries `passed_over`.**
 The last round found no trainable group; `passed_over` counts what it
