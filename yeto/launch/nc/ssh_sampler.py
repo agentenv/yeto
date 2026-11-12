@@ -239,6 +239,9 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     upload_file(alias, r2_env_file, env_on_node, run=run)
     extra: list[str] = []
     env = sampler_env(prefix)
+    # the release download's start spread is taken from this key (policy_release.download_delay_s):
+    # with --network host the host name is the node's, which NC nodes need not keep distinct
+    env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
     if setup is not None:
         target = agentic_setup.SshNode(alias, node.image or IMAGE, NVME, yeto_dir, PYTHON, lease.user,
                                        prelude=SSH_HOME_LINK, run=run)

@@ -120,3 +120,22 @@ def test_a_replaced_object_still_fails_the_download_at_once(tmp_path, monkeypatc
         store.read_file("big", tmp_path / "out")
     assert store.range_gate.cuts == 0
 
+
+
+def test_the_retry_layers_of_a_refused_range_stay_bounded(tmp_path, monkeypatch):
+    """botocore's retries times ours: 54 requests and at most 577 s of waits for a
+    range refused every time (the bound in the module comment)."""
+    retries = s3_store.client_config({})["retries"]
+    assert retries == {"mode": "standard", "total_max_attempts": 9}
+    botocore_worst = sum(min(2 ** (n - 1), 20) for n in range(1, retries["total_max_attempts"]))
+    s3 = Limited(allowed=0)
+    store, _data = _store(s3, ranges=2, concurrency=1)
+    pauses = []
+    monkeypatch.setattr(s3_store.random, "uniform", lambda lo, hi: hi)  # the longest pause each time
+    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    with pytest.raises(ClientError):
+        store.read_file("big", tmp_path / "out")
+    tries = s3_store.THROTTLED_READ_ATTEMPTS
+    ranges, rest = divmod(s3.refused, tries)
+    assert ranges in (1, 2) and rest == 0 and retries["total_max_attempts"] * tries == 54
+    assert botocore_worst == 91 and tries * botocore_worst + sum(pauses) / ranges == 577

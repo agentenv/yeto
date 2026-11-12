@@ -136,6 +136,10 @@ THROTTLE_CODES = frozenset({"ServiceUnavailable", "SlowDown", "TooManyRequests",
                             "Throttling", "ThrottlingException", "RequestThrottled", "503", "429"})
 THROTTLE_STATUS = frozenset({429, 503})
 THROTTLED_READ_ATTEMPTS = 6  # tries of one refused range (each one botocore's 9 requests)
+# The two retry layers multiply: a range refused every time is 6 x 9 = 54 requests and
+# waits at most 6 x 91 s (botocore) + 1 + 2 + 4 + 8 + 16 s (ours) = 577 s before the
+# download fails; ours exist to lower the concurrency (RangeGate), not to retry more.
+# A non-throttle error is never retried here (body errors: RANGE_READ_ATTEMPTS).
 RANGE_RESTORE_READS = 8  # range reads without a refusal per read given back to the limit
 
 
