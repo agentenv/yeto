@@ -25,7 +25,7 @@ def make_run(tmp_path, monkeypatch):
 
     def build(**budget):
         cfg = {"run": "r1", "store": "s3://b/runs/r1", "pool": {"config": str(pool_cfg)},
-               "trainer": {"argv": ["--gpu", "modal:2x8xb300"], "usd_per_h": 100},
+               "trainer": {"argv": ["--gpu", "modal:2x8xb300", "--cluster-prefix", "r1-trainer"], "usd_per_h": 100},
                "first_group": {"timeout_s": 0, "poll_s": 0}, "budget": budget}
         run = up.Run(cfg)
         run.calls = []
@@ -53,7 +53,7 @@ def _stops_pool(run) -> bool:
 
 
 def _stops_trainer(run) -> bool:
-    return any(argv[-2:] == ["down", "r1"] for argv in run.calls)
+    return any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
 
 
 @pytest.mark.parametrize("why", ["budget $600", "wall clock", "trainer: Traceback / OOM",
