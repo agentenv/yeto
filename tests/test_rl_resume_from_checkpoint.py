@@ -1066,3 +1066,93 @@ def test_volume_writer_guard_is_released_when_the_cut_fails(tmp_path):
     base = vol.reloads
     store.reload()
     assert vol.reloads == base + 1
+
+
+class _Killed(BaseException):
+    """The process dies here (nothing after it runs)."""
+
+
+def _die_in_store_sync(ctl, monkeypatch):
+    def killed(*args, **kwargs):
+        raise _Killed()
+
+    monkeypatch.setattr(ctl, "sync_checkpoint_store", killed)
+
+
+def test_an_inline_first_cut_dead_before_its_store_sync_starts_over_at_zero(tmp_path, monkeypatch):
+    """Background commits off (or a buffer committing the same store): the store's
+    first cut is inline. Shards written, the run dies before LATEST: the next start
+    drops the marked cut instead of refusing the store forever."""
+    monkeypatch.setenv("YETO_RL_CUT_BACKGROUND_COMMIT", "0")
+    store = _store(tmp_path / "store", _Vol())
+    _rank, ctl, driver, cp = _trained_island(tmp_path, store, 2)
+    _die_in_store_sync(ctl, monkeypatch)
+    with pytest.raises(_Killed):
+        cp.save(driver, rollout_id=2)
+    cut_id = cp._cut_id(2)
+    assert (store.root / rs.ROUND_CUTS / cut_id).is_dir() and rs.read_latest(store.root) is None
+    ctl_b = _rctl(tmp_path, "b", store)
+    assert ctl_b.restored is None and f"{rs.ROUND_CUTS}/{cut_id}" in ctl_b.discarded_first_cut
+
+
+def test_a_final_cut_after_a_failed_first_store_sync_dead_inline_starts_over(tmp_path, monkeypatch):
+    """The first (background) cut's store sync failed; the final cut (inline) dies
+    before its LATEST: both cuts are marked, the next start drops them."""
+    store = _store(tmp_path / "store", _Vol())
+    rank, ctl, driver, cp = _trained_island(tmp_path, store, 2)
+    real, calls = rs.write_snapshot, []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("transient store error")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "write_snapshot", flaky)
+    assert cp.save(driver, rollout_id=2)["store_commit"] == "deferred"
+    assert cp.join_commit(driver)["ok"] is False
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(4)))
+    driver.local_step = driver.published_version = 3
+    cp.source.ledger = _Ledger(3)
+    _die_in_store_sync(ctl, monkeypatch)
+    with pytest.raises(_Killed):
+        cp.save(driver, rollout_id=3, final=True)
+    ctl_b = _rctl(tmp_path, "b", store)
+    assert ctl_b.restored is None and f"{rs.ROUND_CUTS}/{cp._cut_id(3)}" in ctl_b.discarded_first_cut
+    assert list((store.root / rs.ROUND_CUTS).iterdir()) == []
+
+
+def test_an_inline_cut_on_a_committed_store_is_not_marked(tmp_path, monkeypatch):
+    monkeypatch.setenv("YETO_RL_CUT_BACKGROUND_COMMIT", "0")
+    store = _store(tmp_path / "store", _Vol())
+    rank, ctl, driver, cp = _trained_island(tmp_path, store, 2)
+    assert cp.save(driver, rollout_id=2)["store_synced"] is True
+    assert not list((store.root / rs.ROUND_CUTS).glob(f"*{rs.FIRST_CUT_MARK}"))
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(4)))
+    driver.local_step = driver.published_version = 3
+    cp.source.ledger = _Ledger(3)
+    seen = []
+    save_cut = cp.trainer.save_cut
+    cp.trainer.save_cut = lambda **kw: (seen.append(rs.first_cut_mark(store.root, kw["context"].cut_id)
+                                                    .exists()), save_cut(**kw))[1]
+    assert cp.save(driver, rollout_id=3)["store_synced"] is True and seen == [False]
+
+
+def test_a_failed_staged_pointer_write_keeps_the_local_pointer_on_a_present_cut(tmp_path):
+    """The background commit's staged pointer write fails: the new cut's files are
+    dropped, and the local pointer still names the previous cut, whose files exist."""
+    store = _store(tmp_path / "store", _Vol())
+    rank, driver, _trainer_c, cp, first = _island_with_first_cut(tmp_path, store)
+    _publish(driver, 2, _hash(rank))
+    real = cp._write_pointer
+
+    def failing(info, *, path=None):
+        if path is not None:
+            raise OSError("staged pointer write failed")
+        return real(info, path=path)
+
+    cp._write_pointer = failing
+    cp.save(driver, rollout_id=2)
+    assert cp.join_commit(driver)["ok"] is False
+    assert cp.pointer()["cut_id"] == first["cut_id"]
+    assert (store.root / rs.ROUND_CUTS / first["cut_id"]).is_dir()

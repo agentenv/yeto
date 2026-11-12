@@ -383,16 +383,18 @@ class RoundCutCheckpoint:
         """Start the trainer part of a cut: a pending cut whose shards are written in
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
-        if background and callable(start):
-            if not self._store_committed:
-                # the store's first cut: until its LATEST is committed the store holds a
-                # cut and no LATEST; the mark lets a restart drop it and start at 0. Also
-                # a later cut while no earlier one is committed (its store sync failed or
-                # still runs): an unmarked cut beside them would make the store unstartable
-                from yeto.rl.engine.resume import mark_first_cut
+        if not self._store_committed:
+            # the store's first cut: until its LATEST is committed the store holds a
+            # cut and no LATEST; the mark lets a restart drop it and start at 0. Also
+            # a later cut while no earlier one is committed (its store sync failed or
+            # still runs): an unmarked cut beside them would make the store unstartable.
+            # Inline cuts too (background commits off, a final cut): the run may die
+            # between their shards and their LATEST just the same
+            from yeto.rl.engine.resume import mark_first_cut
 
-                mark_first_cut(self.controller.checkpoint_store, context.cut_id,
-                               store=getattr(self.controller, "store", None))
+            mark_first_cut(self.controller.checkpoint_store, context.cut_id,
+                           store=getattr(self.controller, "store", None))
+        if background and callable(start):
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
@@ -834,11 +836,13 @@ class RoundCutCheckpoint:
         ``defer``: the caller commits in the background). ``staged``: the state dir as
         staged at the cut (:meth:`_stage`) is the one synced, with the same pointer."""
         pointer = {**info, CUT_KEY: cut_record}
-        self._write_pointer(pointer)
         kwargs: dict[str, Any] = {"defer_commit": True} if defer else {}
         if staged is not None:
+            # the staged copy first: a failure here leaves the local pointer on the
+            # previous cut, so dropping this cut's files (_drop_unpointed) is safe
             self._write_pointer(pointer, path=Path(staged) / POINTER)
             kwargs["source_dir"] = Path(staged)
+        self._write_pointer(pointer)
         synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True, **kwargs)
         # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
         # in the controller, outside its lock), also when it failed: recovery.save must not
