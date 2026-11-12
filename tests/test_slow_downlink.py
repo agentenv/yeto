@@ -57,7 +57,13 @@ SLOW_S = 14.0
 # half the size); merges are counted from then on.
 FILLED_S = 8.0
 FULL_EVERY = 4
+# After the slow phase island 1 drains its backlog and is merged again.
+RECOVER_S = 8.0
 SYNCER_LEASE_S = 60
+# --min-round-interval-ms 20: the syncer merges at most this many rounds a
+# second, so a phase of S seconds uses at most S * MAX_MERGES_PER_S steps.
+MAX_MERGES_PER_S = 50
+TOTAL_STEPS = 1200
 
 
 class SlowDownlinkClient(SyncerClient):
@@ -119,7 +125,26 @@ def steady(tape, syncer_log) -> bool:
     return all(merges_with(records, island, joined, time.time() + 1) >= 10 for island in (0, 1))
 
 
-def start_syncer(tmp_path, port, *extra, total_steps=1200):
+def start_as_first_members(tmp_path, first, initializer) -> None:
+    """Start ``first``, and only once the syncer has registered it start
+    ``initializer`` (island 0, which uploads the INIT), so both islands are
+    members when the syncer sends the initial cut.
+
+    The syncer starts its rounds as soon as the INIT is in and the launch
+    quorum (here one island) is connected. An island that connects after
+    that joins through a catch-up and gets no initial cut; started together,
+    the two islands race (the syncer hears island 1's HELLO, or island 0's
+    whole INIT, first)."""
+    log = tmp_path / "syncer.log"
+    first.start()
+    registered = f"learner_id={first.learner_id} "
+    wait_until(lambda: first.first_generation is not None  # its data stream's hello is sent too
+               and any("learner connected" in line and registered in line for line in log.read_text().splitlines()),
+               60, f"island {first.learner_id} did not connect")
+    initializer.start()
+
+
+def start_syncer(tmp_path, port, *extra, total_steps=TOTAL_STEPS):
     binary = build_syncer()
     tape = tmp_path / "tape.jsonl"
     log = (tmp_path / "syncer.log").open("w")
@@ -145,12 +170,20 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
     a = CountingIsland(0, port, store, dtype=dtype)
     b = CountingIsland(1, port, store, dtype=dtype, slow=slow)
     try:
-        a.start()
-        b.start()
+        # Island 1 is a member before island 0's INIT: started together, it
+        # could join after the rounds began, as a late joiner whose catch-up
+        # used up rounds of the fixed run (on CI the run then ended before the
+        # slow phase, which saw no merge and no PULL at all).
+        start_as_first_members(tmp_path, b, a)
         wait_until(lambda: sum(a.versions) >= 40 and sum(b.versions) >= 40, 60, "no early rounds")
-        # Both islands are ordinary members: a late joiner's catch-up is done
-        # and both pushes are being merged.
+        # Both islands are ordinary members and both pushes are being merged.
         wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
+        # The slow phase and island 1's recovery after it fit in the run's
+        # remaining steps whatever the merge rate (it is at most
+        # MAX_MERGES_PER_S), so the phase never outlasts the run.
+        step = max((r["step"] for r in tape_records(tape) if r.get("kind") == "outer_step"), default=0)
+        assert step + (SLOW_S + RECOVER_S) * MAX_MERGES_PER_S <= TOTAL_STEPS, (
+            f"the islands merged steadily only at step {step} of {TOTAL_STEPS}")
         generations = (a.client.connection_generation, b.client.connection_generation)
         slow.set()  # island 1's downlink is slow from now on
         slow_from = time.time()
@@ -281,8 +314,7 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
     b = CountingIsland(1, port, store, dtype=DTYPE_F32)
     assert a.client._downlink_window is None and b.client._downlink_window is not None
     try:
-        a.start()
-        b.start()
+        start_as_first_members(tmp_path, b, a)
         wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
         window = b.client._downlink_window
         assert window._started is None, "the limit started before both islands merged steadily"

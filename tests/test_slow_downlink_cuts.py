@@ -34,7 +34,14 @@ import pytest
 
 from tests.test_bulk_resend import FRAGMENTS, _log_seconds, merges_with, tape_records
 from tests.test_peer_recovery import build_syncer, free_port, wait_until
-from tests.test_slow_downlink import FILLED_S, FULL_EVERY, SYNCER_LEASE_S, CountingIsland, steady
+from tests.test_slow_downlink import (
+    FILLED_S,
+    FULL_EVERY,
+    SYNCER_LEASE_S,
+    CountingIsland,
+    start_as_first_members,
+    steady,
+)
 from yeto.protocol import DTYPE_F32, DTYPE_FLAG_BCAST_DELTA
 
 # Island 1 reads its initial cut slowly for this long after the INIT (the
@@ -83,25 +90,6 @@ def start_syncer(tmp_path, port, total_steps: int, *extra):
          "--island-lease-s", str(SYNCER_LEASE_S), "--syncer-epoch", "0", "--max-base-lag", "2", *extra],
         stdout=log, stderr=subprocess.STDOUT, text=True, env={**os.environ, "TOKIO_WORKER_THREADS": "4"})
     return proc, tape, log
-
-
-def start_as_first_members(tmp_path, first, initializer) -> None:
-    """Start ``first``, and only once the syncer has registered it start
-    ``initializer`` (island 0, which uploads the INIT), so both islands are
-    members when the syncer sends the initial cut.
-
-    The syncer starts its rounds as soon as the INIT is in and the launch
-    quorum (here one island) is connected. An island that connects after
-    that joins through a catch-up and gets no initial cut; started together,
-    the two islands race (the syncer hears island 1's HELLO, or island 0's
-    whole INIT, first)."""
-    log = tmp_path / "syncer.log"
-    first.start()
-    registered = f"learner_id={first.learner_id} "
-    wait_until(lambda: first.first_generation is not None  # its data stream's hello is sent too
-               and any("learner connected" in line and registered in line for line in log.read_text().splitlines()),
-               60, f"island {first.learner_id} did not connect")
-    initializer.start()
 
 
 def finish(proc, islands) -> None:
@@ -247,8 +235,7 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
     a = CuttingIsland(0, port, store, dtype=dtype)
     b = CuttingIsland(1, port, store, dtype=dtype, slow=slow)
     try:
-        a.start()
-        b.start()
+        start_as_first_members(tmp_path, b, a)
         wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
         a_generation, first = a.client.connection_generation, b.client.connection_generation
         slow.set()
