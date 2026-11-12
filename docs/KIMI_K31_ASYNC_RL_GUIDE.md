@@ -806,6 +806,17 @@ continue when it joins.
   `--rl-ledger-set-aside-before <now>`. A start from the base then moves the
   earlier batch ledger aside (`ledger.before-<ts>`) instead of stopping on it.
   No manual cleanup is needed.
+- **Without a cut, on a store that holds releases.** A trainer that stopped
+  before its first cut was committed leaves releases `v1..vK` and no cut. The
+  next launch starts from the base checkpoint, continues the version numbers
+  at `vK`, and reads the sample buffer from the position the release of `vK`
+  recorded (`rl_buffer_resume_versions`, field `buffer_selected`), not from
+  the start: groups the stopped trainer had selected are not read again. The
+  earlier batch ledger is moved aside as above.
+- **Behind the releases.** When the latest cut is older than the newest
+  release, the trainer restores the cut and continues the version numbers at
+  the newest release (`rl_round_cut_behind_releases`). It keeps no cut before
+  it has trained a round (`rl_round_cut_skipped`); the next due cut is kept.
 
 ### 5.4 Upgrading the code of a running run
 

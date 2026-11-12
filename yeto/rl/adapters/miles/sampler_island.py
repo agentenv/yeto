@@ -1050,6 +1050,11 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
             return None
         synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
     else:
+        if config.role == TRAINER:
+            # A buffer trainer draws no prompts: its data position is the buffer's (the
+            # cut's watermark, or the newest release's read position), so a relaunch
+            # above v0 without a recorded data cursor has none to restore.
+            driver.data_cursor_optional = "sample_buffer"
         synced = _resume_single_trainer(driver, release_store(config, environ),
                                         init_release=getattr(miles_args, "yeto_rl_init_release", None))
 
@@ -1122,10 +1127,17 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
     resume_at = getattr(getattr(driver, "sync", None), "resume_at", None)
     if callable(resume_at):
         resume_at(resumed.start_version, behind_round_cuts=True)
+    round_cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    if round_cuts is not None and resumed.buffer_selected is not None:
+        # Without a round cut to restore, the buffer is read on from where the launch
+        # that released vK had selected it, not from 0: that launch trained the groups
+        # before it (a restored cut's watermark wins, RoundCutCheckpoint.resume).
+        round_cuts.buffer_start_without_cut = int(resumed.buffer_selected)
     driver.published_policy_history = resumed.history
     driver.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
                 start_version=resumed.start_version, account_resumed=callable(resume_at),
-                known_versions=list(resumed.known_versions()))
+                known_versions=list(resumed.known_versions()),
+                buffer_selected=resumed.buffer_selected)
     return {"resumed_base": resumed.base_version}
 
 

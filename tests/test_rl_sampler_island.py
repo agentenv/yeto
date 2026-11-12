@@ -302,9 +302,12 @@ def test_a_single_trainer_restored_from_an_older_cut_continues_above_the_store(t
                                     runner=SimpleNamespace(run=lambda value: value))
     br._ACTIVE.pop(br.TRAINER, None)
     assert driver.published_policy_history() == [(1, "h1"), (2, "h2"), (3, "h3")]
+    # a buffer trainer draws no prompts: a relaunch above v0 needs no recorded data cursor
+    assert driver.data_cursor_optional == "sample_buffer"
 
     start = sync.start(driver)
     assert (start.rollout_id, start.state.policy_version) == (3, 3)  # not the cut's 1
+    assert sync.continues_releases_without_cut is False  # a cut was restored
     assert ("rl_round_cut_behind_releases",
             {"cut_rollout_id": 1, "latest_release_version": 3}) in events
     wired.publish(start.state)  # the cut's weights: v3 is the store's, not released again

@@ -661,6 +661,10 @@ class IslandDriver:
         # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
         # log); None: the data source cursor is restored (_restore_data_cursor).
         self.data_position_owner: str | None = None
+        # Why a restart above rollout 0 with no recorded data cursor is not refused
+        # (None: it is): "sample_buffer" for a trainer that reads the sample buffer
+        # and draws no prompts (``_restore_data_cursor``).
+        self.data_cursor_optional: str | None = None
         # Task assignment: an island whose rounds count from 0 in every process
         # (full parameter) keeps its data position in the run store
         # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
@@ -2593,6 +2597,14 @@ class IslandDriver:
                           data_cursor=dict(landed))
                 return
         if cursor is None:
+            optional = getattr(self, "data_cursor_optional", None)
+            if optional is not None:
+                # The island draws nothing from the data source (a buffer trainer):
+                # a launch with no cut and no ledger record of rollout v-1 (a new
+                # container that continues above the store's releases) leaves it as is.
+                self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=optional,
+                          data_cursor=None)
+                return
             if callable(seek):
                 raise DriverError(
                     f"restart at rollout {start_rollout_id}: the ledger holds no data cursor "
@@ -2710,14 +2722,19 @@ class IslandDriver:
     ledger_set_aside_before: float | None = None
 
     def _set_aside_ledger_of_a_base_restart(self, start_rollout_id: int) -> None:
-        """A launch that starts at rollout 0 starts from the base (no cut, no release to
-        continue from). Rounds an earlier launch recorded in the ledger on the island's
-        volume are not this history: ``rebase(0)`` would refuse them (LedgerError) after the
-        whole trainer start-up. With ``ledger_set_aside_before`` and every recorded round
-        older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead. A round
-        recorded by this launch (an in-place restart at 0) is still refused."""
+        """A launch that restored no round cut starts from the weights its process loaded:
+        at rollout 0, or at vK when the store holds releases up to vK (the version
+        account continues above them, ``LocalOnlySync.continues_releases_without_cut``).
+        Rounds an earlier launch recorded in the ledger on the island's volume are not
+        this history: ``rebase`` would refuse the ones at or above the start (LedgerError)
+        after the whole trainer start-up, and ``prepare`` every group they trained that
+        the buffer hands over again. With ``ledger_set_aside_before`` and every recorded
+        round older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead.
+        A round recorded by this launch (an in-place restart) is still refused."""
         cutoff = self.ledger_set_aside_before
-        recorded = self.ledger.recorded_rollouts() if start_rollout_id == 0 and cutoff is not None else []
+        from_base = start_rollout_id == 0 or bool(
+            getattr(self.sync, "continues_releases_without_cut", False))
+        recorded = self.ledger.recorded_rollouts() if from_base and cutoff is not None else []
         set_aside = getattr(self.ledger, "set_aside", None)
         if not recorded or not callable(set_aside):
             return
@@ -2727,9 +2744,12 @@ class IslandDriver:
         import time as _time
 
         dest = set_aside(_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()))
-        self.emit("rl_ledger_set_aside", rollout_id=0, recorded_rollouts=recorded[-8:],
+        self.emit("rl_ledger_set_aside", rollout_id=start_rollout_id, recorded_rollouts=recorded[-8:],
                   recorded_count=len(recorded), moved_to=str(dest),
-                  why="start from the base (rollout 0) over a ledger of an earlier attempt")
+                  why="start from the base (rollout 0) over a ledger of an earlier attempt"
+                  if start_rollout_id == 0 else
+                  "start without a round cut above the store's releases over a ledger of "
+                  "an earlier attempt")
 
     def run(self) -> TrainableState:
         with self._telemetry_threads():

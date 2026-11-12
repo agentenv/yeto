@@ -1,0 +1,497 @@
+"""CPU: a single buffer trainer relaunched from a round cut that is behind the
+store's policy releases (the K3.1 trainer: round cuts and policy releases are two
+commit chains, and a cut is far rarer than a release).
+
+Every launch here is a real ``IslandDriver`` on ``LocalOnlySync`` with the real
+round-cut controller (``ResumeController`` + ``RoundCutCheckpoint``, a torch
+model behind ``VerlCutTrainer``), the real batch ledger, the real policy release
+store (it keeps the newest two releases), the real ``ReleasingPublisher`` and
+``_resume_single_trainer`` of the Miles trainer island, and the real
+``BatchReader`` over a ``FileSampleBuffer``. Only the rollout pool is a stand-in:
+it hands the reader's groups over as ``MilesRolloutPool`` does for a buffer
+trainer (the plain behavior version as the group's policy token,
+``rollout_meta_hook.group_record``). A launch on a new state dir is a new
+container; a launch on the state dir of an earlier one is an in-place restart.
+
+Still red (xfail, strict, until the timeline identity lands): groups of a version
+released after the cut and pruned since. The rest are regression tests:
+the cut at the first safe point after such a relaunch, a relaunch without a cut
+over the earlier ledger, and one in a new container.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import time
+from types import SimpleNamespace
+
+import pytest
+import torch
+from test_rl_verl_cut import _handles, _model
+from test_rl_verl_round_cuts import NAME, _plan, _TorchTrainer
+
+from tests.buffer_rollout_procs import sample
+from yeto.rl.adapters.miles import sampler_island as si
+from yeto.rl.adapters.miles.buffer_rollout import BatchReader, GroupWriter
+from yeto.rl.adapters.verl import round_cuts
+from yeto.rl.engine import resume as rs
+from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+from yeto.rl.engine.bridges import LocalOnlySync
+from yeto.rl.engine.buffer_payload import group_entry_fields
+from yeto.rl.engine.driver import EventTape, IslandDriver, PolicyIdentityError
+from yeto.rl.engine.execution_profile import ExecutionProfile
+from yeto.rl.engine.fake import FakeEngine, FakeRolloutPool, fake_capabilities
+from yeto.rl.engine.ledger import LedgerError
+from yeto.rl.engine.policy_release import PolicyReleaseStore
+from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
+from yeto.rl.engine.resume import CheckpointStore
+from yeto.rl.engine.sample_buffer import FileSampleBuffer
+
+GROUPS = 2  # groups per round
+
+
+class _Killed(BaseException):
+    """The trainer process is gone (SIGKILL, a reclaimed container): nothing after
+    this point of the launch runs, no final cut is taken."""
+
+
+class _Samplers:
+    """The sampler islands of the run: before every trainer round they write one
+    round of groups generated with the newest release in the store (v0, the base,
+    while there is none). They outlive the trainer's launches."""
+
+    def __init__(self, store):
+        self.releases = PolicyReleaseStore(store)
+        self.buffer = FileSampleBuffer(store, batch_size=1)
+        self.writer = GroupWriter(self.buffer, "s0")
+        self.written = 0
+        self.versions: dict[str, int] = {}  # group id -> generating version
+
+    def write_round(self):
+        latest = self.releases.latest()
+        version = 0 if latest is None else int(latest.version)
+        for _ in range(GROUPS):
+            g = self.written
+            self.writer.write([sample(2 * g, g, version), sample(2 * g + 1, g, version)], group_key=f"g{g}")
+            self.versions[f"g{g}"] = version
+            self.written += 1
+
+
+class _BufferPool(FakeRolloutPool):
+    """The rollout port of a buffer trainer: a round is the next ``GROUPS`` groups
+    of the reader, each named by its plain behavior version."""
+
+    def __init__(self, engine, reader, samplers, kill_in_round):
+        super().__init__(engine)
+        self.reader = reader
+        self.samplers = samplers
+        self.kill_in_round = kill_in_round
+
+    def generate(self, rollout_id, *, expected_policy_version=None):
+        version, digest = self.engine.published
+        self.samplers.write_round()
+        if rollout_id == self.kill_in_round:
+            raise _Killed(f"in round {rollout_id}")
+        taken, report = self.reader.take(rollout_id, GROUPS, current_version=version)
+        groups = []
+        for _position, samples in taken:
+            behavior, tokens = group_entry_fields(samples)
+            groups.append(GroupMetadata(
+                f"g{samples[0]['group_index']}", tuple(f"s{s['index']}" for s in samples),
+                str(behavior), 0.5, 0.5, int(tokens), policy_versions=(int(behavior),)))
+        return RolloutBatchHandle(rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object(),
+                                  buffer_stale_groups=report.stale_groups, data_cursor=self.data_cursor())
+
+    # MilesRolloutPool reports and seeks the executor's data source; a buffer trainer
+    # draws no prompts, so the position never moves
+    def data_cursor(self):
+        return {"sample_offset": 0}
+
+    def seek_data_cursor(self, cursor):
+        return {"sample_offset": int(cursor["sample_offset"])}
+
+    # a buffer trainer holds no unfinished trajectory (the samplers do)
+    def export_in_flight(self):
+        return {"entries": [], "buffer_groups": 0}
+
+
+def _launch(tmp_path, name, samplers, *, age, every, rounds=64, state_dir=None,
+            kill_in_round=None, kill_before_safe_point=None, set_aside_before=None):
+    """One trainer launch over the run's store. ``kill_in_round`` /
+    ``kill_before_safe_point``: where this process dies."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    engine = FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=1.0, groups=GROUPS)
+    reader = BatchReader(FileSampleBuffer(store, batch_size=1, create_index=False), max_policy_age=age,
+                         wait_s=0.0, poll_s=0.0, read_workers=1, prefetch=False, incarnation_gate=None)
+    engine.rollout = _BufferPool(engine, reader, samplers, kill_in_round)
+    engine.trainer = _TorchTrainer(engine, _handles(_model()))
+    algorithm = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=age),
+                              correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
+    caps = fake_capabilities("miles-like")
+    caps = dataclasses.replace(caps, execution=dataclasses.replace(caps.execution, max_policy_staleness=age))
+    profile = ExecutionProfile("p", "colocated-serial", "strict-avg", max_policy_age=age,
+                               algorithm_contract="bounded-staleness", groups_per_batch=GROUPS,
+                               samples_per_group=engine.samples_per_group,
+                               algorithm_spec_sha256=algorithm.sha256())
+    plan = _plan(store_dir, state_dir or tmp_path / name, every=every)
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint="verl@test")
+    tape = tmp_path / f"{name}.jsonl"
+    driver = IslandDriver(
+        learner_id=0, rollout=engine.rollout, trainer=engine.trainer, policy_state=engine.policy_state,
+        publisher=engine.publisher, placement=engine.placement, algorithm=algorithm, capabilities=caps,
+        sync=LocalOnlySync(rounds), events=EventTape(tape, 0), ledger=resume.ledger, profile=profile)
+    driver.ledger_set_aside_before = set_aside_before
+    driver.data_cursor_optional = "sample_buffer"  # wire_policy_releases, role trainer
+    # a Miles single trainer wires its round cuts before its releases (sampler_island module doc)
+    checkpoint = round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=algorithm,
+                                            install_signals=False)
+    checkpoint.buffer_watermark = reader.watermark_before  # buffer_rollout.wire_sample_buffer
+    checkpoint.buffer_resume = reader.reset
+    releases = PolicyReleaseStore(store)
+    resumed = si._resume_single_trainer(driver, releases)
+    # k31/resume-pruned-release-groups: wire_policy_releases hands the publisher the
+    # driver's published policies for the release records (absent on main)
+    published_of = getattr(si, "_published_of", None)
+    if published_of is not None:
+        resumed = {**resumed, "published": published_of(driver)}
+    driver.publisher = si.ReleasingPublisher(
+        driver.publisher, releases, lambda version, directory: (directory / "w.bin").write_text(str(version)),
+        read_position=lambda: reader.buffer.read_cursor, emit=driver.emit, skip_base=True, **resumed)
+    if kill_before_safe_point is not None:
+        safe_point = driver.safe_point
+
+        def killed_before(rollout_id):
+            if rollout_id == kill_before_safe_point:
+                raise _Killed(f"before the safe point of rollout {rollout_id}")
+            return safe_point(rollout_id)
+
+        driver.safe_point = killed_before
+    return SimpleNamespace(driver=driver, checkpoint=checkpoint, tape=tape, releases=releases,
+                           state_dir=resume.controller.state_dir, store_dir=store_dir)
+
+
+def _run(launch):
+    """Run the launch to its end: ``"finished"``, ``"killed"``, or the error it died with."""
+    try:
+        launch.driver.run()
+        outcome = "finished"
+    except _Killed:
+        outcome = "killed"
+    except Exception as error:  # noqa: BLE001 - the outcome under test
+        outcome = error
+    commit = launch.checkpoint._commit  # a cut commit that ran in the background ends
+    if commit is not None:
+        commit[0].join()
+    launch.driver.ledger.close()  # the process is gone: its journal lock with it
+    return outcome
+
+
+def _events(launch, kind):
+    return [e for e in map(json.loads, launch.tape.read_text().splitlines()) if e.get("event") == kind]
+
+
+def _trained(launch):
+    """rollout id -> the generating versions of the groups it trained."""
+    return {e["rollout_id"]: sorted(int(g[1].split(":")[1]) for g in e["groups"])
+            for e in _events(launch, "rl_group_policies")}
+
+
+def _release_versions(tmp_path):
+    return [r.version for r in PolicyReleaseStore(CheckpointStore(tmp_path / "store")).records()]
+
+
+def _latest_cut(tmp_path):
+    return rs.read_latest(tmp_path / "store")
+
+
+def _first_launch(tmp_path, samplers, *, age, cut_every, dies_in_round):
+    """The run's first trainer: cuts every ``cut_every`` rounds, dies in round K."""
+    first = _launch(tmp_path, "launch1", samplers, age=age, every=cut_every, kill_in_round=dies_in_round)
+    assert _run(first) == "killed"
+    return first
+
+
+# ------------------------------------------------------------------------------------------
+# versions released after the cut and pruned since: nothing durable names them
+# ------------------------------------------------------------------------------------------
+def _pruned_release_run(tmp_path, *, cut_at, dies_at, age):
+    """Cut at M, releases v1..vK (the store keeps vK-1, vK), killed in round K. The
+    samplers wrote round r's groups with v_r, so rounds M..K-1 trained groups of vM..vK-1."""
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    _first_launch(tmp_path, samplers, age=age, cut_every=cut_at, dies_in_round=dies_at)
+    assert _latest_cut(tmp_path)["next_rollout_id"] == cut_at
+    assert _release_versions(tmp_path) == [dies_at - 1, dies_at]
+    return samplers
+
+
+PRUNED_RELEASE = pytest.mark.xfail(strict=True, raises=PolicyIdentityError,
+                            reason="a pruned release inside the policy-age window: needs the timeline identity")
+
+
+@pytest.mark.parametrize("cut_at, dies_at, age", [
+    pytest.param(4, 7, 8, marks=PRUNED_RELEASE, id="K-M=3,age=8"),
+    pytest.param(4, 7, 2, marks=PRUNED_RELEASE, id="K-M=3,age=2"),   # the K3.1 example limit: v5 = K - 2
+    pytest.param(4, 6, 2, marks=PRUNED_RELEASE, id="K-M=2,age=2"),   # v4 = K - 2: the cut's own version
+    pytest.param(4, 5, 2, id="K-M=1,age=2"),                  # v4 = K - 1: still in the store
+    pytest.param(4, 7, 1, id="K-M=3,age=1"),                  # window = {K-1}: older groups are over-age
+])
+def test_a_relaunch_behind_the_releases_trains_the_groups_inside_the_policy_age_window(
+        tmp_path, cut_at, dies_at, age):
+    """Wanted: the relaunch trains every replayed group whose version is inside the
+    policy-age window, as the run would have without the interruption."""
+    samplers = _pruned_release_run(tmp_path, cut_at=cut_at, dies_at=dies_at, age=age)
+    launch = _launch(tmp_path, "launch2", samplers, age=age, every=1000, rounds=3)
+    outcome = _run(launch)
+    if isinstance(outcome, Exception):
+        raise outcome
+    assert outcome == "finished"
+    trained = _trained(launch)
+    assert sorted(trained) == [dies_at, dies_at + 1, dies_at + 2]
+    assert all(rid - v <= age for rid, versions in trained.items() for v in versions)
+
+
+# ------------------------------------------------------------------------------------------
+# a launch after a relaunch that was behind the releases
+# ------------------------------------------------------------------------------------------
+def test_a_launch_after_one_round_of_a_relaunch_behind_the_releases_starts(tmp_path):
+    """Cut 2, releases up to v3 (the store keeps v2, v3), killed. The relaunch
+    continues at v3 with the cut's weights (v3 of this process is the cut's hash; the
+    store's v3 is the dead trainer's), trains one round, releases v4, cuts at 4 and
+    stops. The store still holds v3 next to v4: the next launch must start.
+
+    Green on main. A resume that refuses a version the cut and a release record
+    name with different hashes (PolicyVersionConflict) fails here at every start
+    until v3 leaves the store: the cut at 4 recorded v3 with the cut-2 hash, the
+    store's v3 record holds the dead trainer's."""
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    _first_launch(tmp_path, samplers, age=1, cut_every=2, dies_in_round=3)
+    assert _latest_cut(tmp_path)["next_rollout_id"] == 2 and _release_versions(tmp_path) == [2, 3]
+    store_v3 = {r.version: r.policy_hash for r in PolicyReleaseStore(
+        CheckpointStore(tmp_path / "store")).records()}[3]
+
+    second = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run(second) == "finished"  # round 3, then the final cut at 4
+    assert _events(second, "rl_round_cut_behind_releases")[0]["latest_release_version"] == 3
+    assert _latest_cut(tmp_path)["next_rollout_id"] == 4 and _release_versions(tmp_path) == [3, 4]
+    # v3 names two sets of weights: the store's release and this process's publication
+    published_v3 = [e for e in _events(second, "rl_publication") if e["policy_version"] == 3][0]
+    assert published_v3["rl/policy_token"] != f"yeto:3:{store_v3}"
+
+    third = _launch(tmp_path, "launch3", samplers, age=1, every=1000, rounds=1)
+    outcome = _run(third)
+    if isinstance(outcome, Exception):
+        raise outcome
+    assert outcome == "finished" and sorted(_trained(third)) == [4]
+
+
+# ------------------------------------------------------------------------------------------
+# the cut at the first safe point of a relaunch that is behind the releases
+# ------------------------------------------------------------------------------------------
+def _run_or_raise(launch):
+    outcome = _run(launch)
+    if isinstance(outcome, Exception):
+        raise outcome
+    return outcome
+
+
+def _recorded_rounds(launch):
+    journal = (launch.state_dir / "ledger" / "journal.jsonl").read_text().splitlines()
+    return sorted({r["rollout_id"] for r in map(json.loads, journal) if r.get("kind") == "outer_recorded"})
+
+
+def test_a_relaunch_behind_the_releases_takes_no_cut_before_it_trained_a_round(tmp_path):
+    """``--rl-cut-every 2``. The first trainer cut at 2, released v3 and v4 and died
+    before its cut at 4 was committed. The relaunch restores cut 2 and continues at
+    v4, where a cut is due at its first safe point. Its ledger ends at round 1 (2 and
+    3 were the dead trainer's): a cut there named rollout 4 over a ledger without
+    rollout 3, ``resume`` refused it (RoundCutError "no outer-recorded rollout 3"),
+    and as LATEST it stopped every later launch. No cut is taken there now; the
+    relaunch dies in round 5 and the next launch resumes from cut 2 again."""
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    first = _launch(tmp_path, "launch1", samplers, age=1, every=2, kill_before_safe_point=4)
+    assert _run(first) == "killed"
+    assert _latest_cut(tmp_path)["next_rollout_id"] == 2 and _release_versions(tmp_path) == [3, 4]
+
+    second = _launch(tmp_path, "launch2", samplers, age=1, every=2, kill_in_round=5)
+    assert _run(second) == "killed"
+    assert _events(second, "rl_cut_saved") == []
+    [skipped] = _events(second, "rl_round_cut_skipped")
+    assert (skipped["rollout_id"], skipped["reason"]) == (4, "no_round_trained_since_start")
+    assert sorted(_trained(second)) == [4] and _recorded_rounds(second) == [0, 1, 4]
+    assert _latest_cut(tmp_path)["next_rollout_id"] == 2
+
+    third = _launch(tmp_path, "launch3", samplers, age=1, every=2, rounds=2)
+    assert _run_or_raise(third) == "finished"
+    assert _events(third, "rl_resume")[0]["rollout_id"] == 2
+    assert _events(third, "rl_round_cut_behind_releases")[0]["latest_release_version"] == 5
+    # rounds 5 and 6: the periodic cut at 6 (after a trained round) and the final one at 7
+    assert [e["rollout_id"] for e in _events(third, "rl_cut_saved")] == [6, 7]
+
+    fourth = _launch(tmp_path, "launch4", samplers, age=1, every=2, rounds=1)
+    assert _run_or_raise(fourth) == "finished"
+    assert _events(fourth, "rl_resume")[0]["rollout_id"] == 7  # a cut of the relaunch resumes
+
+
+def test_the_default_timed_interval_takes_no_cut_at_the_first_safe_point():
+    """Which interval asked for that cut. ``--rl-cut-every N``: when K % N == 0
+    (above). ``--rl-cut-auto-mtbf-s``: always, the first safe point of every process
+    is due. Neither flag (the default, the K3.1 examples): the first cut waits
+    DEFAULT_FIRST_CUT_S, so the first safe point is never due."""
+    from yeto.rl.engine.cut_interval import DEFAULT_FIRST_CUT_S, cut_interval_for
+
+    now = [0.0]
+    auto = cut_interval_for(every=None, auto_mtbf_s=3600.0, max_interval_s=None)
+    assert auto.due(7) is True
+    default = cut_interval_for(every=None, auto_mtbf_s=None, max_interval_s=None)
+    default.clock = lambda: now[0]
+    assert default.first_cut_s == DEFAULT_FIRST_CUT_S and default.due(7) is False
+    now[0] = DEFAULT_FIRST_CUT_S
+    assert default.due(8) is True  # a later safe point: the ledger then holds round 7
+    assert cut_interval_for(every=4, auto_mtbf_s=None, max_interval_s=None).due(8) is True
+
+
+# ------------------------------------------------------------------------------------------
+# releases but no committed cut
+# ------------------------------------------------------------------------------------------
+def _no_cut_run(tmp_path, *, dies, cut_every=1000):
+    """No cut was ever committed. The first trainer released v1..v3 and died: in
+    round 3 (``"in_round"``), or after it recorded round 3 and before v4 reached the
+    store (``"before_release"``: a staged release takes minutes to upload)."""
+    samplers = _Samplers(CheckpointStore(tmp_path / "store"))
+    first = _launch(tmp_path, "launch1", samplers, age=1, every=cut_every,
+                    **({"kill_in_round": 3} if dies == "in_round" else {}))
+    if dies == "before_release":
+        publish = first.driver.publisher.publish
+
+        def killed_releasing(state, **kwargs):
+            if int(state.policy_version) == 4:
+                raise _Killed("releasing v4")
+            return publish(state, **kwargs)
+
+        first.driver.publisher.publish = killed_releasing
+    assert _run(first) == "killed"
+    assert _latest_cut(tmp_path) is None and _release_versions(tmp_path) == [2, 3]
+    return samplers, first
+
+
+def _trained_groups(launch):
+    return {e["rollout_id"]: sorted(g[0] for g in e["groups"]) for e in _events(launch, "rl_group_policies")}
+
+
+@pytest.mark.parametrize("dies", ["in_round", "before_release"])
+def test_a_new_container_without_a_cut_continues_above_the_releases(tmp_path, dies):
+    """The store holds releases up to v3 and no cut (the trainer died before its
+    first cut was committed), and the relaunch runs in a new container: an empty
+    ledger. Its account starts at v3. Before: ``_restore_data_cursor`` refused the
+    start (DriverError "the ledger holds no data cursor for rollout 2") although a
+    buffer trainer draws no prompts, and the buffer was read from position 0 again.
+
+    Now it starts, and reads the buffer from the position the release of v3
+    recorded (``buffer_selected``: the 6 groups rounds 0..2 selected). None of
+    those is selected again; the groups of round 3, whose update never reached the
+    store, are trained."""
+    samplers, first = _no_cut_run(tmp_path, dies=dies)
+    before = _trained_groups(first)
+    assert sorted(before)[:3] == [0, 1, 2] and before[2] == ["g4", "g5"]
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run_or_raise(launch) == "finished"
+    [versions] = _events(launch, "rl_buffer_resume_versions")
+    assert (versions["start_version"], versions["buffer_selected"]) == (3, 6)
+    [cursor] = _events(launch, "rl_data_cursor_restored")
+    assert (cursor["rollout_id"], cursor["source"], cursor["data_cursor"]) == (3, "sample_buffer", None)
+    assert _trained_groups(launch) == {3: ["g6", "g7"]}
+    [stale] = _events(launch, "rl_buffer_stale_skipped")
+    assert stale["stale_groups"] == 0  # nothing before the position was read, not even to skip it
+
+
+def test_a_relaunch_without_a_cut_reads_the_buffer_from_zero_when_no_release_names_a_position(tmp_path):
+    """A release record without ``buffer_selected`` (nothing was read when it was
+    written, or an earlier yeto): the relaunch reads from 0 as before, and the
+    policy-age gate passes over what is too old."""
+    samplers, _first = _no_cut_run(tmp_path, dies="in_round")
+    for record in (tmp_path / "store" / "policy-releases").rglob("*.json"):
+        data = json.loads(record.read_text())
+        data["buffer_selected"] = None
+        record.write_text(json.dumps(data, sort_keys=True))
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run_or_raise(launch) == "finished"
+    assert _events(launch, "rl_buffer_resume_versions")[0]["buffer_selected"] is None
+    assert _events(launch, "rl_buffer_stale_skipped")[0]["stale_groups"] == 4  # v0, v1
+    assert _trained_groups(launch) == {3: ["g4", "g5"]}  # v2: inside the window, read again
+
+
+def test_a_release_position_beyond_the_buffer_index_falls_back_to_zero(tmp_path):
+    """The position is a hint of where to read on. One the buffer refuses (a store
+    whose index holds fewer entries than the record names) is reported and the
+    buffer is read from 0; the start is not refused."""
+    samplers, _first = _no_cut_run(tmp_path, dies="in_round")
+    for record in (tmp_path / "store" / "policy-releases").rglob("*.json"):
+        data = json.loads(record.read_text())
+        data["buffer_selected"] = 10_000
+        record.write_text(json.dumps(data, sort_keys=True))
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1)
+    assert _run_or_raise(launch) == "finished"
+    [refused] = _events(launch, "rl_buffer_start_position_refused")
+    assert refused["position"] == 10_000 and "outside the index" in refused["error"]
+    assert _trained_groups(launch) == {3: ["g4", "g5"]}
+
+
+def test_a_new_container_without_a_cut_takes_no_cut_at_its_first_safe_point(tmp_path):
+    """``--rl-cut-every 3`` and a first cut that was never committed: the relaunch
+    starts at v3 with an empty ledger and a cut due at its first safe point. A cut
+    there could not be resumed from (no rollout 2 in the ledger); it is skipped and
+    the cut after the first trained rounds resumes."""
+    samplers, _first = _no_cut_run(tmp_path, dies="in_round", cut_every=1000)
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=3, rounds=3)
+    assert _run_or_raise(launch) == "finished"
+    assert [e["rollout_id"] for e in _events(launch, "rl_round_cut_skipped")] == [3]
+    assert [e["rollout_id"] for e in _events(launch, "rl_cut_saved")] == [6]
+    third = _launch(tmp_path, "launch3", samplers, age=1, every=3, rounds=1)
+    assert _run_or_raise(third) == "finished"
+    assert _events(third, "rl_resume")[0]["rollout_id"] == 6
+
+
+@pytest.mark.parametrize("dies", ["in_round", "before_release"])
+def test_a_restart_without_a_cut_sets_the_ledger_of_the_earlier_launch_aside(tmp_path, dies):
+    """The same relaunch on the state dir of the dead trainer (the island's volume;
+    the store holds no cut, so nothing restores over it), with
+    ``--rl-ledger-set-aside-before`` as ``yeto run up`` passes it on a restart.
+    Before, the ledger was set aside only for a start at rollout 0; a start at v3
+    kept it and ``rebase`` refused the restart (LedgerError "restart at rollout 3 is
+    behind outer-recorded rollouts [3]") when the dead trainer had recorded round 3.
+    The earlier ledger now moves aside and round 3 is trained."""
+    samplers, first = _no_cut_run(tmp_path, dies=dies)
+    recorded = [0, 1, 2] + ([3] if dies == "before_release" else [])
+    assert _recorded_rounds(first) == recorded
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1,
+                     state_dir=first.state_dir, set_aside_before=time.time() + 60)
+    assert _run_or_raise(launch) == "finished"
+    [aside] = _events(launch, "rl_ledger_set_aside")
+    assert (aside["rollout_id"], aside["recorded_rollouts"]) == (3, recorded)
+    assert list(first.state_dir.glob("ledger.before-*")) and _recorded_rounds(launch) == [3]
+    assert _trained_groups(launch) == {3: ["g6", "g7"]}
+
+
+def test_a_restart_without_a_cut_keeps_refusing_the_rounds_of_its_own_launch(tmp_path):
+    """The protection of ``--rl-ledger-set-aside-before`` is unchanged: rounds
+    recorded after the cutoff (this launch's own: a container the platform retried)
+    or no cutoff at all leave the ledger where it is. A dead trainer that recorded
+    round 3 is then still refused; one that died inside round 3 starts (the buffer
+    is read from the release's position, so the ledger sees no group twice)."""
+    samplers, first = _no_cut_run(tmp_path, dies="before_release")
+    for n, cutoff in ((2, None), (3, time.time() - 3600)):
+        launch = _launch(tmp_path, f"launch{n}", samplers, age=1, every=1000, rounds=1,
+                         state_dir=first.state_dir, set_aside_before=cutoff)
+        with pytest.raises(LedgerError, match=r"restart at rollout 3 is behind outer-recorded rollouts \[3\]"):
+            _run_or_raise(launch)
+        assert _events(launch, "rl_ledger_set_aside") == []
+
+
+def test_a_retried_container_that_died_inside_a_round_continues_on_its_ledger(tmp_path):
+    samplers, first = _no_cut_run(tmp_path, dies="in_round")
+    launch = _launch(tmp_path, "launch2", samplers, age=1, every=1000, rounds=1, state_dir=first.state_dir)
+    assert _run_or_raise(launch) == "finished"
+    assert _events(launch, "rl_ledger_set_aside") == [] and _recorded_rounds(launch) == [0, 1, 2, 3]
+    assert _trained_groups(launch) == {3: ["g6", "g7"]}

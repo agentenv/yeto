@@ -156,3 +156,31 @@ def test_a_resumed_account_and_a_round_cut_resume_are_refused_together():
         sync.resume_at(3)
     with pytest.raises(ValueError, match="below 0"):
         LocalOnlySync(2).resume_at(-1)
+
+
+def test_a_relaunch_without_a_cut_reads_the_buffer_from_the_position_of_the_newest_release(tmp_path):
+    """The record of vK holds the trainer's buffer read position at that release;
+    a relaunched single trainer hands it to its round cuts as the place to read from
+    when the store holds no cut (RoundCutCheckpoint.resume), and its sync knows the
+    account continued without one."""
+    store = PolicyReleaseStore(CheckpointStore(tmp_path), keep=4)
+    for version, position in ((1, 4), (2, 9), (3, None)):
+        store.release(version, f"h{version}", lambda d: (d / "w.bin").write_text("w"),
+                      buffer_selected=position)
+    assert resumed_releases(store, 2).buffer_selected is None  # v3 recorded none
+    store.release(4, "h4", lambda d: (d / "w.bin").write_text("w"), buffer_selected=17)
+    assert resumed_releases(store, 2).buffer_selected == 17
+
+    calls = []
+    cuts = SimpleNamespace(resume=lambda driver: None, buffer_start_without_cut=0)
+    sync = LocalOnlySync(2)
+    sync.round_cuts = cuts
+    driver = SimpleNamespace(sync=sync, _max_policy_age=lambda: 2, emit=lambda event, **f: calls.append((event, f)),
+                             export_local_resident=lambda *, policy_version: SimpleNamespace(
+                                 policy_version=policy_version))
+    assert si._resume_single_trainer(driver, store) == {"resumed_base": 4}
+    assert cuts.buffer_start_without_cut == 17 and calls[-1][1]["buffer_selected"] == 17
+    assert sync.start(driver).rollout_id == 4 and sync.continues_releases_without_cut is True
+    fresh = LocalOnlySync(2)
+    fresh.start(driver)
+    assert fresh.continues_releases_without_cut is False  # a run that starts here

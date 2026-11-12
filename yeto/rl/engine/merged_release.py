@@ -248,6 +248,10 @@ class ResumedReleases:
     base_version: int
     limit: int
     releases: tuple[tuple[int, str], ...]  # (version, policy hash), ascending by version
+    # The trainer's buffer read position the record of vK holds (``PolicyRelease.
+    # buffer_selected``; None: not recorded): the groups before it were selected by
+    # the launch that released vK. A relaunch without a round cut reads on from there.
+    buffer_selected: int | None = None
 
     @property
     def start_version(self) -> int:
@@ -282,12 +286,16 @@ def resumed_releases(releases: Any, limit: int) -> ResumedReleases | None:
     ``adapters.miles.sampler_island``). Of two records with one version the
     newest (highest ``seq``) names that version."""
     found: dict[int, str] = {}
+    selected: dict[int, int | None] = {}
     for record in sorted(releases.records(), key=lambda r: int(r.seq)):
         if record.derived_from is None and record.policy_hash:
             found[int(record.version)] = str(record.policy_hash)
+            position = getattr(record, "buffer_selected", None)
+            selected[int(record.version)] = None if position is None else int(position)
     if not found:
         return None
-    return ResumedReleases(max(found), int(limit), tuple(sorted(found.items())))
+    return ResumedReleases(max(found), int(limit), tuple(sorted(found.items())),
+                           buffer_selected=selected[max(found)])
 
 
 class LaneCursorLog:
