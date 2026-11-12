@@ -328,3 +328,13 @@ def test_releases_whose_multipart_uploads_fail_part_way_are_never_named_half_upl
     results = _run("upload")
     assert sum(r.metrics.get("fault_upload_outage", 0) for r in results) > 0
     _assert_holds(results, open_findings=OPEN_FINDINGS)
+
+
+def test_a_claim_create_applied_whose_call_raised_never_lets_a_drain_be_answered_over_it():
+    # PR #380: before it, seeds 4 / 5 / 19 / 27 of this preset each answered a drain while
+    # the store held a claim of the drained process (drain_answered_while_holding_a_claim)
+    seeds = sorted({4, 5, 19, 27} | set(range(FIRST, FIRST + SEEDS)))
+    results = [run_seed(SimConfig(seed=seed, faults=FaultConfig.preset("create-answer-lost"), checks=CHECKS))
+               for seed in seeds]
+    assert not _seeds_with(results, "drain_answered_while_holding_a_claim")
+    assert sum(r.metrics.get("fault_create_answer_lost", 0) for r in results)

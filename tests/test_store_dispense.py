@@ -575,3 +575,50 @@ def test_an_unreadable_lost_claim_holds_the_drain_answer(tmp_path):
     store.read = read
     worker._claim(1)
     assert sd.drain_answered(store, "run/dispense", "nc-0", seq)
+
+
+def test_a_lost_claim_read_back_after_its_expiry_is_not_released_over_the_expiry(tmp_path):
+    # the read back failed past the lease: a scan ended the attempt ``expired`` (counted
+    # toward max_redo); a later ``release`` of the same attempt would undo that count
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    clock = Clock(store)
+    worker = _open(path, store, holder="nc-0", groups=1, clock=clock)
+    assert worker._claim(1)[0] == []
+    read = store.read
+    store.read = lambda key: (_ for _ in ()).throw(TimeoutError("x")) if "/claims/" in key else read(key)
+    clock.sleep(200)  # past the 90 s lease
+    other = _open(path, store, holder="nc-1", groups=1)
+    other(0)  # ends attempt 0 expired, claims attempt 1
+    assert "run/dispense/fail/000000000000/0000.expired" in store.data
+    store.read = read
+    worker._claim(1)
+    assert "run/dispense/fail/000000000000/0000.release" not in store.data
+    assert not worker._unsure
+    states, _ = worker.ledger.scan()
+    assert states[0].counted() == 1
+
+
+def test_a_lost_claim_of_an_earlier_attempt_never_ends_the_slots_later_claim(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    clock = Clock(store)
+    worker = _open(path, store, holder="nc-0", groups=1, clock=clock)
+    assert worker._claim(1)[0] == []
+    worker._claim(1)
+    assert "run/dispense/fail/000000000000/0000.release" in store.data
+    got, _ = worker._claim(1)
+    assert got == [0] and worker._held[0].attempt == 1
+    worker._claim(1)  # nothing unsure left: attempt 1 is not touched
+    assert not any(k.startswith("run/dispense/fail/000000000000/0001") for k in store.data)
+    assert worker._held[0].attempt == 1 and 0 not in worker._unsure
+
+
+def test_a_store_without_exclusive_create_is_fatal_in_the_read_back_too(tmp_path):
+    store = LostAnswerObjects({"run/dispense/claims/000000000000/0000"})
+    path = _write(tmp_path, _rows(2))
+    worker = _open(path, store, holder="nc-0", groups=1)
+    assert worker._claim(1)[0] == []
+    store.conditional_writes = False
+    with pytest.raises(sd.DispenseError):
+        worker._settle_unsure(worker.ledger.scan()[0])
