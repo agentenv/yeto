@@ -245,6 +245,7 @@ class _Pulled:
     samples: list[dict[str, Any]]
     param_versions: tuple[int | None, ...]
     record: dict[str, Any]
+    entry: Any = None  # its buffer index entry (judged again before training)
 
 
 DROP_WINDOW_ENV = "YETO_BUFFER_DROP_WINDOW"  # groups per drop-rate window (default 20)
@@ -339,6 +340,10 @@ class BufferFeed:
         self.cursor_log = cursor_log
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
+        # kept groups not yet handed to the trainer: (position, entry, rows, record);
+        # judged again (:meth:`recheck_kept`) and handed over when the round closes
+        self._kept_pending: list[tuple[int, Any, dict[str, Any], dict[str, Any]]] = []
+        self._lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
         # the closed round's cursor record, written only once that round has trained
         # (:meth:`commit_round`)
         self._pending: tuple[int, list[int], int] | None = None
@@ -441,7 +446,7 @@ class BufferFeed:
             "position": position, "sample_id": item.entry.sample_id,
             "behavior_versions": versions, "param_versions": list(local),
             "source": (item.entry.provenance or {}).get("sampler_id"),
-            "samples": len(samples), "response_tokens": sum(lengths)})
+            "samples": len(samples), "response_tokens": sum(lengths)}, item.entry)
         self.pulled_positions.append(position)
         return {"uid": f"{UID_PREFIX}{int(item.position)}", "min_steps": local, "max_steps": local,
                 "calls": (None,) * len(samples), "lengths": lengths,
@@ -489,11 +494,62 @@ class BufferFeed:
         if None in last.param_versions:  # the collector keeps only groups whose versions it knows
             raise BufferFeedError(f"buffer position {last.position}: kept with an unknown version "
                                   f"{last.param_versions}")
-        self.add_group(group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
-                                  param_versions=last.param_versions, shape=self.shape,
-                                  tokenize=self.tokenize))
+        rows = group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
+                          param_versions=last.param_versions, shape=self.shape, tokenize=self.tokenize)
+        # handed to the trainer when the round closes (:meth:`close_round`), after the
+        # round's collector judged its kept groups again (:meth:`recheck_kept`)
+        self._kept_pending.append((last.position, last.entry, rows, {**last.record, "kept": True}))
         self._round_kept.append(last.position)
-        self.record({**last.record, "kept": True})
+
+    def recheck_kept(self) -> list[str]:
+        """Judge the kept groups not yet handed to the trainer again, their leases
+        read again now (``IncarnationGate.recheck``): a round waits for its later
+        groups, and a fence that came meanwhile must keep an earlier group out (the
+        selection judged it on a lease cached up to ``refresh_s``). A group fenced
+        since is dropped as ``stale_incarnation`` (recorded and counted, never
+        trained); returns the uids dropped, which the round's collector replaces.
+        While a lease cannot be read the round waits and asks again (fail closed)."""
+        if self.gate is None or not self._kept_pending:
+            return []
+        recheck = getattr(self.gate, "recheck", None)
+        while True:
+            items = [(entry, position) for position, entry, _, _ in self._kept_pending]
+            if callable(recheck):
+                verdicts = recheck(items, self._lease_reads)
+            else:
+                verdicts = []
+                for entry, position in items:
+                    try:
+                        verdicts.append(self.gate.verdict(entry, int(position)))
+                    except LeaseUnknown as error:
+                        verdicts.append(error)
+            if not any(isinstance(v, LeaseUnknown) for v in verdicts):
+                break
+            self.lease_waits += 1
+            self.sleep(self.poll_s)
+        fenced: list[str] = []
+        kept: list[tuple[int, Any, dict[str, Any], dict[str, Any]]] = []
+        for pending, verdict in zip(self._kept_pending, verdicts):
+            if verdict is None:
+                kept.append(pending)
+                continue
+            position, entry, _, _ = pending
+            self.record({"position": position, "sample_id": entry.sample_id, "kept": False,
+                         "dropped": STALE_REASON, "detail": verdict,
+                         "source": (entry.provenance or {}).get("sampler_id")})
+            self._round_kept.remove(position)
+            self.accepted -= 1  # counted when pulled; it is not trained
+            self._dropped(STALE_REASON, position, verdict)
+            fenced.append(f"{UID_PREFIX}{position}")
+        self._kept_pending = kept
+        return fenced
+
+    def _hand_over(self) -> None:
+        """Hand the round's kept groups to the trainer and record them kept."""
+        pending, self._kept_pending = self._kept_pending, []
+        for _, _, rows, record in pending:
+            self.add_group(rows)
+            self.record(record)
 
     def drop(self) -> None:
         self.record({**self._take_last().record, "kept": False})
@@ -510,6 +566,8 @@ class BufferFeed:
         has trained (module doc, "What a relaunch reads again")."""
         if self._last is not None:
             raise BufferFeedError("round closed with a pulled group not kept or dropped")
+        self._hand_over()
+        self._lease_reads = {}
         kept, self._round_kept = self._round_kept, []
         self._pending = (int(rollout_id), kept, int(self.buffer.read_cursor))
 

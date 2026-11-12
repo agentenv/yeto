@@ -234,6 +234,7 @@ def install_relay_ports(island: FullyAsyncIsland, *, buffer: Any, shape: RowShap
                       # dropped groups and starved-feed warnings as YETO_RL_EVENT records
                       emit=pump_event_printer(int(island.learner_id)))
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
+    island.recheck_kept = feed.recheck_kept  # the round judged again before assembly
     island.start_rollouter = None  # no rollouter: the spot samplers generate
     publisher = RelayPublisher(island, feed)
     pool = RelayRolloutPool(island, lambda: getattr(publisher.driver, "external_policy", None))

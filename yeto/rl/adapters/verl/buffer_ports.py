@@ -629,6 +629,7 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
                       merged=None if lane is None else MergedVersions(), **feed_kwargs)
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
+    island.recheck_kept = feed.recheck_kept  # the round judged again before assembly
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
     if int(delta_full_every) > 0 and staging is None:
         raise ValueError("--rl-release-delta-full-every needs a staging directory")

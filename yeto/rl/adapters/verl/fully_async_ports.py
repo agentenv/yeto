@@ -97,6 +97,9 @@ class FullyAsyncIsland:
         # A full-parameter island's trainer group (``full_parameter_stream.VerlFullParameterGroup``,
         # set by ``fully_async_full.full_parameter_ports``); None on a LoRA island.
         self.full_group = None
+        # A buffer trainer's ``BufferFeed.recheck_kept``: the round's kept groups judged
+        # again before it is assembled (the uids dropped since); None: no recheck.
+        self.recheck_kept: Callable[[], list[str]] | None = None
 
     # hooks of ports_impl.VerlPolicyState (run on the trainer actor's worker group)
     def export_tensors(self) -> tuple[dict, dict]:
@@ -162,23 +165,31 @@ class FullyAsyncRolloutPool:
         started = time.monotonic()
         collector = self._collector(rollout_id)
         pulled = 0
-        while not collector.full:
-            if self.max_pulls is not None and pulled >= self.max_pulls:
-                raise RuntimeError(f"rollout {rollout_id}: {pulled} queued samples pulled, only "
-                                   f"{len(collector.kept)}/{isl.required} within the policy-age limit")
-            meta = isl.call("yeto_pull_sample")
-            if meta is None:
-                if self.queue_end_is_buffer_end:
-                    from yeto.rl.engine.buffer_payload import SampleBufferExhausted
+        while True:
+            while not collector.full:
+                if self.max_pulls is not None and pulled >= self.max_pulls:
+                    raise RuntimeError(f"rollout {rollout_id}: {pulled} queued samples pulled, only "
+                                       f"{len(collector.kept)}/{isl.required} within the policy-age limit")
+                meta = isl.call("yeto_pull_sample")
+                if meta is None:
+                    if self.queue_end_is_buffer_end:
+                        from yeto.rl.engine.buffer_payload import SampleBufferExhausted
 
-                    raise SampleBufferExhausted(
-                        f"rollout {rollout_id}: the sample buffer ended with {len(collector.kept)}/"
-                        f"{isl.required} trainable groups for this round")
-                raise RuntimeError(f"rollout {rollout_id}: rollouter ended the queue")
-            pulled += 1
-            self._cursor.consume(1)
-            keep = collector.offer(SampleMeta(**meta))
-            isl.call("yeto_keep_last" if keep else "yeto_drop_last")
+                        raise SampleBufferExhausted(
+                            f"rollout {rollout_id}: the sample buffer ended with {len(collector.kept)}/"
+                            f"{isl.required} trainable groups for this round")
+                    raise RuntimeError(f"rollout {rollout_id}: rollouter ended the queue")
+                pulled += 1
+                self._cursor.consume(1)
+                keep = collector.offer(SampleMeta(**meta))
+                isl.call("yeto_keep_last" if keep else "yeto_drop_last")
+            # judged again right before the round is assembled: a group fenced while the
+            # round waited for later ones is dropped by the feed and replaced here
+            recheck = getattr(isl, "recheck_kept", None)
+            fenced = set(recheck()) if callable(recheck) else set()
+            if not fenced:
+                break
+            collector.kept = [v for v in collector.kept if v.meta.uid not in fenced]
         queue = isl.call("yeto_assemble")
         version, digest = isl.published
         groups = self._group_metadata(collector, rollout_id)

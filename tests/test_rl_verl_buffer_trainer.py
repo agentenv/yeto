@@ -103,6 +103,9 @@ def test_feed_maps_versions_judges_and_records_each_position_once(tmp_path):
         meta = feed.pull()
         keep = collector.offer(far.SampleMeta(**meta))
         feed("yeto_keep_last" if keep else "yeto_drop_last")
+    assert added == []  # kept groups are handed over when the round closes (judged again first)
+    feed.close_round(0)
+    records.sort(key=lambda r: r["position"])
     assert [r["position"] for r in records] == [0, 1, 2] == feed.pulled_positions
     assert [r["kept"] for r in records] == [True, True, False]  # v5 was never published here
     assert records[2]["param_versions"] == [None, None]
@@ -898,6 +901,8 @@ def test_d21_a_group_wider_than_the_rows_is_dropped_not_fatal(tmp_path):
     for _ in range(2):
         assert feed.pull() is not None
         feed("yeto_keep_last")
+    feed.close_round(0)
+    records.sort(key=lambda r: r["position"])
     assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
         (0, True, None), (1, False, "over_length"), (2, False, "over_length"), (3, True, None)]
     assert "prompt 7" in records[1]["detail"] and "response 9" in records[2]["detail"]
@@ -920,6 +925,8 @@ def test_d22_a_group_short_of_samples_per_group_is_dropped(tmp_path):
     for _ in range(2):
         assert feed.pull() is not None
         feed("yeto_keep_last")
+    feed.close_round(0)
+    records.sort(key=lambda r: r["position"])
     assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
         (0, True, None), (1, False, "short_group"), (2, True, None)]
     assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf2"]
