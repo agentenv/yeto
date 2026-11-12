@@ -448,9 +448,13 @@ class SamplerProc:
                       "sampler_round": {"sampler": self.sid, "incarnation": self.incarnation,
                                         "rollout_id": gen.rollout_id, "last": False, "data_cursor": gen.cursor,
                                         "dispense_position": slot}}
-            plan = getattr(self.prompts.ledger, "plan_id", None)
-            if plan is not None:  # the record fields of a dispenser that names its plan
-                record["sampler_round"].update(dispense_attempt=gen.attempt, dispense_plan=plan)
+            # the store dispenser's fields, as the engine sampler records them (``_round_record``):
+            # the attempt, and the plan of a dispenser that names one (``StoreDispensedPrompts.plan_id``)
+            if gen.attempt is not None:
+                record["sampler_round"]["dispense_attempt"] = gen.attempt
+            plan = getattr(self.prompts, "plan_id", None)
+            if isinstance(plan, str) and plan:
+                record["sampler_round"]["dispense_plan"] = plan
             self._check_begins(gen)
             self.sim.intent(sample_id, self, gen, rogue=True)
             objects.write(f"{sample_buffer.BUFFER_DIR}/{ref}", encode_group(samples))
