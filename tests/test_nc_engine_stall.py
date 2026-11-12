@@ -202,3 +202,15 @@ def test_a_crash_restart_clears_the_fence_so_the_real_end_of_the_data_ends_the_p
     cloud.tickets[first.ticket].update(sampler="exited", exit=0)
     _run(pool, clock, clock.t + 3 * MIN)
     assert pool.finished and len(pool.members) == 1 and "sampler_left_fenced" not in _names(pool)
+
+
+def test_a_fenced_sampler_that_left_late_and_cannot_be_restarted_is_still_replaced():
+    clock, cloud, pool, first, second = _stall_with_a_failed_restart(max_sampler_restarts=2)
+    cloud.tickets[first.ticket].update(sampler="running", exit=None)  # not gone yet
+    cloud.eng(first.ticket).update(running=0, queued=0, rate=0.0)  # winding down, no stall
+    _run(pool, clock, clock.t + 35 * MIN)
+    assert first.fenced_for_restart and first.state == READY
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    cloud.fail_restarts = 10**6
+    _run(pool, clock, clock.t + 30 * MIN)
+    assert first.state == GONE and pool.members[-1].replaces_shard == first.shard

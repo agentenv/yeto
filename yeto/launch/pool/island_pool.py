@@ -1404,6 +1404,7 @@ class IslandPool:
         reset = self.ecfg.sampler_restart_reset_s
         if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
             m.restarts = 0  # healthy long enough since the last restart
+        m.ready_since = None  # counted from here: a restart that keeps failing reaches the limit
         if m.restarts >= self.ecfg.max_sampler_restarts:
             m.fenced_for_restart = False
             self._fail(now, f"sampler on {m.ticket} not restarted after its fence")
