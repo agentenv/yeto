@@ -1260,6 +1260,7 @@ class IslandPool:
                         after_resume=True)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1277,6 +1278,7 @@ class IslandPool:
             self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts, detail=detail)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1391,10 +1393,17 @@ class IslandPool:
         """The sampler this pool fenced for an in-place restart ended with exit 0 and no
         restart has replaced it yet: start the shard's sampler again on the node, counted
         toward ``max_sampler_restarts`` (past it the node is retired and replaced)."""
+        if m.retiring_since is not None:  # scaled down: not restarted
+            m.fenced_for_restart = False
+            self._finish_retire(m, now, outcome="sampler exited")
+            return
         self._once(m, "left_fenced", "sampler_left_fenced")
         restart = getattr(self.ops, "restart", None)
         if restart is None or self._paused_now(m):
             return
+        reset = self.ecfg.sampler_restart_reset_s
+        if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
+            m.restarts = 0  # healthy long enough since the last restart
         if m.restarts >= self.ecfg.max_sampler_restarts:
             m.fenced_for_restart = False
             self._fail(now, f"sampler on {m.ticket} not restarted after its fence")

@@ -177,3 +177,28 @@ def test_exit_0_without_a_fence_still_ends_the_pool():
     cloud.tickets[m.ticket].update(sampler="exited", exit=0)
     _run(pool, clock, clock.t + 2 * MIN)
     assert pool.finished and "sampler_finished" in _names(pool)
+
+
+def test_a_crash_restart_clears_the_fence_so_the_real_end_of_the_data_ends_the_pool():
+    """The fenced sampler died with a non-zero exit and the crash restart replaced it:
+    a later exit 0 is the end of the data, with no extra restart and no new order."""
+    clock = Clock()
+    cloud = _FlakyRestart(clock, ready_after=300)
+    pool = _pool(clock, cloud, target=1, accounts=(1, 4), max_sampler_restarts=1)
+    _run(pool, clock, clock.t + 1800)
+    (first,) = [m for m in pool.members if m.state == READY]
+    cloud.eng(first.ticket).update(running=8, rate=5000.0)
+    _run(pool, clock, clock.t + 5 * MIN)
+    cloud.eng(first.ticket).update(running=8, queued=3, rate=0.0)
+    cloud.fail_restarts = 1
+    _run(pool, clock, clock.t + 12 * MIN)
+    assert first.fenced_for_restart
+    cloud.tickets[first.ticket].update(sampler="exited", exit=137)
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert not first.fenced_for_restart
+    cloud.eng(first.ticket).update(running=8, queued=0, rate=5000.0)
+    _run(pool, clock, clock.t + 45 * MIN)
+    assert first.state == READY and len(pool.members) == 1
+    cloud.tickets[first.ticket].update(sampler="exited", exit=0)
+    _run(pool, clock, clock.t + 3 * MIN)
+    assert pool.finished and len(pool.members) == 1 and "sampler_left_fenced" not in _names(pool)
