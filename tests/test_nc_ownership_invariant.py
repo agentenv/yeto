@@ -22,17 +22,16 @@ def _untouched_foreign(sc):
 def test_under_random_faults_the_client_never_changes_a_ticket_outside_its_ledger(seed, tmp_path):
     sc = sim.scenario(tmp_path, seed)
     sim.run_scenario(sc, steps=150)
-    assert sim.violations(sc.nc) == []
+    assert sim.check_invariants(sc) == []
 
     sim.settle(sc, operator=False)
-    assert sim.violations(sc.nc) == [] and _untouched_foreign(sc) == []
-    # a delete that took someone else's ticket in the residual window never goes unnoticed
-    assert sim.residual_outcomes(sc)["undetected"] == [] and sc.nc.creates_after_residual == 0
+    # writes on tickets outside the ledger: 0; residual hits unnoticed with the account writable: 0
+    assert sim.check_invariants(sc) == [] and _untouched_foreign(sc) == []
     assert sim.leaks(sc) == []  # what is still open of ours was reported (order_unrecorded, or a halt)
     foreign = sim.still_open(sc, "foreign")
 
     sim.settle(sc)  # the operator lifts halts, adopts or releases what was reported; the tool releases the rest
-    assert sim.violations(sc.nc) == [] and _untouched_foreign(sc) == []
+    assert sim.check_invariants(sc) == [] and _untouched_foreign(sc) == []
     assert sim.still_open(sc, "client") == [] and sim.still_open(sc, "foreign") == foreign
 
 

@@ -1203,10 +1203,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"account {args.account} is not halted")
             return 0
         print(json.dumps(halt, indent=1, default=str))
+        try:  # what the account holds now, for the operator to compare with the console
+            t = client(args.account).status().get("ticket")
+            print(f"account {args.account} now: " + ("no order" if not t else
+                  f"ticket {t.get('id')} state={t.get('state')} end_reason={t.get('end_reason')} "
+                  f"lease_until={t.get('lease_until')}"))
+        except Exception as error:  # noqa: BLE001 - shown, the decision stays with the operator
+            print(f"account {args.account} now: the status could not be read ({error!r})"[:300])
+        if ledger().halted(args.account) is None:
+            print("the halt was lifted by this status read: the expected ticket reads ended")
+            return 0
         if not args.yes:
-            print("pass --yes to lift the halt once the account was checked")
+            print("nothing changed. Check the account in the National Compute console, then pass --yes "
+                  "to lift the halt")
             return 2
         ledger().clear_halt(args.account)
+        print(f"account {args.account}: halt lifted")
         return 0
     if args.cmd == "down":
         if not args.direct:

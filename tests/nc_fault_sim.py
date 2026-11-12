@@ -328,6 +328,23 @@ def residual_outcomes(sc: Scenario) -> dict[str, list[str]]:
     return out
 
 
+def check_invariants(sc: Scenario) -> list[str]:
+    """The two standing invariants, for a test or a simulation that runs the client
+    over :class:`FaultyNc` (call it at any point; an empty list is a pass):
+
+    1. no changing call hit a ticket outside the ledger, no node of such a ticket was
+       handed out, no foreign ticket was adopted late (:func:`violations`);
+    2. no delete that took someone else's ticket in the residual window went
+       unnoticed with the account still writable (:func:`residual_outcomes`), and no
+       order was placed on an account before such a hit was accounted for."""
+    out = violations(sc.nc)
+    out += [f"residual hit on ticket {t} is undetected and the account is writable"
+            for t in residual_outcomes(sc)["undetected"]]
+    if sc.nc.creates_after_residual:
+        out.append(f"{sc.nc.creates_after_residual} order(s) placed on an account with an unaccounted residual hit")
+    return out
+
+
 def false_halts(sc: Scenario) -> int:
     """``delete_unconfirmed`` halts for a delete that did release the tool's own ticket
     (the cost of halting whenever the target cannot be established)."""

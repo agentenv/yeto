@@ -594,14 +594,59 @@ def test_a_delete_whose_ticket_is_gone_without_reading_ended_halts_the_account(t
     assert c.ledger.halted(1) is not None and sum(w["op"] == "create" for w in nc.writes) == 1
 
 
-def test_the_clear_halt_command_shows_the_halt_and_needs_yes(tmp_path, monkeypatch, capsys):
+def test_the_clear_halt_command_shows_the_halt_and_the_accounts_ticket_and_needs_yes(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("YETO_NC_STATE_DIR", str(tmp_path))
+    nc = Nc({"id": "b", "state": "ended", "end_reason": "released", "lease_until": "2026-11-10T09:35:03Z"})
+    monkeypatch.setattr(cli, "client", lambda account, **kw: ncc.NcClient(account, cli.ledger(), run=nc))
     assert cli.main(["clear-halt", "--account", "1"]) == 0 and "not halted" in capsys.readouterr().out
-    cli.ledger().halt(1, "a delete meant for ticket a released ticket b", released_ticket="b")
+    cli.ledger().halt(1, "a delete meant for ticket a released ticket b", kind="foreign_ticket_released",
+                      expected_ticket="a", released_ticket="b")
     assert cli.main(["clear-halt", "--account", "1"]) == 2 and cli.ledger().halted(1) is not None
-    assert '"released_ticket": "b"' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert '"released_ticket": "b"' in out and "nothing changed" in out
+    assert "ticket b state=ended end_reason=released lease_until=2026-11-10T09:35:03Z" in out
+    nc.ticket = None
     assert cli.main(["clear-halt", "--account", "1", "--yes"]) == 0 and cli.ledger().halted(1) is None
-    assert cli.ledger().open_rows() == []  # a halt row is no ticket
+    assert "no order" in capsys.readouterr().out and cli.ledger().open_rows() == []  # a halt row is no ticket
+
+
+def test_a_halt_for_an_unconfirmed_delete_lifts_only_when_that_very_ticket_reads_ended(tmp_path):
+    """No timeout lifts a halt. The one piece of evidence that does: a trusted status
+    answer that shows the ticket the delete was meant for, by id, ended."""
+    sc, nc, c = _quiet(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        _lost_delete(sc, nc, c, race=False)
+    (mine,) = [r["ticket"] for r in c.ledger.open_rows()]
+    shown, nc.current[1] = nc.current[1], None  # the status wrongly shows no order, twice
+    c.account_free()
+    with pytest.raises(ncc.NcDeleteUnconfirmed):
+        c.account_free()
+    assert c.ledger.halted(1)["kind"] == "delete_unconfirmed"
+    sc.clock.advance(30 * 86400)
+    assert c.account_free() and c.ledger.halted(1) is not None  # a month of "no order" lifts nothing
+    other = nc._place(1, "foreign")
+    other.update(state="ended", end_reason="released")
+    assert c.account_free() and c.ledger.halted(1) is not None  # nor does another ticket that reads released
+    nc.current[1] = shown  # the status shows our ticket again: ended, released
+    assert c.account_free() and c.ledger.halted(1) is None
+    name, detail = sc.events[-1]
+    assert (name, detail["account"], detail["ticket"]) == ("halt_cleared", 1, mine)
+    assert c.delete(mine)["already"] is True and sim.violations(nc) == []
+
+
+def test_a_halt_for_a_released_foreign_ticket_is_never_lifted_by_a_status_read(tmp_path):
+    sc, nc, c = _quiet(tmp_path)
+    with pytest.raises(ncc.NcForeignTicketReleased):
+        _lost_delete(sc, nc, c, status_down=False)
+    (mine,) = [r["ticket"] for r in c.ledger.open_rows()]
+    halt = c.ledger.halted(1)
+    assert (halt["kind"], halt["expected_ticket"]) == ("foreign_ticket_released", mine)
+    name, detail = sc.events[-1]
+    assert name == "foreign_ticket_released" and detail["account"] == 1 and detail["expected"] == mine
+    assert "released ticket" in detail["reason"] and "clear-halt --account 1 --yes" in detail["action"]
+    nc.current[1] = mine  # even our own ticket reading ended changes nothing: someone's node was taken
+    sc.clock.advance(30 * 86400)
+    assert c.account_free() and c.ledger.halted(1) is not None
 
 
 def test_open_rows_of_an_earlier_version_are_listed_once_for_the_operator(tmp_path):

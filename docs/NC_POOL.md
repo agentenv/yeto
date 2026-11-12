@@ -28,7 +28,10 @@ You need:
 
 - **NC accounts.** An NC account holds **one node at a time**. To run N
   samplers you need at least N accounts. To have a replacement ready before
-  each lease ends (with no gap in sampling), you need more than N.
+  each lease ends (with no gap in sampling), you need N + 1. Provide
+  **N + 2**: the pool takes an account out of use (a
+  [halt](#a-halted-account-clear-halt)) when it cannot prove what one of its
+  deletes released, until a person has checked it.
 - **The NC order tools** `nc-manage` and `nc-query`, plus the controller tool
   directory, which provides the workspace relay. The pool reaches nodes over
   SSH through a small relay in each account's NC workspace.
@@ -426,17 +429,42 @@ inside the call; the call then counts as over 6 minutes after `created_at`),
 python -m yeto.launch.nc clear-halt --account <account> [--yes]
 ```
 
-The pool halts an account, by a halt row in the ledger, in two cases (see
-[Known limitations](#known-limitations)):
+The order tool's delete cannot name a ticket (see
+[Known limitations](#known-limitations)). When the pool cannot prove that a
+delete it sent released its own ticket, it **halts the account**: a halt row
+in the ledger. While the row is there, every order, delete and adopt on the
+account is refused, by the pool and by the CLI. The other accounts keep
+working. A halt never ends by a timeout.
 
-| Event (`severity: critical`) | What happened |
-|---|---|
-| `nc_elastic_foreign_ticket_released` (`ticket`, `expected`) | A delete of this tool released `ticket`, which is not its own. Tell its owner. |
-| `nc_elastic_delete_unconfirmed` (`expected`, `delete_sent_at`) | A delete meant for `expected` was sent, and that ticket is gone from the account without ever reading `ended`. The pool cannot tell what the delete released. Usually it was `expected`; check in the console which ticket of the account was released around `delete_sent_at`. |
+There are two reasons. Each comes with an event (`severity: critical`) that
+carries `account`, `reason`, `expected` (the ticket the delete was meant for)
+and `action` (the command to run):
 
-While the halt is there, every order, delete and adopt on the account is
-refused, by the pool and by the CLI. Check the account in the console, then
-lift the halt with `--yes`. Without `--yes` the command prints the halt.
+| Event | What happened | How it ends |
+|---|---|---|
+| `nc_elastic_foreign_ticket_released` (`ticket`) | A delete of this tool released `ticket`, which is not its own: the pool's ticket ended on its own and someone else ordered in the instant before the delete. | Only by `clear-halt --yes`. |
+| `nc_elastic_delete_unconfirmed` (`delete_sent_at`) | A delete was sent, and the pool's ticket is gone from the account without ever reading `ended` (the account shows no order, or a newer ticket). The pool cannot tell which ticket the delete released. Most often it was the pool's own. | By `clear-halt --yes`, or by itself when a later status read shows the `expected` ticket, by id, ended (event `halt_cleared`). |
+
+What to do:
+
+1. Run `clear-halt --account <account>` without `--yes`. It prints the halt
+   (reason, `expected_ticket`, `released_ticket` or `delete_sent_at`) and the
+   ticket the account holds now (id, state, `lease_until`). It changes nothing.
+2. In the National Compute console, look at the account's tickets around the
+   time of the halt:
+   - `foreign_ticket_released`: find who placed `released_ticket` and tell
+     them their node was released. Check that the `expected` ticket is ended.
+   - `delete_unconfirmed`: check that the `expected` ticket is ended and that
+     no other ticket of the account was released at `delete_sent_at`. If one
+     was, treat it as the first case.
+   - If the `expected` ticket is still active, release it in the console (the
+     pool will not touch the account while it is halted).
+3. Run `clear-halt --account <account> --yes`. The pool uses the account
+   again at its next tick.
+
+Until then the pool has one account less. With no spare account, a node of
+the pool that reaches its lease end is not replaced. See
+[Before you start](#before-you-start) for how many accounts to provide.
 
 ### Retry after a configuration error: `pool-retry`
 
@@ -578,11 +606,12 @@ yeto dashboard export --tapes <tapes-dir>
     without knowing.
   - Either way the pool places no order on the account in between.
 
-  *Suggested change to the order tool:* give `nc-manage delete` a
-  `--ticket <id>` argument that calls the release-by-id endpoint the tool
-  already wraps (`release(ticketId)` in `tool/core.mjs`), and have it refuse
-  when the id is not the session's ticket. The pool would then pass the id and
-  this window, and the halts above, go away.
+  *The fix is in the order tool:* give `nc-manage delete` a `--ticket <id>`
+  argument that calls the release-by-id endpoint the tool already wraps
+  (`release(ticketId)` in `tool/core.mjs`), and have it refuse when the id is
+  not the session's ticket. The pool would then pass the id; this window and
+  the halts above go away. Until the tool has it, the pool stays strict: there
+  is no setting that relaxes the halt.
 - **A queued ticket has no time.** National Compute reports `granted_at` for
   an active ticket and no order time at all. An unrecorded order whose ticket
   is still queued cannot be checked against the time of the order, so

@@ -519,9 +519,26 @@ class NcClient:
                 ticket is None or (isinstance(ticket, dict) and isinstance(ticket.get("state"), str))):
             raise NcError(f"{_tool('query')[0]} status: account {self.account}: the answer does not report "
                           f"the ticket (keys {sorted(doc)[:8]}, error {str(doc.get('error'))[:200]!r})")
+        self._judge_halt(ticket or {})
         self._judge_delete(ticket or {})
         self._note_order(doc)
         return doc
+
+    def _judge_halt(self, t: dict[str, Any]) -> None:
+        """The one way a halt ends without an operator: the account was halted because
+        the target of a delete could not be established (``delete_unconfirmed``), and
+        a trusted status answer now shows that very ticket, by id, ended. The delete
+        (or the ticket's own end) is thereby accounted for. No timeout lifts a halt,
+        and a halt for a foreign ticket that was released is never lifted here."""
+        if not t.get("id") or t.get("state") in OPEN_STATES:
+            return
+        halt = self.ledger.halted(self.account)
+        if halt is None or halt.get("kind") != "delete_unconfirmed" or halt.get("expected_ticket") != t["id"]:
+            return
+        self.ledger.clear_halt(self.account)
+        self._emit("halt_cleared", account=self.account, ticket=t["id"], state=t.get("state"),
+                   end_reason=t.get("end_reason"), halted_at=halt.get("halted_at"),
+                   why=f"ticket {t['id']} now reads {t.get('state')}: the delete sent for it is accounted for")
 
     def _judge_delete(self, t: dict[str, Any]) -> None:
         """Every trusted status answer settles, if it can, a delete this tool sent
@@ -912,9 +929,10 @@ class NcClient:
 
     def _foreign_release(self, ticket: str, other: str, why: str) -> None:
         reason = f"a delete meant for ticket {ticket} released ticket {other}"
-        self.ledger.halt(self.account, reason, expected_ticket=ticket, released_ticket=other)
-        self._emit("foreign_ticket_released", account=self.account, ticket=other, expected=ticket, why=why,
-                   severity="critical",
+        self.ledger.halt(self.account, reason, kind="foreign_ticket_released", expected_ticket=ticket,
+                         released_ticket=other)
+        self._emit("foreign_ticket_released", account=self.account, ticket=other, expected=ticket, reason=reason,
+                   why=why, severity="critical",
                    action=f"tell the owner of ticket {other}; account {self.account} is halted for this tool "
                           f"until clear-halt --account {self.account} --yes")
         raise NcForeignTicketReleased(f"account {self.account}: {reason} ({why}); the account is halted")
@@ -922,8 +940,10 @@ class NcClient:
     def _unconfirmed_delete(self, pending: dict[str, Any], why: str) -> None:
         ticket = pending["pending_delete"]
         reason = f"a delete meant for ticket {ticket} was sent and what it released is not known"
-        self.ledger.halt(self.account, reason, expected_ticket=ticket, delete_sent_at=pending.get("sent_at"))
-        self._emit("delete_unconfirmed", account=self.account, expected=ticket, why=why, severity="critical",
+        self.ledger.halt(self.account, reason, kind="delete_unconfirmed", expected_ticket=ticket,
+                         delete_sent_at=pending.get("sent_at"))
+        self._emit("delete_unconfirmed", account=self.account, expected=ticket, reason=reason, why=why,
+                   severity="critical",
                    delete_sent_at=pending.get("sent_at"),
                    action=f"check in the National Compute console which ticket of account {self.account} was "
                           f"released around that time; if it was not {ticket}, tell its owner. The account is "
