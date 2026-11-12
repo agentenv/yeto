@@ -31,7 +31,6 @@ this tool may order on, e.g. ``1``; required for ``up``/``pool``), ``YETO_SKY_BI
 from __future__ import annotations
 
 import argparse
-import threading
 import json
 import os
 import shutil
@@ -45,7 +44,8 @@ from .. import agentic_setup
 from ..pool import status as island_status
 from ..pool.island_pool import Member
 from . import elastic, node_pool, scale_args, ssh_sampler, tasks, tunnel
-from .client import Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time
+from .client import (Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time, state_file_lock,
+                     write_json_atomic)
 from .lease_pool import PoolConfig
 from .provider import NCProvider, load_provider
 
@@ -71,19 +71,16 @@ def leases_path() -> Path:
     return tunnel.state_dir() / "leases.json"
 
 
-_LEASES_LOCK = threading.Lock()  # the pool reads tickets and starts members from several threads
-
-
 def save_lease(lease: NodeLease) -> None:
-    """Add a lease to the lease file: read-modify-write under a lock, then an atomic rename
-    (a concurrent reader never sees a half-written file, no writer drops another's lease)."""
-    with _LEASES_LOCK:
-        path = leases_path()
+    """Add a lease to the lease file: read-modify-write under the state file lock (the
+    threads of the pool, and another command on the same state dir), then an atomic
+    rename (a concurrent reader never sees a half-written file, no writer drops
+    another's lease)."""
+    path = leases_path()
+    with state_file_lock(path):
         doc = json.loads(path.read_text()) if path.exists() else {}
         doc[lease.ticket] = lease.to_json()
-        tmp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(doc, indent=1))
-        tmp.replace(path)
+        write_json_atomic(path, doc)
 
 
 def load_lease(ticket: str) -> NodeLease:

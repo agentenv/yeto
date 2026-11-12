@@ -16,13 +16,17 @@ The tools read their own account file; no account secret passes through here.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +42,10 @@ LEASE_HOURS = 4.0
 
 class NcError(RuntimeError):
     pass
+
+
+class LedgerError(NcError):
+    """The ticket ledger exists and cannot be read (it is not taken for empty)."""
 
 
 class NcRefused(NcError):
@@ -153,29 +161,84 @@ def cost_record(op: str, ticket: str, *, name: str | None = None, **attrs: Any) 
         print(f"WARNING: cost ledger write for NC ticket {ticket} failed: {error!r}", file=sys.stderr, flush=True)
 
 
+_FILE_LOCKS: dict[str, threading.RLock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+@contextlib.contextmanager
+def state_file_lock(path: Path) -> Iterator[None]:
+    """Exclusive hold on a state file for one read-modify-write: a lock per path
+    for the threads of this process (the pool reads tickets from several), and an
+    ``flock`` on ``<name>.lock`` next to it for other processes on the same state
+    dir (a manual command while a pool runs). The lock file is never replaced."""
+    key = os.path.abspath(path)
+    with _FILE_LOCKS_GUARD:
+        thread_lock = _FILE_LOCKS.setdefault(key, threading.RLock())
+    with thread_lock:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing the descriptor drops the flock
+
+
+def write_json_atomic(path: Path, doc: Any) -> None:
+    """Replace ``path`` with ``doc``: a temporary file of its own (0600, same
+    directory), synced, then renamed. A reader sees the old file or the new one."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 class Ledger:
-    """Tickets created by this tool (append-only file, 0600)."""
+    """Tickets created by this tool (append-only file, 0600). Every change is one
+    read-modify-write under :func:`state_file_lock`. A ledger that exists and cannot
+    be read is an error, never an empty ledger: the next write would replace every
+    ticket this tool owns with one row."""
 
     def __init__(self, path: Path):
         self.path = path
 
     def load(self) -> list[dict[str, Any]]:
         try:
-            return json.loads(self.path.read_text())
-        except (OSError, ValueError):
+            text = self.path.read_text()
+        except FileNotFoundError:
             return []
+        except OSError as error:
+            raise LedgerError(f"ticket ledger {self.path}: cannot be read: {error!r}") from error
+        try:
+            rows = json.loads(text)
+        except ValueError as error:
+            raise LedgerError(f"ticket ledger {self.path}: not JSON ({error}); repair or move it aside "
+                              "(its tickets may still be billing)") from error
+        if not isinstance(rows, list) or not all(isinstance(r, dict) and "ticket" in r for r in rows):
+            raise LedgerError(f"ticket ledger {self.path}: not a list of ticket rows")
+        return rows
 
     def add(self, account: int, ticket: str, **extra: Any) -> None:
-        rows = self.load()
-        rows.append({"account": account, "ticket": ticket, "created_at": time.time(), **extra})
-        self._write(rows)
+        with state_file_lock(self.path):
+            rows = self.load()
+            rows.append({"account": account, "ticket": ticket, "created_at": time.time(), **extra})
+            self._write(rows)
 
     def mark(self, ticket: str, **fields: Any) -> None:
-        rows = self.load()
-        for row in rows:
-            if row["ticket"] == ticket:
-                row.update(fields)
-        self._write(rows)
+        with state_file_lock(self.path):
+            rows = self.load()
+            for row in rows:
+                if row["ticket"] == ticket:
+                    row.update(fields)
+            self._write(rows)
 
     def owns(self, account: int, ticket: str) -> bool:
         return any(r["account"] == account and r["ticket"] == ticket for r in self.load())
@@ -188,12 +251,7 @@ class Ledger:
         return [r for r in self.open_rows() if r.get("run") == run]
 
     def _write(self, rows: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(rows, f, indent=1)
-        os.replace(tmp, self.path)
+        write_json_atomic(self.path, rows)
 
 
 class NcClient:
