@@ -1848,6 +1848,10 @@ FORMAT_1_MEMBER_FIELDS = (
 )
 
 
+class PoolStateFormatError(RuntimeError):
+    """The pool state file has a format this code does not read."""
+
+
 def check_state_format(doc: dict[str, Any], path: Any = None) -> None:
     """Refuse a state file written by a newer pool (its fields would be dropped or misread)."""
     try:
@@ -1855,7 +1859,7 @@ def check_state_format(doc: dict[str, Any], path: Any = None) -> None:
     except (TypeError, ValueError):
         found = None
     if found is None or found > STATE_FORMAT:
-        raise RuntimeError(
+        raise PoolStateFormatError(
             f"pool state {path or ''} has format {doc.get('format')!r}; this code reads up to format "
             f"{STATE_FORMAT}. It was written by a newer yeto: run the pool commands with that version, or "
             "write the file back for this one with its `python -m yeto.launch.nc pool-state-downgrade "

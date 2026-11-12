@@ -124,3 +124,43 @@ def test_pool_state_downgrade_is_refused_while_a_pool_loop_holds_the_lock(tmp_pa
     finally:
         lock.close()
     assert "a pool loop is alive" in capsys.readouterr().out and state.read_text() == before
+
+
+def _newer_state(tmp_path):
+    cfg, config_path, clock, cloud, pool, m, state = _saved_pool(tmp_path)
+    doc = pool.snapshot()
+    doc["format"] = island_pool.STATE_FORMAT + 1
+    state.write_text(json.dumps(doc))
+    return cfg, config_path, state, m
+
+
+@pytest.mark.parametrize("argv", [["pool-status"], ["pool-stop", "--wait", "0"], ["pool"], ["pool-retry"],
+                                  ["pool-scale", "--target", "2"], ["pool-pause", "--ticket", "t1"],
+                                  ["pool-state-downgrade"]])
+def test_every_pool_command_refuses_a_newer_state_file_in_one_line_without_a_traceback(tmp_path, capsys, argv):
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    before = state.read_text()
+    assert cli.main([argv[0], "--config", config_path, *argv[1:]]) == 2
+    out = capsys.readouterr()
+    assert out.out == "" and out.err.count("\n") == 1 and "Traceback" not in out.err
+    assert out.err.startswith(f"{argv[0]}: refused, nothing changed: pool state")
+    assert "format 3" in out.err and "newer yeto" in out.err and "pool-state-downgrade" in out.err
+    assert state.read_text() == before and not pool_run.scale_path(cfg).exists()
+
+
+def test_pool_status_reads_a_state_file_of_its_own_and_of_the_older_format(tmp_path, capsys):
+    cfg, config_path, clock, cloud, pool, m, state = _saved_pool(tmp_path)
+    pool.save(state)
+    assert cli.main(["pool-status", "--config", config_path]) in (0, 1)
+    assert m.ticket in capsys.readouterr().out
+    assert cli.main(["pool-state-downgrade", "--config", config_path]) == 0
+    capsys.readouterr()
+    assert cli.main(["pool-status", "--config", config_path]) in (0, 1)
+    assert m.ticket in capsys.readouterr().out
+
+
+def test_pool_status_called_directly_refuses_a_newer_state_file(tmp_path):
+    cfg, config_path, state, m = _newer_state(tmp_path)
+    with pytest.raises(island_pool.PoolStateFormatError, match="format 3"):
+        pool_run.pool_status(cfg, config_path)
+    assert issubclass(island_pool.PoolStateFormatError, RuntimeError)

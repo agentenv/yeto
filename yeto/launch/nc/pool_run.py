@@ -1067,7 +1067,22 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
 
 # -- status --------------------------------------------------------------------
 
+def check_state_file(cfg: dict[str, Any]) -> None:
+    """Raise ``PoolStateFormatError`` when the pool's state file has a format newer than
+    this code reads (every pool command reads the file; none may guess at it)."""
+    from ..pool.island_pool import check_state_format  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    try:
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return  # unreadable: each command reports that in its own way
+    if isinstance(doc, dict):
+        check_state_format(doc, state)
+
+
 def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> int:
+    check_state_file(cfg)
     state = cli.pool_state_path(cfg)
     doc = json.loads(state.read_text()) if state.exists() else {}
     path = cli.pool_events_path(cfg)

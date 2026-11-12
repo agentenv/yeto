@@ -1192,6 +1192,22 @@ def main(argv: list[str] | None = None) -> int:
                 return rc
         down(args.account, args.ticket)
         return 0
+    if args.cmd in ("pool-pause", "pool-resume", "pool", "pool-stop", "pool-status", "pool-retry", "pool-scale",
+                    "pool-state-downgrade"):
+        from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+        from . import pool_run  # noqa: PLC0415
+
+        try:
+            pool_run.check_state_file(json.loads(Path(args.config).read_text()))
+            return _pool_command(args)
+        except PoolStateFormatError as error:  # one line, no traceback: the first thing an operator reads
+            print(f"{args.cmd}: refused, nothing changed: {error}", file=sys.stderr)
+            return 2
+    return 2
+
+
+def _pool_command(args: Any) -> int:
+    """The pool commands (their state file's format is checked by the caller)."""
     if args.cmd in ("pool-pause", "pool-resume"):
         from . import pool_run  # noqa: PLC0415
 
