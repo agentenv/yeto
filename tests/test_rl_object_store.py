@@ -1251,42 +1251,57 @@ def _dead_pid():
     return child.pid
 
 
-@pytest.mark.parametrize("size", ["small", "large"])
-def test_a_download_removes_what_killed_downloads_of_its_target_left_and_no_live_ones_file(tmp_path, size):
+def _leftovers(tmp_path, target):
+    """``left(owner, idle_s)``: a download file of ``target`` last written ``idle_s`` ago."""
     import os
     import time
 
-    part = s3_store.MIN_PART_BYTES
-    data = b"{}" if size == "small" else bytes(range(256)) * (2 * part // 256)
-    target = tmp_path / "model.safetensors"
-    host, suffix = s3_store._host_token(), s3_store.DOWNLOAD_SUFFIX
-    quiet = time.time() - s3_store.UNKNOWN_PARTIAL_S - 60  # no write for a little over the short threshold
-    long_ago = time.time() - s3_store.STALE_PARTIAL_S - 60
-
-    def left(owner, mtime=None, name=target.name):
-        path = tmp_path / f"{name}.{owner}{suffix}"
+    def left(owner, idle_s=0.0, name=target.name):
+        path = tmp_path / f"{name}.{owner}{s3_store.DOWNLOAD_SUFFIX}"
+        assert not path.exists()
         path.write_bytes(b"x")
-        if mtime is not None:
-            os.utime(path, (mtime, mtime))
+        at = time.time() - idle_s
+        os.utime(path, (at, at))
         return path
 
-    gone = [left(f"{host}-{_dead_pid()}-0123abcd"),  # its process is gone: at once
-            left(f"{host}-{os.getpid()}-0123abcd"),  # an earlier process that had this pid (a restarted container)
-            left("ffffffff-1-0123abcd", quiet),  # another host's, long without a write
-            left("4242-0123abcd", quiet),  # a name of another format
-            left(f"{host}-{os.getppid()}-89abcdef", long_ago)]  # a live pid that is no download any more
-    kept = [left(f"{host}-{os.getppid()}-0123abcd", quiet),  # another live process: may be between two parts
-            left("ffffffff-1-89abcdef"),  # another host's, written a moment ago
-            left(f"{host}-{_dead_pid()}-0123abcd", long_ago, name="other.bin"),  # of another target
+    return left
+
+
+def _download(tmp_path, target, size):
+    part = s3_store.MIN_PART_BYTES
+    data = b"{}" if size == "small" else bytes(range(256)) * (2 * part // 256)
+    s3 = FakeS3()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+    s3.objects[("bkt", objects._key("big"))] = data
+    assert objects.read_file("big", target) and target.read_bytes() == data
+
+
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_a_download_removes_what_killed_downloads_of_its_target_left_and_no_live_ones_file(tmp_path, size, monkeypatch):
+    import os
+
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: "boot:4026531836")  # as on Linux
+    target = tmp_path / "model.safetensors"
+    left, host = _leftovers(tmp_path, target), s3_store._host_token()
+    grace, unknown, stale = s3_store.DEAD_PARTIAL_GRACE_S, s3_store.UNKNOWN_PARTIAL_S, s3_store.STALE_PARTIAL_S
+    assert s3_store.PARTIAL_HEARTBEAT_S * 4 <= grace < unknown < stale
+    gone = [left(f"{host}-{_dead_pid()}-00000001", grace + 5),  # its process is gone
+            left(f"{host}-{os.getpid()}-00000002", grace + 5),  # an earlier process that had this pid
+            left("ffffffff-1-00000003", unknown + 5),  # another host's or container's
+            left("4242-00000004", unknown + 5),  # a name of another format
+            left(f"{host}-{os.getppid()}-00000005", stale + 5)]  # a live pid that is no download any more
+    kept = [left(f"{host}-{_dead_pid()}-00000011", 5),  # "gone" by its name, written 5 s ago: another
+            left(f"{host}-{os.getpid()}-00000012", 5),  # container with the same name and pids writes it
+            left(f"{host}-{os.getppid()}-00000013", unknown + 5),  # a live process
+            left("ffffffff-1-00000014", grace + 5),  # another host's, within the longer window
+            left("4242-00000015", grace + 5),
+            left(f"{host}-{_dead_pid()}-00000016", stale + 5, name="other.bin"),  # of another target
             tmp_path / (target.name + ".json")]
     kept[-1].write_bytes(b"x")  # no download file
     mine = s3_store.S3ObjectStore._partial(target)  # another thread of this process downloads the target
-    open(mine, "wb").close()
+    left(os.path.basename(mine)[len(target.name) + 1:-len(s3_store.DOWNLOAD_SUFFIX)], stale + 5)
     try:
-        s3 = FakeS3()
-        objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
-        s3.objects[("bkt", objects._key("big"))] = data
-        assert objects.read_file("big", target) and target.read_bytes() == data
+        _download(tmp_path, target, size)
         assert not [p.name for p in gone if p.exists()]
         assert all(p.exists() for p in kept) and os.path.exists(mine)
     finally:
@@ -1295,19 +1310,73 @@ def test_a_download_removes_what_killed_downloads_of_its_target_left_and_no_live
     assert not s3_store._LIVE_PARTIALS
 
 
-def test_a_release_download_cut_off_again_and_again_does_not_pile_up_download_files(tmp_path):
-    """A sampler whose prefetch is killed part way, many times: each try leaves one
-    file of a dead process, and the next try removes it."""
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_where_the_pid_namespace_cannot_be_read_a_pid_in_a_name_removes_nothing(tmp_path, size, monkeypatch):
+    """No /proc (macOS), or two containers that share a host name: only the time
+    since the last write decides."""
+    import os
+
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: None)
+    target = tmp_path / "model.safetensors"
+    left, host = _leftovers(tmp_path, target), s3_store._host_token()
+    grace, unknown = s3_store.DEAD_PARTIAL_GRACE_S, s3_store.UNKNOWN_PARTIAL_S
+    kept = [left(f"{host}-{_dead_pid()}-00000001", grace + 5), left(f"{host}-{os.getpid()}-00000002", grace + 5)]
+    gone = [left(f"{host}-{_dead_pid()}-00000003", unknown + 5), left(f"{host}-{os.getpid()}-00000004", unknown + 5)]
+    _download(tmp_path, target, size)
+    assert all(p.exists() for p in kept) and not [p.name for p in gone if p.exists()]
+
+
+def test_the_host_token_tells_two_pid_namespaces_of_one_host_name_apart(monkeypatch):
+    tokens = set()
+    for namespace in ("boot:1", "boot:2", "other-boot:1", None):
+        monkeypatch.setattr(s3_store, "_pid_namespace", lambda: namespace)
+        tokens.add(s3_store._host_token())
+    assert len(tokens) == 4 and all(len(t) == 8 and "-" not in t for t in tokens)
+
+
+def test_a_large_download_marks_its_file_while_a_part_is_on_its_way(tmp_path, monkeypatch):
+    """One part can take longer to arrive than the windows above: the file is
+    written only when a part is whole, so the download marks it in between."""
+    import os
+    import time
+
+    monkeypatch.setattr(s3_store, "PARTIAL_HEARTBEAT_S", 0.02)
     part = s3_store.MIN_PART_BYTES
     data = bytes(range(256)) * (2 * part // 256)
     target = tmp_path / "model.safetensors"
-    s3 = FakeS3()
-    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part))
+    seen = []
+
+    class Slow(FakeS3):
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+            if Range is not None and not seen:
+                (partial,) = [p for p in tmp_path.iterdir() if p.name.endswith(s3_store.DOWNLOAD_SUFFIX)]
+                long_ago = time.time() - 10_000
+                os.utime(partial, (long_ago, long_ago))
+                deadline = time.time() + 10
+                while partial.stat().st_mtime < long_ago + 1 and time.time() < deadline:
+                    time.sleep(0.01)  # the part is still on its way
+                seen.append(time.time() - partial.stat().st_mtime)
+            return super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+
+    s3 = Slow()
+    objects = s3_store.S3ObjectStore(URI, client=s3, transfer=s3_store.TransferSettings(part_bytes=part, concurrency=1))
     s3.objects[("bkt", objects._key("big"))] = data
-    for _ in range(3):
-        killed = tmp_path / f"{target.name}.{s3_store._host_token()}-{_dead_pid()}-0123abcd{s3_store.DOWNLOAD_SUFFIX}"
-        killed.write_bytes(data[:part])
-        assert objects.read_file("big", target)
+    assert objects.read_file("big", target) and target.read_bytes() == data
+    assert seen and seen[0] < 60 and [p.name for p in tmp_path.iterdir()] == [target.name]
+    import threading
+
+    assert not [t for t in threading.enumerate() if t.name == "yeto-get-mark"]
+
+
+def test_a_release_download_cut_off_again_and_again_does_not_pile_up_download_files(tmp_path, monkeypatch):
+    """A sampler whose prefetch is killed part way, many times: each try leaves one
+    file of a dead process, and a later try removes it."""
+    monkeypatch.setattr(s3_store, "_pid_namespace", lambda: "boot:4026531836")
+    target = tmp_path / "model.safetensors"
+    left = _leftovers(tmp_path, target)
+    for n in range(3):
+        left(f"{s3_store._host_token()}-{_dead_pid()}-0000000{n}", s3_store.DEAD_PARTIAL_GRACE_S + 5)
+        _download(tmp_path, target, "large")
         assert [p.name for p in tmp_path.iterdir()] == [target.name]
 
 

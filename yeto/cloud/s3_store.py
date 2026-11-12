@@ -65,26 +65,49 @@ try:  # botocore ships with boto3
 except ImportError:  # pragma: no cover - a store without boto3 never reads
     pass
 RANGE_READ_ATTEMPTS = 5
-# A download file (``S3ObjectStore._partial``) is named by its host, process and
-# call. One whose process is gone (same host) is removed by the next download of the
-# same target at once. One whose writer cannot be asked about (another host or
-# container on a shared directory, a name of another format) is removed after
-# UNKNOWN_PARTIAL_S without a write; one whose pid is alive after STALE_PARTIAL_S
-# without a write (the pid of a killed download, given to another process).
+# A download file (``S3ObjectStore._partial``) is named by where its writer runs
+# (:func:`_host_token`), its pid and the call. The next download of the same target
+# removes it once it has no writer:
+# * the same pid namespace and the pid is gone, or the pid is this process's but
+#   the file is none of its downloads (an earlier process that had the pid):
+#   after DEAD_PARTIAL_GRACE_S without a write;
+# * the same pid namespace and the pid is alive: after STALE_PARTIAL_S without a
+#   write (the pid went to another process);
+# * a writer that cannot be asked about (another host or container, a host whose
+#   pid namespace cannot be read, a name of another format): after
+#   UNKNOWN_PARTIAL_S without a write.
+# Never on the pid alone: a running download marks its file every
+# PARTIAL_HEARTBEAT_S (one part can take minutes to arrive before it is written),
+# so a file inside these windows may have a writer whatever its name says.
 STALE_PARTIAL_S = 3600.0
 UNKNOWN_PARTIAL_S = 600.0
+DEAD_PARTIAL_GRACE_S = 120.0
+PARTIAL_HEARTBEAT_S = 20.0
 _LIVE_PARTIALS: set[str] = set()  # the download files this process is writing
 _LIVE_PARTIALS_LOCK = threading.Lock()
 
 
 @functools.lru_cache(maxsize=1)
+def _pid_namespace() -> str | None:
+    """What tells this pid namespace from every other one: the boot of the kernel
+    and the namespace's inode (Linux). None when it cannot be read (macOS, no
+    /proc): a pid in a file's name then proves nothing. The host name does not
+    do: containers on the host network, or started with one fixed name, share it
+    while each has its own pids, often the same ones."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        return f"{boot}:{os.stat('/proc/self/ns/pid').st_ino}"
+    except (OSError, ValueError):
+        return None
+
+
 def _host_token() -> str:
-    """This host (or container) in a download file's name: a pid means something
+    """Where this process runs, in a download file's name: a pid means something
     only next to it."""
     import hashlib
     import socket
 
-    return hashlib.sha256(socket.gethostname().encode("utf-8", "replace")).hexdigest()[:8]
+    return hashlib.sha256(f"{socket.gethostname()}\n{_pid_namespace() or ''}".encode("utf-8", "replace")).hexdigest()[:8]
 
 
 def _pid_alive(pid: int) -> bool:
@@ -948,19 +971,21 @@ class S3ObjectStore:
         host, _, rest = owner.partition("-")
         pid, _, _ = rest.partition("-")
         idle = time.time() - path.stat().st_mtime
-        if host != _host_token() or not pid.isdigit():
+        if _pid_namespace() is None or host != _host_token() or not pid.isdigit():
             return idle > UNKNOWN_PARTIAL_S  # nobody here to ask
-        if int(pid) == os.getpid():  # this process, or an earlier one that had its pid (a restarted container)
+        if int(pid) == os.getpid():  # this process, or an earlier one that had its pid
             with _LIVE_PARTIALS_LOCK:
-                return os.path.abspath(path) not in _LIVE_PARTIALS
-        return not _pid_alive(int(pid)) or idle > STALE_PARTIAL_S
+                mine = os.path.abspath(path) in _LIVE_PARTIALS
+            return not mine and idle > DEAD_PARTIAL_GRACE_S
+        return idle > (STALE_PARTIAL_S if _pid_alive(int(pid)) else DEAD_PARTIAL_GRACE_S)
 
     @classmethod
     def _drop_stale_partials(cls, target: str | os.PathLike[str]) -> None:
         """Remove what killed downloads of ``target`` left next to it (a file of up
         to the object's size each; a sampler whose release prefetch is cut off again
         and again would fill its disk): :meth:`_partial_abandoned`. The file of a
-        download still running, in this process or another, stays."""
+        download still running, in this process or another, stays: it was written
+        or marked (:meth:`_read_ranges`) a moment ago."""
         path = Path(target)
         head = path.name + "."
         try:
@@ -998,8 +1023,23 @@ class S3ObjectStore:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
                 os.pwrite(fh.fileno(), body, offset)
 
-            with ThreadPoolExecutor(self.transfer.concurrency) as pool:
-                list(pool.map(fetch, range(0, size, part)))
+            done = threading.Event()
+
+            def mark() -> None:  # "this file has a writer", while parts are on their way
+                while not done.wait(PARTIAL_HEARTBEAT_S):
+                    try:
+                        os.utime(partial)
+                    except OSError:
+                        return
+
+            marker = threading.Thread(target=mark, name="yeto-get-mark", daemon=True)
+            marker.start()
+            try:
+                with ThreadPoolExecutor(self.transfer.concurrency) as pool:
+                    list(pool.map(fetch, range(0, size, part)))
+            finally:
+                done.set()
+                marker.join()
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
         """Download each ``(key, target)`` like :meth:`read_file`; returns the keys
