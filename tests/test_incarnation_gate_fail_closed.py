@@ -532,3 +532,45 @@ def test_a_take_stopped_while_groups_wait_loses_none_of_them(tmp_path):
     flaky.objects.fail = None
     out, report = reader.take(0, 2, current_version=None)
     assert [position for position, _ in out] == [0, 2] and report.stale_incarnation_groups == 1
+
+
+def test_a_task_check_that_cannot_read_a_lease_defers_instead_of_raising(tmp_path):
+    """TaskSlots asks the gate whether an earlier group of the task was fenced; that
+    lease unreadable is a deferral (strict order), never an error out of the take."""
+    from yeto.rl.adapters.miles.buffer_rollout import BatchReader
+
+    root = tmp_path / "store"
+    store = CheckpointStore(root)
+    writer = FileSampleBuffer(store, batch_size=1)
+    _write_group(writer, "s1", "xxxx", 0)
+    _write_group(writer, "s1", "xxxx", 1)
+    buffer = FileSampleBuffer(store, batch_size=1)
+    unreadable = [True]
+    seen: list = []
+    reader: list = []
+
+    def sleep(seconds: float) -> None:
+        seen.append([position for position, _ in reader[0]._deferred])  # noqa: SLF001
+        unreadable[0] = False
+
+    reader.append(BatchReader(buffer, max_policy_age=2, prefetch=False, read_workers=1, wait_s=0.0, poll_s=0.5,
+                              sleep=sleep, incarnation_gate=None))
+
+    class Tasks:
+        def begin(self, cursor):
+            pass
+
+        def first(self, entry, position):
+            if unreadable[0] and position == 0:
+                raise LeaseUnknown("lease of s0 unreadable")
+            return None
+
+        def accept(self, key, position):
+            pass
+
+        def commit(self, end):
+            pass
+
+    reader[0].tasks = Tasks()
+    out, report = reader[0].take(0, 2, current_version=None)
+    assert seen == [[0, 1]] and [position for position, _ in out] == [0, 1] and report.end == 2

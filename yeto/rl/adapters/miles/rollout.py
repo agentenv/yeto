@@ -577,6 +577,18 @@ def handle_from_metadata(
             [dict(record) for record in payload["buffer_damaged_payloads"]]
             if payload.get("buffer_damaged_payloads") else None
         ),
+        buffer_duplicate_task_groups=(
+            int(payload["buffer_duplicate_task_groups"])
+            if "buffer_duplicate_task_groups" in payload else None
+        ),
+        buffer_duplicate_task_unverified_groups=(
+            int(payload["buffer_duplicate_task_unverified_groups"])
+            if "buffer_duplicate_task_unverified_groups" in payload else None
+        ),
+        buffer_duplicate_tasks=(
+            [dict(record) for record in payload["buffer_duplicate_tasks"]]
+            if payload.get("buffer_duplicate_tasks") else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),

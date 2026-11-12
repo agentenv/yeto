@@ -75,6 +75,12 @@ class SamplerRound:
     last: bool = False  # the round's last group
     # the task-dispenser position of the group's row (a sampler with a dispenser)
     dispense_position: int | None = None
+    # the store dispenser's attempt of that task (``store_dispense.ATTEMPT_KEY``); only
+    # a group of the store dispenser has it: there ``dispense_position`` is the slot,
+    # one per task of the run, and the trainer's reader trains one group per slot
+    dispense_attempt: int | None = None
+    # the store dispenser that slot belongs to (``StoreDispensedPrompts.plan_id``)
+    dispense_plan: str | None = None
 
     def record(self) -> dict[str, Any]:
         out = {"sampler": self.sampler, "incarnation": self.incarnation,
@@ -83,6 +89,10 @@ class SamplerRound:
             out["data_cursor"] = {k: int(v) for k, v in self.data_cursor.items()}
         if self.dispense_position is not None:
             out["dispense_position"] = int(self.dispense_position)
+        if self.dispense_attempt is not None:
+            out["dispense_attempt"] = int(self.dispense_attempt)
+        if self.dispense_plan is not None:
+            out["dispense_plan"] = str(self.dispense_plan)
         return out
 
 

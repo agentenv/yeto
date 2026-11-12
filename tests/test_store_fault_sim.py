@@ -222,7 +222,9 @@ def test_every_fault_at_once_breaks_nothing_but_the_open_findings():
                    reason="open finding: a slot can be trained twice when its sampler fails between the "
                           "buffer append and the trained settlement (fixed by one group per dispensed task)")
 def test_no_slot_is_trained_twice_under_every_fault_at_once():
-    _assert_holds(_run("all"))
+    # strict on the slot; the other open findings (of other layers) keep their shares
+    _assert_holds(_run("all"), open_findings={kind: finding for kind, finding in OPEN_FINDINGS.items()
+                                              if kind != "trained_twice_same_slot"})
 
 
 def test_the_tasks_of_samplers_that_died_are_taken_over_by_the_others():
