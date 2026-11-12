@@ -38,6 +38,7 @@ import pickle
 import subprocess
 import sys
 import random
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -64,11 +65,170 @@ try:  # botocore ships with boto3
 except ImportError:  # pragma: no cover - a store without boto3 never reads
     pass
 RANGE_READ_ATTEMPTS = 5
-# botocore's retries of one request (throttling 429 / 503 SlowDown included):
-# "standard" mode backs off exponentially with jitter, so 16 samplers refused at
-# once by the store do not come back in lock step; AWS_RETRY_MODE /
-# AWS_MAX_ATTEMPTS in the environment win
+# A download file (``S3ObjectStore._partial``) is named by where its writer runs
+# (:func:`_host_token`), its pid and the call. The next download of the same target
+# removes it once it has no writer:
+# * the same pid namespace and the pid is gone, or the pid is this process's but
+#   the file is none of its downloads (an earlier process that had the pid):
+#   after DEAD_PARTIAL_GRACE_S without a write;
+# * the same pid namespace and the pid is alive: after STALE_PARTIAL_S without a
+#   write (the pid went to another process);
+# * a writer that cannot be asked about (another host or container, a host whose
+#   pid namespace cannot be read, a name of another format): after
+#   UNKNOWN_PARTIAL_S without a write.
+# Never on the pid alone: a running download marks its file every
+# PARTIAL_HEARTBEAT_S (one part can take minutes to arrive before it is written),
+# so a file inside these windows may have a writer whatever its name says.
+STALE_PARTIAL_S = 3600.0
+UNKNOWN_PARTIAL_S = 600.0
+DEAD_PARTIAL_GRACE_S = 120.0
+PARTIAL_HEARTBEAT_S = 20.0
+_LIVE_PARTIALS: set[str] = set()  # the download files this process is writing
+_LIVE_PARTIALS_LOCK = threading.Lock()
+
+
+@functools.lru_cache(maxsize=1)
+def _pid_namespace() -> str | None:
+    """What tells this pid namespace from every other one: the boot of the kernel
+    and the namespace's inode (Linux). None when it cannot be read (macOS, no
+    /proc): a pid in a file's name then proves nothing. The host name does not
+    do: containers on the host network, or started with one fixed name, share it
+    while each has its own pids, often the same ones."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        return f"{boot}:{os.stat('/proc/self/ns/pid').st_ino}"
+    except (OSError, ValueError):
+        return None
+
+
+def _host_token() -> str:
+    """Where this process runs, in a download file's name: a pid means something
+    only next to it."""
+    import hashlib
+    import socket
+
+    return hashlib.sha256(f"{socket.gethostname()}\n{_pid_namespace() or ''}".encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # EPERM: a process of another user
+        return True
+    return True
+
+
+def _read_retry_pause(attempt: int) -> None:
+    """Wait before try ``attempt + 2`` of a body read: exponential, with jitter (16
+    samplers cut off at once do not come back in lock step)."""
+    time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))
+
+
+# A range read the store refused for its request rate, after botocore's own retries
+# (R2: ``503 ServiceUnavailable: Reduce your concurrent request rate for the same
+# object``; S3: ``503 SlowDown``; a 429). The download then lowers the range reads
+# this process runs at once and tries the range again (:class:`RangeGate`), instead
+# of failing the whole file: 16 samplers that pull one release together are 8000
+# concurrent reads, up to 256 on one file.
+THROTTLE_CODES = frozenset({"ServiceUnavailable", "SlowDown", "TooManyRequests", "RequestLimitExceeded",
+                            "Throttling", "ThrottlingException", "RequestThrottled", "503", "429"})
+THROTTLE_STATUS = frozenset({429, 503})
+THROTTLED_READ_ATTEMPTS = 6  # tries of one refused range (each one botocore's 9 requests)
+# The two retry layers multiply: a range refused every time is 6 x 9 = 54 requests and
+# waits at most 6 x 91 s (botocore) + 1 + 2 + 4 + 8 + 16 s (ours) = 577 s before the
+# download fails; ours exist to lower the concurrency (RangeGate), not to retry more.
+# A non-throttle error is never retried here (body errors: RANGE_READ_ATTEMPTS).
+RANGE_RESTORE_READS = 8  # range reads without a refusal per read given back to the limit
+
+
+def is_throttled(error: BaseException) -> bool:
+    """``error`` is the store refusing a request for its rate (a botocore
+    ``ClientError`` by code or HTTP status)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return error_code(error) in THROTTLE_CODES or status in THROTTLE_STATUS
+
+
+class RangeGate:
+    """How many range reads one process runs at once. Unlimited until the store
+    refuses a read for its rate; each refusal halves the reads then in flight
+    (never below one), and every :data:`RANGE_RESTORE_READS` reads without a
+    refusal give one back (the limit is never dropped again: going back to
+    every thread at once would ask for the next refusal). One gate per store
+    object: every file and thread of a download in this process shares it."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self.limit: int | None = None  # None: no limit
+        self.active = 0
+        self.peak = 0  # the most reads in flight since the last refusal
+        self.cuts = 0  # refusals that lowered the limit
+        self._good = 0
+
+    def __enter__(self) -> int:
+        """Wait for a free read; the cut it runs under (``refused(started=...)``)."""
+        with self._cond:
+            while self.limit is not None and self.active >= self.limit:
+                self._cond.wait()
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            return self.cuts
+
+    def __exit__(self, *exc: object) -> None:
+        with self._cond:
+            self.active -= 1
+            self._cond.notify()
+
+    def refused(self, started: int | None = None) -> int:
+        """A read was refused: halve what ran at once; the new limit. ``started``
+        (what ``with gate as started`` gave the read): a read started before the latest cut does
+        not cut again. Reads in flight together are refused together (one burst of
+        the store): each halving them again would take 256 reads to a limit of 1."""
+        with self._cond:
+            if started is not None and started != self.cuts and self.limit is not None:
+                return self.limit
+            running = self.peak if self.limit is None else min(self.limit, self.peak)
+            self.limit = max(1, running // 2)
+            self.peak, self._good = self.active, 0
+            self.cuts += 1
+            return self.limit
+
+    def succeeded(self) -> None:
+        with self._cond:
+            if self.limit is None:
+                return
+            self._good += 1
+            if self._good >= RANGE_RESTORE_READS:
+                self._good = 0
+                self.limit += 1
+                self._cond.notify()
+
+
+# botocore's retries of one request. "standard" mode retries a 500 / 502 / 503 / 504
+# and the throttling codes (SlowDown, ...) with full jitter: the wait before retry
+# ``n`` is ``random() * min(2 ** (n - 1), 20)`` s, so 16 samplers refused at once by
+# the store do not come back in lock step. ``max_attempts`` here counts retries (the
+# client config's meaning): 8 retries are 9 requests and 8 waits, 45.5 s on average
+# and 91 s at most (measured against an endpoint that always answers 503: mean 45.8 s,
+# p95 65 s). A client also holds a retry quota (500 units, 5 per retry, refilled by
+# successes): after about 100 retries without a success between them a refused
+# request fails at once (measured: the 14th refused call in a row was not retried).
+# "adaptive" mode adds a client-side rate limit, but only after a throttling *code*
+# (SlowDown, Throttling, ...): R2's ``503 ServiceUnavailable: Reduce your concurrent
+# request rate`` is not one, so it would never slow this client down (measured).
+# :func:`client_config` reads the overrides.
 RETRIES = {"mode": "standard", "max_attempts": 8}
+RETRY_MODES = ("standard", "adaptive", "legacy")
+# Seconds to open a connection / to wait for the next bytes of a response. botocore's
+# 60 s connect timeout times 9 requests keeps one call to an unreachable endpoint
+# busy for 9 minutes, longer than the dispenser's lease renewal period (lease / 3 =
+# 300 s); a TCP + TLS handshake that has not finished in 10 s is retried instead.
+CONNECT_TIMEOUT_S = 10.0
+READ_TIMEOUT_S = 60.0  # botocore's default; a 64 MiB range read is many socket reads
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 URI_ENV = "YETO_RL_STORE_S3_URI"
@@ -86,12 +246,17 @@ PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts of one file mov
 FILE_CONCURRENCY_ENV = "YETO_RL_STORE_FILE_CONCURRENCY"  # files of one push tier moved in parallel
 MAX_CONNECTIONS_ENV = "YETO_RL_STORE_MAX_CONNECTIONS"  # HTTP connection pool of the client (default: the threads)
 DOWNLOAD_PROCESSES_ENV = "YETO_RL_STORE_DOWNLOAD_PROCESSES"  # processes of a many-file download (read_files)
+CONNECT_TIMEOUT_ENV = "YETO_RL_STORE_CONNECT_TIMEOUT_S"  # seconds to open a connection (default 10)
+READ_TIMEOUT_ENV = "YETO_RL_STORE_READ_TIMEOUT_S"  # seconds without a byte of a response (default 60)
+RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (default) / adaptive / legacy
+MAX_ATTEMPTS_ENV = "YETO_RL_STORE_MAX_ATTEMPTS"  # requests of one call, the first included (default 9)
 PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
 UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
-                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV)
+                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV,
+                CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
 # cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
@@ -147,10 +312,41 @@ def _warn_part_checksums_off(uri: str, error: Exception) -> None:
           file=sys.stderr, flush=True)
 
 
+def error_code(error: BaseException) -> str:
+    """The store's error code of a botocore ``ClientError``, ``""`` for anything else.
+    A connection-level error (botocore ``HTTPClientError``: ``ReadTimeoutError``,
+    ``ConnectionClosedError``) has ``response = None``, not a dict: it has no code,
+    and asking for one must not replace it with an ``AttributeError``."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return ""
+    return str((response.get("Error") or {}).get("Code", ""))
+
+
 def _b64(digest: bytes) -> str:
     import base64
 
     return base64.b64encode(digest).decode("ascii")
+
+
+def multipart_etag(part_etags: Sequence[Any]) -> str | None:
+    """The ETag S3 and R2 report for a multipart object whose parts have
+    ``part_etags`` (in part order; each the MD5 of its part, as UploadPart answers
+    without SSE-KMS / SSE-C): the MD5 of the concatenated raw part MD5s, then
+    ``-<parts>`` (measured on R2, a one-part upload included). Unquoted; None when
+    a part ETag is not an MD5, so nothing can be derived."""
+    import hashlib
+
+    raw = b""
+    for etag in part_etags:
+        text = str(etag or "").strip('"')
+        if len(text) != 32:
+            return None
+        try:
+            raw += bytes.fromhex(text)
+        except ValueError:
+            return None
+    return f"{hashlib.md5(raw).hexdigest()}-{len(part_etags)}" if part_etags else None
 
 
 def composite_sha256(part_digests: Sequence[str]) -> str:
@@ -426,6 +622,36 @@ def client_pool_size(environ: Mapping[str, str]) -> int:
     return max(BOTOCORE_DEFAULT_POOL, t.file_concurrency * t.concurrency)
 
 
+def _seconds(environ: Mapping[str, str], name: str, default: float) -> float:
+    raw = environ.get(name)
+    value = float(raw) if raw else default
+    if value <= 0:
+        raise ValueError(f"{name}={raw!r}: expected seconds > 0")
+    return value
+
+
+def client_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """The botocore ``Config`` arguments of the store's client: the connection pool
+    (:func:`client_pool_size`), the timeouts (:data:`CONNECT_TIMEOUT_ENV` /
+    :data:`READ_TIMEOUT_ENV`) and the retries (:data:`RETRIES`).
+
+    Retry mode: :data:`RETRY_MODE_ENV`, else ``AWS_RETRY_MODE``, else "standard".
+    Requests of one call (the first included): :data:`MAX_ATTEMPTS_ENV`, else
+    ``AWS_MAX_ATTEMPTS``, else 9. Each is read on its own: ``AWS_MAX_ATTEMPTS`` alone
+    keeps "standard" mode (botocore's own default mode is "legacy")."""
+    mode = environ.get(RETRY_MODE_ENV) or environ.get("AWS_RETRY_MODE") or RETRIES["mode"]
+    if mode not in RETRY_MODES:
+        raise ValueError(f"retry mode {mode!r} ({RETRY_MODE_ENV} / AWS_RETRY_MODE): expected one of {RETRY_MODES}")
+    raw = environ.get(MAX_ATTEMPTS_ENV) or environ.get("AWS_MAX_ATTEMPTS")
+    attempts = int(raw) if raw else int(RETRIES["max_attempts"]) + 1
+    if attempts < 1:
+        raise ValueError(f"{MAX_ATTEMPTS_ENV} / AWS_MAX_ATTEMPTS={raw!r}: expected an integer >= 1")
+    return {"max_pool_connections": client_pool_size(environ),
+            "connect_timeout": _seconds(environ, CONNECT_TIMEOUT_ENV, CONNECT_TIMEOUT_S),
+            "read_timeout": _seconds(environ, READ_TIMEOUT_ENV, READ_TIMEOUT_S),
+            "retries": {"mode": mode, "total_max_attempts": attempts}}
+
+
 def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
     import boto3
     from botocore.config import Config
@@ -447,9 +673,8 @@ def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
         raise ObjectStoreError(missing_credentials_message())
     else:
         session = boto3.session.Session()
-    retries = {} if (environ.get("AWS_RETRY_MODE") or environ.get("AWS_MAX_ATTEMPTS")) else {"retries": dict(RETRIES)}
     return session.client("s3", endpoint_url=store_endpoint(environ), region_name=store_region(environ),
-                          config=Config(max_pool_connections=client_pool_size(environ), **retries))
+                          config=Config(**client_config(environ)))
 
 
 class S3ObjectStore:
@@ -481,6 +706,7 @@ class S3ObjectStore:
         self.client = client
         self.transfer = transfer or TransferSettings()
         self.client_factory = client_factory
+        self.range_gate = RangeGate()  # range reads of this process, lowered when the store refuses
         self.conditional_writes = True
         # set when the endpoint answered a part checksum with NotImplemented
         self.part_checksums_refused = False
@@ -492,13 +718,30 @@ class S3ObjectStore:
         return self._full(check_key(key))
 
     def _code(self, error: Exception) -> str:
-        return str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+        return error_code(error)
 
     def read(self, key: str) -> bytes | None:
-        try:
-            return self.client.get_object(Bucket=self.bucket, Key=self._key(key))["Body"].read()
-        except self.client.exceptions.NoSuchKey:
-            return None
+        """The object's bytes, None when it is missing. A body cut short (a reset
+        connection, a stalled stream) is read again, up to
+        :data:`RANGE_READ_ATTEMPTS` times: botocore retries the request, never the
+        body it streams afterwards, and one reset while the trainer reads a payload
+        or a sampler its lease would otherwise end the caller. Each try is one GET
+        of one version: an object replaced meanwhile is read as it is now, one
+        deleted meanwhile is missing. An error answer (403, a 503 after the SDK's
+        retries) is raised as before."""
+        full = self._key(key)
+        for attempt in range(RANGE_READ_ATTEMPTS):
+            try:
+                response = self.client.get_object(Bucket=self.bucket, Key=full)
+            except self.client.exceptions.NoSuchKey:
+                return None
+            try:
+                return response["Body"].read()
+            except RANGE_READ_RETRYABLE:
+                if attempt + 1 == RANGE_READ_ATTEMPTS:
+                    raise
+                _read_retry_pause(attempt)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def write(self, key: str, data: bytes) -> None:
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
@@ -594,6 +837,12 @@ class S3ObjectStore:
         so a later call (the next push, a restarted process) continues it. A journal
         of another version of the file aborts its upload and starts again.
 
+        A CompleteMultipartUpload that the store applied but did not answer (the
+        SDK's retry, or the next try, then finds ``NoSuchUpload``): when every part
+        is journaled and the upload is gone, the object under the key is compared
+        with the journal (:meth:`_completed`) and, when it is that upload, the file
+        is not sent again (a 100-200 GB release file otherwise goes up twice).
+
         An endpoint that answers a checksum with ``NotImplemented`` (Cloudflare R2
         on UploadPart) turns checksums off for this store, with one warning per
         process, and the file is uploaded again without them."""
@@ -624,8 +873,8 @@ class S3ObjectStore:
         journal = _UploadJournal(source, {"bucket": self.bucket, "key": full, "size": int(size),
                                           "mtime_ns": int(st.st_mtime_ns), "part_bytes": int(part),
                                           "checksum": checks})
-        self._open_upload(journal, full, part, size, checks)
-        for attempt in range(1, self.transfer.upload_attempts + 1):
+        completed = self._open_upload(journal, full, part, size, checks, count=count)
+        for attempt in range(1, 0 if completed else self.transfer.upload_attempts + 1):
             try:
                 self._send_parts(journal, full, source, part, size, count, checks)
                 parts = [{"PartNumber": n, "ETag": journal.parts[n]["ETag"],
@@ -643,9 +892,19 @@ class S3ObjectStore:
                         pass
                     journal.remove()
                     raise
-                if attempt == self.transfer.upload_attempts:
+                last = attempt == self.transfer.upload_attempts
+                if last and len(journal.parts) < count:
                     raise  # the upload and its journal stay: the next call continues them
-                listed = self._listed_parts(full, journal.upload_id, part, size)
+                try:
+                    listed = self._listed_parts(full, journal.upload_id, part, size)
+                    if listed is None and self._completed(full, journal.parts, count, size, checks):
+                        break  # the complete took effect and its answer was lost
+                except Exception:  # noqa: BLE001 - the store is still failing
+                    if last:
+                        raise error from None
+                    raise
+                if last:
+                    raise  # as above; the next call looks at the object again when the upload is gone
                 if listed is None:  # the upload is gone (completed elsewhere, expired, aborted)
                     journal.upload_id, journal.parts = None, {}
                     self._open_upload(journal, full, part, size, checks, fresh=True)
@@ -662,17 +921,23 @@ class S3ObjectStore:
         return expected
 
     def _open_upload(self, journal: _UploadJournal, full: str, part: int, size: int, checks: bool, *,
-                     fresh: bool = False) -> None:
-        """Continue the journaled upload of this file version, or create one."""
+                     fresh: bool = False, count: int = 0) -> bool:
+        """Continue the journaled upload of this file version, or create one. True
+        when the journaled upload is gone and the object is what it completed
+        (:meth:`_completed`; a process killed, or out of tries, between the complete
+        and its answer): nothing is left to send."""
         state = None if fresh else journal.load()
         if state is not None and state.get("upload_id") and "stale_upload_id" not in state:
             listed = self._listed_parts(full, str(state["upload_id"]), part, size)
+            saved = {int(n): v for n, v in dict(state.get("parts") or {}).items()}
             if listed is not None:
                 journal.upload_id = str(state["upload_id"])
-                saved = {int(n): v for n, v in dict(state.get("parts") or {}).items()}
                 journal.parts = self._agreed(saved, listed, checks)
                 journal.save()
-                return
+                return False
+            if count and self._completed(full, saved, count, size, checks):
+                journal.upload_id, journal.parts = str(state["upload_id"]), saved
+                return True
         stale = (state or {}).get("stale_upload_id")
         if stale:
             try:  # another version of the file: its parts are never completed
@@ -683,6 +948,39 @@ class S3ObjectStore:
         journal.upload_id = self.client.create_multipart_upload(Bucket=self.bucket, Key=full, **extra)["UploadId"]
         journal.parts = {}
         journal.save()
+        return False
+
+    def _completed(self, full: str, parts: Mapping[int, Mapping[str, Any]], count: int, size: int,
+                   checks: bool) -> bool:
+        """Whether the object under ``full`` is the multipart upload of the journaled
+        ``parts``, for an upload the store does not know any more: a complete that
+        took effect answers the next one (the SDK's own retry included) with
+        ``NoSuchUpload`` (measured on R2), like an aborted or expired upload.
+
+        Proof, not a guess: every part 1..``count`` is journaled, the object has the
+        file's size, and it carries what only these parts produce: the composite
+        SHA-256 of their checksums when the store reports one, else the multipart
+        ETag of their ETags (:func:`multipart_etag`; R2 takes no part checksums).
+        Anything else (no object, another size, part ETags that are not MD5s, an
+        endpoint with another ETag scheme such as OSS) is False: the file is
+        uploaded again, as before."""
+        if set(parts) != set(range(1, count + 1)):
+            return False
+        try:
+            head = self.client.head_object(Bucket=self.bucket, Key=full,
+                                           **({"ChecksumMode": "ENABLED"} if checks else {}))
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            if self._code(error) in _MISSING:
+                return False
+            raise
+        if int(head.get("ContentLength", -1)) != int(size):
+            return False
+        ordered = [parts[n] for n in range(1, count + 1)]
+        reported = head.get("ChecksumSHA256")
+        if checks and reported and all(p.get("sha256") for p in ordered):
+            return str(reported) == composite_sha256([p["sha256"] for p in ordered])
+        expected = multipart_etag([p.get("ETag") for p in ordered])
+        return expected is not None and str(head.get("ETag") or "").strip('"') == expected
 
     def _send_parts(self, journal: _UploadJournal, full: str, source: str | os.PathLike[str], part: int,
                     size: int, count: int, checks: bool) -> None:
@@ -760,35 +1058,142 @@ class S3ObjectStore:
             data = self.read(key)
             if data is None:  # deleted since the HEAD (a prune)
                 return False
-            Path(target).write_bytes(data)
+            self._drop_stale_partials(target)
+            partial = self._partial(target)
+            try:  # never a cut-short file at the final name (a killed process, a full disk)
+                Path(partial).write_bytes(data)
+                os.replace(partial, target)
+            finally:
+                self._release_partial(partial)
             return True
         pin = {"IfMatch": etag} if etag else {}
-        partial = f"{target}{DOWNLOAD_SUFFIX}"  # renamed onto target once whole (a resumed download keeps it)
+        self._drop_stale_partials(target)
+        partial = self._partial(target)  # renamed onto target once whole
+        try:
+            self._read_ranges(key, full, partial, size, part, pin)
+            os.replace(partial, target)
+        finally:  # a failed download leaves nothing (its name is this call's alone)
+            self._release_partial(partial)
+        return True
+
+    @staticmethod
+    def _partial(target: str | os.PathLike[str]) -> str:
+        """The file a download of ``target`` is written to: next to it, named by this
+        host, process and call, so two downloads of one target (two processes sharing
+        a cache directory, a retry beside a stalled try) never truncate or interleave
+        each other's bytes; the last rename wins with a whole file. It ends in
+        :data:`DOWNLOAD_SUFFIX`: what a killed process left is recognised and removed
+        (:meth:`_drop_stale_partials`, ``policy_release``), and a stage push skips it."""
+        import uuid
+
+        partial = f"{target}.{_host_token()}-{os.getpid()}-{uuid.uuid4().hex[:8]}{DOWNLOAD_SUFFIX}"
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.add(os.path.abspath(partial))
+        return partial
+
+    @staticmethod
+    def _release_partial(partial: str) -> None:
+        Path(partial).unlink(missing_ok=True)
+        with _LIVE_PARTIALS_LOCK:
+            _LIVE_PARTIALS.discard(os.path.abspath(partial))
+
+    @staticmethod
+    def _partial_abandoned(path: Path, owner: str) -> bool:
+        """Whether download file ``path`` (``owner``: the part of its name between
+        the target's name and :data:`DOWNLOAD_SUFFIX`) has no writer any more."""
+        host, _, rest = owner.partition("-")
+        pid, _, _ = rest.partition("-")
+        idle = time.time() - path.stat().st_mtime
+        if _pid_namespace() is None or host != _host_token() or not pid.isdigit():
+            return idle > UNKNOWN_PARTIAL_S  # nobody here to ask
+        if int(pid) == os.getpid():  # this process, or an earlier one that had its pid
+            with _LIVE_PARTIALS_LOCK:
+                mine = os.path.abspath(path) in _LIVE_PARTIALS
+            return not mine and idle > DEAD_PARTIAL_GRACE_S
+        return idle > (STALE_PARTIAL_S if _pid_alive(int(pid)) else DEAD_PARTIAL_GRACE_S)
+
+    @classmethod
+    def _drop_stale_partials(cls, target: str | os.PathLike[str]) -> None:
+        """Remove what killed downloads of ``target`` left next to it (a file of up
+        to the object's size each; a sampler whose release prefetch is cut off again
+        and again would fill its disk): :meth:`_partial_abandoned`. The file of a
+        download still running, in this process or another, stays: it was written
+        or marked (:meth:`_read_ranges`) a moment ago."""
+        path = Path(target)
+        head = path.name + "."
+        try:
+            with os.scandir(path.parent) as entries:
+                names = [e.name for e in entries if e.name.startswith(head) and e.name.endswith(DOWNLOAD_SUFFIX)]
+        except OSError:
+            return
+        for name in names:
+            other = path.with_name(name)
+            try:
+                if cls._partial_abandoned(other, name[len(head):-len(DOWNLOAD_SUFFIX)]):
+                    other.unlink(missing_ok=True)
+            except OSError:  # raced with that download's rename or another cleanup
+                pass
+
+    def _read_ranges(self, key: str, full: str, partial: str, size: int, part: int, pin: Mapping[str, Any]) -> None:
         with open(partial, "wb") as fh:
             fh.truncate(size)
 
             def fetch(offset: int) -> None:
                 end = min(offset + part, size) - 1
-                for attempt in range(RANGE_READ_ATTEMPTS):
+                attempt = refusals = 0
+                while True:
+                    started = None
                     try:
-                        body = self.client.get_object(Bucket=self.bucket, Key=full, Range=f"bytes={offset}-{end}",
-                                                      **pin)["Body"].read()
+                        with self.range_gate as started:
+                            body = self.client.get_object(Bucket=self.bucket, Key=full,
+                                                          Range=f"bytes={offset}-{end}", **pin)["Body"].read()
                     except RANGE_READ_RETRYABLE:
                         # botocore retries the request, not the streamed body: a stalled
                         # body read of one part would otherwise fail the whole download
-                        if attempt + 1 == RANGE_READ_ATTEMPTS:
+                        attempt += 1
+                        if attempt == RANGE_READ_ATTEMPTS:
                             raise
-                        time.sleep(random.uniform(0.5, 1.0) * min(30.0, 2.0 ** attempt))  # jitter: no lock step
+                        _read_retry_pause(attempt - 1)
                         continue
+                    except Exception as error:  # noqa: BLE001 - a ClientError, by code
+                        refusals += 1
+                        if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
+                            raise
+                        self._range_refused(error, started)
+                        _read_retry_pause(refusals - 1)
+                        continue
+                    self.range_gate.succeeded()
                     break
                 if len(body) != end - offset + 1:
                     raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
                 os.pwrite(fh.fileno(), body, offset)
 
-            with ThreadPoolExecutor(self.transfer.concurrency) as pool:
-                list(pool.map(fetch, range(0, size, part)))
-        os.replace(partial, target)
-        return True
+            done = threading.Event()
+
+            def mark() -> None:  # "this file has a writer", while parts are on their way
+                while not done.wait(PARTIAL_HEARTBEAT_S):
+                    try:
+                        os.utime(partial)
+                    except OSError:
+                        return
+
+            marker = threading.Thread(target=mark, name="yeto-get-mark", daemon=True)
+            marker.start()
+            try:
+                with ThreadPoolExecutor(self.transfer.concurrency) as pool:
+                    list(pool.map(fetch, range(0, size, part)))
+            finally:
+                done.set()
+                marker.join()
+
+    def _range_refused(self, error: BaseException, started: int | None = None) -> None:
+        cuts = self.range_gate.cuts
+        limit = self.range_gate.refused(started)
+        if self.range_gate.cuts == cuts:
+            return  # the burst that lowered the limit already: no new cut, no new warning
+        print(f"[s3-store] WARNING: {self.uri}: the store refused a range read for its request rate "
+              f"({error_code(error) or type(error).__name__}); this process now runs at most {limit} range "
+              f"read(s) at once and raises that again as reads succeed", file=sys.stderr, flush=True)
 
     def read_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> list[str]:
         """Download each ``(key, target)`` like :meth:`read_file`; returns the keys
@@ -837,23 +1242,49 @@ class S3ObjectStore:
             keys += [item["Key"][strip:] for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
         return keys
 
-    def list_meta(self, prefix: str) -> tuple[list[tuple[str, float]], float]:
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request (``ListObjectsV2``): up to ``limit`` keys after
+        ``start_after`` and the key to continue from (None: that was the last page).
+        A reader that knows which keys it can skip pages through a prefix itself."""
+        strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix), "MaxKeys": int(limit)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        page = self.client.list_objects_v2(**kwargs)
+        contents = page.get("Contents", ())
+        keys = [item["Key"][strip:] for item in contents if not item["Key"].endswith("/")]
+        return keys, (contents[-1]["Key"][strip:] if page.get("IsTruncated") and contents else None)
+
+    def list_meta(self, prefix: str, *, start_after: str = "",
+                  end: str = "") -> tuple[list[tuple[str, float]], float]:
         """``([(key, LastModified epoch s)], server time)`` under ``prefix``: the
         object times and the clock they compare to both come from the server
-        (the ``Date`` header of the listing), never from this host's clock."""
+        (the ``Date`` header of the listing), never from this host's clock.
+
+        ``start_after`` / ``end``: only the keys ``start_after < key < end`` (byte
+        order). The listing starts there (``StartAfter``) and stops at the first
+        page that reaches ``end``, so a short range of a large prefix costs one
+        request, not one per 1000 keys of the prefix."""
         from email.utils import parsedate_to_datetime
 
         strip = len(self.prefix) + 1 if self.prefix else 0
+        kwargs = {"Bucket": self.bucket, "Prefix": self._full(prefix)}
+        if start_after:
+            kwargs["StartAfter"] = self._full(start_after)
+        stop = self._full(end) if end else None
         out: list[tuple[str, float]] = []
         now: float | None = None
-        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket,
-                                                                          Prefix=self._full(prefix)):
+        for page in self.client.get_paginator("list_objects_v2").paginate(**kwargs):
             date = (page.get("ResponseMetadata") or {}).get("HTTPHeaders", {}).get("date")
             if date:
                 stamp = parsedate_to_datetime(date).timestamp()
                 now = stamp if now is None else max(now, stamp)
+            contents = page.get("Contents", ())
             out += [(item["Key"][strip:], item["LastModified"].timestamp())
-                    for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
+                    for item in contents
+                    if not item["Key"].endswith("/") and (stop is None or item["Key"] < stop)]
+            if stop is not None and contents and contents[-1]["Key"] >= stop:
+                break
         if now is None:  # no Date header: the newest object time is a lower bound of the server clock
             now = max((t for _, t in out), default=0.0)
         return out, now
@@ -1057,7 +1488,7 @@ def describe_store_error(error: BaseException, uri: str = "", environ: Mapping[s
     None for any other error."""
     env = os.environ if environ is None else environ
     name = type(error).__name__
-    code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+    code = error_code(error)
     endpoint = store_endpoint(env)
     where = f"endpoint {endpoint}" if endpoint else "AWS S3 (no endpoint set)"
     hint_endpoint = (f"set {ENDPOINT_ENV} or AWS_ENDPOINT_URL (or --endpoint-url, or endpoint_url in the "

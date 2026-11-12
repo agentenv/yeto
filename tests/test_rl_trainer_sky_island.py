@@ -316,3 +316,19 @@ def test_first_policy_probe_reads_the_release_store_until_one_is_there():
     store["policy-releases/LATEST.json"] = b"{}"
     assert probe() is False and probe() is False
     assert reads == ["policy-releases/LATEST.json"] * 2
+
+
+def test_a_launch_still_provisioning_after_the_cancel_wait_is_not_confirmed_down(tmp_path):
+    """The cancel did not end the launch within ``cancel_wait_s``: the down ran
+    while the cluster may still come up, so the release is not confirmed."""
+    ops = _SkyOps()
+    ops.provision_gate = threading.Event()
+    islands = SkyTrainerIslands(_Task(), ops, name="r-l1", jobs_path=tmp_path / "jobs.json",
+                                cancel_wait_s=0.01)
+    job = islands.launch(0, None)
+    try:
+        assert islands.release(job) is False
+        assert ops.cancelled == ["req-r-l1-i0"] and ops.downed == ["r-l1-i0"]
+    finally:
+        ops.provision_gate.set()
+        job.provisioning.join(10)

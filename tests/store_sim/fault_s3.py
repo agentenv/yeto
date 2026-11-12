@@ -30,7 +30,7 @@ import datetime
 import hashlib
 import random
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from email.utils import format_datetime
 from typing import Any, Callable
 
@@ -51,6 +51,10 @@ EPOCH = 1_800_000_000.0  # the simulation starts here (server time, seconds)
 class Crash(BaseException):
     """The calling process was killed at this store operation. A ``BaseException``:
     no ``except Exception`` of the code under test may survive it."""
+
+
+class Budget(BaseException):
+    """The run used up its request or virtual-time budget (it is stuck or loops)."""
 
 
 class SimClock:
@@ -91,6 +95,8 @@ class FaultConfig:
     slow: float = 0.0  # the call takes up to ``slow_max_s``
     slow_max_s: float = 20.0
     body_cut: float = 0.0  # a GET body ends early
+    upload_outage: float = 0.0  # a multipart part or complete fails on every attempt (a half upload)
+    create_answer_lost: float = 0.0  # a claim create is applied, then every attempt fails (the call raises)
     preempt: float = 0.0  # another participant acts in the middle of the call
     crash: float = 0.0  # per scheduler action: the actor dies at one of its next calls
     partition: float = 0.0  # per scheduler step: a node loses the store for a while
@@ -100,6 +106,9 @@ class FaultConfig:
     read_outage: float = 0.0  # per scheduler step: reads (GET / HEAD / LIST) fail for a while
     read_outage_max_s: float = 600.0
     clock_skew_s: float = 0.0  # each process's wall clock is off by up to this much
+    abandon: float = 0.0  # per scheduler step: a sampler dies and its shard stays down while faults last
+    fence_bypass: float = 0.0  # per pool fence: the fenced process writes its groups in flight unchecked
+    second_start: bool = False  # a pool action may start a shard's sampler again while the old one runs
     two_trainers: bool = False  # a restarted trainer's predecessor keeps running for a while
 
     @classmethod
@@ -114,14 +123,35 @@ PRESETS: dict[str, dict[str, Any]] = {
                 "body_cut": 0.01, "preempt": 0.05},
     # lost answers only (the PR #354 class), densely
     "lost-response": {"lost_response": 0.08, "preempt": 0.03},
+    # a claim create applied whose call raised (the PR #380 class), with pool drains
+    "create-answer-lost": {"create_answer_lost": 0.3, "control": 0.2},
     # processes die and restart, nodes are partitioned, the pool acts
     "process": {"crash": 0.03, "partition": 0.01, "control": 0.02, "trainer_restart": 0.01,
                 "preempt": 0.05, "clock_skew_s": 5.0},
     "all": {"lost_response": 0.02, "lost_request": 0.02, "outage": 0.003, "slow": 0.02, "body_cut": 0.01,
             "preempt": 0.05, "crash": 0.02, "partition": 0.008, "control": 0.02, "trainer_restart": 0.008,
             "clock_skew_s": 5.0},
+    # multipart uploads (policy releases) fail part-way, again and again: half uploads, resumed ones
+    "upload": {"upload_outage": 0.03, "lost_response": 0.02, "preempt": 0.03},
+    # ... so often that most releases fail: the run need not end, only no release may be named half
+    "upload-heavy": {"upload_outage": 0.15, "lost_response": 0.02, "preempt": 0.03},
     # the store refuses reads for up to ``read_outage_max_s`` (one node or all); writes pass
     "read-outage": {"read_outage": 0.02},
+    # the pool takes partitioned nodes for gone and fences their shards while the old
+    # process still runs; every clock is up to a minute off
+    "fence-zombie": {"partition": 0.04, "partition_max_s": 240.0, "control": 0.08, "preempt": 0.05,
+                     "clock_skew_s": 20.0},
+    # ... and the fenced process writes what it has in flight without any check of its own:
+    # only the trainer's side can keep those groups out
+    "fence-bypass": {"partition": 0.02, "control": 0.08, "fence_bypass": 1.0, "preempt": 0.05,
+                     "clock_skew_s": 5.0},
+    # the pool acts all the time: retire, drain and scale down, restart in place, a second start
+    "pool": {"control": 0.12, "preempt": 0.05},
+    # a supervisor starts a shard's sampler again while the old process still runs: only the
+    # incarnation lease tells the old one, and until it reads it both write the shard
+    "second-start": {"control": 0.08, "second_start": True, "preempt": 0.05},
+    # samplers die holding claims and do not come back: only the lease expiry frees their tasks
+    "abandon": {"abandon": 0.02, "preempt": 0.05},
     # the unfixed design gap: two trainers merge the same shards
     "two-trainers": {"trainer_restart": 0.03, "two_trainers": True, "preempt": 0.05},
 }
@@ -146,6 +176,19 @@ class _Object:
         return '"' + hashlib.md5(self.data).hexdigest() + '"'
 
 
+class _Bucket(dict):
+    """The objects, remembering every body each key ever held (the md5s): a read
+    that returns bytes the key never held is a torn or foreign read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.held: dict[str, set[str]] = {}
+
+    def __setitem__(self, key: str, obj: "_Object") -> None:
+        super().__setitem__(key, obj)
+        self.held.setdefault(key, set()).add(hashlib.md5(obj.data).hexdigest())
+
+
 class S3Server:
     """The bucket: objects with their server-side modification time, multipart
     uploads in progress, and what the oracle wants to know afterwards."""
@@ -153,11 +196,13 @@ class S3Server:
     def __init__(self, clock: SimClock, *, page_size: int = 7) -> None:
         self.clock = clock
         self.page_size = int(page_size)
-        self.objects: dict[str, _Object] = {}
+        self.objects: _Bucket = _Bucket()
         self.uploads: dict[str, dict[int, bytes]] = {}
         self._upload_seq = 0
         self.lock = threading.RLock()
         self.requests = 0
+        self.max_requests: int | None = None  # more than this: Budget
+        self.deadline: float | None = None  # server time past this: Budget
         # conditional puts this server applied whose answer was lost and whose retry it
         # then refused: key -> actor (the writer owns the object without having been told)
         self.own_retry_refusals: dict[str, str] = {}
@@ -167,6 +212,9 @@ class S3Server:
     def get(self, key: str) -> bytes | None:
         obj = self.objects.get(key)
         return None if obj is None else obj.data
+
+    def ever_held(self, key: str, data: bytes) -> bool:
+        return hashlib.md5(bytes(data)).hexdigest() in self.objects.held.get(key, ())
 
     def keys(self, prefix: str = "") -> list[str]:
         return sorted(k for k in self.objects if k.startswith(prefix))
@@ -256,7 +304,19 @@ class Injector:
                 return "outage", False
             if not self.enabled:
                 return None
-            f, r = self.faults, self.rng.random()
+            f = self.faults
+            if not attempt and f.upload_outage and op in ("mpu_part", "mpu_complete") \
+                    and self.rng.random() < f.upload_outage:
+                applied = self.rng.random() < 0.5
+                self._count("upload_outage")
+                self.trace("upload_outage", actor=actor, op=op, key=key, applied=applied)
+                return "outage", applied
+            if not attempt and f.create_answer_lost and op == "create" and "/claims/" in key \
+                    and self.rng.random() < f.create_answer_lost:
+                self._count("create_answer_lost")
+                self.trace("create_answer_lost", actor=actor, op=op, key=key)
+                return "outage", True
+            r = self.rng.random()
             if attempt:
                 return (self.rng.choice(("reset", "5xx", "429")), False) if r < f.retry_fault else None
             if r < f.lost_response:
@@ -326,6 +386,11 @@ class FaultyS3Client:
     def _send(self, op: str, key: str, apply: Callable[[], Any], *, mutates: bool = False,
               conditional: bool = False) -> Any:
         inj = self.injector
+        if inj is not None and ((self.server.max_requests is not None
+                                 and self.server.requests > self.server.max_requests)
+                                or (self.server.deadline is not None
+                                    and self.server.clock.now > self.server.deadline)):
+            raise Budget(f"{self.server.requests} requests, t={self.server.clock.now - EPOCH:.0f} s")
         die_after = inj.begin(self.actor, self.node, op, key) if inj is not None else False
         attempt = 0
         applied_unanswered = False

@@ -233,3 +233,52 @@ def test_fleet_controller_run_ends_with_the_abort_error():
     controller.abort(error)
     with pytest.raises(TrainerLoopGaveUp):
         controller.run()
+
+
+class _SameCutLifecycle(_Lifecycle):
+    """Every incarnation restores the same cut (version 0: no new cut since, the
+    round cut interval is longer than the run), trains ``good`` rounds and then
+    fails at the same round (a deterministic OOM on a long batch)."""
+
+    def __init__(self, good: int) -> None:
+        super().__init__([])
+        self.good = good
+
+    def start(self, plan, resume_from=None):
+        handle = super().start(plan, resume_from)
+        handle.outcome, handle.left = "ok", self.good
+        return handle
+
+    def run(self, handle, buffer, condition):
+        if handle.left > 0:
+            handle.left -= 1
+            first = handle.trained_version or 0
+            handle.trained_version = first + 1
+            return RunReceipt(rounds=1, first_version=first, trained_version=handle.trained_version,
+                              data_ended=False)
+        handle.outcome = "train_error"
+        return super().run(handle, buffer, condition)
+
+
+def test_a_crash_at_the_same_round_after_the_same_cut_gives_up():
+    # each incarnation retrains the rounds the previous one already trained, then
+    # crashes where it did: no progress, so those rounds must not reset the count
+    loop = TrainerLoop(scheduler=_Scheduler(), lifecycle=(lifecycle := _SameCutLifecycle(2)),
+                       buffer=_Buffer(), cuts=_Cuts(), record=lambda kind, **f: None)
+    _tick_until_gave_up(loop)
+    assert lifecycle.started == [0, 1, 2]
+
+
+def test_progress_past_the_previous_crash_resets_the_count():
+    class _Further(_SameCutLifecycle):
+        def start(self, plan, resume_from=None):
+            handle = super().start(plan, resume_from)
+            handle.left = plan.incarnation + 1  # each one gets one round further
+            return handle
+
+    lifecycle = _Further(0)
+    loop = TrainerLoop(scheduler=_Scheduler(), lifecycle=lifecycle, buffer=_Buffer(), cuts=_Cuts(),
+                       record=lambda kind, **f: None)
+    for _ in range(60):
+        loop.tick()
+    assert len(lifecycle.started) > 5 and loop.consecutive_failures <= 1

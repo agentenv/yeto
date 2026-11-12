@@ -55,7 +55,8 @@ PROBE_OK, PROBE_UNREACHABLE, PROBE_CRASHED, PROBE_STARTING = "ok", "unreachable"
 
 @dataclass(frozen=True)
 class Probe:
-    """One look at the node (one ssh round trip). ``node``: ``ok`` / ``unreachable``;
+    """One look at the node (one ssh round trip). ``node``: ``ok`` / ``unreachable`` (it
+    did not answer, or its container state did not read: ``status=unknown``);
     ``sampler``: ``running`` / ``exited`` / ``absent``; ``exit_code`` of an exited
     container; ``joined``: the sampler wrote its JOIN (engine up, first round on its
     way); ``progress_age_s``: seconds since its event tape last grew (None: unknown).
@@ -87,6 +88,8 @@ class Probe:
                     key, _, value = part.partition("=")
                     doc[key] = value
         status = doc.get("status", "absent")
+        if status == "unknown":  # the state command failed (sudo, dockerd): no reading of the sampler
+            return cls(node="unreachable")
         sampler = "running" if status == "running" else ("absent" if status == "absent" else "exited")
         code = doc.get("exit")
         age = doc.get("age")
@@ -151,6 +154,20 @@ class ElasticConfig:
 
     unreachable_grace_s: float = 300.0
     control_plane_alert_s: float = 600.0
+    # a shard fence that fails is tried again every tick; after this many failures or this
+    # long without success the pool sends ``fence_stuck`` (once) and keeps trying
+    fence_alert_failures: int = 5
+    fence_alert_s: float = 600.0
+    # a node kept because its shard fence fails is released after this long anyway (a
+    # provider without leases would bill it for good); the fence is still tried and nothing
+    # continues the shard before it succeeds (None: kept until the fence succeeds)
+    fence_max_hold_s: float | None = 7200.0
+    # a node to continue a shard whose fence is owed is ordered only while the fence has
+    # failed for less than this (it may succeed before the node is up); one already granted
+    # whose start the fence holds back is released after fence_blocked_hold_s and ordered
+    # again once the fence succeeded
+    fence_order_ahead_s: float = 300.0
+    fence_blocked_hold_s: float = 1800.0
     stall_s: float | None = None
     engine_stall_s: float | None = 600.0
     # the engine server's port on the node (its /metrics): "spec" reads the sampler spec's
@@ -216,6 +233,12 @@ class ElasticConfig:
             raise ValueError("elastic config: manual_hold_s must be >= 0")
         if float(cfg.scale_drain_timeout_s) < 0:
             raise ValueError("elastic config: scale_drain_timeout_s must be >= 0")
+        if int(cfg.fence_alert_failures) < 1 or float(cfg.fence_alert_s) < 0:
+            raise ValueError("elastic config: fence_alert_failures must be >= 1 and fence_alert_s >= 0")
+        if float(cfg.fence_order_ahead_s) < 0 or float(cfg.fence_blocked_hold_s) < 0:
+            raise ValueError("elastic config: fence_order_ahead_s and fence_blocked_hold_s must be >= 0")
+        if cfg.fence_max_hold_s is not None and float(cfg.fence_max_hold_s) < 0:
+            raise ValueError("elastic config: fence_max_hold_s must be >= 0 (or null: no limit)")
         if cfg.breaker_failures < 1 or cfg.breaker_max_trips < 1:
             raise ValueError("elastic config: breaker_failures and breaker_max_trips must be >= 1")
         return cfg

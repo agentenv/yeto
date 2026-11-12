@@ -144,3 +144,40 @@ def test_cloud_probe_builds_against_sky_status_version_enum(monkeypatch):
 
     Cloud.STATUS_VERSION = StatusVersion.CLOUD_CLI
     assert launcher._cloud_live_instances_probe("c") is None
+
+
+def test_probe_error_does_not_trust_a_failed_down():
+    """A down that errored (not "does not exist") and a cloud that cannot be
+    asked: nothing says the cluster is gone."""
+    def down():
+        raise RuntimeError("sky API server unreachable")
+
+    def probe():
+        raise RuntimeError("cloud API down")
+
+    assert terminate_and_verify(None, "c", probe=probe, down=down, sleep_fn=_no_sleep) is False
+
+
+def test_probe_error_after_live_instances_is_not_confirmed():
+    """The cloud reported a live instance, then stopped answering: the last
+    word is "still live", never "gone"."""
+    answers = [["i-zombie"]]
+
+    def probe():
+        if answers:
+            return answers.pop(0)
+        raise RuntimeError("cloud API down")
+
+    assert terminate_and_verify(FakeSky(), "c", probe=probe, attempts=3, sleep_fn=_no_sleep) is False
+
+
+def test_final_probe_error_after_retries_is_not_confirmed():
+    calls = {"n": 0}
+
+    def probe():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return ["i-zombie"]
+        raise RuntimeError("cloud API down")
+
+    assert terminate_and_verify(FakeSky(), "c", probe=probe, attempts=2, sleep_fn=_no_sleep) is False

@@ -246,6 +246,11 @@ class RoundCutCheckpoint:
         # (buffer_rollout.wire_sample_buffer sets both).
         self.buffer_watermark: Any = None  # callable(int) -> int | None
         self.buffer_resume: Any = None  # callable(int) -> int
+        # Where the buffer is read from when the store holds no cut: 0, or the
+        # position the newest policy release is trained up to, for a relaunched trainer
+        # (sampler_island._resume_single_trainer, PolicyRelease.buffer_trained).
+        self.buffer_start_without_cut = 0
+        self._unresumable_reported: int | None = None  # rollout of the last skipped cut
         # a cut prepared before the trainer offloads (see prepare()), consumed by save()
         self._prepared: _PreparedCut | None = None
         # a periodic cut writes its shards and commits the store in the background
@@ -265,6 +270,12 @@ class RoundCutCheckpoint:
         # writers are collected (and their files dropped) at the next cut, when done
         self._abandoned: list[_PreparedCut] = []
         self._declined: int | None = None  # rollout whose prepare met a running commit
+        # the store holds a committed LATEST (restored at start, or a cut of this process
+        # committed it): until then every cut is marked first (_start). A local pointer
+        # is no proof: it moves before the store sync, which may fail or not be committed yet
+        from yeto.rl.engine.resume import read_latest
+
+        self._store_committed = read_latest(Path(controller.checkpoint_store)) is not None
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -329,12 +340,41 @@ class RoundCutCheckpoint:
         return self.interval.due(int(rollout_id), final=final)
 
     def _skip(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
-        """No cut at this safe point: not due, island RECOVERY_REQUIRED, or just
-        resumed from (or already cut at) this rollout."""
+        """No cut at this safe point: not due, island RECOVERY_REQUIRED, just
+        resumed from (or already cut at) this rollout, or a cut here could not be
+        resumed from (:meth:`_unresumable`)."""
         if self.controller.recovery_required or not self.due(rollout_id, final=final):
             return True
         current = self.pointer()
-        return current is not None and int(current["next_rollout_id"]) == int(rollout_id)
+        if current is not None and int(current["next_rollout_id"]) == int(rollout_id):
+            return True
+        return self._unresumable(driver, rollout_id)
+
+    def _unresumable(self, driver: Any, rollout_id: int) -> bool:
+        """A cut before ``rollout_id`` whose ledger does not hold rollout
+        ``rollout_id - 1`` as outer-recorded is refused by :meth:`resume`; once it is
+        LATEST no launch starts. That is the first safe point of a process whose
+        account continues above the store's releases (``LocalOnlySync.start``): it
+        starts at vK with a ledger that ends at the restored cut (or is empty, without
+        a cut), and it has trained nothing, so the cut would hold the weights it
+        started from. No cut is taken there (one ``rl_round_cut_skipped`` event); the
+        next safe point, after its first round, cuts. Only for a sync that resumes
+        from its cuts: a synced island's cuts are never resumed from."""
+        ledger = getattr(self.source, "ledger", None)
+        if (ledger is None or int(rollout_id) <= 0
+                or not getattr(getattr(driver, "sync", None), "resumes_from_round_cuts", False)):
+            return False
+        last = ledger.batch(int(rollout_id) - 1)
+        if last is not None and last.get("state") == "outer_recorded":
+            return False
+        if self._unresumable_reported != int(rollout_id):  # prepare() and save() both ask
+            self._unresumable_reported = int(rollout_id)
+            emit = getattr(driver, "emit", None)
+            if callable(emit):
+                emit("rl_round_cut_skipped", rollout_id=int(rollout_id),
+                     reason="no_round_trained_since_start",
+                     ledger_last_round=None if last is None else last.get("state"))
+        return True
 
     def _cut_id(self, rollout_id: int) -> str:
         return f"r{int(rollout_id):06d}-{self.controller.incarnation['id']}"
@@ -343,13 +383,18 @@ class RoundCutCheckpoint:
         """Start the trainer part of a cut: a pending cut whose shards are written in
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
-        if background and callable(start):
-            if self.pointer() is None:
-                # the store's first cut: until its LATEST is committed the store holds a
-                # cut and no LATEST; the mark lets a restart drop it and start at 0
-                from yeto.rl.engine.resume import mark_first_cut
+        if not self._store_committed:
+            # the store's first cut: until its LATEST is committed the store holds a
+            # cut and no LATEST; the mark lets a restart drop it and start at 0. Also
+            # a later cut while no earlier one is committed (its store sync failed or
+            # still runs): an unmarked cut beside them would make the store unstartable.
+            # Inline cuts too (background commits off, a final cut): the run may die
+            # between their shards and their LATEST just the same
+            from yeto.rl.engine.resume import mark_first_cut
 
-                mark_first_cut(self.controller.checkpoint_store, context.cut_id)
+            mark_first_cut(self.controller.checkpoint_store, context.cut_id,
+                           store=getattr(self.controller, "store", None))
+        if background and callable(start):
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
@@ -586,6 +631,8 @@ class RoundCutCheckpoint:
                 return
             with commit_budget(getattr(self.controller, "store", None), done["cut_bytes"]):
                 box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
+            if box["result"].get("ok", True) and box["result"].get("committed", True):
+                self._store_committed = True
 
         def run_held() -> None:
             started = time.monotonic()
@@ -746,6 +793,8 @@ class RoundCutCheckpoint:
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
+        if synced and sync.get("committed", True) and not sync.get("commit_error"):
+            self._store_committed = True
         info.update(extra)
         info["store_synced"] = bool(synced)
         info["store_commit"] = "inline"
@@ -787,11 +836,13 @@ class RoundCutCheckpoint:
         ``defer``: the caller commits in the background). ``staged``: the state dir as
         staged at the cut (:meth:`_stage`) is the one synced, with the same pointer."""
         pointer = {**info, CUT_KEY: cut_record}
-        self._write_pointer(pointer)
         kwargs: dict[str, Any] = {"defer_commit": True} if defer else {}
         if staged is not None:
+            # the staged copy first: a failure here leaves the local pointer on the
+            # previous cut, so dropping this cut's files (_drop_unpointed) is safe
             self._write_pointer(pointer, path=Path(staged) / POINTER)
             kwargs["source_dir"] = Path(staged)
+        self._write_pointer(pointer)
         synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True, **kwargs)
         # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
         # in the controller, outside its lock), also when it failed: recovery.save must not
@@ -810,7 +861,7 @@ class RoundCutCheckpoint:
         info = self.pointer()
         if info is None:
             if callable(self.buffer_resume):
-                self.buffer_resume(0)
+                self._start_buffer_without_cut(driver)
             return None
         started = time.monotonic()
         rid = int(info["next_rollout_id"])
@@ -899,6 +950,20 @@ class RoundCutCheckpoint:
             state_restore=restored_store or None,
         )
         return info
+
+    def _start_buffer_without_cut(self, driver: Any) -> None:
+        """No cut to restore: read the buffer from ``buffer_start_without_cut``. A
+        position the buffer refuses (beyond the index this store holds) must not
+        stop the start: the buffer is then read from 0, as a first start reads it,
+        and the policy-age gate passes over what is too old."""
+        start = int(self.buffer_start_without_cut or 0)
+        try:
+            self.buffer_resume(start)
+        except Exception as error:  # noqa: BLE001 - reported; position 0 is always valid
+            if start == 0:
+                raise
+            driver.emit("rl_buffer_start_position_refused", position=start, error=repr(error)[:500])
+            self.buffer_resume(0)
 
     def _restore_in_flight(self, driver: Any, manifest: Any, rollout_id: int) -> dict[str, Any] | None:
         """agentic-rollout-utilization 3.3: the cut's unfinished trajectories, by the

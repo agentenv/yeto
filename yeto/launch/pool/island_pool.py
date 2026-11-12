@@ -17,7 +17,12 @@ the National Compute lease pool and keeps every behaviour of it:
   sampler and a failed status call apart;
 * a gone member is retired: its shard is fenced (the work contract releases its
   claims at once), its machine is released and confirmed ended, and its data
-  slot and shard go to a pending handoff that the next order continues;
+  slot and shard go to a pending handoff that the next order continues. The
+  fence comes first: while it fails the member stays ``fencing`` (the fence is
+  tried again every tick; its machine is kept, nothing is handed on, no
+  replacement is ordered). A machine that is gone anyway (its ticket ended, its
+  lease is over, the pool stops) is released without the fence, but no sampler
+  that continues the shard starts before the fence succeeded;
 * a crashed sampler on a reachable node is restarted in place; a stalled engine
   is fenced (incarnation only) and restarted in place;
 * orders are gated by a circuit breaker, a budget (run spend, billed nodes,
@@ -51,6 +56,24 @@ LEASE_HOURS = 4  # the default lease of a lease-bounded provider (National Compu
 METRICS_MISS_ALERT = 3  # probes in a row without engine /metrics before an event
 PROGRESS_SLACK_S = 5.0  # tape age jitter (probe latency, whole seconds) that is not growth
 PROVISIONING, STARTING, READY, DRAINING, GONE = "provisioning", "starting", "ready", "draining", "gone"
+# a member the pool is retiring whose shard fence has not succeeded yet: its node is kept
+# (not watched, not restarted), nothing of it is handed on, no replacement is ordered
+FENCING = "fencing"
+# What a provider's guard raises, told by class name (the pool imports no provider):
+# a refusal sent nothing to the provider and is no provisioning failure; a halted slot
+# (National Compute: the account, until an operator's ``clear-halt``) is skipped
+REFUSED_ERRORS = ("NcRefused",)
+HALTED_ERRORS = ("NcHalted",)
+DEFERRED_ERRORS = ("NcReleaseDeferred",)  # the ticket ends on its own shortly: no delete now
+OWNERSHIP_ERRORS = ("NcForeignTicketReleased", "NcDeleteUnconfirmed")  # a delete hit, or may have hit, a foreign ticket
+SLOT_RETRY_S = 600.0  # a slot whose guard refused is tried again after this long
+
+
+def error_is(error: BaseException, names: tuple[str, ...]) -> bool:
+    return any(c.__name__ in names for c in type(error).__mro__)
+
+
+FENCE_FAILED_EVERY = 10  # a fence that keeps failing: the first failure and every Nth send an event
 
 
 @dataclass
@@ -75,17 +98,40 @@ class Member:
     ready_since: float | None = None  # this incarnation's sampler joined at
     ever_ready: bool = False  # a sampler on this node joined once (restarts before that are setup)
     unreachable_since: float | None = None
+    # the last tick the unreachable grace was looked at (a failed probe, or a tick without a
+    # probe): the grace counts only time that ends in a failed probe (None: not known, e.g.
+    # after a pool restart; the next failed probe starts the grace anew)
+    unreachable_seen: float | None = None
     status_fail_since: float | None = None
     alerted: list[str] = field(default_factory=list)  # one-shot events already sent
     predecessor_lost: bool = False  # the shard it continues has no live sampler to wait for
     predecessor_retired: bool = False  # at its start the pool had already retired that shard's sampler
     handed_off: bool = False  # a successor that continues this shard started (its sampler stops)
+    # a fence of its shard that has not succeeded yet (why it was asked for): tried again every
+    # tick, also after its node was released; no sampler that continues it starts before
+    fence_pending: str | None = None
+    fence_then: str | None = None  # what the fence holds back: "retire" / "scale" (None: nothing)
+    fence_lost: bool = False  # the retire it holds back takes the shard's sampler for lost
+    fence_failures: int = 0
+    fence_since: float | None = None  # the first failure
+    continues_from: str | None = None  # ticket of the member whose slot / shard this one took over
+    fence_wait_since: float | None = None  # granted, its start held back by an owed fence since then
     end_reason: str | None = None
     drain_error: str | None = None
     config_error: str | None = None  # its sampler refused the config: kept as is until pool-retry
     tokens_seen: float | None = None  # the engine's generation-token counter at the last probe
     tokens_moved_at: float | None = None  # last probe it moved, or the engine was idle
     stall_failures: int = 0  # stall restarts in a row with no token progress between them
+    # the pool fenced (or tried to fence) this sampler's incarnation for an in-place restart
+    # (a stalled engine): an exit 0 that follows is the fenced sampler leaving, not the end
+    # of the data. Only read when the ops cannot say why a sampler ended (no
+    # ``exit_evidence``: the run store's lease and member records decide otherwise). Set
+    # before the fence call and saved at once; cleared when a restart replaced the sampler,
+    # at a pool-retry, and when the engine's token counter reads below ``fence_tokens`` (a
+    # new engine process counts from zero: a restart whose call failed did replace the
+    # sampler). Left set when in doubt: the cost is one more restart at the end of the data.
+    fenced_for_restart: bool = False
+    fence_tokens: float | None = None  # the engine's token counter when that fence was asked for
     metrics_misses: int = 0  # probes in a row of a running sampler whose engine /metrics did not read
     # scale down in "drain" mode: since when its sampler claims no new task (None: not retiring)
     retiring_since: float | None = None
@@ -105,6 +151,7 @@ class Member:
     start_retries: int = 0
     start_retry_at: float | None = None
     vram_alerts_seen: int = 0  # the sampler's high-VRAM alerts already reported (probe)
+    absent_seen: bool = False  # the last probe of its ready sampler found no container
 
 
 class PoolOps(Protocol):
@@ -118,6 +165,9 @@ class PoolOps(Protocol):
     # optional (``getattr``): probe(member) -> el.Probe; restart(member, shards); fence(member);
     # fence_incarnation(member) (lease only, no handoff: a stalled engine restarted in place);
     # run_tickets() -> [(account, ticket)] open tickets of this run in the ledger;
+    # slot_halt(account) -> why the slot takes no order / release now (None: it does);
+    # exit_evidence(member) -> what the run's store says about a sampler that ended with
+    # exit 0 (R2DataPath.exit_evidence; None: this data path keeps no such record);
     # scale down in "drain" mode: request_drain(member) (its sampler claims no new task),
     # drained(member) -> bool (it holds no task claim any more), cancel_drain(member)
 
@@ -174,9 +224,6 @@ def is_transient_start_error(error: BaseException) -> bool:
 START_RETRIES = 3  # transient start failures retried in place before the node is retired
 START_RETRY_S = 30.0  # first retry delay; doubled for every further retry
 
-
-FENCE_SUCCESSOR_PREFIX = "pool-fence:"  # yeto.launch.nc.elastic.FENCE_PREFIX: a pool fence's handoff
-
 SLOW_TICK_S = 60.0  # a tick longer than this is logged
 CONTROL_POLL_S = 1.0  # the loop's wait between ticks checks the control file this often
 
@@ -197,6 +244,11 @@ class IslandPool:
     breaker: el.Breaker = field(default_factory=el.Breaker)
     budget: el.Budget = field(default_factory=el.Budget)
     _refused: str | None = None
+    _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
+    _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
+    _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
+    _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
+    _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _executor: Any = None
     state_path: Path | None = None  # saved right after every order
@@ -295,12 +347,82 @@ class IslandPool:
                 return f"{index}/{count}"
         raise RuntimeError(f"pool: every one of the {count} data slots is held; target exceeds data_slots")
 
+    def _slot_halt(self, account: Any) -> dict[str, Any] | None:
+        """Why the provider takes no order or release on the slot (``ops.slot_halt``), None
+        when it does or when the ops cannot tell. A failed read is no evidence the halt was
+        lifted: the slot keeps the halt it is known to have (None if none is known)."""
+        read = getattr(self.ops, "slot_halt", None)
+        if read is None:
+            return None
+        try:
+            halt = read(account)
+        except Exception as error:  # noqa: BLE001 - an order on it is refused by the guard anyway
+            self.log(f"pool: halt state of {self.config.slot_name} {account} unreadable: {error!r}"[:300])
+            return self._slot_halts.get(account)
+        return dict(halt) if halt else None
+
+    def _note_halt(self, account: Any, halt: dict[str, Any]) -> None:
+        """A halted slot: one alert, and the slot is left out until the halt is lifted."""
+        if account in self._slot_halts:
+            return
+        self._slot_halts[account] = halt
+        name = self.config.slot_name
+        self.log(f"pool: WARNING: {name} {account} is HALTED ({halt.get('halt')}): the pool orders and releases "
+                 f"nothing on it until an operator lifts the halt"[:400])
+        self._event("slot_halted", level="alert", account=account, reason=str(halt.get("halt"))[:300],
+                    expected_ticket=halt.get("expected_ticket"), released_ticket=halt.get("released_ticket"),
+                    members=[m.ticket for m in self.live() if m.account == account],
+                    action=f"check the {name} (which ticket was released, whose it is), then lift the halt: "
+                           f"python -m yeto.launch.nc clear-halt --account {account} --yes")
+
+    def _halt_lifted(self, account: Any) -> None:
+        if self._slot_halts.pop(account, None) is not None:
+            self._slot_hold.pop(account, None)
+            self._event("slot_halt_cleared", account=account)
+
     def _free_account(self) -> int | None:
+        now = self.clock()
         busy = {m.account for m in self.live()}
+        can_tell = getattr(self.ops, "slot_halt", None) is not None
         for account in self.config.accounts:
-            if account not in busy and self.ops.account_free(account):
+            halt = self._slot_halt(account)
+            if halt is not None:
+                self._note_halt(account, halt)
+                continue
+            if can_tell:
+                self._halt_lifted(account)
+            if account in busy or self._slot_hold.get(account, 0.0) > now:
+                continue
+            if self.ops.account_free(account):
                 return account
         return None
+
+    def _guard_refused(self, account: Any, error: BaseException, now: float) -> None:
+        """The provider's guard refused an order on the slot (nothing was sent): no
+        provisioning failure. The slot is left out for ``SLOT_RETRY_S``."""
+        self._slot_hold[account] = now + SLOT_RETRY_S
+        if error_is(error, HALTED_ERRORS):
+            self._note_halt(account, {"halt": str(error)[:300]})
+        else:
+            self._event("order_refused_by_guard", account=account, error=repr(error)[:300], retry_in_s=SLOT_RETRY_S)
+
+    def _slots_short(self) -> None:
+        """Halted slots leave fewer usable slots than the target: a higher alert (a
+        replacement has no free slot, so a lease end leaves a gap)."""
+        halted = sorted(self._slot_halts, key=str)
+        usable = len(self.config.accounts) - len(halted)
+        key = tuple(halted) if halted and usable < self.config.target else None
+        if key is not None and key != self._short:
+            name = self.config.slot_name
+            self.log(f"pool: CRITICAL: {usable} usable {name}(s) for target {self.config.target} "
+                     f"({name}s {halted} halted): the pool runs short")
+            self._event("slots_below_target", level="critical", usable=usable, target=self.config.target,
+                        halted=halted, slot_name=name,
+                        detail=(f"{usable} usable {name}(s) for target {self.config.target}: the pool cannot hold "
+                                f"its target, and a node at its lease end has no free {name} for its replacement "
+                                "(a gap in sampling)"),
+                        action="lift the halt(s) once checked (clear-halt), add slots, or lower the target")
+        self._short = key
 
     def _gate(self, now: float) -> str | None:
         """Why no order may be placed now (breaker, budget), None when one may."""
@@ -324,7 +446,12 @@ class IslandPool:
         now = self.clock()
         balance = self.ops.balance()
         if balance is not None and balance < self.config.order_floor():
-            self.log(f"pool: balance {balance} < order floor {self.config.order_floor()}: not ordering")
+            refused = f"balance below the order floor {self.config.order_floor()}"
+            if refused != self._refused:  # once per change, not every tick (the balance moves)
+                self.log(f"pool: balance {balance} < order floor {self.config.order_floor()}: not ordering")
+                self._event("order_refused", why=refused, balance=balance,
+                            replaces=replaces.ticket if replaces else None)
+            self._refused = refused
             return None
         refused = self._gate(now)
         if refused:
@@ -337,12 +464,25 @@ class IslandPool:
         if account is None:
             refused = (f"no free slot: {len(self.live())} of {len(self.config.accounts)} slots (the pool's "
                        f"'{self.config.slot_name}s') hold a machine of this pool (one per slot), target {self.config.target}")
+            if self._slot_halts:
+                refused += f"; halted (clear-halt needed): {sorted(self._slot_halts, key=str)}"
             if refused != self._no_account:  # once per change, not every tick
                 self._event("order_refused", why=refused)
             self._no_account = refused
             return None
         self._no_account = None
-        handoff = self.pending[0] if replaces is None and self.pending else None
+        handoff = None
+        if replaces is None and self.pending:
+            # a handoff whose origin's fence is still owed is not ordered for (its node would
+            # sit granted, billed and unstarted), except in the first fence_order_ahead_s
+            handoff = next((p for p in self.pending if not self._handoff_waits_for_fence(p, now)), None)
+            if handoff is None:
+                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing: nothing "
+                           "is ordered to continue an unfenced shard")
+                if refused != self._refused:
+                    self._event("order_refused", why=refused)
+                self._refused = refused
+                return None
         if self.config.shard_limit is not None and self.next_shard >= self.config.shard_limit:
             refused = (f"shard {self.config.shard_base}-{self.next_shard} is past shard_limit "
                        f"{self.config.shard_limit} (the trainer's buffer shards / the tunnel ports)")
@@ -352,28 +492,39 @@ class IslandPool:
             self._refused = refused
             return None
         shard = f"{self.config.shard_base}-{self.next_shard}"
-        try:
-            ticket = self.ops.order(account)
-        except Exception as error:  # noqa: BLE001 - an order failure is counted, never fatal
-            self._event("order_failed", account=account, error=repr(error)[:300])
-            fallback = getattr(self.ops, "has_fallback_offer", None)
-            if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
-                self._event("offer_failed", account=account)
+        ticket = None
+        while ticket is None:
+            try:
+                ticket = self.ops.order(account)
+            except Exception as error:  # noqa: BLE001 - an order failure is counted, never fatal
+                if error_is(error, REFUSED_ERRORS):  # a guard: nothing was sent; the next slot is tried
+                    self._guard_refused(account, error, now)
+                    account = self._free_account()
+                    if account is None:
+                        return None
+                    continue
+                self._event("order_failed", account=account, error=repr(error)[:300])
+                fallback = getattr(self.ops, "has_fallback_offer", None)
+                if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
+                    self._event("offer_failed", account=account)
+                    return None
+                self._fail(now, f"order on {self.config.slot_name} {account}")
                 return None
-            self._fail(now, f"order on {self.config.slot_name} {account}")
-            return None
+        if account in self._slot_halts and getattr(self.ops, "slot_halt", None) is None:
+            self._halt_lifted(account)  # ops that cannot tell: an order went through again
         self.next_shard += 1
         self.budget.orders += 1
         if handoff is not None:
-            self.pending.pop(0)
+            self.pending.remove(handoff)
         if replaces is not None:
             slot, continues, lost = replaces.data_slot, replaces.shard, False
         elif handoff is not None:
             slot, continues, lost = handoff.get("data_slot"), handoff.get("shard"), bool(handoff.get("lost"))
         else:
             slot, continues, lost = self._free_slot(), None, False
+        origin = replaces.ticket if replaces else None if handoff is None else handoff.get("from")
         member = Member(account, ticket, shard, created=now, replaces=replaces.ticket if replaces else None,
-                        data_slot=slot, replaces_shard=continues, predecessor_lost=lost)
+                        data_slot=slot, replaces_shard=continues, predecessor_lost=lost, continues_from=origin)
         if replaces:
             replaces.replaced_by = ticket
         self.members.append(member)
@@ -436,32 +587,115 @@ class IslandPool:
         if member.state != DRAINING:
             self.log(f"pool: draining {member.ticket} ({why})")
             member.state = DRAINING
+        now = self.clock()
+        if member.ticket in self._drain_hold:
+            # its release was refused: a halted slot is asked again when the ops say the halt
+            # is lifted (ops that cannot tell: after SLOT_RETRY_S); any other guard refusal
+            # (an unconfirmed delete, ...) after SLOT_RETRY_S, not every tick
+            on_lift = member.ticket in self._drain_on_halt and getattr(self.ops, "slot_halt", None) is not None
+            held = self._slot_halt(member.account) is not None or (
+                not on_lift and self._drain_hold[member.ticket] > now)
+            if held and self._ticket_ended(member):  # it ended meanwhile: nothing left to release
+                self._released(member, why, ended_already=True)
+                return True
+            if held:
+                return False
+        self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
         try:
             self.ops.drain(member)
         except Exception as error:  # noqa: BLE001
             member.drain_error = repr(error)[:300]
+            if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS) and self._ticket_ended(member):
+                # nothing to delete: the ticket ended on its own (evicted, expired, released
+                # in the console). The guard's refusal does not keep the member.
+                self._released(member, why, ended_already=True)
+                return True
+            if error_is(error, DEFERRED_ERRORS):  # it ends on its own shortly: asked again, not a failure
+                self._once(member, "release_deferred", "release_deferred", why=why, detail=str(error)[:300])
+                return False
+            if error_is(error, OWNERSHIP_ERRORS + REFUSED_ERRORS):
+                self._drain_hold[member.ticket] = now + SLOT_RETRY_S
+                action = (f"check the {self.config.slot_name}, then: python -m yeto.launch.nc clear-halt "
+                          f"--account {member.account} --yes; the pool then releases {member.ticket}")
+                if error_is(error, OWNERSHIP_ERRORS):
+                    self.log(f"pool: CRITICAL: releasing {member.ticket}: {error}"[:400])
+                    self._once(member, "release_ownership", "release_hit_foreign_ticket", level="critical", why=why,
+                               kind=type(error).__name__, error=str(error)[:300], action=action)
+                    self._note_halt(member.account, {"halt": str(error)[:300], "expected_ticket": member.ticket})
+                    self._drain_on_halt.add(member.ticket)
+                else:
+                    if error_is(error, HALTED_ERRORS):
+                        self._note_halt(member.account, {"halt": str(error)[:300]})
+                        self._drain_on_halt.add(member.ticket)
+                    self._once(member, "release_blocked", "release_blocked", level="alert", why=why,
+                               error=str(error)[:300], retry_in_s=SLOT_RETRY_S, action=action,
+                               detail="the member is kept as it is (still billed) until the release is allowed")
+                return False
             self._event("drain_failed", ticket=member.ticket, account=member.account, why=why,
                         error=member.drain_error)
             return False
+        self._released(member, why)
+        return True
+
+    def _ticket_ended(self, member: Member) -> bool:
+        """The provider reports the member's ticket ended (a failed read: not known, False)."""
+        try:
+            return el.LeaseStatus.of(self.ops.poll(member)).state == "ended"
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _released(self, member: Member, why: str, *, ended_already: bool = False) -> None:
         self._charge(member, self.clock())
         member.state = GONE
         member.drain_error = None
+        self._drain_hold.pop(member.ticket, None)
+        self._drain_on_halt.discard(member.ticket)
+        if ended_already:  # no delete was sent and none is: the patrol does not ask for one either
+            self._drain_hold[member.ticket] = float("inf")
+        for key in ("release_deferred", "release_blocked", "release_ownership"):
+            if key in member.alerted:
+                member.alerted.remove(key)
+        detail = {"ended_already": True} if ended_already else {}
         self._event("released", ticket=member.ticket, account=member.account, why=why,
-                    spent_ucr=round(self.budget.spent_ucr))
+                    spent_ucr=round(self.budget.spent_ucr), **detail)
         for m in self.members:  # a replacement that lost its predecessor is a plain member now
             if m.replaces == member.ticket:
                 m.replaces = None
-        return True
 
-    def _fence(self, m: Member, why: str) -> None:
+    def _fence(self, m: Member, why: str) -> bool:
+        """Fence the shard of ``m`` (every step of the fence is idempotent). False: it failed;
+        the member keeps ``fence_pending`` and the fence is tried again every tick
+        (:meth:`_retry_fences`), with ``fence_stuck`` once it failed ``fence_alert_failures``
+        times or for ``fence_alert_s``. True: fenced, or nothing to fence (never started)."""
         fence = getattr(self.ops, "fence", None)
         if fence is None or m.started is None:
-            return
+            return True
         try:
-            self._owner_event(m, fence(m))
-            self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why)
-        except Exception as error:  # noqa: BLE001 - the trainer's age filter is the second line
-            self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            lease = fence(m)
+        except Exception as error:  # noqa: BLE001 - a fence is a safety step: owed until it succeeds
+            now = self.clock()
+            m.fence_pending = m.fence_pending or why
+            m.fence_failures += 1
+            m.fence_since = now if m.fence_since is None else m.fence_since
+            if m.fence_failures == 1 or m.fence_failures % FENCE_FAILED_EVERY == 0:
+                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                            failures=m.fence_failures)
+            if m.fence_failures >= self.ecfg.fence_alert_failures or now - m.fence_since >= self.ecfg.fence_alert_s:
+                if "fence_stuck" not in m.alerted:
+                    self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} is NOT fenced after {m.fence_failures} "
+                             f"attempt(s) in {now - m.fence_since:.0f} s ({error!r}); nothing continues it until "
+                             "the fence succeeds (tried again every tick)"[:400])
+                self._once(m, "fence_stuck", "fence_stuck", why=m.fence_pending, failures=m.fence_failures,
+                           for_s=round(now - m.fence_since), state=m.state, error=repr(error)[:300])
+            return False
+        detail = {"after_failures": m.fence_failures} if m.fence_failures else {}
+        self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why, **detail)
+        m.fence_pending, m.fence_failures, m.fence_since = None, 0, None
+        if "fence_stuck" in m.alerted:
+            m.alerted.remove("fence_stuck")
+        self._owner_event(m, lease)
+        return True
 
     def _owner_event(self, m: Member, lease: Any) -> None:
         """``rl_shard_owner`` when the fence appended the pool's ownership record to the
@@ -471,21 +705,84 @@ class IslandPool:
             self._event("rl_shard_owner", ticket=m.ticket, shard=m.shard, incarnation=lease.get("incarnation"),
                         by=owner.get("by"), epoch=owner.get("epoch"), pos=owner.get("pos"))
 
-    def _retire(self, m: Member, why: str, *, lost: bool) -> None:
-        """A member that will not sample again: fence, release, hand its slot on."""
+    def _fence_blocker(self, m: Member) -> Member | None:
+        """The member whose slot / shard ``m`` took over and whose fence is still owed."""
+        origins = {t for t in (m.continues_from, m.replaces) if t}
+        return next((p for p in self.members if p is not m and p.fence_pending is not None
+                     and p.ticket in origins), None)
+
+    def _handoff_waits_for_fence(self, handoff: dict[str, Any], now: float) -> bool:
+        """The member ``handoff`` comes from still owes its fence, for longer than
+        ``fence_order_ahead_s`` (a fence about to succeed does not cost the cold start)."""
+        origin = next((p for p in self.members if p.fence_pending is not None
+                       and p.ticket == handoff.get("from")), None)
+        if origin is None:
+            return False
+        return origin.fence_since is None or now - origin.fence_since >= float(self.ecfg.fence_order_ahead_s)
+
+    def _retry_fences(self, now: float) -> None:
+        """Every fence still owed is tried again. A ``fencing`` member (its node kept) goes on
+        with what the fence held back once it succeeds; when its ticket ended or its lease
+        is over meanwhile, or the fence has failed for ``fence_max_hold_s`` (a provider
+        without leases would bill the node for good: ``fence_abandoned_node_released``), its
+        node is released without the fence and the fence stays owed."""
+        for m in [m for m in self.members if m.fence_pending is not None]:
+            if m.state != FENCING:  # its node is released (or being drained): only the fence is owed
+                self._fence(m, m.fence_pending)
+                continue
+            status = self._status(m, now)
+            if status.state in ("active", "ended"):
+                self._charge(m, now)
+            if status.state == "active" and el.effective_end(status) is not None:
+                m.lease_until = el.effective_end(status)
+            if status.state == "ended":
+                m.end_reason = status.end_reason
+            over = status.state == "ended" or (m.lease_until is not None
+                                              and now >= m.lease_until - self.config.end_margin_s)
+            hold = self.ecfg.fence_max_hold_s
+            if not over and hold is not None and m.fence_since is not None and now - m.fence_since >= float(hold):
+                over = True
+                self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} is NOT fenced after "
+                         f"{now - m.fence_since:.0f} s (fence_max_hold_s {float(hold):.0f}): releasing its node; "
+                         "the fence is still tried every tick and nothing continues the shard before it")
+                self._once(m, "fence_abandoned", "fence_abandoned_node_released", why=m.fence_pending,
+                           failures=m.fence_failures, held_s=round(now - m.fence_since))
+            if m.fence_then == "scale":
+                if self._fence(m, m.fence_pending) or over:
+                    m.fence_then = None
+                    self._drain(m, "scale down")
+            else:
+                self._retire(m, m.fence_pending, lost=m.fence_lost, must_release=over)
+
+    def _retire(self, m: Member, why: str, *, lost: bool, must_release: bool = False) -> None:
+        """A member that will not sample again: fence, release, hand its slot on. The fence
+        comes first: while it fails the member stays ``fencing`` and nothing else happens.
+        ``must_release``: its node is gone or must not stay billed (its ticket ended, its
+        lease is over): released even when the fence failed; the fence stays owed and
+        whatever continues the shard starts only after it (:meth:`_fence_blocker`)."""
         if m.retiring_since is not None:  # a scale-down victim: nothing is handed on
-            self._finish_retire(m, self.clock(), outcome=why)
+            self._finish_retire(m, self.clock(), outcome=why, must_release=must_release)
             return
-        self._fence(m, why)
+        if m.state != FENCING:
+            lost = lost or m.state != READY
+        if not self._fence(m, why) and not must_release:
+            if m.state != FENCING:
+                self.log(f"pool: {m.ticket} (shard {m.shard}) stays until its shard is fenced ({why})")
+            m.state, m.fence_then, m.fence_lost = FENCING, "retire", lost
+            return
+        m.fence_then = None
         successor = next((s for s in self.members if s.state != GONE and s.replaces == m.ticket), None)
         if successor is not None:  # its replacement is on the way: it continues m's shard
-            successor.predecessor_lost = successor.predecessor_lost or lost or m.state != READY
+            successor.predecessor_lost = successor.predecessor_lost or lost
+            successor.continues_from = m.ticket
         else:
             if m.joined:
                 continues = m.shard
             else:  # wrote nothing: continue what it was meant to continue
                 continues = m.replaces_shard
-            handoff = {"data_slot": m.data_slot, "shard": continues, "lost": True, "from": m.ticket}
+            # a member that never started hands on the origin of what it took over (a fence owed there)
+            origin = m.ticket if m.started is not None else (m.continues_from or m.ticket)
+            handoff = {"data_slot": m.data_slot, "shard": continues, "lost": True, "from": origin}
             if m.replaces:  # its predecessor is still live: re-plan that member's replacement
                 for p in self.members:
                     if p.ticket == m.replaces and p.state != GONE:
@@ -565,7 +862,7 @@ class IslandPool:
                         self.log(f"pool: task hold of {m.ticket} failed: {error!r}"[:300])
             elif m.paused and m.ticket not in paused:
                 m.paused = False
-                m.unreachable_since = m.status_fail_since = None
+                m.unreachable_since = m.unreachable_seen = m.status_fail_since = None
                 m.tokens_moved_at = None  # no stall verdict from the paused time
                 m.resumed = True  # its sampler may have been stopped by hand: not a crash
                 self._event("manual_resume", ticket=m.ticket, account=m.account, shard=m.shard)
@@ -579,7 +876,14 @@ class IslandPool:
     def record_target(self, target: int, *, source: str, **extra: Any) -> None:
         """The pool lowers its own target (a manual release it detected): written to the
         control file under the scale lock, so the target outlives a restart and a later
-        ``pool-scale`` starts from it."""
+        ``pool-scale`` starts from it.
+
+        The file is read again under the lock and changed relative to what it holds then:
+        a request written since this tick read it (``pool-scale --remove T``: a lower
+        target, a retire list) keeps its target change and its tickets, and stays unapplied
+        (``scale_seq`` is not moved past it), so the next read of the file applies it. The
+        time of the last manual change (``manual_at``: the hold against automatic scaling)
+        is kept too."""
         if self.scale_path is None:
             return
         import fcntl  # noqa: PLC0415
@@ -593,21 +897,30 @@ class IslandPool:
                 old = {}
             if self.scale_run is not None and old.get("run") not in (None, self.scale_run):
                 old = {}
+            try:
+                unapplied = int(old.get("seq", 0)) > self.scale_seq and int(old["target"]) >= 0
+            except (KeyError, TypeError, ValueError):
+                unapplied = False
             seq = max(int(old.get("seq", 0)), self.scale_seq) + 1
-            new = {**{k: v for k, v in old.items() if k in ("paused", "hold_tasks", "manual_released")},
-                   "run": self.scale_run if self.scale_run is not None else old.get("run"), "target": int(target),
-                   "seq": seq, "retire": [], "mode": None, "source": source, "requested": self.clock(),
+            wanted = int(target)
+            if unapplied:  # the same step down from the target that request asked for
+                wanted = max(0, int(old["target"]) + int(target) - self.config.target)
+            new = {**{k: v for k, v in old.items() if k in ("paused", "hold_tasks", "manual_released", "manual_at")},
+                   "run": self.scale_run if self.scale_run is not None else old.get("run"), "target": wanted,
+                   "seq": seq, "retire": list(old.get("retire") or ()) if unapplied else [],
+                   "mode": old.get("mode") if unapplied else None, "source": source, "requested": self.clock(),
                    "previous": self.config.target, **extra}
             tmp = self.scale_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(new, indent=1))
             tmp.replace(self.scale_path)
-        self.scale_seq = seq
+        if not unapplied:
+            self.scale_seq = seq
         self.config.target = int(target)
 
     def counted(self) -> list[Member]:
         """The members that count against the target, as the fill step counts them (a
         member whose replacement is ready does not; one draining does not)."""
-        return [m for m in self.live() if m.state != DRAINING and m.retiring_since is None
+        return [m for m in self.live() if m.state not in (DRAINING, FENCING) and m.retiring_since is None
                 and not (m.replaced_by and m.state == READY)]
 
     def retiring(self) -> list[Member]:
@@ -654,7 +967,7 @@ class IslandPool:
             self.shrink -= len(victims)
             mode = self.scale_mode or self.ecfg.scale_down
             for m in victims:
-                if m.state in (GONE, DRAINING):
+                if m.state in (GONE, DRAINING, FENCING):
                     continue
                 if mode == "drain" and m.state != READY:
                     # a replacement not ready yet: it goes now, the ready node it replaces drains
@@ -750,9 +1063,12 @@ class IslandPool:
             m.retiring_since = None
             self._event("scale_drain_cancelled", ticket=m.ticket, shard=m.shard, target=self.config.target)
 
-    def _finish_retire(self, m: Member, now: float, *, outcome: str, alone: bool = False) -> None:
+    def _finish_retire(self, m: Member, now: float, *, outcome: str, alone: bool = False,
+                       must_release: bool = False) -> None:
         """Fence and drain (release, delete, ended) ``m`` and its linked members that are not
-        draining on their own (``alone``: ``m`` only); event ``scaled_down``."""
+        draining on their own (``alone``: ``m`` only); event ``scaled_down``. A member whose
+        fence failed stays ``fencing`` and is drained once it succeeds (``must_release``: its
+        ticket ended or its lease is over; it is drained now and the fence stays owed)."""
         waited = None if m.retiring_since is None else round(now - m.retiring_since)
         group = [m] if alone else [m] + [x for x in self._linked(m)[1:] if x.retiring_since is None]
         if self.config.data_slots is not None and (m.data_slot is not None or m.joined):
@@ -762,9 +1078,12 @@ class IslandPool:
             self._event("slot_paused", ticket=m.ticket, shard=m.shard, data_slot=m.data_slot)
         for x in group:
             x.retiring_since = None
-            self._fence(x, "scale down")
             x.replaced_by = None
             x.end_reason = "scaled down"
+            if not self._fence(x, "scale down") and not must_release:
+                x.state, x.fence_then, x.fence_lost = FENCING, "scale", False
+                continue
+            x.fence_then = None
             self._drain(x, "scale down")
         ended = None
         if m.state == GONE:
@@ -836,6 +1155,7 @@ class IslandPool:
 
         for m in [m for m in self.members if m.state == DRAINING]:
             self._drain(m, "retry")
+        self._retry_fences(now)
         self._reassert_drains()
 
         self._prefetch()
@@ -853,17 +1173,29 @@ class IslandPool:
         by_ticket = {m.ticket: m for m in self.members}
         for m in self.live():
             if m.state == READY and m.replaces and by_ticket.get(m.replaces) \
-                    and by_ticket[m.replaces].state not in (GONE, DRAINING):
+                    and by_ticket[m.replaces].state not in (GONE, DRAINING, FENCING):
                 self._drain(by_ticket[m.replaces], f"replacement {m.ticket} ready")
                 m.replaces = None
         for m in self.live():
             if m.state != DRAINING and not m.paused and m.lease_until is not None \
                     and now >= m.lease_until - self.config.end_margin_s:
                 if m.retiring_since is not None:
-                    self._finish_retire(m, now, outcome="lease end")
+                    self._finish_retire(m, now, outcome="lease end", must_release=True)
                     continue
-                if m.replaced_by is None or by_ticket.get(m.replaced_by) is None \
-                        or by_ticket[m.replaced_by].state != READY:
+                successor = by_ticket.get(m.replaced_by) if m.replaced_by else None
+                if successor is None or successor.state != READY:
+                    # make-before-break did not make it: the slot samples nothing until a
+                    # successor is up, and no sampler of the shard answers a handoff, so
+                    # the shard is fenced (its claims go back at once; a successor not
+                    # started yet waits for the fence, as after an eviction)
+                    self._once(m, "lease_end_gap", "lease_end_without_ready_replacement", level="alert",
+                               lease_until=m.lease_until, replacement=successor.ticket if successor else None,
+                               replacement_state=successor.state if successor else None,
+                               refused=self._refused or self._no_account)
+                    # only a successor whose sampler is starting asks for the handoff; one that
+                    # failed meanwhile (fencing, draining, gone) answers nothing: fence then too
+                    if successor is None or successor.state != STARTING or successor.started is None:
+                        self._fence(m, "lease end")
                     self._handoff_slot(m)
                 self._drain(m, "lease end")
 
@@ -880,6 +1212,12 @@ class IslandPool:
         # adopt this run's unowned tickets before ordering (a restarted pool must not order
         # a second node for a target its adopted node already fills)
         self._patrol(now)
+        for account in self.config.accounts:  # halted slots are seen (and alerted) without an order
+            halt = self._slot_halt(account)
+            if halt is not None:
+                self._note_halt(account, halt)
+            elif getattr(self.ops, "slot_halt", None) is not None:
+                self._halt_lifted(account)  # lifted while no order was due: a later halt alerts again
 
         # replacements for members close to their lease end
         for m in self.live():
@@ -888,10 +1226,13 @@ class IslandPool:
                 self._order(replaces=m)
 
         # fill up to target (members waiting for a replacement count until they go)
+        # (a member whose release its halted slot refuses may stay for hours: it fills no place)
         while len([m for m in self.live() if m.retiring_since is None
-                   and not (m.replaced_by and m.state == READY)]) < self.config.target:
+                   and not (m.replaced_by and m.state == READY)
+                   and not (m.state == DRAINING and m.ticket in self._drain_hold)]) < self.config.target:
             if self._order() is None:
                 break
+        self._slots_short()
         if self.breaker.tripped and not self.live():
             self.stop("breaker tripped and no member left")
 
@@ -939,7 +1280,7 @@ class IslandPool:
                 if p.ticket == m.replaces and p.state != GONE:
                     p.replaced_by = None
         m.retiring_since = m.retiring_since or now
-        self._finish_retire(m, now, outcome="released by a person", alone=True)
+        self._finish_retire(m, now, outcome="released by a person", alone=True, must_release=True)
 
     def _watch_kept(self, m: Member, now: float) -> None:
         """A member kept after a configuration error: its lease end and its ticket's
@@ -1029,21 +1370,31 @@ class IslandPool:
         probe = self._probe(m) if status.state == "active" else None
         if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
             self._note_progress(m, probe, now)
+            m.absent_seen = False
             if m.state == READY:
                 m.resumed = False  # its sampler outlived the pause: a later exit is a crash
         if probe is not None:
             if probe.node == el.PROBE_UNREACHABLE:
-                m.unreachable_since = m.unreachable_since if m.unreachable_since is not None else now
+                if m.unreachable_since is None or m.unreachable_seen is None:
+                    m.unreachable_since = now
+                m.unreachable_seen = now
             else:
                 if m.unreachable_since is not None:
                     self._event("node_reachable_again", ticket=m.ticket, after_s=round(now - m.unreachable_since))
                     if "blip" in m.alerted:
                         m.alerted.remove("blip")
-                m.unreachable_since = None
+                m.unreachable_since = m.unreachable_seen = None
             if probe.joined and not m.joined:
                 m.joined = True
             self._metrics_seen(m, probe)
             self._vram_seen(m, probe)
+        elif m.unreachable_since is not None and m.unreachable_seen is not None:
+            # not probed this tick (the status call failed, a start runs): the time since the
+            # last look says nothing about the node, so the grace does not run through it.
+            # Else two lone probe failures around such a gap read as one long outage and a
+            # healthy node is fenced and deleted.
+            m.unreachable_since += now - m.unreachable_seen
+            m.unreachable_seen = now
         verdict = el.classify(status, probe, now=now, unreachable_since=m.unreachable_since, cfg=cfg,
                               joined=m.joined if probe is None else (m.joined or probe.joined))
         kind = verdict.kind
@@ -1070,13 +1421,13 @@ class IslandPool:
                 self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
             elif m.state == PROVISIONING:  # never granted (e.g. lost in provisioning)
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
-            self._retire(m, kind, lost=True)
+            self._retire(m, kind, lost=True, must_release=True)  # its ticket ended: nothing to keep
             if kind == el.BALANCE:
                 self.stop("a ticket ended for the balance")
             return
         if kind == el.OVERDUE:
             self._event("lease_overdue", ticket=m.ticket, account=m.account, shard=m.shard, detail=verdict.detail)
-            self._retire(m, "overdue", lost=False)
+            self._retire(m, "overdue", lost=False, must_release=True)  # billed past its lease
             return
         if kind == el.LOST:
             self._event("node_lost", ticket=m.ticket, account=m.account, shard=m.shard, detail=verdict.detail)
@@ -1095,6 +1446,9 @@ class IslandPool:
                 self._retire(m, "handed off", lost=False)
             return
         if kind == el.FINISHED:
+            # once the data ended (another sampler finished) nothing is restarted any more
+            if not self.finished and self._exit_zero_not_data_end(m, now):
+                return
             self._event("sampler_finished", ticket=m.ticket, shard=m.shard)
             # a normal end (the data ended): no restart, no replacement node, no new order
             self.finished = self.finished or f"sampler {m.shard} finished (exit 0)"
@@ -1104,6 +1458,12 @@ class IslandPool:
                 self.stop(f"sampler {m.shard} finished (exit 0)")
             return
         if kind == el.CRASHED:
+            if m.state == READY and probe is not None and probe.sampler == "absent" and not m.absent_seen:
+                # a restart removes the container first: one reading that it is not there
+                # (a ready sampler's container does not go by itself) waits for a second one
+                m.absent_seen = True
+                return
+            m.absent_seen = False
             self._crashed(m, now, verdict.detail)
             return
         if kind == el.CONFIG_ERROR:
@@ -1115,6 +1475,26 @@ class IslandPool:
         if m.state == PROVISIONING:
             if status.state == "active" and m.start_retry_at is not None and now < m.start_retry_at:
                 return  # a transient start failure: the retry waits out its backoff
+            blocker = self._fence_blocker(m) if status.state == "active" else None
+            if blocker is not None:
+                # the shard it continues is not fenced yet: its old sampler may still write
+                # and hold its claims. The start waits for the fence.
+                self._once(m, "fence_wait", "start_waits_for_fence", predecessor=blocker.ticket,
+                           predecessor_shard=blocker.shard)
+                m.fence_wait_since = now if m.fence_wait_since is None else m.fence_wait_since
+                if now - m.fence_wait_since >= float(self.ecfg.fence_blocked_hold_s):
+                    # granted and billed for nothing: released; what it was to continue goes
+                    # back to pending and is ordered again once the fence succeeded. Not a
+                    # provisioning failure (the breaker does not count it).
+                    self._event("fence_blocked_node_released", ticket=m.ticket, account=m.account, shard=m.shard,
+                                predecessor=blocker.ticket, predecessor_shard=blocker.shard,
+                                waited_s=round(now - m.fence_wait_since))
+                    self._retire(m, "start blocked by an owed fence", lost=False)
+                return
+            m.fence_wait_since = None
+            if status.state == "active" and "fence_wait" in m.alerted:
+                m.alerted.remove("fence_wait")
+                m.created = now  # the start timeout counts from here, not from the wait
             if status.state == "active":  # a provider without leases (sky) has no lease_until
                 m.start_retry_at = None
                 self._clear_stale_handoff(m)
@@ -1193,6 +1573,7 @@ class IslandPool:
             restart(m, self.shards())
             now = self.clock()
             m.config_error = None
+            m.fenced_for_restart = False  # a new sampler replaced the fenced one
             m.restarts = 0  # restarts before a configuration fix are not a crash loop
             m.state, m.started, m.joined, m.created = STARTING, now, False, now
             self._event("sampler_retry", ticket=m.ticket, shard=m.shard)
@@ -1224,13 +1605,17 @@ class IslandPool:
         that shard that no member of this pool wrote is left from an earlier run
         attempt that used the same shard name (a fenced shard of a failed pool); it
         would stop the new sampler at once. Such a record is set aside by the ops
-        (``clear_stale_handoff``, the run's store only); one naming a live shard or a
-        fence of a ticket of this pool stays."""
+        (``clear_stale_handoff``, the run's store only). The only request that stays is
+        one of a live member this pool started to continue ``m.shard`` (its sampler
+        wrote it). A record that names another shard this pool holds (the earlier
+        attempt numbered its shards the same way) or a pool fence (a member this pool
+        fenced is drained, never started again; a fence of the same ticket is left
+        from the pool that held it before it was adopted) is stale."""
         clear = getattr(self.ops, "clear_stale_handoff", None)
         if clear is None or not m.shard:
             return
-        keep = {s.shard for s in self.members if s.state != GONE and s.shard and s.shard != m.shard}
-        keep |= {f"{FENCE_SUCCESSOR_PREFIX}{s.ticket}" for s in self.members}
+        keep = {s.shard for s in self.members if s is not m and s.state != GONE and s.shard
+                and s.started is not None and s.replaces_shard == m.shard}
         try:
             record = clear(m, keep)
         except Exception as error:  # noqa: BLE001 - the sampler then reports the handoff itself
@@ -1259,6 +1644,7 @@ class IslandPool:
                         after_resume=True)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1276,6 +1662,7 @@ class IslandPool:
             self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts, detail=detail)
             try:
                 restart(m, self.shards())
+                m.fenced_for_restart = False  # a new sampler replaced the fenced one
             except Exception as error:  # noqa: BLE001
                 self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
                 if is_config_error(error):
@@ -1287,6 +1674,62 @@ class IslandPool:
         self._event("sampler_crash_loop", ticket=m.ticket, shard=m.shard, restarts=m.restarts, detail=detail)
         self._fail(now, f"sampler on {m.ticket} crash loop")
         self._retire(m, "sampler crash loop", lost=False)
+
+    def _exit_zero_not_data_end(self, m: Member, now: float) -> bool:
+        """A sampler ended with exit 0: before that is read as the end of the data, ask the
+        run's store why it ended (``ops.exit_evidence``; ops without it: False, as before).
+        A sampler that obeys a stop request (handoff record) or leaves FENCED (its lease
+        taken by a pool fence, its dispenser member retired by an operator) ends cleanly
+        too, and this pool may not know it asked: its fence is written to the store before
+        its state is saved. True: handled here, the data has not ended.
+
+        * a stop request naming a live member's shard: that member continues the shard;
+        * any other stop request (a pool fence): the node is retired as fenced and the
+          next order continues its shard;
+        * no stop request, the lease held by a pool fence or the newest incarnation left
+          FENCED: the sampler is restarted in place like a crashed one (counted toward
+          ``max_sampler_restarts``; past it the node is replaced);
+        * the store did not read: nothing is decided this tick.
+
+        The store's records decide whenever the ops can read them; ``fenced_for_restart``
+        (this pool's memory of a stall fence) is the fallback for ops that cannot, because
+        the note can be wrong both ways: lost with a killed pool, or left set after a
+        restart whose call failed although the new sampler runs."""
+        read = getattr(self.ops, "exit_evidence", None)
+        if read is None:
+            if m.fenced_for_restart:
+                # no store to ask: this pool's own note that it fenced the incarnation for a
+                # restart that did not replace it (e.g. its start failed on one ssh error)
+                self._restart_fenced(m, now)
+                return True
+            return False
+        try:
+            seen = read(m)
+        except Exception as error:  # noqa: BLE001 - never end the pool on a store that did not read
+            self._once(m, "exit_evidence", "exit_evidence_unreadable", error=repr(error)[:300])
+            return True
+        if "exit_evidence" in m.alerted:
+            m.alerted.remove("exit_evidence")
+        if not seen:
+            return False
+        successor = seen.get("handoff")
+        # a pool fence on the lease that did not supersede the newest incarnation (it never
+        # held the lease: a sampler without a lease, or an old fence left on the shard) says
+        # nothing about that incarnation: its FINISHED leave is the end of the data
+        untouched = seen.get("leave") == "FINISHED" and seen.get("superseded") is False
+        fenced = (bool(seen.get("pool_fenced")) and not untouched) or seen.get("leave") == "FENCED"
+        if successor is None and not fenced:
+            return False
+        self._event("sampler_exit_not_data_end", ticket=m.ticket, account=m.account, shard=m.shard,
+                    handoff=successor, lease=seen.get("lease"), leave=seen.get("leave"))
+        if successor is not None:
+            if any(s is not m and s.state != GONE and s.shard == successor for s in self.members):
+                m.handed_off = True  # the next tick takes it as handed off
+            else:
+                self._retire(m, "fenced", lost=False)
+            return True
+        self._crashed(m, now, f"sampler left fenced (exit 0): lease {seen.get('lease')}, leave {seen.get('leave')}")
+        return True
 
     def _vram_seen(self, m: Member, probe: el.Probe) -> None:
         """A new high-VRAM alert on the sampler's tape (``rl_sampler_vram_high``)
@@ -1338,6 +1781,12 @@ class IslandPool:
         limit = self.ecfg.engine_stall_s
         if limit is None or probe.gen_tokens is None or probe.sampler != "running":
             return False
+        if m.fenced_for_restart and m.fence_tokens is not None and probe.gen_tokens < m.fence_tokens:
+            # the counter started over: a new engine process runs, so a restart whose call
+            # failed (the ssh dropped after ``docker run``) did replace the fenced sampler. A
+            # counter that only grew proves nothing (the stalled engine may have recovered,
+            # and its sampler still leaves fenced): the note stays.
+            m.fenced_for_restart, m.fence_tokens = False, None
         busy = (probe.running or 0) + (probe.queued or 0) > 0
         if m.tokens_seen is None or probe.gen_tokens != m.tokens_seen:
             if m.tokens_seen is not None and probe.gen_tokens > m.tokens_seen and m.stall_failures:
@@ -1365,16 +1814,26 @@ class IslandPool:
             return False
         fence = getattr(self.ops, "fence_incarnation", None)  # lease only: the shard keeps sampling
         if fence is not None:  # the stuck incarnation's claims go back at once
+            # noted before the call (a fence can take effect and still raise: a lost answer)
+            # and saved before the restart (a pool killed during its ssh must not forget it)
+            m.fenced_for_restart, m.fence_tokens = True, probe.gen_tokens
+            self._save_now()
             try:
                 self._owner_event(m, fence(m))
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")
-            except Exception as error:  # noqa: BLE001 - the restart supersedes it at its join anyway
-                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            except Exception as error:  # noqa: BLE001
+                # not owed like a shard fence: the restart below supersedes the incarnation at
+                # its join, and when that fails too the stall is seen again after
+                # engine_stall_s and both are tried again (max_stall_restart_failures, then
+                # the node is retired with the shard fence, which is retried until it holds)
+                self._event("fence_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300],
+                            kind="incarnation")
         m.stall_failures += 1
         self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.stall_failures,
                     detail=f"engine stalled: {detail}")
         try:
             restart(m, self.shards())
+            m.fenced_for_restart = False  # the new sampler replaced the fenced one
         except Exception as error:  # noqa: BLE001 - counts as a failed restart; probed again next tick
             self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
             if is_config_error(error):
@@ -1383,6 +1842,43 @@ class IslandPool:
         m.state, m.started, m.joined, m.created = STARTING, now, False, now
         m.tokens_seen = m.tokens_moved_at = None
         return True
+
+    def _restart_fenced(self, m: Member, now: float) -> None:
+        """The sampler this pool fenced for an in-place restart ended with exit 0 and no
+        restart has replaced it yet: start the shard's sampler again on the node, counted
+        toward ``max_sampler_restarts`` (past it the node is retired and replaced)."""
+        if m.retiring_since is not None:  # scaled down: not restarted
+            m.fenced_for_restart = False
+            self._finish_retire(m, now, outcome="sampler exited")
+            return
+        self._once(m, "left_fenced", "sampler_left_fenced")
+        restart = getattr(self.ops, "restart", None)
+        if restart is None or self._paused_now(m):
+            return
+        reset = self.ecfg.sampler_restart_reset_s
+        if m.restarts and m.ready_since is not None and reset is not None and now - m.ready_since >= reset:
+            m.restarts = 0  # healthy long enough since the last restart
+        m.ready_since = None  # counted from here: a restart that keeps failing reaches the limit
+        if m.restarts >= self.ecfg.max_sampler_restarts:
+            m.fenced_for_restart = False
+            self._fail(now, f"sampler on {m.ticket} not restarted after its fence")
+            self._retire(m, "fenced restart failed", lost=False)
+            return
+        m.restarts += 1
+        self._event("sampler_restart", ticket=m.ticket, shard=m.shard, attempt=m.restarts,
+                    detail="left fenced by this pool's restart (exit 0)")
+        try:
+            restart(m, self.shards())
+        except Exception as error:  # noqa: BLE001 - tried again at the next tick
+            self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(error)[:300])
+            if is_config_error(error):
+                self._config_error(m, repr(error)[:300])
+            return
+        m.fenced_for_restart = False
+        if "left_fenced" in m.alerted:
+            m.alerted.remove("left_fenced")
+        m.state, m.started, m.joined, m.created = STARTING, now, False, now
+        m.tokens_seen = m.tokens_moved_at = None
 
     def _patrol(self, now: float) -> None:
         """Open tickets of this run (ledger, by id) that no live member owns are adopted
@@ -1406,11 +1902,24 @@ class IslandPool:
                 owned.add(str(ticket))
                 continue
             stray = Member(account, str(ticket), shard="", state=DRAINING, created=now)
+            if str(ticket) in self._drain_hold:
+                # a release its slot's guard refused: not asked for every tick. Nothing to
+                # release once the ticket ended (the ledger row is the provider's to close).
+                if self._drain_hold[str(ticket)] == float("inf") or self._drain_hold[str(ticket)] > now \
+                        or self._slot_halt(account) is not None:
+                    continue
             self._event("orphan_lease", ticket=ticket, account=account)
             try:
                 self.ops.drain(stray)
+                self._drain_hold.pop(str(ticket), None)
                 self._event("released", ticket=ticket, account=account, why="orphan")
             except Exception as error:  # noqa: BLE001
+                if error_is(error, DEFERRED_ERRORS + REFUSED_ERRORS + OWNERSHIP_ERRORS):
+                    ended = self._ticket_ended(stray)
+                    self._drain_hold[str(ticket)] = float("inf") if ended else now + SLOT_RETRY_S
+                    self._event("orphan_release_refused", ticket=ticket, account=account, ended=ended,
+                                error=str(error)[:300], retry_in_s=None if ended else SLOT_RETRY_S)
+                    continue
                 self._event("drain_failed", ticket=ticket, account=account, why="orphan", error=repr(error)[:300])
 
     def _adopt(self, account: Any, ticket: str, now: float) -> Member:
@@ -1473,16 +1982,26 @@ class IslandPool:
         self.stop(why)
         for _ in range(attempts - 1):
             left = self.live()
-            if not left:
+            owed = [m for m in self.members if m.fence_pending is not None]
+            if not left and not owed:
                 break
             sleep(wait_s)
             for m in left:
                 self._drain(m, "stop retry")
+            for m in owed:  # the nodes go anyway; the fences are tried again
+                self._fence(m, m.fence_pending)
+        for m in self.members:
+            if m.fence_pending is not None:
+                self.log(f"pool: WARNING: shard {m.shard} of {m.ticket} was NOT fenced ({m.fence_failures} "
+                         "attempts); its node is released")
+                self._once(m, "fence_stuck", "fence_stuck", why=m.fence_pending, failures=m.fence_failures,
+                           for_s=None if m.fence_since is None else round(self.clock() - m.fence_since),
+                           state=m.state)
         self._patrol(self.clock())
         return self.live()
 
     def snapshot(self) -> dict:
-        return {"stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,
+        return {"format": STATE_FORMAT, "stopped": self.stopped, "finished": self.finished, "halted": self.halted, "next_shard": self.next_shard,
                 "target": self.config.target, "scale_seq": self.scale_seq, "shrink": self.shrink,
                 "members": [asdict(m) for m in self.members], "pending": list(self.pending),
                 "breaker": asdict(self.breaker), "budget": asdict(self.budget)}
@@ -1498,9 +2017,11 @@ class IslandPool:
         pool.state_path = path
         if path.exists():
             doc = json.loads(path.read_text())
+            check_state_format(doc, path)
             pool.members = [Member(**m) for m in doc.get("members", [])]
             for m in pool.members:  # a state file from before ever_ready: a joined sampler was ready once
                 m.ever_ready = m.ever_ready or m.joined
+                m.unreachable_seen = None  # the pool was down: that time is not part of a grace
             pool.next_shard = doc.get("next_shard", 0)
             pool.stopped = doc.get("stopped")
             pool.finished = doc.get("finished")
@@ -1517,6 +2038,69 @@ class IslandPool:
                     else:  # no probe: run the start again (every step is idempotent)
                         m.state = PROVISIONING
         return pool
+
+
+# -- state file format ---------------------------------------------------------
+# 1: no ``format`` key (the files before the fence retry). 2: ``format``, the member state
+# ``fencing`` and the member fields below. A pool reads any format up to its own; the code
+# before format 2 fails on a format 2 file (unknown member fields), also in pool-stop:
+# ``pool-state-downgrade`` (:func:`downgrade_state`) writes the file back as format 1.
+STATE_FORMAT = 2
+FORMAT_1_MEMBER_FIELDS = (
+    "account", "ticket", "shard", "state", "lease_until", "replaces",
+    "replaced_by", "created", "data_slot", "replaces_shard", "granted", "charged_to",
+    "hourly_ucr", "started", "joined", "restarts", "ready_since", "ever_ready",
+    "unreachable_since", "status_fail_since", "alerted", "predecessor_lost", "predecessor_retired", "handed_off",
+    "end_reason", "drain_error", "config_error", "tokens_seen", "tokens_moved_at", "stall_failures",
+    "metrics_misses", "retiring_since", "drain_seq", "paused", "resumed", "progress_at",
+    "progress_ticks", "trainer_wait", "start_retries", "start_retry_at", "vram_alerts_seen",
+)
+
+
+class PoolStateFormatError(RuntimeError):
+    """The pool state file has a format this code does not read."""
+
+
+def check_state_format(doc: dict[str, Any], path: Any = None) -> None:
+    """Refuse a state file written by a newer pool (its fields would be dropped or misread)."""
+    try:
+        found = int(doc.get("format", 1))
+    except (TypeError, ValueError):
+        found = None
+    if found is None or found > STATE_FORMAT:
+        raise PoolStateFormatError(
+            f"pool state {path or ''} has format {doc.get('format')!r}; this code reads up to format "
+            f"{STATE_FORMAT}. It was written by a newer yeto: run the pool commands with that version, or "
+            "write the file back for this one with its `python -m yeto.launch.nc pool-state-downgrade "
+            "--config <pool.json>`")
+
+
+def downgrade_state(doc: dict[str, Any], *, drop_owed_fences: bool = False) -> tuple[dict[str, Any] | None, list[str]]:
+    """``doc`` as a format 1 state document, and why not (then None): a member in a state
+    format 1 does not know (``fencing``), or a shard fence still owed (format 1 would forget
+    it; ``drop_owed_fences`` gives it up, the notes then name each shard left unfenced).
+    The format 2 member fields are dropped: grace and restart bookkeeping only."""
+    notes: list[str] = []
+    refused = False
+    for m in doc.get("members", []):
+        if m.get("state") == FENCING:
+            refused = True
+            notes.append(f"member {m.get('ticket')} (shard {m.get('shard')}) is `fencing`: its node is kept until "
+                         "its shard fence succeeds; the older code does not know this state. Let the pool finish "
+                         "the fence, or run pool-stop (it releases the node) first")
+        elif m.get("fence_pending") is not None:
+            if drop_owed_fences:
+                notes.append(f"shard {m.get('shard')} of {m.get('ticket')} is NOT fenced and the older code will "
+                             "not retry it")
+            else:
+                refused = True
+                notes.append(f"the fence of shard {m.get('shard')} (member {m.get('ticket')}) is still owed; the "
+                             "older code would forget it. Let the pool finish it, or pass --drop-owed-fences")
+    if refused:
+        return None, notes
+    out = {k: v for k, v in doc.items() if k != "format"}
+    out["members"] = [{k: v for k, v in m.items() if k in FORMAT_1_MEMBER_FIELDS} for m in doc.get("members", [])]
+    return out, notes
 
 
 def _slot(account: Any) -> Any:

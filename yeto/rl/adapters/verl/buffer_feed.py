@@ -245,6 +245,7 @@ class _Pulled:
     samples: list[dict[str, Any]]
     param_versions: tuple[int | None, ...]
     record: dict[str, Any]
+    entry: Any = None  # its buffer index entry (judged again before training)
 
 
 DROP_WINDOW_ENV = "YETO_BUFFER_DROP_WINDOW"  # groups per drop-rate window (default 20)
@@ -271,6 +272,7 @@ def print_feed_event(event: str, **fields: Any) -> None:
 from yeto.rl.engine.incarnation_lease import (  # noqa: E402
     INCARNATION_FENCE_ENV,
     LEASE_ROOT_ENV,
+    LeaseUnknown,
     default_incarnation_gate,
 )
 
@@ -280,11 +282,14 @@ class BufferFeed:
 
     ``buffer``: the trainer's ``FileSampleBuffer``; ``vmap``: returns the
     island's live consumption map (module doc, ``pull``); ``add_group(rows)``:
-    hands kept rows to the trainer actor; ``record(fields)``: one record per
-    pulled group."""
+    hands kept rows to the trainer actor (at once: the feed process never holds
+    a round's rows); ``remove_group(uid)``: takes a handed-over group back out of
+    the trainer actor's round before it is assembled (a group fenced since it was
+    kept, :meth:`recheck_kept`); ``record(fields)``: one record per pulled group."""
 
     def __init__(self, buffer: Any, *, vmap: Callable[[], VersionMap], shape: RowShape,
                  add_group: Callable[[dict[str, Any]], Any], record: Callable[[dict[str, Any]], None],
+                 remove_group: Callable[[str], Any] | None = None,
                  tokenize: Callable[[str], Sequence[int]] | None = None, wait_s: float = 3600.0,
                  poll_s: float = 2.0, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
@@ -325,6 +330,7 @@ class BufferFeed:
         self.vmap = vmap
         self.shape = shape
         self.add_group = add_group
+        self.remove_group = remove_group
         self.record = record
         self.tokenize = tokenize
         self.wait_s = float(wait_s)
@@ -334,9 +340,16 @@ class BufferFeed:
         self.sleep = sleep
         self._last: _Pulled | None = None
         self.pulled_positions: list[int] = []
+        self.lease_waits = 0  # pauses for a lease the gate could not read
         self.cursor_log = cursor_log
         self.merged = merged
         self._round_kept: list[int] = []  # trained positions of the round being collected
+        # kept groups of the round being collected, already in the trainer actor (their
+        # rows are not held here: a 1M-context group is GBs of row lists):
+        # (position, entry, record); judged again (:meth:`recheck_kept`) and recorded
+        # kept when the round closes
+        self._kept_pending: list[tuple[int, Any, dict[str, Any]]] = []
+        self._lease_reads: dict[str, float] = {}  # shard -> when the recheck read its lease
         # the closed round's cursor record, written only once that round has trained
         # (:meth:`commit_round`)
         self._pending: tuple[int, list[int], int] | None = None
@@ -368,6 +381,20 @@ class BufferFeed:
                                       f"(read position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
 
+    def _gate_verdict(self, item: Any) -> str | None:
+        """The incarnation gate's verdict on ``item``. While its lease cannot be read
+        (:class:`LeaseUnknown`: the gate fails closed and logs, rate limited) the
+        group is neither trained nor dropped: the feed reads one position after the
+        other, so it waits and asks again."""
+        if self.gate is None:
+            return None
+        while True:
+            try:
+                return self.gate.verdict(item.entry, int(item.position))
+            except LeaseUnknown:
+                self.lease_waits += 1
+                self.sleep(self.poll_s)
+
     def _local(self, version: int) -> int | None:
         if self.merged is not None:
             local = self.merged.local(version)
@@ -386,7 +413,7 @@ class BufferFeed:
             item = self._next()
             if item is None:
                 return None
-            stale = None if self.gate is None else self.gate.verdict(item.entry, int(item.position))
+            stale = self._gate_verdict(item)
             if stale is not None:  # never trained, never read
                 self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
                              "kept": False, "dropped": STALE_REASON, "detail": stale,
@@ -426,7 +453,7 @@ class BufferFeed:
             "position": position, "sample_id": item.entry.sample_id,
             "behavior_versions": versions, "param_versions": list(local),
             "source": (item.entry.provenance or {}).get("sampler_id"),
-            "samples": len(samples), "response_tokens": sum(lengths)})
+            "samples": len(samples), "response_tokens": sum(lengths)}, item.entry)
         self.pulled_positions.append(position)
         return {"uid": f"{UID_PREFIX}{int(item.position)}", "min_steps": local, "max_steps": local,
                 "calls": (None,) * len(samples), "lengths": lengths,
@@ -482,11 +509,67 @@ class BufferFeed:
         if None in last.param_versions:  # the collector keeps only groups whose versions it knows
             raise BufferFeedError(f"buffer position {last.position}: kept with an unknown version "
                                   f"{last.param_versions}")
+        # handed to the trainer actor now, as before the recheck: holding the rows here
+        # until the round closes kept a whole round's rows in the feed process. A group
+        # fenced before the round is assembled is taken back out (:meth:`recheck_kept`).
         self.add_group(group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
                                   param_versions=last.param_versions, shape=self.shape,
                                   tokenize=self.tokenize))
+        self._kept_pending.append((last.position, last.entry, {**last.record, "kept": True}))
         self._round_kept.append(last.position)
-        self.record({**last.record, "kept": True})
+
+    def recheck_kept(self) -> list[str]:
+        """Judge the kept groups not yet handed to the trainer again, their leases
+        read again now (``IncarnationGate.recheck``): a round waits for its later
+        groups, and a fence that came meanwhile must keep an earlier group out (the
+        selection judged it on a lease cached up to ``refresh_s``). A group fenced
+        since is dropped as ``stale_incarnation`` (recorded and counted, never
+        trained); returns the uids dropped, which the round's collector replaces.
+        While a lease cannot be read the round waits and asks again (fail closed)."""
+        if self.gate is None or not self._kept_pending:
+            return []
+        recheck = getattr(self.gate, "recheck", None)
+        while True:
+            items = [(entry, position) for position, entry, _ in self._kept_pending]
+            if callable(recheck):
+                verdicts = recheck(items, self._lease_reads)
+            else:
+                verdicts = []
+                for entry, position in items:
+                    try:
+                        verdicts.append(self.gate.verdict(entry, int(position)))
+                    except LeaseUnknown as error:
+                        verdicts.append(error)
+            if not any(isinstance(v, LeaseUnknown) for v in verdicts):
+                break
+            self.lease_waits += 1
+            self.sleep(self.poll_s)
+        fenced: list[str] = []
+        kept: list[tuple[int, Any, dict[str, Any]]] = []
+        for pending, verdict in zip(self._kept_pending, verdicts):
+            if verdict is None:
+                kept.append(pending)
+                continue
+            position, entry, _ = pending
+            if self.remove_group is None:
+                raise BufferFeedError(f"buffer position {position}: fenced after it was kept, and this "
+                                      "feed cannot take a handed-over group back (no remove_group)")
+            self.remove_group(f"{UID_PREFIX}{position}")
+            self.record({"position": position, "sample_id": entry.sample_id, "kept": False,
+                         "dropped": STALE_REASON, "detail": verdict,
+                         "source": (entry.provenance or {}).get("sampler_id")})
+            self._round_kept.remove(position)
+            self.accepted -= 1  # counted when pulled; it is not trained
+            self._dropped(STALE_REASON, position, verdict)
+            fenced.append(f"{UID_PREFIX}{position}")
+        self._kept_pending = kept
+        return fenced
+
+    def _hand_over(self) -> None:
+        """Record the round's kept groups (judged again) kept."""
+        pending, self._kept_pending = self._kept_pending, []
+        for _, _, record in pending:
+            self.record(record)
 
     def drop(self) -> None:
         self.record({**self._take_last().record, "kept": False})
@@ -503,6 +586,8 @@ class BufferFeed:
         has trained (module doc, "What a relaunch reads again")."""
         if self._last is not None:
             raise BufferFeedError("round closed with a pulled group not kept or dropped")
+        self._hand_over()
+        self._lease_reads = {}
         kept, self._round_kept = self._round_kept, []
         self._pending = (int(rollout_id), kept, int(self.buffer.read_cursor))
 

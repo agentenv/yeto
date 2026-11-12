@@ -386,6 +386,13 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
                   f"buffer_shards {spec.get('buffer_shards')})")
             from yeto.launch import agentic_setup  # noqa: PLC0415
 
+            from yeto.rl.engine.agentic_round import drain_settings, drain_timeout_warning  # noqa: PLC0415
+
+            if isinstance(spec.get("agentic"), dict):
+                drain_settings(spec, drain=True)  # a bad drain_timeout_s / abandon_grace_s: a problem here
+            warning = drain_timeout_warning(spec)  # none for a spec that resolves to the live switch
+            if warning is not None:
+                notes.append(warning)
             setup_lines, setup_problems = agentic_setup.dry_run_report(spec, base_dir=Path(cfg["spec"]).parent)
             for line in setup_lines:
                 print(f"agentic.setup: {line}")
@@ -641,6 +648,7 @@ def pool_cfg_of(config_path: str) -> dict[str, Any]:
 def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     """``pool-retry --config F``: after a configuration error, restart the sampler on
     the same node(s) with the fixed config (checked here first)."""
+    check_state_file(cfg)
     try:
         cli.pool_config(cfg, allowed=None)
         if cfg.get("route", "ssh") == "ssh":
@@ -662,6 +670,50 @@ def retry_pool(cfg: dict[str, Any], config_path: str) -> int:
     else:
         print(f"pool-retry: no pool loop is alive; start it again (python -m yeto.launch.nc pool --config "
               f"{config_path}) and it restarts the sampler in place on {names}")
+    return 0
+
+
+def downgrade_state_file(cfg: dict[str, Any], config_path: str, *, drop_owed_fences: bool = False) -> int:
+    """``pool-state-downgrade --config F``: before going back to a yeto that reads only
+    the older pool state format, write the state file in that format (the file as it was
+    is kept next to it as ``<name>.format<N>.bak``). Refused while a pool loop is alive
+    and while a member is in a state the older code does not know."""
+    from ..pool import island_pool  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    if not state.exists():
+        print(f"pool-state-downgrade: no state file {state}: nothing to do")
+        return 0
+    lock = acquire_lock(lock_path(cfg), run=cli.run_id(cfg), role="pool-state-downgrade")
+    if lock is None:
+        print("pool-state-downgrade: refused, nothing changed: a pool loop is alive and rewrites the file "
+              f"every tick; stop it first (kill the loop, or pool-stop --config {config_path})")
+        return 2
+    try:
+        text = state.read_text()
+        doc = json.loads(text)
+        found = int(doc.get("format", 1))
+        if found <= 1:
+            print(f"pool-state-downgrade: {state} is format 1 already: nothing to do")
+            return 0
+        island_pool.check_state_format(doc, state)
+        new, notes = island_pool.downgrade_state(doc, drop_owed_fences=drop_owed_fences)
+        if new is None:
+            print("pool-state-downgrade: refused, nothing changed:")
+            for note in notes:
+                print(f"  - {note}")
+            return 2
+        backup = state.with_name(f"{state.name}.format{found}.bak")
+        backup.write_text(text)
+        tmp = state.with_suffix(state.suffix + ".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(state)
+    finally:
+        lock.close()
+    for note in notes:
+        print(f"pool-state-downgrade: WARNING: {note}")
+    print(f"pool-state-downgrade: {state} written as format 1 ({len(new['members'])} member(s)); the format "
+          f"{found} file is kept as {backup}")
     return 0
 
 
@@ -770,6 +822,7 @@ def scale_pool(cfg: dict[str, Any], config_path: str, target: int | None = None,
     ``elastic.manual_hold_s`` after a manual one (manual operations take priority).
     The control file keeps the manual entries (paused tickets, released tickets) and
     the tickets of an earlier request the loop has not applied yet."""
+    check_state_file(cfg)
     retire = list(retire or []) + list(remove or [])
     if mode is not None and mode not in island_status.SCALE_DOWN_MODES:
         print(f"pool-scale: refused: mode {mode!r} is not one of {list(island_status.SCALE_DOWN_MODES)}")
@@ -853,6 +906,7 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
     """``pool-pause --ticket T [--hold-tasks]`` / ``pool-resume --ticket T``: recorded in the
     control file; the running loop applies it within about a second (and after a restart). A paused
     member gets no automatic action and counts toward the target."""
+    check_state_file(cfg)
     name = "pool-resume" if resume else "pool-pause"
     state = cli.pool_state_path(cfg)
     path = scale_path(cfg)
@@ -904,7 +958,8 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
 
 def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | None:
     """The pool (config, config path, member) whose state holds ``ticket`` as a live
-    member, from the pid files of the state dir (they name the pool config)."""
+    member, from the pid files of the state dir (they name the pool config). Raises
+    ``PoolStateFormatError`` on a pool state of a newer format."""
     for pid in sorted(tunnel.state_dir().glob("pool-*.pid")):
         try:
             config_path = json.loads(pid.read_text())["config"]
@@ -912,6 +967,7 @@ def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | 
             doc = json.loads(cli.pool_state_path(cfg).read_text())
         except (OSError, ValueError, KeyError, TypeError):
             continue
+        check_state_file(cfg)  # a newer format: whether the ticket is a member cannot be told
         for m in billed_members(doc):
             if m.get("ticket") == ticket:
                 return cfg, config_path, m
@@ -962,6 +1018,7 @@ def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
 def stop_pool(cfg: dict[str, Any], config_path: str, *, wait_s: float = 900.0, poll_s: float = 5.0,
               sleep=None, ops=None) -> int:
     """Release every node the pool created (``pool-stop --config F``)."""
+    check_state_file(cfg)
     sleep = sleep or time.sleep
     cli.pool_config(cfg, allowed=None)  # releasing needs no ordering rights
     state = cli.pool_state_path(cfg)
@@ -1023,7 +1080,70 @@ def _release_from_state(cfg, config_path, proc, state, *, sleep, ops) -> int:
 
 # -- status --------------------------------------------------------------------
 
+def check_state_file(cfg: dict[str, Any]) -> None:
+    """Raise ``PoolStateFormatError`` when the pool's state file has a format newer than
+    this code reads (every pool command reads the file; none may guess at it)."""
+    from ..pool.island_pool import check_state_format  # noqa: PLC0415
+
+    state = cli.pool_state_path(cfg)
+    try:
+        doc = json.loads(state.read_text()) if state.exists() else {}
+    except (OSError, ValueError):
+        return  # unreadable: each command reports that in its own way
+    if isinstance(doc, dict):
+        check_state_format(doc, state)
+
+
+def account_attention(cfg: dict[str, Any], *, book: Any = None) -> list[dict[str, Any]]:
+    """What an operator must look at on the pool's National Compute accounts, from the
+    ticket ledger (read only, no call to National Compute): a halted account, a delete not
+    confirmed yet, an order without a recorded outcome whose call is over (the account may
+    hold a ticket no ledger row knows). [] for another provider."""
+    if not is_national_compute(cfg):
+        return []
+    try:
+        book = book if book is not None else cli.ledger()
+        accounts = [int(a) for a in cfg.get("accounts") or ()]
+    except Exception as error:  # noqa: BLE001 - reported, never fatal to a status
+        return [{"kind": "ledger_unreadable", "error": repr(error)[:300]}]
+    out: list[dict[str, Any]] = []
+    for account in accounts:
+        try:
+            halt, delete = book.halted(account), book.pending_delete(account, sent_only=True)
+            orders = book.pending_orders(account, in_flight=False)
+        except Exception as error:  # noqa: BLE001
+            out.append({"kind": "ledger_unreadable", "account": account, "error": repr(error)[:300]})
+            continue
+        if halt is not None:
+            out.append({"kind": "halted", "account": account, "halt_kind": halt.get("kind"),
+                        "reason": halt.get("halt"),
+                        "since": _until(halt.get("halted_at")), "expected_ticket": halt.get("expected_ticket"),
+                        "released_ticket": halt.get("released_ticket"),
+                        "action": f"check the account, then: python -m yeto.launch.nc clear-halt --account "
+                                  f"{account} --yes (the pool orders and releases nothing on it until then)"})
+        if delete is not None:
+            out.append({"kind": "delete_unconfirmed", "account": account, "ticket": delete.get("pending_delete"),
+                        "sent": _until(delete.get("sent_at")), "attempts": delete.get("attempts"),
+                        "action": "no other write on the account until that ticket reads ended"})
+        for row in orders:
+            out.append({"kind": "order_without_outcome", "account": account,
+                        "since": _until(row.get("since") or row.get("created_at")),
+                        "observed_ticket": row.get("observed_ticket"),
+                        "action": "an order was sent and its outcome never recorded: the account may hold a "
+                                  "billed ticket no ledger row knows; check it (python -m yeto.launch.nc status "
+                                  f"--account {account})"})
+    return out
+
+
+def print_attention(notes: list[dict[str, Any]]) -> None:
+    for note in notes:
+        what = " ".join(f"{k}={v}" for k, v in note.items() if k not in ("kind", "action") and v is not None)
+        print(f"ATTENTION: {str(note.get('kind')).upper()}: {what}" + (f" -> {note['action']}" if note.get("action")
+                                                                       else ""), file=sys.stderr)
+
+
 def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> int:
+    check_state_file(cfg)
     state = cli.pool_state_path(cfg)
     doc = json.loads(state.read_text()) if state.exists() else {}
     path = cli.pool_events_path(cfg)
@@ -1047,10 +1167,13 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
               "paused": list((scale or {}).get("paused") or []),
               "hold_tasks": list((scale or {}).get("hold_tasks") or []),
               "released_by_hand": sorted((scale or {}).get("manual_released") or {})}
+    attention = account_attention(cfg)
     print(json.dumps({"process": proc, "target": target, "nodes": len(left),
-                      "samplers": f"{len(left)}/{target}", "manual": manual, "scale": scale, "billed": billed,
+                      "samplers": f"{len(left)}/{target}", "accounts_attention": attention,
+                      "manual": manual, "scale": scale, "billed": billed,
                       "state": doc,
                       "events": [json.loads(x) for x in lines[-events:]]}, indent=1))
+    print_attention(attention)
     if left and (proc is None or not proc.get("alive")):
         _print_banner(billing_banner(config_path, left, why="no pool process is alive to drain them",
                                      national=is_national_compute(cfg), kind=provider_kind(cfg)))

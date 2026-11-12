@@ -998,15 +998,92 @@ def test_a_sampler_that_joined_before_the_trainer_moves_to_ownership_records_at_
     assert _names(_trainer(objects)) == ["inc-1-g0", "inc-1-g1"]
 
 
-def test_a_sampler_does_not_take_its_shard_back_from_a_fence_when_it_moves_to_ownership_records(tmp_path):
-    """The pool fenced the shard with an ownership record before the sampler's next
-    poll: the sampler's move finds an owner and is fenced by it."""
+def test_a_pool_fence_writes_no_ownership_record_into_a_shard_that_holds_none(tmp_path):
+    """The sampler joined before the trainer's generation lease (or runs older code):
+    its shard holds no ownership record, so the pool fences it by the lease record
+    alone. Its writer may not read ownership records, and an older one would stop on
+    the record instead of continuing the shard."""
     objects = _objects(tmp_path, trainer_lease=False)
     writer, lease = _sampler(objects, "inc-1")
     _add(writer, "inc-1", [0])
     TrainerLease.claim(objects, incarnation="trainer-1")
-    assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1")[0].epoch == 1  # no lease record written
+    assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1") is None
+    record = elastic.fence_shard(_records(objects), SHARD, by="t-1")
+    assert "owner" not in record and read_lease(_records(objects), SHARD)["incarnation"] == "pool-fence:t-1"
+    assert not [r for r in _shard(objects) if "owner" in r]
     assert lease.poll() is True and lease.fenced_by == "pool-fence:t-1" and not lease.adopted
-    assert [r["owner"]["incarnation"] for r in _shard(objects) if "owner" in r] == ["pool-fence:t-1"]
+
+
+def test_a_sampler_that_moves_to_ownership_records_after_a_lease_only_fence_is_fenced(tmp_path):
+    """The race the lease-only fence leaves: the sampler read its lease (still its own),
+    the pool wrote its lease record and found the shard without an owner, then the
+    sampler took the shard with its first ownership record. Its move reads the lease
+    once more and is fenced by the pool's record."""
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer, lease = _sampler(objects, "inc-1")
+    _add(writer, "inc-1", [0])
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1") is None
+    IncarnationLease(_records(objects), SHARD, "pool-fence:t-1").claim()  # the pool's lease write
+    lease._adopt()  # noqa: SLF001 - the move, after its lease read saw itself
+    assert lease.fenced and lease.fenced_by == "pool-fence:t-1"
+
+
+def test_a_pool_fence_after_the_sampler_moved_to_ownership_records_writes_one(tmp_path):
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer, lease = _sampler(objects, "inc-1")
+    _add(writer, "inc-1", [0])
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    assert lease.poll() is False and lease.adopted and lease.owned
+    record = elastic.fence_shard(_records(objects), SHARD, by="t-1")
+    assert record["owner"]["created"] is True
+    assert [r["owner"]["incarnation"] for r in _shard(objects) if "owner" in r] == ["inc-1", "pool-fence:t-1"]
     with pytest.raises(ShardFenced):
         _add(writer, "inc-1", [1])
+
+
+def test_the_trainer_buffer_on_an_object_store_claims_a_trainer_generation(tmp_path):
+    """The merging trainer is the switch to ownership records: its buffer open
+    claims the next generation, so samplers that join after it own their shards."""
+    objects = DirectoryObjectStore(tmp_path)
+    assert TrainerLease.current(objects) == 0
+    trainer = _trainer(objects)
+    assert trainer.trainer_lease is not None and TrainerLease.current(objects) == 1
+    writer, lease = _sampler(objects, "inc-1")
+    assert lease.owned
+
+
+def test_an_owned_claim_over_an_unreadable_lease_writes_no_ownership_record(tmp_path, monkeypatch):
+    """The claim reads the previous lease before it takes the shard: a claim that
+    fails (and is tried again by ``claim_patiently``) leaves no ownership record."""
+    from yeto.rl.engine import incarnation_lease as il
+
+    objects = _objects(tmp_path)
+    writer = _writer(objects)
+    lease = IncarnationLease(_records(objects), SHARD, "inc-1", buffer=writer, sleep=lambda s: None)
+
+    def unreadable(*a, **k):
+        raise il.LeaseReadError("503")
+
+    monkeypatch.setattr(il, "read_lease", unreadable)
+    with pytest.raises(il.LeaseReadError):
+        lease.claim()
+    assert not lease.owned and not [r for r in _shard(objects) if "owner" in r]
+
+
+def test_an_owned_sampler_holds_its_writes_while_the_shard_index_is_unreadable(tmp_path):
+    """Owned, the lease record is not read: the time bound of an unread lease does not
+    apply, the shard index's failed reads do (``unread_too_long``: the group waits)."""
+    now = [0.0]
+    objects = _objects(tmp_path)
+    writer, lease = _sampler(objects, "inc-1", monotonic=lambda: now[0], max_read_failures=2)
+    assert lease.owned
+    now[0] = 10_000.0  # far past max_unread_s: no lease read since the claim
+    assert not lease.unread_too_long() and not lease.check_before_write()
+
+    def unreadable():
+        raise OSError("503")
+
+    writer.refresh = unreadable
+    assert lease.poll() is False and lease.poll() is False
+    assert lease.unreadable and lease.unread_too_long() and lease.check_before_write() and not lease.fenced

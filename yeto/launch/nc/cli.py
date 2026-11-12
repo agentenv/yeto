@@ -18,6 +18,7 @@
     pool-stop --config F                  release every node the pool created (running or not)
     pool-retry --config F                 after a configuration error: restart in place, same node(s)
     pool-status --config F                the pool's state, billed nodes and last events (read-only)
+    pool-state-downgrade --config F       before a rollback of yeto: write the state file in the older format
 
 A National Compute lease is NOT ended at ``lease_until``: the node stays active
 and billed until its ticket is deleted. See docs/NC_POOL.md.
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -162,6 +164,20 @@ def reach(lease: NodeLease) -> str:
         raise NcError(f"ssh {alias} never answered")
     _log(f"ssh {alias} ok")
     return alias
+
+
+def pull_ended_without_done(status: str) -> bool:
+    """The pull status says the pull is over but not done: a ``YETO_NC_PULL fail`` line
+    of the current attempt, the pull container exited (any code; ``done`` is its last
+    line) or is gone (``absent``: docker restarted,
+    removed), or the no-docker route logged a nonzero ``YETO_NC_PULL exit``. Waiting
+    for ``done`` then only bills the node until ``timeout_s``."""
+    first = status.splitlines()[0].strip() if status.strip() else ""
+    if first == "absent" or re.match(r"exited \d+$", first):
+        return True
+    current = status.rsplit("YETO_NC_PULL start", 1)[-1]  # an appended log keeps earlier attempts
+    return "YETO_NC_PULL fail" in current or any(
+        code != "0" for code in re.findall(r"YETO_NC_PULL exit (\d+)", current))
 
 
 def attach_ssh(lease: NodeLease) -> str:
@@ -314,7 +330,7 @@ class NcSkyOps:
         return client(slot_list(self.cfg)[0]).balance()
 
     def account_free(self, account: int) -> bool:
-        return NcClient.own_ticket(client(account).status()) is None
+        return client(account).account_free()
 
 
 class NcSshOps:
@@ -355,6 +371,13 @@ class NcSshOps:
 
     def run_tickets(self) -> list[tuple[int, str]]:
         return self.provider.run_tickets()
+
+    def slot_halt(self, account: Any) -> dict[str, Any] | None:
+        """The ledger's halt of a National Compute account (None: not halted, or not NC)."""
+        book = getattr(self.provider, "ledger", None)
+        if not isinstance(self.provider, NCProvider) or book is None:
+            return None
+        return book.halted(int(account))
 
     def released_by_us(self, ticket: str) -> bool:
         """The ticket ledger says this tool deleted ``ticket`` (an earlier pool instance)."""
@@ -446,6 +469,10 @@ class NcSshOps:
         clear = getattr(self.data_path(), "clear_stale_handoff", None)  # the syncer path keeps no handoff record
         return None if clear is None else clear(m.shard, keep=keep)
 
+    def exit_evidence(self, m: Member) -> Any:
+        read = getattr(self.data_path(), "exit_evidence", None)  # the syncer path has no such record
+        return None if read is None else read(m.shard)
+
     def data_path(self) -> Any:
         """The work contract's data path of this pool (:func:`pool_data_path`)."""
         return pool_data_path(self.cfg, self._fence_store,
@@ -527,7 +554,7 @@ class NcSshOps:
                       else ssh_sampler.pull_status(lease, run=self._run))
             if "YETO_NC_PULL done" in status:
                 return
-            if "YETO_NC_PULL fail" in status or status.startswith("exited 1"):
+            if pull_ended_without_done(status):
                 raise NcError(f"model pull failed on {lease.ticket}: {status[-300:]}")
             time.sleep(float(pull.get("poll_s", 30)))
         raise NcError(f"model pull on {lease.ticket} not done in {pull.get('timeout_s', 3600)}s")
@@ -653,8 +680,12 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
 
 def nc_provider(cfg: dict[str, Any], run: str) -> NCProvider:
     """The National Compute provider of a pool: this tool's ledger, lease key and relay."""
+    def event(name: str, **detail: Any) -> None:  # the pool's events file and its event_command hook
+        hook = island_status.command_hook(cfg["event_command"]) if cfg.get("event_command") else None
+        island_status.EventLog(path=pool_events_path(cfg), run=run, log=_log, hook=hook)(name, **detail)
+
     return NCProvider([int(a) for a in cfg["accounts"]], run, ledger=ledger(), allowed=allowed_accounts(),
-                      model=machine_type(cfg), pubkey=node_pool.ensure_key, before_order=ensure_relay)
+                      model=machine_type(cfg), pubkey=node_pool.ensure_key, before_order=ensure_relay, event=event)
 
 
 def run_id(cfg: dict[str, Any]) -> str:
@@ -1046,6 +1077,17 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--direct", action="store_true",
                    help="delete the ticket here even when a running pool owns it (the pool then sees a manual "
                    "release: it lowers its target and orders no replacement)")
+    ad = sub.add_parser("adopt", help="record a ticket an unrecorded order of this tool placed (an operator's call)",
+                        description="After an order call that failed, the account may show an open ticket that "
+                        "is in no ledger (event order_unrecorded). Check in the National Compute console that this "
+                        "tool's order placed it and no one else did, then adopt it: the ticket is recorded in the "
+                        "ledger (adopted_by=operator) and this tool may use and release it (pool, down, pool-stop).")
+    ad.add_argument("--account", type=int, required=True)
+    ad.add_argument("--ticket", required=True)
+    ad.add_argument("--yes", action="store_true", help="I checked that this ticket is this tool's order")
+    ch = sub.add_parser("clear-halt", help="lift the halt of an account (a delete hit, or may have hit, a foreign ticket)")
+    ch.add_argument("--account", type=int, required=True)
+    ch.add_argument("--yes", action="store_true", help="I checked the account and told the ticket's owner")
     po = sub.add_parser("pool", help="the foreground sampler pool loop (docs/NC_POOL.md)",
                         description="Run the lease-aware sampler pool in the foreground. Keep it up for the "
                         "whole run: National Compute does not end a lease at lease_until (it stays billed).")
@@ -1063,6 +1105,14 @@ def main(argv: list[str] | None = None) -> int:
                          description="Check the fixed pool config and sampler spec, then have the pool loop "
                          "restart the sampler in place on every node halted by a configuration error.")
     prt.add_argument("--config", required=True, help="the fixed pool config JSON")
+    psd = sub.add_parser("pool-state-downgrade", help="before a rollback of yeto: write the pool state file in "
+                         "the older format",
+                         description="Write the pool's state file in the format the yeto before the fence retry "
+                         "reads (it fails on the newer file, also in pool-stop). Run it with the newer yeto, "
+                         "with the pool loop stopped. Refused while a member is `fencing`.")
+    psd.add_argument("--config", required=True, help="the pool config JSON the pool runs with")
+    psd.add_argument("--drop-owed-fences", action="store_true",
+                     help="give up shard fences still owed (the older code does not retry them)")
     psc = sub.add_parser("pool-scale", help="change a pool's sampler target while it runs (more or fewer nodes)",
                          description="Record the wanted target in the pool's state dir; the running loop "
                          "orders (scale up) or fences, drains and releases (scale down) at its next tick. "
@@ -1170,22 +1220,80 @@ def main(argv: list[str] | None = None) -> int:
         doc = tasks.with_secrets(tasks.sampler_task(pool, spec_path=str(spec_path), run_prefix=args.run_prefix,
                                                     workdir=args.workdir), args.r2_env_file)
         return launch(doc, cluster_name("sampler", args.ticket), down=False)
+    if args.cmd == "adopt":
+        if not args.yes:
+            print(f"adopt records ticket {args.ticket} (account {args.account}) as this tool's own, to be released "
+                  "by it. Check in the National Compute console that no one else placed it, then pass --yes.")
+            return 2
+        try:
+            row = client(args.account).adopt(args.ticket)
+        except NcError as error:
+            print(f"adopt refused: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(row, indent=1, default=str))
+        return 0
+    if args.cmd == "clear-halt":
+        halt = ledger().halted(args.account)
+        if halt is None:
+            print(f"account {args.account} is not halted")
+            return 0
+        print(json.dumps(halt, indent=1, default=str))
+        try:  # what the account holds now, for the operator to compare with the console
+            t = client(args.account).status().get("ticket")
+            print(f"account {args.account} now: " + ("no order" if not t else
+                  f"ticket {t.get('id')} state={t.get('state')} end_reason={t.get('end_reason')} "
+                  f"lease_until={t.get('lease_until')}"))
+        except Exception as error:  # noqa: BLE001 - shown, the decision stays with the operator
+            print(f"account {args.account} now: the status could not be read ({error!r})"[:300])
+        if ledger().halted(args.account) is None:
+            print("the halt was lifted by this status read: the expected ticket reads ended")
+            return 0
+        if not args.yes:
+            print("nothing changed. Check the account in the National Compute console, then pass --yes "
+                  "to lift the halt")
+            return 2
+        ledger().clear_halt(args.account)
+        print(f"account {args.account}: halt lifted")
+        return 0
     if args.cmd == "down":
         if not args.direct:
             from . import pool_run  # noqa: PLC0415
 
-            rc = pool_run.down_member(args.ticket, mode=args.mode)
+            from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+
+            try:
+                rc = pool_run.down_member(args.ticket, mode=args.mode)
+            except PoolStateFormatError as error:  # the ticket may be a pool's member: not deleted
+                print(f"down: refused, nothing changed: {error} (--direct deletes the ticket without asking "
+                      "any pool)", file=sys.stderr)
+                return 2
             if rc is not None:
                 return rc
         down(args.account, args.ticket)
         return 0
+    if args.cmd in ("pool-pause", "pool-resume", "pool", "pool-stop", "pool-status", "pool-retry", "pool-scale",
+                    "pool-state-downgrade"):
+        from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+        from . import pool_run  # noqa: PLC0415
+
+        try:
+            pool_run.check_state_file(json.loads(Path(args.config).read_text()))
+            return _pool_command(args)
+        except PoolStateFormatError as error:  # one line, no traceback: the first thing an operator reads
+            print(f"{args.cmd}: refused, nothing changed: {error}", file=sys.stderr)
+            return 2
+    return 2
+
+
+def _pool_command(args: Any) -> int:
+    """The pool commands (their state file's format is checked by the caller)."""
     if args.cmd in ("pool-pause", "pool-resume"):
         from . import pool_run  # noqa: PLC0415
 
         cfg = json.loads(Path(args.config).read_text())
         return pool_run.pause_pool(cfg, args.config, args.ticket, resume=args.cmd == "pool-resume",
                                    hold_tasks=getattr(args, "hold_tasks", False))
-    if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale"):
+    if args.cmd in ("pool", "pool-stop", "pool-status", "pool-retry", "pool-scale", "pool-state-downgrade"):
         from . import pool_run  # noqa: PLC0415
 
         cfg = json.loads(Path(args.config).read_text())
@@ -1201,6 +1309,8 @@ def main(argv: list[str] | None = None) -> int:
             return pool_run.pool_status(cfg, args.config, events=args.events)
         if args.cmd == "pool-retry":
             return pool_run.retry_pool(cfg, args.config)
+        if args.cmd == "pool-state-downgrade":
+            return pool_run.downgrade_state_file(cfg, args.config, drop_owed_fences=args.drop_owed_fences)
         if args.cmd == "pool-stop":
             return pool_run.stop_pool(cfg, args.config, wait_s=args.wait)
         if args.dry_run:

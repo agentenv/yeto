@@ -548,6 +548,11 @@ def handle_from_metadata(
             [[int(v) for v in run] for run in payload["buffer_stale_positions"]]
             if payload.get("buffer_stale_positions") else None
         ),
+        buffer_unidentified_groups=(
+            int(payload["buffer_unidentified_groups"]) if "buffer_unidentified_groups" in payload else None
+        ),
+        **{key: [[int(v) for v in run] for run in payload[key]] if payload.get(key) else None
+           for key in ("buffer_unidentified_versions", "buffer_unidentified_positions")},
         buffer_source_tokens=(
             {str(k): int(v) for k, v in payload["buffer_source_tokens"].items()}
             if isinstance(payload.get("buffer_source_tokens"), dict) else None
@@ -564,6 +569,26 @@ def handle_from_metadata(
             int(payload["buffer_xhw_downweighted"]) if "buffer_xhw_downweighted" in payload else None
         ),
         **{key: int(payload[key]) if key in payload else None for key in BUFFER_FILL_KEYS},
+        buffer_damaged_payload_groups=(
+            int(payload["buffer_damaged_payload_groups"])
+            if "buffer_damaged_payload_groups" in payload else None
+        ),
+        buffer_damaged_payloads=(
+            [dict(record) for record in payload["buffer_damaged_payloads"]]
+            if payload.get("buffer_damaged_payloads") else None
+        ),
+        buffer_duplicate_task_groups=(
+            int(payload["buffer_duplicate_task_groups"])
+            if "buffer_duplicate_task_groups" in payload else None
+        ),
+        buffer_duplicate_task_unverified_groups=(
+            int(payload["buffer_duplicate_task_unverified_groups"])
+            if "buffer_duplicate_task_unverified_groups" in payload else None
+        ),
+        buffer_duplicate_tasks=(
+            [dict(record) for record in payload["buffer_duplicate_tasks"]]
+            if payload.get("buffer_duplicate_tasks") else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
@@ -851,6 +876,15 @@ class MilesRolloutPool:
             logger.warning("live data cursor unknown: the executor's data source reports no "
                            "complete cursor")
         return (None if cursor is None else dict(cursor)), length
+
+    def set_unidentified_policy_gate(self, start_version: int, known_versions: Any) -> None:
+        """Driver (``_gate_unidentified_policies``): tell the buffer reader in the
+        rollout executor which versions below the start version a record names; a
+        pool whose rollout is not a buffer reader keeps it unused."""
+        from .buffer_rollout import executor_set_unidentified_gate
+
+        self._in_executor(executor_set_unidentified_gate, int(start_version),
+                          sorted(int(v) for v in known_versions))
 
     def seek_data_cursor(self, cursor: Mapping[str, int]) -> dict[str, int] | None:
         """Restart (driver ``_restore_data_cursor``): move the executor's data

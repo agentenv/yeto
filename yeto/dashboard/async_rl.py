@@ -30,7 +30,8 @@ SAMPLER_WAIT_EVENTS = {"rl_sampler_backlog_full": "backlog full (trainers behind
                        "rl_sampler_waiting_policy": "waiting for a policy release"}
 SAMPLER_END_EVENTS = frozenset({"rl_sampler_stopped", "rl_sampler_data_end"})
 TRAINER_EVENTS = frozenset({"rl_round_trained", "rl_driver_start", "rl_group_policies",
-                            "rl_buffer_stale_skipped", "rl_policy_released"})
+                            "rl_buffer_stale_skipped", "rl_policy_released",
+                            "rl_buffer_unidentified_policy_skipped"})
 # sampler-reported reward/length summary keys (rl_sampler_engine_round)
 # the sample-buffer reader's short-group handling per round (rl_buffer_stale_skipped)
 FILL_KEYS = ("incomplete_groups", "dropped_small_groups", "carried_over_groups", "padded_samples")
@@ -55,7 +56,7 @@ POOL_STOPPED = "nc_elastic_pool_stopped"
 POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason", "detail", "error", "state", "after_s",
              "waited_s", "restarts", "attempt", "data_slot", "old", "new", "target", "outcome", "source",
              "by", "usd_per_h", "end_reason", "replaces", "continues_shard", "max_frac", "alerts",
-             "retry_in_s", "successor")
+             "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
 
@@ -125,7 +126,8 @@ class AsyncState:
             self.roles[iid] = "sampler"
             self._fold_sampler(r, iid, ts, ev)
         elif ev in TRAINER_EVENTS or ev in ("rl_rollout_carry_over", "offpolicy_gate", "rl_round_phases",
-                                            "rl_round_wall", "island_leave"):
+                                            "rl_round_wall", "island_leave",
+                                            "rl_buffer_unidentified_policy_starved"):
             if ev in TRAINER_EVENTS and self.roles.get(iid) != "sampler":
                 self.roles[iid] = "trainer"
             self._fold_trainer(r, iid, ts, ev)
@@ -236,6 +238,11 @@ class AsyncState:
             t["left"] = {"ts": ts, "reason": r.get("reason_name") or r.get("reason"),
                          "error_type": r.get("error_type")}
             return
+        if ev == "rl_buffer_unidentified_policy_starved":
+            # the reader reads groups and keeps none (groups of versions no record names)
+            t["unidentified_starved"] = {"ts": ts, "selections": r.get("selections"),
+                                         "groups": r.get("unidentified_policy_groups_total")}
+            return
         if ev == "rl_policy_released":
             origin = r.get("origin") if isinstance(r.get("origin"), dict) else {}
             timings = r.get("release_timings") if isinstance(r.get("release_timings"), dict) else {}
@@ -257,6 +264,8 @@ class AsyncState:
             row.update({"ts": ts, "trained_groups": r.get("trained_groups"),
                         "trained_samples": r.get("trained_samples"),
                         "policy_age_mean": r.get("policy_age_mean"), "policy_age_max": r.get("policy_age_max")})
+        elif ev == "rl_buffer_unidentified_policy_skipped":
+            row["unidentified_policy_groups"] = r.get("unidentified_policy_groups")
         elif ev == "rl_buffer_stale_skipped":
             row["stale_groups"] = r.get("stale_groups")
             row["max_policy_age"] = r.get("max_policy_age")
@@ -421,6 +430,8 @@ class AsyncState:
 
             trainers[iid] = {"rounds": rows[-500:], "age_hist": dict(sorted(ages.items(), key=lambda kv: _age_key(kv[0]))),
                              "stale_groups": tot("stale_groups"), "gate_dropped": tot("gate_dropped"),
+                             "unidentified_policy_groups": tot("unidentified_policy_groups"),
+                             "unidentified_starved": t.get("unidentified_starved"),
                              "over_age_discarded_groups": tot("over_age_discarded_groups"),
                              "trained_groups": tot("trained_groups"), "left": t["left"],
                              **{k: tot(k) for k in FILL_KEYS}}

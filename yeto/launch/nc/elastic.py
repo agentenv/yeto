@@ -64,15 +64,22 @@ def probe_script(container: str, tape_glob: str, join_pattern: str = "rl_sampler
     ``/metrics`` on the node (the sampler runs ``--network host``). One line
     ``YETO_NC_PROBE status=... exit=... joined=0|1 age=... tw=0|1 tok=... run=... wq=...``;
     read-only. ``state_script`` / ``logs_script``: shell printing ``<status> <exit>`` and
-    the sampler's log, for a sampler that is a process rather than a container."""
+    the sampler's log, for a sampler that is a process rather than a container.
+
+    ``status=absent`` only when docker itself says there is no such container; a
+    ``docker inspect`` that failed for another reason (sudo, dockerd not answering) prints
+    ``status=unknown``: nothing is known about the sampler (``Probe.parse`` reads it as a
+    node that did not answer, so one failed command never restarts a running sampler)."""
     metrics = "t=- r=- w=-; "
     if metrics_port is not None:
         metrics = (f"set -- $(curl -s -m 5 http://127.0.0.1:{int(metrics_port)}/metrics 2>/dev/null | awk "
                    "'/^vllm:generation_tokens_total/{t+=$NF;f=1} /^vllm:num_requests_running/{r+=$NF} "
                    "/^vllm:num_requests_waiting/{w+=$NF} END{if(f) printf \"%.0f %d %d\", t, r, w; "
                    "else print \"- - -\"}'); t=${1:--} r=${2:--} w=${3:--}; ")
-    state = state_script or (f"sudo docker inspect -f '{{{{.State.Status}}}} {{{{.State.ExitCode}}}}' {container} "
-                             "2>/dev/null || echo 'absent -'")
+    inspect = f"sudo docker inspect -f '{{{{.State.Status}}}} {{{{.State.ExitCode}}}}' {container}"
+    state = state_script or (f"{inspect} 2>/dev/null || case \"$({inspect} 2>&1 >/dev/null)\" in "
+                             "(*'o such object'*|*'o such container'*) echo 'absent -';; "
+                             "(*) echo 'unknown -';; esac")
     logs = logs_script or f"sudo docker logs --tail 2000 {container} 2>&1"
     return (f"s=$({state}); set -- $s; "
             f"j=0; ls {tape_glob} >/dev/null 2>&1 && grep -qs {join_pattern} {tape_glob} && j=1; "
@@ -101,6 +108,13 @@ def _claim(store: Any, shard: str, by: str, clock: Callable[[], float]) -> dict[
     name = f"{FENCE_PREFIX}:{by}"
     fenced = fence_shard_owner(store, shard, name, by="pool", clock=clock)
     record = IncarnationLease(store, shard, name, clock=clock).claim(owner=None if fenced is None else fenced[0])
+    if fenced is None:
+        # the shard had no ownership record: its sampler may have taken one since (it
+        # moves to them once the trainer's generation lease exists) - look again after
+        # the lease write; a sampler that takes one later reads the lease after it
+        fenced = fence_shard_owner(store, shard, name, by="pool", clock=clock)
+        if fenced is not None:
+            record["owner"] = {"epoch": fenced[0].epoch, "pos": fenced[0].pos, "by": fenced[0].by}
     if fenced is not None:
         record["owner"]["created"] = fenced[1]
     return record

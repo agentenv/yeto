@@ -59,6 +59,45 @@ class ObjectStore(Protocol):
     def delete(self, key: str) -> None: ...
 
 
+# Store answers that no retry changes: the credentials or the bucket are wrong (an
+# expired *session* token is left out: a credential provider may refresh it)
+FATAL_STORE_CODES = frozenset({"AccessDenied", "403", "401", "Unauthorized", "InvalidAccessKeyId",
+                               "SignatureDoesNotMatch", "NoSuchBucket", "InvalidBucketName", "AllAccessDisabled",
+                               "AccountProblem"})
+FATAL_STORE_ERRORS = frozenset({"NoCredentialsError", "PartialCredentialsError", "ProfileNotFound"})
+
+
+# the error codes of an absent key (a store that answers with a bare ClientError)
+ABSENT_STORE_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+
+
+def store_error_code(error: BaseException) -> str:
+    """The store's error code of a botocore ``ClientError``; "" for anything else
+    (a connection-level error has ``response = None``)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return str((response.get("Error") or {}).get("Code", ""))
+
+
+def is_absent_store_error(error: BaseException) -> bool:
+    """A bare ``ClientError`` that says the key is not there (404 / NoSuchKey / NotFound)."""
+    return store_error_code(error) in ABSENT_STORE_CODES
+
+
+def is_fatal_store_error(error: BaseException) -> bool:
+    """Whether a failed store request is a configuration error (refused
+    credentials, no such bucket, no credentials at all) rather than an outage: a
+    poll that fails this way is not read again, it ends the process (it would
+    fail the same way forever while looking alive)."""
+    cause = error.__cause__  # wrapped (incarnation_lease.LeaseReadError): judged by what the store said
+    if cause is not None and cause is not error and is_fatal_store_error(cause):
+        return True
+    if type(error).__name__ in FATAL_STORE_ERRORS:
+        return True
+    return store_error_code(error) in FATAL_STORE_CODES
+
+
 def upload_file(objects: ObjectStore, key: str, path: str | os.PathLike[str]) -> None:
     """Write the file at ``path`` as object ``key``."""
     write_file = getattr(objects, "write_file", None)
@@ -172,6 +211,12 @@ class DirectoryObjectStore:
         keys = (p.relative_to(self.root).as_posix() for p in base.rglob("*")
                 if p.is_file() and not p.name.endswith(TMP_SUFFIX))
         return sorted(k for k in keys if k.startswith(prefix) and k > start_after)
+
+    def list_page(self, prefix: str, *, start_after: str = "", limit: int = 1000) -> tuple[list[str], str | None]:
+        """One listing request: up to ``limit`` keys after ``start_after`` and the key
+        to continue from (None: that was the last page)."""
+        keys = self.list(prefix, start_after=start_after)
+        return keys[:limit], (keys[limit - 1] if len(keys) > limit else None)
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)

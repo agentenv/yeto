@@ -377,3 +377,19 @@ def test_a_replacement_that_starts_on_the_latest_release_shows_in_its_row():
     load = rel[2]["loads"]["nc-b1"]
     assert load["at_start"] is True and load["loaded_at"] == T0 + 900 and load["latency_s"] is None
     assert rel[2]["loads"]["nc-a1"]["at_start"] is False
+
+
+def test_groups_without_a_policy_identity_are_counted_per_trainer():
+    """A relaunched trainer's reader passes over groups of versions no record names
+    (rl_buffer_unidentified_policy_skipped) and warns when it keeps none."""
+    extra = [{"event": "rl_buffer_unidentified_policy_skipped", "island_id": 0, "rollout_id": 1,
+              "unidentified_policy_groups": 4, "versions": [[5, 4]], "time_unix": T0 + 125},
+             {"event": "rl_buffer_unidentified_policy_skipped", "island_id": 0, "rollout_id": 2,
+              "unidentified_policy_groups": 2, "versions": [[6, 2]], "time_unix": T0 + 165},
+             {"event": "rl_buffer_unidentified_policy_starved", "island_id": 0, "rollout_id": 3, "selections": 3,
+              "unidentified_policy_groups_total": 9, "time_unix": T0 + 200}]
+    trainers = export_view(run_reducer(extra), generated_at=T0 + 1000)["page"]["async"]["trainers"]
+    assert trainers["0"]["unidentified_policy_groups"] == 6
+    assert trainers["0"]["unidentified_starved"] == {"ts": T0 + 200, "selections": 3, "groups": 9}
+    assert [r.get("unidentified_policy_groups") for r in trainers["0"]["rounds"]][:3] == [None, 4, 2]
+    assert trainers["1"]["unidentified_policy_groups"] is None and trainers["1"]["unidentified_starved"] is None

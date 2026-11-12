@@ -183,6 +183,10 @@ class FullBufferActor:
         self.kept.append(rows)
         return len(self.kept)
 
+    def yeto_remove_group(self, uid):
+        self.kept = [r for r in self.kept if r["non_tensor"]["uid"][0] != uid]
+        return len(self.kept)
+
     def yeto_assemble(self):
         self.assembled.append([r["non_tensor"]["uid"][0] for r in self.kept])
         n, self.kept = len(self.kept), []

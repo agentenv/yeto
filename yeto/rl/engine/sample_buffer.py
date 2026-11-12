@@ -616,7 +616,8 @@ def _newest_owner(objects: ObjectStore, keys: list[str], known: ShardOwner | Non
 
 def claim_shard_owner(objects: ObjectStore, shard: str, incarnation: str, *, by: str,
                       clock: Callable[[], float] = time.time,
-                      tail: ShardTail | None = None) -> tuple[ShardOwner, bool]:
+                      tail: ShardTail | None = None,
+                      only_owned: bool = False) -> tuple[ShardOwner, bool] | None:
     """Append an ownership record for ``incarnation`` to ``shard`` without reading the
     shard's groups (the pool's fence: ``pool-fence:<ticket>``, ``by="pool"``).
     Returns ``(owner, created)``; ``created`` is False when ``incarnation`` already
@@ -627,7 +628,10 @@ def claim_shard_owner(objects: ObjectStore, shard: str, incarnation: str, *, by:
     of the owner ``tail`` names (usually the last record: one GET), one create; a
     lost create (the sampler wrote a group meanwhile) lists and reads only what
     was added. Without a ``tail`` owner, a shard with no ownership record yet is
-    read whole, once (its first fence)."""
+    read whole, once (its first fence). ``only_owned``: None (nothing written) when
+    the shard holds no ownership record yet - its writer may be code that does not
+    read them (older code, or a sampler that joined before the trainer's generation
+    lease): such a shard is fenced by its lease record alone."""
     tail = ShardTail() if tail is None else tail
     index = ObjectIndex(objects, prefix=shard_prefix(shard))
     for _ in range(_MAX_CREATE_RACES):
@@ -641,6 +645,8 @@ def claim_shard_owner(objects: ObjectStore, shard: str, incarnation: str, *, by:
         tail.next += len(keys)
         if tail.owner is not None and tail.owner.incarnation == str(incarnation):
             return tail.owner, False
+        if only_owned and tail.owner is None:
+            return None
         epoch = (0 if tail.owner is None else tail.owner.epoch) + 1
         record = {"schema": OWNER_SCHEMA, "pos": tail.next,
                   "owner": {"incarnation": str(incarnation), "epoch": epoch, "by": str(by),
@@ -649,6 +655,28 @@ def claim_shard_owner(objects: ObjectStore, shard: str, incarnation: str, *, by:
             tail.owner, tail.next = _owner_of(record), tail.next + 1
             return tail.owner, True
     raise SampleBufferError(f"{index.prefix}: lost {_MAX_CREATE_RACES} ownership claims in a row to other writers")
+
+
+def claim_reader_generation(objects: ObjectStore, *, incarnation: str | None = None) -> Any:
+    """The merging trainer's claim of the next trainer generation
+    (``trainer_lease.TrainerLease``) at its buffer open. It is the switch to shard
+    ownership records (module doc): samplers and the pool write them only once a
+    generation exists, i.e. once a trainer that reads them ran on the store, and
+    from then on code older than them cannot read the run's buffer. A store without
+    an atomic create (the lease refuses it) stays on the lease JSON fence: None.
+    Any other failure (the store did not answer) is raised: the trainer's start
+    fails and is retried, rather than run on a format it did not announce."""
+    from .trainer_lease import TrainerLease, TrainerLeaseError  # noqa: PLC0415
+
+    if not callable(getattr(objects, "create", None)):
+        return None
+    name = incarnation or f"trainer-{os.uname().nodename}-{os.getpid()}"
+    try:
+        return TrainerLease.claim(objects, incarnation=name)
+    except TrainerLeaseError as error:
+        print(f"[sample-buffer] WARNING: no trainer generation claimed ({error}): the shards stay "
+              f"on the lease record fence (no shard ownership records)", flush=True)
+        return None
 
 
 def _objects_of(store: CheckpointStore | ObjectStore) -> ObjectStore | None:
@@ -805,6 +833,9 @@ class FileSampleBuffer:
         if expected_shards is not None and not merge_shards:
             raise SampleBufferError("expected_shards needs merge_shards")
         self._merge = merge_shards
+        # the merger announces that it reads shard ownership records (module doc)
+        self.trainer_lease = (claim_reader_generation(self.index.objects)
+                              if merge_shards and isinstance(self.index, ObjectIndex) else None)
         self._expected_shards = (None if expected_shards is None
                                  else frozenset(_shard_name(s) for s in expected_shards))
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)

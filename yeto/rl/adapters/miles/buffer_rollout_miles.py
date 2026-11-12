@@ -32,12 +32,16 @@ from .buffer_rollout import (
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
     INCARNATION_ENV,
+    DEFAULT_MAX_DAMAGED_RUN,
+    MAX_DAMAGED_RUN_ENV,
     MAX_POLICY_AGE_ENV,
+    ONE_GROUP_PER_TASK_ENV,
     POLL_ENV,
     SAMPLER_ID_ENV,
     SHARD_ENV,
     TRAINER,
     WAIT_ENV,
+    unidentified_metadata,
     BatchReader,
     DataSlot,
     SampleBufferRolloutError,
@@ -67,6 +71,8 @@ from .task_dispense import written as dispense_written
 
 # takes in a row whose every group is malformed before the round fails (a systematic cause)
 MAX_UNCONVERTIBLE_TAKES = 8
+MAX_DUPLICATE_TASK_RECORDS = 64  # duplicate-task records of a round sent to the driver (the count is whole)
+MAX_DAMAGED_PAYLOAD_RECORDS = 64  # damaged-payload records of a round sent to the driver (the count is whole)
 
 # the boat VM pools of the Harbor agentic path (``close_pools_now``, also used by .harbor_rollout)
 BOAT_POOL_MODULE = "yeto.rl.harness.harbor.boat_pool"
@@ -216,7 +222,10 @@ class _BufferRound:
             max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)),
-            group_size=self.samples_per_group)
+            group_size=self.samples_per_group,
+            max_damaged_run=int(os.environ.get(MAX_DAMAGED_RUN_ENV) or DEFAULT_MAX_DAMAGED_RUN),
+            one_group_per_task=(os.environ.get(ONE_GROUP_PER_TASK_ENV) or "1").strip().lower()
+            not in ("0", "off", "false"))
         register_reader(self.reader)
         self._tokenizer: Any = None
 
@@ -227,9 +236,13 @@ class _BufferRound:
         # the driver's basis (its published policy token), not Miles' weight_version
         r3_layers, num_experts = self._r3_layers()
         unconvertible: list[str] = []
+        damaged: list[dict[str, Any]] = []  # of every take of this round
+        duplicates: list[dict[str, Any]] = []
         for _attempt in range(MAX_UNCONVERTIBLE_TAKES):
             groups, report = self.reader.take(input.rollout_id, self.groups,
                                               current_version=self._basis_version(input))
+            damaged += list(getattr(report, "damaged_payloads", None) or ())
+            duplicates += list(getattr(report, "duplicate_tasks", None) or ())
             groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
                       for position, group in groups]
             converted, problems = miles_groups(groups, samples_per_group=self.samples_per_group,
@@ -269,6 +282,9 @@ class _BufferRound:
         missing = max(0, self.groups * self.samples_per_group - sum(len(group) for group in samples))
         report.padded_samples = missing
         report.padded_fraction = missing / max(1, self.groups * self.samples_per_group)
+        report.damaged_payloads, report.damaged_payload_groups = damaged, len(damaged)
+        report.duplicate_tasks, report.duplicate_task_groups = duplicates, len(duplicates)
+        report.duplicate_task_unverified_groups = sum(1 for d in duplicates if not d.get("first_trained_here"))
         record_round_metadata(self.args, int(input.rollout_id),
                               buffer_stale_groups=int(report.stale_groups) + pruned,
                               buffer_incomplete_groups=int(getattr(report, "incomplete_groups", 0)),
@@ -276,8 +292,21 @@ class _BufferRound:
                               buffer_carried_over_groups=int(getattr(report, "carried_over_groups", 0)),
                               buffer_padded_samples=int(missing),
                               **xhw_meta,
+                              # groups passed over for a missing or undecodable payload
+                              # (the driver's rl_buffer_damaged_payload_skipped)
+                              **({"buffer_damaged_payload_groups": len(damaged),
+                                  "buffer_damaged_payloads": damaged[:MAX_DAMAGED_PAYLOAD_RECORDS]}
+                                 if damaged else {}),
+                              # groups of a store-dispenser task an earlier group already holds
+                              # (the driver's rl_buffer_duplicate_task_skipped)
+                              **({"buffer_duplicate_task_groups": len(duplicates),
+                                  "buffer_duplicate_task_unverified_groups":
+                                      report.duplicate_task_unverified_groups,
+                                  "buffer_duplicate_tasks": duplicates[:MAX_DUPLICATE_TASK_RECORDS]}
+                                 if duplicates else {}),
                               **({"buffer_stale_positions": row_runs(stale)}
-                                 if (stale := getattr(report, "stale_positions", None)) else {}))
+                                 if (stale := getattr(report, "stale_positions", None)) else {}),
+                              **unidentified_metadata(report))
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on

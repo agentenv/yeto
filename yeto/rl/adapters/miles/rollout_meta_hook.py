@@ -83,14 +83,31 @@ LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # held for the next round, loss-free padding samples (BatchReader group_size)
 BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
                     "buffer_carried_over_groups", "buffer_padded_samples")
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups",
-                                 "buffer_xhw_quarantined", "buffer_xhw_downweighted", *BUFFER_FILL_KEYS})
+# buffer_damaged_payload_groups: groups the reader passed over because their payload
+# is missing or is not a group; buffer_duplicate_task_groups: because an earlier group
+# of the buffer holds their store-dispenser task (both consumed, not trained);
+# buffer_duplicate_task_unverified_groups: of those, the ones whose earlier group this
+# trainer process did not judge itself (below a restored watermark)
+# buffer_unidentified_groups: groups of a version no record names, passed over by a
+# trainer that resumed behind its releases (BatchReader.set_unidentified_gate)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
+                                 "buffer_xhw_quarantined", "buffer_xhw_downweighted",
+                                 "buffer_damaged_payload_groups", "buffer_duplicate_task_groups",
+                                 "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
-ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions"})
+# buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:
+# their task-dispenser positions as row runs
+ROUND_METADATA_LIST_KEYS = frozenset({"buffer_stale_positions", "buffer_unidentified_versions",
+                                      "buffer_unidentified_positions"})
+# buffer_damaged_payloads: one record per such group ({"position", "sample_id",
+# "payload_ref", "reason"[, "dispense_position"]}); buffer_duplicate_tasks: ({"slot",
+# "position", "sample_id", "first_position", "first_sample_id", "first_trained_here"
+# [, "plan", "attempt"]}); BatchReader's TakeReport
+ROUND_METADATA_RECORD_KEYS = frozenset({"buffer_damaged_payloads", "buffer_duplicate_tasks"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:
@@ -126,13 +143,20 @@ def record_round_metadata(
     """Rollout side: report this rollout's per-round counters (call once per rollout)."""
 
     del args
-    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS - ROUND_METADATA_DICT_KEYS)
+    unknown = sorted(set(counts) - ROUND_METADATA_KEYS - ROUND_METADATA_LIST_KEYS - ROUND_METADATA_DICT_KEYS
+                     - ROUND_METADATA_RECORD_KEYS)
     if unknown:
         raise RuntimeError(f"unknown per-round metadata keys {unknown}")
     for key, value in counts.items():
         if key in ROUND_METADATA_DICT_KEYS:
             if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
                 raise RuntimeError(f"per-round metadata {key} must be a mapping with str keys")
+            continue
+        if key in ROUND_METADATA_RECORD_KEYS:
+            if not isinstance(value, list) or any(
+                    not isinstance(record, Mapping) or not all(isinstance(k, str) for k in record)
+                    for record in value):
+                raise RuntimeError(f"per-round metadata {key} must be a list of mappings with str keys")
             continue
         if key in ROUND_METADATA_LIST_KEYS:
             if not isinstance(value, list) or any(

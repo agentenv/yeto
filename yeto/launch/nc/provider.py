@@ -33,14 +33,17 @@ class NCProvider:
     caps = ProviderCaps(lease_bounded=True, renewable=False, currency="ucr", balance=True, cold_start_s=3600)
 
     def __init__(self, accounts: list[int], run_id: str, *, ledger: Ledger, allowed: set[int],
-                 model: str = "mi355x", pubkey=None, before_order=None, run=None):
+                 model: str = "mi355x", pubkey=None, before_order=None, run=None, event=None):
         self.accounts, self.run_id, self.ledger, self.allowed = list(accounts), run_id, ledger, allowed
         self.model, self.pubkey, self.before_order = model, pubkey, before_order
         self._run = run
+        self.event = event  # event(name, **detail): what the client reports (an unrecorded order)
+        self._legacy_listed = False
 
     def client(self, account: int, *, ordering: bool = False) -> NcClient:
         kw = {"run": self._run} if self._run is not None else {}
-        return NcClient(account, self.ledger, allowed_accounts=self.allowed if ordering else None, **kw)
+        return NcClient(account, self.ledger, allowed_accounts=self.allowed if ordering else None,
+                        event=self.event, **kw)
 
     def order(self, account: int) -> str:
         c = self.client(account, ordering=True)
@@ -62,10 +65,17 @@ class NCProvider:
         return self.client(self.accounts[0]).balance()
 
     def account_free(self, account: int) -> bool:
-        return NcClient.own_ticket(self.client(account).status()) is None
+        return self.client(account).account_free()
 
     def run_tickets(self) -> list[tuple[int, str]]:
         accounts = set(self.accounts)
+        if not self._legacy_listed:  # once per process: open rows from before orders were recorded with the row
+            self._legacy_listed = True
+            legacy = [r for r in self.ledger.legacy_rows() if int(r["account"]) in accounts]
+            if legacy and self.event is not None:
+                self.event("legacy_ledger_rows", tickets=[f"{r['account']}:{r['ticket']}" for r in legacy],
+                           action="open tickets recorded by an earlier version, without the order that placed "
+                                  "them; they are treated as this tool's. Check that each one is")
         return [(int(r["account"]), str(r["ticket"])) for r in self.ledger.run_rows(self.run_id)
                 if int(r["account"]) in accounts]
 

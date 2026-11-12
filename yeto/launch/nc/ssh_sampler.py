@@ -117,7 +117,10 @@ def sampler_env(run_prefix: str) -> dict[str, str]:
             "YETO_RL_STORE_S3_CREDENTIALS": "aws-env", "YETO_NC_RUN_PREFIX": run_prefix,
             # release download: 8 processes x 4 files x 16 parts took a 207 GB K3.1 release
             # in 144 s (1.43 GB/s mean, 5.2 GB/s 5-second peak) on an MI355X node
-            "YETO_RL_STORE_DOWNLOAD_PROCESSES": "8", "YETO_RL_STORE_FILE_CONCURRENCY": "32"}
+            "YETO_RL_STORE_DOWNLOAD_PROCESSES": "8", "YETO_RL_STORE_FILE_CONCURRENCY": "32",
+            # each node starts a release download at its own fixed point of 30 s: 16 nodes do not
+            # send their first 512 range reads each in the same second (policy_release.download_delay_s)
+            "YETO_RL_RELEASE_SPREAD_S": "30"}
 
 
 # OpenSSH reads ~/.ssh of the passwd entry, not $HOME: an agentic env file that sets
@@ -236,6 +239,9 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     upload_file(alias, r2_env_file, env_on_node, run=run)
     extra: list[str] = []
     env = sampler_env(prefix)
+    # the release download's start spread is taken from this key (policy_release.download_delay_s):
+    # with --network host the host name is the node's, which NC nodes need not keep distinct
+    env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
     if setup is not None:
         target = agentic_setup.SshNode(alias, node.image or IMAGE, NVME, yeto_dir, PYTHON, lease.user,
                                        prelude=SSH_HOME_LINK, run=run)
@@ -334,8 +340,12 @@ def pull_body(src_key: str, dest: str, *, max_mb_s: int = 2500, include: str | N
             "aws configure set default.s3.max_concurrent_requests 16 && "
             f"aws configure set default.s3.max_bandwidth {max(1, int(max_mb_s) // jobs)}MB/s && "
             f'echo "YETO_NC_PULL start $(date -u +%FT%TZ) jobs={jobs}" && '
-            f'aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL" '
-            "| awk '{print $4, $3}' | sort -k2 -n -r "
+            # the listing is read before any copy: a refused or empty listing is a failed
+            # pull, not a "done" with nothing copied (a pipeline exits with xargs' status)
+            f'{{ L=$(aws s3 ls --recursive "s3://$R2_BUCKET/{src}/" --endpoint-url "$AWS_ENDPOINT_URL") '
+            f'|| {{ echo "YETO_NC_PULL fail listing s3://$R2_BUCKET/{src}/"; exit 3; }}; }} && '
+            f'{{ [ -n "$L" ] || {{ echo "YETO_NC_PULL fail empty listing s3://$R2_BUCKET/{src}/"; exit 3; }}; }} && '
+            'printf "%s\\n" "$L" | awk \'{print $4, $3}\' | sort -k2 -n -r '
             f"| xargs -r -P {jobs} -L1 sh -c {shlex.quote(one)} pull "
             '&& echo "YETO_NC_PULL done $(date -u +%FT%TZ)"')
 

@@ -82,7 +82,7 @@ from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec
-from .buffer_payload import data_end_kind
+from .buffer_payload import data_end_kind, passed_over_of
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
@@ -478,6 +478,26 @@ BUFFER_FILL_FIELDS = {"buffer_incomplete_groups": "incomplete_groups",
                       "buffer_padded_samples": "padded_samples"}
 
 
+def _damaged_payloads(batch: Any) -> dict[str, Any] | None:
+    """The fields of ``rl_buffer_damaged_payload_skipped`` for a round whose reader
+    passed over groups with a missing or undecodable payload (None: it did not)."""
+    count = getattr(batch, "buffer_damaged_payload_groups", None)
+    if not count:
+        return None
+    return {"damaged_groups": int(count), "payloads": list(getattr(batch, "buffer_damaged_payloads", None) or ())}
+
+
+def _duplicate_tasks(batch: Any) -> dict[str, Any] | None:
+    """The fields of ``rl_buffer_duplicate_task_skipped`` for a round whose reader
+    passed over groups of a task an earlier group holds (None: it did not)."""
+    count = getattr(batch, "buffer_duplicate_task_groups", None)
+    if not count:
+        return None
+    return {"duplicate_groups": int(count),
+            "unverified_groups": int(getattr(batch, "buffer_duplicate_task_unverified_groups", None) or 0),
+            "tasks": list(getattr(batch, "buffer_duplicate_tasks", None) or ())}
+
+
 def _buffer_fill(batch: Any) -> dict[str, int]:
     """The sample-buffer reader's short-group handling of a round (reported fields only)."""
     return {name: int(value) for key, name in BUFFER_FILL_FIELDS.items()
@@ -661,6 +681,14 @@ class IslandDriver:
         # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
         # log); None: the data source cursor is restored (_restore_data_cursor).
         self.data_position_owner: str | None = None
+        # Why a restart above rollout 0 with no recorded data cursor is not refused
+        # (None: it is): "sample_buffer" for a trainer that reads the sample buffer
+        # and draws no prompts (``_restore_data_cursor``).
+        self.data_cursor_optional: str | None = None
+        # The weights this process loaded at start are the base checkpoint (policy v0),
+        # not a release: set by the wiring of a relaunched single trainer
+        # (``_restore_base_policy``).
+        self.base_policy_is_start_state = False
         # Task assignment: an island whose rounds count from 0 in every process
         # (full parameter) keeps its data position in the run store
         # (``data_position.DataPositionLog``, set by the adapter entry); None: off.
@@ -1084,6 +1112,73 @@ class IslandDriver:
         self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
                   versions=sorted(restored))
 
+    def _restore_base_policy(self, start: Any) -> None:
+        """The base policy v0 is never released (the samplers start on the base
+        checkpoint themselves), so no release record names it, yet a relaunch whose
+        start version K is within ``max_policy_age`` of 0 reads groups of v0 inside
+        its window: early in a run nearly every buffered group is one. Two records
+        still name v0:
+
+        * the weights this process loaded, when it restored no round cut and loaded
+          the base checkpoint (``base_policy_is_start_state``: not a release,
+          ``--rl-init-from-release``): the start state's hash is v0's;
+        * the batch ledger restored with a round cut: round 0 was trained from v0
+          and recorded its policy token.
+
+        With neither (a cut whose ledger does not hold round 0), v0 stays unnamed and
+        its groups are passed over like those of a pruned release
+        (``rl_buffer_unidentified_policy_gate`` then says ``base_version_named`` False)."""
+        start_rollout_id = int(start.rollout_id)
+        if (start_rollout_id <= 0 or start_rollout_id - self._max_policy_age() > 0
+                or not callable(getattr(self, "published_policy_history", None))
+                or self.published_policies.hash_of(0) is not None):
+            return
+        policy_hash, source = None, None
+        if getattr(self.sync, "continues_releases_without_cut", False):
+            if getattr(self, "base_policy_is_start_state", False):
+                policy_hash, source = start.state.policy_tensor_hash(), "start_state"
+        elif self.ledger is not None:
+            from .policy_age import token_version
+
+            token = str((self.ledger.batch(0) or {}).get("policy_token") or "")
+            if token_version(token) == 0:
+                policy_hash, source = token.split(":", 2)[2], "ledger"
+        if not policy_hash:
+            return
+        self.published_policies.record(0, str(policy_hash))
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_base_policy_restored", rollout_id=start_rollout_id, source=source,
+                  policy_hash=str(policy_hash))
+
+    def _gate_unidentified_policies(self, start_rollout_id: int) -> None:
+        """A relaunched trainer whose account continues over the store's releases
+        (``published_policy_history``) starts at vK and reads its sample buffer on
+        from an earlier position: a cut's watermark, or where the newest release is
+        trained up to. The store keeps the newest two releases, so a group it reads
+        inside the policy-age window may be of a version below K that no record
+        names any more. Its policy cannot be identified; training it under a guessed
+        label is not an option, and refusing it (PolicyIdentityError) stopped every
+        start on the same group. The rollout side is told the versions below K this
+        driver restored (``set_unidentified_policy_gate``); its reader consumes such
+        a group untrained and counts it (``rl_buffer_unidentified_policy_skipped``).
+
+        Only below K: versions from K on are this process's own publications, and a
+        group naming an unpublished one, or a label with another hash, is still an
+        identity error, as in a run that starts here (which gets no gate)."""
+        setter = getattr(self.rollout, "set_unidentified_policy_gate", None)
+        if (start_rollout_id <= 0 or not callable(setter)
+                or not callable(getattr(self, "published_policy_history", None))):
+            return
+        known = sorted(v for v in self.published_policies.hashes() if v < start_rollout_id)
+        setter(int(start_rollout_id), known)
+        in_window = start_rollout_id - self._max_policy_age() <= 0
+        self.emit("rl_buffer_unidentified_policy_gate", rollout_id=start_rollout_id,
+                  start_version=int(start_rollout_id), known_versions=known,
+                  # the base policy has no release record (_restore_base_policy)
+                  **({"base_version_named": 0 in known} if in_window else {}))
+
     def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """Name every group's generating policy by its label.
 
@@ -1352,6 +1447,20 @@ class IslandDriver:
                       # The dispenser positions of those groups (row runs)
                       **({"stale_positions": positions} if positions else {}),
                       **_buffer_fill(batch))
+        if (damaged := _damaged_payloads(batch)) is not None:
+            self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
+        if (duplicates := _duplicate_tasks(batch)) is not None:
+            self.emit("rl_buffer_duplicate_task_skipped", rollout_id=rollout_id, **duplicates)
+        unidentified = getattr(batch, "buffer_unidentified_groups", None)
+        if unidentified:
+            # Consumed untrained by the reader of a trainer that resumed behind its
+            # releases (_gate_unidentified_policies): no record names their version.
+            positions = getattr(batch, "buffer_unidentified_positions", None)
+            self.emit("rl_buffer_unidentified_policy_skipped", rollout_id=rollout_id,
+                      unidentified_policy_groups=int(unidentified),
+                      versions=getattr(batch, "buffer_unidentified_versions", None),
+                      max_policy_age=self._max_policy_age(),
+                      **({"positions": positions} if positions else {}))
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             # IR-3 (age 0): a sample generated by a policy other than the
@@ -1463,6 +1572,10 @@ class IslandDriver:
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
                       stale_groups=int(stale), max_policy_age=self._max_policy_age(),
                       **_buffer_fill(batch))
+        if (damaged := _damaged_payloads(batch)) is not None:
+            self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
+        if (duplicates := _duplicate_tasks(batch)) is not None:
+            self.emit("rl_buffer_duplicate_task_skipped", rollout_id=rollout_id, **duplicates)
         violations = getattr(batch, "policy_age_violation", None)
         if violations:
             raise PolicyIdentityError(
@@ -2593,6 +2706,14 @@ class IslandDriver:
                           data_cursor=dict(landed))
                 return
         if cursor is None:
+            optional = getattr(self, "data_cursor_optional", None)
+            if optional is not None:
+                # The island draws nothing from the data source (a buffer trainer):
+                # a launch with no cut and no ledger record of rollout v-1 (a new
+                # container that continues above the store's releases) leaves it as is.
+                self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=optional,
+                          data_cursor=None)
+                return
             if callable(seek):
                 raise DriverError(
                     f"restart at rollout {start_rollout_id}: the ledger holds no data cursor "
@@ -2710,14 +2831,19 @@ class IslandDriver:
     ledger_set_aside_before: float | None = None
 
     def _set_aside_ledger_of_a_base_restart(self, start_rollout_id: int) -> None:
-        """A launch that starts at rollout 0 starts from the base (no cut, no release to
-        continue from). Rounds an earlier launch recorded in the ledger on the island's
-        volume are not this history: ``rebase(0)`` would refuse them (LedgerError) after the
-        whole trainer start-up. With ``ledger_set_aside_before`` and every recorded round
-        older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead. A round
-        recorded by this launch (an in-place restart at 0) is still refused."""
+        """A launch that restored no round cut starts from the weights its process loaded:
+        at rollout 0, or at vK when the store holds releases up to vK (the version
+        account continues above them, ``LocalOnlySync.continues_releases_without_cut``).
+        Rounds an earlier launch recorded in the ledger on the island's volume are not
+        this history: ``rebase`` would refuse the ones at or above the start (LedgerError)
+        after the whole trainer start-up, and ``prepare`` every group they trained that
+        the buffer hands over again. With ``ledger_set_aside_before`` and every recorded
+        round older than it, the earlier ledger moves to ``ledger.before-<ts>`` instead.
+        A round recorded by this launch (an in-place restart) is still refused."""
         cutoff = self.ledger_set_aside_before
-        recorded = self.ledger.recorded_rollouts() if start_rollout_id == 0 and cutoff is not None else []
+        from_base = start_rollout_id == 0 or bool(
+            getattr(self.sync, "continues_releases_without_cut", False))
+        recorded = self.ledger.recorded_rollouts() if from_base and cutoff is not None else []
         set_aside = getattr(self.ledger, "set_aside", None)
         if not recorded or not callable(set_aside):
             return
@@ -2727,9 +2853,12 @@ class IslandDriver:
         import time as _time
 
         dest = set_aside(_time.strftime("%Y%m%dT%H%M%SZ", _time.gmtime()))
-        self.emit("rl_ledger_set_aside", rollout_id=0, recorded_rollouts=recorded[-8:],
+        self.emit("rl_ledger_set_aside", rollout_id=start_rollout_id, recorded_rollouts=recorded[-8:],
                   recorded_count=len(recorded), moved_to=str(dest),
-                  why="start from the base (rollout 0) over a ledger of an earlier attempt")
+                  why="start from the base (rollout 0) over a ledger of an earlier attempt"
+                  if start_rollout_id == 0 else
+                  "start without a round cut above the store's releases over a ledger of "
+                  "an earlier attempt")
 
     def run(self) -> TrainableState:
         with self._telemetry_threads():
@@ -2746,6 +2875,8 @@ class IslandDriver:
                 try:
                     start = self.sync.start(self)
                     self._restore_published_policies(start.rollout_id)
+                    self._restore_base_policy(start)
+                    self._gate_unidentified_policies(start.rollout_id)
                     if self.ledger is not None:
                         self._set_aside_ledger_of_a_base_restart(start.rollout_id)
                         self.ledger.rebase(start.rollout_id)
@@ -2827,7 +2958,10 @@ class IslandDriver:
         kind = data_end_kind(error)
         text = f"{type(error).__name__}: {error}"
         if kind == "buffer_exhausted":
-            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text)
+            # what the reader's last take passed over (it returned no round to report them)
+            passed_over = passed_over_of(text)
+            self.emit("rl_buffer_exhausted", rollout_id=rollout_id, error=text,
+                      **({"passed_over": passed_over} if passed_over else {}))
         else:
             self.emit("rl_data_ended", rollout_id=rollout_id, source=kind, error=text)
         end = getattr(self.sync, "end_on_data", None)
