@@ -247,27 +247,33 @@ def terminate_and_verify(
     err = _down()
     if probe is None:
         return err is None or "does not exist" in str(err)
-    for i in range(attempts):
+    # A probe that fails falls back to the last down's own result, but only
+    # while the cloud never reported a live instance: once it did, an
+    # unanswered probe leaves the cluster unconfirmed.
+    seen_live = False
+    for i in range(attempts + 1):
         try:
             live = probe()
         except Exception as e:
-            print(f"[launcher] cloud verify of {cluster} failed ({e}); trusting sky.down",
-                  file=sys.stderr)
-            return True
+            trusted = not seen_live and (err is None or "does not exist" in str(err))
+            print(f"[launcher] cloud verify of {cluster} failed ({e}); "
+                  + ("trusting sky.down" if trusted else "NOT confirmed down"), file=sys.stderr)
+            return trusted
         if not live:
             return True
+        seen_live = True
+        if i == attempts:
+            break
         print(
             f"[launcher] {cluster}: {len(live)} instance(s) still live after down "
             f"({','.join(map(str, live))}); retrying teardown ({i + 1}/{attempts})",
             file=sys.stderr,
         )
         sleep_fn(min(30, 5 * (i + 1)))
-        _down()
-    try:
-        return not probe()
-    except Exception:
-        return True
-
+        err = _down()
+    print(f"[launcher] {cluster}: instance(s) {','.join(map(str, live))} still live after "
+          f"{attempts} retries; NOT confirmed down", file=sys.stderr)
+    return False
 
 def _terminate_and_verify_nodes(cluster, *, probe, attempts, sleep_fn, down, num_nodes) -> bool:
     """A multi-node island is confirmed gone only when the
