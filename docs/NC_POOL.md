@@ -380,7 +380,11 @@ one SSH round trip. Then it acts:
   nothing more. The node is kept (and billed) until you fix the config and run
   `pool-retry`, or until its lease end, when it is drained as usual.
 - **Crashed sampler.** The sampler is restarted in place, up to
-  `max_sampler_restarts` times. After that, the node is replaced.
+  `max_sampler_restarts` times. After that, the node is replaced. A
+  `docker inspect` that fails (sudo, dockerd not answering) is not a crash:
+  it counts as a probe that did not reach the node (`unreachable_grace_s`).
+  A ready sampler whose container is reported missing is restarted when the
+  next probe reports the same.
 - **Sampler exits 0: the data ended.** When the store dispenser has settled
   every task, the sampler prints `data ended` and exits 0. The pool treats
   this as the normal end of the run. It does not restart the sampler, does
