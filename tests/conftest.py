@@ -11,6 +11,13 @@ def pytest_addoption(parser):
         default=False,
         help="collect and run tests marked ray_local (they start Ray on this machine)",
     )
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="I/N",
+        help="run only shard I (0-based) of N: the selected tests sorted by node id, "
+        "dealt round-robin, so every test runs in exactly one shard",
+    )
 
 
 def pytest_configure(config):
@@ -145,12 +152,31 @@ def _fixed_thread_reading(monkeypatch):
 
 def pytest_collection_modifyitems(config, items):
     """Deselect ray_local tests unless --run-ray-local is given (deselect, not skip,
-    so that no fixture of these tests runs)."""
-    if config.getoption("--run-ray-local"):
+    so that no fixture of these tests runs). Then keep only this --shard."""
+    if not config.getoption("--run-ray-local"):
+        keep, drop = [], []
+        for item in items:
+            (drop if item.get_closest_marker("ray_local") else keep).append(item)
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = keep
+    _select_shard(config, items)
+
+
+def _select_shard(config, items):
+    spec = config.getoption("--shard")
+    if not spec:
         return
-    keep, drop = [], []
-    for item in items:
-        (drop if item.get_closest_marker("ray_local") else keep).append(item)
+    index, count = (int(x) for x in spec.split("/"))
+    if not 0 <= index < count:
+        raise _pytest.UsageError(f"--shard {spec}: need 0 <= I < N")
+    # Round-robin over sorted node ids: deterministic across runners, and the
+    # slow parametrizations of one file spread over all shards.
+    mine = {id(item) for n, item in enumerate(sorted(items, key=lambda i: i.nodeid))
+            if n % count == index}
+    keep = [item for item in items if id(item) in mine]
+    drop = [item for item in items if id(item) not in mine]
+    print(f"\nshard {index}/{count}: {len(keep)} of {len(items)} tests")
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep
