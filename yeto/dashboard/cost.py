@@ -172,3 +172,21 @@ def cost_view(reducer, now: float) -> dict:
             "note": "estimate: price table x (GPU + CPU + memory) x wall clock; not billing data"
                     + ("; some islands lack CPU/memory specs, GPU only" if any(r.get("gpu_only") for r in rows) else ""),
             "prices_source": reducer.prices.get("_source")}
+
+
+def run_up_view(path: str | None, now: float) -> dict | None:
+    """The ``yeto run up`` state of the run (``--up-state``): its cumulative runtime over
+    every up (stopped gaps excluded), the current up's runtime and the cumulative spend
+    estimate the up monitor last recorded. None without a readable state file."""
+    if not path:
+        return None
+    import json
+    from pathlib import Path
+
+    from yeto.rl.up_segments import uptime_summary
+
+    try:
+        state = json.loads(Path(path).expanduser().read_text())
+    except (OSError, ValueError):
+        return None
+    return uptime_summary(state, now) if isinstance(state, dict) else None

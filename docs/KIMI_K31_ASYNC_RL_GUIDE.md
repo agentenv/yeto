@@ -443,8 +443,8 @@ starts, reports and stops every pool; `yeto run down` releases all of them.
 | `first_group.timeout_s`, `poll_s` | How long `up` waits for the first buffer object before starting the trainer (default 5400 s, polled every 60 s). |
 | `dashboard.port` | Loopback port of the dashboard (default 8795). |
 | `dashboard.prices` | Price table JSON for the dashboard's cost panel (default: the built-in example table, see section 6). `up` also passes the run name and `budget.usd` to the dashboard. |
-| `budget.usd` | Spend cap (trainer plus NC estimate). The NC part counts the nodes actually billed (grant to release), so it follows `yeto run scale`. |
-| `budget.wall_h` | Wall-clock cap from the pool start (default 3). |
+| `budget.usd` | Spend cap (trainer plus NC estimate). The NC part counts the nodes actually billed (grant to release), so it follows `yeto run scale`. Cumulative over the whole run: a `yeto run down` followed by `yeto run up` does not reset it. |
+| `budget.wall_h` | Wall-clock cap of the current `yeto run up`, counted from the moment that `up` starts the pools (default 3). A new `yeto run up` after `down` (or after a stop or crash) starts it again; a trainer restart inside the same `up` does not. See section 5.5, "Clocks across down and up". |
 | `budget.nc_usd_per_h` | Price of one NC node hour for the estimate. |
 | `budget.silence_min` | Minimum silence window of the backstop; the effective window is `max(4 x --rl-stall-timeout, silence_min)`. |
 | `budget.release_nc_on_breach` | `true`: a budget or wall-clock breach performs the full `down` including the NC pool. Default `false` (see section 7). |
@@ -1249,6 +1249,28 @@ provider (`the sampler pools nc (nc), modal (modal) ...`); the same applies
 to Daytona, Sky and Modal pools. Recommended practice: set `"release_nc_on_finish": true` in `budget` so
 the monitor runs the full `down` as soon as the trainer finishes, or run
 `yeto run down` yourself.
+
+**Clocks across down and up.** Each `yeto run up` process records its period
+(start, last monitor poll, end) in `ups` of `~/.yeto/rl-up/<run>/state.json`
+and sets `t0` to its own start. The two caps differ:
+
+| | Counts from | Reset by a new `yeto run up` |
+|---|---|---|
+| `budget.wall_h` (and the 1.2x wall cap of the NC breaker) | `t0`, the start of the current `up` | yes |
+| Starvation watch; first-group wait (skipped once the run has a first group) | the current `up` process | yes |
+| `budget.usd` (spend estimate) | `run_t0`, the first start of the run; NC nodes billed grant to release; the trainer from its first launch, inside the up periods only (a stopped gap bills no trainer) | no |
+
+A restart inside the same `up` process (for example the trainer restarted by
+its scheduler) keeps the current `up`'s clock. A run whose state predates the
+periods keeps its old `t0` as `run_t0`, so its spend stays counted.
+
+`yeto run status` reports under `uptime` the number of ups, the cumulative
+runtime (`cumulative_runtime_h`: the up periods summed, the stopped gaps
+between `down` and the next `up` excluded), the current up's runtime, the
+time left on `budget.wall_h`, and the cumulative spend estimate. The
+dashboard started by `up` (`--up-state <state.json>`) shows the same as the
+"Run uptime" card. An `up` that ended without `down` (crash, kill) counts
+until its last monitor poll.
 
 ### 5.6 Manual operations take priority
 

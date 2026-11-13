@@ -24,6 +24,9 @@ def add_parser(sub) -> None:
                        "uploaded under tapes/ (samplers on leased nodes, replacements included)")
         p.add_argument("--prices", default=None, help="price table JSON (default: built-in example, not a bill)")
         p.add_argument("--budget", type=float, default=None, help="budget cap in $ for the cost bar/alerts")
+        p.add_argument("--up-state", default=None, metavar="PATH",
+                       help="state.json of a `yeto run up` run: show its cumulative runtime (every up, "
+                       "stopped gaps excluded) and cumulative spend estimate")
         p.add_argument("--thresholds", default=None, help="alert threshold overrides JSON")
         p.add_argument("--compare", nargs="*", default=[], metavar="PATH",
                        help="tapes of a second run to compare generation-stage utilization with "
@@ -57,8 +60,10 @@ def _reducer(args):
     from .reducer import Reducer
 
     thresholds = json.loads(Path(args.thresholds).read_text()) if args.thresholds else None
-    return Reducer(run=args.run, prices=load_prices(args.prices), budget_usd=args.budget,
-                   thresholds=thresholds)
+    reducer = Reducer(run=args.run, prices=load_prices(args.prices), budget_usd=args.budget,
+                      thresholds=thresholds)
+    reducer.up_state = getattr(args, "up_state", None)
+    return reducer
 
 
 def _paths(args) -> list[str]:

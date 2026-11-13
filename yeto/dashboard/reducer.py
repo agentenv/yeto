@@ -1256,7 +1256,9 @@ class Reducer:
     def cost(self, now: float) -> dict:
         self.apply_run_host_shape()
         self.infer_hardware()
-        return cost_mod.cost_view(self, now)
+        view = cost_mod.cost_view(self, now)
+        view["run_up"] = cost_mod.run_up_view(getattr(self, "up_state", None), now)
+        return view
 
     def overview(self, *, live: bool = False, now: float | None = None) -> dict:
         now = self.now(live) if now is None else now
