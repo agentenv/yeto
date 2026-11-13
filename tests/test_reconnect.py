@@ -562,3 +562,62 @@ def test_subclass_dispatch_overrides_take_the_block_digest():
 
     for cls in (SyncerClient, SubscriberClient):
         inspect.signature(cls._dispatch).bind(None, 0, 0, b"", b"\0" * 32)
+
+
+@pytest.mark.timeout(30)
+def test_flapping_syncer_keeps_backing_off_instead_of_redialing_at_the_start_interval(monkeypatch):
+    """A syncer that accepts the group and drops it right away (crash loop,
+    flapping link) must not reset the backoff on every accepted dial: the
+    gap between redials keeps growing, otherwise every island hammers the
+    syncer and floods the log at the start interval forever."""
+    from yeto import protocol
+
+    monkeypatch.setattr(protocol, "RECONNECT_BACKOFF_START", 0.1)
+    monkeypatch.setattr(protocol, "RECONNECT_BACKOFF_CAP", 2.0)
+    monkeypatch.setattr(protocol, "RECONNECT_STABLE_S", 30.0)
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32,
+                          num_streams=1, connect_timeout=10, max_reconnects=None)
+    try:
+        client.start()
+        stamps = []
+        for _ in range(5):
+            _, _, group = accept_group(listener, 1)
+            stamps.append(time.monotonic())
+            drop_group(group)
+        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+        assert gaps[-1] > 0.6, f"backoff reset on every flap: gaps {gaps}"
+        client.check_health()
+    finally:
+        client.close()
+        listener.close()
+
+
+@pytest.mark.timeout(30)
+def test_reconnect_budget_counts_consecutive_failures_not_lifetime_redials(monkeypatch):
+    """max_reconnects (the island pool's max_rejoin_failures) bounds
+    *consecutive* failed redials: a link that came back and stayed up
+    restores the full budget, so a few blips over a multi-day run do not
+    eventually kill a healthy island."""
+    from yeto import protocol
+
+    monkeypatch.setattr(protocol, "RECONNECT_BACKOFF_START", 0.05)
+    monkeypatch.setattr(protocol, "RECONNECT_STABLE_S", 0.3)
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32,
+                          num_streams=1, connect_timeout=10, max_reconnects=1)
+    try:
+        client.start()
+        _, _, group = accept_group(listener, 1)
+        for _ in range(3):  # three separate blips, each after a stable period
+            time.sleep(0.6)
+            drop_group(group)
+            _, _, group = accept_group(listener, 1)
+            client.check_health()
+        assert client.send_progress().reconnects == 3
+        drop_group(group)
+    finally:
+        client.close()
+        listener.close()

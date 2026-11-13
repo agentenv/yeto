@@ -148,6 +148,10 @@ MAX_PARTIAL_MESSAGES = 64
 RECONNECT_BACKOFF_START = 1.0
 RECONNECT_BACKOFF_CAP = 30.0
 RECONNECT_DIAL_TIMEOUT = 20.0
+# A redialed group must stay up this long before the backoff and the
+# max_reconnects budget reset; one that drops sooner (crash-looping syncer,
+# flapping link) counts as the same outage and keeps backing off.
+RECONNECT_STABLE_S = 60.0
 
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
@@ -1244,8 +1248,10 @@ class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
     Self-healing: any socket error tears down and redials the whole group.
-    ``max_reconnects`` bounds the number of redial attempts (None = retry
-    forever); once exhausted, check_health raises.
+    ``max_reconnects`` bounds the redials of one outage (None = retry
+    forever); once exhausted, check_health raises. A redialed group that
+    drops within RECONNECT_STABLE_S belongs to the same outage: its budget
+    and exponential backoff carry on instead of restarting.
     """
 
     # push_fragment_parts takes ``timings`` (push time split).
@@ -1465,7 +1471,10 @@ class SyncerClient:
         self._connected = threading.Event()
         self._failure = threading.Event()  # set by any thread of the live group
         self._closed = threading.Event()
-        self._reconnects_used = 0
+        self._reconnects_used = 0  # lifetime redials (SendProgress.reconnects)
+        self._outage_redials = 0  # redials of the current outage (max_reconnects)
+        self._backoff = RECONNECT_BACKOFF_START
+        self._connected_at = 0.0
         self._bytes_sent = 0
         self._bytes_sent_lock = threading.Lock()
         self._reset_bcasts_on_reconnect = False
@@ -1577,6 +1586,7 @@ class SyncerClient:
             self._queues = []
             self._threads = []
             self._failure.clear()
+            self._connected_at = time.monotonic()
             self._connected.set()
             for i, s in enumerate(socks):
                 q: queue.Queue[_Outbound | None] = queue.Queue(maxsize=256)
@@ -1632,8 +1642,11 @@ class SyncerClient:
                 return
             _connect_log(f"connection to syncer {self.addr[0]}:{self.addr[1]} lost "
                          f"(learner {self.learner_id}): {self._last_err!r}; redialing")
+            if time.monotonic() - self._connected_at >= RECONNECT_STABLE_S:
+                # The last group stayed up: a new outage, not a flap.
+                self._outage_redials = 0
+                self._backoff = RECONNECT_BACKOFF_START
             self._teardown_group()
-            backoff = RECONNECT_BACKOFF_START
             # A lease expiry is the syncer asking for a re-JOIN, not a link
             # failure: its first redial does not use the reconnect budget.
             rejoin = isinstance(self._last_err, LeaseExpiredError)
@@ -1643,7 +1656,7 @@ class SyncerClient:
                 if (
                     not rejoin
                     and self.max_reconnects is not None
-                    and self._reconnects_used >= self.max_reconnects
+                    and self._outage_redials >= self.max_reconnects
                 ):
                     with self._lock:
                         self._err = self._last_err or ConnectionError("syncer connection lost")
@@ -1654,9 +1667,10 @@ class SyncerClient:
                     rejoin = False
                 else:
                     self._reconnects_used += 1
-                if self._closed.wait(backoff):
+                    self._outage_redials += 1
+                if self._closed.wait(self._backoff):
                     return
-                backoff = min(backoff * 2.0, RECONNECT_BACKOFF_CAP)
+                self._backoff = min(self._backoff * 2.0, RECONNECT_BACKOFF_CAP)
                 try:
                     self._connect_group(patient=False)
                     _connect_log(f"reconnected to syncer {self.addr[0]}:{self.addr[1]} "
