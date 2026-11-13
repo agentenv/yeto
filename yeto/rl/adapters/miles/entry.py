@@ -966,6 +966,7 @@ def compose_island(
         watch_preempt_marker(resume.controller)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
+    _wire_round_cuts_off(driver, miles_args=miles_args)
     _wire_droppable_reclaim(sync, driver)
     from .sampler_island import wire_policy_releases
 
@@ -1124,6 +1125,8 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
     from .rebuild_wiring import CutSource
     from .round_cut import wire_round_cuts
 
+    if getattr(miles_args, "yeto_rl_round_cuts", None) == "off":
+        return  # --rl-round-cuts off: _wire_round_cuts_off
     controller = elastic.controller
     if getattr(controller, "checkpoint_store", None) is None:
         return
@@ -1149,6 +1152,27 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
         _commit_cuts_inline_for_buffer_reader(checkpoint, miles_args=miles_args)
         return
     _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _wire_round_cuts_off(driver: Any, *, miles_args: Any) -> None:
+    """``--rl-round-cuts off``: no round cut is wired (none written, none read). The
+    start event says so; a trainer that reads the sample buffer gets the hook that
+    starts its read position where the release it continues from was trained up to
+    (``driver.buffer_start_without_cuts``, sampler_island._resume_single_trainer)."""
+    if getattr(miles_args, "yeto_rl_round_cuts", None) != "off":
+        return
+    from yeto.rl.engine.cut_interval import ROUND_CUTS_OFF_NOTE
+
+    from .buffer_rollout import READER_FUNCTION_PATHS, BufferCutLink
+
+    reader = custom_function_path(getattr(miles_args, "rollout_function_path", None)) in READER_FUNCTION_PATHS
+    in_executor = getattr(driver.rollout, "_in_executor", None)
+    if reader and callable(in_executor):
+        driver.buffer_start_without_cuts = BufferCutLink(in_executor).resume
+    print(f"[rl] {ROUND_CUTS_OFF_NOTE}", flush=True)
+    driver.emit("rl_round_cuts_off", buffer_reader=bool(reader),
+                init_release=(getattr(miles_args, "yeto_rl_init_release", None) or {}).get("path"),
+                note=ROUND_CUTS_OFF_NOTE)
 
 
 def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -> None:

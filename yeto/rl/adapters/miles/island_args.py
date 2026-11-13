@@ -76,6 +76,7 @@ DRIVER_KEYS: frozenset[str] = frozenset({
     "rl_resume",
     "rl_resume_every",
     "rl_rollout_model_revision",
+    "rl_round_cuts",
     "rl_sample_buffer",
     "rl_sample_lane",
     "rl_source_sha256",

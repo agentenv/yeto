@@ -725,6 +725,16 @@ _RESUME = (
                 "publication checks (policy "
                 "hash, engine weight read-back) run at the same interval and on the first "
                 "publication; see --rl-verify-every-round"),
+    shared_flag("--rl-round-cuts", choices=("auto", "off"), default="auto",
+                help="auto (default): round cuts as the store and the cut flags give them. "
+                "off: no round cut is wired, written or read (a full-parameter Kimi-K3.1 cut "
+                "holds bf16 weights, fp32 master and both Adam moments: about 5 TB); a "
+                "relaunch continues from the store's newest release instead "
+                "(every trainer node adds --rl-init-from-release latest when the store holds a "
+                "release; a trainer over releases without it refuses to start). Refused "
+                "with --rl-backend verl and "
+                "--rl-cut-every / --rl-cut-auto-mtbf-s / --rl-cut-max-interval-s / "
+                "--rl-cut-keep / --rl-stop-after-rounds / --rl-resume-allow-config-change"),
     # a timed cut interval
     shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
                 help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
+from ..rl.engine.cut_interval import round_cuts_off
 from ..rl.engine.run_flags import CLI, check_verify_every, rl_forward_pairs, rl_option, rl_option_pairs
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
@@ -391,6 +392,9 @@ def _check_resume_launch_flags(args) -> bool:
     ``--rl-checkpoint-store-export-only``: False (the store holds only HF exports)."""
     from ..rl.engine.cut_interval import cut_interval_for
 
+    from ..rl.engine.cut_interval import check_round_cuts_off
+
+    check_round_cuts_off(args)  # before any store check: the message names the real conflict
     store = getattr(args, "rl_checkpoint_store", None)
     elastic = bool(getattr(args, "rl_elastic", False))
     if store_export_only(args):
@@ -791,6 +795,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             if getattr(args, name, None) is not None:
                 flags += f" {flag} {int(getattr(args, name))}"
     flags += hf_export_flags(args)
+    if round_cuts_off(args):
+        flags += " --rl-round-cuts off"  # the island wires no cut (no write, no read)
     if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_cut_every", None) is not None:
         flags += f" --rl-cut-every {int(args.rl_cut_every)}"
     for name, flag in (("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),

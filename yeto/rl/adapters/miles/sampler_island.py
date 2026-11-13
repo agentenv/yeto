@@ -1070,7 +1070,8 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
             # above v0 without a recorded data cursor has none to restore.
             driver.data_cursor_optional = "sample_buffer"
         synced = _resume_single_trainer(driver, release_store(config, environ),
-                                        init_release=getattr(miles_args, "yeto_rl_init_release", None))
+                                        init_release=getattr(miles_args, "yeto_rl_init_release", None),
+                                        round_cuts_off=getattr(miles_args, "yeto_rl_round_cuts", None) == "off")
 
     lora = lora_mode(miles_args)
     # module doc: a trainer island stages its full releases unless --rl-release-inline
@@ -1120,8 +1121,13 @@ def _local_dir(path: Any) -> Path | None:
     return Path(path) if path and Path(path).is_dir() else None
 
 
+class RoundCutsOffRestartError(SampleBufferRolloutError):
+    """``--rl-round-cuts off`` over a store that holds releases, without the release loaded."""
+
+
 def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
-                           init_release: dict[str, Any] | None = None) -> dict[str, Any]:
+                           init_release: dict[str, Any] | None = None, *,
+                           round_cuts_off: bool = False) -> dict[str, Any]:
     """A single trainer relaunched over a store that holds releases (module doc,
     relaunch): its account continues at the highest release vK, and the versions
     below it are restored with the hashes the store recorded. Returns the
@@ -1139,6 +1145,15 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
                     version=int(init_release["version"]), policy_hash=init_release["policy_hash"])
     if resumed is None:
         return {}
+    if round_cuts_off and init_release is None:
+        # No cut restores the weights: this process holds the base checkpoint, yet the
+        # numbering continues at vK and the buffer at what vK was trained up to, so the
+        # groups below that position would never reach the weights.
+        raise RoundCutsOffRestartError(
+            f"--rl-round-cuts off: the store already holds policy releases up to v{resumed.base_version} "
+            "but this trainer loaded the base checkpoint (no --rl-init-from-release). Relaunch with "
+            "--rl-init-from-release latest (yeto launch adds it on every trainer node; yeto run up on a "
+            "restart), or start a new run under a fresh run prefix / store")
     # without a round cut this process trains from what it loaded: the base checkpoint
     # (policy v0), unless it loaded a release
     driver.base_policy_is_start_state = init_release is None
@@ -1152,12 +1167,40 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
         # RoundCutCheckpoint.resume). A record without it (an earlier yeto) reads from
         # 0: its read position (buffer_selected) may lie past groups vK never trained.
         round_cuts.buffer_start_without_cut = int(resumed.buffer_trained)
+    start_buffer = getattr(driver, "buffer_start_without_cuts", None)
+    sync = getattr(driver, "sync", None)
+    if round_cuts is None and callable(start_buffer) and resumed.buffer_trained is not None:
+        # --rl-round-cuts off (entry._wire_round_cuts_off): no cut keeps the watermark,
+        # so the buffer is read on from where the weights of vK were trained up to
+        # (at the sync's start, when the reader exists)
+        if sync is None or not hasattr(sync, "buffer_start_without_cuts"):
+            # reading from 0 instead would train groups vK already holds a second time
+            raise RoundCutsOffRestartError(
+                f"--rl-round-cuts off: the sync {type(sync).__name__} has no buffer_start_without_cuts "
+                f"hook, so the buffer cannot be read on from v{resumed.base_version}'s trained "
+                f"position {int(resumed.buffer_trained)}")
+        position = int(resumed.buffer_trained)
+        sync.buffer_start_without_cuts = lambda: _start_buffer_at(driver, start_buffer, position)
     driver.published_policy_history = resumed.history
     driver.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
                 start_version=resumed.start_version, account_resumed=callable(resume_at),
                 known_versions=list(resumed.known_versions()),
                 buffer_trained=resumed.buffer_trained)
     return {"resumed_base": resumed.base_version}
+
+
+def _start_buffer_at(driver: Any, start_buffer: Any, position: int) -> None:
+    """``--rl-round-cuts off``: read the buffer on from ``position``. A position the buffer
+    refuses (beyond the index this store holds) is handled as with round cuts
+    (``RoundCutCheckpoint._start_buffer_without_cut``): reported, and the buffer is read
+    from 0, where the policy-age gate passes over what is too old."""
+    try:
+        start_buffer(int(position))
+    except Exception as error:  # noqa: BLE001 - reported; position 0 is always valid
+        if int(position) == 0:
+            raise
+        driver.emit("rl_buffer_start_position_refused", position=int(position), error=repr(error)[:500])
+        start_buffer(0)
 
 
 def start_trainer_releaser(miles_args: Any, config: Any, environ: Any = None) -> Any:

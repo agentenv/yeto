@@ -33,12 +33,16 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from .policy_release import PolicyRelease, PolicyReleaseStore
+from .policy_release import PolicyRelease, PolicyReleaseStore, trained_releases
 from .release_overlay import is_partial_release, overlay_release
 
 RECORD = "INIT_RELEASE.json"
+# ``--if-released`` found no trained release: the island starts from the base checkpoint
+# (--rl-round-cuts off, the run's first launch). Without RECORD or this marker the
+# island refuses to start (the node did not prepare).
+NO_RELEASE = "NO_RELEASE.json"
 MODEL_SUBDIR = "model"  # the overlay, beside the record
 LATEST_SELECTOR = "latest"
 _NAME = re.compile(r"r(\d+)-v(\d+)")
@@ -52,7 +56,7 @@ def select_release(records: Iterable[PolicyRelease], selector: str) -> PolicyRel
     """The release to start from: the trained release (not derived) with the highest
     version, of the highest seq among those. ``selector``: ``latest``, or that
     release's ``r<seq>-v<version>`` / version number (checked against it)."""
-    trained = [r for r in records if r.derived_from is None and r.policy_hash]
+    trained = trained_releases(records)
     if not trained:
         raise InitFromReleaseError("the store holds no trained release to start from")
     top = max(trained, key=lambda r: (int(r.version), int(r.seq)))
@@ -111,6 +115,30 @@ def prepare(releases: PolicyReleaseStore, selector: str, base_dir: str | os.Path
     return record
 
 
+def prepare_if_released(releases: PolicyReleaseStore, base_dir: str | os.PathLike[str] | Callable[[], str],
+                        out_dir: str | os.PathLike[str], *,
+                        expected_selection_sha256: str | None = None) -> dict[str, Any] | None:
+    """``--rl-round-cuts off`` without ``--rl-init-from-release``: prepare the newest
+    release when the store holds a trained one (a relaunch: :func:`prepare` with
+    ``latest``), else write :data:`NO_RELEASE` (the run's first start, from the base).
+    ``base_dir`` may be a callable (resolved only when a release is laid over it).
+    A record of an earlier preparation in ``out_dir`` is removed first. Returns the
+    release record, or None."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    for name in (RECORD, NO_RELEASE):
+        (out / name).unlink(missing_ok=True)
+    if not trained_releases(releases.records()):
+        (out / NO_RELEASE).write_text(json.dumps({"selector": LATEST_SELECTOR, "release": None}))
+        print("[yeto-init-release] --rl-round-cuts off: the store holds no policy release yet; "
+              "the trainer starts from the base checkpoint", flush=True)
+        return None
+    print("[yeto-init-release] --rl-round-cuts off: the store holds policy releases; adding "
+          "--rl-init-from-release latest (the newest release's weights, a fresh optimizer)", flush=True)
+    base = base_dir() if callable(base_dir) else base_dir
+    return prepare(releases, LATEST_SELECTOR, base, out, expected_selection_sha256=expected_selection_sha256)
+
+
 def read_record(out_dir: str | os.PathLike[str]) -> dict[str, Any]:
     path = Path(out_dir).expanduser() / RECORD
     if not path.is_file():
@@ -118,9 +146,14 @@ def read_record(out_dir: str | os.PathLike[str]) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def island_model_path(out_dir: str | os.PathLike[str], base_path: str | os.PathLike[str]) -> tuple[str, dict]:
+def island_model_path(out_dir: str | os.PathLike[str],
+                      base_path: str | os.PathLike[str]) -> tuple[str, dict | None]:
     """The model directory the island loads instead of ``base_path`` and the record;
-    raises when the release was laid over another base."""
+    raises when the release was laid over another base. ``(base_path, None)`` when
+    :func:`prepare_if_released` found no release (:data:`NO_RELEASE`)."""
+    out = Path(out_dir).expanduser()
+    if not (out / RECORD).is_file() and (out / NO_RELEASE).is_file():
+        return str(base_path), None
     record = read_record(out_dir)
     if record["partial"] and Path(record["base_dir"]).resolve() != Path(base_path).resolve():
         raise InitFromReleaseError(f"{record['path']} was laid over {record['base_dir']}, "
@@ -141,6 +174,22 @@ def check_resumed(record: Mapping[str, Any], base_version: int | None, history: 
                                    f"{record['policy_hash']}")
 
 
+def selection_sha256(path: str | None) -> str | None:
+    """The sha256 of the expert selection file at ``path`` (None without one)."""
+    if not path:
+        return None
+    from . import backends  # the selection file format is the backend's (never imported statically)
+
+    return backends.module("expert_selection").ExpertSelection.load_file(Path(path).expanduser()).sha256
+
+
+def base_path(model: str, revision: str | None) -> str:
+    """The local directory of ``model`` (an HF repo is resolved and downloaded)."""
+    from yeto.models import resolve
+
+    return _base_path(resolve(model), revision)
+
+
 def _base_path(model: str, revision: str | None) -> str:
     if Path(model).expanduser().is_dir():
         return str(Path(model).expanduser().resolve())
@@ -157,23 +206,29 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     parser.add_argument("--model-revision", default=None)
     parser.add_argument("--expert-selection", default=None, help="the trainer's selection file")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--if-released", action="store_true",
+                        help="--rl-round-cuts off: prepare the newest release only when the store "
+                        "holds one (with --release latest); else mark the start from the base")
     args = parser.parse_args(argv)
+    if args.if_released and args.release != LATEST_SELECTOR:
+        raise InitFromReleaseError("--if-released selects the newest release: use --release latest")
     env = os.environ if environ is None else environ
     from .resume import store_for
 
     store_path = args.store or env.get("YETO_RL_STORE_S3_STAGE")
     if not store_path:
         raise InitFromReleaseError("no store path: pass --store or set YETO_RL_STORE_S3_STAGE")
-    selection = None
-    if args.expert_selection:
-        from . import backends  # the selection file format is the backend's (never imported statically)
-
-        selection_file = backends.module("expert_selection").ExpertSelection.load_file
-        selection = selection_file(Path(args.expert_selection).expanduser()).sha256
+    selection = selection_sha256(args.expert_selection)
     out = Path(args.out).expanduser()
     releases = PolicyReleaseStore(store_for(store_path, environ=env), cache_dir=out / "files")
-    record = prepare(releases, args.release, _base_path(args.model, args.model_revision), out,
-                     expected_selection_sha256=selection)
+    if args.if_released:
+        record = prepare_if_released(releases, lambda: _base_path(args.model, args.model_revision), out,
+                                     expected_selection_sha256=selection)
+        if record is None:
+            return 0
+    else:
+        record = prepare(releases, args.release, _base_path(args.model, args.model_revision), out,
+                         expected_selection_sha256=selection)
     print(f"[yeto-init-release] {json.dumps(record, sort_keys=True)}", flush=True)
     return 0
 

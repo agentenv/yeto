@@ -65,7 +65,16 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     """``plan["resume"]`` from the island flags (None: no cut store). Raises on
     a flag combination the cut controller cannot run."""
     from yeto.rl.engine.cut_interval import (check_island_cut_store, cut_auto_options, cut_interval_for,
-                                             island_cut_store_for)
+                                             island_cut_store_for, check_round_cuts_off,
+                                             round_cuts_off)
+
+    from yeto.rl.engine.cut_interval import VERL_ROUND_CUTS_OFF_REFUSED
+
+    check_round_cuts_off(args)
+    if round_cuts_off(args):
+        # the launcher refuses it (check_round_cuts_off with --rl-backend verl); an island
+        # started without the launcher refuses it here
+        raise ValueError(VERL_ROUND_CUTS_OFF_REFUSED)
 
     store = getattr(args, "rl_resume_store", None)
     island_store = getattr(args, "rl_island_cut_store", None)

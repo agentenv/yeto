@@ -596,6 +596,7 @@ injection and are omitted here.
 | Flag | Default | Description |
 |---|---|---|
 | `--rl-checkpoint-store` | — | off-island state store: bucket URI, `modal-volume://NAME[/PREFIX]`, or a shared path |
+| `--rl-round-cuts` | `auto` | `off`: no round cut wired, written or read; a relaunch continues from the newest release (every trainer node adds `--rl-init-from-release latest` when the store holds one; a trainer over releases without it refuses to start); refused with `--rl-backend verl` and the cut flags below |
 | `--rl-cut-every` | — | keep a round cut every N rounds |
 | `--rl-cut-auto-mtbf-s` | — | choose the cut interval from an expected MTBF instead |
 | `--rl-cut-keep` | — | newest cuts kept (default 2) |

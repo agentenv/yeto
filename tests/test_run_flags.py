@@ -261,7 +261,7 @@ _NON_RL_LITERALS = frozenset({
     "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--inline-resend", "--inline-broadcast", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--background-checkpoint", "--checkpoint-at-steps", "--checkpoint-every", "--checkpoint-on-start",
     "--checkpoint-path", "--config-json",
-    "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
+    "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--if-released", "--detach", "--dtype",
     # task dispenser (syncer flags)
     "--dispense", "--dispense-lease-s", "--dispense-log", "--dispense-max-redo", "--dispense-passes",
     "--entrypoint", "--expected-island-contract", "--expert-selection", "--out", "--expert-token-weights", "--final-ack-timeout-s", "--final-cut-payload", "--final-grace-s", "--follow", "--force",
