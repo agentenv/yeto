@@ -155,6 +155,7 @@ from typing import Any
 
 from .merged_release import BufferLane, merges_shards
 from .object_store import ObjectStore
+from .policy_age import age_floor
 from .resume import CheckpointStore
 from .trainer_lifecycle import BacklogStats, SampleIndexEntry, Selected
 
@@ -1598,7 +1599,7 @@ def trainable_backlog(stats: BacklogStats, current_version: int, max_policy_age:
     None: every sample counts. The version fields still describe the whole backlog."""
     if max_policy_age is None:
         return stats
-    floor = int(current_version) - int(max_policy_age)
+    floor = age_floor(int(current_version), int(max_policy_age))
     fresh = sum(n for v, n in (stats.version_histogram or {}).items() if v >= floor)
     if fresh == stats.samples:
         return stats

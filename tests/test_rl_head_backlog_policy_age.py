@@ -56,9 +56,10 @@ def test_over_age_groups_do_not_start_the_trainer(tmp_path):
     assert isinstance(s1.decide(whole, LifecycleState.COLD), Start)
 
 
-def test_without_an_age_window_every_group_counts(tmp_path):
-    stats = _binding_backlog(tmp_path, [5, 7, 8], 10)
-    assert (stats.samples, stats.batches) == (3, 1.5)
+def test_unset_age_is_the_readers_limit_zero(tmp_path):
+    # unset = 0 = age_floor(10, 0) == 10: none of these groups is trainable
+    stats = _binding_backlog(tmp_path, [5, 7, 8, 10], 10)
+    assert (stats.samples, stats.batches) == (1, 0.5)
 
 
 def test_the_head_and_the_reader_share_one_floor():

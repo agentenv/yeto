@@ -588,11 +588,14 @@ def head_store_objects(uri: str, environ: Mapping[str, str] | None = None) -> Ob
     return head_objects(uri, environ=environ)
 
 
-def _trainable_age(args: Any) -> int | None:
-    """The sample-age window the trainer's reader applies (``--rl-max-policy-age``;
-    None when unset): older samples are passed over, so they are no backlog."""
-    age = int(getattr(args, "rl_max_policy_age", 0) or 0)
-    return age if age > 0 else None
+def _trainable_age(args: Any) -> int:
+    """The sample-age window the trainer's reader applies (``--rl-max-policy-age``):
+    older samples are passed over, so they are no backlog. 0 (the default) is the
+    reader's rule too (``age_floor(cur, 0) == cur``: only the current version's
+    samples), never "no limit"."""
+    from yeto.rl.engine.policy_age import validate_limit
+
+    return validate_limit(int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 
 def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,
