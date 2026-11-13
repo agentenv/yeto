@@ -35,3 +35,12 @@ def test_policy_age_override_without_scheduler_still_allowed():
     out = io_.overrides_of(_args(rl_trainer_scheduler="off", rl_trainer_island=None,
                                  rl_island_override=["1:rl_max_policy_age=5"]), 2)
     assert out == {1: {"rl_max_policy_age": 5}}
+
+
+@pytest.mark.parametrize("island", [0, 1])
+def test_policy_age_override_in_a_convertible_pool_is_refused(island):
+    args = _args(rl_trainer_scheduler="off", rl_trainer_island=None,
+                 rl_node_class=["island0=convertible", "island1=convertible"],
+                 rl_island_override=[f"{island}:rl_max_policy_age=5"])
+    with pytest.raises(ValueError, match="trainer scheduler"):
+        io_.overrides_of(args, 2)
