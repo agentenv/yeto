@@ -327,9 +327,12 @@ def test_a_drain_request_that_cannot_be_read_costs_one_scan():
     assert not sd.drain_answered(objects, NS, "s-0", seq)  # it still holds a claim
 
 
-def test_a_claim_whose_holder_cannot_be_read_stays_a_claim_until_its_lease_runs_out():
+def test_a_claim_whose_holder_cannot_be_read_stays_a_claim_until_its_lease_runs_out(monkeypatch):
     """The fence check of a live claim reads its body: a failed read (or a body
-    that is no JSON) is no fence verdict and does not end the scan."""
+    that is no JSON) is no fence verdict and does not end the scan. The lease record
+    fence of the ledger is the rule of a plan of version 2 (a run started before
+    shard ownership records): the plan is written at that version."""
+    monkeypatch.setattr(sd, "PLAN_VERSION", 2)
     s3, objects = _world()
     a = _sampler(objects, "s-0", "i1", lease_s=90.0)
     assert a.take(1) == [0]

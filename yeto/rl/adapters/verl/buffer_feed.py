@@ -371,6 +371,7 @@ class BufferFeed:
         started = self.clock()
         while True:
             selected = self.buffer.select(self.consumer, 1)
+            self._count_merge_dropped()
             if selected:
                 return selected[0]
             if self.buffer.data_ended:
@@ -467,6 +468,14 @@ class BufferFeed:
         self._streak = 0
         self._last_accepted_at = self.clock()
         self._stall_warned_at = None
+
+    def _count_merge_dropped(self) -> None:
+        """Groups the buffer's merge dropped as written by a fenced incarnation (shard
+        ownership records, ``sample_buffer`` module doc): counted as ``stale_incarnation``
+        like the gate's (the merge already emitted one event per group)."""
+        take = getattr(self.buffer, "take_fenced_dropped", None)
+        for dropped in take() if callable(take) else ():
+            self.dropped[STALE_REASON] = self.dropped.get(STALE_REASON, 0) + int(dropped["groups"])
 
     def _dropped(self, reason: str, position: int, detail: str) -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1

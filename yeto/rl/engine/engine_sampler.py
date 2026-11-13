@@ -69,6 +69,7 @@ from .sampler_engine import (
     updates_during_generation,
     version_fields,
 )
+from .sample_buffer import ShardFenced
 from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
 from .task_dispense import DISPENSE_POSITION_KEY
@@ -462,6 +463,8 @@ class EngineRound:
         written = 0
         dispensed: list[int] = []
         for position, (item, group) in enumerate(scored):
+            # ``fenced`` is an early stop, not the fence: the write itself refuses (ShardFenced)
+            # once the shard has another owner; what is not written goes back through ``_written``
             refusal = self._write_refusal(dispense_position(item))
             if refusal in ("reclaimed", "fenced"):  # leaving: the replacement owns the shard
                 self.dropped_groups += len(scored) - position
@@ -469,7 +472,11 @@ class EngineRound:
             if refusal is not None:  # a store ledger gave it out again
                 self.dropped_groups += 1
                 continue
-            spot = self._write_group(rollout_id, item, group, record=record, last=position == len(scored) - 1)
+            try:
+                spot = self._write_group(rollout_id, item, group, record=record, last=position == len(scored) - 1)
+            except ShardFenced:  # the shard changed owner since the check: the write was refused
+                self.dropped_groups += len(scored) - position
+                break
             written += 1
             if spot is not None:
                 dispensed.append(spot)

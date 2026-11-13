@@ -672,7 +672,7 @@ class IslandPool:
         if fence is None or m.started is None:
             return True
         try:
-            fence(m)
+            lease = fence(m)
         except Exception as error:  # noqa: BLE001 - a fence is a safety step: owed until it succeeds
             now = self.clock()
             m.fence_pending = m.fence_pending or why
@@ -694,7 +694,16 @@ class IslandPool:
         m.fence_pending, m.fence_failures, m.fence_since = None, 0, None
         if "fence_stuck" in m.alerted:
             m.alerted.remove("fence_stuck")
+        self._owner_event(m, lease)
         return True
+
+    def _owner_event(self, m: Member, lease: Any) -> None:
+        """``rl_shard_owner`` when the fence appended the pool's ownership record to the
+        shard (r2 data path, ``sample_buffer`` module doc): shard, epoch, incarnation, by."""
+        owner = lease.get("owner") if isinstance(lease, dict) else None
+        if owner and owner.get("created"):
+            self._event("rl_shard_owner", ticket=m.ticket, shard=m.shard, incarnation=lease.get("incarnation"),
+                        by=owner.get("by"), epoch=owner.get("epoch"), pos=owner.get("pos"))
 
     def _fence_blocker(self, m: Member) -> Member | None:
         """The member whose slot / shard ``m`` took over and whose fence is still owed."""
@@ -1810,7 +1819,7 @@ class IslandPool:
             m.fenced_for_restart, m.fence_tokens = True, probe.gen_tokens
             self._save_now()
             try:
-                fence(m)
+                self._owner_event(m, fence(m))
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")
             except Exception as error:  # noqa: BLE001
                 # not owed like a shard fence: the restart below supersedes the incarnation at

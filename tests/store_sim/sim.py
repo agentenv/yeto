@@ -281,7 +281,13 @@ class Simulation:
                 if self.truth_holds(namespace, slot, attempt, sid, incarnation)]
 
     def truth_fenced(self, sid: str, incarnation: str) -> bool:
-        """The incarnation lease of the shard names another incarnation."""
+        """Another incarnation holds the shard: its newest ownership record names one
+        (where the shard holds them they decide, the lease record is observation
+        only), else the incarnation lease names one."""
+        for key in reversed(self.server.keys(sample_buffer.shard_prefix(sid))):
+            record = json.loads(self.server.get(key) or b"{}")
+            if isinstance(record.get("owner"), dict):
+                return str(record["owner"].get("incarnation")) != incarnation
         raw = self.server.get(f"sample-buffer/leases/{sid}.json")
         return bool(raw) and str(json.loads(raw).get("incarnation")) != incarnation
 
@@ -303,6 +309,10 @@ class Simulation:
         if not intent["owned"]:
             self.metric("writes_without_ownership")
         lease = self.server.objects.get(f"sample-buffer/leases/{proc.sid}.json")
+        for key in reversed(self.server.keys(sample_buffer.shard_prefix(proc.sid))):
+            if isinstance(json.loads(self.server.get(key) or b"{}").get("owner"), dict):
+                lease = self.server.objects.get(key)  # an owned shard: fenced since its newest ownership record
+                break
         grace = self.config.lease_poll_s + self.config.write_check_s + 60.0
         if intent["fenced"] and not rogue and lease is not None and self.clock.now - lease.modified > grace:
             # its watcher and its check before the write both had the time to read the lease
@@ -923,14 +933,15 @@ class Simulation:
         for i, record in enumerate(merged):
             if int(record["pos"]) != i:
                 self.violation("merged_index_position_gap", position=i, record_pos=record["pos"])
-            if record.get("end"):
+            if record.get("end") or record.get("marker"):  # the end, the format marker of ownership records
                 continue
             by_shard[record["shard"]].append(int(record["shard_pos"]))
             source = server.get(f"{sample_buffer.shard_prefix(record['shard'])}{int(record['shard_pos']):012d}.json")
             if source is None or json.loads(source).get("sample_id") != record.get("sample_id"):
                 self.violation("merged_record_is_not_its_shard_record", position=i, sample_id=record.get("sample_id"))
         # -- every shard stays resumable: a restart reads its rounds back from the merged index
-        rounds = [SimpleNamespace(sampler_round=r.get("sampler_round")) for r in merged if not r.get("end")]
+        rounds = [SimpleNamespace(sampler_round=r.get("sampler_round")) for r in merged
+                  if not r.get("end") and not r.get("marker")]
         for sid in self.shards:
             try:
                 resume_point(rounds, sid)
@@ -969,7 +980,7 @@ class Simulation:
                     self.violation(f"trained_twice_same_{name}", value=value, times=n,
                                    sample_id=first["sample_id"], slot=first["slot"])
         consumed = {g["position"] for g in trained} | {g["position"] for g in skipped}
-        unread = [i for i, r in enumerate(merged) if not r.get("end") and i not in consumed]
+        unread = [i for i, r in enumerate(merged) if not r.get("end") and not r.get("marker") and i not in consumed]
         if unread and ended_run:
             self.violation("merged_record_never_consumed", positions=unread[:10],
                            sample_id=merged[unread[0]].get("sample_id"))

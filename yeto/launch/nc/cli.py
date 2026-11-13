@@ -459,11 +459,11 @@ class NcSshOps:
             return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
         return island_status.Probe.parse(out.stdout or "", out.returncode)
 
-    def fence(self, m: Member) -> None:
-        self.data_path().fence_shard(m.shard, by=m.ticket)
+    def fence(self, m: Member) -> Any:
+        return self.data_path().fence_shard(m.shard, by=m.ticket)
 
-    def fence_incarnation(self, m: Member) -> None:
-        self.data_path().fence_incarnation(m.shard, by=m.ticket)
+    def fence_incarnation(self, m: Member) -> Any:
+        return self.data_path().fence_incarnation(m.shard, by=m.ticket)
 
     def clear_stale_handoff(self, m: Member, keep: Any) -> Any:
         clear = getattr(self.data_path(), "clear_stale_handoff", None)  # the syncer path keeps no handoff record

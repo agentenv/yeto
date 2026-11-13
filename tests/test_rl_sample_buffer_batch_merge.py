@@ -83,7 +83,8 @@ def test_batch_merge_lists_once_per_batch(tmp_path):
     objects.calls.update(list=0, read=0, create=0)
     buf = FileSampleBuffer(objects, batch_size=1, merge_shards=True)
     assert len(buf) == 600
-    assert objects.calls["create"] == 601  # 600 records + the end record
+    # 600 records + the end record + the merger's trainer generation (sample_buffer.claim_reader_generation)
+    assert objects.calls["create"] == 602
     # index read + shard names + 3 shard reads + the batch's one read_new (was ~2 per record)
     assert objects.calls["list"] <= 8
     assert objects.calls["read"] == 603  # each shard record once; nothing read back
