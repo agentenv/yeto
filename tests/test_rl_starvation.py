@@ -762,3 +762,50 @@ def test_a_hung_trainer_over_a_full_backlog_is_still_reported(run_up, capsys):
     assert run.state["starvation"]["event"] == "trainer_starvation_alert"
     assert "waited for the trainer" in run.state["starvation"]["why"]
     assert "CRITICAL trainer_starvation_alert" in capsys.readouterr().out
+
+
+def test_trainer_side_cause_ignores_an_earlier_launch_in_the_same_log(run_up, tmp_path):
+    """trainer.log is appended by every launch: a fatal line of the previous launch is
+    not the cause of the current launch's pause (only the bytes after its offset count)."""
+    from yeto.rl.engine.incarnation_lease import FATAL_MARK
+
+    run = run_up()
+    log = tmp_path / "trainer.log"
+    log.write_text(f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied)\n"
+                   "\n### relaunch\n")
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log), "offset": log.stat().st_size}}
+    with log.open("a") as fh:
+        fh.write("INFO training round 3\n")
+    assert run.trainer_side_cause() is None
+
+
+def test_trainer_log_tail_does_not_read_the_whole_log(run_up, tmp_path, monkeypatch):
+    """A multi-day trainer.log grows to gigabytes; the monitor polls it every minute and
+    must read only its tail, never the whole file into memory."""
+    import pathlib
+
+    run = run_up()
+    log = tmp_path / "trainer.log"
+    with log.open("wb") as fh:
+        fh.write(b"x" * 99 + b"\n")
+        fh.seek(64 * 1024 * 1024)
+        fh.write(b"\nWARNING incarnation gate: training paused: lease of shard s-0 unreadable since t\n")
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log), "offset": 0}}
+
+    def whole(self):  # noqa: ANN001
+        raise AssertionError(f"read the whole of {self}")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", whole)
+    assert "fail-closed pause" in run.trainer_side_cause()
+
+
+def test_trainer_side_cause_reads_a_log_truncated_below_its_offset(run_up, tmp_path):
+    """A trainer.log truncated (or replaced) after the launch: the recorded offset is past
+    its end, so the whole (short) file is the current output, not nothing."""
+    from yeto.rl.engine.incarnation_lease import FATAL_MARK
+
+    run = run_up()
+    log = tmp_path / "trainer.log"
+    log.write_text(f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied)\n")
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log), "offset": 10_000}}
+    assert FATAL_MARK in (run.trainer_side_cause() or "")
