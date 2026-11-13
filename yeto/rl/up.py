@@ -105,7 +105,10 @@ def _log_tail(path: str | os.PathLike, offset: int = 0, size: int = 200_000) -> 
     start in an appended log), read with a seek: a multi-day log is never read whole."""
     with open(path, "rb") as fh:
         end = fh.seek(0, os.SEEK_END)
-        start = max(int(offset or 0), end - size, 0)
+        offset = int(offset or 0)
+        if offset > end:  # truncated or replaced under us: the offset no longer marks this launch
+            offset = 0
+        start = max(offset, end - size, 0)
         fh.seek(start)
         return fh.read(end - start).decode("utf-8", "replace")
 

@@ -797,3 +797,15 @@ def test_trainer_log_tail_does_not_read_the_whole_log(run_up, tmp_path, monkeypa
 
     monkeypatch.setattr(pathlib.Path, "read_bytes", whole)
     assert "fail-closed pause" in run.trainer_side_cause()
+
+
+def test_trainer_side_cause_reads_a_log_truncated_below_its_offset(run_up, tmp_path):
+    """A trainer.log truncated (or replaced) after the launch: the recorded offset is past
+    its end, so the whole (short) file is the current output, not nothing."""
+    from yeto.rl.engine.incarnation_lease import FATAL_MARK
+
+    run = run_up()
+    log = tmp_path / "trainer.log"
+    log.write_text(f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied)\n")
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log), "offset": 10_000}}
+    assert FATAL_MARK in (run.trainer_side_cause() or "")
