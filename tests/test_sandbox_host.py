@@ -29,12 +29,14 @@ class FakeDaemon:
         self.calls: list[list[str]] = []
         self.n = 0
 
-    def add_container(self, name, image, *, labels=None, running=True, port=None, cport=9111):
+    def add_container(self, name, image, *, labels=None, running=True, port=None, cport=9111, host_ip=None):
         self.n += 1
         cid = f"c{self.n:04d}"
         self.containers[cid] = {"Id": cid, "Name": "/" + name, "Config": {"Image": image, "Labels": dict(labels or {})},
                                 "State": {"Running": running},
-                                "HostConfig": {"PortBindings": {f"{cport}/tcp": [{"HostPort": str(port)}]} if port else {}},
+                                "HostConfig": {"PortBindings": {f"{cport}/tcp": [{"HostPort": str(port),
+                                                                                  **({"HostIp": host_ip} if host_ip else {})}]}
+                                               if port else {}},
                                 "_port": port}
         return cid
 
@@ -263,6 +265,62 @@ def test_existing_foreign_container_is_adopted_not_touched(world):
     assert sc["adopted"] and sc["host_port"] == 19100 and sc["container"] == "cybergym-ts-cg-1"
     assert cid in d.containers and d.containers[cid]["Config"]["Labels"] == {}
     assert not [c for c in d.calls if c[:2] == ["docker", "rm"]]
+
+
+def test_foreign_container_on_a_stale_bridge_address_is_an_error_and_left_alone(world):
+    # the daemon's bridge moved (172.17.0.1 -> 10.9.0.1): the old binding publishes nothing
+    d = world["daemon"]
+    d.images["ts:cg-1"] = "sha256:ts1"
+    cid = d.add_container("cybergym-ts-cg-1", "ts:cg-1", port=19100, host_ip="172.17.0.1")
+    (world["tmp"] / "tasks" / "cg_1" / "yeto-sidecars.json").write_text(json.dumps(
+        {"sidecars": [{"name": "ts", "image": "ts:cg-1", "port": 9111, "host_port": 19100,
+                       "container_name": "cybergym-ts-cg-1", "health": "/health"}]}))
+    world["cfg"] = parse_envs(world["section"])
+    report = _prepare(world)
+    assert [f["task_id"] for f in report["failed"]] == ["cg_1"]
+    assert "172.17.0.1" in str(report["failed"]) and "10.9.0.1" in str(report["failed"])
+    assert cid in d.containers and not [c for c in d.calls if c[:2] == ["docker", "rm"]]
+
+
+def test_declared_health_without_ssh_fails_instead_of_passing(world):
+    world["factory"] = lambda h: DockerHost(h.docker_host, runner=world["daemon"])  # no hosts[].ssh
+    report = _prepare(world)
+    failed = {f["task_id"]: f["error"] for f in report["failed"]}
+    assert set(failed) == {"cg_1", "cg_2"} and "hosts[].ssh" in failed["cg_1"]
+    doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
+    assert doc["tasks"]["tb_a"]["hosts"]["h1"]["prepared"]  # no sidecar health declared: unchanged
+
+
+def test_unknown_bridge_address_fails_the_whole_host(world):
+    world["daemon"].bridge = ""
+    report = _prepare(world)
+    assert report["hosts"]["h1"]["prepared"] == 0 and not report["ok"]
+    assert "bridge" in report["host_facts"]["h1"]["error"]
+    assert not [c for c in world["daemon"].calls if c[:2] == ["docker", "run"]]
+
+
+def test_own_running_sidecar_on_a_stale_bridge_address_is_not_reused(world):
+    _prepare(world)
+    d = world["daemon"]
+    ours = [c for c in d.containers.values() if c["Config"]["Labels"].get(LABEL_RUN) == "r1"]
+    for c in ours:  # the daemon's bridge moved after the first prepare
+        for b in c["HostConfig"]["PortBindings"]["9111/tcp"]:
+            b["HostIp"] = "172.17.0.1"
+    report = _prepare(world)
+    failed = {f["task_id"]: f["error"] for f in report["failed"]}
+    assert set(failed) == {"cg_1", "cg_2"}
+    assert "172.17.0.1" in failed["cg_1"] and "docker rm" in failed["cg_1"] and "10.9.0.1" in failed["cg_1"]
+
+
+def test_foreign_container_on_the_bridge_address_is_adopted(world):
+    d = world["daemon"]
+    d.images["ts:cg-1"] = "sha256:ts1"
+    d.add_container("cybergym-ts-cg-1", "ts:cg-1", port=19100, host_ip="10.9.0.1")
+    (world["tmp"] / "tasks" / "cg_1" / "yeto-sidecars.json").write_text(json.dumps(
+        {"sidecars": [{"name": "ts", "image": "ts:cg-1", "port": 9111, "host_port": 19100,
+                       "container_name": "cybergym-ts-cg-1", "health": "/health"}]}))
+    world["cfg"] = parse_envs(world["section"])
+    assert _prepare(world)["ok"]
 
 
 def test_foreign_container_with_another_image_is_an_error_and_left_alone(world):
@@ -513,3 +571,38 @@ def test_a_task_image_pull_is_retried(world):
     _prepare(world)
     doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
     assert doc["tasks"]["tb_b"]["hosts"]["h1"]["prepared"] and fails["left"] == 0
+
+
+def _ssh_255(argv, env, stdin):
+    return 255, "", "ssh: connect to host h1 port 22: Connection refused"
+
+
+def test_gate_docker_check_fails_with_the_fix_when_ssh_is_refused(tmp_path):
+    from yeto.sandbox.docker import DockerError
+
+    spec = {"sampling": {"n": 8}, "agentic": {"envs": {
+        "run": "r1", "hosts": [{"name": "h1", "docker_host": "ssh://a@h1", "max_sandboxes": 64}]}}}
+    g = gate_from_spec(spec, sd.DirObjects(tmp_path), environ={},
+                       docker_factory=lambda h: DockerHost(h.docker_host, runner=_ssh_255))
+    with pytest.raises(DockerError, match=r"h1.*unreachable.*rc=255.*DOCKER_HOST=ssh://a@h1 docker info"):
+        g.check_docker()
+    ok = gate_from_spec(spec, sd.DirObjects(tmp_path), environ={},
+                        docker_factory=lambda h: DockerHost(h.docker_host, runner=FakeDaemon()))
+    ok.check_docker()  # a reachable daemon passes
+
+
+def test_sampler_start_exits_when_the_sandbox_docker_is_unreachable(tmp_path, monkeypatch):
+    import yeto.sandbox.gate as gate_mod
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.task_dispense import SAMPLER_INCARNATION_ENV
+
+    monkeypatch.setattr(gate_mod, "DockerHost", lambda dh: DockerHost(dh, runner=_ssh_255))
+    path = tmp_path / "p.jsonl"
+    path.write_text("".join(json.dumps({"text": f"q{i}", "label": "a"}) + "\n" for i in range(2)))
+    spec = {"sampler_id": "nc-0", "store": str(tmp_path / "store"),
+            "prompts": {"path": str(path), "input_key": "text", "label_key": "label", "groups_per_round": 2,
+                        "dispense": {"backend": "store", "namespace": "task-dispense"}},
+            "agentic": {"envs": {"run": "r1",
+                                 "hosts": [{"name": "h1", "docker_host": "ssh://a@h1", "max_sandboxes": 64}]}}}
+    with pytest.raises(entry.SamplerSpecError, match="unreachable.*docker info"):
+        entry.store_dispensed_prompts(spec, environ={SAMPLER_INCARNATION_ENV: "inc-1"})

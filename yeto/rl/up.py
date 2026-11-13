@@ -77,6 +77,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from yeto.rl import up_consistency
+
 STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 # the launcher's last line (yeto.cli): ``[yeto] run '<run>' finished: <state> (exit code <n>)``
 # a budget / wall-clock breach stops the trainer only; the NC pool is released by force
@@ -86,6 +88,7 @@ _FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already r
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
 # ``yeto launch --cluster-prefix`` default (yeto.cli): the trainer's run name without the flag
 LAUNCH_DEFAULT_NAME = "yeto"
+SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an owned shard as
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
 
@@ -480,8 +483,19 @@ class Run:
         return nc + tr
 
     def node_usd_per_h(self, i: int = 0) -> float:
-        """One node hour of pool ``i``: its ``usd_per_h``, else ``budget.nc_usd_per_h``."""
+        """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
+        states (``price_usd_h`` of a Modal / Daytona / Sky pool, the one the pool's own budget
+        charges), else ``budget.nc_usd_per_h``."""
         price = self.pools[i].usd_per_h
+        if price is None:
+            try:
+                from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+
+                price, currency = pool_price(self.pools[i].load())
+                if currency == "ucr":  # National Compute: its rate stays budget.nc_usd_per_h
+                    price = None
+            except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
+                price = None
         return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
 
     def nc_node_hours(self, now: float | None = None) -> float:
@@ -647,7 +661,7 @@ class Run:
             return controller.check()
         if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
             why = "wall clock"
-        elif self.spend_usd() > float(b.get("usd", 1e9)):
+        elif self.spend_usd() > up_consistency.budget_usd(b):
             why = f"budget ${self.spend_usd():.0f}"
         # the trainer: only its launcher's exit. An OOM or a fatal island error ends the
         # launcher; a hang is Miles' --rl-stall-timeout and the launcher's own business.
@@ -766,10 +780,25 @@ class Run:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
         template value) with a price set, so the first estimated dollar is a breach."""
         b = self.cfg.get("budget") or {}
+        try:
+            capped = up_consistency.budget_capped(b)
+        except ValueError as exc:
+            return str(exc)
+        if "usd" in b and b["usd"] is None:
+            _log("preflight: budget.usd is null: no spend cap (as if unset); the wall clock still applies")
         priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
-        if "usd" in b and float(b["usd"]) <= 0 and priced:
+        if capped and up_consistency.budget_usd(b) <= 0 and priced:
             return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
+        if capped:
+            for ref in self.pools:
+                try:
+                    pool_cfg = ref.load()
+                except (OSError, ValueError):
+                    continue  # the pool dry-run reports an unreadable pool config
+                problem = up_consistency.price_problem(ref.name, ref.usd_per_h, pool_cfg)
+                if problem is not None:
+                    return problem
         return None
 
     def stall_timeout_s(self) -> float:
@@ -983,13 +1012,20 @@ class Run:
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails
-        closed while a lease is unreadable (groups wait in the buffer, nothing trains)."""
+        closed while a lease is unreadable (groups wait in the buffer, nothing trains), or
+        it ended the trainer on a store refusal no retry changes (credentials, bucket)."""
         log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
         try:
             tail = Path(log).read_bytes()[-200_000:].decode("utf-8", "replace") if log else ""
         except OSError:
             return None
+        from yeto.rl.engine.incarnation_lease import FATAL_MARK  # noqa: PLC0415
+
         paused = tail.rfind("incarnation gate: training paused")
+        fatal = tail.rfind(FATAL_MARK)
+        if fatal >= 0 and fatal > paused:
+            line = tail[fatal:].splitlines()[0]
+            return f"{line[:400]} (the trainer exits on it: not starvation, not a gate pause)"
         if paused < 0 or tail.rfind("incarnation gate: lease of", paused + 1) > paused:
             return None
         line = tail[paused:].splitlines()[0]
@@ -1056,6 +1092,11 @@ class Run:
             for shard in self.data_end_shards():
                 writer = FileSampleBuffer(objects, batch_size=1, index=shard_index(shard))
                 if not writer.data_ended:
+                    if writer.owner is not None:
+                        # a shard under ownership records takes only its owner's end
+                        # (``sample_buffer`` module doc): no writer is left, so the seal
+                        # takes the shard first (a fenced sampler's end record is void)
+                        writer.claim_owner(SEAL_OWNER, by="operator")
                     writer.mark_data_end()
                     sealed.append(shard)
         except Exception as error:  # noqa: BLE001 - tried again next poll
@@ -1233,7 +1274,7 @@ class Run:
         ``FORCE_FACTOR`` x ``budget.usd`` (or the wall time ``FORCE_FACTOR`` x ``wall_h``)
         release the pool (``pool-stop``). Returns when no member bills any more."""
         b = self.cfg.get("budget") or {}
-        usd_cap = float(b.get("usd", 1e9)) * FORCE_FACTOR
+        usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
         wall_cap = float(b.get("wall_h", 3)) * 3600 * FORCE_FACTOR
         while True:
             members = self.pool_members()
@@ -1372,7 +1413,7 @@ class Run:
             return (f"the run's breaker fired ({breaker.get('why')} at {breaker.get('at')}): no node is added "
                     f"to a stopped run")
         b = self.cfg.get("budget") or {}
-        cap = float(b.get("usd", 1e9))
+        cap = up_consistency.budget_usd(b)
         spent = self.spend_usd()
         add = new * self.node_usd_per_h(i)
         if spent + add > cap:

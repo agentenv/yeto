@@ -59,7 +59,11 @@ def container_name(run: str, task: TaskEnv, sidecar: Sidecar) -> str:
 
 def probe(dk: DockerHost) -> dict[str, Any]:
     info = dk.info()
-    return {"docker_host": dk.docker_host, "bridge_ip": dk.bridge_ip(),
+    bridge = dk.bridge_ip()
+    if not bridge:  # sidecars publish on it and health/URLs name it: without it nothing on this host is usable
+        raise DockerError(f"{dk.docker_host}: no gateway address on the default 'bridge' network "
+                          "(docker network inspect bridge); the host is skipped")
+    return {"docker_host": dk.docker_host, "bridge_ip": bridge,
             "data_root": info.get("DockerRootDir"), "server_version": info.get("ServerVersion"),
             "rootless": "rootless" in json.dumps(info.get("SecurityOptions") or []), "probed_at": time.time()}
 
@@ -153,11 +157,13 @@ class _HostPrep:
         if current is not None and not ours:
             image = (current.get("Config") or {}).get("Image")
             if running and image == s.image:  # adopt: started by someone else, left exactly as it is
+                _refuse_stale_bridge(current, name, s.port, bridge)
                 port = _host_port(current, s.port) or s.host_port
                 return self._health(s, name, bridge, port, adopted=True)
             raise DockerError(f"container {name} exists and is not this run's (image {image}, running={running}); "
                               "it is left alone: free the name or declare another container_name")
         if current is not None and ours and running and labels.get(LABEL_SPEC) == s.spec_hash():
+            _refuse_stale_bridge(current, name, s.port, bridge)
             return self._health(s, name, bridge, _host_port(current, s.port) or s.host_port, adopted=False)
         if current is not None:  # ours, stale or stopped
             self.dk.remove([current.get("Id") or name])
@@ -171,13 +177,17 @@ class _HostPrep:
         return self._health(s, name, bridge, port, adopted=False)
 
     def _health(self, s: Sidecar, name: str, bridge: str, port: int | None, *, adopted: bool) -> dict[str, Any]:
+        if not bridge:
+            raise DockerError(f"host {self.host.name}: bridge address unknown; sidecar {name} cannot be published")
         out = {"container": name, "host_port": port, "adopted": adopted,
                "url": f"http://{bridge}:{port}" if port else None, "healthy": None}
         if s.health and port:
             for i in range(HEALTH_TRIES):
                 ok = self.dk.http_ok(f"http://{bridge}:{port}{s.health}")
-                if ok is None:
-                    break
+                if ok is None:  # a declared health check that cannot run must not pass as healthy
+                    raise DockerError(f"sidecar {name} declares health {s.health!r} but host {self.host.name} has "
+                                      f"no hosts[].ssh, so http://{bridge}:{port}{s.health} cannot be checked; "
+                                      "configure hosts[].ssh for this host")
                 if ok:
                     out["healthy"] = True
                     return out
@@ -244,6 +254,28 @@ def _set_docker_image(toml_text: str, image: str) -> str:
     if re.search(r"(?m)^\[environment\]\s*$", toml_text):
         return re.sub(r"(?m)^\[environment\]\s*$", "[environment]\n" + line, toml_text, count=1)
     return toml_text.rstrip("\n") + f"\n\n[environment]\n{line}\n"
+
+
+def _refuse_stale_bridge(container: Mapping[str, Any], name: str, cport: int, bridge: str) -> None:
+    """Raise when the container's port binding names an address other than the current bridge.
+
+    The daemon's bridge moved (bip / default-address-pools changed and the daemon restarted): docker cannot
+    bind the old address, so the port is published nowhere and the health URL is unreachable.
+    """
+    stale = _host_ip(container, cport)
+    if stale and stale not in (bridge, "0.0.0.0", "::"):
+        raise DockerError(f"container {name} publishes port {cport} on {stale}, but the bridge is now {bridge}: "
+                          f"it is unreachable and is left alone; fix: `docker rm -f {name}` and publish it again "
+                          f"on {bridge}:<port> (e.g. -p {bridge}:<port>:{cport}), or declare another container_name")
+
+
+def _host_ip(container: Mapping[str, Any], cport: int) -> str | None:
+    """The host address the container's port binding names (None: any address / unset)."""
+    bindings = ((container.get("HostConfig") or {}).get("PortBindings") or {}).get(f"{cport}/tcp") or []
+    for b in bindings:
+        if b.get("HostIp"):
+            return str(b["HostIp"])
+    return None
 
 
 def _host_port(container: Mapping[str, Any], cport: int) -> int | None:

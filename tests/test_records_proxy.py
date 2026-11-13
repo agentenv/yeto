@@ -479,3 +479,37 @@ def test_http_shell_serves_codex_sse_and_records(qwen):
             assert (await client.post(f"{t}/close")).status == 200
 
     asyncio.run(go())
+
+
+def test_qwen3_without_thinking_continues_past_the_dropped_prefill(qwen):
+    """Qwen3 with enable_thinking=False ends the generation prompt in an empty
+    ``<think>\\n\\n</think>\\n\\n`` prefill that the history form of an earlier
+    turn omits. The prefill is template text (mask 0), not sampled text, so the
+    stream continues; a rewrite of an earlier turn still fails closed (the
+    compaction test above)."""
+    import dataclasses
+
+    template = ChatTemplate(dataclasses.replace(qwen.spec, template_kwargs={"enable_thinking": False}), qwen.tokenizer)
+    prefill = "<think>\n\n</think>\n\n"
+    assert template.render([{"role": "user", "content": "x"}], add_generation_prompt=True).endswith(prefill)
+    replies = ['<tool_call>\n{"name": "shell", "arguments": {"cmd": "ls"}}\n</tool_call>',
+               '<tool_call>\n{"name": "shell", "arguments": {"cmd": "cat a.txt"}}\n</tool_call>',
+               "The file says hello."]
+    end = template.encode("<|im_end|>")
+
+    def reply(prompt: tuple[int, ...], index: int) -> list[int]:
+        return template.encode(replies.pop(0)) + end
+
+    engine = engine_for(reply)
+    proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, max_chains=1)
+    outputs = run_codex(proxy, "t")
+    assert outputs[-1]["output"][-1]["content"][0]["text"] == "The file says hello."
+    records = proxy.records("t")
+    assert records["counters"]["prefill_dropped_turns"] == 2
+    (session,) = records["sessions"]
+    (sample,) = session["samples"]
+    ids = sample["token_ids"]
+    prompts = [p[0] for p, *_ in engine.token_requests]
+    assert len(prompts) == 3 and all(list(p) == ids[:len(p)] for p in prompts)
+    # every engine prompt ends in the prefill the engine saw, and the stream keeps it
+    assert all(template.decode(p).endswith("<|im_start|>assistant\n" + prefill) for p in prompts)

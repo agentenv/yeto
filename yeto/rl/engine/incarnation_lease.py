@@ -53,6 +53,22 @@ be *read* (a timeout, a 5xx, a truncated or garbled body) are told apart
   keep failing are logged ("training paused: lease of shard X unreadable since
   T") at most every ``warn_s`` seconds.
 
+Shard ownership records (``sample_buffer`` module doc) replace the lease JSON as
+the fence wherever the sampler's shard can hold them - a shard on an object
+store, in a run whose trainer reads them (``TrainerLease.current(objects) >= 1``).
+There :meth:`IncarnationLease.claim` appends the shard's ownership record
+(``FileSampleBuffer.claim_owner``), :meth:`~IncarnationLease.poll` is an
+incremental read of the shard index, and the write itself refuses
+(``ShardFenced``) once another owner's record is in the shard: no clock and no
+check-then-write window. The lease JSON is still written (observation, older
+readers) but decides nothing, and the trainer's :class:`IncarnationGate` judges
+only the records of a shard's legacy part (before its first ownership record).
+Everywhere else (a shared-directory buffer, the syncer data path, a run whose
+trainer is older) the lease JSON and the gate work as described above. A sampler
+that joined before the run's trainer claimed its generation lease starts under
+the lease JSON and moves to ownership records at a later :meth:`~IncarnationLease.poll`
+(``adopted``), unless its shard was fenced meanwhile.
+
 Nothing here talks to a cloud.
 """
 
@@ -70,7 +86,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .object_store import is_absent_store_error
+from .object_store import is_absent_store_error, is_fatal_store_error, store_error_code
 
 LEASE_DIR = "sample-buffer/leases"
 FENCED_EVENT = "rl_sampler_fenced"
@@ -79,6 +95,8 @@ STALE_REASON = "stale_incarnation"
 DEFAULT_POLL_S = 30.0
 DEFAULT_WRITE_CHECK_S = 1.0
 DEFAULT_CLOCK_MARGIN_S = 60.0
+# a lease record field: its incarnation's shard writer reads ownership records
+READS_OWNER_RECORDS = "reads_owner_records"
 DEFAULT_RETRY_S = 1.0  # the gate reads a lease that failed again at most this often
 DEFAULT_WARN_S = 60.0  # ... and logs a lease it keeps failing to read at most this often
 CLAIM_READ_ATTEMPTS = 3
@@ -116,9 +134,88 @@ class LeaseReadError(OSError):
     a 5xx, a truncated or garbled body): unlike an absent one it is no verdict."""
 
 
+class LeaseStoreFatal(RuntimeError):
+    """:meth:`IncarnationGate.verdict` read a lease and the store refused in a way
+    no retry changes (refused credentials, no such bucket:
+    :func:`~yeto.rl.engine.object_store.is_fatal_store_error`). Unlike
+    :class:`LeaseUnknown` it is not waited out: it ends the trainer (a gate that
+    paused on it would hold the trainer idle forever)."""
+
+
+FATAL_MARK = "incarnation gate: fatal store error"  # logged before LeaseStoreFatal (the head reads it)
+
+
 class LeaseUnknown(Exception):
     """:meth:`IncarnationGate.verdict` could not read the entry's lease: the entry
     is neither trainable nor stale yet (the caller defers it)."""
+
+# consecutive failed reads of the shard index after which an owning incarnation
+# stops trusting its last verdict (the write itself reads the index and fails closed)
+DEFAULT_MAX_READ_FAILURES = 5
+
+
+def owner_records_enabled(buffer: Any) -> bool:
+    """Whether a sampler writes shard ownership records into ``buffer``: its shard
+    can hold them (``FileSampleBuffer.can_own``) and the run's trainer reads them
+    (a trainer generation lease exists; an older trainer fails on the record)."""
+    if buffer is None or not getattr(buffer, "can_own", False):  # can_own: an atomic create too
+        return False
+    from .trainer_lease import TrainerLease  # noqa: PLC0415
+
+    return TrainerLease.current(buffer.index.objects) >= 1
+
+
+def fence_shard_owner(store: Any, shard: str, incarnation: str, *, by: str = "pool",
+                      clock: Callable[[], float] = time.time) -> tuple[Any, bool] | None:
+    """Fence ``shard`` from outside its sampler (the pool, an operator): append an
+    ownership record naming ``incarnation`` (``pool-fence:<ticket>``) to its index,
+    so every group its sampler created before stays valid and nothing it writes
+    after is (``sample_buffer`` module doc). ``(owner, created)`` as
+    ``sample_buffer.claim_shard_owner``; None where the shard holds no ownership
+    records: the store has no object API, the shard has no index of its own, or
+    the run's trainer is older (no trainer lease), or the shard holds no ownership
+    record yet and the lease record's holder did not say that it reads them
+    (:data:`READS_OWNER_RECORDS`; older code would stop on the record instead of
+    continuing the shard) - the lease record alone fences then.
+
+    The shard's end is found from the lease record's ``owner`` hint (the position of
+    the last ownership record a claim wrote, checked against the shard): one LIST
+    after it, not of the whole shard."""
+    from .sample_buffer import (  # noqa: PLC0415
+        BUFFER_DIR,
+        SHARD_NAMES,
+        ObjectIndex,
+        ShardTail,
+        _owner_of,
+        _shard_name,
+        claim_shard_owner,
+        is_owner_record,
+        shard_prefix,
+    )
+    from .trainer_lease import TrainerLease  # noqa: PLC0415
+
+    objects = getattr(store, "objects", None)
+    from .object_store import atomic_create  # noqa: PLC0415
+
+    if objects is None or not callable(getattr(objects, "create", None)) or not atomic_create(objects):
+        return None  # a check-then-write create would race the sampler's group for the position
+    if not objects.exists(f"{BUFFER_DIR}/{SHARD_NAMES}/{_shard_name(shard)}"):
+        return None
+    if TrainerLease.current(objects) < 1:
+        return None
+    tail = ShardTail()
+    lease = read_lease(store, shard) or {}
+    hint = lease.get("owner")
+    if isinstance(hint, Mapping) and hint.get("pos") is not None:
+        try:
+            raw = objects.read(ObjectIndex(objects, prefix=shard_prefix(shard)).key(int(hint["pos"])))
+            record = None if raw is None else json.loads(raw)
+            if isinstance(record, dict) and is_owner_record(record) and int(record["pos"]) == int(hint["pos"]):
+                tail = ShardTail(next=int(hint["pos"]) + 1, owner=_owner_of(record))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # a hint only: the whole shard is listed
+    return claim_shard_owner(objects, shard, incarnation, by=by, clock=clock, tail=tail,
+                             only_owned=not lease.get(READS_OWNER_RECORDS))
 
 
 def lease_key(sampler: str) -> str:
@@ -192,16 +289,24 @@ def sealed_counts(entries: Iterable[Any], sampler: str) -> dict[str, int]:
 
 
 class IncarnationLease:
-    """One incarnation's side of the lease (module doc)."""
+    """One incarnation's side of the lease (module doc).
+
+    ``buffer``: the sampler's shard writer. When it can hold ownership records
+    (:func:`owner_records_enabled` at :meth:`claim`), the shard index is the fence
+    (``owned``) and the lease JSON is written for observation only."""
 
     def __init__(self, store: Any, sampler: str, incarnation: str, *,
                  write_check_s: float = DEFAULT_WRITE_CHECK_S,
                  clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] | None = None,
-                 max_unread_s: float | None = DEFAULT_MAX_UNREAD_S) -> None:
+                 max_unread_s: float | None = DEFAULT_MAX_UNREAD_S,
+                 buffer: Any = None, by: str = "sampler",
+                 max_read_failures: int = DEFAULT_MAX_READ_FAILURES) -> None:
         """``max_unread_s``: the longest the lease may stay unread before a group
-        write is refused (:meth:`unread_too_long`); None: no bound."""
+        write is refused (:meth:`unread_too_long`); None: no bound. Owned (shard
+        ownership records), the bound is ``max_read_failures`` failed reads of the
+        shard index in a row instead."""
         self.store = store
         self.max_unread_s = None if max_unread_s is None else float(max_unread_s)
         self.unread_refusals = 0  # group writes refused because the lease stayed unread
@@ -211,10 +316,18 @@ class IncarnationLease:
         self.write_check_s = float(write_check_s)
         self.clock = clock
         self.monotonic = monotonic
+        self.buffer = buffer
+        self.by = str(by)
+        self.max_read_failures = int(max_read_failures)
+        self.owned = False  # the shard's ownership records decide, not the lease JSON
+        self.adopted = False  # owned since a poll after the join (the trainer's lease came later)
+        self._record: dict[str, Any] | None = None  # the lease record this incarnation wrote
+        self.owner: Any = None  # this incarnation's ownership record (owned)
         self.sleep = sleep  # the claim's pause between its reads (None: time.sleep)
         self.holder: str | None = None  # who the last read named
         self.fenced_by: str | None = None
         self.read_failures = 0
+        self.failures_in_a_row = 0
         self.reads = 0
         self.unknown = False  # the last read of the lease failed (no verdict)
         self._checked_at = -float("inf")
@@ -222,13 +335,41 @@ class IncarnationLease:
 
     @property
     def fenced(self) -> bool:
+        self._sync()
         return self.fenced_by is not None
 
-    def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = ()) -> dict[str, Any]:
-        """Write the lease naming this incarnation (module doc); returns the record.
+    def _sync(self) -> None:
+        """Owned: take the verdict of the shard writer's last read (a write that
+        raised ``ShardFenced`` has fenced it without a poll)."""
+        if self.owned and self.fenced_by is None and self.buffer.fenced:
+            self.holder = self.fenced_by = self.buffer.owner.incarnation
+
+    def take_shard(self) -> Any:
+        """At the sampler's start, before it reads its resume point: append the shard's
+        ownership record (where the shard can hold one; module doc) and return it, else
+        None. Every valid write of an earlier incarnation then precedes the record and
+        is in the shard index read after it, so the resume point read after this call
+        is final: an earlier incarnation that still runs (a second start, a process
+        taken for dead) can add no round the new one does not see - its later writes
+        are refused, or void for the merge. :meth:`claim` then writes the lease record
+        with this owner and appends no second record."""
+        if self.owned or not owner_records_enabled(self.buffer):
+            return self.owner
+        self.owner = self.buffer.claim_owner(self.incarnation, by=self.by)
+        self.owned = True
+        return self.owner
+
+    def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = (), *,
+              owner: Any = None) -> dict[str, Any]:
+        """Take the shard for this incarnation: its ownership record where the shard
+        can hold one (module doc), and the lease record; returns the lease record
+        (owned: with ``owner``, the ownership record's epoch and position).
+        ``owner``: the ownership record a fence already wrote (:func:`fence_shard_owner`).
         A previous lease that cannot be read (:class:`LeaseReadError` after
-        :data:`CLAIM_READ_ATTEMPTS` reads, paused by :func:`_claim_pause`) is not overwritten: the new record would
-        forget the incarnations it supersedes, so the error is raised."""
+        :data:`CLAIM_READ_ATTEMPTS` reads, paused by :func:`_claim_pause`) is not
+        overwritten: the new record would forget the incarnations it supersedes, so
+        the error is raised - before any ownership record is written, so a claim
+        that is tried again (:func:`claim_patiently`) appends at most one."""
         for attempt in range(CLAIM_READ_ATTEMPTS):
             try:
                 previous = read_lease(self.store, self.sampler, strict=True) or {}
@@ -237,6 +378,11 @@ class IncarnationLease:
                 if attempt + 1 == CLAIM_READ_ATTEMPTS:
                     raise
                 _claim_pause(attempt, self.sleep)
+        if owner is None and self.owned and self.owner is not None:  # taken by take_shard
+            owner = self.owner
+        elif owner is None and owner_records_enabled(self.buffer):
+            owner = self.buffer.claim_owner(self.incarnation, by=self.by)
+            self.owned, self.owner = True, owner
         superseded: list[str] = []
         for inc in [*previous.get("superseded", ()), previous.get("incarnation"), *earlier]:
             if inc is not None and str(inc) != self.incarnation and str(inc) not in superseded:
@@ -248,18 +394,78 @@ class IncarnationLease:
         record = {"sampler": self.sampler, "incarnation": self.incarnation, "claimed_at": self.clock(),
                   "generation": int(previous.get("generation") or 0) + 1,
                   "superseded": superseded, "sealed": sealed}
-        _put(self.store, lease_key(self.sampler), record)
+        if getattr(self.buffer, "can_own", False):
+            # this incarnation's writer reads ownership records: a pool fence may write
+            # one into its shard even before it took the shard with one (fence_shard_owner)
+            record[READS_OWNER_RECORDS] = True
+        if owner is not None:
+            record["owner"] = {"epoch": owner.epoch, "pos": owner.pos, "by": owner.by}
+        try:
+            _put(self.store, lease_key(self.sampler), record)
+        except Exception:  # noqa: BLE001 - owned: the lease record is observation only
+            if owner is None:
+                raise
         self.holder = self.incarnation
+        self._record = record
         self._read_at = self.monotonic()
         return record
 
+    def _adopt(self) -> None:
+        """A sampler under the lease record: once the run's trainer reads ownership
+        records, take the shard with one (only a shard that has none: a fence that
+        got there first stays, and fences this incarnation)."""
+        from .sample_buffer import ShardFenced  # noqa: PLC0415
+
+        try:
+            if not owner_records_enabled(self.buffer):
+                return
+            self.owner = self.buffer.claim_owner(self.incarnation, by=self.by, first_only=True)
+        except ShardFenced as fenced:
+            self.owned = True
+            self.holder = self.fenced_by = fenced.owner.incarnation
+            return
+        except Exception:  # noqa: BLE001 - not this time; the lease record still fences
+            return
+        self.owned = self.adopted = True
+        # a pool fence that read the shard before this record wrote the lease record
+        # only (the shard was not owned then; ``fence_shard_owner``): it wrote the lease
+        # before that read, so a read now shows it
+        try:
+            lease = read_lease(self.store, self.sampler, strict=True)
+        except LeaseReadError:
+            lease = None
+        if lease is not None and str(lease.get("incarnation")) != self.incarnation:
+            self.holder = self.fenced_by = str(lease.get("incarnation"))
+            return
+        if self._record is not None:  # the fence's hint of the shard's end (observation)
+            self._record["owner"] = {"epoch": self.owner.epoch, "pos": self.owner.pos, "by": self.owner.by}
+            try:
+                _put(self.store, lease_key(self.sampler), self._record)
+            except Exception:  # noqa: BLE001
+                pass
+
     def poll(self) -> bool:
-        """Read the lease; True once another incarnation holds it (sticky)."""
+        """Read the fence; True once another incarnation holds the shard (sticky).
+        Owned: an incremental read of the shard index; else the lease record."""
         with self._lock:
             self._checked_at = self.monotonic()
+            self._sync()
             if self.fenced_by is not None:
                 return True
             self.reads += 1
+            if self.owned:
+                try:
+                    self.buffer.refresh()
+                except Exception:  # noqa: BLE001 - no verdict this time; the write reads again
+                    self.read_failures += 1
+                    self.failures_in_a_row += 1
+                    self.unknown = True
+                    return False
+                self.failures_in_a_row = 0
+                self.unknown = False
+                self._read_at = self._checked_at
+                self._sync()
+                return self.fenced_by is not None
             try:
                 lease = read_lease(self.store, self.sampler, strict=True)
             except LeaseReadError:
@@ -272,23 +478,46 @@ class IncarnationLease:
             self.holder = str(lease.get("incarnation"))
             if self.holder != self.incarnation:
                 self.fenced_by = self.holder
+            elif self._record is not None and getattr(self.buffer, "can_own", False):
+                self._adopt()
             return self.fenced_by is not None
 
+    @property
+    def unreadable(self) -> bool:
+        """Owned: the shard index could not be read ``max_read_failures`` times in a
+        row; no group is written until a read succeeds (not a fence: nothing is sticky)."""
+        return self.owned and self.failures_in_a_row >= self.max_read_failures
+
     def unread_s(self) -> float:
-        """Seconds since the lease was last read (0.0 before the first read or claim)."""
+        """Seconds since the lease (owned: the shard index) was last read (0.0 before the first read or claim)."""
         return 0.0 if self._read_at is None else max(0.0, self.monotonic() - self._read_at)
 
     def unread_too_long(self) -> bool:
-        """Not known to be fenced, but the lease stayed unread for longer than
-        ``max_unread_s``: this incarnation cannot tell whether it still holds it
-        (:attr:`unknown` says only that the last read failed)."""
-        return (self.fenced_by is None and self.max_unread_s is not None
-                and self.unread_s() > self.max_unread_s)
+        """Not known to be fenced, but this incarnation cannot tell whether it still
+        holds the shard: the lease stayed unread for longer than ``max_unread_s``, or
+        (owned) the shard index was :attr:`unreadable` (:attr:`unknown` says only
+        that the last read failed)."""
+        if self.fenced_by is not None:
+            return False
+        if self.owned:
+            return self.unreadable
+        return self.max_unread_s is not None and self.unread_s() > self.max_unread_s
 
     def check_before_write(self) -> bool:
-        """Before a group write: the cached verdict when read in the last
-        ``write_check_s`` seconds, else a fresh :meth:`poll`. True: do not write
+        """Before a group write: True when it must not be written. Owned: the shard
+        writer's verdict, no request here - the write reads the index itself and
+        raises ``ShardFenced`` (so there is no window between this check and the
+        create) - or the index was :attr:`unreadable` (read again at most every
+        ``write_check_s``). Else the cached lease verdict when read in the last
+        ``write_check_s`` seconds, or a fresh :meth:`poll`. True: do not write
         (fenced, sticky; or :meth:`unread_too_long`, until a read succeeds again)."""
+        if self.owned:
+            self._sync()
+            if self.fenced_by is None and self.unreadable and self.monotonic() - self._checked_at >= self.write_check_s:
+                self.poll()
+            if self.fenced_by is None and self.unreadable:
+                self.unread_refusals += 1
+            return self.fenced_by is not None or self.unreadable
         if self.fenced_by is not None:
             return True
         if self.monotonic() - self._checked_at >= self.write_check_s and self.poll():
@@ -304,8 +533,12 @@ class IncarnationLease:
                 "lease_unread_s": round(self.unread_s(), 1), "lease_unread_refusals": self.unread_refusals}
 
     def detail(self) -> dict[str, Any]:
-        return {"fenced": "superseded", "superseded_by": self.fenced_by, "lease_reads": self.reads,
-                "lease_read_failures": self.read_failures}
+        out = {"fenced": "superseded", "superseded_by": self.fenced_by, "lease_reads": self.reads,
+               "lease_read_failures": self.read_failures}
+        if self.owned:
+            owner = self.buffer.owner
+            out["shard_owner"] = None if owner is None else owner.to_dict()
+        return out
 
 
 DEFAULT_CLAIM_PATIENCE_S = 600.0
@@ -355,9 +588,14 @@ class IncarnationGate:
     def __init__(self, store: Any, entries: Callable[[], list[Any]], *, refresh_s: float = 30.0,
                  clock_margin_s: float = DEFAULT_CLOCK_MARGIN_S, retry_s: float = DEFAULT_RETRY_S,
                  warn_s: float = DEFAULT_WARN_S,
-                 monotonic: Callable[[], float] = time.monotonic) -> None:
+                 monotonic: Callable[[], float] = time.monotonic,
+                 owner_epoch: Callable[[int], int] | None = None) -> None:
+        """``owner_epoch(position)``: the shard owner epoch of a merged position
+        (``FileSampleBuffer.shard_epoch_at``); a position above 0 was merged under the
+        shard's ownership records and is never judged here (no lease read either)."""
         self.store = store
         self.entries = entries
+        self.owner_epoch = owner_epoch
         self.refresh_s = float(refresh_s)
         self.clock_margin_s = float(clock_margin_s)
         self.retry_s = float(retry_s)
@@ -376,7 +614,9 @@ class IncarnationGate:
         self.read_failures = 0
 
     def _read(self, sampler: str, now: float) -> dict[str, Any] | None:
-        """Read the lease (cached on success); :class:`LeaseUnknown` on a failure."""
+        """Read the lease (cached on success); :class:`LeaseUnknown` on a failure,
+        :class:`LeaseStoreFatal` when the store refused for good (not caught by the
+        readers: the trainer exits)."""
         failing = self._failing.get(sampler)
         if failing is not None and now - failing[1] < self.retry_s:
             raise LeaseUnknown(f"lease of {sampler} unreadable (retried every {self.retry_s:g} s)")
@@ -384,6 +624,14 @@ class IncarnationGate:
             lease = read_lease(self.store, sampler, strict=True)
         except LeaseReadError as error:
             self.read_failures += 1
+            if is_fatal_store_error(error):
+                cause = error.__cause__ or error
+                code = store_error_code(cause) or type(cause).__name__
+                message = (f"{FATAL_MARK}: lease of shard {sampler} refused by the store ({code}): {error}; "
+                           "no retry changes this: check the run store's credentials (key id, secret, "
+                           "endpoint) and that the bucket exists, then start the trainer again")
+                log.error("%s", message)
+                raise LeaseStoreFatal(message) from error
             if failing is None:
                 failing = self._failing[sampler] = [now, now, -float("inf"), time.time()]
             failing[1] = now
@@ -432,6 +680,8 @@ class IncarnationGate:
         if sampler is None or inc is None:
             return None
         sampler, inc = str(sampler), str(inc)
+        if self.owner_epoch is not None and self.owner_epoch(int(position)) > 0:
+            return None  # valid by its shard's ownership records: the merge decided
         # judged before (the index is append-only: its ordinal stands), or counted now
         ordinal = self._ordinals.get(int(position)) if int(position) < self._upto else None
         if ordinal is None:
@@ -511,4 +761,5 @@ def default_incarnation_gate(buffer: Any, environ: Mapping[str, str] | None = No
         store = store_for(str(env[LEASE_ROOT_ENV]), environ=env)
     if store is None or not callable(entries):
         return None
-    return IncarnationGate(store, entries)
+    epoch = getattr(buffer, "shard_epoch_at", None)
+    return IncarnationGate(store, entries, owner_epoch=epoch if callable(epoch) else None)

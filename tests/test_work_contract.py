@@ -52,7 +52,8 @@ class ServerObjects:
 
 class StoreContract:
     """The WorkContract over :class:`sd.StoreDispensedPrompts` (one per member)
-    sharing one ledger; ``fence`` moves the holder's incarnation lease."""
+    sharing one ledger; ``fence`` is the pool's: the holder loses its shard (its own
+    ``fenced`` check) and the incarnation is retired in the ledger."""
 
     def __init__(self, tmp_path: Path, config: dict) -> None:
         self.objects = ServerObjects()
@@ -124,6 +125,7 @@ class StoreContract:
 
     def fence(self, m: Member) -> None:
         self.leases[m.holder] = f"{m.incarnation}-fenced"
+        sd.retire(self.objects, NAMESPACE, m.holder, m.incarnation, reason="pool fence")
 
     def retire(self, holder: str, incarnation: str | None = None, reason: str = "scale_down") -> int:
         return sd.retire(self.objects, NAMESPACE, holder, incarnation, reason=reason)["released"]

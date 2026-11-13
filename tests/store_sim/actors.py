@@ -207,6 +207,15 @@ class SamplerProc:
                                   clock=self.clock.time, timer=self.clock.monotonic)
         self.buffer = R2Buffer(self.store, batch_size=1, index=shard_index(self.sid), clock=self.clock.time)
         self.buffer.refresh()
+        lease_kwargs: dict[str, Any] = {}
+        if _accepts(IncarnationLease, "buffer") and not self.legacy:  # shard ownership records are the fence
+            lease_kwargs["buffer"] = self.buffer
+        if _accepts(IncarnationLease, "sleep"):  # the claim's pauses between its reads
+            lease_kwargs["sleep"] = self._wait
+        self.lease = IncarnationLease(self.store, self.sid, self.incarnation, write_check_s=cfg.write_check_s,
+                                      clock=self.clock.time, monotonic=self.clock.monotonic, **lease_kwargs)
+        if hasattr(self.lease, "take_shard") and self.lease.take_shard() is not None:
+            self.buffer.refresh()  # as the sampler entry: the resume point after the ownership record
         self.resume = resume_point(self.buffer.entries(), self.sid)
         self.prompts = StoreDispensedPrompts.open(
             sim.prompt_path, {**sim.dispense_config, "namespace": self.namespace}, store=self.store,
@@ -217,13 +226,6 @@ class SamplerProc:
         self.prompts.recover(self.buffer.entries())
         self.membership = SamplerMembership(self.store, self.sid, self.incarnation, self.resume, self._emit,
                                             clock=self.clock.time)
-        lease_kwargs: dict[str, Any] = {}
-        if _accepts(IncarnationLease, "buffer") and not self.legacy:  # shard ownership records are the fence
-            lease_kwargs["buffer"] = self.buffer
-        if _accepts(IncarnationLease, "sleep"):  # the claim's pauses between its reads
-            lease_kwargs["sleep"] = self._wait
-        self.lease = IncarnationLease(self.store, self.sid, self.incarnation, write_check_s=cfg.write_check_s,
-                                      clock=self.clock.time, monotonic=self.clock.monotonic, **lease_kwargs)
         self.follower = PolicyFollower(self.releases, self._load, timer=self.clock.monotonic,
                                        wall=self.clock.time, max_defer_s=cfg.reload_max_defer_s)
         self.follower.hold = lambda: bool(self.inflight)

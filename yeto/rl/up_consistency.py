@@ -26,7 +26,10 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   each pool's ``s3://<bucket>/runs/<run_prefix>`` must be one store (the trainer
   reads the buffer and writes the releases under its own; the first-group wait
   lists the run config's);
-* the release directory a sampler follows must be one the trainer side writes.
+* the release directory a sampler follows must be one the trainer side writes;
+* prices (:func:`price_problem`): with a spend cap (``budget.usd``) every pool of a
+  USD-priced provider (Modal / Daytona / Sky) needs a real hourly price, or the run's
+  spend estimate counts its islands at 0 and the cap never fires on them.
 
 Only local files are read (the run config, pool configs, specs, the store env
 file's bucket name, the selection file); no cloud API, no store access.
@@ -250,3 +253,63 @@ def problems(run_store: str, trainer_argv: list[str], pool_cfg: dict[str, Any], 
                         release_dir_problem(spec)) if p]
     out += length_problems(args, spec)
     return out
+
+
+# where an hourly price comes from, per USD-priced provider kind (the preflight hint)
+PRICE_SOURCES = {
+    "modal": "the Modal pricing page (modal.com/pricing): GPU price per second x 3600 x gpus, plus CPU / memory",
+    "daytona": "your Daytona contract / dashboard rate for the sandbox class (spot or on-demand)",
+    "sky": "the cloud's price for the instance type (`sky show-gpus --all` lists them)",
+}
+NO_CAP_USD = 1e9  # budget.usd absent or null: no spend cap (the monitor's default)
+
+
+def budget_usd(budget: dict[str, Any] | None) -> float:
+    """The spend cap ``budget.usd``; absent or ``null`` means no cap (:data:`NO_CAP_USD`).
+    A value that is not a number raises ValueError naming the field."""
+    usd = (budget or {}).get("usd")
+    if usd is None:
+        return NO_CAP_USD
+    try:
+        return float(usd)
+    except (TypeError, ValueError):
+        raise ValueError(f"budget.usd must be a number of dollars or null (no cap), got {usd!r}") from None
+
+
+def budget_capped(budget: dict[str, Any] | None) -> bool:
+    """Whether the run sets a spend cap (``budget.usd`` a finite number below :data:`NO_CAP_USD`)."""
+    usd = budget_usd(budget)
+    return usd == usd and usd < NO_CAP_USD
+
+
+def price_problem(name: str, entry_usd_per_h: float | None, pool_cfg: dict[str, Any]) -> str | None:
+    """A pool of a USD-priced provider without a positive hourly price (with a spend cap set):
+    the run's spend estimate would count its islands at $0. The entry's ``usd_per_h`` wins
+    over the provider section's ``price_usd_h``; National Compute (ucr) is priced by
+    ``budget.nc_usd_per_h`` and never refused here."""
+    from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+    from yeto.launch.pool import provider as providers  # noqa: PLC0415
+
+    kind = providers.kind_of(pool_cfg) or "factory"
+    entry = providers.registered(kind)
+    if entry is None or entry.caps.currency != "usd":
+        return None
+    if entry_usd_per_h is not None:
+        if entry_usd_per_h > 0:
+            return None
+        where, value = f"samplers[{name}].usd_per_h", entry_usd_per_h
+    else:
+        where = "provider.price_usd_h" + (" (or offers[0].price_usd_h)" if kind == "sky" else "")
+        try:
+            value = pool_price(pool_cfg)[0]
+        except (TypeError, ValueError):
+            value = (pool_cfg.get("provider") or {}).get("price_usd_h")
+        if isinstance(value, (int, float)) and value > 0:
+            return None
+    state = "missing" if value is None else f"{value!r}"
+    hint = f"; drop samplers[{name}].usd_per_h (it overrides the provider price) or" if where.startswith("samplers") \
+        else "; set"
+    return (f"pool {name} ({kind}, priced in USD): {where} is {state} while budget.usd caps the run: its islands "
+            f"would be counted at $0 and the budget guard would not stop them{hint} a real USD price of one "
+            f"island hour (source: {PRICE_SOURCES.get(kind, 'the provider price list')}); or set budget.usd "
+            "to null to run without a spend cap")
