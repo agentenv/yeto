@@ -573,6 +573,10 @@ class DeltaMirror:
         if not chain:
             return base
         self.root.mkdir(parents=True, exist_ok=True)
+        from . import disk_space  # before the scratch directory: no ENOSPC half way
+
+        disk_space.check_free(self.root, sum(entry.size for entry in entries_of(release.delta).values()),
+                              f"rebuild of delta release {release.path}")
         # unique per process and call: two rebuilds of one name never share a scratch directory
         partial = self.root / f".{release.path}.{os.getpid()}.{uuid.uuid4().hex}.partial"
         try:
