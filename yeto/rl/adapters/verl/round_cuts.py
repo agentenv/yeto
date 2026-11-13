@@ -65,7 +65,13 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     """``plan["resume"]`` from the island flags (None: no cut store). Raises on
     a flag combination the cut controller cannot run."""
     from yeto.rl.engine.cut_interval import (check_island_cut_store, cut_auto_options, cut_interval_for,
-                                             island_cut_store_for)
+                                             island_cut_store_for, check_round_cuts_off,
+                                             round_cuts_off)
+
+    check_round_cuts_off(args)
+    if round_cuts_off(args):
+        print("[rl] round cuts are off (--rl-round-cuts off): no cut is written or read", flush=True)
+        return None  # no plan["resume"]: wire_round_cuts gets no resume wiring
 
     store = getattr(args, "rl_resume_store", None)
     island_store = getattr(args, "rl_island_cut_store", None)

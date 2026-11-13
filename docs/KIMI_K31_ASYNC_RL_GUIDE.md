@@ -464,7 +464,8 @@ The full trainer command, with comments for every flag, is in
 | `--n-samples-per-prompt` | Group size; must match the spec's `sampling.n`. |
 | `--rl-max-policy-age` | How many versions old a group may be; needs a matching algorithm spec (`--rl-algorithm-spec`, e.g. `examples/k31/algorithm-spec.async-age2.json`). |
 | `--rl-checkpoint-store` | Where round cuts and the ledger are kept; enables resume across launches. |
-| `--rl-cut-every N` | Keep a round cut every `N` rounds (plus the last round). See also `--rl-cut-keep`, `--rl-cut-auto-mtbf-s`. |
+| `--rl-round-cuts {auto,off}` | `auto` (default): round cuts as the store and the cut flags give them. `off`: no round cut is wired, written or read; a relaunch continues from the newest policy release. The K3.1 examples use `off` (one full-parameter cut is about 5 TB). Refused together with `--rl-cut-every`, `--rl-cut-auto-mtbf-s`, `--rl-cut-max-interval-s`, `--rl-cut-keep`, `--rl-stop-after-rounds` and `--rl-resume-allow-config-change`. See section 5.3. |
+| `--rl-cut-every N` | Keep a round cut every `N` rounds (plus the last round). Not with `--rl-round-cuts off`. See also `--rl-cut-keep`, `--rl-cut-auto-mtbf-s`. |
 | `--rl-release-every N` | Release every N-th policy version to the samplers (default 1). Needs `--rl-max-policy-age >= N`. |
 | `--rl-release-skip-busy` | Skip a release while the previous upload is still in flight (latest wins; the trainer never waits for an upload). Needs staged releases (no `--rl-release-inline`) and `--rl-max-policy-age >= 3`. See section 3.5. |
 | `--rl-stall-timeout` | Trainer hang detection in seconds. `yeto run up` refuses `0`. |
@@ -977,6 +978,41 @@ over it the same way instead of failing at its start.
 
 ### 5.3 Resuming training
 
+- **K3.1 default: round cuts off.** The K3.1 trainer examples
+  (`examples/k31/launch-trainer-modal-b300.sh`,
+  `examples/k31/launch-convertible-modal.sh`) pass `--rl-round-cuts off`. A
+  full-parameter K3.1 round cut holds the bf16 weights, the fp32 master copy
+  and both Adam moments of every trained expert: about 5 TB per cut, too much
+  to write at a useful interval. With `off` the trainer wires no round cut: it
+  writes none, reads none, and logs `round cuts are off` with the event
+  `rl_round_cuts_off` at start. The cut flags (`--rl-cut-every`,
+  `--rl-cut-auto-mtbf-s`, `--rl-cut-max-interval-s`, `--rl-cut-keep`,
+  `--rl-stop-after-rounds`, `--rl-resume-allow-config-change`) are refused with
+  `off` before anything starts; so is a convertible node
+  (`--rl-sample-role convertible`), which hands its trainer state over through
+  round cuts. Other runs keep the default `auto`, which behaves as before.
+  Resume with `off`:
+  - When `yeto run up` restarts the trainer of a run that launched before,
+    `trainer.argv` has `--rl-round-cuts off`, the store holds a committed
+    policy release (`policy-releases/LATEST.json`) and `trainer.argv` names no
+    `--rl-init-from-release` itself, it adds `--rl-init-from-release latest`
+    and logs that the optimizer state starts fresh (step
+    `trainer_init_from_release` in the run state). The first launch, and a
+    restart before the first release, start from the base checkpoint. If the
+    store cannot be listed, the restart stops with an error instead of
+    guessing.
+  - The trainer loads the newest release, continues the version numbers after
+    it, and reads the sample buffer from the position that release was trained
+    up to (`buffer_trained`).
+  - Cost of this resume: the Adam moments and step count start from zero and
+    the fp32 master copy is rebuilt from the bf16 release weights; the LR
+    schedule position is not restored (warmup and decay restart from the
+    beginning of the schedule); the RNG state is reset. At most one release
+    interval of training is lost (`--rl-release-every` versions): the rounds
+    trained after the newest release are trained again from the buffer.
+  - To resume from a specific release instead, put
+    `--rl-init-from-release r<seq>-v<version>` in `trainer.argv` (it must be
+    the store's newest; see the next item).
 - **From the latest cut.** With `--rl-checkpoint-store`, the trainer keeps
   round cuts (`--rl-cut-every`, `--rl-cut-keep`). Run
   `yeto run up --config <run.json>` again with the same run config; the

@@ -190,6 +190,10 @@ class LocalOnlySync(RoundCutHooks):
         # The version the island's account continues at
         # (:meth:`resume_at`); 0 = this process starts the account at v0.
         self.resumed_at = 0
+        # --rl-round-cuts off: no round cut keeps the buffer watermark; a callable()
+        # :meth:`start` runs instead (the buffer read position of the release the
+        # trainer continues from; sampler_island._resume_single_trainer)
+        self.buffer_start_without_cuts: Any = None
         # Set by :meth:`start`: the account continues above the store's releases
         # (:meth:`resume_at`) and no round cut was restored, so the island holds the
         # weights its process loaded and nothing an earlier launch trained.
@@ -217,6 +221,8 @@ class LocalOnlySync(RoundCutHooks):
 
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
+        if self.round_cuts is None and callable(self.buffer_start_without_cuts):
+            self.buffer_start_without_cuts()
         rollout_id = self.resumed_at if resumed is None else int(resumed["next_rollout_id"])
         self.continues_releases_without_cut = resumed is None and self.resumed_at > 0
         if resumed is not None and self.resumed_at > rollout_id:

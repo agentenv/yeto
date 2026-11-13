@@ -96,6 +96,17 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    """The last value of ``flag`` in ``argv`` (``--flag V`` or ``--flag=V``; None: absent)."""
+    value = None
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif a.startswith(flag + "="):
+            value = a.split("=", 1)[1]
+    return value
+
+
 def _log(msg: str) -> None:
     print(f"{_now()} [rl up] {msg}", flush=True)
 
@@ -446,7 +457,44 @@ class Run:
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
         if self.trainer_restart() and not any(a.startswith("--rl-ledger-set-aside-before") for a in argv):
             argv += ["--rl-ledger-set-aside-before", f"{time.time() if now is None else now:.0f}"]
+        if self.continue_from_release(argv):
+            argv += ["--rl-init-from-release", "latest"]
         return argv
+
+    def continue_from_release(self, argv: list[str]) -> bool:
+        """A trainer restart under ``--rl-round-cuts off`` continues from the store's
+        newest release (``--rl-init-from-release latest``): there is no round cut,
+        and a start from the base would continue the release numbering with base
+        weights. Not on the first launch, not when the store holds no release yet,
+        not when the argv names a release itself."""
+        if not self.trainer_restart() or _argv_value(argv, "--rl-round-cuts") != "off":
+            return False
+        if any(a == "--rl-init-from-release" or a.startswith("--rl-init-from-release=") for a in argv):
+            return False
+        if not self.store_has_release():
+            _log("trainer restart with --rl-round-cuts off: the store holds no policy release yet, "
+                 "so the trainer starts from the base checkpoint")
+            return False
+        if not getattr(self, "_init_release_logged", False):
+            self._init_release_logged = True
+            _log("trainer restart with --rl-round-cuts off: adding --rl-init-from-release latest "
+                 "(the weights of the newest release; optimizer state, LR schedule position and "
+                 "RNG start fresh)")
+            self.mark("trainer_init_from_release", selector="latest")
+        return True
+
+    def store_has_release(self) -> bool:
+        """The run store holds a committed policy release (``policy-releases/LATEST.json``).
+        A failed listing raises: guessing would either start a restart from the base or
+        name a release that is not there."""
+        from yeto.rl.quant.schemes import RELEASE_DIR  # noqa: PLC0415
+
+        try:
+            keys = self._objects().list(f"{RELEASE_DIR}/")
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"--rl-round-cuts off restart: cannot list the store's policy releases "
+                               f"({type(error).__name__}: {error})"[:400]) from error
+        return any(str(k).rsplit("/", 1)[-1] in ("LATEST.json", "RELEASE.json") for k in keys)
 
     def trainer(self) -> None:
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))

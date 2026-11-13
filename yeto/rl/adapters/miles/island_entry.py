@@ -267,6 +267,9 @@ def _check_resume_switches(args) -> None:
     need a store (elastic, resume or island cuts)."""
     from yeto.rl.engine.cut_interval import cut_interval_for
 
+    from yeto.rl.engine.cut_interval import check_round_cuts_off
+
+    check_round_cuts_off(args)
     store = getattr(args, "rl_resume_store", None)
     island_store = getattr(args, "rl_island_cut_store", None)
     has_store = bool(store) or bool(island_store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
@@ -486,7 +489,13 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     if auto:
         miles_args.yeto_rl_cut_auto = auto  # a timed interval (any cut store)
     island_store = getattr(args, "rl_island_cut_store", None)
-    if getattr(args, "rl_resume_store", None) or island_store:
+    from yeto.rl.engine.cut_interval import round_cuts_off
+
+    if round_cuts_off(args):
+        # no resume wiring: no cut controller, no cut written or read (entry._wire_round_cuts);
+        # --rl-resume-store stays the sample buffer / release store
+        miles_args.yeto_rl_round_cuts = "off"
+    elif getattr(args, "rl_resume_store", None) or island_store:
         from yeto.rl.engine.cut_interval import island_cut_store_for
 
         every = getattr(args, "rl_cut_every", None)

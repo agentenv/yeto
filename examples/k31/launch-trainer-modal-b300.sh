@@ -38,6 +38,9 @@
 # The dry run (append --dry-run) validates the selection against --expert-parallel and prints a
 # rough per-GPU memory estimate (kimi_k31_full.memory), with warnings for long sequences.
 # 262k context: SEQ_LEN=262144; the response length follows SEQ_LEN - PROMPT_LEN.
+# Round cuts are off (--rl-round-cuts off): a full-parameter cut holds bf16 weights, fp32 master and
+# both Adam moments (about 5 TB). A relaunch continues from the store's newest release
+# (--rl-init-from-release latest; yeto run up adds it on a trainer restart) with a fresh optimizer.
 set -euo pipefail
 
 STAGE=${STAGE:-1}
@@ -105,6 +108,7 @@ yeto launch --training-mode rl \
   --expert-parallel 8 --tensor-parallel "$TP" --pipeline-parallel "$PP" --context-parallel "${CP:-1}" \
   --rl-sample-role trainer "${SYNC_FLAGS[@]}" --controller local \
   --rl-checkpoint-store "$STORE_URI" --rl-object-store-endpoint "$STORE_ENDPOINT" \
+  --rl-round-cuts off \
   --modal-store-secret "$STORE_SECRET" \
   --inner-lr "${INNER_LR:-1e-6}" --rl-max-policy-age 2 --rl-algorithm-spec "$SPEC" \
   --rl-rollout-top-logprobs-num 128 ${LOSS_FLAGS[@]+"${LOSS_FLAGS[@]}"} \

@@ -146,6 +146,7 @@ def parse_args(argv):
     p.add_argument("--rl-island-cut-store", default=None)
     p.add_argument("--rl-cut-auto-mtbf-s", type=float, default=None)
     p.add_argument("--rl-cut-max-interval-s", type=float, default=None)
+    p.add_argument("--rl-round-cuts", choices=("auto", "off"), default="auto")
     # rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
     p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     # the Megatron engine island (megatron_engine; EP/TP/PP > 1 select it);

@@ -6,8 +6,8 @@
 # of the same object-store buffer. After SAMPLE_MINUTES (or SAMPLE_GROUPS groups, or the store
 # marker convertible/<node>/switch.json written by an operator) this node stops its SGLang server
 # and runs the Miles trainer island on the same GPUs: it reads every island's shard from the
-# newest cut's watermark, trains (score_centering + GRPO advantage, --rl-max-policy-age gating the
-# staleness) and releases whole checkpoints with the selection sha into the store; the A-card
+# newest release's trained buffer position (round cuts are off: --rl-round-cuts off), trains
+# (score_centering + GRPO advantage, --rl-max-policy-age gating the staleness) and releases whole checkpoints with the selection sha into the store; the A-card
 # samplers keep generating and pull each release. With THEN_SAMPLER=1 the node comes back as a
 # sampler on the newest release when the trainer phase ends.
 #
@@ -51,6 +51,7 @@ yeto launch --training-mode rl --dry-run \
   --expert-parallel 8 --tensor-parallel 1 --pipeline-parallel 1 \
   --rl-sample-role trainer --rl-single-island-no-sync --controller local \
   --rl-checkpoint-store "$STORE_URI" --rl-object-store-endpoint "$STORE_ENDPOINT" \
+  --rl-round-cuts off \
   --modal-store-secret "$STORE_SECRET" \
   --inner-lr "${INNER_LR:-1e-6}" --rl-max-policy-age 2 --rl-algorithm-spec "$HERE/algorithm-spec.async-age2.json" \
   --rl-loss score_centering --rl-score-centering-is tis --rl-rollout-top-logprobs-num 128 \

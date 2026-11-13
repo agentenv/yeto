@@ -37,6 +37,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 DEFAULT_MAX_INTERVAL_S = 3600.0  # plan C: at most one hour between cuts
 DEFAULT_MTBF_S = 21600.0  # the default interval's prior: six hours between interruptions (spot)
@@ -221,3 +222,38 @@ def check_island_cut_store(args) -> None:
 def island_cut_store_for(island_store: str, learner_id: int) -> str:
     """This island's own cut store below the launch's ``--rl-island-cut-store``."""
     return f"{str(island_store).rstrip('/')}/island{int(learner_id)}"
+
+
+# ----------------------------------------------------------------------------- --rl-round-cuts off
+ROUND_CUTS_OFF = "off"
+# the flags that only mean something with round cuts (refused with --rl-round-cuts off)
+ROUND_CUT_ONLY_FLAGS = (("rl_cut_every", "--rl-cut-every"),
+                        ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+                        ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"),
+                        ("rl_cut_keep", "--rl-cut-keep"),
+                        ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                        ("rl_resume_allow_config_change", "--rl-resume-allow-config-change"),
+                        ("rl_island_cut_store", "--rl-island-cut-store"))  # island side
+ROUND_CUTS_OFF_NOTE = ("round cuts are off (--rl-round-cuts off): no cut is written or read; "
+                       "a relaunch continues from the store's newest policy release "
+                       "(--rl-init-from-release latest) with a fresh optimizer state")
+
+
+def round_cuts_off(args: Any) -> bool:
+    """``--rl-round-cuts off`` (launcher or island args, or a Miles args namespace)."""
+    return str(getattr(args, "rl_round_cuts", None) or "auto") == ROUND_CUTS_OFF
+
+
+def check_round_cuts_off(args: Any) -> None:
+    """``--rl-round-cuts off`` takes none of the flags that only configure cuts."""
+    if not round_cuts_off(args):
+        return
+    given = [flag for name, flag in ROUND_CUT_ONLY_FLAGS
+             if getattr(args, name, None) not in (None, False)]
+    if str(getattr(args, "rl_sample_role", None) or "") == "convertible":
+        raise ValueError("--rl-round-cuts off: a convertible node hands its trainer state over "
+                         "through round cuts (convertible.run_convertible_node); use "
+                         "--rl-round-cuts auto")
+    if given:
+        raise ValueError(f"--rl-round-cuts off: no round cuts are written, so {', '.join(given)} "
+                         "cannot apply; drop them, or use --rl-round-cuts auto")

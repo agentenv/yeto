@@ -1152,6 +1152,15 @@ def _resume_single_trainer(driver: Any, releases: PolicyReleaseStore,
         # RoundCutCheckpoint.resume). A record without it (an earlier yeto) reads from
         # 0: its read position (buffer_selected) may lie past groups vK never trained.
         round_cuts.buffer_start_without_cut = int(resumed.buffer_trained)
+    start_buffer = getattr(driver, "buffer_start_without_cuts", None)
+    sync = getattr(driver, "sync", None)
+    if (round_cuts is None and callable(start_buffer) and resumed.buffer_trained is not None
+            and sync is not None and hasattr(sync, "buffer_start_without_cuts")):
+        # --rl-round-cuts off (entry._wire_round_cuts_off): no cut keeps the watermark,
+        # so the buffer is read on from where the weights of vK were trained up to
+        # (at the sync's start, when the reader exists)
+        position = int(resumed.buffer_trained)
+        sync.buffer_start_without_cuts = lambda: start_buffer(position)
     driver.published_policy_history = resumed.history
     driver.emit("rl_buffer_resume_versions", base_version=resumed.base_version,
                 start_version=resumed.start_version, account_resumed=callable(resume_at),
