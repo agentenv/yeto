@@ -411,6 +411,19 @@ impl Args {
     }
 }
 
+/// Create the parent directory of every file the syncer writes, so a fresh
+/// host (no ~/yeto-output yet) does not lose its tape or exit at start.
+fn create_output_dirs(args: &Args) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let paths = [&args.final_state, &args.checkpoint_path, &args.event_tape, &args.dispense_log];
+    for path in paths.into_iter().flatten() {
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         // Logs are consumed by launchers, tests, and event collectors. Keep
@@ -422,6 +435,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    create_output_dirs(&args)?;
     for warning in deprecation_warnings(&args) {
         tracing::warn!("{warning}");
     }
@@ -636,6 +650,24 @@ fn parse_hex32(text: &str) -> anyhow::Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_parent_directories_of_every_output_path_are_created() {
+        let root = std::env::temp_dir().join(format!("yeto-syncer-output-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let p = |name: &str| root.join(name).join("file").display().to_string();
+        let args = Args::try_parse_from([
+            "yeto-syncer", "--learners", "1", "--total-steps", "1",
+            "--final-state", &p("final"), "--checkpoint-path", &p("ckpt"),
+            "--event-tape", &p("tape"), "--dispense-log", &p("dispense"),
+        ])
+        .unwrap();
+        create_output_dirs(&args).unwrap();
+        for name in ["final", "ckpt", "tape", "dispense"] {
+            assert!(root.join(name).is_dir(), "{name}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn inline_flags_still_parse_and_warn_once_each() {

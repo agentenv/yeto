@@ -531,3 +531,32 @@ def test_checker_compares_tape_rows_with_trained_reports():
     assert check_tapes(summary, tape, seed=3) == []
     extra = tape + [{"event": "rl_round_data_rows", "island_id": 0, "rows": [[3, 3, 1], [3, 3, 1]]}]
     assert check_tapes(summary, extra, seed=3)
+
+
+def test_the_launcher_dispense_log_on_a_fresh_home_does_not_stop_the_syncer(syncer_binary, tmp_path):
+    """The launcher passes --dispense-log ~/yeto-output/task-dispense.jsonl; on a
+    new host ~/yeto-output does not exist yet and the syncer must create it."""
+    from yeto.launch.dispense_evidence import DISPENSE_LOG
+
+    home = tmp_path / "home"
+    home.mkdir()
+    port = free_port()
+    command = (f"exec {syncer_binary} --port {port} --learners 1 --quorum 1 --total-steps 10"
+               f" --dispense --dispense-log {DISPENSE_LOG}")
+    env = {**_cargo_env(), "HOME": str(home)}
+    with open(tmp_path / "syncer.out", "w") as out:
+        proc = subprocess.Popen(["bash", "-c", command], stdout=out, stderr=subprocess.STDOUT, env=env)
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            assert proc.poll() is None, (tmp_path / "syncer.out").read_text()[-2000:]
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                assert time.monotonic() < deadline, "syncer did not listen"
+                time.sleep(0.05)
+        assert (home / "yeto-output" / "task-dispense.jsonl").is_file()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
