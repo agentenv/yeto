@@ -1352,6 +1352,7 @@ class IslandPool:
                 self._event("start_resumed", ticket=m.ticket, shard=m.shard, joined=bool(probe.joined))
             else:
                 m.state = PROVISIONING  # every start step is idempotent: run it again
+                m.created = now  # the start timeout counts from the rerun, as for an in-place restart
         future = self._starts.get(m.ticket)
         if future is not None and future.done():  # a background start finished
             self._starts.pop(m.ticket)
@@ -2038,6 +2039,7 @@ class IslandPool:
                         pool._recheck.add(m.ticket)
                     else:  # no probe: run the start again (every step is idempotent)
                         m.state = PROVISIONING
+                        m.created = pool.clock()  # its start timeout counts from the rerun
         return pool
 
 
