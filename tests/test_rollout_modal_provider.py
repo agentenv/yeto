@@ -5,6 +5,7 @@ with function calls instead of nodes. No Modal call is made."""
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -496,3 +497,35 @@ def test_concurrent_spawns_keep_every_call_in_the_record(tmp_path):
         t.join()
     assert not errors
     assert sorted(p.call_id(t) for t in tickets) == sorted(client.calls)
+
+
+def test_concurrent_orders_from_two_processes_keep_every_ticket(tmp_path):
+    """A manual command (another process) may rewrite the record while the pool runs:
+    the read-modify-write holds a file lock too, not only a thread lock, and the
+    temporary file is per writer (two processes can share a thread id)."""
+    import multiprocessing
+
+    record = tmp_path / "modal-calls.json"
+    ctx = multiprocessing.get_context("fork")
+
+    def work(slot):
+        p = ModalProvider("run-m", slots=[1, 2], client=FakeClient(), record=record)
+        save = p._save
+
+        def slow_save(rows):
+            time.sleep(0.01)
+            save(rows)
+
+        p._save = slow_save
+        for _ in range(10):
+            p.order(slot)
+
+    procs = [ctx.Process(target=work, args=(s,)) for s in (1, 2)]
+    for q in procs:
+        q.start()
+    for q in procs:
+        q.join(30)
+        assert q.exitcode == 0
+    rows = json.loads(record.read_text())
+    assert len(rows) == 20 and sorted(r["n"] for r in rows.values()) == list(range(1, 21))
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["modal-calls.json", "modal-calls.lock"]

@@ -59,7 +59,7 @@ from ..pool import status as island_status
 from ..pool.provider import ProviderCaps
 from ..pool.status import LeaseStatus
 from . import elastic
-from .client import NodeLease
+from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
 
 KIND, LEDGER_KIND = "modal", "modal_call"
@@ -106,8 +106,8 @@ class ModalProvider:
         self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
         self.record = record or state_dir() / f"modal-calls-{self.prefix}.json"
         # the record is rewritten from several threads (the pool starts islands in the
-        # background): every read-modify-write holds this lock, or one drops another's call
-        self._lock = threading.RLock()
+        # background) and processes (a manual release while the pool runs): every
+        # read-modify-write holds the record's state_file_lock, or one drops another's call
 
     @property
     def client(self):
@@ -122,12 +122,13 @@ class ModalProvider:
         except (OSError, ValueError):
             return {}
 
+    def _locked(self):
+        """The record's thread and process lock (not reentrant: never nest it)."""
+        return state_file_lock(self.record)
+
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
-        with self._lock:
-            self.record.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.record.with_suffix(f".{threading.get_ident()}.tmp")
-            tmp.write_text(json.dumps(rows, indent=1))
-            tmp.replace(self.record)
+        """Replace the record (a temporary file of its own); callers hold :meth:`_locked`."""
+        write_json_atomic(self.record, rows)
 
     def _ours(self, ticket: str) -> bool:
         return ticket.startswith(self.prefix + "-") and ticket in self._rows()
@@ -141,7 +142,7 @@ class ModalProvider:
 
     # -- IslandProvider
     def order(self, account: int) -> str:
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
             name = f"{self.prefix}-{n}"
@@ -161,7 +162,7 @@ class ModalProvider:
         if payload.get("shard") is not None:
             payload = {**payload, "ready_key": ready_key(str(payload["shard"]), ticket, n)}
         call = str(self.client.spawn(payload))
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None,
                                 ready_key=payload.get("ready_key"))
@@ -205,7 +206,7 @@ class ModalProvider:
                 raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs "
                                    f"after {self.cancel_wait_s:g} s")
             _record_ledger("released", LEDGER_KIND, call, FUNCTION)
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             rows[ticket].update(open=False, cancelled=call)
             self._save(rows)
