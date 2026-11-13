@@ -107,7 +107,12 @@ def test_agent_loop_samples_through_verls_client_behind_the_path_secret(verl_loo
     assert engine.pop_steps(endpoint.split("/t/")[1].split("/")[0]) == []  # taken by the loop
 
 
-def test_an_aborted_verl_request_aborts_the_sample(verl_loop, qwen):
+def test_an_aborted_verl_request_aborts_the_sample(verl_loop, qwen, monkeypatch):
+    from yeto.rl.adapters.verl.rollout_engine import ABORT_RETRY_ENV
+
+    # every call is aborted: with no resend window the first abort fails the sample
+    # (the default 30-minute window kept this test resending for minutes)
+    monkeypatch.setenv(ABORT_RETRY_ENV, "0")
     loop_mod, _ = verl_loop
     proxy, _ = _verl_proxy(qwen)
     recorder = ProxyTokenRecorder(proxy)
