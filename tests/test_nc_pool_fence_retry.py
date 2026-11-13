@@ -348,3 +348,30 @@ def test_no_node_is_ordered_for_a_handoff_whose_fence_failed_longer_than_fence_o
     assert [e["why"] for e in pool.events.events if e["event"] == "nc_elastic_order_refused"][-1].startswith("1 handoff")
     _run(pool, clock, clock.t + 1800)
     assert len(cloud.kinds("order")) == 2 and pool.members[-1].state == READY and not pool.pending
+
+
+def test_a_pool_killed_after_a_fence_succeeded_does_not_fence_the_successor_again(tmp_path):
+    """The fence of a shard retires the shard's member id ("its current incarnation" on
+    the syncer path): sent again after the successor on that shard joined, it would retire
+    the successor. The fence's success is saved before anything continues the shard, so a
+    pool killed in the tick that fenced and started the successor restores without it owed."""
+    clock, cloud, pool, m = _setup()
+    path = pool.state_path = tmp_path / "pool.json"  # as IslandPool.restore sets it in a run
+    cloud.fence_errors = 3
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    pool.save(path)
+    assert m.fence_pending == "evicted"
+    while not cloud.kinds("fence"):  # the controller saves after every tick; the last one is lost
+        clock.t += 60
+        pool.tick()
+        if not cloud.kinds("fence"):
+            pool.save(path)
+    successor = pool.members[-1]
+    assert successor.started is not None and successor.continues_from == m.ticket
+    again = IslandPool.restore(path, PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), cloud, clock=clock,
+                               log=lambda x: None, events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
+    assert all(r.fence_pending is None for r in again.members)
+    clock.t += 60
+    again.tick()
+    assert len(cloud.kinds("fence")) == 1  # the one before the successor started; none after
