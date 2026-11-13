@@ -303,3 +303,21 @@ def test_a_real_sampler_without_a_lease_that_finishes_under_an_old_pool_fence_en
     pool.tick()
     assert pool.finished and pool.stopped and not cloud.kinds("restart")
     assert "sampler_exit_not_data_end" not in _names(pool)
+
+
+def test_hourly_cost_raises_a_type_error_from_inside_the_providers_rate():
+    """``hourly_cost(ticket)`` and a no-argument ``hourly_cost()`` are both supported,
+    told apart by signature: a TypeError raised inside the rate is a bug and goes up,
+    never retried without the ticket."""
+    m = SimpleNamespace(account=1, ticket="t-1")
+    assert ProviderPoolOps(SimpleNamespace(hourly_cost=lambda: 7.0)).hourly_cost(m) == 7.0
+    assert ProviderPoolOps(SimpleNamespace(hourly_cost=lambda ticket=None: ticket)).hourly_cost(m) == "t-1"
+    calls = []
+
+    def rate(ticket):
+        calls.append(ticket)
+        return None + 1  # a real TypeError inside the rate
+
+    with pytest.raises(TypeError, match="unsupported operand"):
+        ProviderPoolOps(SimpleNamespace(hourly_cost=rate)).hourly_cost(m)
+    assert calls == ["t-1"]
