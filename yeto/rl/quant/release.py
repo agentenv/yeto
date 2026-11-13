@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import threading
 from collections.abc import Callable
@@ -96,13 +97,19 @@ class RequantReleaser:
 
     def sync(self) -> PolicyRelease | None:
         """Convert the newest BF16 release once; returns the release written,
-        or None (no BF16 release, already converted, or not complete yet)."""
+        or None (no BF16 release, already converted, or not complete yet).
+        The source is pinned while it is read: a trainer in this process does not
+        prune it (a conversion may outlast ``keep`` trainer releases)."""
         src = self.source.latest()
         if src is None or self.done_for(src):
             return None
         if src.weights != FULL:
             raise PolicyReleaseError(f"release r{src.seq}: {src.weights!r} weights cannot be re-quantized "
                                      "(full-parameter BF16 releases only)")
+        with self.source.pinned(src):
+            return self._convert(src)
+
+    def _convert(self, src: PolicyRelease) -> PolicyRelease | None:
         try:
             directory = self.source.resolve(src)
         except ReleaseIncomplete as error:
@@ -117,13 +124,49 @@ class RequantReleaser:
         def write(out: Path) -> None:
             stats["requant"] = self.requantize(directory, out)
 
-        record = self.target.release(src.version, f"{src.policy_hash}+{self.scheme}", write,
-                                     buffer_selected=src.buffer_selected, buffer_shards=src.buffer_shards,
-                                     derived_from=derived, manifest=src.manifest)
+        before = self._target_dirs()
+        try:
+            record = self.target.release(src.version, f"{src.policy_hash}+{self.scheme}", write,
+                                         buffer_selected=src.buffer_selected, buffer_shards=src.buffer_shards,
+                                         derived_from=derived, manifest=src.manifest)
+        except Exception as error:  # noqa: BLE001 - re-raised unless the source was pruned
+            if not self._pruned_during_conversion(src):
+                raise
+            # The trainer released newer versions and pruned this one (``keep``) while it
+            # was read: drop the partial target and convert the newer release next time.
+            # never the release the target's LATEST names (a failure after its commit)
+            for name in self._partial_target_dirs(before):
+                shutil.rmtree(self.target.root / name, ignore_errors=True)
+            self.waiting = (f"BF16 {src.path} was pruned during its conversion "
+                            f"({type(error).__name__}: {error}); the newer release is converted next")
+            self.log(f"[requant] {self.waiting}")
+            return None
         if record is not None:
             self.log(f"[requant] BF16 r{src.seq}-v{src.version} -> {self.target.release_dir}/{record.path} "
                      f"{json.dumps(stats.get('requant'), default=str)}")
         return record
+
+    def _partial_target_dirs(self, before: set[str]) -> set[str]:
+        """Target directories this conversion created that LATEST does not name
+        (none when LATEST cannot be read: a published release is never removed)."""
+        try:
+            latest = self.target.latest()
+        except Exception:  # noqa: BLE001 - unknown: keep them
+            return set()
+        return self._target_dirs() - before - ({latest.path} if latest is not None else set())
+
+    def _target_dirs(self) -> set[str]:
+        root = self.target.root
+        return {p.name for p in root.iterdir() if p.is_dir()} if root.is_dir() else set()
+
+    def _pruned_during_conversion(self, src: PolicyRelease) -> bool:
+        """``src`` is gone from the source store and a newer BF16 release replaced it."""
+        try:
+            newer = self.source.latest()
+            return (newer is not None and newer.seq > src.seq
+                    and src.path not in self.source._listed_names())
+        except Exception:  # noqa: BLE001 - unknown: the original error stands
+            return False
 
     def run(self, stop: threading.Event, poll_s: float = 10.0) -> None:
         """:meth:`sync` until ``stop`` is set (a failed conversion ends the loop)."""

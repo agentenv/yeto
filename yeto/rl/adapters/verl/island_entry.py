@@ -833,6 +833,8 @@ def main(argv=None) -> int:
         "rollout_quant": quant_summary,
         **({eval_port.PLAN_KEY: eval_plan} if eval_plan else {}),
     }
+    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # tier 2: BF16 releases -> FP8 releases
+        trainer_releaser_plan(buffer_section, Path(model_path), work / "fp8-template")
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))
     (OUTPUT / f"verl-plan-{lid}.json").write_text(json.dumps(plan, indent=1, default=str))
@@ -866,19 +868,13 @@ def main(argv=None) -> int:
     cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
-    stop_releaser = threading.Event()
-    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # tier 2: BF16 releases -> FP8 releases
-        start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
-    try:
-        with log.open("a") as handle:
-            proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-            for line in proc.stdout:
-                sys.stdout.write(line)
-                handle.write(line)
-            code = proc.wait()
-    finally:
-        stop_releaser.set()
+    with log.open("a") as handle:
+        proc = subprocess.Popen(cmd, env=env, cwd=verl_root(),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            handle.write(line)
+        code = proc.wait()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
 
@@ -1324,18 +1320,27 @@ def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> 
     return [], summary
 
 
-def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template_dir: Path,
-                           stop: threading.Event) -> threading.Thread:
-    """Tier 2 on a buffer trainer: convert every BF16 release of the store into an
-    FP8 release (``yeto.rl.quant.release.scoped_releaser``) in a thread of this process."""
-    from yeto.rl.engine.resume import store_for
+TRAINER_FP8_KEY = "trainer_fp8"
+
+
+def trainer_releaser_plan(buffer_section: dict | None, base_dir: Path, template_dir: Path) -> None:
+    """Tier 2 on a buffer trainer: the plan's sample_buffer section asks the trainer
+    process (``buffer_trainer_runner``) to convert every BF16 release of the store into
+    an FP8 release (``yeto.rl.quant.release.scoped_releaser``). The releaser runs in the
+    process that writes the BF16 releases, so its pin on the source it reads
+    (``PolicyReleaseStore.pinned``) keeps that source from the trainer's prune."""
+    if not buffer_section:
+        raise SystemExit("--rl-rollout-quant-tier 2 needs --rl-sample-role trainer on a verl island")
+    buffer_section[TRAINER_FP8_KEY] = {"base_dir": str(base_dir), "template_dir": str(template_dir)}
+
+
+def start_trainer_releaser(release_store, fp8: dict, stop: threading.Event) -> threading.Thread:
+    """Start the tier-2 releaser of :func:`trainer_releaser_plan` on ``release_store``
+    (the trainer's own release store object) in a thread of this process."""
     from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
     from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
 
-    if not buffer_section:
-        raise SystemExit("--rl-rollout-quant-tier 2 needs --rl-sample-role trainer on a verl island")
-    store = store_for(buffer_section.get("release_store") or buffer_section["store"])
-    releaser = scoped_releaser(store, base_dir, template_dir, FP8_FFN_CHANNEL)
+    releaser = scoped_releaser(release_store, Path(fp8["base_dir"]), Path(fp8["template_dir"]), FP8_FFN_CHANNEL)
     return start_scoped_releaser(releaser, stop)
 
 

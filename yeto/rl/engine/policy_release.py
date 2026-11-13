@@ -469,6 +469,15 @@ def store_cache_key(store: Any) -> str:
     return hashlib.sha256(str(identity).encode("utf-8")).hexdigest()[:16]
 
 
+# Releases a reader of this process holds (``PolicyReleaseStore.pinned``): a writer of
+# the same store and release directory in this process does not prune them. The
+# scoped re-quantizer runs beside the trainer and reads a BF16 release for longer
+# than the trainer's release interval can be; unpinned, every source it reads would
+# be pruned mid-conversion and the quantized side never publish. In memory only.
+_PINS: dict[tuple[str, str], dict[str, int]] = {}
+_PINS_LOCK = threading.Lock()
+
+
 class PolicyReleaseStore:
     """Writes (trainer) and reads (sampler) the releases in one store.
     ``cache_dir``: where a store with an object API downloads a release to; the
@@ -684,6 +693,31 @@ class PolicyReleaseStore:
                     and not old.name.endswith(".overlay")):
                 shutil.rmtree(old, ignore_errors=True)
 
+    def _pin_key(self) -> tuple[str, str]:
+        return store_cache_key(self.store), self.release_dir
+
+    @contextmanager
+    def pinned(self, release: PolicyRelease) -> Iterator[None]:
+        """Keep ``release`` from this process's prunes of the store while the block runs."""
+        key = self._pin_key()
+        with _PINS_LOCK:
+            names = _PINS.setdefault(key, {})
+            names[release.path] = names.get(release.path, 0) + 1
+        try:
+            yield
+        finally:
+            with _PINS_LOCK:
+                names = _PINS.get(key, {})
+                names[release.path] -= 1
+                if names[release.path] <= 0:
+                    del names[release.path]
+                if not names:
+                    _PINS.pop(key, None)
+
+    def _pinned_names(self) -> set[str]:
+        with _PINS_LOCK:
+            return set(_PINS.get(self._pin_key(), ()))
+
     def latest(self) -> PolicyRelease | None:
         objects = self.store.objects
         if objects is not None:
@@ -887,7 +921,7 @@ class PolicyReleaseStore:
         island pruned ``r1-v0`` while keeping the delta ``r2-v1``). An unreadable
         record keeps the release rather than dropping a base that may be needed.
         """
-        kept = set(names[-self.keep:])
+        kept = set(names[-self.keep:]) | (self._pinned_names() & set(names))
         pending = list(kept)
         while pending:
             name = pending.pop()
@@ -1005,7 +1039,8 @@ class PolicyReleaseStore:
         one of them fails the load and retries with the next LATEST)."""
         named = sorted((int(m.group(1)), p.name) for p in self.root.iterdir()
                        if p.is_dir() and (m := _RELEASE_NAME.fullmatch(p.name)))
-        removed = [name for _, name in named[:-self.keep]]
+        pinned = self._pinned_names()
+        removed = [name for _, name in named[:-self.keep] if name not in pinned]
         for name in removed:
             shutil.rmtree(self.root / name, ignore_errors=True)
         if removed:
