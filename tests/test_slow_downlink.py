@@ -109,6 +109,15 @@ class CountingIsland(LightIsland):
             return pulls
 
         self.client.drain_pulls = counted_pulls
+        self.push_times: list[float] = []
+        push_fragment = self.client.push_fragment
+
+        def counted_push(*args, **kwargs):
+            result = push_fragment(*args, **kwargs)
+            self.push_times.append(time.time())
+            return result
+
+        self.client.push_fragment = counted_push
 
     def apply_broadcast(self, update) -> None:
         p = update.fragment_id
@@ -127,7 +136,8 @@ def steady(tape, syncer_log) -> bool:
     return all(merges_with(records, island, joined, time.time() + 1) >= 10 for island in (0, 1))
 
 
-def stall_report(tape, syncer_log, pull_times, since: float, until: float, other_pull_times=None) -> str:
+def stall_report(tape, syncer_log, pull_times, since: float, until: float, other_pull_times=None,
+                 other_push_times=None) -> str:
     """What the syncer did in [since, until]: merges with each island and
     PULLs read by the slow island, per second; the rounds that ended at the
     quorum timeout (``timed_out`` on the tape) or took long, and the longest
@@ -136,7 +146,9 @@ def stall_report(tape, syncer_log, pull_times, since: float, until: float, other
     ``step_seconds``, so the log lines are what marks it). Printed when a slow-phase check fails.
     ``other_pull_times``: PULLs read by the other island; with them, the tape records and syncer
     log lines of the longest gap tell a scheduler that sent no PULL from an island that got its
-    PULL but whose push was refused or never arrived."""
+    PULL but whose push was refused or never arrived. ``other_push_times``: pushes the other
+    island queued; with them the report ends with every thread's stack, which tells an island
+    thread blocked in the test process from a syncer that ignores its pushes."""
     records = tape_records(tape)
     steps = [r for r in records if r.get("kind") == "outer_step" and since - 30 <= r["time_unix"] <= until + 1]
     seconds = range(int(until - since) + 1)
@@ -178,6 +190,8 @@ def stall_report(tape, syncer_log, pull_times, since: float, until: float, other
         f"  merges with island 1: {merges[1]}",
         f"  PULLs read by the slow island: {per_second(pull_times)}",
         *([f"  PULLs read by the other island: {per_second(other_pull_times)}"] if other_pull_times is not None else []),
+        *([f"  pushes queued by the other island: {per_second(other_push_times)}"]
+          if other_push_times is not None else []),
         f"  rounds ended by the quorum timeout (t, step, fragment, arrived, absent): {timed_out or 'none'}",
         f"  longest gaps without a merge (seconds, from t): {[(round(g, 2), round(t, 2)) for g, t in gaps]}",
         f"  rounds of >= 2 s (t, step, fragment, step_seconds): {long_rounds or 'none'}",
@@ -186,7 +200,18 @@ def stall_report(tape, syncer_log, pull_times, since: float, until: float, other
         "tape records of the longest gap (and of rounds of >= 2 s):", *in_gap,
         f"syncer log lines of the longest gap ({len(gap_log)}, at most 40):", *gap_log[:40],
         "tape tail:", tail,
+        *(["thread stacks:", thread_stacks()] if other_push_times is not None else []),
     ])
+
+
+def thread_stacks() -> str:
+    """Where every thread of this process is now (the islands' loops and their clients)."""
+    import sys
+    import traceback
+
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    return "\n".join(f"--- {names.get(ident, ident)}\n" + "".join(traceback.format_stack(frame)[-6:])
+                     for ident, frame in sys._current_frames().items())
 
 
 def start_as_first_members(tmp_path, first, initializer) -> None:
@@ -269,7 +294,7 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
         if during < 60 or pulls_to_slow < 10:
             time.sleep(1.0)  # the tape's last records
             report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until,
-                                  other_pull_times=a.pull_times)
+                                  other_pull_times=a.pull_times, other_push_times=a.push_times)
             assert during >= 60, f"{during} merges with island 0\n{report}"
             assert pulls_to_slow >= 10, f"{pulls_to_slow} PULLs to the slow island\n{report}"
         for island in (a, b):
@@ -404,7 +429,7 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
         if during < 60 or pulls_to_slow < 10:
             time.sleep(1.0)
             report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until,
-                                  other_pull_times=a.pull_times)
+                                  other_pull_times=a.pull_times, other_push_times=a.push_times)
             assert during >= 60, f"{during} merges with island 0\n{report}"
             assert pulls_to_slow >= 10, f"{pulls_to_slow} PULLs to the slow island\n{report}"
         for island in (a, b):

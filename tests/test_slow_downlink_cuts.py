@@ -267,7 +267,7 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
         if during < 60:
             time.sleep(1.0)
             report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until,
-                                  other_pull_times=a.pull_times)
+                                  other_pull_times=a.pull_times, other_push_times=a.push_times)
             assert during >= 60, f"{during} merges with island 0\n{report}"
         finish(proc, (a, b))
     except BaseException:
