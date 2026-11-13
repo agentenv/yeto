@@ -29,17 +29,19 @@ the alias.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .client import NodeLease
+from .client import NodeLease, state_file_lock
 from .tunnel import RELAY_PORT, state_dir
 
 SKY_POOLS_FILE = Path(os.path.expanduser("~/.sky/ssh_node_pools.yaml"))
@@ -113,10 +115,8 @@ def _blocks(text: str) -> dict[str, str]:
 def write_ssh_alias(lease: NodeLease, *, ssh_config: Path = SSH_CONFIG, relay_port: int = RELAY_PORT) -> str:
     """Add the node's alias and pin its host key; make ``~/.ssh/config`` include our file."""
     ours = state_dir() / "ssh_config"
-    blocks = _blocks(ours.read_text()) if ours.exists() else {}
-    blocks[host_alias(lease.ticket)] = ssh_host_block(lease, relay_port=relay_port)
-    ours.write_text("".join(blocks.values()))
-    os.chmod(ours, 0o600)
+    block = ssh_host_block(lease, relay_port=relay_port)
+    edit_ssh_config(ours, lambda blocks: blocks.__setitem__(host_alias(lease.ticket), block))
     if lease.host_key:
         known = state_dir() / "known_hosts"
         lines = [ln for ln in (known.read_text().splitlines() if known.exists() else [])
@@ -139,11 +139,33 @@ def include_ours(ours: Path, *, ssh_config: Path | None = None) -> None:
 
 
 def remove_ssh_alias(ticket: str) -> None:
-    ours = state_dir() / "ssh_config"
-    if ours.exists():
-        blocks = _blocks(ours.read_text())
-        blocks.pop(host_alias(ticket), None)
-        ours.write_text("".join(blocks.values()))
+    alias = host_alias(ticket)
+    edit_ssh_config(state_dir() / "ssh_config", lambda blocks: blocks.pop(alias, None), create=False)
+
+
+def edit_ssh_config(ours: Path, edit: Callable[[dict[str, str]], Any], *, create: bool = True) -> None:
+    """One read-modify-write of the shared alias file: every provider (NC, sky,
+    Daytona) of every process on the state dir writes this one file, so the edit
+    holds ``state_file_lock`` (a thread lock plus an ``flock``; not reentrant across
+    the flock, so ``edit`` must not call back in) and the new text replaces the file
+    atomically (a 0600 temporary of its own, synced, renamed): a concurrent ssh never
+    reads a half-written config and no writer drops another's alias."""
+    with state_file_lock(ours):
+        if not create and not ours.exists():
+            return
+        blocks = _blocks(ours.read_text()) if ours.exists() else {}
+        edit(blocks)
+        fd, tmp = tempfile.mkstemp(prefix=f".{ours.name}.", suffix=".tmp", dir=ours.parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write("".join(blocks.values()))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, ours)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
 
 def write_pool(ticket: str, *, path: Path = SKY_POOLS_FILE) -> str:

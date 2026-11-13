@@ -92,12 +92,10 @@ Pool config::
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import random
 import re
-import tempfile
 import threading
 import time
 import zlib
@@ -465,7 +463,7 @@ class DaytonaProvider:
                             "  StrictHostKeyChecking accept-new",
                             f"  UserKnownHostsFile {state_dir() / 'known_hosts'}",
                             "  ServerAliveInterval 15", "  ServerAliveCountMax 4", ""])
-        _edit_ssh_config(ours, lambda blocks: blocks.__setitem__(alias, block))
+        node_pool.edit_ssh_config(ours, lambda blocks: blocks.__setitem__(alias, block))
         node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
         with self._locked():
             rows = self._rows()
@@ -499,34 +497,7 @@ class DaytonaProvider:
 def _drop_alias(ticket: str) -> None:
     from . import node_pool  # noqa: PLC0415
 
-    alias = node_pool.host_alias(ticket)
-    _edit_ssh_config(state_dir() / "ssh_config", lambda blocks: blocks.pop(alias, None), create=False)
-
-
-def _edit_ssh_config(ours: Path, edit, *, create: bool = True) -> None:
-    """One read-modify-write of the shared ssh config: every sandbox of every process
-    on the state dir writes this one file, so the edit holds ``state_file_lock`` (a
-    thread lock plus an ``flock``), and the new text replaces the file atomically
-    (a 0600 temporary of its own, synced, renamed): a concurrent ssh never reads a
-    half-written config and no writer drops another's alias."""
-    from . import node_pool  # noqa: PLC0415
-
-    with state_file_lock(ours):
-        if not create and not ours.exists():
-            return
-        blocks = node_pool._blocks(ours.read_text()) if ours.exists() else {}
-        edit(blocks)
-        fd, tmp = tempfile.mkstemp(prefix=f".{ours.name}.", suffix=".tmp", dir=ours.parent)
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write("".join(blocks.values()))
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, ours)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+    node_pool.remove_ssh_alias(ticket)
 
 
 def validate(*, image: str | None, snapshot: str | None, gpus: Any, gpu_type: Any, spot: Any, name_prefix: Any,
