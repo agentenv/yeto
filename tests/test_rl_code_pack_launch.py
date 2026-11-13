@@ -217,3 +217,22 @@ def test_island_checks_a_release_tree(tmp_path):
                                 log=lambda _m: None)
     parsed = [a for a in build_parser()._actions if "--code-pack-mode" in a.option_strings]
     assert parsed and parsed[0].choices == ["git-patch", "release"]
+
+
+def test_dry_run_reports_the_pinned_pack_drift(launch):
+    """``yeto launch --dry-run`` (``yeto run up``'s preflight) refuses the same drift
+    the launch refuses, before anything is ordered; --rl-code-pack-keep passes it."""
+
+    args, manifest = launch()
+    plan = launcher.dry_run_plan(args)  # unchanged tree: the dry run passes
+    assert plan
+    (launch.repo / "yeto" / "a.py").write_text("A = 2\n")
+    with pytest.raises(ValueError, match="pins code pack .*--rl-code-pack-keep"):
+        launcher.dry_run_plan(args)
+    args.rl_code_pack_keep = True
+    assert launcher.dry_run_plan(args)
+    args.rl_code_pack_keep, args.rl_code_pack_upgrade = False, "move to the fix"
+    assert launcher.dry_run_plan(args)
+    # nothing was stored by the dry runs: still only the first start's pack
+    assert [p.name for p in (launch.store / "code_packs").iterdir()] == [
+        f"{manifest['code_pack']['digest']}.tar"]
