@@ -309,6 +309,10 @@ class Simulation:
         if not intent["owned"]:
             self.metric("writes_without_ownership")
         lease = self.server.objects.get(f"sample-buffer/leases/{proc.sid}.json")
+        for key in reversed(self.server.keys(sample_buffer.shard_prefix(proc.sid))):
+            if isinstance(json.loads(self.server.get(key) or b"{}").get("owner"), dict):
+                lease = self.server.objects.get(key)  # an owned shard: fenced since its newest ownership record
+                break
         grace = self.config.lease_poll_s + self.config.write_check_s + 60.0
         if intent["fenced"] and not rogue and lease is not None and self.clock.now - lease.modified > grace:
             # its watcher and its check before the write both had the time to read the lease

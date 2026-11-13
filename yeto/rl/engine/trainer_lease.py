@@ -167,6 +167,7 @@ class TrainerLease:
         store (:func:`lease_objects`)."""
         objects = lease_objects(objects)
         nonce = uuid.uuid4().hex
+        _require_atomic_create(objects, nonce)
         # A claimer that lost the create of generation N + 1 never keeps N + 1: it lists
         # again and creates the new highest + 1, until it wins. The winner of the highest
         # generation is the trainer; every other one is fenced at its next check().
@@ -229,6 +230,29 @@ class TrainerLease:
         """Fields of the :data:`FENCED_EVENT` event."""
         return {"generation": self.generation, "incarnation": self.incarnation,
                 "fenced_by": self.fenced_by, "lease_checks": self.checks}
+
+
+PROBE_DIR = "trainer-lease-probe"  # one object per claim of a store whose create is not proven
+
+
+def _require_atomic_create(objects: Any, nonce: str) -> None:
+    """Refuse before any lease record is written when the store's create is not an
+    atomic exclusive create: it declares so, or (S3: ``conditional_writes`` is learnt
+    at the first create) a probe create under :data:`PROBE_DIR` showed it. A lease
+    record written by a check-then-write create would turn on shard ownership records
+    (``TrainerLease.current``) on a store where they race."""
+    from .object_store import atomic_create  # noqa: PLC0415
+
+    if atomic_create(objects) and getattr(objects, "conditional_writes", None) is True:
+        key = f"{PROBE_DIR}/{nonce}.json"
+        try:
+            objects.create(key, b"{}")
+            objects.delete(key)
+        except Exception:  # noqa: BLE001 - only a NotImplemented answer (conditional_writes) matters here;
+            pass  # the lease create below is checked again, and a probe left behind is harmless
+    if not atomic_create(objects):
+        raise TrainerLeaseError("the object store has no atomic exclusive create (If-None-Match refused, or a "
+                                "check-then-write store): no trainer lease is claimed")
 
 
 def _is_claim(objects: Any, generation: int, nonce: str) -> bool:

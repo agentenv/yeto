@@ -1132,3 +1132,49 @@ def test_a_pool_fence_writes_an_ownership_record_for_a_sampler_that_reads_them(t
     trainer = _trainer(objects)
     trainer.refresh()
     assert _names(trainer) == ["inc-1-g0"]
+
+
+class _NoConditionalWrites(DirectoryObjectStore):
+    """An S3 endpoint that answers NotImplemented to If-None-Match: its first create
+    learns it and every create is check-then-write from then on."""
+
+    conditional_writes = True
+
+    def create(self, key, data):
+        self.conditional_writes = False
+        if self.exists(key):
+            return False
+        self.write(key, data)
+        return True
+
+
+def test_a_store_without_conditional_writes_gets_no_trainer_lease_and_no_ownership_records(tmp_path):
+    objects = _NoConditionalWrites(tmp_path)
+    trainer = open_trainer_buffer(objects, batch_size=1, shards=[SHARD])
+    assert trainer.trainer_lease is None
+    assert TrainerLease.current(objects) == 0  # no lease record was written before the refusal
+    writer, lease = _sampler(objects, "inc-1")
+    assert not writer.can_own and not lease.owned
+    assert "reads_owner_records" not in read_lease(_records(objects), SHARD)
+    assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1") is None
+
+
+def test_a_check_then_write_store_never_turns_ownership_records_on(tmp_path):
+    """Even with a lease record on the store (claimed earlier through an atomic
+    endpoint), a store whose create is not atomic writes no ownership record."""
+    objects = DirectoryObjectStore(tmp_path)
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    relay = DirectoryObjectStore(tmp_path)
+    relay.atomic_create = False  # as RelayOssObjectStore
+    writer, lease = _sampler(relay, "inc-1")
+    assert not writer.can_own and not lease.owned
+    assert fence_shard_owner(_records(relay), SHARD, "pool-fence:t-1") is None
+    with pytest.raises(Exception):
+        TrainerLease.claim(relay, incarnation="trainer-2")
+
+
+def test_the_oss_relay_store_declares_its_create_not_atomic():
+    from yeto.cloud.oss_relay import RelayOssObjectStore
+    from yeto.rl.engine.object_store import atomic_create
+
+    assert RelayOssObjectStore.atomic_create is False and not atomic_create(RelayOssObjectStore)

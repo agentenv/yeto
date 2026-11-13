@@ -1059,6 +1059,7 @@ Mixed versions on one run store (the fence format of section 5.2):
 | new | old, on a run started by old code | Works as before the upgrade (lease record). Restart the samplers on the new code to get the fence above; the dispenser plan of the run stays at its version. |
 | any | old, on a run started by new code | Refused at the sampler's start: `dispense mismatch: version is 2 here, 3 in .../plan.json`. Use the new sampler image. |
 | old, after a new trainer ran on the store | - | Not supported, and refused: see "No way back" below. |
+| new | new samplers, old pool | Not supported. The old pool fences by the lease record only, which an owned shard ignores: groups the fenced process writes before it stops are trained. Upgrade the pool together with the samplers. |
 | new | old, still running when the new trainer starts | Not supported (see the upgrade order below): a pool fence or a new sampler writes an ownership record into the shard, and the old sampler stops at its next read of it. Nothing is misread. |
 
 **No way back to older trainer code.** Once a shard of the run holds an
@@ -1077,10 +1078,13 @@ fields, `shard_epoch` and `shard_passed`, that older code ignores). To go back
 to older code, start a new run prefix.
 
 **Upgrade order for a running run: samplers and pool first, the trainer
-last.** The trainer is the switch: the new format starts when the new trainer
+last.** Ownership records need an atomic exclusive create: on a store without
+one (an endpoint that refuses `If-None-Match`, the OSS relay) the trainer claims
+no generation and everything stays on the lease record fence. The trainer is the switch: the new format starts when the new trainer
 claims its generation lease in the store (`trainer-lease/<generation>.json`,
 one more at every start of a trainer that merges the shards of an object
-store), and from then on the new samplers and the pool write ownership records.
+store; a generation is only this format switch, it does not keep two trainers
+from running at once), and from then on the new samplers and the pool write ownership records.
 
 1. Bring the samplers up on the new image (drain the old ones, below) and
    restart the pool on the control host with the new code. With the old
@@ -1103,7 +1107,8 @@ it runs the new image: safe, but the shard does not continue.
 
 **Rollback.** Before step 2: roll the samplers and the pool back as usual.
 After step 2 there is no rollback to older code on the same run store, of the
-trainer or of the samplers ("No way back" above): older code stops on the new
+trainer, the samplers or the pool (an older pool's lease-only fence does not
+fence an owned shard) ("No way back" above): older code stops on the new
 records instead of misreading them, so a rollback costs the run, not its data.
 To go back, start a new run prefix (another `--cluster-prefix`), from the last
 released policy if you want to keep the training so far.

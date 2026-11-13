@@ -147,7 +147,7 @@ def owner_records_enabled(buffer: Any) -> bool:
     """Whether a sampler writes shard ownership records into ``buffer``: its shard
     can hold them (``FileSampleBuffer.can_own``) and the run's trainer reads them
     (a trainer generation lease exists; an older trainer fails on the record)."""
-    if buffer is None or not getattr(buffer, "can_own", False):
+    if buffer is None or not getattr(buffer, "can_own", False):  # can_own: an atomic create too
         return False
     from .trainer_lease import TrainerLease  # noqa: PLC0415
 
@@ -184,8 +184,10 @@ def fence_shard_owner(store: Any, shard: str, incarnation: str, *, by: str = "po
     from .trainer_lease import TrainerLease  # noqa: PLC0415
 
     objects = getattr(store, "objects", None)
-    if objects is None or not callable(getattr(objects, "create", None)):
-        return None
+    from .object_store import atomic_create  # noqa: PLC0415
+
+    if objects is None or not callable(getattr(objects, "create", None)) or not atomic_create(objects):
+        return None  # a check-then-write create would race the sampler's group for the position
     if not objects.exists(f"{BUFFER_DIR}/{SHARD_NAMES}/{_shard_name(shard)}"):
         return None
     if TrainerLease.current(objects) < 1:

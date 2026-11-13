@@ -958,7 +958,10 @@ class FileSampleBuffer:
     def can_own(self) -> bool:
         """Whether this buffer writes a shard that can hold ownership records (a
         shard on an object store: create-if-absent decides the positions)."""
-        return self.shard is not None and isinstance(self.index, ObjectIndex)
+        from .object_store import atomic_create  # noqa: PLC0415
+
+        return (self.shard is not None and isinstance(self.index, ObjectIndex)
+                and atomic_create(self.index.objects))
 
     @property
     def owner(self) -> ShardOwner | None:
