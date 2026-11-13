@@ -1451,7 +1451,7 @@ the pool now do on their own when a part of the run fails, so you can tell
 expected recovery from a real fault. Each item names its settings, the events
 or metrics to look for and what to do. Where another section already explains
 it in detail, it is linked. It covers every robustness change merged from
-#352 to #401; section 5.11 describes the end-to-end rehearsal on the merged code. Pool events below are shown by their short name;
+#352 to #406; section 5.11 describes the end-to-end rehearsal on the merged code. Pool events below are shown by their short name;
 on the NC event tape they carry the `nc_elastic_` prefix.
 
 #### Samplers (agentic)
@@ -1467,6 +1467,7 @@ on the NC event tape they carry the `nc_elastic_` prefix.
 | A failed store **read** never ends a sampler or disarms a fence: lease, handoff, ledger, `LATEST.json` and buffer reads are polls, read again at the next poll; the sampler keeps its weights and its tasks. A finished group whose hold cannot be checked waits instead of being written or dropped, and is given up (task released, not counted toward `max_redo`) after `write_defer_max_s`. Only a failed **write** ends the process (`INFRA_FAILED`, restarted by the pool). Two exceptions end the process at once: a configuration error of the store (403 / `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `NoSuchBucket`, missing credentials) is fatal and not retried, and one poll that keeps failing for longer than 1800 s (`max_read_outage_s`, fixed in code) ends the sampler with `StoreReadOutage`. Details: section 5.10. | `write_defer_max_s` (600), `incarnation_lease.max_unread_s` (60), `prompts.dispense.lease_s` (900) | `rl_sampler_store_read_failed` / `rl_sampler_store_read_ok`, `rl_dispense_scan_failed`, `rl_sampler_write_deferred` (`claim_unread`, `lease_unread`, `given_up`), `rl_sampler_release_not_loaded` (`latest_unread`) | Short outages: nothing. A sampler that exits on a 403 or `NoSuchBucket`: fix the store credentials or bucket name in the store env file; the pool restarts it. `StoreReadOutage`: the store has been unreadable for 30 minutes; fix the store access. |
 | Store dispenser retire and lost claim answers: `store_dispense retire` writes the retired marker **before** it lists the claims to release, and a sampler checks its marker once after a claim pass that won anything; a claim taken while the retire ran is released at once. A claim whose create was applied but whose answer was lost (timeout) is tracked as unsure; each scan reads it back and releases it if it is this holder's, and the sampler does not answer a drain while a claim is unsure. | none | claim release reasons `retired`, `claim_answer_lost` | Nothing. A drained or retired node no longer leaves a claim behind until its lease expires. |
 | An agentic group whose trials ran across an in-place weight load that failed after touching the engine (or that started while the loader was not ready) is dropped instead of being written with the old `behavior_version`. | none | groups dropped as `unchecked_weights_in_flight` | Occasional drops after a failed hot reload are expected; frequent drops mean the reload itself fails: read the sampler log. |
+| At sampler close, the agent error of a detached trial that is cancelled again is retrieved and recorded instead of lost (#406). | none | the trial's error record | Nothing; the real error is there when you troubleshoot. |
 
 #### Object store client
 
@@ -1495,6 +1496,7 @@ on the NC event tape they carry the `nc_elastic_` prefix.
 | **Trainer scheduler restarts stop on a repeated crash.** A trained round resets the failure count only when it reaches a version no earlier incarnation of this loop trained. A trainer that crashes deterministically after the same cut (it restores the cut, retrains the same rounds, crashes again) now gives up after `--rl-trainer-max-failures` incarnations instead of restarting forever. | `--rl-trainer-max-failures` (3) | trainer journal `gave_up`, `TrainerLoopGaveUp` | Read the trainer log of the last incarnation; fix the cause, then `yeto run up` resumes from the newest cut. |
 | **A fatal store error at the incarnation gate ends the trainer.** A lease read refused for configuration reasons (403 / `AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `NoSuchBucket`) is no longer a fail-closed pause: the trainer exits through its failure path (failure count, `TrainerLoopGaveUp`). `ExpiredToken`, 5xx and timeouts remain pauses. | none | trainer log `incarnation gate: fatal store error: lease of shard <s> refused by the store (<code>)`; `yeto run up` names it "the trainer exits on it: not starvation, not a gate pause" | Fix the store credentials or bucket in the trainer's store env, then `yeto run up`. |
 | A failed staged release upload (export, full disk, throttling past retries, `LATEST` put) stops the trainer at its very next publish, whatever `--rl-release-every` is (before, a cadence-skipped publish could hide it for N-1 rounds while the samplers stayed on the old policy). | `--rl-release-every` | trainer failure with the upload error | Read the trainer log, fix the cause (disk, store), `yeto run up` resumes from the newest cut. |
+| `--rl-round-cuts {auto,off}`; the K3.1 examples pass `off` (one full-parameter cut is about 5 TB). With `off` no round cut is written or read, and a relaunch continues from the newest policy release: `yeto run up` and every trainer node add `--rl-init-from-release latest` on their own. A trainer that finds releases but started from the base stops with `RoundCutsOffRestartError`. `off` is refused with the cut flags, a convertible node and `--rl-backend verl` (#405). | `--rl-round-cuts` (`auto`) | `rl_round_cuts_off`, `adding --rl-init-from-release latest`, `no policy release yet`, `RoundCutsOffRestartError` | See section 5.3. Cost of the resume: optimizer state, LR schedule position and RNG restart; at most one release interval is trained again. |
 
 #### Pool and National Compute
 
@@ -1523,13 +1525,17 @@ on the NC event tape they carry the `nc_elastic_` prefix.
 | Modal / Daytona / Sky sampler pools are counted at their own price (`usd_per_h`, else the provider's `price_usd_h`), not at `budget.nc_usd_per_h`, by the budget breaker, the forced pool stop and `run scale`; the cost guard counts priced Modal pool calls before Modal's billing report shows the app. | - | - | Nothing, once the prices are real. |
 | Safe re-entry: one `up` per run (`~/.yeto/rl-up/<run>/up.lock`; a second `up` exits), a leftover controller `STOP` flag is removed and logged before the pool starts, and the trainer is stopped by its `--cluster-prefix` (not the run name), so a breach or starvation stop does not miss it. | - | message from the second `up` | Rerunning `yeto run up --config run.json` on a stopped, crashed or running run is safe. |
 | Data end: once every sampler pool is finished and holds no live member, the monitor writes the end record of every shard the trainer reads that has not ended (fenced, lost or never used shards), so the trainer finishes on the data end; starvation is not checked after that. | - | `state["data_ended"]` | Nothing. |
+| `yeto run down` takes the run's `up.lock` first: a running `run up` of the same run gets SIGTERM and up to `YETO_RUN_DOWN_GRACE_S` seconds to exit before the teardown starts; a `down` that meets another `down` only waits for it (#402). | `YETO_RUN_DOWN_GRACE_S` (60) | the `down` message that it interrupts the running `up` | Nothing: `down` and a running `up` no longer race. To keep training after a `down`, run `yeto run up` again. |
+| The run's `state.json` is read, merged and written under a lock and replaced atomically, so `yeto run scale` and `yeto run up` writing at the same time no longer overwrite each other (#403). | none | - | Nothing. |
 
 #### CI
 
 A newer push to a pull request cancels the CI run of its older head; runs on
 `main` are never cancelled. The store fault simulation (real sampler, trainer
 and pool store code on a fault-injecting S3) runs green on `main` in its full
-mode, and flaky throttling and timing tests were isolated.
+mode, and flaky throttling and timing tests were isolated. Since #398 the
+gate mutations are skipped on the fence-zombie preset; a unit test now covers
+the gate's seal boundary instead and fails under both mutations (#404).
 
 ### 5.10 Object store outages
 
@@ -1984,6 +1990,8 @@ whose payload holds an older policy version: the payload decides.
 | Multi-turn trials end on turn 2 with `RecordsMismatch: the rendering of the earlier turns changed (template rewrites history)` | Qwen3 with `enable_thinking: false`: the template drops the empty think block from history. Not K3.1 | Fixed by #400 (update the code); a K3.1 run or a real history rewrite showing it is a bug report |
 | `lease_end_without_ready_replacement` alert | A node reached its lease end and its replacement is not ready (order refused, low balance) | Top up or add accounts; the shard was fenced and continues when a node is back |
 | A second `yeto run up` of the same run exits at once | Another `up` of this run still holds `up.lock` | Use the running one, or stop it first |
+| The trainer stops at start with `RoundCutsOffRestartError` | `--rl-round-cuts off`, the store holds policy releases, but the trainer loaded the base checkpoint (no `--rl-init-from-release`, e.g. an island command started by hand) | Relaunch through `yeto run up` / `yeto launch`, or add `--rl-init-from-release latest`; to start over, use a new run prefix / store (section 5.3) |
+| A running `yeto run up` ends on SIGTERM | A `yeto run down` of the same run interrupted it (#402) | Expected; run `yeto run up` again after the `down` if training should go on |
 | Trainer exits with `incarnation gate: fatal store error` | The store refuses the trainer's credentials or the bucket does not exist | Fix the trainer's store env; this is not a pause or starvation |
 
 **The tape shows `rl_buffer_duplicate_task_skipped`.**
