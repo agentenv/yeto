@@ -329,9 +329,13 @@ def store_dispensed_prompts(spec: Mapping[str, Any], *, render: Callable[[Any], 
 
             from .store_dispense import ledger_objects  # noqa: PLC0415
 
+            from yeto.sandbox.docker import DockerError  # noqa: PLC0415
+
             try:
                 gate = gate_from_spec(spec, ledger_objects(store), environ=env)
-            except EnvsError as error:
+                if gate is not None:
+                    gate.check_docker()  # an unreachable daemon fails the start, not a silent capacity wait
+            except (EnvsError, DockerError) as error:
                 raise SamplerSpecError(str(error)) from error
         return StoreDispensedPrompts.open(
             _require(prompts, "path", "prompts"), config, store=store, holder=str(_require(spec, "sampler_id")),
