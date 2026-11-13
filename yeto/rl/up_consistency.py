@@ -283,6 +283,29 @@ def budget_usd(budget: dict[str, Any] | None) -> float:
         raise ValueError(f"budget.usd must be a number of dollars or null (no cap), got {usd!r}") from None
 
 
+DEFAULT_WALL_H = 3.0  # budget.wall_h absent: the wall clock stops the trainer after 3 h
+
+
+def budget_wall_h(budget: dict[str, Any] | None) -> float | None:
+    """The wall-clock cap ``budget.wall_h`` in hours. Absent means :data:`DEFAULT_WALL_H`;
+    ``null`` means no wall-clock cap (``None``, like ``budget.usd: null``). A value that is
+    not a positive number raises ValueError naming the field."""
+    b = budget or {}
+    if "wall_h" not in b:
+        return DEFAULT_WALL_H
+    wall = b["wall_h"]
+    if wall is None:
+        return None
+    try:
+        hours = float(wall)
+    except (TypeError, ValueError):
+        hours = float("nan")
+    if isinstance(wall, bool) or not hours > 0 or hours == float("inf"):
+        raise ValueError(f"budget.wall_h must be a positive number of hours or null (no wall-clock cap), "
+                         f"got {wall!r}")
+    return hours
+
+
 def budget_capped(budget: dict[str, Any] | None) -> bool:
     """Whether the run sets a spend cap (``budget.usd`` a finite number below :data:`NO_CAP_USD`)."""
     usd = budget_usd(budget)

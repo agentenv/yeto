@@ -473,9 +473,46 @@ def test_null_prices_and_silence_take_their_defaults_instead_of_crashing_the_mon
     assert run.silence_limit_s() >= 30 * 60
 
 
-def test_null_wall_h_takes_the_default_instead_of_crashing_the_monitor(make_run):
-    run = make_run(usd=100)
-    run.cfg["budget"]["wall_h"] = None
-    run.state["t0"] = up.time.time()
-    assert run.uptime()["wall_h"] == pytest.approx(3.0)
-    assert run.breach() is None
+@pytest.mark.parametrize("wall_h, why", [(None, None), (3, "wall clock"), (5, None)])
+def test_the_wall_clock_breach_follows_budget_wall_h(make_run, monkeypatch, wall_h, why):
+    run = make_run(usd=None, wall_h=wall_h)
+    monkeypatch.setattr(up.Run, "spend_usd", lambda self: 0.0)
+    run.state["t0"] = up.time.time() - 4 * 3600
+    assert run.breach(trainer=False) == why
+
+
+def test_an_absent_wall_h_keeps_the_3_h_default(make_run, monkeypatch):
+    run = make_run(usd=None)
+    monkeypatch.setattr(up.Run, "spend_usd", lambda self: 0.0)
+    run.state["t0"] = up.time.time() - 4 * 3600
+    assert run.breach(trainer=False) == "wall clock"
+
+
+@pytest.mark.parametrize("wall_h, forced", [(None, "spend $"), (3, "wall ")])
+def test_the_1_2x_breaker_skips_the_wall_cap_when_wall_h_is_null(make_run, tmp_path, monkeypatch, wall_h, forced):
+    run = make_run(usd=100, nc_usd_per_h=10, wall_h=wall_h)
+    run.cfg["trainer"]["usd_per_h"] = 0
+    clock = {"t": 100_000.0}
+    monkeypatch.setattr(up.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(up.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 3600))
+    run.state["t0"] = clock["t"] - 3600
+    _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": clock["t"] - 3600}])
+    run.watch_nc_after_breach("budget", poll_s=60)
+    assert run.state["steps"]["nc_forced_stop"]["why"].startswith(forced)
+
+
+@pytest.mark.parametrize("budget, warned", [({"usd": 450}, True), ({"usd": 450, "wall_h": 80}, False),
+                                            ({"usd": 450, "wall_h": None}, False)])
+def test_preflight_warns_when_wall_h_is_not_set(make_run, monkeypatch, capsys, budget, warned):
+    monkeypatch.setattr("yeto.launch_preflight.modal_sdk_problem", lambda env: None)
+    run = make_run(**budget)
+    assert run.preflight() is True
+    assert ("WARNING: budget.wall_h is not set" in capsys.readouterr().out) is warned
+
+
+@pytest.mark.parametrize("wall_h", ["3h", "", 0, -1, True, [3]])
+def test_a_wall_h_that_is_not_a_positive_number_fails_preflight(make_run, monkeypatch, capsys, wall_h):
+    monkeypatch.setattr("yeto.launch_preflight.modal_sdk_problem", lambda env: None)
+    run = make_run(usd=450, wall_h=wall_h)
+    assert run.preflight() is False and run.calls == []
+    assert "budget.wall_h must be a positive number of hours or null" in capsys.readouterr().out
