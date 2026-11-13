@@ -1493,7 +1493,7 @@ class Run:
 
     def down(self) -> bool:
         self.lock_for_down()
-        ok = True
+        failed: list[str] = []  # the checks that did not pass, named in the verdict
         self._cmd(self.yeto("dashboard", "export", *self.dashboard_args(), "-o",
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy
         dash = (self.state.get("procs") or {}).get("dashboard")
@@ -1503,23 +1503,29 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        ok &= self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) == 0
+        if self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
+            failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
         for path in self.pool_configs:
-            ok &= self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) == 0
+            if self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) != 0:
+                failed.append(f"pool-stop {path}")
         if self.envs:
-            ok &= self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
-                            log="down.log", timeout=600) == 0
+            if self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
+                         log="down.log", timeout=600) != 0:
+                failed.append("sandbox teardown")
         hosts = self.sandbox_hosts()
         if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
             for host in hosts:
                 self._sweep_trials(host)
             left = self.run_containers()
             _log(f"sandbox: {left} container(s) of this run left")
-            ok &= left == 0
+            if left:
+                failed.append(f"sandbox containers ({left} left)")
         for path in self.pool_configs:
-            ok &= self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) == 0
-        self.mark("down", ok=bool(ok))
-        _log("down: " + ("verified" if ok else "NOT verified, see down.log"))
+            if self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) != 0:
+                failed.append(f"pool-status {path}")
+        ok = not failed
+        self.mark("down", ok=ok)
+        _log("down: " + ("verified" if ok else f"NOT verified ({'; '.join(failed)}), see down.log"))
         return bool(ok)
 
     def status(self) -> dict[str, Any]:

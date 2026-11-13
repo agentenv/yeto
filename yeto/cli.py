@@ -2155,6 +2155,10 @@ def _cloud_probe(cluster: str):
 
 
 DOWN_VERIFY_SLEEP = time.sleep  # patched out in tests
+# Right after ``modal app stop`` the app can still list a draining task ("still
+# stopped with 1 task(s)") for some seconds; poll that long before NOT verified.
+MODAL_DOWN_VERIFY_ATTEMPTS = 19
+MODAL_DOWN_VERIFY_POLL_S = 5.0
 
 
 def _down_and_verify(cluster: str, num_nodes: int = 1) -> bool:
@@ -2219,6 +2223,27 @@ def _modal_app_stopped(run_name: str) -> tuple[bool, str]:
     if state == "stopped" and tasks == 0:
         return True, f"Modal app {app}: stopped, 0 tasks"
     return False, f"Modal app {app}: still {state} with {tasks} task(s)"
+
+
+def _await_modal_app_stopped(run_name: str) -> tuple[bool, str]:
+    """:func:`_modal_app_stopped`, polled up to MODAL_DOWN_VERIFY_ATTEMPTS times
+    MODAL_DOWN_VERIFY_POLL_S apart until the app converges (stopped, 0 tasks). The
+    detail of a failure names what did not converge and its last reading."""
+
+    ok, detail = _modal_app_stopped(run_name)
+    for attempt in range(1, MODAL_DOWN_VERIFY_ATTEMPTS):
+        if ok:
+            return ok, detail
+        if attempt == 1:
+            print(f"[yeto] waiting for the Modal app to converge after stop ({detail}); "
+                  f"up to {(MODAL_DOWN_VERIFY_ATTEMPTS - 1) * MODAL_DOWN_VERIFY_POLL_S:.0f}s")
+        DOWN_VERIFY_SLEEP(MODAL_DOWN_VERIFY_POLL_S)
+        ok, detail = _modal_app_stopped(run_name)
+    if ok:
+        return ok, detail
+    return False, (f"did not converge: Modal app state (want stopped, 0 tasks) after "
+                   f"{MODAL_DOWN_VERIFY_ATTEMPTS} checks over "
+                   f"{(MODAL_DOWN_VERIFY_ATTEMPTS - 1) * MODAL_DOWN_VERIFY_POLL_S:.0f}s; last: {detail}")
 
 
 def _modal_stop_app(run_name: str) -> None:
@@ -2322,7 +2347,7 @@ def _cmd_down_clusters(args) -> int:
 
     if modal_names:
         _modal_stop_app(name)
-        ok, detail = _modal_app_stopped(name)
+        ok, detail = _await_modal_app_stopped(name)
         for c in modal_names:
             if ok:
                 print(f"[yeto] {c}: stopped with the Modal app ({detail})")

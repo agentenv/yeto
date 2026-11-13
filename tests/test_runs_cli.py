@@ -364,12 +364,40 @@ def test_down_fails_when_the_modal_app_is_still_running(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
     monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: (lambda: []))
     monkeypatch.setattr(cli, "_modal_stop_app", lambda run: None)
-    monkeypatch.setattr(
-        cli, "_modal_app_stopped", lambda run: (False, "Modal app yeto-m2: still running with 1 task(s)")
-    )
+    sleeps, checks = [], []
+
+    def still_running(run):
+        checks.append(run)
+        return False, "Modal app yeto-m2: still running with 1 task(s)"
+
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", sleeps.append)
+    monkeypatch.setattr(cli, "_modal_app_stopped", still_running)
     assert cli.main(["down", "m2"]) == 1
     assert runs.load_run("m2")["teardown_unconfirmed"] == ["m2-l0-modal"]
-    assert "m2-l0-modal: not confirmed stopped" in capsys.readouterr().err
+    # bounded: polled until the convergence window ran out, then reported
+    assert len(checks) == cli.MODAL_DOWN_VERIFY_ATTEMPTS > 1
+    assert sum(sleeps) <= cli.MODAL_DOWN_VERIFY_ATTEMPTS * cli.MODAL_DOWN_VERIFY_POLL_S
+    err = capsys.readouterr().err
+    assert "m2-l0-modal: not confirmed stopped" in err
+    assert "did not converge" in err and "Modal app state" in err and "still running with 1 task(s)" in err
+
+
+def test_down_waits_for_a_stopping_modal_app_to_converge(monkeypatch, capsys):
+    """Right after ``modal app stop`` the app can still list as stopped with a task
+    draining (q06 regression: the first ``run down`` said NOT verified, a rerun
+    seconds later verified). ``yeto down`` polls until it converges."""
+    runs.create_run("m3", make_args_dict("m3"))
+    runs.update_run("m3", pid=None, clusters=["m3-l0-modal"])
+    monkeypatch.setattr(cli, "_modal_stop_app", lambda run: None)
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", lambda s: None)
+    answers = iter([(False, "Modal app yeto-m3: still stopped with 1 task(s)"),
+                    (False, "Modal app yeto-m3: still stopped with 1 task(s)"),
+                    (True, "Modal app yeto-m3: stopped, 0 tasks")])
+    monkeypatch.setattr(cli, "_modal_app_stopped", lambda run: next(answers))
+    assert cli.main(["down", "m3"]) == 0
+    assert runs.load_run("m3")["state"] == "DOWN"
+    out = capsys.readouterr().out
+    assert "m3-l0-modal: stopped with the Modal app (Modal app yeto-m3: stopped, 0 tasks)" in out
 
 
 def test_modal_app_stopped_reads_state_and_tasks(monkeypatch):
