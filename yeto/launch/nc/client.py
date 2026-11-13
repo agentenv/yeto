@@ -54,6 +54,10 @@ DELETE_GUARD_S = 120.0  # no delete this close to the ticket's lease end or pree
 PENDING_ONLY_FIELDS = ("before", "since", "observed_ticket", "observed_at", "stale_reported", "free_reads",
                        "call_ended", "error")  # of a row without a ticket
 
+# consecutive failed status reads ``wait_active`` rides out before it gives up
+WAIT_STATUS_RETRIES = 5
+
+
 class NcError(RuntimeError):
     pass
 
@@ -850,8 +854,22 @@ class NcClient:
         if not self.ledger.owns(self.account, ticket):  # no address or host key of a ticket that is not ours
             raise NcRefused(f"ticket {ticket} on account {self.account} was not created by this tool")
         deadline = time.monotonic() + timeout_s
+        failures = 0
         while True:
-            t = self.status().get("ticket") or {}
+            try:
+                t = self.status().get("ticket") or {}
+            except (NcError, subprocess.TimeoutExpired) as error:
+                # a failed read says nothing about the ticket: poll again (a guard's
+                # refusal or a judged ticket - an NcError subclass - is final)
+                if type(error) not in (NcError, subprocess.TimeoutExpired):
+                    raise
+                failures += 1
+                if failures >= WAIT_STATUS_RETRIES or time.monotonic() > deadline:
+                    raise
+                log(f"ticket {ticket}: status read failed ({failures}/{WAIT_STATUS_RETRIES}): {error}")
+                self.sleep(poll_s)
+                continue
+            failures = 0
             if t.get("id") != ticket:
                 raise NcError(f"account {self.account}: current ticket is {t.get('id')}, expected {ticket}")
             state = t.get("state")
