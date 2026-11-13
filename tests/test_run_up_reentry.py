@@ -327,3 +327,17 @@ def test_run_down_grace_from_the_environment(make_run, monkeypatch):
         assert len(slept) == up.DOWN_GRACE_S == 60
     finally:
         held._up_lock.close()
+
+
+def test_run_down_names_the_check_that_did_not_verify(make_run, capsys):
+    """NOT verified says which check failed (q06: the trainer's Modal app had not
+    converged yet), not only "see down.log"."""
+    run = make_run()
+    run._cmd = lambda argv, *, log, timeout=None: 1 if argv[-2:] == ["down", "r1-trainer"] else 0
+    assert run.down() is False
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert "NOT verified (trainer (yeto down: cloud/Modal teardown not confirmed))" in text
+    assert "pool-status" not in text.split("NOT verified", 1)[1]
+    run._cmd = lambda argv, *, log, timeout=None: 0
+    assert run.down() is True

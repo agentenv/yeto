@@ -518,6 +518,7 @@ class Run:
         try:
             for ref in self.pools:
                 slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name))
+                self._restart_stopped_pool(ref.name, slots[ref.name].pool)
         except BaseException:
             for slot in slots.values():
                 if slot.lock is not None:
@@ -631,6 +632,32 @@ class Run:
             self.state.pop(key, None)
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
+
+    def drain_controller(self) -> None:
+        """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
+        while ``main`` still runs. Left to the ``atexit`` hook it ran during interpreter
+        shutdown, after the Modal client had closed: a tick in flight failed with
+        ``ClientClosed``, the drain waited on it forever, and the process hung holding
+        the pool with its sampler still billing."""
+        controller = getattr(self, "controller", None)
+        if controller is None or controller.stopped or not controller.drain_on_exit:
+            return
+        from yeto.launch.pool.controller import drain_active  # noqa: PLC0415
+
+        drain_active("process exit")
+
+    def _restart_stopped_pool(self, name: str, pool: Any) -> None:
+        """A pool an earlier stop of this run left stopped (``yeto run down``, a process
+        exit drain) and with no live member: this ``run up`` drives it again. Kept
+        stopped, the controller skips it at every tick, so no sampler is ordered and the
+        trainer waits for samples that never come. A pool with live members is left as
+        it is (the stop has not finished), and so is one that finished its run."""
+        if not pool.stopped or pool.live() or getattr(pool, "finished", None):
+            return
+        _log(f"pool {name}: its state says stopped ({pool.stopped}) by an earlier stop of this run and no "
+             "member is live: this run up drives it again")
+        pool.stopped = None
+        pool._event("pool_restarted", why="run up")  # noqa: SLF001
 
     def dashboard_args(self) -> list[str]:
         """``--store`` plus the run's local records (``--run``: the launcher's fleet record
@@ -1542,7 +1569,7 @@ class Run:
 
     def down(self) -> bool:
         self.lock_for_down()
-        ok = True
+        failed: list[str] = []  # the checks that did not pass, named in the verdict
         self._cmd(self.yeto("dashboard", "export", *self.dashboard_args(), "-o",
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy
         dash = (self.state.get("procs") or {}).get("dashboard")
@@ -1552,24 +1579,30 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        ok &= self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) == 0
+        if self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
+            failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
         for path in self.pool_configs:
-            ok &= self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) == 0
+            if self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) != 0:
+                failed.append(f"pool-stop {path}")
         if self.envs:
-            ok &= self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
-                            log="down.log", timeout=600) == 0
+            if self._cmd(self.yeto("sandbox", "teardown", "--envs", self.envs, "--store", self.cfg["store"]),
+                         log="down.log", timeout=600) != 0:
+                failed.append("sandbox teardown")
         hosts = self.sandbox_hosts()
         if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
             for host in hosts:
                 self._sweep_trials(host)
             left = self.run_containers()
             _log(f"sandbox: {left} container(s) of this run left")
-            ok &= left == 0
+            if left:
+                failed.append(f"sandbox containers ({left} left)")
         for path in self.pool_configs:
-            ok &= self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) == 0
+            if self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) != 0:
+                failed.append(f"pool-status {path}")
+        ok = not failed
         self.end_up()
-        self.mark("down", ok=bool(ok))
-        _log("down: " + ("verified" if ok else "NOT verified, see down.log"))
+        self.mark("down", ok=ok)
+        _log("down: " + ("verified" if ok else f"NOT verified ({'; '.join(failed)}), see down.log"))
         return bool(ok)
 
     def status(self) -> dict[str, Any]:
@@ -1875,6 +1908,14 @@ def main(args: Any) -> int:
         # path (the drain, or with drain_on_exit false the undriven banner) runs
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
     run.pool()
+    try:
+        return _drive(run, args)
+    finally:
+        if run.in_process:
+            run.drain_controller()
+
+
+def _drive(run: Run, args) -> int:
     if getattr(args, "trainer_now", False):
         _log("--trainer-now: the trainer starts now, in parallel with the sampler setup")
     elif not (run.state.get("steps") or {}).get("first_group"):

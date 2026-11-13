@@ -156,6 +156,7 @@ error, never silently ignored.
 | `accounts` | NC accounts the pool may order on. No repeats; each must be in `YETO_NC_ACCOUNTS`. Accounts beyond `target` are used for replacements. | required |
 | `shard_base` | Prefix of the buffer shards (`<shard_base>-0`, `-1`, ...). Also names the state file `pool-<shard_base>.json`. | required |
 | `run` | Run tag written to every ticket in the ledger. The pool and `pool-stop` only ever delete tickets that carry this tag. One word, no spaces. | `shard_base` |
+| `protected_accounts` | Extra NC accounts `delete-ticket` refuses to delete on. Accounts 2 and 3 (production) are always protected. | `[]` (+ 2, 3) |
 | `machine_type` | NC machine type to order. This is **not** a Hugging Face model; the served model is set in the sampler spec. A value containing `/` is refused. | `mi355x` |
 | `model` | Deprecated name of `machine_type`. It still works but prints a deprecation note; it cannot be set together with `machine_type`. | none |
 | `route` | `ssh`: SSH + docker on the node (the verified route). `sky`: SkyPilot SSH node pool (refused on nodes with the provider's health k3s). | `ssh` |
@@ -511,6 +512,36 @@ To release a single ticket:
 ```
 python -m yeto.launch.nc down --account <account> --ticket <ticket>
 ```
+
+### Delete one ticket of this run: `delete-ticket`
+
+```
+python -m yeto.launch.nc delete-ticket --config pool.json --ticket <ticket>         # dry run
+python -m yeto.launch.nc delete-ticket --config pool.json --ticket <ticket> --yes   # delete
+```
+
+For cleaning up a leftover node of one run. It is stricter than `down` and is
+refused (exit 2, nothing sent to National Compute) unless all of these hold:
+
+- the ticket is recorded for this run: a ledger row tagged with the pool's
+  `run`, or a member of the pool state file `pool-<shard_base>.json`. A ticket
+  of another run, another session or unknown origin is refused;
+- its account (from those records; records that disagree are refused) is one
+  of the pool config's `accounts`;
+- its account is not protected: accounts **2 and 3 are always protected**
+  (production nodes), plus any listed in the config's `protected_accounts`.
+  The config can add accounts there, never remove 2 or 3;
+- no pool loop of this config is alive (use `pool-scale --remove <ticket>` so
+  the pool does not replace the node).
+
+Without `--yes` it prints the run, account and ticket it would delete and
+stops. With `--yes` it sends one guarded delete (the same client guards as
+`down`: the ticket must be the account's current one, the halt rules apply),
+checks that the ticket reads `ended` / `released`, and writes the event
+`ticket_deleted` (or `ticket_delete_failed` / `ticket_delete_unconfirmed`,
+exit 1) to the pool's events file. It takes exactly one ticket id: no
+patterns, lists or `--all`. A deleted pool member is seen by a later `pool`
+start as a manual release (no replacement is ordered).
 
 ### Upgrading and rolling back yeto: the state file format
 

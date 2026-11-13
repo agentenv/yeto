@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import types
 
 import pytest
 
@@ -525,3 +526,58 @@ def test_a_finished_trainer_names_and_releases_every_pool(tmp_path, monkeypatch,
     monkeypatch.setattr(up, "_alive", lambda pid: False)
     assert run.on_trainer_finished() is True
     assert [a[a.index("--config") + 1] for a in calls if "pool-stop" in a] == run.pool_configs
+
+
+def test_run_up_drives_a_pool_an_earlier_stop_left_stopped(tmp_path, monkeypatch):
+    """run down (or a process exit) drains the pools and saves them stopped; the next
+    run up must order samplers again instead of skipping the stopped pool forever."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    cfg = dict(run_cfg, controller="in_process")
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    c = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    assert all(pool.live() for pool in c.pools.values())
+    c.stop("process exit")
+    assert all(pool.stopped and not pool.live() for pool in c.pools.values())
+    again = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert not any(pool.stopped for pool in again.pools.values())
+        again.tick()
+        assert all(pool.live() for pool in again.pools.values())
+        assert sum(len(p.orders) for p in providers.values()) == 4
+    finally:
+        again.stop("test")
+
+
+def test_run_up_drains_the_in_process_pools_before_main_returns(tmp_path, monkeypatch):
+    """The exit drain runs in main (a trainer breaker returns from monitor), not only in
+    the atexit hook: at interpreter shutdown the Modal client is already closed."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool import controller as ctl  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    run = up.Run(dict(run_cfg, controller="in_process"))
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    monkeypatch.setattr(up, "Run", lambda cfg: run)
+    monkeypatch.setattr(up, "load_config", lambda path: {})
+    monkeypatch.setattr(up.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(run, "sandbox_prepare", lambda: True)
+    monkeypatch.setattr(run, "pool", lambda: run.start_controller(ops=ops, thread_cls=_NoThread).tick())
+    monkeypatch.setattr(run, "trainer", lambda: None)
+    monkeypatch.setattr(run, "dashboard", lambda: None)
+    seen = {}
+    monkeypatch.setattr(run, "monitor", lambda: seen.update(live=sum(len(p.live()) for p in run.controller.pools.values())))
+    args = types.SimpleNamespace(config="x", rl_command="up", skip_preflight=True, dry_run=False, no_monitor=False,
+                                 trainer_now=True)
+    assert up.main(args) == 0
+    assert seen["live"] == 2
+    assert run.controller.stopped == "process exit" and run.controller not in ctl.active()
+    assert all(not pool.live() for pool in run.controller.pools.values())

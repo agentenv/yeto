@@ -701,7 +701,7 @@ POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
-                       "workdir", "comment", "sampler_route", "data_path", "syncer"})
+                       "workdir", "comment", "sampler_route", "data_path", "syncer", "protected_accounts"})
 DATA_PATHS = ("r2", "syncer")  # buffer shards + releases in the run store | syncer broadcast + sample relay
 REQUIRED_KEYS = ("target", "shard_base")  # and "accounts" (or "slots" off National Compute)
 
@@ -1077,6 +1077,14 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--direct", action="store_true",
                    help="delete the ticket here even when a running pool owns it (the pool then sees a manual "
                    "release: it lowers its target and orders no replacement)")
+    dt = sub.add_parser("delete-ticket", help="release one ticket this pool's run ordered (dry run unless --yes)",
+                        description="Delete exactly one ticket, named by its id, that the ledger rows of the "
+                        "pool's run or its pool state record. Refused for any other ticket, an account outside "
+                        "the pool config, a protected account (2 and 3 always, plus protected_accounts) and while "
+                        "the pool loop runs. No patterns, lists or --all.")
+    dt.add_argument("--config", required=True, help="the pool config JSON of the run that ordered the ticket")
+    dt.add_argument("--ticket", required=True, help="one exact ticket id")
+    dt.add_argument("--yes", action="store_true", help="send the delete (default: print what would be deleted)")
     ad = sub.add_parser("adopt", help="record a ticket an unrecorded order of this tool placed (an operator's call)",
                         description="After an order call that failed, the account may show an open ticket that "
                         "is in no ledger (event order_unrecorded). Check in the National Compute console that this "
@@ -1271,6 +1279,16 @@ def main(argv: list[str] | None = None) -> int:
                 return rc
         down(args.account, args.ticket)
         return 0
+    if args.cmd == "delete-ticket":
+        from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
+        from . import pool_run  # noqa: PLC0415
+
+        try:
+            return pool_run.delete_own_ticket(json.loads(Path(args.config).read_text()), args.config, args.ticket,
+                                              yes=args.yes)
+        except (PoolStateFormatError, ValueError, NcError) as error:
+            print(f"delete-ticket: refused, nothing sent: {error}", file=sys.stderr)
+            return 2
     if args.cmd in ("pool-pause", "pool-resume", "pool", "pool-stop", "pool-status", "pool-retry", "pool-scale",
                     "pool-state-downgrade"):
         from ..pool.island_pool import PoolStateFormatError  # noqa: PLC0415
