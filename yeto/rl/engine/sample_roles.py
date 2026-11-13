@@ -806,6 +806,11 @@ def _check_release_cadence(args: Any, role: str) -> None:
     if busy:
         if getattr(args, "rl_release_inline", False):
             problems.append("staged releases for --rl-release-skip-busy (no --rl-release-inline)")
+        if not _full_weights(args):
+            # a LoRA trainer writes every release inline (sampler_island stages full
+            # weights only): the flag would be dropped without a word
+            problems.append("full-weight releases for --rl-release-skip-busy "
+                            "(--tuning full or the full-parameter preset)")
         if age < RELEASE_SKIP_BUSY_MIN_AGE:
             problems.append(f"--rl-max-policy-age >= {RELEASE_SKIP_BUSY_MIN_AGE} for "
                             f"--rl-release-skip-busy (got {age})")
