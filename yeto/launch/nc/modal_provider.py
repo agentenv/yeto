@@ -59,7 +59,7 @@ from ..pool import status as island_status
 from ..pool.provider import ProviderCaps
 from ..pool.status import LeaseStatus
 from . import elastic
-from .client import NodeLease
+from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
 
 KIND, LEDGER_KIND = "modal", "modal_call"
@@ -105,6 +105,9 @@ class ModalProvider:
         # a cancel is asynchronous: the call reads RUNNING for some seconds after it
         self.sleep, self.cancel_wait_s = sleep, float(cancel_wait_s)
         self.record = record or state_dir() / f"modal-calls-{self.prefix}.json"
+        # the record is rewritten from several threads (the pool starts islands in the
+        # background) and processes (a manual release while the pool runs): every
+        # read-modify-write holds the record's state_file_lock, or one drops another's call
 
     @property
     def client(self):
@@ -119,11 +122,13 @@ class ModalProvider:
         except (OSError, ValueError):
             return {}
 
+    def _locked(self):
+        """The record's thread and process lock (not reentrant: never nest it)."""
+        return state_file_lock(self.record)
+
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
-        self.record.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.record.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rows, indent=1))
-        tmp.replace(self.record)
+        """Replace the record (a temporary file of its own); callers hold :meth:`_locked`."""
+        write_json_atomic(self.record, rows)
 
     def _ours(self, ticket: str) -> bool:
         return ticket.startswith(self.prefix + "-") and ticket in self._rows()
@@ -137,11 +142,12 @@ class ModalProvider:
 
     # -- IslandProvider
     def order(self, account: int) -> str:
-        rows = self._rows()
-        n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
-        name = f"{self.prefix}-{n}"
-        rows[name] = {"slot": account, "n": n, "open": True, "ordered_at": self.clock(), "call": None}
-        self._save(rows)
+        with self._locked():
+            rows = self._rows()
+            n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
+            name = f"{self.prefix}-{n}"
+            rows[name] = {"slot": account, "n": n, "open": True, "ordered_at": self.clock(), "call": None}
+            self._save(rows)
         return name
 
     def spawn(self, ticket: str, payload: dict[str, Any]) -> str:
@@ -156,10 +162,12 @@ class ModalProvider:
         if payload.get("shard") is not None:
             payload = {**payload, "ready_key": ready_key(str(payload["shard"]), ticket, n)}
         call = str(self.client.spawn(payload))
-        rows = self._rows()
-        rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None, ready_key=payload.get("ready_key"))
-        rows[ticket].setdefault("calls", []).append(call)
-        self._save(rows)
+        with self._locked():
+            rows = self._rows()
+            rows[ticket].update(call=call, spawned_at=self.clock(), cancelled=None,
+                                ready_key=payload.get("ready_key"))
+            rows[ticket].setdefault("calls", []).append(call)
+            self._save(rows)
         _record_ledger("created", LEDGER_KIND, call, FUNCTION, ticket=ticket, run=self.run_id, pool=True,
                        usd_per_hour=self.price_usd_h)
         return call
@@ -198,9 +206,10 @@ class ModalProvider:
                 raise RuntimeError(f"Modal call {call} of {ticket}: cancel sent but it still runs "
                                    f"after {self.cancel_wait_s:g} s")
             _record_ledger("released", LEDGER_KIND, call, FUNCTION)
-        rows = self._rows()
-        rows[ticket].update(open=False, cancelled=call)
-        self._save(rows)
+        with self._locked():
+            rows = self._rows()
+            rows[ticket].update(open=False, cancelled=call)
+            self._save(rows)
         return {"ticket": ticket, "call": call, "state": "ended"}
 
     def _ended_after_cancel(self, call: str) -> bool:

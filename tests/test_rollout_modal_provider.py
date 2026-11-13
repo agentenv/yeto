@@ -5,6 +5,7 @@ with function calls instead of nodes. No Modal call is made."""
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -462,3 +463,69 @@ def test_the_sdk_client_spawns_through_a_deployed_function():
     results = {"fc-0": {"rc": 0}, "fc-1": {"rc": 1}}
     modal.FunctionCall = SimpleNamespace(from_id=lambda c: SimpleNamespace(get=lambda timeout=None: results[c]))
     assert client.status("fc-0") == SUCCEEDED and client.status("fc-1") == FAILED
+
+
+def test_concurrent_spawns_keep_every_call_in_the_record(tmp_path):
+    """The pool starts Modal islands on background threads (``start_in_background``):
+    two spawns at once each rewrite the local record; neither may drop the other's call
+    id (a dropped id is a billed GPU call the pool can no longer see or cancel)."""
+    import threading
+    import time as real_time
+
+    client = FakeClient()
+    p = ModalProvider("run-m", slots=[1, 2], client=client)
+    tickets = [p.order(1), p.order(2)]
+    save = p._save
+
+    def slow_save(rows):  # widens the read-modify-write window of each writer
+        real_time.sleep(0.2)
+        save(rows)
+
+    p._save = slow_save
+    errors: list[BaseException] = []
+
+    def spawn(ticket):
+        try:
+            p.spawn(ticket, {"shard": ticket})
+        except BaseException as error:  # noqa: BLE001
+            errors.append(error)
+
+    threads = [threading.Thread(target=spawn, args=(t,)) for t in tickets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert sorted(p.call_id(t) for t in tickets) == sorted(client.calls)
+
+
+def test_concurrent_orders_from_two_processes_keep_every_ticket(tmp_path):
+    """A manual command (another process) may rewrite the record while the pool runs:
+    the read-modify-write holds a file lock too, not only a thread lock, and the
+    temporary file is per writer (two processes can share a thread id)."""
+    import multiprocessing
+
+    record = tmp_path / "modal-calls.json"
+    ctx = multiprocessing.get_context("fork")
+
+    def work(slot):
+        p = ModalProvider("run-m", slots=[1, 2], client=FakeClient(), record=record)
+        save = p._save
+
+        def slow_save(rows):
+            time.sleep(0.01)
+            save(rows)
+
+        p._save = slow_save
+        for _ in range(10):
+            p.order(slot)
+
+    procs = [ctx.Process(target=work, args=(s,)) for s in (1, 2)]
+    for q in procs:
+        q.start()
+    for q in procs:
+        q.join(30)
+        assert q.exitcode == 0
+    rows = json.loads(record.read_text())
+    assert len(rows) == 20 and sorted(r["n"] for r in rows.values()) == list(range(1, 21))
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["modal-calls.json", "modal-calls.lock"]
