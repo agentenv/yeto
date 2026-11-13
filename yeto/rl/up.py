@@ -52,7 +52,8 @@ Run config (JSON; paths may use ``~``)::
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
 whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
-that dies with its process); an in-process ``up`` removes a STOP flag an earlier stop left.
+that dies with its process; ``run down`` takes it as well, stopping a running ``up`` first and
+going on without the lock after a grace period); an in-process ``up`` removes a STOP flag an earlier stop left.
 
 ``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
 changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
@@ -1299,7 +1300,39 @@ class Run:
             time.sleep(poll_s)
 
     # -- down
+    def lock_for_down(self, grace_s: float = 60.0, poll_s: float = 1.0) -> bool:
+        """``yeto run down`` takes ``up.lock`` too, so a ``run up`` of the run cannot order
+        nodes or spawn a trainer while down stops them (and none starts during down). A
+        running ``up`` holding the lock gets SIGTERM (its exit path runs) and down waits up
+        to ``grace_s`` for the lock; past that down goes on without it: shutting the run
+        down wins over the lock. Then the state is reloaded (the up may have spawned
+        processes since this process read it). True: down holds the lock."""
+        holder = self.lock_up()
+        if holder is not None:
+            _log(f"down: `yeto run up` of run {self.run} is running (PID {holder or '?'}; "
+                 f"{self.dir / 'up.lock'}): stopping it (SIGTERM), waiting up to {grace_s:.0f}s for its lock")
+            if holder and holder != os.getpid() and _alive(holder):
+                try:
+                    os.kill(holder, signal.SIGTERM)
+                except OSError:
+                    pass
+            for _ in range(max(1, int(grace_s / poll_s))):
+                time.sleep(poll_s)
+                holder = self.lock_up()
+                if holder is None:
+                    break
+        if holder is not None:
+            _log(f"down: the run up (PID {holder or '?'}) still holds {self.dir / 'up.lock'} after "
+                 f"{grace_s:.0f}s: going on without the lock (shutdown first); run `yeto run down` "
+                 "again once it exited to stop what it started meanwhile")
+        else:
+            _log("down: holding up.lock (no run up of this run starts until down ends)")
+        if self.state_path.exists():
+            self.state = json.loads(self.state_path.read_text())
+        return holder is None
+
     def down(self) -> bool:
+        self.lock_for_down()
         ok = True
         self._cmd(self.yeto("dashboard", "export", *self.dashboard_args(), "-o",
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy

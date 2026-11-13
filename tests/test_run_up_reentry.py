@@ -132,3 +132,82 @@ def test_a_sigkilled_run_up_leaves_no_lock_held_by_its_children(make_run, tmp_pa
         holder.kill()
         os.kill(child, signal.SIGKILL)
         holder.stdout.close()
+
+
+_HOLD_UNTIL_TERM = """
+import json, sys, time
+sys.path.insert(0, {root!r})
+from yeto.rl import up
+up.STATE_ROOT = __import__("pathlib").Path({state!r})
+run = up.Run.__new__(up.Run)
+run.dir = up.STATE_ROOT / "r1"
+run.dir.mkdir(parents=True, exist_ok=True)
+assert run.lock_up() is None
+(run.dir / "state.json").write_text(json.dumps({{"procs": {{"trainer": {{"pid": 0, "log": "t.log"}}}}}}))
+print("held", flush=True)
+time.sleep({hold})
+"""
+
+
+def _holder(run, hold):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = str(Path(up.__file__).resolve().parents[2])
+    proc = subprocess.Popen([sys.executable, "-c", _HOLD_UNTIL_TERM.format(root=root, state=str(run.dir.parent),
+                                                                           hold=hold)],
+                            stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "held"
+    return proc
+
+
+def test_run_down_stops_a_running_run_up_and_takes_its_lock(make_run, monkeypatch):
+    """``run down`` while ``run up`` runs: the up gets SIGTERM, down holds ``up.lock`` (no
+    up of the run starts during down) and reads the state the up wrote since."""
+    import time as real_time
+
+    run = make_run()
+    monkeypatch.setattr(up.time, "sleep", real_time.sleep)  # the fixture's sleep is a no-op
+    holder = _holder(run, 60)
+    try:
+        assert run.lock_for_down(grace_s=10, poll_s=0.05) is True
+        assert holder.wait(timeout=5) == -15  # SIGTERM
+        assert run.state["procs"]["trainer"]["log"] == "t.log"  # reloaded
+        other = up.Run.__new__(up.Run)
+        other.dir = run.dir
+        assert other.lock_up() == os.getpid()  # a new run up sees down holding the lock
+    finally:
+        holder.kill()
+        holder.stdout.close()
+
+
+def test_run_down_does_not_wait_forever_for_a_run_up_that_ignores_sigterm(make_run, monkeypatch):
+    """Shutdown first: an up that does not let go of the lock delays down by the grace
+    period only; down still stops the trainer, the pools and the sandboxes."""
+    import signal
+
+    run = make_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    sent = []
+    monkeypatch.setattr(up.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    held = up.Run.__new__(up.Run)
+    held.dir = run.dir
+    assert held.lock_up() is None  # stands for an up that ignores SIGTERM
+    (run.dir / "up.lock").write_text("424242")
+    try:
+        assert run.lock_for_down(grace_s=3, poll_s=1) is False
+        assert (424242, signal.SIGTERM) in sent
+        run.calls.clear()
+        run.down()
+        assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+        assert any("pool-stop" in argv for argv in run.calls)
+    finally:
+        held._up_lock.close()
+
+
+def test_run_down_without_a_running_up_takes_the_lock_at_once(make_run, monkeypatch):
+    run = make_run()
+    monkeypatch.setattr(up.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("no kill")))
+    assert run.lock_for_down(grace_s=3, poll_s=1) is True
+    assert (run.dir / "up.lock").read_text() == str(os.getpid())
