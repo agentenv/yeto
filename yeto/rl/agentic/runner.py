@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Protocol
 
-from .admission import AdmissionClosed, AdmissionGate
+from .admission import Admission, AdmissionClosed, AdmissionGate
 from .outcome import WALL_CLOCK_REASON, classify
 from .suspend import SuspendLedger
 from .trust import TrustViolation
@@ -50,7 +51,7 @@ async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
     wall-clock cap is extended by the time it was suspended."""
     try:
         async with gate.admit() as admission:
-            verdict, cap_reason = await _run_capped(task, harness, endpoint, ledger)
+            verdict, cap_reason = await _run_capped(task, harness, endpoint, ledger, admission)
     except AdmissionClosed:
         trajectory = _aborted(task, "admission_draining", policy_version=None)
         gate.metrics.record_outcome(trajectory.outcome)
@@ -69,10 +70,20 @@ async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
 
 
 async def _run_capped(task: AgentTask, harness: AgentHarness, endpoint: str,
-                      ledger: SuspendLedger | None = None) -> tuple[TrialVerdict | None, str]:
+                      ledger: SuspendLedger | None = None,
+                      admission: Admission | None = None) -> tuple[TrialVerdict | None, str]:
     """``(verdict, "")`` or ``(None, reason)`` for an infrastructure failure."""
+
+    def stuck(run: asyncio.Future) -> None:
+        logger.warning("stuck harness: agent task %s ignored cancellation for %ss; the trajectory "
+                       "returns ABORTED, its sandbox slot stays held until the harness ends",
+                       task.task_id, _CANCEL_GRACE_S)
+        if admission is not None:
+            admission.hold_until_done(run)
+
     try:
-        return await _capped(harness.run(task, endpoint), task.budget.wall_clock_s, ledger), ""
+        return await _capped(harness.run(task, endpoint), task.budget.wall_clock_s, ledger,
+                             on_stuck=stuck), ""
     except asyncio.TimeoutError:
         # The harness's own agent timeout sits below this cap; reaching it means
         # the harness did not return (stuck teardown, lost sandbox), not a slow policy.
@@ -86,16 +97,23 @@ async def _run_capped(task: AgentTask, harness: AgentHarness, endpoint: str,
 
 
 _SUSPENDED_RECHECK_S = 1.0
+# How long a cancelled run may take to exit before the trajectory returns without it.
+_CANCEL_GRACE_S = 30.0
 
 
-async def _capped(coro, cap_s: float, ledger: SuspendLedger | None):
+async def _capped(coro, cap_s: float, ledger: SuspendLedger | None, *,
+                  on_stuck: Callable[[asyncio.Future], None] | None = None):
     """``coro`` under a ``cap_s`` budget that does not count the ledger's suspended time.
 
     ``coro`` runs in its own task. When this call is cancelled again while it waits
     for a cancelled run that ignores the cancel (a sandbox tool call, then the island
     closing), the run's later error is still retrieved and logged, never left to
     asyncio as "Task exception was never retrieved" (``asyncio.wait_for`` of
-    Python 3.11 drops it so)."""
+    Python 3.11 drops it so).
+
+    A cancelled run that has not exited after ``_CANCEL_GRACE_S`` is left running
+    and handed to ``on_stuck`` (which keeps its sandbox slot until it ends), so
+    a harness that ignores cancellation cannot block its trajectory forever."""
     run = asyncio.ensure_future(coro)
     waiting = [True]
 
@@ -123,9 +141,11 @@ async def _capped(coro, cap_s: float, ledger: SuspendLedger | None):
         if not run.done():
             run.cancel()
             try:
-                await asyncio.gather(run, return_exceptions=True)
+                await asyncio.wait({run}, timeout=_CANCEL_GRACE_S)
             finally:
                 waiting[0] = run.done()
+            if not run.done() and on_stuck is not None:
+                on_stuck(run)
 
 
 def _aborted(task: AgentTask, reason: str, *, policy_version: int | None) -> AgentTrajectory:

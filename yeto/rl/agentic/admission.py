@@ -16,7 +16,7 @@ import asyncio
 import contextlib
 from collections import Counter
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .types import Outcome
 
@@ -30,6 +30,13 @@ class Admission:
     """Ticket for one admitted trajectory."""
 
     policy_version: int | None
+    _held_by: asyncio.Future | None = field(default=None, repr=False, compare=False)
+
+    def hold_until_done(self, run: asyncio.Future) -> None:
+        """Keep this trajectory's slot (its sandbox) until ``run`` ends, even after
+        the trajectory itself returned: a harness that ignored its cancellation
+        still owns a live sandbox, so admitting another one would exceed the bound."""
+        self._held_by = run
 
 
 class HarnessMetrics:
@@ -40,6 +47,10 @@ class HarnessMetrics:
         self.admitted = 0
         self.refused = 0
         self.outcomes: Counter[str] = Counter()
+        # trajectories that returned while their harness ignored cancellation and
+        # still holds its sandbox (counted in ``in_flight`` until it ends)
+        self.stuck = 0
+        self.stuck_total = 0
 
     def record_outcome(self, outcome: Outcome) -> None:
         self.outcomes[outcome.value] += 1
@@ -56,6 +67,8 @@ class HarnessMetrics:
             "env_live": self.in_flight,
             "harness_admitted_total": self.admitted,
             "harness_refused_total": self.refused,
+            "harness_stuck": self.stuck,
+            "harness_stuck_total": self.stuck_total,
             **{f"harness_outcome_{o.value}_total": self.outcomes[o.value] for o in Outcome},
         }
 
@@ -83,13 +96,30 @@ class AdmissionGate:
         if self._draining:
             self.metrics.refused += 1
             raise AdmissionClosed("admission is draining")
-        async with self._slots:
+        await self._slots.acquire()
+        try:
             if self._draining:  # drain started while this one waited for a slot
                 self.metrics.refused += 1
                 raise AdmissionClosed("admission is draining")
-            self.metrics.admitted += 1
-            self.metrics.in_flight += 1
-            try:
-                yield Admission(policy_version=self._policy_version())
-            finally:
-                self.metrics.in_flight -= 1
+        except BaseException:
+            self._slots.release()
+            raise
+        self.metrics.admitted += 1
+        self.metrics.in_flight += 1
+        admission = Admission(policy_version=self._policy_version())
+        try:
+            yield admission
+        finally:
+            held = admission._held_by
+            if held is not None and not held.done():
+                self.metrics.stuck += 1
+                self.metrics.stuck_total += 1
+                held.add_done_callback(lambda _run: self._release(stuck=True))
+            else:
+                self._release(stuck=False)
+
+    def _release(self, *, stuck: bool) -> None:
+        if stuck:
+            self.metrics.stuck -= 1
+        self.metrics.in_flight -= 1
+        self._slots.release()
