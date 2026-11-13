@@ -281,6 +281,7 @@ class IslandTrainerAgent:
                  resume_from: CutRef | None, emit: Callable[..., Any], cuts: CutLog | None = None,
                  watermark: Callable[[int], int | None] | None = None,
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep) -> None:
+        self.driver = driver
         self.lifecycle = DriverLifecycle(lambda _handle: driver, cuts=cuts,
                                          first_incarnation=int(incarnation))
         self.commands = commands
@@ -306,10 +307,26 @@ class IslandTrainerAgent:
                 self._apply(command)
                 if handle.state is LifecycleState.STOPPED:
                     break
+        self._drain_releases(handle)
         self._event(STOPPED)
         if handle.error is not None:
             raise handle.error
         return handle
+
+    def _drain_releases(self, handle: TrainerHandle) -> None:
+        """The staged policy release still uploading (and a version the release
+        cadence held back) reaches the store before STOPPED: on that event the head
+        releases the island, which would kill the upload and leave the samplers on
+        an older release. A failed upload is the incarnation's error."""
+        if handle.error is not None:
+            return
+        drain = getattr(getattr(self.driver, "publisher", None), "drain_releases", None)
+        if not callable(drain):
+            return
+        try:
+            drain()
+        except BaseException as error:  # noqa: BLE001 - carried by the stopped event
+            handle.error = error
 
     def _apply(self, command: Command) -> None:
         lc, handle = self.lifecycle, self.handle

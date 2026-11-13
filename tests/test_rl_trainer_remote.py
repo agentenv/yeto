@@ -88,6 +88,7 @@ class _FakeIslands:
         self.released: list[int] = []
         self.agents: list = []
         self.die_at: int | None = None
+        self.on_driver = None  # hook(driver, job) after the island's driver is built
 
     def published(self):
         return None if self.engine is None or self.engine.published is None else self.engine.published[0]
@@ -113,6 +114,8 @@ class _FakeIslands:
             job["events"].feed(event_echo.format_record(
                 {"island_id": 0, "time_unix": 0.0, "event": event, **fields}))
 
+        if self.on_driver is not None:
+            self.on_driver(driver, job)
         files = LocalStoreFiles(store)
         agent = IslandTrainerAgent(driver, commands=CommandReader(files, incarnation),
                                    incarnation=int(env["YETO_TRAINER_INCARNATION"]),
@@ -221,6 +224,61 @@ def test_remote_start_stop_to_the_data_end(tmp_path):
     # every command reached the island in order
     sent = json.loads((tmp_path / "store" / command_path(0)).read_text().splitlines()[-1])
     assert sent == {"seq": 3, "verb": "stop", "rounds": None, "reason": "STOPPED"}
+    journal.close()
+
+
+class _UploadingPublisher:
+    """A trainer publisher whose last staged release is still uploading at the stop:
+    ``drain_releases`` notes whether the island had already reported STOPPED (the
+    head releases the island -- and kills the upload -- on that event)."""
+
+    def __init__(self, inner, job, log, fail=False):
+        self.inner, self.job, self.log, self.fail = inner, job, log, fail
+        feed = job["events"].feed
+
+        def watched(line):
+            if '"phase": "stopped"' in line or '"phase":"stopped"' in line:
+                self.log.append("stopped_event")
+            return feed(line)
+
+        job["events"].feed = watched
+
+    def drain_releases(self):
+        self.log.append("drain")
+        if self.fail:
+            raise RuntimeError("background policy release failed: upload error")
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_stop_drains_the_release_upload_before_the_stopped_event(tmp_path, fail):
+    """Run down / budget STOP: the island reports STOPPED only after its last staged
+    policy release reached the store; a failed upload is the incarnation's error."""
+    clock = _Clock()
+    islands, lifecycle, cuts, head_buffer = _setup(tmp_path)
+    log: list[str] = []
+
+    def wrap(driver, job):
+        driver.publisher = _UploadingPublisher(driver.publisher, job, log, fail=fail)
+
+    islands.on_driver = wrap
+    journal = Journal(tmp_path / "head" / "journal")
+    loop = _loop(islands, lifecycle, cuts, head_buffer, clock, journal)
+    sampler = FakeSampler(islands.sampler_buffer, islands.published)
+    _ticks(loop, 1)
+    sampler.produce(2 * BATCH)
+    assert _ticks(loop, 3) == [Start, Hold, Hold]
+    assert _ticks(loop, 1) == [Hold]
+    clock.now += T_S
+    assert _ticks(loop, 1) == [Stop]
+    assert loop.state is LifecycleState.STOPPED
+    assert log[:2] == ["drain", "stopped_event"], log
+    if fail:
+        assert loop.handle.error is not None and "upload error" in str(loop.handle.error)
+    else:
+        assert loop.handle.error is None
     journal.close()
 
 

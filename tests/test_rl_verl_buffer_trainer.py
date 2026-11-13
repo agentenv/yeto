@@ -777,7 +777,7 @@ def test_a_run_releases_only_the_listed_versions(tmp_path):
     assert beat["release"] is None  # no release existed when it last read
 
 
-def _staged_run(tmp_path, *, background):
+def _staged_run(tmp_path, *, background, close=True):
     tmp_path.mkdir(parents=True, exist_ok=True)
     store_dir = tmp_path / "store"
     store = CheckpointStore(store_dir)
@@ -791,7 +791,8 @@ def _staged_run(tmp_path, *, background):
         buffer=FileSampleBuffer(store, batch_size=1, create_index=False), releases=releases,
         staging=tmp_path / "staging", delta_full_every=4, release_background=background)
     state = driver.run()
-    publisher.close()  # as trainer.run_fully_async_island does after the driver returns
+    if close:
+        publisher.close()  # as trainer.run_fully_async_island does after the driver returns
     return driver, state, releases, _lines(tmp_path / "tape.jsonl"), _lines(island.out / RELEASE_LOG.format(learner=0))
 
 
@@ -819,6 +820,17 @@ def test_background_releases_match_the_inline_ones(tmp_path):
     assert order == [("rl_policy_release_background", 1), ("rl_policy_released", 1),
                      ("rl_policy_release_background", 2), ("rl_policy_released", 2)]
     assert all("wait_seconds" in r and "write_seconds" in r for r in background[4] if r["policy_version"] > 0)
+
+
+def test_the_driver_drains_the_last_background_release_before_it_finishes(tmp_path):
+    """The driver's end-of-run drain (and a commanded island's, before its STOPPED
+    event: the head then releases the island) reaches the verl publisher: the last
+    background upload is in the store and on the tape without ``close``."""
+    driver, state, releases, events, log = _staged_run(tmp_path, background=True, close=False)
+    assert state.policy_version == 2
+    assert releases.latest() is not None and releases.latest().version == 2
+    assert [e["policy_version"] for e in events if e["event"] == "rl_policy_released"] == [1, 2]
+    assert [r["released"] for r in log if r["policy_version"] > 0] == [True, True]
 
 
 def test_a_failed_background_release_raises_at_the_next_one(tmp_path):
