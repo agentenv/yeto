@@ -506,3 +506,31 @@ def test_a_wall_h_that_is_not_a_positive_number_fails_preflight(make_run, monkey
     run = make_run(usd=450, wall_h=wall_h)
     assert run.preflight() is False and run.calls == []
     assert "budget.wall_h must be a positive number of hours or null" in capsys.readouterr().out
+
+
+def test_a_forced_pool_stop_that_times_out_is_retried_until_no_node_bills(make_run, tmp_path, monkeypatch):
+    """The breaker's pool-stop hits its timeout (rc 124): the machines may still bill, so
+    the watch goes on and stops again at the next poll instead of returning as if done."""
+    run = make_run(usd=100, nc_usd_per_h=10, wall_h=100)
+    run.cfg["trainer"]["usd_per_h"] = 0
+    clock = {"t": 100_000.0}
+    monkeypatch.setattr(up.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(up.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 3600))
+    run.state["t0"] = clock["t"] - 13 * 3600
+    _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": clock["t"] - 13 * 3600}])
+    path = tmp_path / "nc" / "pool-s.json"
+    rcs = iter([124, 0])
+
+    def cmd(argv, *, log, timeout=None):
+        run.calls.append(argv)
+        rc = next(rcs)
+        if rc == 0:  # this stop released the node
+            doc = json.loads(path.read_text())
+            doc["members"][0]["state"] = "gone"
+            path.write_text(json.dumps(doc))
+        return rc
+
+    run._cmd = cmd
+    run.watch_nc_after_breach("budget", poll_s=60)
+    assert sum("pool-stop" in argv for argv in run.calls) == 2
+    assert run.state["steps"]["nc_forced_stop"]["rc"] == 124  # the first forced stop is the one recorded
