@@ -87,8 +87,9 @@ class SshTapeMirror:
             proc.wait()
         err = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
         if not self.lost:
+            from yeto.rl.engine.init_from_release import redact_text  # noqa: PLC0415
             self.lost = True
-            self._event("dashboard_source_lost", error=(err or f"stream ended rc={proc.returncode}")[:300],
+            self._event("dashboard_source_lost", error=redact_text(err or f"stream ended rc={proc.returncode}")[:300],
                         offset=off + got)
         return got
 

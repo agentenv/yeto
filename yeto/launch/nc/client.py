@@ -542,7 +542,9 @@ class NcClient:
         except ValueError as exc:
             raise NcError(f"{argv[0]}: unparseable output (exit {out.returncode})") from exc
         if out.returncode != 0:  # a failed call decides nothing, whatever it printed
-            detail = doc.get("error") or (out.stderr or "")[-300:]
+            from yeto.rl.engine.init_from_release import redact_text  # noqa: PLC0415
+            # redacted whole, then cut: a cut first could split a secret past recognition
+            detail = redact_text(str(doc.get("error") or "")) or redact_text(out.stderr or "")[-300:]
             raise NcError(f"{argv[0]} exit {out.returncode}: {detail}")
         return doc
 

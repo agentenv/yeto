@@ -145,6 +145,16 @@ def _log(msg: str) -> None:
     print(f"{_now()} [rl up] {msg}", flush=True)
 
 
+def _output_tail(proc: subprocess.CompletedProcess) -> str:
+    """The last 3000 characters of a status tool's output for ``run status`` and the
+    dashboard: its stdout, or else its stderr without credentials (a failing tool may
+    print presigned URLs, ``key=value`` secrets or URL userinfo)."""
+    if proc.stdout:
+        return proc.stdout[-3000:]
+    from yeto.rl.engine.init_from_release import redact_text  # noqa: PLC0415
+    return redact_text(proc.stderr or "")[-3000:]
+
+
 class RunConfigError(ValueError):
     """The run config (or the run's state directory) cannot be used: one line for the user."""
 
@@ -1890,7 +1900,7 @@ class Run:
             p = subprocess.run(self.nc("pool-status", "--config", ref.config), env=self.env, capture_output=True,
                                text=True, timeout=300, check=False)
             row: dict[str, Any] = {"pool": ref.name, "provider": ref.kind(), "data_path": ref.data_path,
-                                   "status": (p.stdout or p.stderr)[-3000:]}
+                                   "status": _output_tail(p)}
             try:
                 doc = json.JSONDecoder().raw_decode((p.stdout or "").lstrip())[0]
                 st = doc.get("state") or {}
@@ -1912,7 +1922,7 @@ class Run:
         p = subprocess.run([self.py, "-m", "yeto.rl.engine.store_dispense", "status", "--store", self.cfg["store"],
                             "--namespace", self._namespace(), "--brief"],
                            env=self.env, capture_output=True, text=True, timeout=300, check=False)
-        out["dispense"] = (p.stdout or p.stderr)[-3000:]
+        out["dispense"] = _output_tail(p)
         out["trainer_buffer"] = self.trainer_buffer_counts()
         return out
 

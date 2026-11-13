@@ -559,3 +559,35 @@ def test_status_reports_unknown_buffer_count_when_the_store_listing_fails(make_r
     monkeypatch.setattr(up.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(stdout="", stderr="", returncode=1))
     assert run.status()["buffer_objects"] is None
+
+
+def _leaky_stderr():
+    """A failing subprocess's stderr naming a presigned URL, a key=value secret and URL
+    userinfo, around readable diagnostics (the fake values are split so no scanner
+    takes them for real ones)."""
+    sig = "Zm9vYmFy" + "c2lnbmF0dXJl"
+    secret = "wJalr" + "XUtnFEMI" + "K7MDENG"
+    userinfo = "admin:" + "hunt" + "er2pass"
+    text = (f"Traceback (most recent call last):\n  pool-status: no node answered\n"
+            f"GET https://bucket.r2.example/obj?X-Amz-Signature={sig}&X-Amz-Expires=600 failed\n"
+            f"aws_secret_access_key={secret}\n"
+            f"mirror https://{userinfo}@store.example/run refused\n")
+    return text, (sig, secret, userinfo)
+
+
+def test_status_redacts_credentials_in_subprocess_stderr(make_run, monkeypatch):
+    """``run status`` (and the dashboard reading it) shows the tail of a failing
+    ``pool-status`` / dispense stderr: no credential reaches it, the diagnostics do."""
+    run = make_run()
+    text, secrets = _leaky_stderr()
+    monkeypatch.setattr(run, "_objects", lambda: [])
+    monkeypatch.setattr(run, "run_containers", lambda: None)
+    monkeypatch.setattr(up.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout="", stderr=text, returncode=1))
+    out = run.status()
+    shown = json.dumps(out)
+    for value in secrets:
+        assert value not in shown
+    for field in (out["pool"], out["dispense"]):
+        assert "pool-status: no node answered" in field and "\n" in field
+        assert "https://bucket.r2.example/obj?" in field and "store.example/run refused" in field

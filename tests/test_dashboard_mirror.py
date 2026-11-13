@@ -70,3 +70,15 @@ def test_lost_source_is_shown_on_the_island():
 def test_ssh_command_quotes_the_remote_path():
     cmd = ssh_tail_command("u@h", "/tmp/a b.jsonl", 10)
     assert cmd[0] == "ssh" and cmd[-2] == "u@h" and cmd[-1] == "tail -c +11 -F '/tmp/a b.jsonl'"
+
+
+def test_lost_source_error_carries_no_credentials(tmp_path):
+    secret = "wJalr" + "XUtnFEMI" + "K7MDENG"
+    userinfo = "admin:" + "hunt" + "er2pass"
+    m = SshTapeMirror("h", "/nonexistent", tmp_path / "m.jsonl",
+                      command=lambda off: ["sh", "-c", f"echo 'aws_secret_access_key={secret} "
+                                                       f"https://{userinfo}@h.example refused' >&2; exit 255"],
+                      sleep=lambda s: None)
+    m.run_forever(max_connections=1)
+    (lost,) = [json.loads(x) for x in m.sidecar.read_text().splitlines()]
+    assert secret not in lost["error"] and userinfo not in lost["error"] and "refused" in lost["error"]
