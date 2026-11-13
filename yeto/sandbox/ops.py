@@ -529,31 +529,34 @@ def teardown(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = Non
     out: dict[str, Any] = {}
     task_updates: dict[str, dict[str, Any]] = {}
     for host in _hosts(cfg, hosts):
-        dk = factory(host)
-        mine = []
-        for c in dk.containers(f"label={LABEL_RUN}={cfg.run}"):
-            cid = str(c.get("ID") or "")
-            detail = dk.inspect(cid) if cid else None
-            labels = ((detail or {}).get("Config") or {}).get("Labels") or {}
-            if labels.get(LABEL_RUN) == cfg.run:  # the filter's answer is checked again, per container
-                mine.append((cid, labels.get(LABEL_TASK)))
-        if not dry_run:
-            dk.remove([cid for cid, _ in mine])
-        removed_images = []
-        if images:
-            _, lines, _ = dk.docker("images", "-q", "--filter", f"label={LABEL_RUN}={cfg.run}")
-            removed_images = sorted({i for i in lines.split() if i})
-            if removed_images and not dry_run:
-                dk.docker("rmi", "-f", *removed_images, check=False)
-        for _, tid in mine:
-            if tid and not dry_run:
-                task_updates.setdefault(tid, {"hosts": {}})["hosts"][host.name] = {
-                    "prepared": False, "error": "torn down"}
-        from .trial_labels import sweep_run  # noqa: PLC0415
+        try:  # one unreachable host must not leave the other hosts (and their ready state) as they were
+            dk = factory(host)
+            mine = []
+            for c in dk.containers(f"label={LABEL_RUN}={cfg.run}"):
+                cid = str(c.get("ID") or "")
+                detail = dk.inspect(cid) if cid else None
+                labels = ((detail or {}).get("Config") or {}).get("Labels") or {}
+                if labels.get(LABEL_RUN) == cfg.run:  # the filter's answer is checked again, per container
+                    mine.append((cid, labels.get(LABEL_TASK)))
+            for _, tid in mine:  # marked before removal: a step failing later on this host keeps it
+                if tid and not dry_run:
+                    task_updates.setdefault(tid, {"hosts": {}})["hosts"][host.name] = {
+                        "prepared": False, "error": "torn down"}
+            if not dry_run:
+                dk.remove([cid for cid, _ in mine])
+            removed_images = []
+            if images:
+                _, lines, _ = dk.docker("images", "-q", "--filter", f"label={LABEL_RUN}={cfg.run}")
+                removed_images = sorted({i for i in lines.split() if i})
+                if removed_images and not dry_run:
+                    dk.docker("rmi", "-f", *removed_images, check=False)
+            from .trial_labels import sweep_run  # noqa: PLC0415
 
-        trials = sweep_run(dk, cfg.run, dry_run=dry_run)
-        out[host.name] = {"containers": [cid for cid, _ in mine], "images": removed_images, "dry_run": dry_run,
-                          "trial_containers": trials["containers"], "trial_networks": trials["networks"]}
+            trials = sweep_run(dk, cfg.run, dry_run=dry_run)
+            out[host.name] = {"containers": [cid for cid, _ in mine], "images": removed_images, "dry_run": dry_run,
+                              "trial_containers": trials["containers"], "trial_networks": trials["networks"]}
+        except (DockerError, OSError) as exc:
+            out[host.name] = {"error": f"{type(exc).__name__}: {exc}", "dry_run": dry_run}
     if task_updates:
         ready_mod.merge_write(objects, cfg.ready_key, cfg.run, tasks=task_updates)
     return out

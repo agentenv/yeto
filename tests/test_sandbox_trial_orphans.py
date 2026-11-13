@@ -262,3 +262,24 @@ def test_run_down_sweeps_trial_networks_too(monkeypatch):
     run.run, run.env = "r1", {"DOCKER_CONTEXT": "x"}
     run._sweep_trials("ssh://u@h1")
     assert set(daemon.containers) == {"other"} and daemon.net_rm == ["net-p1"]
+
+
+def test_run_down_counts_stopped_containers_and_unreachable_hosts(monkeypatch):
+    """``yeto rl down`` verification: an exited trial container left on a host and a
+    host that did not answer both make the down unverified."""
+    from yeto.rl import up
+
+    run = up.Run.__new__(up.Run)
+    run.run, run.env = "r1", {}
+    seen = []
+
+    def ps(argv, **k):
+        seen.append(argv[4])
+        if argv[2] == "ssh://u@h2":
+            raise up.subprocess.TimeoutExpired("docker", 60)
+        out = "exited1\n" if argv[4] == "-aq" and argv[2] == "ssh://u@h1" else ""
+        return up.subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(up.subprocess, "run", ps)
+    left, unreachable = run.left_trial_containers(["ssh://u@h0", "ssh://u@h1", "ssh://u@h2"])
+    assert left == 1 and unreachable == ["ssh://u@h2"] and set(seen) == {"-aq"}

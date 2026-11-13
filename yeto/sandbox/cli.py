@@ -94,7 +94,8 @@ def main(args: argparse.Namespace) -> int:
                 Path(args.out).write_text("".join(f"{t}\n" for t in report["passed"]))
             code = 0 if all(r.get("passed") is True for r in report["results"]) else 1
         else:
-            report, code = ops.teardown(cfg, objects, hosts=args.host, images=args.images, dry_run=args.dry_run), 0
+            report = ops.teardown(cfg, objects, hosts=args.host, images=args.images, dry_run=args.dry_run)
+            code = 1 if any(r.get("error") for r in report.values()) else 0  # a host left as it was
     except EnvsError as exc:
         print(f"[yeto sandbox] {exc}", file=sys.stderr)
         return 2
@@ -149,6 +150,9 @@ def _brief(cmd: str, report: dict[str, Any]) -> str:
         lines += [f"  WARNING {w}" for w in report["warnings"]]
     else:
         for h, r in report.items():
+            if r.get("error"):
+                lines.append(f"{h}: ERROR {r['error']} (nothing removed there)")
+                continue
             lines.append(f"{h}: removed {len(r['containers'])} containers, {len(r['images'])} images"
                          + (" (dry run)" if r["dry_run"] else ""))
     return "\n".join(lines)

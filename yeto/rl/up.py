@@ -1093,6 +1093,16 @@ class Run:
         _log(f"sandbox: {host}: removed {len(done['containers'])} trial container(s), "
              f"networks of {len(done['networks'])} trial(s)")
 
+    def left_trial_containers(self, hosts: list[str]) -> tuple[int, list[str]]:
+        """After the down's sweep: this run's trial containers still on ``hosts``, stopped
+        ones too (they keep their compose networks), and the hosts that did not answer."""
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        with ThreadPoolExecutor(max_workers=max(1, min(16, len(hosts)))) as pool:
+            counts = list(pool.map(lambda h: self._host_containers(h, every=True), hosts))
+        return (sum(len(c) for c in counts if c is not None),
+                [h for h, c in zip(hosts, counts) if c is None])
+
     def run_containers(self) -> int | None:
         """This run's running trial containers on every sandbox host (asked at once);
         None when no host answered."""
@@ -1849,10 +1859,13 @@ class Run:
         if hosts:  # Harbor trial containers of this run (ai.yeto.run label) on every sandbox host
             for host in hosts:
                 self._sweep_trials(host)
-            left = self.run_containers()
-            _log(f"sandbox: {left} container(s) of this run left")
+            left, unreachable = self.left_trial_containers(hosts)
+            _log(f"sandbox: {left} container(s) of this run left" +
+                 (f", hosts not answering: {' '.join(unreachable)}" if unreachable else ""))
             if left:
                 failed.append(f"sandbox containers ({left} left)")
+            if unreachable:
+                failed.append(f"sandbox hosts not answering ({' '.join(unreachable)}): their containers unknown")
         for path in self.pool_configs:
             if self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) != 0:
                 failed.append(f"pool-status {path}")
