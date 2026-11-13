@@ -1,6 +1,8 @@
-"""Read-only ``yeto run status`` / ``run down`` on a run that was never brought up (a typo
-in the name) say so and exit 2 without creating ``<state root>/<run>/``; ``run up`` still
-creates it. ``YETO_STATE_DIR`` moves the state root."""
+"""``yeto run status`` on a run that was never brought up here (a typo in the name) says so
+and exits 2 without creating ``<state root>/<run>/``; ``run up`` still creates it. ``run
+down`` without local state (another control host, HOME wiped) warns, creates nothing under
+the state root, and still runs every stop step the config drives, verdict NOT verified.
+``YETO_STATE_DIR`` moves the state root."""
 
 from __future__ import annotations
 
@@ -22,14 +24,56 @@ def _config(tmp_path):
     return str(path)
 
 
-@pytest.mark.parametrize("command", ["status", "down"])
-def test_read_only_command_on_unknown_run_is_rc2_and_creates_nothing(tmp_path, monkeypatch, capsys, command):
+def test_status_on_unknown_run_is_rc2_and_creates_nothing(tmp_path, monkeypatch, capsys):
     root = tmp_path / "rl-up"
     monkeypatch.setattr(up, "STATE_ROOT", root)
-    assert up.main(types.SimpleNamespace(config=_config(tmp_path), rl_command=command)) == 2
+    assert up.main(types.SimpleNamespace(config=_config(tmp_path), rl_command="status")) == 2
     err = capsys.readouterr().err
     assert "typo" in err and "state directory" in err and "misspelled" in err
     assert not (root / "typo").exists()
+
+
+def _mock_down(monkeypatch, calls):
+    monkeypatch.setattr(up.Run, "_cmd", lambda self, argv, *, log, timeout=None: calls.append(list(argv)) or 0)
+    monkeypatch.setattr(up.Run, "sandbox_hosts", lambda self: [])
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    monkeypatch.setenv("YETO_RUN_DOWN_GRACE_S", "0")
+
+
+def _steps(calls):
+    return {name for argv in calls for name in ("pool-stop", "pool-status", "teardown") if name in argv} | {
+        "trainer-down" for argv in calls if "down" in argv and "--config" not in argv}
+
+
+def test_down_without_local_state_still_stops_what_the_config_names(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "rl-up"
+    monkeypatch.setattr(up, "STATE_ROOT", root)
+    monkeypatch.setattr(up.tempfile, "mkdtemp", lambda prefix="": str((tmp_path / "tmp").mkdir() or tmp_path / "tmp"))
+    path = tmp_path / "run.json"
+    path.write_text(CONFIG.replace('"pool"', '"sandbox": {"envs": "e.json"}, "pool"'))
+    calls: list[list[str]] = []
+    _mock_down(monkeypatch, calls)
+    assert up.main(types.SimpleNamespace(config=str(path), rl_command="down")) == 1  # NOT verified
+    cap = capsys.readouterr()
+    err = cap.err + cap.out
+    assert "no local state for typo" in err and "stopping what the config names" in err
+    assert "NOT verified" in err and "no local state" in err.split("NOT verified")[1]
+    assert not root.exists()
+    assert _steps(calls) == {"trainer-down", "pool-stop", "pool-status", "teardown"}
+    assert any(a[a.index("--config") + 1] == "p.json" for a in calls if "pool-stop" in a)
+
+
+def test_down_with_local_state_runs_the_same_steps(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "rl-up"
+    (root / "typo").mkdir(parents=True)
+    monkeypatch.setattr(up, "STATE_ROOT", root)
+    path = tmp_path / "run.json"
+    path.write_text(CONFIG.replace('"pool"', '"sandbox": {"envs": "e.json"}, "pool"'))
+    calls: list[list[str]] = []
+    _mock_down(monkeypatch, calls)
+    assert up.main(types.SimpleNamespace(config=str(path), rl_command="down")) == 0
+    assert "no local state" not in capsys.readouterr().err
+    assert _steps(calls) == {"trainer-down", "pool-stop", "pool-status", "teardown"}
 
 
 def test_open_run_for_up_still_creates_state_dir(tmp_path, monkeypatch):

@@ -80,6 +80,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -312,10 +313,13 @@ def _killpg(proc: subprocess.Popen) -> None:
     proc.wait()
 
 class Run:
-    def __init__(self, cfg: dict[str, Any]):
+    def __init__(self, cfg: dict[str, Any], state_root: Path | None = None):
         self.cfg = cfg
         self.run = str(cfg["run"])
-        self.dir = STATE_ROOT / self.run
+        self.dir = (state_root or STATE_ROOT) / self.run
+        # Set when this run had no local state directory (``run down`` from another host):
+        # down still stops what the config names, but cannot claim the run is verified down.
+        self.no_local_state: Path | None = None
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.dir / "state.json"
         self.state: dict[str, Any] = {}
@@ -1852,6 +1856,8 @@ class Run:
         for path in self.pool_configs:
             if self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) != 0:
                 failed.append(f"pool-status {path}")
+        if self.no_local_state is not None:  # pids, step times, launch state of the run unknown here
+            failed.append(f"no local state ({self.no_local_state} missing): only what the config names was stopped")
         ok = not failed
         self.end_up()
         self.mark("down", ok=ok)
@@ -2173,11 +2179,14 @@ def ack_forced_stop(run: Run) -> None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
 
 
-def open_run(config: str, create: bool = True) -> Run:
+def open_run(config: str, create: bool = True, missing: str | None = None) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
     :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
     ``create=False`` (read-only commands) refuses a run whose state directory does not exist
-    instead of creating it: the run name is most likely misspelled."""
+    instead of creating it: the run name is most likely misspelled. ``missing="temp"``
+    (``run down``) neither refuses nor creates it: the run is opened on a fresh temporary
+    state directory, so the stop steps the config drives (trainer down, pool-stop, sandbox
+    teardown) still run on a control host that lost (or never had) the run's state."""
     try:
         cfg = load_config(config)
     except RunConfigError:
@@ -2185,6 +2194,13 @@ def open_run(config: str, create: bool = True) -> Run:
     except ValueError as error:  # a check of the config's content
         raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
     state_dir = STATE_ROOT / str(cfg.get("run"))
+    if missing == "temp" and "run" in cfg and not state_dir.is_dir():
+        tmp = Path(tempfile.mkdtemp(prefix=f"yeto-run-down-{cfg.get('run')}-"))
+        print(f"{_now()} [rl up] no local state for {cfg.get('run')} ({state_dir}): stopping what the config "
+              f"names; logs in {tmp / str(cfg.get('run'))}", file=sys.stderr, flush=True)
+        run = Run(cfg, state_root=tmp)
+        run.no_local_state = state_dir
+        return run
     if not create and "run" in cfg and not state_dir.is_dir():
         raise RunConfigError(f"run {cfg.get('run')}: no state directory {state_dir}; it was never brought up "
                              "here (`yeto run up`), or the run name is misspelled")
@@ -2199,7 +2215,8 @@ def open_run(config: str, create: bool = True) -> Run:
 
 def main(args: Any) -> int:
     try:
-        run = open_run(args.config, create=args.rl_command not in ("status", "down"))
+        run = open_run(args.config, create=args.rl_command != "status",
+                       missing="temp" if args.rl_command == "down" else None)
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2
