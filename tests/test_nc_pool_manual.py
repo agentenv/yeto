@@ -383,3 +383,19 @@ def test_pause_resume_restarts_are_not_a_crash_loop(tmp_path):
     cloud.tickets[node.ticket].update(sampler="exited", exit=1)  # a real crash still counts
     _run(pool, clock, clock.t + 60)
     assert node.restarts == 1
+
+
+def test_resuming_a_node_the_pool_holds_paused_without_a_control_file_entry(tmp_path):
+    """The pool keeps a member's pause in its state across restarts; if the control file
+    is lost (or left by another run), ``pool-resume`` must still be accepted for a node
+    the pool says is paused, otherwise it can never be resumed."""
+    cfg, path, clock, cloud, pool = _elastic(tmp_path, target=2)
+    a, _b = _ready(pool)
+    assert pool_run.pause_pool(cfg, path, [a.ticket]) == 0
+    pool.apply_scale()
+    assert a.paused
+    _save(pool)
+    pool_run.scale_path(cfg).unlink()
+    assert pool_run.pause_pool(cfg, path, [a.ticket], resume=True) == 0
+    pool.apply_scale()
+    assert not a.paused
