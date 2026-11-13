@@ -743,3 +743,21 @@ def test_run_up_refuses_after_a_forced_stop_until_acknowledged(tmp_path, monkeyp
     args.allow_after_forced_stop = False  # acknowledged: later run ups of the run go on
     assert up.forced_stop_refusal(run, False) is None
     assert _parser().parse_args(["run", "up", "--config", "c", "--allow-after-forced-stop"]).allow_after_forced_stop
+
+
+@pytest.mark.parametrize("how", ["dry_run", "failed_preflight"])
+def test_an_allowed_run_up_that_orders_nothing_does_not_acknowledge_the_forced_stop(
+        tmp_path, monkeypatch, capsys, keep_sigterm, how):
+    """``--allow-after-forced-stop`` with ``--dry-run`` (or a preflight that fails)
+    orders nothing, so the forced stop stays unacknowledged: a later plain run up is
+    still refused."""
+    run, providers, args = _main_harness(tmp_path, monkeypatch)
+    run.mark("nc_forced_stop", why="spend $600 > $540", rc=0)
+    args.allow_after_forced_stop = True
+    args.skip_preflight = False
+    monkeypatch.setattr(run, "preflight", lambda: how != "failed_preflight")
+    args.dry_run = how == "dry_run"
+    assert up.main(args) == (0 if how == "dry_run" else 2)
+    assert not any(p.orders for p in providers.values())
+    assert "nc_forced_stop_ack" not in run.state["steps"]
+    assert up.forced_stop_refusal(run, False) is not None
