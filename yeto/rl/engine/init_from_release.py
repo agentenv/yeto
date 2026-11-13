@@ -49,6 +49,34 @@ LATEST_SELECTOR = "latest"
 _NAME = re.compile(r"r(\d+)-v(\d+)")
 
 
+# under --out: the last error of a failed prepare, one line (the run script's failure
+# line quotes it, so the reason reaches the launcher's output); removed on a new start
+FAILURE_FILE = ".init-release-failed"
+FAILURE_REASON_MAX = 500  # characters of the reason line kept (the launcher prints it)
+
+# a reason reaches the launcher's output and logs: no credentials in it
+_URL_QUERY = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s?#'\"]*)\?[^\s'\"]*", re.I)
+_URL_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s@'\"]+@", re.I)
+_SECRET_PAIR = re.compile(r"((?:secret|token|password|passwd|credential|signature|authorization|"
+                          r"access[_-]?key|api[_-]?key)[a-z0-9_-]*['\"]?\s*[:=]\s*['\"]?)[^\s'\",;&]+", re.I)
+_SECRET_ENV = re.compile(r"SECRET|TOKEN|PASSWORD|KEY|CREDENTIAL", re.I)
+
+
+def redact_reason(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """``text`` as one line without credentials (secret env values, URL queries such
+    as presigned signatures, URL userinfo, ``key=value`` secrets), at most
+    :data:`FAILURE_REASON_MAX` characters."""
+    env = os.environ if environ is None else environ
+    for name, value in env.items():
+        if value and len(value) >= 8 and _SECRET_ENV.search(name):
+            text = text.replace(value, "<redacted>")
+    text = _URL_QUERY.sub(r"\1?<redacted>", text)
+    text = _URL_USERINFO.sub(r"\1<redacted>@", text)
+    text = _SECRET_PAIR.sub(r"\1<redacted>", text)
+    text = " ".join(text.split())
+    return text if len(text) <= FAILURE_REASON_MAX else text[:FAILURE_REASON_MAX - 3] + "..."
+
+
 class InitFromReleaseError(ValueError):
     pass
 
@@ -310,5 +338,34 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     return 0
 
 
+def cli(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
+    """:func:`main` for the run script: a failure prints its last error line
+    (``[yeto-init-release] FAILED: <type>: <message>``) and leaves it in
+    :data:`FAILURE_FILE` under ``--out``, then returns 1."""
+    import sys
+    import traceback
+
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--out", default=None)
+    out = probe.parse_known_args(argv)[0].out
+    failure = None if out is None else Path(out).expanduser() / FAILURE_FILE
+    if failure is not None:
+        failure.unlink(missing_ok=True)
+    try:
+        return main(argv, environ)
+    except Exception as error:  # noqa: BLE001 - every failure ends the node with its reason
+        traceback.print_exc()
+        reason = redact_reason(f"{type(error).__name__}: {error}",
+                               {**os.environ, **(environ or {})})
+        print(f"[yeto-init-release] FAILED: {reason}", file=sys.stderr, flush=True)
+        if failure is not None:
+            try:
+                failure.parent.mkdir(parents=True, exist_ok=True)
+                failure.write_text(reason + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
