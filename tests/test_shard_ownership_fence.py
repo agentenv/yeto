@@ -999,12 +999,13 @@ def test_a_sampler_that_joined_before_the_trainer_moves_to_ownership_records_at_
 
 
 def test_a_pool_fence_writes_no_ownership_record_into_a_shard_that_holds_none(tmp_path):
-    """The sampler joined before the trainer's generation lease (or runs older code):
-    its shard holds no ownership record, so the pool fences it by the lease record
-    alone. Its writer may not read ownership records, and an older one would stop on
-    the record instead of continuing the shard."""
+    """The sampler runs older code (its lease record does not say that it reads
+    ownership records) and its shard holds none: the pool fences it by the lease
+    record alone; an older writer would stop on the record instead of continuing."""
     objects = _objects(tmp_path, trainer_lease=False)
-    writer, lease = _sampler(objects, "inc-1")
+    writer = _writer(objects)
+    lease = IncarnationLease(_records(objects), SHARD, "inc-1")  # no buffer: older code
+    lease.claim()
     _add(writer, "inc-1", [0])
     TrainerLease.claim(objects, incarnation="trainer-1")
     assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1") is None
@@ -1020,7 +1021,10 @@ def test_a_sampler_that_moves_to_ownership_records_after_a_lease_only_fence_is_f
     sampler took the shard with its first ownership record. Its move reads the lease
     once more and is fenced by the pool's record."""
     objects = _objects(tmp_path, trainer_lease=False)
-    writer, lease = _sampler(objects, "inc-1")
+    writer = _writer(objects)
+    lease = IncarnationLease(_records(objects), SHARD, "inc-1")
+    lease.claim()  # a lease record that does not say the writer reads ownership records
+    lease.buffer = writer
     _add(writer, "inc-1", [0])
     TrainerLease.claim(objects, incarnation="trainer-1")
     assert fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1") is None
@@ -1087,3 +1091,44 @@ def test_an_owned_sampler_holds_its_writes_while_the_shard_index_is_unreadable(t
     writer.refresh = unreadable
     assert lease.poll() is False and lease.poll() is False
     assert lease.unreadable and lease.unread_too_long() and lease.check_before_write() and not lease.fenced
+
+
+def test_a_second_start_reads_its_resume_point_after_its_ownership_record(tmp_path):
+    """Two processes of one sampler: the second takes the shard before it reads its
+    resume point, so a round the first one still writes is either before the record
+    (and in the resume point) or refused - never a round both write (two data cursors)."""
+    from yeto.rl.engine.sampler_resume import resume_point
+
+    objects = _objects(tmp_path)
+    first, lease1 = _sampler(objects, "inc-1")
+    _add(first, "inc-1", [0, 1])
+    second = _writer(objects)
+    lease2 = IncarnationLease(_records(objects), SHARD, "inc-2", buffer=second)
+    second.refresh()
+    _add(first, "inc-1", [2])  # lands after the second process's first read
+    owner = lease2.take_shard()
+    assert owner is not None and owner.incarnation == "inc-2" and lease2.owned
+    second.refresh()
+    assert resume_point(second.entries(), SHARD).next_rollout_id == 3
+    with pytest.raises(ShardFenced):
+        _add(first, "inc-1", [3])
+    record = lease2.claim(second.entries())  # the lease record, no second ownership record
+    assert record["owner"]["pos"] == owner.pos
+    assert [r["owner"]["incarnation"] for r in _shard(objects) if "owner" in r] == ["inc-1", "inc-2"]
+
+
+def test_a_pool_fence_writes_an_ownership_record_for_a_sampler_that_reads_them(tmp_path):
+    """A sampler of this code that joined before the trainer's generation lease holds
+    no ownership record yet, but its lease record says that it reads them: the pool's
+    fence is an ownership record, and a write it does without any check is void."""
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer, lease = _sampler(objects, "inc-1")
+    assert not lease.owned and read_lease(_records(objects), SHARD)["reads_owner_records"] is True
+    _add(writer, "inc-1", [0])
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    owner, created = fence_shard_owner(_records(objects), SHARD, "pool-fence:t-1")
+    assert created and owner.incarnation == "pool-fence:t-1"
+    _bypass(objects, "inc-1", 1)
+    trainer = _trainer(objects)
+    trainer.refresh()
+    assert _names(trainer) == ["inc-1-g0"]

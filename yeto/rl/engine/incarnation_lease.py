@@ -95,6 +95,8 @@ STALE_REASON = "stale_incarnation"
 DEFAULT_POLL_S = 30.0
 DEFAULT_WRITE_CHECK_S = 1.0
 DEFAULT_CLOCK_MARGIN_S = 60.0
+# a lease record field: its incarnation's shard writer reads ownership records
+READS_OWNER_RECORDS = "reads_owner_records"
 DEFAULT_RETRY_S = 1.0  # the gate reads a lease that failed again at most this often
 DEFAULT_WARN_S = 60.0  # ... and logs a lease it keeps failing to read at most this often
 CLAIM_READ_ATTEMPTS = 3
@@ -161,8 +163,9 @@ def fence_shard_owner(store: Any, shard: str, incarnation: str, *, by: str = "po
     ``sample_buffer.claim_shard_owner``; None where the shard holds no ownership
     records: the store has no object API, the shard has no index of its own, or
     the run's trainer is older (no trainer lease), or the shard holds no ownership
-    record yet (its writer may not read them: older code, or a sampler that joined
-    before the trainer lease) - the lease record alone fences then.
+    record yet and the lease record's holder did not say that it reads them
+    (:data:`READS_OWNER_RECORDS`; older code would stop on the record instead of
+    continuing the shard) - the lease record alone fences then.
 
     The shard's end is found from the lease record's ``owner`` hint (the position of
     the last ownership record a claim wrote, checked against the shard): one LIST
@@ -188,7 +191,8 @@ def fence_shard_owner(store: Any, shard: str, incarnation: str, *, by: str = "po
     if TrainerLease.current(objects) < 1:
         return None
     tail = ShardTail()
-    hint = (read_lease(store, shard) or {}).get("owner")
+    lease = read_lease(store, shard) or {}
+    hint = lease.get("owner")
     if isinstance(hint, Mapping) and hint.get("pos") is not None:
         try:
             raw = objects.read(ObjectIndex(objects, prefix=shard_prefix(shard)).key(int(hint["pos"])))
@@ -197,7 +201,8 @@ def fence_shard_owner(store: Any, shard: str, incarnation: str, *, by: str = "po
                 tail = ShardTail(next=int(hint["pos"]) + 1, owner=_owner_of(record))
         except (OSError, ValueError, KeyError, TypeError):
             pass  # a hint only: the whole shard is listed
-    return claim_shard_owner(objects, shard, incarnation, by=by, clock=clock, tail=tail, only_owned=True)
+    return claim_shard_owner(objects, shard, incarnation, by=by, clock=clock, tail=tail,
+                             only_owned=not lease.get(READS_OWNER_RECORDS))
 
 
 def lease_key(sampler: str) -> str:
@@ -326,6 +331,21 @@ class IncarnationLease:
         if self.owned and self.fenced_by is None and self.buffer.fenced:
             self.holder = self.fenced_by = self.buffer.owner.incarnation
 
+    def take_shard(self) -> Any:
+        """At the sampler's start, before it reads its resume point: append the shard's
+        ownership record (where the shard can hold one; module doc) and return it, else
+        None. Every valid write of an earlier incarnation then precedes the record and
+        is in the shard index read after it, so the resume point read after this call
+        is final: an earlier incarnation that still runs (a second start, a process
+        taken for dead) can add no round the new one does not see - its later writes
+        are refused, or void for the merge. :meth:`claim` then writes the lease record
+        with this owner and appends no second record."""
+        if self.owned or not owner_records_enabled(self.buffer):
+            return self.owner
+        self.owner = self.buffer.claim_owner(self.incarnation, by=self.by)
+        self.owned = True
+        return self.owner
+
     def claim(self, entries: Iterable[Any] = (), earlier: Iterable[str] = (), *,
               owner: Any = None) -> dict[str, Any]:
         """Take the shard for this incarnation: its ownership record where the shard
@@ -345,7 +365,9 @@ class IncarnationLease:
                 if attempt + 1 == CLAIM_READ_ATTEMPTS:
                     raise
                 _claim_pause(attempt, self.sleep)
-        if owner is None and owner_records_enabled(self.buffer):
+        if owner is None and self.owned and self.owner is not None:  # taken by take_shard
+            owner = self.owner
+        elif owner is None and owner_records_enabled(self.buffer):
             owner = self.buffer.claim_owner(self.incarnation, by=self.by)
             self.owned, self.owner = True, owner
         superseded: list[str] = []
@@ -359,6 +381,10 @@ class IncarnationLease:
         record = {"sampler": self.sampler, "incarnation": self.incarnation, "claimed_at": self.clock(),
                   "generation": int(previous.get("generation") or 0) + 1,
                   "superseded": superseded, "sealed": sealed}
+        if getattr(self.buffer, "can_own", False):
+            # this incarnation's writer reads ownership records: a pool fence may write
+            # one into its shard even before it took the shard with one (fence_shard_owner)
+            record[READS_OWNER_RECORDS] = True
         if owner is not None:
             record["owner"] = {"epoch": owner.epoch, "pos": owner.pos, "by": owner.by}
         try:

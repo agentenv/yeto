@@ -29,6 +29,7 @@ from store_sim.sim import Result, SimConfig, run_seed
 from yeto.cloud.s3_store import S3ObjectStore
 from yeto.rl.adapters.miles import buffer_rollout
 from yeto.rl.engine import incarnation_lease, sample_buffer, store_dispense
+from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.sampler_resume import handoff_requested
 
@@ -50,11 +51,8 @@ MERGE_VIOLATIONS = ("shard_record_merged_twice", "shard_record_never_merged", "s
 SHARD_OWNERSHIP = hasattr(sample_buffer, "ShardFenced")
 # a failed store read neither ends a sampler nor releases its claims
 SAMPLER_SURVIVES_READS = "on_error" in inspect.signature(handoff_requested).parameters
-try:  # the trainer generation lease
-    import yeto.rl.engine.trainer_lease  # noqa: F401
-    TRAINER_LEASE = True
-except ImportError:
-    TRAINER_LEASE = False
+# the trainer generation lease fences the release store (PolicyReleaseStore takes it)
+TRAINER_LEASE = "lease" in inspect.signature(PolicyReleaseStore.__init__).parameters
 # more invariants of other suites, as package.module:name (store_sim.sim.load_check)
 CHECKS = tuple(c for c in os.environ.get("YETO_STORE_SIM_CHECKS", "").split(",") if c)
 

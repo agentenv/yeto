@@ -281,7 +281,13 @@ class Simulation:
                 if self.truth_holds(namespace, slot, attempt, sid, incarnation)]
 
     def truth_fenced(self, sid: str, incarnation: str) -> bool:
-        """The incarnation lease of the shard names another incarnation."""
+        """Another incarnation holds the shard: its newest ownership record names one
+        (where the shard holds them they decide, the lease record is observation
+        only), else the incarnation lease names one."""
+        for key in reversed(self.server.keys(sample_buffer.shard_prefix(sid))):
+            record = json.loads(self.server.get(key) or b"{}")
+            if isinstance(record.get("owner"), dict):
+                return str(record["owner"].get("incarnation")) != incarnation
         raw = self.server.get(f"sample-buffer/leases/{sid}.json")
         return bool(raw) and str(json.loads(raw).get("incarnation")) != incarnation
 

@@ -759,16 +759,18 @@ def _run_on(data_path: Any, spec: Mapping[str, Any], env: Any, config: Any, inca
     if env.get(RECLAIM_MARKER_ENV):
         install_marker_signals(env)
     buffer.refresh()
+    member_store = data_path.member_store
+    lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ,
+                                            buffer=buffer)
+    if lease is not None and lease.take_shard() is not None:
+        buffer.refresh()  # the resume point below sees every valid write of an earlier incarnation
     resume = resume_point(buffer.entries(), config.sampler_id)
     if callable(getattr(prompts, "recover", None)):  # store dispenser: settle what was written, free the rest
         if getattr(prompts, "emit", False) is None:
             prompts.emit = emit
         prompts.recover(buffer.entries())
-    member_store = data_path.member_store
     membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
-    lease, lease_poll_s = incarnation_lease(spec, config.sampler_id, incarnation, member_store, environ,
-                                            buffer=buffer)
     # the shard writer's own verdict too: a write refused by the shard's ownership records
     fenced = lambda: (lease is not None and lease.fenced) or bool(getattr(buffer, "fenced", False))  # noqa: E731
     island = None

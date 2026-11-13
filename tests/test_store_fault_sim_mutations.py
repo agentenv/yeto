@@ -347,6 +347,15 @@ class Mutation:
         return self.apply.__name__.strip("_")
 
 
+# with shard ownership records the shard's own records fence a sampler of this code and the
+# lease JSON / gate only the shards of samplers that do not read them: the lease mutations
+# run with every sampler on those rules (an owned shard is fenced without them)
+_LEASE_RULES = (("legacy_samplers", 3),) if MERGE_DROPS_FENCED_WRITES else ()
+# ... except the gate: on fence-zombie every shard of this tree is owned, so the gate judges
+# nothing there (owned positions are the merge's), and with every sampler on the lease rules
+# the preset shows the gate's known clock-margin window without any mutation
+_GATE_SKIP = ("the shard ownership records fence every shard of the preset; the gate judges only "
+              "the legacy part of a shard") if MERGE_DROPS_FENCED_WRITES else None
 _GATE = ("stale_incarnation_group_trained",) if not MERGE_DROPS_FENCED_WRITES else ("fenced_writer_group_trained",)
 MUTATIONS = [
     # -- the dispenser: one holder per task, the holder knows when it lost the task
@@ -361,11 +370,12 @@ MUTATIONS = [
              ("slot_settled_trained_without_a_group",)),
     Mutation(_a_drain_is_answered_with_claims_still_held, "pool", ("drain_answered_while_holding_a_claim",)),
     # -- fencing: a superseded incarnation's late groups are not trained
-    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE, seeds=max(SEEDS, 120)),
+    Mutation(_the_gate_fences_nothing, "fence-zombie", _GATE, seeds=max(SEEDS, 120), skip=_GATE_SKIP),
     # (the round is judged again before training: the seal's off-by-one shows from seed 130 on)
-    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 240)),
+    Mutation(_the_gate_trains_one_entry_past_the_seal, "fence-zombie", _GATE, seeds=max(SEEDS, 240), skip=_GATE_SKIP),
     Mutation(_a_new_lease_supersedes_nobody, "process", ("lease_forgot_a_superseded_incarnation",)),
-    Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",)),
+    Mutation(_a_fenced_incarnation_never_learns_it, "second-start", ("fenced_incarnation_still_writes",),
+             config=_LEASE_RULES),
     # -- the buffer: every shard record merged once, read as itself, consumed once per cut lineage
     Mutation(_the_merge_drops_every_seventh_shard_record, "none", ("shard_record_never_merged", "run_did_not_end")),
     Mutation(_a_restarted_merger_merges_the_last_record_again, "process", ("shard_record_merged_twice",),
