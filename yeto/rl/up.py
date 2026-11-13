@@ -1841,11 +1841,29 @@ class RunUpRefused(RuntimeError):
     """``run up`` must not go on; the message says why and what to do."""
 
 
-def forced_stop_refusal(run: Run, allow: bool) -> str | None:
+def forced_stop_refusal(run: Run, allow: bool, *, record: bool = True) -> str | None:
     """A breaker of an earlier ``run up`` forced the NC pool down (``nc_forced_stop``,
     spend or wall time past ``FORCE_FACTOR`` x the budget): a new ``run up`` would order
     again past that cap. Refused unless ``--allow-after-forced-stop``, which is recorded
-    (``nc_forced_stop_ack``) so later ``run up``s of the run go on until the next one."""
+    (``nc_forced_stop_ack``) so later ``run up``s of the run go on until the next one.
+    ``record`` False: the acknowledgement is left to the caller (:func:`ack_forced_stop`
+    once the run up goes on to order; a dry run or a failed preflight does not record it)."""
+    forced = unacknowledged_forced_stop(run)
+    if forced is None:
+        return None
+    if allow:
+        _log(f"--allow-after-forced-stop: the forced stop at {forced.get('at')} ({forced.get('why')}) is "
+             "acknowledged; this run up orders samplers again")
+        if record:
+            ack_forced_stop(run)
+        return None
+    return (f"CRITICAL: an earlier run up of run {run.run} FORCED the sampler pool down at {forced.get('at')} "
+            f"({forced.get('why')}, {FORCE_FACTOR}x the budget): nothing started. Check the spend, raise "
+            "budget.usd / budget.wall_h if the run should go on, and rerun with --allow-after-forced-stop")
+
+
+def unacknowledged_forced_stop(run: Run) -> dict[str, Any] | None:
+    """The ``nc_forced_stop`` step no ``nc_forced_stop_ack`` at or after it covers (None: none)."""
     steps = run.state.get("steps") or {}
     forced = steps.get("nc_forced_stop")
     if not forced:
@@ -1853,14 +1871,13 @@ def forced_stop_refusal(run: Run, allow: bool) -> str | None:
     ack = steps.get("nc_forced_stop_ack") or {}
     if ack.get("at") and str(ack["at"]) >= str(forced.get("at")):
         return None
-    if allow:
-        _log(f"--allow-after-forced-stop: the forced stop at {forced.get('at')} ({forced.get('why')}) is "
-             "acknowledged; this run up orders samplers again")
+    return forced
+
+
+def ack_forced_stop(run: Run) -> None:
+    forced = unacknowledged_forced_stop(run)
+    if forced is not None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
-        return None
-    return (f"CRITICAL: an earlier run up of run {run.run} FORCED the sampler pool down at {forced.get('at')} "
-            f"({forced.get('why')}, {FORCE_FACTOR}x the budget): nothing started. Check the spend, raise "
-            "budget.usd / budget.wall_h if the run should go on, and rerun with --allow-after-forced-stop")
 
 
 def main(args: Any) -> int:
@@ -1887,7 +1904,8 @@ def main(args: Any) -> int:
         _log(f"another `yeto run {role}` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
              "nothing started" + ("; it already drives this run" if role == "up" else ""))
         return 2
-    refused = forced_stop_refusal(run, bool(getattr(args, "allow_after_forced_stop", False)))
+    allow_forced = bool(getattr(args, "allow_after_forced_stop", False))
+    refused = forced_stop_refusal(run, allow_forced, record=False)
     if refused:
         _log(refused)
         return 2
@@ -1895,11 +1913,15 @@ def main(args: Any) -> int:
         _log("preflight failed: nothing ordered (see preflight.log)")
         return 2
     if args.dry_run:
-        _log("dry run: preflight ok, nothing ordered")
+        _log("dry run: preflight ok, nothing ordered" + (
+            "; a dry run does not acknowledge the forced stop" if allow_forced and unacknowledged_forced_stop(run)
+            else ""))
         return 0
     if not run.sandbox_prepare():
         _log("sandbox prepare failed: nothing ordered")
         return 2
+    if allow_forced:  # recorded once this run up goes on: not by a dry run or a failed preflight
+        ack_forced_stop(run)
     if run.in_process:
         # SIGTERM (systemd stop, kill) ends the process through SystemExit, so the exit
         # path (the drain, or with drain_on_exit false the undriven banner) runs
