@@ -1969,6 +1969,18 @@ class Run:
             listing = ", ".join(f"{r.name} ({r.kind()})" for r in self.pools)
             _log(f"scale: refused, nothing changed: name one pool with --pool (pools: {listing})")
             return 2
+        # the run's budget check and the pool-scale it allows hold the run's scale lock
+        # together: two concurrent scales each passing the check against the same target
+        # (then both added by pool-scale) would pass budget.usd between them
+        with open(self.dir / "scale.lock", "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return self._scale_locked(i, samplers, retire, add=add, remove=remove, mode=mode,
+                                      force_static=force_static, dry_run=dry_run, source=source)
+
+    def _scale_locked(self, i: int, samplers: int | None, retire: list[str] | None, *, add: int,
+                      remove: list[str] | None, mode: str | None, force_static: bool, dry_run: bool,
+                      source: str) -> int:
+        """:meth:`scale` of pool ``i`` under the run's ``scale.lock``."""
         if samplers is None and add:
             wanted = self.pool_target(self.pool_doc(i), i) + int(add)
         elif samplers is None:
