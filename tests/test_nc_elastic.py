@@ -1339,6 +1339,103 @@ def test_a_failing_lease_end_fence_does_not_hold_the_node_past_its_lease():
     assert [e for e in cloud.kinds("drain") if e[1] == m.ticket][0][2] <= m.lease_until
 
 
+def test_a_member_evicted_during_a_start_retry_does_not_count_as_a_failure():
+    """A granted member waits out a transient start retry (state provisioning again)
+    and the provider evicts its node: an eviction of a running node, not a ticket lost
+    before its grant, so the breaker does not count it."""
+    clock = Clock()
+    cloud = Cloud(clock)
+
+    def down(m, shards):
+        raise subprocess.CalledProcessError(255, ["ssh", "yeto-nc-x"], stderr="read timeout")
+
+    cloud.start = down
+    pool = _pool(clock, cloud, accounts=(1,))
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    assert m.state == "provisioning" and m.granted is not None and m.start_retries == 1
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    assert m.state == GONE and "evicted" in _names(pool)
+    assert pool.breaker.failures == 0
+
+
+def test_a_background_start_that_fails_because_its_node_was_evicted_is_not_a_failure():
+    """The node is evicted while its background start runs; the start then fails (its
+    ssh went away). The member is handled as evicted, not counted as a failed start too."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    import threading  # noqa: PLC0415
+
+    gate = threading.Event()
+
+    def start(m, shards):
+        gate.wait(5)
+        raise RuntimeError("model pull failed: connection closed")
+
+    cloud.start = start
+    cloud.start_in_background = True
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    assert m.state == "starting"
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    assert m.state == GONE and "evicted" in _names(pool)
+    assert pool.breaker.failures == 0
+
+
+def _background_start_that_fails(cloud):
+    import threading  # noqa: PLC0415
+
+    gate = threading.Event()
+
+    def start(m, shards):
+        gate.wait(5)
+        raise RuntimeError("model pull failed: connection closed")
+
+    cloud.start = start
+    cloud.start_in_background = True
+    return gate
+
+
+def test_a_background_start_that_fails_on_a_live_node_still_counts_as_a_failure():
+    """The guard against a bad node: the start fails and its ticket is still active, so
+    the breaker counts it (else a bad node is ordered again and again)."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    gate = _background_start_that_fails(cloud)
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    assert m.state != "starting" and pool.breaker.failures == 1
+
+
+def test_a_background_start_failure_whose_lease_status_cannot_be_read_still_counts():
+    """The lease status read fails after a failed start: the pool cannot tell an eviction,
+    so the failure counts (an unknown status never hides a bad node)."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    gate = _background_start_that_fails(cloud)
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    real_poll = cloud.poll
+    cloud.poll = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("control plane down"))
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    cloud.poll = real_poll
+    assert m.state != "starting" and pool.breaker.failures == 1
+
 def test_a_start_cut_off_by_every_pool_restart_is_still_timed_out(tmp_path):
     """The pool loop keeps dying mid-start (the start itself takes it down): each rerun
     gets a fresh start window only up to max_sampler_restarts times; past that the

@@ -1366,12 +1366,20 @@ class IslandPool:
             else:
                 self._rerun_start(m, now)
         future = self._starts.get(m.ticket)
+        status = None
         if future is not None and future.done():  # a background start finished
             self._starts.pop(m.ticket)
             if future.exception() is not None:
-                self._start_failed(m, now, future.exception())
-                return
-        status = self._status(m, now)
+                status = self._status(m, now)
+                if status.state != "ended":
+                    self._start_failed(m, now, future.exception())
+                    return
+                # the start failed because its ticket ended (evicted mid-start): the end is
+                # handled below like any eviction, not counted as a start failure too
+                self._event("start_failed", ticket=m.ticket, shard=m.shard, error=repr(future.exception())[:300],
+                            ticket_ended=True)
+        if status is None:
+            status = self._status(m, now)
         if status.state == "active":
             if m.granted is None:
                 m.granted = now
@@ -1431,9 +1439,13 @@ class IslandPool:
                          el.BALANCE: "ended_for_balance"}[kind], ticket=m.ticket, account=m.account,
                         shard=m.shard, end_reason=status.end_reason, state_was=m.state)
             fallback = getattr(self.ops, "has_fallback_offer", None)
-            if m.state == PROVISIONING and fallback is not None and fallback():
+            # never granted (e.g. lost in provisioning). A granted member back in PROVISIONING
+            # (a start retry, a start rerun after a pool restart) was evicted after its grant:
+            # the provider took a running node, which is not a failure of this pool
+            never_granted = m.state == PROVISIONING and m.granted is None
+            if never_granted and fallback is not None and fallback():
                 self._event("offer_failed", ticket=m.ticket, account=m.account)  # that offer cools down
-            elif m.state == PROVISIONING:  # never granted (e.g. lost in provisioning)
+            elif never_granted:
                 self._fail(now, f"ticket {m.ticket} ended before a grant")
             self._retire(m, kind, lost=True, must_release=True)  # its ticket ended: nothing to keep
             if kind == el.BALANCE:
