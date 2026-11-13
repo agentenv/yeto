@@ -650,6 +650,10 @@ class IslandPool:
         self._charge(member, self.clock())
         member.state = GONE
         member.drain_error = None
+        # a gone member is never watched again: nothing reads its background start
+        start = self._starts.pop(member.ticket, None)
+        if start is not None:
+            start.cancel()  # not begun yet: never runs (a running one finishes on its own)
         self._drain_hold.pop(member.ticket, None)
         self._drain_on_halt.discard(member.ticket)
         if ended_already:  # no delete was sent and none is: the patrol does not ask for one either

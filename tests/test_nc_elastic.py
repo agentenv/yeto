@@ -880,6 +880,36 @@ def test_background_start_keeps_the_other_members_watched():
     assert t2.state == GONE and "start_failed" in _names(pool)
 
 
+def test_a_background_start_is_dropped_when_its_member_is_gone():
+    import threading
+
+    clock = Clock()
+    cloud = Cloud(clock, ready_after=0)
+    gate = threading.Event()
+    sync_start = cloud.start
+
+    def slow_start(m, shards):
+        if m.ticket == "t2":
+            gate.wait(5)
+        sync_start(m, shards)
+
+    cloud.start = slow_start
+    cloud.start_in_background = True
+    pool = _pool(clock, cloud, target=2, accounts=(1, 4))
+    _run(pool, clock, 600)
+    t2 = pool.members[1]
+    assert t2.state == "starting" and "t2" in pool._starts
+    cloud.tickets["t2"].update(state="ended", reason="preempted")  # lost mid-start
+    pool.tick()
+    assert t2.state == GONE
+    gate.set()
+    pool._starts.get("t2", pool._executor.submit(lambda: None)).result(timeout=5)
+    for _ in range(3):
+        clock.t += 60
+        pool.tick()
+    assert "t2" not in pool._starts  # no future kept for a member that is gone
+
+
 def test_restore_keeps_a_cut_off_start_whose_sampler_runs(tmp_path):
     clock = Clock()
     cloud = Cloud(clock)
