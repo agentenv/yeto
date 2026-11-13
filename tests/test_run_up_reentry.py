@@ -341,3 +341,26 @@ def test_run_down_names_the_check_that_did_not_verify(make_run, capsys):
     assert "pool-status" not in text.split("NOT verified", 1)[1]
     run._cmd = lambda argv, *, log, timeout=None: 0
     assert run.down() is True
+
+
+def test_run_down_goes_on_past_a_step_that_hangs(make_run, monkeypatch):
+    """A step of run down that hits its timeout (a hung dashboard export or Modal
+    teardown) must not abort the down: the sampler pools are still stopped (else they
+    keep billing), and the down is recorded as not verified."""
+    import subprocess  # noqa: PLC0415
+
+    run = make_run()
+    del run._cmd  # the real _cmd, over a fake subprocess.run
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        if "export" in argv or argv[-2:] == ["down", "r1-trainer"]:
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(up.subprocess, "run", fake_run)
+    assert run.down() is False
+    assert any("pool-stop" in argv for argv in seen)
+    assert run.state["steps"]["down"]["ok"] is False

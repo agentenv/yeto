@@ -306,8 +306,15 @@ class Run:
         with open(path, "a") as fh:
             fh.write(f"\n### {_now()} {' '.join(argv)}\n")
             fh.flush()
-            proc = subprocess.run(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
-                                  check=False)
+            try:
+                proc = subprocess.run(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
+                                      check=False)
+            except subprocess.TimeoutExpired:
+                # a hung step (dashboard export, Modal teardown) fails that step only: raised,
+                # it ended run down before the pool-stop and the sampler nodes kept billing
+                fh.write(f"\n### {_now()} TIMED OUT after {timeout:.0f}s (killed)\n")
+                _log(f"{' '.join(argv[:6])} ... TIMED OUT after {timeout:.0f}s (log {path})")
+                return 124
         _log(f"{' '.join(argv[:6])} ... rc={proc.returncode} (log {path})")
         return proc.returncode
 
