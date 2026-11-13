@@ -595,6 +595,12 @@ class PolicyReleaseStore:
             # file failed is not fetched again from the start (16 samplers would pull
             # 16 x 207 GB again from the store)
             keys = self._still_needed(release, prefix, keys, staging)
+            if release.files is not None:  # before the first byte: no ENOSPC half way (disk_space)
+                from . import disk_space
+
+                disk_space.check_free(self.cache_dir, sum(int(release.files.get(key[len(prefix):], 0))
+                                                          for key in keys),
+                                      f"download of release r{release.seq}-v{release.version}")
 
             def fetch(key: str) -> None:
                 path = staging / key[len(prefix):]
