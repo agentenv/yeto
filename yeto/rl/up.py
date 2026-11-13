@@ -896,7 +896,7 @@ class Run:
                     trainer_ran = self._trainer_alive()
                 if trainer_ran:
                     e = max(e, now)
-            return e
+            return min(e, now)  # a finished trainer: no period bills past its finish
 
         return sum(max(0.0, end(i, p) - max(float(p["start"]), t0)) for i, p in enumerate(ups)) / 3600
 
