@@ -291,8 +291,12 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     from .release_delta import DeltaMirror
 
     # a delta release (--rl-release-delta-full-every) is rebuilt from its chain here
-    releases = PolicyReleaseStore(store_for(store_path, environ=env), cache_dir=out / "files",
-                                  mirror=DeltaMirror(out / "mirror", keep=1))
+    mirror = DeltaMirror(out / "mirror", keep=1)
+    # the node's disk outlives a launch: a rebuild killed by an earlier one left a
+    # release-sized scratch directory that the mirror's pruning never touches
+    for leftover in mirror.clear_interrupted():
+        print(f"[yeto-init-release] removed an interrupted rebuild: {leftover.name}", flush=True)
+    releases = PolicyReleaseStore(store_for(store_path, environ=env), cache_dir=out / "files", mirror=mirror)
     if args.if_released:
         record = prepare_if_released(releases, lambda: _base_path(args.model, args.model_revision), out,
                                      expected_selection_sha256=selection)
