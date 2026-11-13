@@ -47,6 +47,19 @@ def verl_needs_nccl_shm_off(args, spec: ClusterSpec) -> bool:
     return backend == "verl" and int(spec.gpus_per_node or 1) > 1
 
 
+def parse_modal_env(items) -> dict[str, str]:
+    """``--modal-env KEY=VALUE`` items as a dict. A malformed item is not quoted in
+    the error: it is often a secret value pasted without its name."""
+    out: dict[str, str] = {}
+    for index, item in enumerate(items):
+        key, sep, value = str(item).partition("=")
+        if not sep or not key:
+            raise ValueError(f"--modal-env takes KEY=VALUE; item {index + 1} has no "
+                             f"{'name' if sep else '='} ({len(str(item))} characters, value not shown)")
+        out[key] = value
+    return out
+
+
 def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str):
     """Turn the sky task the factory built for this island into the Modal
     island config: same run script, same envs (syncer address swapped for
@@ -77,11 +90,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs.setdefault("NCCL_SHM_DISABLE", "1")  # --modal-env below still overrides it
     for key, value in MODAL_ISLAND_DEFAULT_ENVS.items():
         envs.setdefault(key, value)  # --modal-env below still overrides it
-    for item in getattr(args, "modal_env", None) or []:
-        key, sep, value = str(item).partition("=")
-        if not sep or not key:
-            raise ValueError(f"--modal-env takes KEY=VALUE, got {item!r}")
-        envs[key] = value
+    envs.update(parse_modal_env(getattr(args, "modal_env", None) or []))
     if rl:  # 0.20: Modal ships cfg.envs as a modal.Secret
         envs.update(island_hmac_secret(args))
     harbor = rl and is_harbor_agent(args)
