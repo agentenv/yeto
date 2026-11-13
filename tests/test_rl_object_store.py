@@ -1498,3 +1498,21 @@ def test_a_connection_error_is_raised_as_it_is_and_never_read_as_a_missing_objec
         assert raised.value is error
         assert s3_store.error_code(error) == "" and s3_store.describe_store_error(error, URI, {}) is not False
     assert s3_store.error_code(_error("NoSuchKey", "GetObject")) == "NoSuchKey"
+
+
+def test_a_finished_download_is_loaded_when_a_newer_release_appeared_during_it(tmp_path, monkeypatch):
+    """A release download slower than the release interval: each finished download
+    must still be loaded. Dropping it for the newer LATEST restarts the download
+    every time and the sampler never loads any release (staleness grows unbounded)."""
+    trainer, sampler, gate, _, weights = _slow_release_world(tmp_path, monkeypatch)
+    loaded = []
+    follower = PolicyFollower(sampler, lambda r, d: loaded.append(r.version), background_download=True)
+    for version in range(1, 4):
+        gate.clear()
+        trainer.release(version, f"h{version}", weights)
+        follower.refresh()  # starts (or polls) a download
+        trainer.release(version + 10, f"n{version}", weights)  # published while it downloads
+        gate.set()
+        assert follower._fetch.done.wait(5)
+        follower.refresh()
+    assert loaded, "no release was ever loaded while releases outpaced the download"
