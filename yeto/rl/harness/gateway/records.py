@@ -170,6 +170,13 @@ class _Session:
     turns: int = 0
 
 
+def _common_prefix(a: str, b: str) -> str:
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return a[:n]
+
+
 def _atomic_step_starts(messages: Sequence[Message]) -> list[int]:
     """Indexes of the assistant messages (a step = assistant + its tool outputs)."""
     return [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
@@ -261,7 +268,15 @@ class RecordingBackend:
             raise RecordsMismatch("history is shorter than the recorded stream")
         start = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=True)
         if not full.startswith(start):
-            raise RecordsMismatch("the rendering of the earlier turns changed (template rewrites history)")
+            # The generation prompt may end in a template prefill that the history form of the
+            # turn omits (Qwen3 enable_thinking=False: ``<think>\n\n</think>\n\n``). The
+            # prefill is template text the engine saw as prompt ids, not sampled text: the stream
+            # keeps it, and only the turns before it must render unchanged.
+            head = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=False)
+            if not (start.startswith(head) and full.startswith(head)):
+                raise RecordsMismatch("the rendering of the earlier turns changed (template rewrites history)")
+            start = head + _common_prefix(start[len(head):], full[len(head):])
+            self.counters[session.trajectory_id]["prefill_dropped_turns"] += 1
         stop_ids: tuple[int, ...] = ()
         if segment.last_stop is None:  # the engine ended on a stop token but did not return it
             found = sorted((full.find(s, len(start)), s) for s in self.template.spec.stop_tokens)
