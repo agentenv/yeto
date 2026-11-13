@@ -4,6 +4,7 @@ Compute. No Daytona API is called."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -464,3 +465,46 @@ def test_an_adopted_sandbox_that_vanished_is_released_without_a_delete():
     p.release(1, "yeto-smp-run-d-51")  # never existed, never recorded: nothing to delete
     with pytest.raises(PermissionError):
         p.release(1, "yeto-smp-run-x-1")  # another run's name space is still refused
+
+
+def test_a_transient_get_error_never_reads_as_a_vanished_sandbox(tmp_path):
+    """Only an explicit not-found counts as gone: an API outage on release raises and
+    leaves the row open (billing still tracked), never marks it released."""
+    dt = FakeDaytona()
+    p = _provider(dt, record=tmp_path / "rec.json")
+    name = "yeto-smp-run-d-60"
+    dt.fail_get = True
+    with pytest.raises(ConnectionError):
+        p.release(1, name)
+    assert name not in p._rows()
+
+
+def test_record_writes_from_two_processes_keep_every_ticket(tmp_path):
+    """A manual release in another process while the pool runs: the record's
+    read-modify-write holds a file lock, not only the provider's thread lock."""
+    import multiprocessing
+    import time as real_time
+
+    record = tmp_path / "rec.json"
+    ctx = multiprocessing.get_context("fork")
+
+    def work(slot):
+        p = _provider(FakeDaytona(), record=record)
+        save = p._save
+
+        def slow_save(rows):
+            real_time.sleep(0.01)
+            save(rows)
+
+        p._save = slow_save
+        for i in range(10):
+            p._update(f"yeto-smp-run-d-{slot}-{i}", open=False)
+
+    procs = [ctx.Process(target=work, args=(s,)) for s in (1, 2)]
+    for q in procs:
+        q.start()
+    for q in procs:
+        q.join(30)
+        assert q.exitcode == 0
+    assert len(json.loads(record.read_text())) == 20
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["rec.json", "rec.lock"]
