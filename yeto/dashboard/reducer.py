@@ -21,6 +21,7 @@ Anything else is passed through to the events view. Missing values stay
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
 import time
@@ -632,11 +633,12 @@ class Reducer:
             rid = sp["rollout_id"]
             if sp["phase"] != "P" and isinstance(rid, int):
                 rounds.setdefault(rid, {})[sp["phase"]] = [sp["start"], sp["end"]]
+        pub_starts = [p["start"] for p in pubs]
         for rid, ph in rounds.items():
             after = max(v[1] for v in ph.values())
-            nxt = [p for p in pubs if p["start"] >= after - 1]
-            if nxt:
-                ph["P"] = [nxt[0]["start"], nxt[0]["end"]]
+            j = bisect.bisect_left(pub_starts, after - 1)  # the first publish starting at/after the round
+            if j < len(pubs):
+                ph["P"] = [pubs[j]["start"], pubs[j]["end"]]
         pts = isl["points"]
         ids = sorted(set(rounds) | {x - 1 for x in pts})
         out = []
@@ -701,6 +703,8 @@ class Reducer:
         for t in isl["trajs"]:
             if t["rid"] is not None:
                 by_rid.setdefault(t["rid"], []).append(t)
+        load_ts = sorted(isl["load"], key=lambda x: x[0])  # once: each round bisects its window
+        load_keys = [x[0] for x in load_ts]
         out_rounds = []
         for rid in sorted(set(gen) | set(isl["cutoffs"]) | set(by_rid)):
             span, trs = gen.get(rid), by_rid.get(rid, [])
@@ -711,7 +715,7 @@ class Reducer:
             tot = sum(known) if known else None
             peaks = {"kv": None, "queued": None}
             if span:
-                win = [x for x in isl["load"] if span[0] <= x[0] <= span[1]]
+                win = load_ts[bisect.bisect_left(load_keys, span[0]):bisect.bisect_right(load_keys, span[1])]
                 kv = [x[1] / x[2] for x in win if x[1] is not None and x[2]]
                 q = [x[3] for x in win if x[3] is not None]
                 peaks = {"kv": round(max(kv), 4) if kv else None, "queued": max(q) if q else None}
