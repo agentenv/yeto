@@ -49,6 +49,11 @@ LATEST_SELECTOR = "latest"
 _NAME = re.compile(r"r(\d+)-v(\d+)")
 
 
+# under --out: the last error of a failed prepare, one line (the run script's failure
+# line quotes it, so the reason reaches the launcher's output); removed on a new start
+FAILURE_FILE = ".init-release-failed"
+
+
 class InitFromReleaseError(ValueError):
     pass
 
@@ -309,5 +314,33 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     return 0
 
 
+def cli(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
+    """:func:`main` for the run script: a failure prints its last error line
+    (``[yeto-init-release] FAILED: <type>: <message>``) and leaves it in
+    :data:`FAILURE_FILE` under ``--out``, then returns 1."""
+    import sys
+    import traceback
+
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--out", default=None)
+    out = probe.parse_known_args(argv)[0].out
+    failure = None if out is None else Path(out).expanduser() / FAILURE_FILE
+    if failure is not None:
+        failure.unlink(missing_ok=True)
+    try:
+        return main(argv, environ)
+    except Exception as error:  # noqa: BLE001 - every failure ends the node with its reason
+        traceback.print_exc()
+        reason = " ".join(f"{type(error).__name__}: {error}".split())
+        print(f"[yeto-init-release] FAILED: {reason}", file=sys.stderr, flush=True)
+        if failure is not None:
+            try:
+                failure.parent.mkdir(parents=True, exist_ok=True)
+                failure.write_text(reason + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

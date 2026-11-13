@@ -210,3 +210,53 @@ def test_cli_prepares_a_delta_release(tmp_path, monkeypatch):
         assert record["path"] == "r3-v3"
         assert (Path(record["model_dir"]) / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
     assert not any(leftover.exists() for leftover in leftovers)
+
+
+def test_a_failed_prepare_leaves_its_reason_for_the_launcher(tmp_path, store, monkeypatch, capsys):
+    """The node's last error line (e.g. how many GB a rebuild needs, how many are
+    free) reaches the run's output instead of only a generic failure."""
+    from yeto.rl.engine import disk_space
+    from yeto.rl.engine import init_from_release as ifr
+
+    def full_disk(*_a, **_k):
+        raise disk_space.InsufficientDiskSpace("rebuild of delta release r3-v3: needs about 210.00 GB "
+                                               "on /x, only 12.50 GB free")
+
+    monkeypatch.setattr(ifr, "prepare", full_disk)
+    out = tmp_path / "init"
+    argv = ["--release", "latest", "--store", str(tmp_path / "store"), "--model", str(_base(tmp_path)),
+            "--out", str(out)]
+    assert ifr.cli(argv, environ={}) == 1
+    reason = (out / ifr.FAILURE_FILE).read_text().strip()
+    assert reason.startswith("InsufficientDiskSpace: ") and "210.00 GB" in reason and "12.50 GB free" in reason
+    assert f"[yeto-init-release] FAILED: {reason}" in capsys.readouterr().err
+    monkeypatch.setattr(ifr, "prepare", lambda *a, **k: {"path": "r3-v3"})
+    assert ifr.cli(argv, environ={}) == 0
+    assert not (out / ifr.FAILURE_FILE).exists()  # a later success clears an earlier reason
+
+
+def test_the_node_failure_line_names_the_reason(tmp_path):
+    """The run script's failure line carries the reason init_from_release left."""
+    import os
+    import subprocess
+
+    from yeto.launch.rl_island_task import init_release_block
+    from yeto.rl.engine.init_from_release import FAILURE_FILE
+
+    home, bin_dir = tmp_path / "home", tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python3"  # stands in for a prepare that failed on a full disk
+    stub.write_text("#!/bin/sh\nmkdir -p \"$HOME/yeto-init-release\"\n"
+                    f"echo 'InsufficientDiskSpace: needs about 210.00 GB, only 12.50 GB free' "
+                    f"> \"$HOME/yeto-init-release/{FAILURE_FILE}\"\nexit 1\n")
+    stub.chmod(0o755)
+    block = init_release_block(SimpleNamespace(rl_init_from_release="latest", model_revision=None,
+                                               rl_expert_selection=None), "m")
+    env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    done = subprocess.run(["bash", "-c", block], env=env, capture_output=True, text=True)
+    assert done.returncode == 1
+    assert "could not be prepared: InsufficientDiskSpace: needs about 210.00 GB, only 12.50 GB free" in done.stderr
+    stub.write_text("#!/bin/sh\nexit 1\n")  # died before it could write a reason
+    done = subprocess.run(["bash", "-c", block], env={**env, "HOME": str(tmp_path / "h2")},
+                          capture_output=True, text=True)
+    assert done.returncode == 1 and "could not be prepared" in done.stderr

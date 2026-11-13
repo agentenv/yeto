@@ -134,8 +134,14 @@ def init_release_block(args, model: str) -> str:
         command += f" --model-revision {shlex.quote(args.model_revision)}"
     if getattr(args, "rl_expert_selection", None):
         command += f" --expert-selection {RL_EXPERT_SELECTION_PATH}"
+    from ..rl.engine.init_from_release import FAILURE_FILE
+
+    # the node's reason (init_from_release.cli leaves its last error line there)
+    failure = shlex.quote(f"{RL_INIT_RELEASE_DIR.removeprefix('~/')}/{FAILURE_FILE}")
     return (f"PYTHONPATH=$HOME/sky_workdir${{PYTHONPATH:+:$PYTHONPATH}} {command} "
-            "|| { echo '[yeto-island] --rl-init-from-release: the release could not be prepared' >&2; exit 1; }\n")
+            f"|| {{ _init_failed=\"$HOME\"/{failure}; "
+            "echo \"[yeto-island] --rl-init-from-release: the release could not be prepared"
+            "$([ -s \"$_init_failed\" ] && printf ': %s' \"$(tail -n 1 \"$_init_failed\")\")\" >&2; exit 1; }\n")
 
 
 def submitted_unix() -> float:
