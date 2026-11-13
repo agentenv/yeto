@@ -459,16 +459,11 @@ class DaytonaProvider:
         from . import node_pool  # noqa: PLC0415
 
         ours = state_dir() / "ssh_config"
-        ours.parent.mkdir(parents=True, exist_ok=True)
-        blocks = node_pool._blocks(ours.read_text()) if ours.exists() else {}
-        blocks[alias] = "\n".join([f"Host {alias}", f"  HostName {SSH_HOST}", f"  User {token}", "  Port 22",
-                                   "  StrictHostKeyChecking accept-new",
-                                   f"  UserKnownHostsFile {state_dir() / 'known_hosts'}",
-                                   "  ServerAliveInterval 15", "  ServerAliveCountMax 4", ""])
-        tmp = ours.with_name(f".{ours.name}.{threading.get_ident()}.tmp")
-        tmp.write_text("".join(blocks.values()))
-        os.chmod(tmp, 0o600)
-        tmp.replace(ours)  # a concurrent ssh never reads a half-written config
+        block = "\n".join([f"Host {alias}", f"  HostName {SSH_HOST}", f"  User {token}", "  Port 22",
+                            "  StrictHostKeyChecking accept-new",
+                            f"  UserKnownHostsFile {state_dir() / 'known_hosts'}",
+                            "  ServerAliveInterval 15", "  ServerAliveCountMax 4", ""])
+        node_pool.edit_ssh_config(ours, lambda blocks: blocks.__setitem__(alias, block))
         node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
         with self._locked():
             rows = self._rows()

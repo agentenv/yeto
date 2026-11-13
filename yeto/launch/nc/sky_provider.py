@@ -311,16 +311,13 @@ class SkyProvider:
 
         alias = node_pool.host_alias(lease.ticket)
         ours = state_dir() / "ssh_config"
-        blocks = node_pool._blocks(ours.read_text()) if ours.exists() else {}
         lines = [f"Host {alias}", f"  HostName {lease.ip}", f"  User {lease.user}",
                  "  StrictHostKeyChecking accept-new", f"  UserKnownHostsFile {state_dir() / 'known_hosts'}",
                  "  ServerAliveInterval 15", "  ServerAliveCountMax 4"]
         if self.ssh_key:
             lines += [f"  IdentityFile {self.ssh_key}", "  IdentitiesOnly yes"]
-        blocks[alias] = "\n".join(lines) + "\n"
-        ours.parent.mkdir(parents=True, exist_ok=True)
-        ours.write_text("".join(blocks.values()))
-        os.chmod(ours, 0o600)
+        block = "\n".join(lines) + "\n"
+        node_pool.edit_ssh_config(ours, lambda blocks: blocks.__setitem__(alias, block))
         for command in self.host_setup:
             out = ssh_run(alias, command)
             if out.returncode != 0:

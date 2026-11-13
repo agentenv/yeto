@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -508,3 +509,59 @@ def test_record_writes_from_two_processes_keep_every_ticket(tmp_path):
         assert q.exitcode == 0
     assert len(json.loads(record.read_text())) == 20
     assert sorted(f.name for f in tmp_path.iterdir()) == ["rec.json", "rec.lock"]
+
+
+def _alias_writer(worker: int, rounds: int) -> None:
+    p = _provider(FakeDaytona())
+    for i in range(rounds):
+        p._write_alias(f"yeto-smp-run-d-w{worker}-{i}", f"tok{worker}-{i}", None)
+
+
+def test_ssh_config_aliases_survive_concurrent_writer_processes():
+    """The ssh config is one file for every sandbox and every process on the state dir
+    (a pool and a manual command): a read-modify-write held only under a thread lock
+    lets one process drop the aliases another just wrote."""
+    import multiprocessing  # noqa: PLC0415
+
+    workers, rounds = 6, 25
+    ctx = multiprocessing.get_context("fork")
+    procs = [ctx.Process(target=_alias_writer, args=(w, rounds)) for w in range(workers)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    text = (cli.tunnel.state_dir() / "ssh_config").read_text()
+    missing = [(w, i) for w in range(workers) for i in range(rounds)
+               if f"Host yeto-nc-yeto-smp-run-d-w{w}-{i}\n" not in text]
+    assert missing == []
+    assert not [f for f in (cli.tunnel.state_dir()).iterdir() if f.name.endswith(".tmp")]
+
+
+def _nc_alias_writer(rounds: int, ssh_config: str) -> None:
+    from yeto.launch.nc import client as ncc  # noqa: PLC0415
+    from yeto.launch.nc import node_pool  # noqa: PLC0415
+
+    for i in range(rounds):
+        lease = ncc.NodeLease(1, f"nc-{i}", "192.0.2.9", "ubuntu", "", None, None, 8, None)
+        node_pool.write_ssh_alias(lease, ssh_config=Path(ssh_config))
+
+
+def test_ssh_config_aliases_survive_nc_and_daytona_writers(tmp_path):
+    """NC (``node_pool.write_ssh_alias``) and Daytona write the same alias file; a
+    lock held by only one of them still lets the other drop its aliases."""
+    import multiprocessing  # noqa: PLC0415
+
+    rounds = 25
+    ctx = multiprocessing.get_context("fork")
+    procs = [ctx.Process(target=_alias_writer, args=(0, rounds)),
+             ctx.Process(target=_nc_alias_writer, args=(rounds, str(tmp_path / "ssh_cfg")))]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    text = (cli.tunnel.state_dir() / "ssh_config").read_text()
+    missing = [i for i in range(rounds) if f"Host yeto-nc-yeto-smp-run-d-w0-{i}\n" not in text]
+    missing += [f"nc-{i}" for i in range(rounds) if f"Host yeto-nc-nc-{i}\n" not in text]
+    assert missing == []
