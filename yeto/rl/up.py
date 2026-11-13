@@ -75,6 +75,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -576,18 +577,38 @@ class Run:
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
-    def drain_controller(self) -> None:
+    def drain_controller(self) -> bool:
         """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
         while ``main`` still runs. Left to the ``atexit`` hook it ran during interpreter
         shutdown, after the Modal client had closed: a tick in flight failed with
         ``ClientClosed``, the drain waited on it forever, and the process hung holding
-        the pool with its sampler still billing."""
+        the pool with its sampler still billing.
+
+        A SIGTERM during the drain is logged, not obeyed (it would cut the drain short).
+        A drain that fails prints the billing banner and is not retried at exit (the
+        controller leaves the active list either way). False: the drain failed."""
         controller = getattr(self, "controller", None)
         if controller is None or controller.stopped or not controller.drain_on_exit:
-            return
-        from yeto.launch.pool.controller import drain_active  # noqa: PLC0415
+            return True
+        from yeto.launch.pool import controller as ctl  # noqa: PLC0415
 
-        drain_active("process exit")
+        restore = None
+        if threading.current_thread() is threading.main_thread():
+            restore = signal.signal(signal.SIGTERM, _log_sigterm_during_drain)
+        try:
+            ctl.drain_active("process exit")
+            return True
+        except Exception as error:  # noqa: BLE001 - reported with the billing banner, never re-raised
+            _log(f"CRITICAL: the exit drain of the sampler pools FAILED ({error!r})"[:600])
+            _log(f"CRITICAL: {self.pools_phrase()} may STILL BE BILLING: release it now with "
+                 "`yeto run down --config <run.json>` and check that it reports verified")
+            return False
+        finally:
+            with ctl._ACTIVE_LOCK:  # noqa: SLF001 - no second drain at interpreter exit
+                if controller in ctl._ACTIVE:  # noqa: SLF001
+                    ctl._ACTIVE.remove(controller)  # noqa: SLF001
+            if restore is not None:
+                signal.signal(signal.SIGTERM, restore)
 
     def _restart_stopped_pool(self, name: str, pool: Any) -> None:
         """A pool an earlier stop of this run left stopped (``yeto run down``, a process
@@ -595,8 +616,24 @@ class Run:
         stopped, the controller skips it at every tick, so no sampler is ordered and the
         trainer waits for samples that never come. A pool with live members is left as
         it is (the stop has not finished), and so is one that finished its run."""
-        if not pool.stopped or pool.live() or getattr(pool, "finished", None):
+        if not pool.stopped or getattr(pool, "finished", None):
             return
+        if pool.live():
+            tickets = [m.ticket for m in pool.live()]
+            raise RunUpRefused(
+                f"pool {name} is stopped ({pool.stopped}) but still holds live member(s) {tickets}: an earlier "
+                "stop has not finished releasing them, and a stopped pool orders nothing, so the trainer would "
+                "wait for samples that never come. Run `yeto run down --config <run.json>` first (it waits "
+                "for the release), then `yeto run up` again")
+        budget = getattr(pool, "budget", None)
+        refused = None if budget is None else budget.refusal(pool.ecfg, billed_nodes=0, target=pool.config.target,
+                                                            hourly_ucr=pool.config.hourly())
+        if refused:
+            raise RunUpRefused(
+                f"pool {name} would refuse every order: {refused}. elastic.max_orders and "
+                "elastic.max_run_spend_ucr / max_run_spend_usd count over the WHOLE run (every earlier run up "
+                "included), so a restarted run starts at the totals it already reached. Raise the limit in the "
+                "pool config (or start a new run name), then `yeto run up` again")
         _log(f"pool {name}: its state says stopped ({pool.stopped}) by an earlier stop of this run and no "
              "member is live: this run up drives it again")
         pool.stopped = None
@@ -1767,6 +1804,8 @@ def add_parser(sub: Any) -> None:
     up.add_argument("--dry-run", action="store_true", help="preflight only; nothing is ordered")
     up.add_argument("--skip-preflight", action="store_true", help="resume: preflight already passed")
     up.add_argument("--no-monitor", action="store_true", help="return after the dashboard starts")
+    up.add_argument("--allow-after-forced-stop", action="store_true",
+                    help="run up again after a budget breaker forced the sampler pool down (nc_forced_stop)")
     up.add_argument("--trainer-now", action="store_true",
                     help="start the trainer without waiting for the first sample group (the samplers and the "
                     "trainer GPUs come up in parallel)")
@@ -1793,6 +1832,37 @@ def _exit_on_sigterm(signum: int, frame: Any) -> None:  # noqa: ARG001
     raise SystemExit(128 + int(signum))
 
 
+def _log_sigterm_during_drain(signum: int, frame: Any) -> None:  # noqa: ARG001
+    _log("SIGTERM during the exit drain of the sampler pools: ignored until the drain ends "
+         "(cutting it short would leave machines billing)")
+
+
+class RunUpRefused(RuntimeError):
+    """``run up`` must not go on; the message says why and what to do."""
+
+
+def forced_stop_refusal(run: Run, allow: bool) -> str | None:
+    """A breaker of an earlier ``run up`` forced the NC pool down (``nc_forced_stop``,
+    spend or wall time past ``FORCE_FACTOR`` x the budget): a new ``run up`` would order
+    again past that cap. Refused unless ``--allow-after-forced-stop``, which is recorded
+    (``nc_forced_stop_ack``) so later ``run up``s of the run go on until the next one."""
+    steps = run.state.get("steps") or {}
+    forced = steps.get("nc_forced_stop")
+    if not forced:
+        return None
+    ack = steps.get("nc_forced_stop_ack") or {}
+    if ack.get("at") and str(ack["at"]) >= str(forced.get("at")):
+        return None
+    if allow:
+        _log(f"--allow-after-forced-stop: the forced stop at {forced.get('at')} ({forced.get('why')}) is "
+             "acknowledged; this run up orders samplers again")
+        run.mark("nc_forced_stop_ack", of=forced.get("at"))
+        return None
+    return (f"CRITICAL: an earlier run up of run {run.run} FORCED the sampler pool down at {forced.get('at')} "
+            f"({forced.get('why')}, {FORCE_FACTOR}x the budget): nothing started. Check the spend, raise "
+            "budget.usd / budget.wall_h if the run should go on, and rerun with --allow-after-forced-stop")
+
+
 def main(args: Any) -> int:
     run = Run(load_config(args.config))
     if args.rl_command == "status":
@@ -1817,6 +1887,10 @@ def main(args: Any) -> int:
         _log(f"another `yeto run {role}` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
              "nothing started" + ("; it already drives this run" if role == "up" else ""))
         return 2
+    refused = forced_stop_refusal(run, bool(getattr(args, "allow_after_forced_stop", False)))
+    if refused:
+        _log(refused)
+        return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
         return 2
@@ -1830,12 +1904,18 @@ def main(args: Any) -> int:
         # SIGTERM (systemd stop, kill) ends the process through SystemExit, so the exit
         # path (the drain, or with drain_on_exit false the undriven banner) runs
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
-    run.pool()
+    rc = 1
     try:
-        return _drive(run, args)
+        # in the try: a SIGTERM while the pools start still drains what they ordered
+        run.pool()
+        rc = _drive(run, args)
+    except RunUpRefused as error:
+        _log(f"CRITICAL: run up refused: {error}")
+        rc = 2
     finally:
-        if run.in_process:
-            run.drain_controller()
+        if run.in_process and not run.drain_controller():
+            rc = rc or 1
+    return rc
 
 
 def _drive(run: Run, args) -> int:

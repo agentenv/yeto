@@ -456,6 +456,7 @@ class IslandPool:
         refused = self._gate(now)
         if refused:
             if refused != self._refused and not refused.startswith("breaker open"):
+                self.log(f"pool: {refused}: not ordering")
                 self._event("order_refused", why=refused)
             self._refused = refused
             return None

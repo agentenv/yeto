@@ -214,16 +214,21 @@ class RolloutController:
             self.stopped = why
             self.log(f"rollout: stopping every pool: {why}")
         out: dict[str, list[Member]] = {}
-        for name, slot in self.slots.items():
-            pool = slot.pool
-            if pool.live() or not pool.stopped:
-                slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
-            self._save(slot)
-            out[name] = list(slot.left)
-            self._close_slot(name, slot)
-        with _ACTIVE_LOCK:
-            if self in _ACTIVE:
-                _ACTIVE.remove(self)
+        try:
+            for name, slot in self.slots.items():
+                pool = slot.pool
+                if pool.live() or not pool.stopped:
+                    slot.left = pool.drain_all(why, wait_s=self.drain_wait_s, sleep=self.sleep)
+                self._save(slot)
+                out[name] = list(slot.left)
+                self._close_slot(name, slot)
+        finally:
+            # a drain that raised is not run a second time by the atexit hook (at
+            # interpreter shutdown its clients may be closed and the retry hangs): the
+            # caller reports it and `yeto run down` releases what is left
+            with _ACTIVE_LOCK:
+                if self in _ACTIVE:
+                    _ACTIVE.remove(self)
         return out
 
     def _close_slot(self, name: str, slot: PoolSlot) -> None:

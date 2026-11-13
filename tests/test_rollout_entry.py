@@ -581,3 +581,165 @@ def test_run_up_drains_the_in_process_pools_before_main_returns(tmp_path, monkey
     assert seen["live"] == 2
     assert run.controller.stopped == "process exit" and run.controller not in ctl.active()
     assert all(not pool.live() for pool in run.controller.pools.values())
+
+
+# -- run up exit drain and refusals ----------------------------------------------------
+
+def _main_harness(tmp_path, monkeypatch, *, pool=None, cfg_extra=None):
+    """``up.main`` over an in-process run of two fake pools; returns (run, providers, args)."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    run = up.Run(dict(run_cfg, controller="in_process", **(cfg_extra or {})))
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    monkeypatch.setattr(up, "Run", lambda cfg: run)
+    monkeypatch.setattr(up, "load_config", lambda path: {})
+    monkeypatch.setattr(run, "sandbox_prepare", lambda: True)
+    start = lambda: run.start_controller(ops=ops, thread_cls=_NoThread).tick()  # noqa: E731
+    monkeypatch.setattr(run, "pool", pool(start) if pool else start)
+    monkeypatch.setattr(run, "trainer", lambda: None)
+    monkeypatch.setattr(run, "dashboard", lambda: None)
+    monkeypatch.setattr(run, "monitor", lambda: None)
+    args = types.SimpleNamespace(config="x", rl_command="up", skip_preflight=True, dry_run=False, no_monitor=False,
+                                 trainer_now=True, allow_after_forced_stop=False)
+    return run, providers, args
+
+
+@pytest.fixture
+def keep_sigterm():
+    import signal  # noqa: PLC0415
+
+    old = signal.getsignal(signal.SIGTERM)
+    yield
+    signal.signal(signal.SIGTERM, old)
+
+
+def test_a_failed_exit_drain_is_reported_once_and_not_retried_at_exit(tmp_path, monkeypatch, capsys, keep_sigterm):
+    from yeto.launch.pool import controller as ctl  # noqa: PLC0415
+
+    run, _, args = _main_harness(tmp_path, monkeypatch)
+    calls = []
+
+    def broken_stop(why, **kw):
+        calls.append(why)
+        raise RuntimeError("ClientClosed")
+
+    real_start = run.start_controller
+
+    def start(**kw):
+        c = real_start(**kw)
+        monkeypatch.setattr(c, "stop", broken_stop)
+        return c
+
+    monkeypatch.setattr(run, "start_controller", start)
+    assert up.main(args) == 1  # the drive returned 0; the failed drain makes it 1, it does not raise
+    out = capsys.readouterr().out
+    assert "CRITICAL" in out and "STILL BE BILLING" in out and "yeto run down" in out
+    assert run.controller not in ctl.active()
+    ctl.drain_active("process exit")  # what the atexit hook runs
+    assert calls == ["process exit"]
+
+
+def test_a_sigterm_during_the_exit_drain_does_not_cut_it_short(tmp_path, monkeypatch, capsys, keep_sigterm):
+    import os  # noqa: PLC0415
+    import signal  # noqa: PLC0415
+
+    run, _, args = _main_harness(tmp_path, monkeypatch)
+    real_start = run.start_controller
+
+    def start(**kw):
+        c = real_start(**kw)
+        real_stop = c.stop
+
+        def stop(why, **kw2):
+            os.kill(os.getpid(), signal.SIGTERM)  # systemd stop while the drain runs
+            return real_stop(why, **kw2)
+
+        monkeypatch.setattr(c, "stop", stop)
+        return c
+
+    monkeypatch.setattr(run, "start_controller", start)
+    assert up.main(args) == 0
+    assert all(not pool.live() for pool in run.controller.pools.values())
+    assert "SIGTERM during the exit drain" in capsys.readouterr().out
+    assert signal.getsignal(signal.SIGTERM) is up._exit_on_sigterm  # restored after the drain
+
+
+def test_a_sigterm_while_the_pools_start_still_drains_them(tmp_path, monkeypatch, keep_sigterm):
+    def pool(start):
+        def go():
+            start()
+            raise SystemExit(143)  # SIGTERM through _exit_on_sigterm, inside run.pool()
+        return go
+
+    run, _, args = _main_harness(tmp_path, monkeypatch, pool=pool)
+    with pytest.raises(SystemExit):
+        up.main(args)
+    assert run.controller.stopped == "process exit"
+    assert all(not p.live() for p in run.controller.pools.values())
+
+
+def test_run_up_refuses_a_stopped_pool_that_still_has_live_members(tmp_path, capsys):
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    cfg = dict(run_cfg, controller="in_process")
+    clock = Clock()
+    ops = {n: ProviderPoolOps(FakeProvider(n, clock), FakeRoute(), FakeFencer()) for n in ("nc", "modal")}
+    c = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    for name, slot in c.slots.items():  # a stop that has not released its members yet
+        slot.pool.stopped = "run down"
+        c._save(slot)
+        c._close_slot(name, slot)
+    with pytest.raises(up.RunUpRefused, match="yeto run down"):
+        up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+
+
+def test_run_up_refuses_a_restart_that_the_pool_budget_would_refuse(tmp_path):
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, nc_path = _two_pools(tmp_path)
+    doc = json.loads(open(nc_path).read())
+    doc["elastic"] = {**(doc.get("elastic") or {}), "max_orders": 1}
+    open(nc_path, "w").write(json.dumps(doc))
+    cfg = dict(run_cfg, controller="in_process")
+    clock = Clock()
+    ops = {n: ProviderPoolOps(FakeProvider(n, clock), FakeRoute(), FakeFencer()) for n in ("nc", "modal")}
+    c = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    c.stop("process exit")
+    with pytest.raises(up.RunUpRefused, match="max_orders.*WHOLE run"):
+        up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+
+
+def test_a_budget_refused_order_is_logged_on_the_console():
+    from tests.test_rollout_island_pool import Clock, FakeProvider, make_pool, quiet_elastic  # noqa: PLC0415
+
+    clock = Clock()
+    pool, _, _ = make_pool(FakeProvider("p", clock), [1, 2], target=1, clock=clock,
+                           elastic=quiet_elastic(max_orders=0))
+    logs = []
+    pool.log = logs.append
+    pool.tick()
+    pool.tick()
+    refused = [line for line in logs if "max_orders 0" in line and "not ordering" in line]
+    assert len(refused) == 1  # once per change, not every tick
+
+
+def test_run_up_refuses_after_a_forced_stop_until_acknowledged(tmp_path, monkeypatch, capsys, keep_sigterm):
+    run, providers, args = _main_harness(tmp_path, monkeypatch)
+    run.mark("nc_forced_stop", why="spend $600 > $540", rc=0)
+    assert up.main(args) == 2
+    assert "FORCED" in capsys.readouterr().out and not any(p.orders for p in providers.values())
+    args.allow_after_forced_stop = True
+    assert up.main(args) == 0
+    assert any(p.orders for p in providers.values())
+    args.allow_after_forced_stop = False  # acknowledged: later run ups of the run go on
+    assert up.forced_stop_refusal(run, False) is None
+    assert _parser().parse_args(["run", "up", "--config", "c", "--allow-after-forced-stop"]).allow_after_forced_stop
