@@ -222,6 +222,50 @@ def test_runner_returns_when_harness_ignores_cancel_but_keeps_its_slot(monkeypat
     _run(go())
 
 
+def test_stuck_harness_keeps_its_slot_when_the_trajectory_is_cancelled_during_the_grace(monkeypatch):
+    from yeto.rl.agentic import runner
+
+    monkeypatch.setattr(runner, "_CANCEL_GRACE_S", 5.0, raising=False)
+    gate = AdmissionGate(1)
+    harness = _IgnoresCancel()
+
+    async def go():
+        first = asyncio.ensure_future(run_agent_task(_task(budget=AgentBudget(wall_clock_s=0.05)), harness, "u", gate))
+        try:
+            await asyncio.sleep(0.2)  # cap hit, now inside the cancel grace
+            first.cancel()  # the island closes
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            snap = gate.metrics.snapshot()
+            assert snap["harness_in_flight"] == 1 and snap["harness_stuck"] == 1
+            nxt = asyncio.ensure_future(run_agent_task(_task(), _Harness(TrialVerdict(rewards={"reward": 0})), "u", gate))
+            await asyncio.sleep(0.1)
+            assert not nxt.done()  # no second sandbox while the stuck one lives
+        finally:
+            harness.release.set()  # never leave a cancel-ignoring task to the loop shutdown
+        assert (await asyncio.wait_for(nxt, timeout=2.0)).outcome == Outcome.OK
+        snap = gate.metrics.snapshot()
+        assert snap["harness_in_flight"] == 0 and snap["harness_stuck"] == 0
+
+    _run(go())
+
+
+def test_admission_releases_the_slot_when_reading_the_policy_version_fails():
+    def boom():
+        raise RuntimeError("version unavailable")
+
+    gate = AdmissionGate(1, policy_version=boom)
+
+    async def go():
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(gate.admit().__aenter__(), timeout=1.0)
+        assert gate.metrics.snapshot()["harness_in_flight"] == 0
+        assert not gate._slots.locked()
+
+    _run(go())
+
+
 def test_runner_raises_configuration_and_trust_errors():
     gate = AdmissionGate(1)
     with pytest.raises(HarnessConfigError):

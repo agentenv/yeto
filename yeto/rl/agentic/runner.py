@@ -143,9 +143,11 @@ async def _capped(coro, cap_s: float, ledger: SuspendLedger | None, *,
             try:
                 await asyncio.wait({run}, timeout=_CANCEL_GRACE_S)
             finally:
+                # also when this call is cancelled again during the grace: the run
+                # still owns its sandbox, so its slot must stay held either way
                 waiting[0] = run.done()
-            if not run.done() and on_stuck is not None:
-                on_stuck(run)
+                if not run.done() and on_stuck is not None:
+                    on_stuck(run)
 
 
 def _aborted(task: AgentTask, reason: str, *, policy_version: int | None) -> AgentTrajectory:

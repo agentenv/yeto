@@ -101,12 +101,12 @@ class AdmissionGate:
             if self._draining:  # drain started while this one waited for a slot
                 self.metrics.refused += 1
                 raise AdmissionClosed("admission is draining")
+            admission = Admission(policy_version=self._policy_version())
         except BaseException:
             self._slots.release()
             raise
         self.metrics.admitted += 1
         self.metrics.in_flight += 1
-        admission = Admission(policy_version=self._policy_version())
         try:
             yield admission
         finally:
