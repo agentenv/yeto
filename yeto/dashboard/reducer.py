@@ -1162,7 +1162,7 @@ class Reducer:
         tpN) and the NC pool naming its shard; a trainer from its tape launch dir
         (``l0-modal-...``), its NVML samples (per-GPU memory -> model, GPUs per node)
         and the node count of remote_code_prewarm. Marked ``hw_inferred``."""
-        pool_shards = {str(p.get("shard")) for p in self.async_.pool if p.get("shard") is not None}
+        pool_shards = self.async_.pool_shards
         for iid, isl in self.islands.items():
             if isl["cloud"] is not None and isl["gpu"] is not None and not isl.get("hw_inferred"):
                 continue

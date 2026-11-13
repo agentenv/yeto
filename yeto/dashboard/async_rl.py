@@ -105,6 +105,8 @@ class AsyncState:
         self.releases: list[dict] = []
         self.loads: list[dict] = []
         self.pool: list[dict] = []
+        self.pool_shards: set[str] = set()  # every shard a pool event named (trimmed events too)
+        self._pool_kept = 0  # self.pool[:_pool_kept] are all state events: the trim scan starts here
 
     # -- folding ----------------------------------------------------------------
     def _s(self, iid: str) -> dict:
@@ -128,12 +130,17 @@ class AsyncState:
         """Every pool event is kept until there are ``POOL_MAX``; past it the oldest event
         that no view folds into state (:func:`pool_state_event`) is dropped, so a long run's
         later member_ready / exit / target change still reaches the sampler count."""
-        self.pool.append({"ts": pool_ts(r), "event": r.get("event"),
-                          **{k: r.get(k) for k in POOL_KEYS if r.get(k) is not None}})
+        p = {"ts": pool_ts(r), "event": r.get("event"), **{k: r.get(k) for k in POOL_KEYS if r.get(k) is not None}}
+        self.pool.append(p)
+        if p.get("shard") is not None:
+            self.pool_shards.add(str(p["shard"]))
         if len(self.pool) > POOL_MAX:
-            drop = next((i for i, p in enumerate(self.pool) if not pool_state_event(p)), None)
-            if drop is not None:
-                del self.pool[drop]
+            i = self._pool_kept
+            while i < len(self.pool) and pool_state_event(self.pool[i]):
+                i += 1
+            self._pool_kept = i
+            if i < len(self.pool):
+                del self.pool[i]
 
     def fold(self, r: dict, iid: str, ts: float | None) -> None:
         ev = r.get("event")
