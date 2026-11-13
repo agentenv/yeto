@@ -88,3 +88,14 @@ def test_delta_rebuild_refuses_before_writing_when_the_disk_is_too_small(tmp_pat
 
 def test_free_bytes_of_a_path_not_created_yet_uses_its_nearest_parent(tmp_path):
     assert disk_space.free_bytes(tmp_path / "a" / "b" / "c") > 0
+
+
+@pytest.mark.parametrize("raw", ["inf", "nan", "-1", "0.5", "abc", ""])
+def test_invalid_headroom_falls_back_to_the_default(raw):
+    assert disk_space.headroom({disk_space.HEADROOM_ENV: raw}) == disk_space.HEADROOM
+
+
+def test_infinite_headroom_does_not_crash_the_check(tmp_path, monkeypatch):
+    monkeypatch.setenv(disk_space.HEADROOM_ENV, "inf")
+    monkeypatch.setattr(disk_space, "free_bytes", lambda path: 10**12)
+    disk_space.check_free(tmp_path, 1000, "x")

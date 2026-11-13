@@ -10,6 +10,7 @@ with what is about to be written (the release record's sizes times
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from pathlib import Path
@@ -36,7 +37,7 @@ def headroom(environ=None) -> float:
         value = float(raw) if raw else HEADROOM
     except ValueError:
         value = HEADROOM
-    return value if value >= 1.0 else HEADROOM
+    return value if math.isfinite(value) and value >= 1.0 else HEADROOM  # inf/nan/<1: default
 
 
 def check_free(path: str | os.PathLike[str], need_bytes: int, what: str) -> None:
