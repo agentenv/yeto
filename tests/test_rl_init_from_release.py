@@ -260,3 +260,28 @@ def test_the_node_failure_line_names_the_reason(tmp_path):
     done = subprocess.run(["bash", "-c", block], env={**env, "HOME": str(tmp_path / "h2")},
                           capture_output=True, text=True)
     assert done.returncode == 1 and "could not be prepared" in done.stderr
+
+
+def test_a_failure_reason_carries_no_credentials(tmp_path, store, monkeypatch):
+    """The reason reaches the run's output and logs: secrets in an exception message
+    (a presigned URL, URL userinfo, key=value, a secret env value) are redacted, and
+    a long multi-line message becomes one bounded line."""
+    from yeto.rl.engine import init_from_release as ifr
+
+    secret = "Zk3uSECRETVALUE0123456789"
+
+    def leaky(*_a, **_k):
+        raise RuntimeError(f"GET https://acct.r2.cloudflarestorage.com/b/k?X-Amz-Signature=abcdef&X-Amz-Credential=AK\n"
+                           f"s3://AKID:{secret}@host/b aws_secret_access_key={secret} token: tok123456 "
+                           + "x" * 2000)
+
+    monkeypatch.setattr(ifr, "prepare", leaky)
+    out = tmp_path / "init"
+    argv = ["--release", "latest", "--store", str(tmp_path / "store"), "--model", str(_base(tmp_path)),
+            "--out", str(out)]
+    assert ifr.cli(argv, environ={"AWS_SECRET_ACCESS_KEY": secret}) == 1
+    reason = (out / ifr.FAILURE_FILE).read_text()
+    assert reason.count("\n") == 1 and len(reason) <= ifr.FAILURE_REASON_MAX + 1
+    for leaked in (secret, "abcdef", "X-Amz-Credential", "AKID", "tok123456"):
+        assert leaked not in reason
+    assert reason.startswith("RuntimeError: GET https://acct.r2.cloudflarestorage.com/b/k?<redacted>")
