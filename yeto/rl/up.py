@@ -1972,8 +1972,16 @@ class Run:
         # the run's budget check and the pool-scale it allows hold the run's scale lock
         # together: two concurrent scales each passing the check against the same target
         # (then both added by pool-scale) would pass budget.usd between them
-        with open(self.dir / "scale.lock", "a+") as lock:
+        try:
+            lock = open(self.dir / "scale.lock", "a+")  # noqa: SIM115 - closed below
+        except OSError as error:  # a state directory this user cannot write
+            _log(f"scale: refused, nothing changed: cannot open {self.dir / 'scale.lock'}: {error}")
+            return 2
+        with lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            # the state as it is now (merged with this process's own changes): a breaker
+            # that fired while this scale waited for the lock refuses it
+            self.save()
             return self._scale_locked(i, samplers, retire, add=add, remove=remove, mode=mode,
                                       force_static=force_static, dry_run=dry_run, source=source)
 

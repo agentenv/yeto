@@ -39,3 +39,34 @@ def test_two_concurrent_scale_adds_do_not_pass_the_run_budget_together(make_run,
     # 1 -> 2 nodes is $20 of the $25 cap; a third node ($30) must be refused
     assert sorted(rcs) == [0, 2]
     assert json.loads(scale_file.read_text())["target"] == 2
+
+
+def test_a_breaker_that_fired_while_the_scale_waited_refuses_it(make_run, monkeypatch, tmp_path):
+    """The run's breaker check reads the state as it is under the scale lock, not as it
+    was when the command opened the run (a scale can wait minutes behind another)."""
+    nc_dir = tmp_path / "nc"
+    nc_dir.mkdir()
+    (nc_dir / "pool-s.scale.json").write_text(json.dumps({"target": 1}))
+    run = make_run(usd=1000, nc_usd_per_h=10)
+    run.env["YETO_NC_STATE_DIR"] = str(nc_dir)
+    monkeypatch.setattr(run, "spend_usd", lambda: 0.0)
+    monkeypatch.setattr(up.Run, "pool_doc", lambda self, i=0: {"members": []})
+    called = []
+    monkeypatch.setattr(up.subprocess, "run", lambda argv, **_kw: called.append(argv))
+    other = up.Run(run.cfg, state_root=run.dir.parent)  # ``run up``'s monitor, another process
+    other.state["breaker"] = {"at": up._now(), "why": "budget"}
+    other.save()
+    assert run.scale(add=1) == 2 and not called
+
+
+def test_a_scale_lock_that_cannot_be_opened_refuses_cleanly(make_run, monkeypatch):
+    run = make_run(usd=1000, nc_usd_per_h=10)
+    real_open = open
+
+    def no_lock(path, *a, **kw):
+        if str(path).endswith("scale.lock"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", no_lock)
+    assert run.scale(add=1) == 2
