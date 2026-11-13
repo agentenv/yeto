@@ -153,6 +153,13 @@ class _HostPrep:
         if current is not None and not ours:
             image = (current.get("Config") or {}).get("Image")
             if running and image == s.image:  # adopt: started by someone else, left exactly as it is
+                stale = _host_ip(current, s.port)
+                if stale and bridge and stale not in (bridge, "0.0.0.0", "::"):
+                    # the daemon's bridge moved (bip / default-address-pools changed): docker cannot bind
+                    # the old address, so the port is published nowhere and the health URL is unreachable
+                    raise DockerError(f"container {name} publishes port {s.port} on {stale}, but the bridge is now "
+                                      f"{bridge}: it is unreachable; it is left alone: recreate it on the bridge, "
+                                      "free the name or declare another container_name")
                 port = _host_port(current, s.port) or s.host_port
                 return self._health(s, name, bridge, port, adopted=True)
             raise DockerError(f"container {name} exists and is not this run's (image {image}, running={running}); "
@@ -244,6 +251,15 @@ def _set_docker_image(toml_text: str, image: str) -> str:
     if re.search(r"(?m)^\[environment\]\s*$", toml_text):
         return re.sub(r"(?m)^\[environment\]\s*$", "[environment]\n" + line, toml_text, count=1)
     return toml_text.rstrip("\n") + f"\n\n[environment]\n{line}\n"
+
+
+def _host_ip(container: Mapping[str, Any], cport: int) -> str | None:
+    """The host address the container's port binding names (None: any address / unset)."""
+    bindings = ((container.get("HostConfig") or {}).get("PortBindings") or {}).get(f"{cport}/tcp") or []
+    for b in bindings:
+        if b.get("HostIp"):
+            return str(b["HostIp"])
+    return None
 
 
 def _host_port(container: Mapping[str, Any], cport: int) -> int | None:

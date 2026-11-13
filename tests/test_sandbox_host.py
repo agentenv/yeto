@@ -29,12 +29,14 @@ class FakeDaemon:
         self.calls: list[list[str]] = []
         self.n = 0
 
-    def add_container(self, name, image, *, labels=None, running=True, port=None, cport=9111):
+    def add_container(self, name, image, *, labels=None, running=True, port=None, cport=9111, host_ip=None):
         self.n += 1
         cid = f"c{self.n:04d}"
         self.containers[cid] = {"Id": cid, "Name": "/" + name, "Config": {"Image": image, "Labels": dict(labels or {})},
                                 "State": {"Running": running},
-                                "HostConfig": {"PortBindings": {f"{cport}/tcp": [{"HostPort": str(port)}]} if port else {}},
+                                "HostConfig": {"PortBindings": {f"{cport}/tcp": [{"HostPort": str(port),
+                                                                                  **({"HostIp": host_ip} if host_ip else {})}]}
+                                               if port else {}},
                                 "_port": port}
         return cid
 
@@ -263,6 +265,32 @@ def test_existing_foreign_container_is_adopted_not_touched(world):
     assert sc["adopted"] and sc["host_port"] == 19100 and sc["container"] == "cybergym-ts-cg-1"
     assert cid in d.containers and d.containers[cid]["Config"]["Labels"] == {}
     assert not [c for c in d.calls if c[:2] == ["docker", "rm"]]
+
+
+def test_foreign_container_on_a_stale_bridge_address_is_an_error_and_left_alone(world):
+    # the daemon's bridge moved (172.17.0.1 -> 10.9.0.1): the old binding publishes nothing
+    d = world["daemon"]
+    d.images["ts:cg-1"] = "sha256:ts1"
+    cid = d.add_container("cybergym-ts-cg-1", "ts:cg-1", port=19100, host_ip="172.17.0.1")
+    (world["tmp"] / "tasks" / "cg_1" / "yeto-sidecars.json").write_text(json.dumps(
+        {"sidecars": [{"name": "ts", "image": "ts:cg-1", "port": 9111, "host_port": 19100,
+                       "container_name": "cybergym-ts-cg-1", "health": "/health"}]}))
+    world["cfg"] = parse_envs(world["section"])
+    report = _prepare(world)
+    assert [f["task_id"] for f in report["failed"]] == ["cg_1"]
+    assert "172.17.0.1" in str(report["failed"]) and "10.9.0.1" in str(report["failed"])
+    assert cid in d.containers and not [c for c in d.calls if c[:2] == ["docker", "rm"]]
+
+
+def test_foreign_container_on_the_bridge_address_is_adopted(world):
+    d = world["daemon"]
+    d.images["ts:cg-1"] = "sha256:ts1"
+    d.add_container("cybergym-ts-cg-1", "ts:cg-1", port=19100, host_ip="10.9.0.1")
+    (world["tmp"] / "tasks" / "cg_1" / "yeto-sidecars.json").write_text(json.dumps(
+        {"sidecars": [{"name": "ts", "image": "ts:cg-1", "port": 9111, "host_port": 19100,
+                       "container_name": "cybergym-ts-cg-1", "health": "/health"}]}))
+    world["cfg"] = parse_envs(world["section"])
+    assert _prepare(world)["ok"]
 
 
 def test_foreign_container_with_another_image_is_an_error_and_left_alone(world):
