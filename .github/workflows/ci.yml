@@ -6,8 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# A newer push to a pull request cancels the run of its older head (a full python
-# run takes about 50 minutes). On main every commit runs to the end.
+# A newer push to a pull request cancels the run of its older head. On main a
+# started run is never cancelled, but GitHub keeps at most one pending run per
+# group, so a burst of merges supersedes the queued (not yet started) main runs
+# and only the newest of them runs. Each pull request has its own group
+# (refs/pull/N/merge), so nothing here cancels a pull request's checks.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -23,9 +26,16 @@ jobs:
           workspaces: syncer
       - run: cargo test --manifest-path syncer/Cargo.toml
 
-  python:
+  # The python suite (~12k tests, ~41 min serial) runs as 4 parallel shards; see
+  # --shard in tests/conftest.py (whole files; every collected test runs in exactly one shard).
+  python-shard:
+    name: python-${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       # Full history: some tests compare against older commits via git show/archive.
       - uses: actions/checkout@v4
@@ -35,6 +45,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Repository hygiene (size, secrets, e-mail, private IPs, home paths)
+        if: matrix.shard == 0
         run: git ls-files -z | xargs -0 python scripts/precommit_check.py
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -76,8 +87,15 @@ jobs:
           HF_HUB_OFFLINE: "1"
           YETO_REQUIRE_HF_ASSETS: "1"
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: PYTHONPATH=. python -m pytest tests -q -p no:cacheprovider -rfEs --timeout=600 --durations=25
+        run: PYTHONPATH=. python -m pytest tests -q -p no:cacheprovider -rfEs --timeout=600 --durations=25 --shard ${{ matrix.shard }}/4
 
+  # The one required/automerge-visible python result: green only when every shard is.
+  python:
+    if: always()
+    needs: python-shard
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.python-shard.result }}" = success
 
   # Boat/sandbox tests import harbor, which needs Python >= 3.12 and conflicts
   # with the skypilot pin in the `test` extra (uvicorn), so the 3.11 `python`

@@ -11,6 +11,13 @@ def pytest_addoption(parser):
         default=False,
         help="collect and run tests marked ray_local (they start Ray on this machine)",
     )
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="I/N",
+        help="run only shard I (0-based) of N: whole test files dealt by test count, "
+        "so every test runs in exactly one shard",
+    )
 
 
 def pytest_configure(config):
@@ -145,12 +152,40 @@ def _fixed_thread_reading(monkeypatch):
 
 def pytest_collection_modifyitems(config, items):
     """Deselect ray_local tests unless --run-ray-local is given (deselect, not skip,
-    so that no fixture of these tests runs)."""
-    if config.getoption("--run-ray-local"):
+    so that no fixture of these tests runs). Then keep only this --shard."""
+    if not config.getoption("--run-ray-local"):
+        keep, drop = [], []
+        for item in items:
+            (drop if item.get_closest_marker("ray_local") else keep).append(item)
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = keep
+    _select_shard(config, items)
+
+
+def _select_shard(config, items):
+    spec = config.getoption("--shard")
+    if not spec:
         return
-    keep, drop = [], []
+    index, count = (int(x) for x in spec.split("/"))
+    if not 0 <= index < count:
+        raise _pytest.UsageError(f"--shard {spec}: need 0 <= I < N")
+    # Whole files, so each file's tests keep their serial order and module state;
+    # files dealt largest-first to the shard with the fewest tests (ties by name),
+    # which is deterministic across runners.
+    per_file: dict[str, int] = {}
     for item in items:
-        (drop if item.get_closest_marker("ray_local") else keep).append(item)
+        path = item.nodeid.split("::", 1)[0]
+        per_file[path] = per_file.get(path, 0) + 1
+    load = [0] * count
+    shard_of: dict[str, int] = {}
+    for path, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+        target = min(range(count), key=lambda s: (load[s], s))
+        shard_of[path] = target
+        load[target] += n
+    keep = [item for item in items if shard_of[item.nodeid.split("::", 1)[0]] == index]
+    drop = [item for item in items if shard_of[item.nodeid.split("::", 1)[0]] != index]
+    print(f"\nshard {index}/{count}: {len(keep)} of {len(items)} tests")
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep
