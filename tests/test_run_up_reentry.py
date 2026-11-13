@@ -211,3 +211,32 @@ def test_run_down_without_a_running_up_takes_the_lock_at_once(make_run, monkeypa
     monkeypatch.setattr(up.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("no kill")))
     assert run.lock_for_down(grace_s=3, poll_s=1) is True
     assert (run.dir / "up.lock").read_text() == str(os.getpid())
+
+
+def test_run_scale_and_the_run_up_monitor_do_not_drop_each_others_state(make_run, monkeypatch):
+    """``run scale`` (its own process) appends to ``scales`` while ``run up``'s monitor
+    keeps writing from its older copy: neither write loses the other's change."""
+    import json
+
+    monitor, scaler = make_run(), make_run()
+    monitor.mark("pool")
+    scaler2 = make_run()  # read after the pool step
+    monkeypatch.setattr(up.subprocess, "run", lambda *a, **k: type("P", (), {"returncode": 0})())
+    monkeypatch.setattr(scaler2, "scale_refusal", lambda wanted, i=0: None)
+    assert scaler2.scale(3) == 0
+    monitor.state["breaker"] = {"at": "t", "why": "w"}
+    monitor.save()  # the monitor's copy has no scales
+    monitor.mark("first_group")
+    assert scaler2.scale(4) == 0  # its copy has no breaker / first_group
+    disk = json.loads(monitor.state_path.read_text())
+    assert [s["samplers"] for s in disk["scales"]] == [3, 4]
+    assert disk["breaker"]["why"] == "w"
+    assert set(disk["steps"]) == {"pool", "first_group"}
+    scaler.state.setdefault("procs", {})["trainer"] = {"pid": 1}
+    scaler.save()
+    disk = json.loads(monitor.state_path.read_text())
+    assert disk["procs"]["trainer"] == {"pid": 1} and len(disk["scales"]) == 2
+    monitor.state.pop("breaker")
+    monitor.save()  # a key this process removes is removed
+    assert "breaker" not in json.loads(monitor.state_path.read_text())
+    assert not list(monitor.dir.glob(".state.json.*.tmp"))

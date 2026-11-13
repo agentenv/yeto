@@ -67,6 +67,7 @@ finds the pool holding T); ``yeto rollout scale`` is the same command.
 from __future__ import annotations
 
 import atexit
+import copy
 import fcntl
 import json
 import os
@@ -162,6 +163,31 @@ def _pythonpath_without_start_dir(env: dict[str, str]) -> dict[str, str]:
     return {"PYTHONPATH": os.pathsep.join(kept)}
 
 
+def _merge_state(base: Any, mine: Any, disk: Any) -> Any:
+    """Three-way merge of ``state.json``: ``base`` is what this process last read or wrote,
+    ``mine`` its copy now, ``disk`` the file now. Keys this process did not touch keep the
+    disk value; dicts merge key by key; a list this process only appended to gets its new
+    items after the disk list; any other change of this process wins."""
+    if mine == base:
+        return disk
+    if isinstance(mine, dict) and isinstance(base, dict) and isinstance(disk, dict):
+        out = dict(disk)
+        for key in set(base) | set(mine):
+            if key not in mine:
+                if key in base and base[key] == disk.get(key):
+                    out.pop(key, None)
+                continue
+            if key in base and key in disk:
+                out[key] = _merge_state(base[key], mine[key], disk[key])
+            elif mine.get(key) != base.get(key) or key not in disk:
+                out[key] = mine[key]
+        return out
+    if (isinstance(mine, list) and isinstance(base, list) and isinstance(disk, list)
+            and mine[:len(base)] == base):
+        return disk + mine[len(base):]
+    return mine
+
+
 class Run:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -170,6 +196,7 @@ class Run:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.dir / "state.json"
         self.state: dict[str, Any] = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self._state_base: dict[str, Any] = copy.deepcopy(self.state)
         self.env = dict(os.environ)
         self.env.update({k: os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
         self.env.setdefault("YETO_RESOURCE_LEDGER", str(Path(f"~/.yeto/runs/{self.run}/resources.jsonl").expanduser()))
@@ -186,7 +213,26 @@ class Run:
 
     # -- state
     def save(self) -> None:
-        self.state_path.write_text(json.dumps(self.state, indent=1, sort_keys=True))
+        """Write ``state.json`` as a read-modify-write under ``state.lock`` (``flock``):
+        several processes of a run write it (``run up``'s monitor, ``run scale``, ``run
+        down``), each from its own copy. Only what this process changed since it last read
+        or wrote the file is applied to what is on disk now (a list it appended to gets the
+        appended items), so one writer no longer drops another's ``scales`` / ``steps`` /
+        ``procs``. The write is atomic (temp file + rename): a reader never sees half a file."""
+        with open(self.dir / "state.lock", "a+") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                disk = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+            except ValueError:
+                disk = {}
+            base = getattr(self, "_state_base", None)
+            merged = _merge_state(base if base is not None else disk, self.state, disk)
+            tmp = self.state_path.with_name(f".state.json.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(merged, indent=1, sort_keys=True))
+            os.replace(tmp, self.state_path)
+        self.state.clear()  # in place: callers may hold self.state
+        self.state.update(merged)
+        self._state_base = copy.deepcopy(merged)
 
     def mark(self, step: str, **fields: Any) -> None:
         self.state.setdefault("steps", {})[step] = {"at": _now(), **fields}
