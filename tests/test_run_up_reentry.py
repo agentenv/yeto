@@ -41,7 +41,7 @@ def test_a_crashed_run_up_leaves_no_stale_lock(make_run, monkeypatch):
     monkeypatch.setattr(up, "load_config", lambda path: {})
     assert up.main(_args()) == 0
     assert order == ["pool", "trainer", "dashboard"]
-    assert (again.dir / "up.lock").read_text() == str(os.getpid())
+    assert up._parse_lock_holder((again.dir / "up.lock").read_text())["pid"] == os.getpid()
 
 
 def test_a_left_stop_flag_does_not_drain_the_pools_of_the_next_in_process_run_up(make_run, monkeypatch):
@@ -210,7 +210,8 @@ def test_run_down_without_a_running_up_takes_the_lock_at_once(make_run, monkeypa
     run = make_run()
     monkeypatch.setattr(up.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("no kill")))
     assert run.lock_for_down(grace_s=3, poll_s=1) is True
-    assert (run.dir / "up.lock").read_text() == str(os.getpid())
+    holder = up._parse_lock_holder((run.dir / "up.lock").read_text())
+    assert holder["role"] == "down" and holder["pid"] == os.getpid() and holder["start"] == up._proc_start(os.getpid())
 
 
 def test_run_scale_and_the_run_up_monitor_do_not_drop_each_others_state(make_run, monkeypatch):
@@ -240,3 +241,89 @@ def test_run_scale_and_the_run_up_monitor_do_not_drop_each_others_state(make_run
     monitor.save()  # a key this process removes is removed
     assert "breaker" not in json.loads(monitor.state_path.read_text())
     assert not list(monitor.dir.glob(".state.json.*.tmp"))
+
+
+def test_run_down_reload_resets_the_merge_base_so_scales_are_not_appended_twice(make_run, monkeypatch):
+    """Disk [n1]; a ``run scale`` appends n2 while down's copy is older; down reloads in
+    ``lock_for_down`` and saves at the end: [n1, n2], not [n1, n2, n2]."""
+    import json
+
+    first = make_run()
+    first.state["scales"] = [{"samplers": 1}]
+    first.save()
+    down = make_run()  # read [n1]
+    scaler = make_run()
+    scaler.state["scales"].append({"samplers": 2})
+    scaler.save()
+    assert down.lock_for_down(grace_s=1, poll_s=1) is True
+    down.state["procs"] = {}
+    down.save()
+    assert [s["samplers"] for s in json.loads(down.state_path.read_text())["scales"]] == [1, 2]
+
+
+def test_run_down_shuts_down_with_a_truncated_state_json(make_run, monkeypatch):
+    run = make_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    run.state["procs"] = {"trainer": {"pid": 999999, "log": "t.log"}}
+    run.save()
+    run.state_path.write_text('{"procs": {"tra')  # truncated
+    assert run.lock_for_down(grace_s=1, poll_s=1) is True
+    assert run.state["procs"]["trainer"]["log"] == "t.log"  # the copy in memory
+    run.calls.clear()
+    run.down()
+    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
+
+
+def test_run_down_waits_for_another_run_down_without_sigterm(make_run, monkeypatch):
+    import json
+
+    run = make_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    monkeypatch.setattr(up.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("no kill")))
+    held = up.Run.__new__(up.Run)
+    held.dir = run.dir
+    assert held.lock_up(role="down") is None
+    try:
+        assert run.lock_for_down(grace_s=2, poll_s=1) is False
+        assert run.lock_holder["role"] == "down"
+    finally:
+        held._up_lock.close()
+    (run.dir / "up.lock").write_text(json.dumps({"role": "down", "pid": 1, "start": None}))
+    assert run.lock_for_down(grace_s=1, poll_s=1) is True  # the other down exited
+
+
+def test_run_down_does_not_sigterm_a_reused_pid(make_run, monkeypatch):
+    import json
+
+    run = make_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    monkeypatch.setattr(up.os, "kill", lambda pid, sig: (_ for _ in ()).throw(AssertionError("no kill")))
+    held = up.Run.__new__(up.Run)
+    held.dir = run.dir
+    assert held.lock_up() is None
+    (run.dir / "up.lock").write_text(json.dumps({"role": "up", "pid": 424242, "start": "not-its-start"}))
+    monkeypatch.setattr(up, "_proc_start", lambda pid: "another-process")
+    try:
+        assert run.lock_for_down(grace_s=1, poll_s=1) is False
+    finally:
+        held._up_lock.close()
+
+
+def test_run_down_grace_from_the_environment(make_run, monkeypatch):
+    run = make_run()
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    slept = []
+    monkeypatch.setattr(up.time, "sleep", slept.append)
+    held = up.Run.__new__(up.Run)
+    held.dir = run.dir
+    assert held.lock_up() is None
+    monkeypatch.setenv("YETO_RUN_DOWN_GRACE_S", "5")
+    try:
+        assert run.lock_for_down(poll_s=1) is False
+        assert len(slept) == 5
+        slept.clear()
+        monkeypatch.delenv("YETO_RUN_DOWN_GRACE_S")
+        assert run.lock_for_down(poll_s=1) is False
+        assert len(slept) == up.DOWN_GRACE_S == 60
+    finally:
+        held._up_lock.close()
