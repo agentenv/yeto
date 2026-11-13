@@ -100,6 +100,16 @@ SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an ow
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
 
+def _log_tail(path: str | os.PathLike, offset: int = 0, size: int = 200_000) -> str:
+    """The last ``size`` bytes of a log at or after byte ``offset`` (the current launch's
+    start in an appended log), read with a seek: a multi-day log is never read whole."""
+    with open(path, "rb") as fh:
+        end = fh.seek(0, os.SEEK_END)
+        start = max(int(offset or 0), end - size, 0)
+        fh.seek(start)
+        return fh.read(end - start).decode("utf-8", "replace")
+
+
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -1076,7 +1086,7 @@ class Run:
         tr = (self.state.get("procs") or {}).get("trainer") if trainer else None
         if why is None and tr and not _alive(tr["pid"]):
             try:
-                tail = Path(tr["log"]).read_bytes()[int(tr.get("offset", 0)):][-20_000:].decode("utf-8", "replace")
+                tail = _log_tail(tr["log"], int(tr.get("offset", 0)), 20_000)
             except OSError:
                 tail = ""
             done = FINISHED.findall(tail)
@@ -1437,7 +1447,8 @@ class Run:
         it ended the trainer on a store refusal no retry changes (credentials, bucket)."""
         log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
         try:
-            tail = Path(log).read_bytes()[-200_000:].decode("utf-8", "replace") if log else ""
+            offset = int(((self.state.get("procs") or {}).get("trainer") or {}).get("offset") or 0)
+            tail = _log_tail(log, offset) if log else ""
         except OSError:
             return None
         from yeto.rl.engine.incarnation_lease import FATAL_MARK  # noqa: PLC0415
