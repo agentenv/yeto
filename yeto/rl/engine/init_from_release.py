@@ -58,7 +58,11 @@ FAILURE_REASON_MAX = 500  # characters of the reason line kept (the launcher pri
 _URL_QUERY = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s?#'\"]*)\?[^\s'\"]*", re.I)
 _URL_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s@'\"]+@", re.I)
 _SECRET_PAIR = re.compile(r"((?:secret|token|password|passwd|credential|signature|authorization|"
-                          r"access[_-]?key|api[_-]?key)[a-z0-9_-]*['\"]?\s*[:=]\s*['\"]?)[^\s'\",;&]+", re.I)
+                          r"access[_-]?key|api[_-]?key)[a-z0-9_-]{0,40}['\"]?\s*[:=]\s*['\"]?)(?!\d+\b)[^\s'\",;&]+", re.I)
+# bounded suffix: an unbounded one backtracks quadratically on long keyword-dense words;
+# an all-digit value (``max_tokens=8192``) is a count, kept for diagnosis
+_AUTH_SCHEME = re.compile(r"\b(bearer|authorization['\"]?\s*[:=]\s*['\"]?[a-z]+)\s+[a-z0-9._~+/=-]{8,}", re.I)
+_PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S)
 _SECRET_ENV = re.compile(r"SECRET|TOKEN|PASSWORD|KEY|CREDENTIAL", re.I)
 
 
@@ -71,6 +75,8 @@ def redact_text(text: str, environ: Mapping[str, str] | None = None) -> str:
             text = text.replace(value, "<redacted>")
     text = _URL_QUERY.sub(r"\1?<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
+    text = _PEM_BLOCK.sub("<redacted private key>", text)
+    text = _AUTH_SCHEME.sub(r"\1 <redacted>", text)
     return _SECRET_PAIR.sub(r"\1<redacted>", text)
 
 

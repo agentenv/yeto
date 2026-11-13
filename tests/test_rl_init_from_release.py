@@ -285,3 +285,28 @@ def test_a_failure_reason_carries_no_credentials(tmp_path, store, monkeypatch):
     for leaked in (secret, "abcdef", "X-Amz-Credential", "AKID", "tok123456"):
         assert leaked not in reason
     assert reason.startswith("RuntimeError: GET https://acct.r2.cloudflarestorage.com/b/k?<redacted>")
+
+
+def test_redact_text_covers_bearer_basic_and_pem_and_keeps_counts():
+    """Bearer / ``Authorization: Basic`` credentials and PEM private keys are redacted;
+    digit-only counts (``max_tokens=8192``) and paths stay readable for diagnosis."""
+    from yeto.rl.engine.init_from_release import redact_text
+
+    fake = "Zk3u" + "FAKEVALUE" + "0123456789"
+    text = (f"Authorization: Bearer {fake}\nAuthorization: Basic {fake}==\nbearer {fake}\n"
+            "-----BEGIN " + "RSA PRIVATE KEY-----\n" + f"MIIE{fake}\n{fake}\n-----END RSA PRIVATE KEY-----\n"
+            "max_tokens=8192 token_count=12 path=/data/key_value.bin")
+    out = redact_text(text, {})
+    assert fake not in out and "MIIE" not in out
+    assert "max_tokens=8192 token_count=12 path=/data/key_value.bin" in out
+
+
+def test_redact_text_is_linear_on_long_keyword_dense_words():
+    """No quadratic backtracking: a long word full of keywords is redacted quickly."""
+    import time
+
+    from yeto.rl.engine.init_from_release import redact_text
+
+    t0 = time.monotonic()
+    redact_text("token" * 40000 + " " + "accesskey" * 20000, {})
+    assert time.monotonic() - t0 < 2.0
