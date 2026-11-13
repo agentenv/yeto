@@ -50,3 +50,36 @@ def test_a_foreign_current_ticket_is_not_retried(tmp_path):
     run = Script(status_of({**QUEUED, "id": "other"}))
     with pytest.raises(ncc.NcError, match="expected abc"):
         _client(run, tmp_path).wait_active("abc", log=lambda m: None)
+
+
+def test_the_failure_count_resets_after_a_good_read(tmp_path):
+    fails = [BAD] * (ncc.WAIT_STATUS_RETRIES - 1)
+    run = Script(*fails, status_of(QUEUED), *fails, status_of(ACTIVE))
+    assert _client(run, tmp_path).wait_active("abc", log=lambda m: None).ticket == "abc"
+
+
+@pytest.mark.parametrize("after", [None, {**QUEUED, "id": "other"}])
+def test_a_ticket_gone_or_replaced_during_retries_ends_the_wait(tmp_path, after):
+    run = Script(status_of(QUEUED), BAD, status_of(after))
+    with pytest.raises(ncc.NcError, match="expected abc"):
+        _client(run, tmp_path).wait_active("abc", log=lambda m: None)
+    assert run.manage == []
+
+
+def test_a_ticket_ended_during_retries_ends_the_wait(tmp_path):
+    run = Script(status_of(QUEUED), BAD, status_of({**QUEUED, "state": "ended", "end_reason": "deleted"}))
+    with pytest.raises(ncc.NcError, match="ended before active"):
+        _client(run, tmp_path).wait_active("abc", log=lambda m: None)
+
+
+def test_a_refusal_from_a_status_read_is_not_retried(tmp_path, monkeypatch):
+    calls = []
+
+    def refuse(self, **kw):
+        calls.append(1)
+        raise ncc.NcRefused("guard")
+
+    monkeypatch.setattr(ncc.NcClient, "status", refuse)
+    with pytest.raises(ncc.NcRefused):
+        _client(Script(), tmp_path).wait_active("abc", log=lambda m: None)
+    assert calls == [1]
