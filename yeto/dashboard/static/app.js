@@ -57,7 +57,7 @@ function header(){
   $("navSub").textContent=(O.global_status||{}).text||"";
 }
 function kpis(){
-  var gs=O.global_status||{},c=O.cost||{},isl=(O.islands||[]).find(function(x){return x.id===SEL})||{},last=RS[RS.length-1]||{};
+  var gs=O.global_status||{},c=O.cost||{},ru=c.run_up||null,isl=(O.islands||[]).find(function(x){return x.id===SEL})||{},last=RS[RS.length-1]||{};
   var rate=(c.islands||[]).reduce(function(a,r){return a+(fin(r.rate_usd_h)?r.rate_usd_h:0)},0);
   var dur=fin(O.data_ts)&&fin(O.first_ts)?O.data_ts-O.first_ts:null;
   var pubs=RS.map(function(r){return r.published_version}).filter(fin);
@@ -66,6 +66,7 @@ function kpis(){
     ["Estimated cost",fin(c.total_usd)?"$"+f(c.total_usd,1):"n/a",(rate?"$"+f(rate,2):"n/a")+"/h ("+((c.gpu_only||[]).length?"some GPU only":"GPU+CPU+memory")+")"+(fin(c.budget_pct)?" · budget "+f(c.budget_pct,0)+"%":"")],
     ["Rounds",String(RS.length),pubs.length?"published up to v"+Math.max.apply(null,pubs):"nothing published yet"],
     ["Duration",hm(dur),isl.starting?"starting for "+hm(isl.startup_s):"first to last event"],
+    ["Run uptime",ru&&fin(ru.cumulative_runtime_h)?hm(ru.cumulative_runtime_h*3600):"n/a",ru?(ru.ups+" up(s)"+(fin(ru.current_up_runtime_h)?" · this up "+hm(ru.current_up_runtime_h*3600):"")+(fin(ru.spend_usd_estimate)?" · spend $"+f(ru.spend_usd_estimate,1):"")):"no run up state"],
     ["Throughput",f(last.tok_s,0),"tok/s, last round"]];
   $("kpis").innerHTML=cards.map(function(x){return '<div class="kpi'+(x[3]?" main":"")+'"><div class="k">'+x[0]+'</div><div class="v">'+x[1]+'</div><div class="s">'+esc(x[2])+'</div></div>'}).join("");
   var al=O.alerts||[];$("alertBox").hidden=!al.length;

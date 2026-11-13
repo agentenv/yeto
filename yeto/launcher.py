@@ -1171,6 +1171,12 @@ def dry_run_plan(args) -> dict:
     from .rl.engine import sample_roles
 
     trainer_loop.check(args)  # the launch refuses the same scheduler combinations
+    if rl:
+        from .launch.code_pack import run_code_pack_problem
+
+        problem = run_code_pack_problem(args)  # the launch's pinned-pack refusal, found early
+        if problem is not None:
+            raise ValueError(problem)
     specs = parse_gpu_spec(args.gpu)
     external = max(0, getattr(args, "external_learners", 0) or 0)
     islands = []

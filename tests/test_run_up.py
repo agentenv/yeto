@@ -386,7 +386,8 @@ def test_dashboard_gets_the_run_name_budget_and_prices(make_run, tmp_path):
     """The dashboard of ``up`` names the run, prices the trainer from the launcher's
     fleet record (``--run``) and draws the cost bar against ``budget.usd``."""
     run = make_run(usd=60)
-    assert run.dashboard_args() == ["--store", "s3://b/runs/r1", "--run", "r1-trainer", "--budget", "60"]
+    assert run.dashboard_args() == ["--store", "s3://b/runs/r1", "--run", "r1-trainer",
+                                    "--up-state", str(run.state_path), "--budget", "60"]
     run.cfg["dashboard"] = {"port": 1, "prices": str(tmp_path / "prices.json")}
     assert run.dashboard_args()[-2:] == ["--prices", str(tmp_path / "prices.json")]
     run.cfg["budget"] = {}
