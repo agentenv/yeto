@@ -1181,3 +1181,87 @@ def pool_status(cfg: dict[str, Any], config_path: str, *, events: int = 20) -> i
     if left:
         print(f"note: {lease_warning(cfg, config_path)}", file=sys.stderr)
     return 0
+
+
+# -- delete one ticket of this run -------------------------------------------------
+
+PROTECTED_NC_ACCOUNTS = frozenset({2, 3})  # production accounts: never deleted on, whatever the config says
+RELEASED_STATES = frozenset({"ended", "released"})
+
+
+def protected_accounts(cfg: dict[str, Any]) -> frozenset[int]:
+    """The accounts ``delete-ticket`` refuses: :data:`PROTECTED_NC_ACCOUNTS` plus the
+    config's ``protected_accounts`` (it can only add to the built-in set)."""
+    return PROTECTED_NC_ACCOUNTS | {int(a) for a in cfg.get("protected_accounts") or ()}
+
+
+def _ticket_evidence(cfg: dict[str, Any], ticket: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The ledger rows of this run and the pool state members that name ``ticket``."""
+    run = cli.run_id(cfg)
+    rows = [r for r in cli.ledger().load() if r.get("ticket") == ticket and r.get("run") == run]
+    try:
+        doc = json.loads(cli.pool_state_path(cfg).read_text())
+    except (OSError, ValueError):
+        doc = {}
+    members = [m for m in doc.get("members", []) if m.get("ticket") == ticket]
+    return rows, members
+
+
+def delete_own_ticket(cfg: dict[str, Any], config_path: str, ticket: str, *, yes: bool = False) -> int:
+    """``delete-ticket --config F --ticket T [--yes]``: release one ticket this run
+    ordered. Refused (exit 2, nothing sent) unless ``T`` is in this run's ledger rows
+    or pool state, on an account of the config, not a protected account, and no pool
+    loop of the config is alive. Without ``--yes`` it only prints what it would delete.
+    No pattern, list or ``--all``: one exact ticket id per call."""
+    check_state_file(cfg)
+    cli.pool_config(cfg, allowed=None)
+
+    def refuse(why: str) -> int:
+        print(f"delete-ticket: refused, nothing sent: {why}", file=sys.stderr)
+        return 2
+
+    if not is_national_compute(cfg):
+        return refuse("the pool config is not a National Compute pool")
+    if not ticket or any(c in ticket for c in "*?[],; \t") or ticket.lower() in ("all", "--all"):
+        return refuse(f"ticket {ticket!r} is not one exact ticket id (no patterns, lists or 'all')")
+    rows, members = _ticket_evidence(cfg, ticket)
+    run = cli.run_id(cfg)
+    if not rows and not members:
+        return refuse(f"ticket {ticket} is in neither the ledger rows of run {run!r} nor the pool state "
+                      f"{cli.pool_state_path(cfg)}: this run did not order it")
+    accounts = {int(r["account"]) for r in rows} | {int(m["account"]) for m in members if "account" in m}
+    if len(accounts) != 1:
+        return refuse(f"ticket {ticket}: the records disagree on its account ({sorted(accounts)})")
+    account = accounts.pop()
+    pool_accounts = [int(a) for a in cfg.get("accounts") or ()]
+    if account not in pool_accounts:
+        return refuse(f"ticket {ticket} is on account {account}, not one of the pool's accounts {pool_accounts}")
+    if account in protected_accounts(cfg):
+        return refuse(f"account {account} is protected ({sorted(protected_accounts(cfg))}: production); "
+                      f"release it in the National Compute console if you must")
+    proc = pool_process(cfg)
+    if proc is not None and proc.get("alive"):
+        return refuse(f"the pool loop of {config_path} is running (pid {proc.get('pid')}): use "
+                      f"pool-scale --remove {ticket} so the pool does not replace it")
+    where = ", ".join(([f"ledger ({len(rows)} row)"] if rows else []) + (["pool state"] if members else []))
+    print(f"delete-ticket: run {run}, account {account}, ticket {ticket} (recorded in: {where})")
+    if not yes:
+        print("delete-ticket: dry run, nothing sent; pass --yes to delete this one ticket")
+        return 0
+    events = event_log(cfg)
+    try:
+        result = cli.client(account).delete(ticket)
+    except Exception as error:
+        events("ticket_delete_failed", ticket=ticket, account=account, error=repr(error)[:300], source="manual")
+        print(f"delete-ticket: ticket {ticket}: delete failed: {error}", file=sys.stderr)
+        return 1
+    state, reason = result.get("state"), result.get("end_reason")
+    if state not in RELEASED_STATES and reason not in RELEASED_STATES:
+        events("ticket_delete_unconfirmed", ticket=ticket, account=account, state=state, source="manual")
+        print(f"delete-ticket: ticket {ticket}: the delete returned state={state} end_reason={reason}, "
+              f"not ended/released; check the National Compute console", file=sys.stderr)
+        return 1
+    events("ticket_deleted", ticket=ticket, account=account, state=state, end_reason=reason,
+           already=bool(result.get("already")), source="manual")
+    print(f"delete-ticket: ticket {ticket} on account {account}: state={state} end_reason={reason}")
+    return 0
