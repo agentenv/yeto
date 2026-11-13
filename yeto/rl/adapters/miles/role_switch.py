@@ -52,6 +52,47 @@ def check_trainer_command(command: Any) -> list[str]:
     return argv
 
 
+INIT_RELEASE_DIR_FLAG = "--rl-init-from-release-dir"
+DEFAULT_INIT_RELEASE_DIR = "~/yeto-init-release"  # yeto.launch.storage.RL_INIT_RELEASE_DIR
+
+
+def _flag_value(argv: list[str], flag: str) -> str | None:
+    value = None
+    for i, token in enumerate(argv):
+        if token == flag and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif token.startswith(flag + "="):
+            value = token.split("=", 1)[1]
+    return value
+
+
+def continue_from_release(argv: list[str], releases: Any, *,
+                          prepare: Callable[..., Any] | None = None) -> list[str]:
+    """``--rl-round-cuts off``: the trainer command runs here, not through the launcher's
+    run script, so this container prepares what every launched trainer node prepares
+    before its Ray starts (``init_from_release --if-released``): the store's newest
+    release when it holds one, else the start from the base. The argv gets
+    ``--rl-init-from-release-dir`` (the launcher's dry run already names it). Without
+    ``off`` the argv is returned unchanged."""
+    if _flag_value(argv, "--rl-round-cuts") != "off":
+        return argv
+    from yeto.rl.engine import init_from_release
+
+    out = _flag_value(argv, INIT_RELEASE_DIR_FLAG)
+    if out is None:
+        out = DEFAULT_INIT_RELEASE_DIR
+        argv = [*argv, INIT_RELEASE_DIR_FLAG, out]
+    model = _flag_value(argv, "--model")
+    if not model:
+        raise RoleSwitchError("role_switch.trainer.command has no --model")
+    revision = _flag_value(argv, "--model-revision")
+    selection = _flag_value(argv, "--rl-expert-selection")
+    (prepare or init_from_release.prepare_if_released)(
+        releases, lambda: init_from_release.base_path(model, revision), os.path.expanduser(out),
+        expected_selection_sha256=init_from_release.selection_sha256(selection))
+    return argv
+
+
 def trainer_environ(state: RoleState, base: Mapping[str, str], extra: Mapping[str, Any] | None = None
                     ) -> dict[str, str]:
     env = {**base, NODE_ENV: state.node, INCARNATION_ENV: str(state.incarnation),
@@ -78,7 +119,7 @@ def report_from_releases(releases: Any, *, before: Any, watermark: int | None) -
 def subprocess_trainer(state: RoleState, plan: RoleSwitchPlan, context: TrainerContext, *,
                        run: Callable[..., Any] = subprocess.run) -> TrainerPhaseReport:
     """Run the trainer command to its end; the release store tells what it released."""
-    argv = check_trainer_command(plan.trainer.get("command"))
+    argv = continue_from_release(check_trainer_command(plan.trainer.get("command")), context.releases)
     before = context.releases.latest()
     env = trainer_environ(state, os.environ if not context.environ else context.environ, plan.trainer.get("env"))
     print(f"[role-switch] node {state.node}: trainer incarnation {state.incarnation} from watermark "

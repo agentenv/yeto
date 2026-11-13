@@ -97,15 +97,39 @@ def _k31_island_flags(args, selection_path: str | None = None) -> str:
             out += f" --{dest.replace('_', '-')} {shlex.quote(str(value))}"
     return out
 
+def init_release_if_released(args) -> bool:
+    """``--rl-round-cuts off`` on a full-parameter trainer island without
+    ``--rl-init-from-release``: every node adds ``--rl-init-from-release latest``
+    itself when the store holds a release (``init_from_release --if-released``,
+    before its Ray starts), so a relaunch never trains base weights under the
+    store's numbering. Decided on the node, not here: the launcher may hold no
+    store credential (a Modal Secret), and a dry-run command (a convertible spec's
+    trainer.command) runs long after the launch."""
+    from ..rl.engine.cut_interval import round_cuts_off
+
+    return (round_cuts_off(args) and not getattr(args, "rl_init_from_release", None)
+            and str(getattr(args, "tuning", None) or "") == "full"
+            and str(getattr(args, "rl_sample_role", None) or "both") in ("both", "trainer"))
+
+
 def init_release_block(args, model: str) -> str:
     """Run-script lines of --rl-init-from-release ("" without it): every node downloads
     the release and lays it over the base before its Ray starts
-    (yeto.rl.engine.init_from_release); a failure ends the node."""
+    (yeto.rl.engine.init_from_release); a failure ends the node. With
+    :func:`init_release_if_released` the node does so only when the store holds one."""
     selector = getattr(args, "rl_init_from_release", None)
-    if not selector:
+    conditional = init_release_if_released(args)
+    if not selector and not conditional:
         return ""
+    if conditional:
+        selector = "latest"
+        print("[launch] --rl-round-cuts off: every trainer node continues from the store's newest "
+              "policy release when it holds one (--rl-init-from-release latest, added on the node "
+              "before Ray starts); a first launch starts from the base", file=sys.stderr, flush=True)
     command = (f"python3 -m yeto.rl.engine.init_from_release --release {shlex.quote(str(selector))} "
                f"--model {shlex.quote(model)} --out {RL_INIT_RELEASE_DIR}")
+    if conditional:
+        command += " --if-released"
     if args.model_revision:
         command += f" --model-revision {shlex.quote(args.model_revision)}"
     if getattr(args, "rl_expert_selection", None):
@@ -456,7 +480,7 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
-    if getattr(args, "rl_init_from_release", None):
+    if getattr(args, "rl_init_from_release", None) or init_release_if_released(args):
         flags += f" --rl-init-from-release-dir {RL_INIT_RELEASE_DIR}"
     if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
         from yeto.rl.engine import backends

@@ -730,8 +730,10 @@ _RESUME = (
                 "off: no round cut is wired, written or read (a full-parameter Kimi-K3.1 cut "
                 "holds bf16 weights, fp32 master and both Adam moments: about 5 TB); a "
                 "relaunch continues from the store's newest release instead "
-                "(--rl-init-from-release; yeto run up adds it on a trainer restart). Refused "
-                "with --rl-cut-every / --rl-cut-auto-mtbf-s / --rl-cut-max-interval-s / "
+                "(every trainer node adds --rl-init-from-release latest when the store holds a "
+                "release; a trainer over releases without it refuses to start). Refused "
+                "with --rl-backend verl and "
+                "--rl-cut-every / --rl-cut-auto-mtbf-s / --rl-cut-max-interval-s / "
                 "--rl-cut-keep / --rl-stop-after-rounds / --rl-resume-allow-config-change"),
     # a timed cut interval
     shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",

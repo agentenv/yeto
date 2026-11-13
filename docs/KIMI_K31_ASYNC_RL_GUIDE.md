@@ -991,19 +991,53 @@ over it the same way instead of failing at its start.
   `off` before anything starts; so is a convertible node
   (`--rl-sample-role convertible`), which hands its trainer state over through
   round cuts. Other runs keep the default `auto`, which behaves as before.
+  `off` is refused with `--rl-backend verl`: the verl island has no
+  `--rl-init-from-release` and does not read the buffer on from a release's
+  trained position, so a relaunch could not continue correctly.
   Resume with `off`:
-  - When `yeto run up` restarts the trainer of a run that launched before,
-    `trainer.argv` has `--rl-round-cuts off`, the store holds a committed
-    policy release (`policy-releases/LATEST.json`) and `trainer.argv` names no
-    `--rl-init-from-release` itself, it adds `--rl-init-from-release latest`
-    and logs that the optimizer state starts fresh (step
-    `trainer_init_from_release` in the run state). The first launch, and a
-    restart before the first release, start from the base checkpoint. If the
-    store cannot be listed, the restart stops with an error instead of
-    guessing.
+  - Every launch path continues from the newest release on its own; no flag
+    has to be added by hand:
+    - `yeto launch` (also a plain re-run of
+      `examples/k31/launch-trainer-modal-b300.sh`): every trainer node of a
+      full-parameter trainer island runs
+      `python -m yeto.rl.engine.init_from_release --release latest --if-released`
+      before its Ray starts. When the store holds a trained policy release it
+      prepares the newest one and logs `adding --rl-init-from-release latest`;
+      when it holds none (the run's first launch) it logs `no policy release
+      yet` and the trainer starts from the base checkpoint. This is decided on
+      the node, not on the launcher: the launcher may have no store credential
+      (a Modal Secret), and a dry-run command is used long after the launch.
+    - Convertible spec (`examples/k31/launch-convertible-modal.sh`): the
+      `role_switch.trainer.command` from the dry run carries
+      `--rl-round-cuts off`; before running it, the container prepares the
+      newest release the same way and adds `--rl-init-from-release-dir`.
+    - `yeto run up`: when it restarts the trainer of a run that launched
+      before, `trainer.argv` has `--rl-round-cuts off`, the store holds a
+      trained policy release and `trainer.argv` names no
+      `--rl-init-from-release` itself, it adds `--rl-init-from-release latest`
+      and logs that the optimizer state starts fresh (step
+      `trainer_init_from_release` in the run state). If the store cannot be
+      listed, the restart stops with an error instead of guessing.
+    "Holds a trained policy release" is judged the same way everywhere: a
+    readable `RELEASE.json` or `LATEST.json` under `policy-releases/` that is
+    not a derived (re-quantized) release. A `RELEASE.json` whose `LATEST.json`
+    was never written counts; a torn record does not.
+  - Safety net in the trainer: with `off`, a trainer that finds releases
+    `v1..vK` in the store but loaded the base checkpoint (no
+    `--rl-init-from-release`, for example an island command started by hand)
+    stops before training with `RoundCutsOffRestartError`: it would continue
+    the numbering at `vK` and read the buffer from `vK`'s trained position, so
+    the groups before that position would never reach the weights. Relaunch
+    through `yeto launch`, add `--rl-init-from-release latest`, or start a new
+    run under a fresh run prefix / store.
   - The trainer loads the newest release, continues the version numbers after
     it, and reads the sample buffer from the position that release was trained
-    up to (`buffer_trained`).
+    up to (`buffer_trained`). If the buffer refuses that position (beyond the
+    index the store holds), the trainer emits
+    `rl_buffer_start_position_refused` and reads from the start, as with round
+    cuts; the `--rl-max-policy-age` gate passes over the stale groups. (A
+    trainer that cannot be told the start position at all stops with an error
+    instead of reading from the start.)
   - Cost of this resume: the Adam moments and step count start from zero and
     the fp32 master copy is rebuilt from the bf16 release weights; the LR
     schedule position is not restored (warmup and decay restart from the
@@ -1028,7 +1062,8 @@ over it the same way instead of failing at its start.
   `--rl-ledger-set-aside-before <now>`. A start from the base then moves the
   earlier batch ledger aside (`ledger.before-<ts>`) instead of stopping on it.
   No manual cleanup is needed.
-- **Without a cut, on a store that holds releases.** A trainer that stopped
+- **Without a cut, on a store that holds releases** (round cuts `auto`; with
+  `off` see the first item). A trainer that stopped
   before its first cut was committed leaves releases `v1..vK` and no cut. The
   next launch starts from the base checkpoint, continues the version numbers
   at `vK`, and reads the sample buffer from the position the weights of `vK`

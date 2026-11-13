@@ -6,7 +6,9 @@
 # of the same object-store buffer. After SAMPLE_MINUTES (or SAMPLE_GROUPS groups, or the store
 # marker convertible/<node>/switch.json written by an operator) this node stops its SGLang server
 # and runs the Miles trainer island on the same GPUs: it reads every island's shard from the
-# newest release's trained buffer position (round cuts are off: --rl-round-cuts off), trains
+# newest release's trained buffer position (round cuts are off: --rl-round-cuts off; before the
+# trainer command runs, the container loads the store's newest release when it holds one, so a
+# re-run of the spec continues from it), trains
 # (score_centering + GRPO advantage, --rl-max-policy-age gating the staleness) and releases whole checkpoints with the selection sha into the store; the A-card
 # samplers keep generating and pull each release. With THEN_SAMPLER=1 the node comes back as a
 # sampler on the newest release when the trainer phase ends.

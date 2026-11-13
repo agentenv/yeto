@@ -68,10 +68,13 @@ def resume_config(args: Any) -> dict[str, Any] | None:
                                              island_cut_store_for, check_round_cuts_off,
                                              round_cuts_off)
 
+    from yeto.rl.engine.cut_interval import VERL_ROUND_CUTS_OFF_REFUSED
+
     check_round_cuts_off(args)
     if round_cuts_off(args):
-        print("[rl] round cuts are off (--rl-round-cuts off): no cut is written or read", flush=True)
-        return None  # no plan["resume"]: wire_round_cuts gets no resume wiring
+        # the launcher refuses it (check_round_cuts_off with --rl-backend verl); an island
+        # started without the launcher refuses it here
+        raise ValueError(VERL_ROUND_CUTS_OFF_REFUSED)
 
     store = getattr(args, "rl_resume_store", None)
     island_store = getattr(args, "rl_island_cut_store", None)

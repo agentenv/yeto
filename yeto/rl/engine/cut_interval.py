@@ -238,6 +238,12 @@ ROUND_CUTS_OFF_NOTE = ("round cuts are off (--rl-round-cuts off): no cut is writ
                        "a relaunch continues from the store's newest policy release "
                        "(--rl-init-from-release latest) with a fresh optimizer state")
 
+VERL_ROUND_CUTS_OFF_REFUSED = (
+    "--rl-round-cuts off is not supported with --rl-backend verl: the verl island has no "
+    "--rl-init-from-release and does not read the sample buffer on from the newest release's "
+    "trained position, so a relaunch would train base weights under the store's numbering; "
+    "use --rl-round-cuts auto")
+
 
 def round_cuts_off(args: Any) -> bool:
     """``--rl-round-cuts off`` (launcher or island args, or a Miles args namespace)."""
@@ -254,6 +260,8 @@ def check_round_cuts_off(args: Any) -> None:
         raise ValueError("--rl-round-cuts off: a convertible node hands its trainer state over "
                          "through round cuts (convertible.run_convertible_node); use "
                          "--rl-round-cuts auto")
+    if str(getattr(args, "rl_backend", None) or "") == "verl":
+        raise ValueError(VERL_ROUND_CUTS_OFF_REFUSED)
     if given:
         raise ValueError(f"--rl-round-cuts off: no round cuts are written, so {', '.join(given)} "
                          "cannot apply; drop them, or use --rl-round-cuts auto")

@@ -205,6 +205,32 @@ def release_scheme(release: PolicyRelease) -> str:
     return str((release.derived_from or {}).get("scheme") or BF16)
 
 
+def _parsed_records(raws: Any) -> list[PolicyRelease]:
+    found: dict[int, PolicyRelease] = {}
+    for raw in raws:
+        try:
+            record = PolicyRelease.from_record(json.loads(raw))
+        except (ValueError, TypeError, PolicyReleaseError):
+            continue  # a torn or foreign record: not a release this trainer made
+        found[record.seq] = record
+    return [found[seq] for seq in sorted(found)]
+
+
+def records_in_objects(objects: Any, release_dir: str = RELEASE_DIR) -> list[PolicyRelease]:
+    """The release records (every ``RELEASE.json`` and ``LATEST``) in an object store, in
+    ``seq`` order (:meth:`PolicyReleaseStore.records`; also the launcher's view)."""
+    keys = [k for k in objects.list(f"{release_dir}/")
+            if k.endswith(f"/{RECORD}") or k == f"{release_dir}/{LATEST}"]
+    return _parsed_records(raw for raw in (objects.read(k) for k in keys) if raw is not None)
+
+
+def trained_releases(records: Any) -> list[PolicyRelease]:
+    """The policy versions a trainer published (not derived, with a policy hash): what
+    ``merged_release.resumed_releases`` continues the numbering at and what
+    ``--rl-init-from-release latest`` selects from."""
+    return [r for r in records if r.derived_from is None and r.policy_hash]
+
+
 class SchemeMismatch(PolicyReleaseError):
     """A release whose weight scheme is not the one the reader serves."""
 
@@ -651,26 +677,16 @@ class PolicyReleaseStore:
         """The release records still in the store (pruning keeps the newest
         ``keep``) and LATEST, in ``seq`` order. A restarted trainer restores its
         published versions from them."""
-        found: dict[int, PolicyRelease] = {}
-        raws: list[bytes | str] = []
         objects = self.store.objects
         if objects is not None:
-            keys = [k for k in objects.list(f"{self.release_dir}/")
-                    if k.endswith(f"/{RECORD}") or k == f"{self.release_dir}/{LATEST}"]
-            raws = [raw for raw in (objects.read(k) for k in keys) if raw is not None]
-        else:
-            self.store.reload()
-            if self.root.is_dir():
-                paths = [p / RECORD for p in self.root.iterdir()
-                         if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)] + [self.root / LATEST]
-                raws = [p.read_bytes() for p in paths if p.is_file()]
-        for raw in raws:
-            try:
-                record = PolicyRelease.from_record(json.loads(raw))
-            except (ValueError, TypeError, PolicyReleaseError):
-                continue  # a torn or foreign record: not a release this trainer made
-            found[record.seq] = record
-        return [found[seq] for seq in sorted(found)]
+            return records_in_objects(objects, self.release_dir)
+        raws: list[bytes | str] = []
+        self.store.reload()
+        if self.root.is_dir():
+            paths = [p / RECORD for p in self.root.iterdir()
+                     if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)] + [self.root / LATEST]
+            raws = [p.read_bytes() for p in paths if p.is_file()]
+        return _parsed_records(raws)
 
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
                 buffer_selected: int | None = None, buffer_trained: int | None = None,

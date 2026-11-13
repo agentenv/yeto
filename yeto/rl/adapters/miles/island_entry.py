@@ -2638,9 +2638,15 @@ def main(argv=None) -> None:
         # the trainer loads the release laid over the base (its node prepared it);
         # the release wiring checks the resumed numbering starts at it
         model_path, args.rl_init_release = island_model_path(args.rl_init_from_release_dir, model_path)
-        rollout_model, rollout_model_path = None, model_path
-        print(f"[rl] --rl-init-from-release: loading {args.rl_init_release['path']} "
-              f"(v{args.rl_init_release['version']}) from {model_path}", flush=True)
+        if args.rl_init_release is None:
+            # --rl-round-cuts off, init_from_release --if-released: the store held no
+            # release when the node prepared (the run's first start, from the base)
+            print("[rl] --rl-round-cuts off: no policy release to continue from; starting "
+                  f"from the base checkpoint {model_path}", flush=True)
+        else:
+            rollout_model, rollout_model_path = None, model_path
+            print(f"[rl] --rl-init-from-release: loading {args.rl_init_release['path']} "
+                  f"(v{args.rl_init_release['version']}) from {model_path}", flush=True)
     if rollout_model is None:
         pass
     elif rollout_model == model:

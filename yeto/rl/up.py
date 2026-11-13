@@ -484,17 +484,20 @@ class Run:
         return True
 
     def store_has_release(self) -> bool:
-        """The run store holds a committed policy release (``policy-releases/LATEST.json``).
-        A failed listing raises: guessing would either start a restart from the base or
-        name a release that is not there."""
-        from yeto.rl.quant.schemes import RELEASE_DIR  # noqa: PLC0415
+        """The run store holds a trained policy release, judged as ``--rl-init-from-release
+        latest`` and the trainer's resumed numbering judge it (``policy_release.
+        trained_releases`` of every ``RELEASE.json`` and ``LATEST.json``): a record
+        without LATEST counts, a torn or derived one does not. A failed listing or read
+        raises: guessing would either start a restart from the base or name a release
+        that is not there."""
+        from yeto.rl.engine.policy_release import records_in_objects, trained_releases  # noqa: PLC0415
 
         try:
-            keys = self._objects().list(f"{RELEASE_DIR}/")
+            records = records_in_objects(self._objects())
         except Exception as error:  # noqa: BLE001
             raise RuntimeError(f"--rl-round-cuts off restart: cannot list the store's policy releases "
                                f"({type(error).__name__}: {error})"[:400]) from error
-        return any(str(k).rsplit("/", 1)[-1] in ("LATEST.json", "RELEASE.json") for k in keys)
+        return bool(trained_releases(records))
 
     def trainer(self) -> None:
         self._spawn("trainer", self.yeto("launch", *self.trainer_argv()))

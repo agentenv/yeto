@@ -39,8 +39,10 @@
 # rough per-GPU memory estimate (kimi_k31_full.memory), with warnings for long sequences.
 # 262k context: SEQ_LEN=262144; the response length follows SEQ_LEN - PROMPT_LEN.
 # Round cuts are off (--rl-round-cuts off): a full-parameter cut holds bf16 weights, fp32 master and
-# both Adam moments (about 5 TB). A relaunch continues from the store's newest release
-# (--rl-init-from-release latest; yeto run up adds it on a trainer restart) with a fresh optimizer.
+# both Adam moments (about 5 TB). A relaunch continues from the store's newest release with a fresh
+# optimizer: re-running this script is enough (every trainer node runs init_from_release
+# --if-released before Ray and loads the newest release when the store holds one; a first launch
+# starts from the base). A trainer that finds releases but loaded the base refuses to start.
 set -euo pipefail
 
 STAGE=${STAGE:-1}
