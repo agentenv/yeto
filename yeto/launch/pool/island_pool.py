@@ -1341,6 +1341,19 @@ class IslandPool:
             self.log(f"pool: probe of {m.ticket} failed: {error!r}"[:300])
             return el.Probe(node=el.PROBE_UNREACHABLE)
 
+    def _rerun_start(self, m: Member, now: float) -> None:
+        """A start a pool restart cut off, with no sampler on the node: run it again (every
+        start step is idempotent). Its start timeout counts from the rerun, as for an
+        in-place restart, and like those it counts against ``max_sampler_restarts``: past
+        that the timeout keeps counting from the earlier start, so a node whose start keeps
+        taking the pool loop down is still timed out and retired, not kept forever."""
+        m.state = PROVISIONING
+        if m.restarts < self.ecfg.max_sampler_restarts:
+            m.restarts += 1
+            m.created = now
+        else:
+            self._event("start_rerun_window_spent", ticket=m.ticket, shard=m.shard, restarts=m.restarts)
+
     def _watch(self, m: Member, now: float) -> None:
         cfg = self.ecfg
         if self._paused_now(m):  # paused while this tick ran: no action on it
@@ -1351,7 +1364,7 @@ class IslandPool:
             if probe is not None and probe.node != el.PROBE_UNREACHABLE and probe.sampler == "running":
                 self._event("start_resumed", ticket=m.ticket, shard=m.shard, joined=bool(probe.joined))
             else:
-                m.state = PROVISIONING  # every start step is idempotent: run it again
+                self._rerun_start(m, now)
         future = self._starts.get(m.ticket)
         if future is not None and future.done():  # a background start finished
             self._starts.pop(m.ticket)
@@ -2037,7 +2050,7 @@ class IslandPool:
                     if getattr(ops, "probe", None) is not None:
                         pool._recheck.add(m.ticket)
                     else:  # no probe: run the start again (every step is idempotent)
-                        m.state = PROVISIONING
+                        pool._rerun_start(m, pool.clock())
         return pool
 
 
