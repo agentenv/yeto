@@ -54,6 +54,11 @@ State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resum
 whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
 that dies with its process; ``run down`` takes it as well, stopping a running ``up`` first and
 going on without the lock after a grace period); an in-process ``up`` removes a STOP flag an earlier stop left.
+Clocks: each ``up`` process appends its period to ``ups`` (``yeto.rl.up_segments``) and restarts
+``t0`` (``budget.wall_h``, the starvation watch, the first-group wait count from this up; a trainer
+restart inside the same up does not reset them); the spend (``budget.usd``) counts from the run's
+first start (``run_t0``) over every up. ``run status`` (``uptime``) and the dashboard show the
+cumulative runtime (the up periods summed, the stopped gaps excluded) and the cumulative spend.
 
 ``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
 changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
@@ -79,7 +84,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from yeto.rl import up_consistency
+from yeto.rl import up_consistency, up_segments
 
 STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 # the launcher's last line (yeto.cli): ``[yeto] run '<run>' finished: <state> (exit code <n>)``
@@ -429,7 +434,7 @@ class Run:
                 _log(f"removing the STOP flag {flag} an earlier stop left: this run up drives the pools again")
                 flag.unlink(missing_ok=True)
             self.start_controller()
-            self.state.setdefault("t0", time.time())
+            self.begin_up()
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
             return
         for i, ref in enumerate(self.pools):
@@ -439,8 +444,60 @@ class Run:
             else:
                 self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
                                                         "--interval", str(int(ref.interval_s))))
-        self.state.setdefault("t0", time.time())
+        self.begin_up()
         self.mark("pool")
+
+    def begin_up(self) -> None:
+        """Open this ``run up`` process's period (``state["ups"]``, see
+        :mod:`yeto.rl.up_segments`) and restart the per-up clocks: ``t0`` (``budget.wall_h``,
+        the NC breaker's wall cap) becomes now. Once per process: a trainer restart inside
+        the same ``run up`` keeps it. ``run_t0`` keeps the run's first start (the spend,
+        ``budget.usd``, stays cumulative over every up)."""
+        if getattr(self, "_up_period", None) is not None:
+            return
+        now = time.time()
+        ups = self.state.setdefault("ups", [])
+        if not ups and "t0" in self.state:  # a run started before periods were recorded
+            ups.append({"pid": None, "start": float(self.state["t0"]), "seen": None, "end": None, "legacy": True})
+        for period in ups:  # an earlier up that ended without a down: closed at its last poll
+            if period.get("end") is None:
+                period["end"] = up_segments.period_end(period, now)
+        self.state.setdefault("run_t0", float(self.state.get("t0", now)))
+        self.state["t0"] = now
+        period = {"pid": os.getpid(), "start": now, "seen": now, "end": None}
+        ups.append(period)
+        self._up_period = period
+        self.save()
+
+    def up_heartbeat(self) -> None:
+        """The monitor's poll: this up's period was seen now; the spend estimate is kept
+        for ``run status`` and the dashboard."""
+        ups = self.state.get("ups") or []
+        if not ups or ups[-1].get("pid") != os.getpid() or ups[-1].get("end") is not None:
+            return
+        ups[-1]["seen"] = time.time()
+        self.state["spend_usd_estimate"] = round(self.spend_usd(), 2)
+        self.save()
+
+    def end_up(self) -> None:
+        """``run down``: every open up period ends now."""
+        now = time.time()
+        for period in self.state.get("ups") or ():
+            if period.get("end") is None:
+                period["end"] = now
+        self.state["spend_usd_estimate"] = round(self.spend_usd(), 2)
+
+    def uptime(self, now: float | None = None) -> dict[str, Any]:
+        """:func:`yeto.rl.up_segments.uptime_summary` with the live spend and the time left
+        on this up's ``budget.wall_h``."""
+        now = time.time() if now is None else now
+        out = up_segments.uptime_summary(self.state, now)
+        out["spend_usd_estimate"] = round(self.spend_usd(), 1)
+        wall_h = float((self.cfg.get("budget") or {}).get("wall_h", 3))
+        out["wall_h"] = wall_h
+        if out["current_up_open"] and "t0" in self.state:
+            out["wall_h_left"] = round(wall_h - (now - float(self.state["t0"])) / 3600, 4)
+        return out
 
     @property
     def in_process(self) -> bool:
@@ -581,7 +638,8 @@ class Run:
         (``budget.usd``) and an optional price table (``dashboard.prices``)."""
         dash = self.cfg.get("dashboard") or {}
         # the launcher writes its records under ~/.yeto/runs/<its --cluster-prefix>
-        argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name()]
+        argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name(),
+                "--up-state", str(self.state_path)]
         usd = (self.cfg.get("budget") or {}).get("usd")
         if usd:
             argv += ["--budget", str(usd)]
@@ -625,16 +683,20 @@ class Run:
     def node_hours(self, i: int = 0, now: float | None = None) -> float:
         """Billed node hours of pool ``i``: each pool state member from its grant (a ticket
         never granted bills nothing) to its release (``charged_to`` of a gone member) or now,
-        counted from this run's ``t0``. Without a readable pool state: the wall time since
-        ``t0`` times the pool target (the scaled one; every node assumed billed)."""
+        counted from the run's first start (``run_t0``: the spend spans every ``run up``).
+        Without a readable pool state: the run's cumulative up time (every up period; the
+        whole time since ``run_t0`` before periods were recorded) times the pool target
+        (the scaled one; every node assumed billed)."""
         now = time.time() if now is None else now
-        t0 = float(self.state.get("t0", now))
+        t0 = float(self.state.get("run_t0", self.state.get("t0", now)))
         members = self._members(i)
         if members is None:  # no state yet / unreadable: the conservative estimate
             try:
                 nodes = max(1, self.pool_target({}, i))
             except Exception:  # noqa: BLE001
                 nodes = 1
+            if self.state.get("ups"):
+                return up_segments.uptime_summary(self.state, now)["cumulative_runtime_h"] * nodes
             return max(0.0, now - t0) / 3600 * nodes
         hours = 0.0
         for m in members:
@@ -1340,6 +1402,7 @@ class Run:
 
     def monitor(self, poll_s: float = 60.0) -> None:
         while True:
+            self.up_heartbeat()
             self.rollout_stall_alert()
             why = self.breach()
             if why:
@@ -1491,13 +1554,14 @@ class Run:
             ok &= left == 0
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) == 0
+        self.end_up()
         self.mark("down", ok=bool(ok))
         _log("down: " + ("verified" if ok else "NOT verified, see down.log"))
         return bool(ok)
 
     def status(self) -> dict[str, Any]:
         out: dict[str, Any] = {"run": self.run, "state": self.state, "buffer_objects": self.buffer_objects(),
-                               "spend_usd_estimate": round(self.spend_usd(), 1),
+                               "spend_usd_estimate": round(self.spend_usd(), 1), "uptime": self.uptime(),
                                "procs": {k: dict(v, alive=_alive(v["pid"])) for k, v in
                                          (self.state.get("procs") or {}).items()}}
         out["sandbox_run_containers"] = self.run_containers()
