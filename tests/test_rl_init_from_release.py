@@ -1,6 +1,7 @@
 """--rl-init-from-release: a trainer starts from its store's highest release."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -167,3 +168,38 @@ def test_prepare_replaces_an_earlier_overlay(tmp_path, store):
     model = out / "model"
     assert not (model / "release-stale.safetensors").exists()
     assert sorted(p.name for p in out.iterdir() if p.name.startswith(".model")) == []
+
+
+def test_cli_prepares_a_delta_release(tmp_path, monkeypatch):
+    """--rl-release-delta-full-every: the newest release is usually a delta of the one
+    before it; a relaunch (--rl-init-from-release latest) must rebuild it from its chain."""
+    import numpy as np
+
+    from yeto.rl.engine import release_delta as rd
+    from yeto.rl.engine.policy_release import DeltaChain
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    rng = np.random.default_rng(0)
+    words = [rng.integers(0, 1 << 16, size=50_000, dtype=np.uint16)]
+    for _ in range(2):
+        nxt = words[-1].copy()
+        nxt[rng.choice(nxt.size, 200, replace=False)] ^= 1
+        words.append(nxt)
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=2)
+    chain = DeltaChain(full_every=8)
+    for version, w in enumerate(words, start=1):
+        staged = tmp_path / "staging" / f"v{version}"
+        staged.mkdir(parents=True)
+        (staged / "config.json").write_text("{}")
+        (staged / "model.safetensors").write_bytes(w.astype("<u2").tobytes())
+        release = trainer.release_staged(version, f"h{version}", staged, position=lambda: (version, None),
+                                         delta_base=chain.base())
+        chain.advance(release, staged)
+    assert trainer.latest().delta is not None
+    base, out = _base(tmp_path), tmp_path / "init"
+    for if_released in ([], ["--if-released"]):
+        assert main(["--release", "latest", "--store", str(tmp_path / "store"), "--model", str(base),
+                     "--out", str(out), *if_released], environ={}) == 0
+        record = read_record(out)
+        assert record["path"] == "r3-v3"
+        assert (Path(record["model_dir"]) / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
