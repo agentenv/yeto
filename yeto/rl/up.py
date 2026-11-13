@@ -843,7 +843,8 @@ class Run:
         controller = getattr(self, "controller", None)
         if controller is not None and controller.check():  # the in-process pools stopped being driven
             return controller.check()
-        if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
+        wall_h = up_consistency.budget_wall_h(b)
+        if wall_h is not None and "t0" in self.state and time.time() - self.state["t0"] > wall_h * 3600:
             why = "wall clock"
         elif self.spend_usd() > up_consistency.budget_usd(b):
             why = f"budget ${self.spend_usd():.0f}"
@@ -968,8 +969,19 @@ class Run:
             capped = up_consistency.budget_capped(b)
         except ValueError as exc:
             return str(exc)
+        try:
+            wall_h = up_consistency.budget_wall_h(b)
+        except ValueError as exc:
+            return str(exc)
         if "usd" in b and b["usd"] is None:
             _log("preflight: budget.usd is null: no spend cap (as if unset); the wall clock still applies")
+        if "wall_h" not in b:
+            _log(f"preflight: WARNING: budget.wall_h is not set: the default {wall_h:g} h wall clock stops the "
+                 f"trainer {wall_h:g} h after this run up starts the pools (and the breaker forces the sampler "
+                 f"pools down at {wall_h * FORCE_FACTOR:g} h). For a long run set budget.wall_h to its hours, "
+                 "or to null for no wall-clock cap")
+        elif wall_h is None:
+            _log("preflight: budget.wall_h is null: no wall-clock cap; only budget.usd (if set) stops the run")
         priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
         if capped and up_consistency.budget_usd(b) <= 0 and priced:
             return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
@@ -1460,7 +1472,8 @@ class Run:
         release the pool (``pool-stop``). Returns when no member bills any more."""
         b = self.cfg.get("budget") or {}
         usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
-        wall_cap = float(b.get("wall_h", 3)) * 3600 * FORCE_FACTOR
+        wall_h = up_consistency.budget_wall_h(b)
+        wall_cap = float("inf") if wall_h is None else wall_h * 3600 * FORCE_FACTOR
         while True:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
@@ -1472,7 +1485,8 @@ class Run:
             n = "?" if billed is None else len(billed)
             _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.0f}; "
                  f"release with: "
-                 f"yeto run down --config <run.json> (forced at ${usd_cap:.0f} or {wall_cap / 3600:.1f} h)")
+                 f"yeto run down --config <run.json> (forced at ${usd_cap:.0f}"
+                 + (f" or {wall_cap / 3600:.1f} h)" if wall_h is not None else "; no wall-clock cap)"))
             if spend > usd_cap or elapsed > wall_cap:
                 cap = f"spend ${spend:.0f} > ${usd_cap:.0f}" if spend > usd_cap else \
                     f"wall {elapsed / 3600:.1f} h > {wall_cap / 3600:.1f} h"

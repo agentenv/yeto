@@ -444,11 +444,19 @@ starts, reports and stops every pool; `yeto run down` releases all of them.
 | `dashboard.port` | Loopback port of the dashboard (default 8795). |
 | `dashboard.prices` | Price table JSON for the dashboard's cost panel (default: the built-in example table, see section 6). `up` also passes the run name and `budget.usd` to the dashboard. |
 | `budget.usd` | Spend cap (trainer plus NC estimate). The NC part counts the nodes actually billed (grant to release), so it follows `yeto run scale`. |
-| `budget.wall_h` | Wall-clock cap from the pool start (default 3). |
+| `budget.wall_h` | Wall-clock cap in hours from the pool start. Default 3 when the key is absent: the trainer is stopped 3 h after `up` starts the pools, and preflight (and `yeto run up --dry-run`) prints a WARNING when the key is missing. `null` means no wall-clock cap (same meaning as `budget.usd: null`); a long production run (50-100 h) should set its hours or `null`. A value that is not a positive number fails preflight. |
 | `budget.nc_usd_per_h` | Price of one NC node hour for the estimate. |
 | `budget.silence_min` | Minimum silence window of the backstop; the effective window is `max(4 x --rl-stall-timeout, silence_min)`. |
 | `budget.release_nc_on_breach` | `true`: a budget or wall-clock breach performs the full `down` including the NC pool. Default `false` (see section 7). |
 | `budget.release_nc_on_finish` | `true`: the full `down` (every sampler pool, any provider) runs as soon as the trainer finishes (`SUCCEEDED`). Default `false` (see section 5.5). |
+
+Both the budget breaker and the wall-clock breaker work on yeto's own estimate,
+not on the platform's live bill: the spend is node uptime as yeto sees it times
+the configured hourly prices (`trainer.usd_per_h`, `budget.nc_usd_per_h`, the
+pool prices). The estimate drifts from the real bill when a price is wrong or
+missing, when Modal bills time yeto does not count (cold start, image pull), and
+when a crashed process leaves containers or nodes running that yeto no longer
+tracks. Check the provider's billing page for the authoritative number.
 
 ### 3.2 Trainer arguments (`trainer.argv`)
 
@@ -1722,7 +1730,7 @@ The monitor in `yeto run up` checks the run every minute:
 | Guard | Trigger | Action |
 |---|---|---|
 | Budget | spend estimate > `budget.usd` | Stop the trainer. |
-| Wall clock | time since pool start > `budget.wall_h` | Stop the trainer. |
+| Wall clock | time since pool start > `budget.wall_h` (default 3 h; `null`: never) | Stop the trainer. |
 | Trainer exit | launcher finished `FAILED` or non-zero | Stop the trainer path cleanly. |
 | Trainer finished | launcher finished `SUCCEEDED` (exit code 0) | Banner: the sampler pools (every provider) still bill; with `budget.release_nc_on_finish` the full `down`. |
 | Silence backstop | trainer log and `progress_paths` unchanged for `max(4 x --rl-stall-timeout, silence_min)` | Stop the trainer. |
