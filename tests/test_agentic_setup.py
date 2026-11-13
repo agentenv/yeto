@@ -260,3 +260,12 @@ def test_a_task_source_sandbox_prepare_stages_is_no_dry_run_problem(tmp_path, mo
     assert not [p for p in su.local_problems(s) if "tasks" in p]
     s = su.parse(_spec(tmp_path, tasks={"source": str(tmp_path / "nowhere"), "ids": ["a"]}))
     assert any("is not a directory" in p for p in su.local_problems(s))
+
+
+@pytest.mark.parametrize("value", ["-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+                                   {"path": "", "inline": "tok-0123456789abcdef"}])
+def test_secret_ref_error_never_quotes_an_inline_secret(value):
+    with pytest.raises(ValueError) as err:
+        su.SecretRef.parse(value, "agentic.setup.sandbox.key")
+    assert "b3BlbnNzaC1rZXktdjEAAAAA" not in str(err.value) and "tok-0123456789abcdef" not in str(err.value)
+    assert "agentic.setup.sandbox.key" in str(err.value)

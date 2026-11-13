@@ -141,7 +141,10 @@ class SecretRef:
             return cls(path=str(value["path"]))
         if isinstance(value, Mapping) and set(value) == {"env"} and _NAME.match(str(value["env"] or "")):
             return cls(env=str(value["env"]))
-        raise ValueError(f"{what} must be {{\"path\": <local file>}} or {{\"env\": <VAR>}}, got {value!r}")
+        # the value is not quoted: an inline value here is the secret itself (a key, a token)
+        shown = sorted(map(str, value)) if isinstance(value, Mapping) else type(value).__name__
+        raise ValueError(f"{what} must be {{\"path\": <local file>}} or {{\"env\": <VAR>}}, got {shown} "
+                         "(value not shown)")
 
     def describe(self) -> str:
         return f"file {self.path}" if self.path else f"env ${self.env}"
