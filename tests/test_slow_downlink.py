@@ -125,6 +125,49 @@ def steady(tape, syncer_log) -> bool:
     return all(merges_with(records, island, joined, time.time() + 1) >= 10 for island in (0, 1))
 
 
+def stall_report(tape, syncer_log, pull_times, since: float, until: float) -> str:
+    """What the syncer did in [since, until]: merges with each island and
+    PULLs read by the slow island, per second; the rounds that ended at the
+    quorum timeout (``timed_out`` on the tape) or took long, and the longest
+    gaps between merges; the scheduler's quorum-timeout restarts in its log (a
+    restarted round merges later with ``timed_out`` false and a fresh
+    ``step_seconds``, so the log lines are what marks it). Printed when a slow-phase check fails."""
+    records = tape_records(tape)
+    steps = [r for r in records if r.get("kind") == "outer_step" and since - 30 <= r["time_unix"] <= until + 1]
+    seconds = range(int(until - since) + 1)
+
+    def per_second(times) -> list[int]:
+        counts = [0 for _ in seconds]
+        for t in times:
+            if since <= t <= until:
+                counts[min(int(t - since), len(counts) - 1)] += 1
+        return counts
+
+    merges = {island: per_second(r["time_unix"] for r in steps if any(w[0] == island for w in r.get("weights", [])))
+              for island in (0, 1)}
+    timed_out = [(round(r["time_unix"] - since, 2), r["step"], r["fragment"], r["arrived"], r["absent"])
+                 for r in steps if r.get("timed_out")]
+    long_rounds = [(round(r["time_unix"] - since, 2), r["step"], r["fragment"], round(r["step_seconds"], 2))
+                   for r in steps if r.get("step_seconds", 0.0) >= 2.0]
+    times = sorted(r["time_unix"] for r in steps if since <= r["time_unix"] <= until)
+    gaps = sorted(((b - a, a - since) for a, b in zip([since, *times], [*times, until])), reverse=True)[:3]
+    restarts = [line for line in syncer_log.read_text().splitlines()
+                if "quorum timeout" in line or "fixed quorum unavailable" in line]
+    tail = "\n".join(tape.read_text().splitlines()[-20:]) if tape.exists() else "(no tape)"
+    return "\n".join([
+        f"slow window {since:.2f}..{until:.2f} (unix), per second from its start:",
+        f"  merges with island 0: {merges[0]}",
+        f"  merges with island 1: {merges[1]}",
+        f"  PULLs read by the slow island: {per_second(pull_times)}",
+        f"  rounds ended by the quorum timeout (t, step, fragment, arrived, absent): {timed_out or 'none'}",
+        f"  longest gaps without a merge (seconds, from t): {[(round(g, 2), round(t, 2)) for g, t in gaps]}",
+        f"  rounds of >= 2 s (t, step, fragment, step_seconds): {long_rounds or 'none'}",
+        f"  quorum-timeout lines in the syncer log: {len(restarts)}",
+        *(f"    {line}" for line in restarts[-10:]),
+        "tape tail:", tail,
+    ])
+
+
 def start_as_first_members(tmp_path, first, initializer) -> None:
     """Start ``first``, and only once the syncer has registered it start
     ``initializer`` (island 0, which uploads the INIT), so both islands are
@@ -200,6 +243,13 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
             # f32 fragment per 2 s, a bf16 delta per 1 s).
             assert during <= 10, f"{during} merges while the scheduler waited on the slow downlink"
             return
+        # Island 0 kept merging at full rate while island 1's downlink was
+        # slow, and island 1 kept getting PULLs.
+        if during < 60 or pulls_to_slow < 10:
+            time.sleep(1.0)  # the tape's last records
+            report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until)
+            assert during >= 60, f"{during} merges with island 0\n{report}"
+            assert pulls_to_slow >= 10, f"{pulls_to_slow} PULLs to the slow island\n{report}"
         for island in (a, b):
             island.join(timeout=180)
             assert not island.is_alive(), f"island {island.learner_id} did not finish"
@@ -209,6 +259,7 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
     except BaseException:
         log.flush()
         print((tmp_path / "syncer.log").read_text()[-6000:])
+        print("tape tail:", *(tape.read_text().splitlines()[-20:] if tape.exists() else []), sep="\n")
         raise
     finally:
         for island in (a, b):
@@ -218,10 +269,6 @@ def test_one_slow_downlink_does_not_stall_merges_or_pulls(tmp_path, inline, delt
         log.close()
     records = tape_records(tape)
     syncer_log = (tmp_path / "syncer.log").read_text()
-    # Island 0 kept merging at full rate while island 1's downlink was slow,
-    # and island 1 kept getting PULLs.
-    assert during >= 60, during
-    assert pulls_to_slow >= 10, pulls_to_slow
     # Nobody lost its lease or redialed (a skipped bf16 delta would make the
     # slow island resync, that is redial).
     assert not [r for r in records if r.get("kind") == "pool_leave"]
@@ -332,6 +379,11 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
         if inline:
             assert during <= 10, f"{during} merges while the scheduler waited on the slow downlink"
             return
+        if during < 60 or pulls_to_slow < 10:
+            time.sleep(1.0)
+            report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until)
+            assert during >= 60, f"{during} merges with island 0\n{report}"
+            assert pulls_to_slow >= 10, f"{pulls_to_slow} PULLs to the slow island\n{report}"
         for island in (a, b):
             island.join(timeout=180)
             assert not island.is_alive(), f"island {island.learner_id} did not finish"
@@ -341,6 +393,7 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
     except BaseException:
         log.flush()
         print((tmp_path / "syncer.log").read_text()[-6000:])
+        print("tape tail:", *(tape.read_text().splitlines()[-20:] if tape.exists() else []), sep="\n")
         raise
     finally:
         for island in (a, b):
@@ -350,8 +403,6 @@ def test_env_downlink_limit_makes_a_running_island_slow(tmp_path, monkeypatch, i
         log.close()
     records = tape_records(tape)
     syncer_log = (tmp_path / "syncer.log").read_text()
-    assert during >= 60, during
-    assert pulls_to_slow >= 10, pulls_to_slow
     assert "slow downlink: the learner's send queues are full" in syncer_log
     assert "slow downlink drained; broadcasts go inline again" in syncer_log
     assert b.out_of_order == []

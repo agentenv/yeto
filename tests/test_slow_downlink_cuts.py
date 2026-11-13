@@ -37,8 +37,11 @@ from tests.test_peer_recovery import build_syncer, free_port, wait_until
 from tests.test_slow_downlink import (
     FILLED_S,
     FULL_EVERY,
+    MAX_MERGES_PER_S,
+    RECOVER_S,
     SYNCER_LEASE_S,
     CountingIsland,
+    stall_report,
     start_as_first_members,
     steady,
 )
@@ -54,6 +57,7 @@ INITIAL_SLOW_S = 12.0
 FINAL_LEAD_STEPS = 150
 FINAL_SLOW_S = 20.0
 CATCH_UP_SLOW_S = 14.0
+CATCH_UP_TOTAL_STEPS = 1500
 
 
 class CuttingIsland(CountingIsland):
@@ -104,6 +108,8 @@ def finish(proc, islands) -> None:
 def dump_on_failure(tmp_path, log) -> None:
     log.flush()
     print((tmp_path / "syncer.log").read_text()[-6000:])
+    tape = tmp_path / "tape.jsonl"
+    print("tape tail:", *(tape.read_text().splitlines()[-20:] if tape.exists() else []), sep="\n")
 
 
 @pytest.mark.timeout(300)
@@ -228,7 +234,7 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
     island 1 decodes every FULL (no resync redial), and is merged again."""
     port = free_port()
     extra = ["--bcast-delta-full-every", str(FULL_EVERY), *(["--inline-resend"] if inline else [])]
-    proc, tape, log = start_syncer(tmp_path, port, 1500, *extra)
+    proc, tape, log = start_syncer(tmp_path, port, CATCH_UP_TOTAL_STEPS, *extra)
     dtype = DTYPE_F32 | DTYPE_FLAG_BCAST_DELTA
     slow = threading.Event()
     store = tmp_path / "store"
@@ -237,6 +243,11 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
     try:
         start_as_first_members(tmp_path, b, a)
         wait_until(lambda: steady(tape, tmp_path / "syncer.log"), 60, "islands not merging steadily")
+        # The slow catch-up and island 1's recovery after it fit in the run's
+        # remaining steps (as in test_slow_downlink).
+        step = max((r["step"] for r in tape_records(tape) if r.get("kind") == "outer_step"), default=0)
+        assert step + (CATCH_UP_SLOW_S + RECOVER_S) * MAX_MERGES_PER_S <= CATCH_UP_TOTAL_STEPS, (
+            f"the islands merged steadily only at step {step} of {CATCH_UP_TOTAL_STEPS}")
         a_generation, first = a.client.connection_generation, b.client.connection_generation
         slow.set()
         b.client._socks[0].shutdown(socket.SHUT_RDWR)  # the connection drops; the client redials
@@ -253,6 +264,10 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
             # Old behavior: each catch-up fragment send waited on the link.
             assert during <= 10, f"{during} merges while the scheduler waited on the slow catch-up"
             return
+        if during < 60:
+            time.sleep(1.0)
+            report = stall_report(tape, tmp_path / "syncer.log", b.pull_times, slow_from, slow_until)
+            assert during >= 60, f"{during} merges with island 0\n{report}"
         finish(proc, (a, b))
     except BaseException:
         dump_on_failure(tmp_path, log)
@@ -265,7 +280,6 @@ def test_a_slow_catch_up_on_a_delta_session_does_not_stall_merges(tmp_path, inli
         log.close()
     records = tape_records(tape)
     syncer_log = (tmp_path / "syncer.log").read_text()
-    assert during >= 60, during
     assert "background resend started" in syncer_log and "kind=CatchUp" in syncer_log
     # No resync redial: every FULL decoded on the island's anchors.
     assert b.client.connection_generation == catching_up and a.client.connection_generation == a_generation
