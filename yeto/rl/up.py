@@ -87,7 +87,8 @@ from typing import Any
 
 from yeto.rl import up_consistency, up_segments
 
-STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
+# ``YETO_STATE_DIR`` moves it (read once, at import); the default is ``~/.yeto/rl-up``.
+STATE_ROOT = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser()
 # the launcher's last line (yeto.cli): ``[yeto] run '<run>' finished: <state> (exit code <n>)``
 # a budget / wall-clock breach stops the trainer only; the NC pool is released by force
 # once the spend (or the wall time) passes this multiple of the budget
@@ -2172,9 +2173,11 @@ def ack_forced_stop(run: Run) -> None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
 
 
-def open_run(config: str) -> Run:
+def open_run(config: str, create: bool = True) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
-    :class:`RunConfigError` naming the file (the CLI prints it, without a traceback)."""
+    :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
+    ``create=False`` (read-only commands) refuses a run whose state directory does not exist
+    instead of creating it: the run name is most likely misspelled."""
     try:
         cfg = load_config(config)
     except RunConfigError:
@@ -2182,6 +2185,9 @@ def open_run(config: str) -> Run:
     except ValueError as error:  # a check of the config's content
         raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
     state_dir = STATE_ROOT / str(cfg.get("run"))
+    if not create and "run" in cfg and not state_dir.is_dir():
+        raise RunConfigError(f"run {cfg.get('run')}: no state directory {state_dir}; it was never brought up "
+                             "here (`yeto run up`), or the run name is misspelled")
     try:
         if "run" in cfg:
             state_dir.mkdir(parents=True, exist_ok=True)  # what Run() does first
@@ -2193,7 +2199,7 @@ def open_run(config: str) -> Run:
 
 def main(args: Any) -> int:
     try:
-        run = open_run(args.config)
+        run = open_run(args.config, create=args.rl_command not in ("status", "down"))
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2

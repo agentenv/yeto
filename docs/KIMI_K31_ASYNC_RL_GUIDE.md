@@ -424,7 +424,7 @@ starts, reports and stops every pool; `yeto run down` releases all of them.
 
 | Field | Meaning |
 |---|---|
-| `run` | Run name. Also the state directory `~/.yeto/rl-up/<run>/` (pids, logs, step times) and the `ai.yeto.run` label of sandbox containers. Required. |
+| `run` | Run name. Also the state directory `~/.yeto/rl-up/<run>/` (pids, logs, step times; set `YETO_STATE_DIR` to use another directory in place of `~/.yeto/rl-up`) and the `ai.yeto.run` label of sandbox containers. Only `yeto run up` creates the state directory: `run status` / `run down` on a run without one exit 2 (most likely a misspelled name). Required. |
 | `store` | Run store URI. The dashboard reads it; the first-group wait lists `sample-buffer/shards/` under it. Required. |
 | `env` | Environment for every subprocess (paths may use `~`). `YETO_RESOURCE_LEDGER` defaults to `~/.yeto/runs/<run>/resources.jsonl`. |
 | `preflight.commands` | Extra checks run during preflight; any non-zero exit stops `up`. |
