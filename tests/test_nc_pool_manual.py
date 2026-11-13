@@ -204,6 +204,24 @@ def test_pausing_an_unknown_ticket_is_refused(tmp_path, capsys):
     assert "not a live member" in capsys.readouterr().out
 
 
+def test_resuming_a_ticket_that_is_not_paused_is_refused(tmp_path, capsys):
+    """A mistyped ``pool-resume`` ticket used to answer 0 ("resumed"), so the paused node
+    stayed paused (no restart, no replacement, still billing) while the operator
+    believed it resumed."""
+    cfg, path, clock, cloud, pool = _elastic(tmp_path, target=2)
+    a, b = _ready(pool)
+    assert pool_run.pause_pool(cfg, path, [a.ticket]) == 0
+    seq = pool_run.read_scale(cfg)["seq"]
+    capsys.readouterr()
+    assert pool_run.pause_pool(cfg, path, [a.ticket + "x"], resume=True) == 2
+    assert pool_run.pause_pool(cfg, path, [b.ticket], resume=True) == 2  # live but not paused
+    assert "not paused" in capsys.readouterr().out
+    doc = pool_run.read_scale(cfg)
+    assert doc["paused"] == [a.ticket] and doc["seq"] == seq  # nothing changed
+    assert pool_run.pause_pool(cfg, path, [a.ticket], resume=True) == 0
+    assert pool_run.read_scale(cfg)["paused"] == []
+
+
 def test_a_paused_node_is_never_an_automatic_scale_down_pick(tmp_path):
     cfg, path, clock, cloud, pool = _elastic(tmp_path, target=2, pool_kw={"scale_down": "fence"})
     newest = max(_ready(pool), key=lambda m: m.created)
