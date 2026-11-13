@@ -205,6 +205,15 @@ def _merge_state(base: Any, mine: Any, disk: Any) -> Any:
     return mine
 
 
+
+def _killpg(proc: subprocess.Popen) -> None:
+    """SIGKILL ``proc``'s process group (it leads its own session) and reap it."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    proc.wait()
+
 class Run:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -306,8 +315,22 @@ class Run:
         with open(path, "a") as fh:
             fh.write(f"\n### {_now()} {' '.join(argv)}\n")
             fh.flush()
-            proc = subprocess.run(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
-                                  check=False)
+            # its own process group: a timeout kills the whole tree (a `yeto down` hangs in the
+            # modal / ssh child it spawned; killing the direct child only would leave that one
+            # running and still tearing down / billing after run down moved on)
+            proc = subprocess.Popen(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # a hung step (dashboard export, Modal teardown) fails that step only: raised,
+                # it ended run down before the pool-stop and the sampler nodes kept billing
+                _killpg(proc)
+                fh.write(f"\n### {_now()} TIMED OUT after {timeout:.0f}s (process group killed)\n")
+                _log(f"{' '.join(argv[:6])} ... TIMED OUT after {timeout:.0f}s (log {path})")
+                return 124
+            except BaseException:  # Ctrl-C / SIGTERM of this process: its own session does not get it
+                _killpg(proc)
+                raise
         _log(f"{' '.join(argv[:6])} ... rc={proc.returncode} (log {path})")
         return proc.returncode
 
@@ -1580,6 +1603,7 @@ class Run:
         usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
         wall_h = up_consistency.budget_wall_h(b)
         wall_cap = float("inf") if wall_h is None else wall_h * 3600 * FORCE_FACTOR
+        forced: set[str] = set()
         while True:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
@@ -1599,8 +1623,14 @@ class Run:
                 _log(f"BREAKER: {cap} ({FORCE_FACTOR}x the budget): forcing pool-stop")
                 rc = max(self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800)
                          for path in self.pool_configs)
-                self.mark("nc_forced_stop", why=cap, rc=rc)
-                return
+                if "nc_forced_stop" not in forced:
+                    self.mark("nc_forced_stop", why=cap, rc=rc)
+                    forced.add("nc_forced_stop")
+                if rc == 0:
+                    return
+                # a pool-stop that failed or timed out (rc 124) has not released the machines:
+                # keep watching (the loop ends once none bills) and try the stop again next poll
+                _log(f"BREAKER: pool-stop rc={rc}: the machines may still bill; retrying next poll")
             time.sleep(poll_s)
 
     # -- down
