@@ -104,6 +104,17 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _utc_seconds(stamp: Any) -> float | None:
+    """The epoch seconds of a :func:`_now` stamp, None when it is not one."""
+    import datetime as _dt  # noqa: PLC0415
+
+    try:
+        return _dt.datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
 def _argv_value(argv: list[str], flag: str) -> str | None:
     """The last value of ``flag`` in ``argv`` (``--flag V`` or ``--flag=V``; None: absent)."""
     value = None
@@ -862,12 +873,16 @@ class Run:
     def trainer_hours(self, now: float | None = None) -> float:
         """Billed trainer hours: from ``trainer_t0`` (its first launch) to now, counted only
         inside the ``run up`` periods (``ups``): the stopped gaps between a ``down`` and the
-        next ``up`` bill no trainer. Inside one up: ``now - trainer_t0`` as before."""
+        next ``up`` bill no trainer. Inside one up: ``now - trainer_t0`` as before. A trainer that
+        finished (``trainer_finished``, its launcher gone) bills up to that stamp only."""
         now = time.time() if now is None else now
         t0 = self.state.get("trainer_t0")
         if t0 is None:
             return 0.0
         t0 = float(t0)
+        finished = _utc_seconds(self.state.get("trainer_finished"))
+        if finished is not None and not self._trainer_alive():  # SUCCEEDED: its app bills no more
+            now = min(now, max(finished, t0))
         ups = [p for p in self.state.get("ups") or () if p.get("start") is not None]
         if not ups:  # a run from before the periods were recorded
             return max(0.0, now - t0) / 3600

@@ -246,3 +246,20 @@ def test_stale_open_periods_are_closed_without_overlap(make_run, monkeypatch):
     _no_pool_state(again, monkeypatch)
     again.begin_up()
     assert again.trainer_hours() == 5.0
+
+
+def test_a_finished_trainer_bills_no_trainer_hours_after_it_finished(make_run, monkeypatch):
+    """After SUCCEEDED the monitor stays up while the samplers still bill (no
+    release_nc_on_finish): the trainer's Modal app is gone, so its hours stop at the
+    finish; otherwise the estimate grows at the trainer rate and trips the budget."""
+    now = _clock(monkeypatch)
+    run = make_run(wall_h=24, usd=300)  # trainer usd_per_h 100
+    _no_pool_state(run, monkeypatch)
+    _trainer_up(run, now)
+    run.state.setdefault("procs", {})["trainer"] = {"pid": 2**22 + 12345}  # the launcher exited
+    now[0] += 2 * H
+    run.state["trainer_finished"] = up.time.strftime("%Y-%m-%dT%H:%M:%SZ", up.time.gmtime(now[0]))  # breach() on SUCCEEDED
+    now[0] += 5 * H
+    run.up_heartbeat()
+    assert abs(run.trainer_hours() - 2.0) < 1e-3
+    assert run.breach(trainer=False) is None  # $200, not $700
