@@ -463,6 +463,16 @@ def test_an_nc_pool_keeps_the_nc_rate_even_with_a_price_in_its_provider(make_run
     assert run.node_usd_per_h() == pytest.approx(24.0)
 
 
+def test_null_prices_and_silence_take_their_defaults_instead_of_crashing_the_monitor(make_run, monkeypatch):
+    # trainer.usd_per_h: null passed preflight (``or 0``) but crashed spend_usd mid-run
+    run = make_run(usd=100, nc_usd_per_h=None, silence_min=None)
+    run.cfg["trainer"]["usd_per_h"] = None
+    assert run.budget_problem() is None
+    assert run.node_usd_per_h(0) == pytest.approx(24.0)
+    assert run.spend_usd() >= 0.0
+    assert run.silence_limit_s() >= 30 * 60
+
+
 @pytest.mark.parametrize("wall_h, why", [(None, None), (3, "wall clock"), (5, None)])
 def test_the_wall_clock_breach_follows_budget_wall_h(make_run, monkeypatch, wall_h, why):
     run = make_run(usd=None, wall_h=wall_h)
