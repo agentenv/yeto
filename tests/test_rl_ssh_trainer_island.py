@@ -207,8 +207,8 @@ class LocalOps(SshOps):
     def __init__(self, home: Path):
         self.home = home
 
-    def command(self, n, script):
-        return ["env", f"HOME={self.home}", "bash", "-c", script]
+    def command(self, n):
+        return ["env", f"HOME={self.home}", "bash", "-c", 'eval "$(cat)"']
 
 
 @needs_setsid
@@ -368,3 +368,45 @@ def test_island_end_closes_the_stream_and_runs_a_last_requant_pass(tmp_path):
     assert (state / "rc").read_text().strip() == "3"
     calls = (tmp_path / "requant.calls").read_text().splitlines()
     assert calls == ["--store s --loop --poll-seconds 10", "--store s"]
+
+
+def test_ssh_argv_never_carries_the_start_script_secrets(monkeypatch, tmp_path):
+    """The start script exports the task's secrets (store key, HF token): it goes to
+    the node on ssh's stdin, never in an argv that ``ps`` (local or on the node) or a
+    ``TimeoutExpired`` message shows."""
+    secret = "s3cr3t-value-of-the-store-key"
+    seen: list[tuple[list[str], str | None]] = []
+
+    class Proc:
+        def __init__(self, argv, **kw):
+            seen.append((list(argv), None))
+            self.stdin = self
+            self.stdout = iter(())
+            self.buf = []
+
+        def write(self, text):
+            self.buf.append(text)
+
+        def close(self):
+            seen[-1] = (seen[-1][0], "".join(self.buf))
+
+        def poll(self):
+            return 0
+
+    def fake_run(argv, **kw):
+        seen.append((list(argv), kw.get("input")))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "Popen", Proc)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    s = SshTrainerSpec(nodes=(node(),), run_id="r", command=("-m", "x"), workdir=str(tmp_path),
+                       env={"AWS_SECRET_ACCESS_KEY": secret})
+    script = start_script(s, 0, {}, remote_paths("r", "t", 1))
+    assert secret in script
+    ops = SshOps()
+    ops.start(s.nodes[0], script)
+    ops.run(s.nodes[0], script)
+    assert len(seen) == 2
+    for argv, sent in seen:
+        assert secret not in " ".join(argv)
+        assert sent == script

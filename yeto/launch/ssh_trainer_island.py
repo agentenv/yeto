@@ -86,6 +86,7 @@ from .trainer_island import (
 
 KILL_GRACE_S = 30
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30")
+READ_SCRIPT = 'eval "$(cat)"'  # the remote command: the script comes on stdin
 STATE_DIR = ".yeto/trainer-islands"  # under the remote $HOME
 CONTAINER_STATE_DIR = "/yeto-island-state"  # the incarnation's state dir inside a docker trainer
 
@@ -312,15 +313,25 @@ class SshOps:
     """The SSH calls (replaced in tests). ``run`` waits; ``start`` returns the
     running ``ssh`` process with its stdout as a text pipe."""
 
-    def command(self, node: Node, script: str) -> list[str]:
-        return ["ssh", *SSH_OPTIONS, *node.ssh_options(), node.host, "bash", "-lc", shlex.quote(script)]
+    def command(self, node: Node) -> list[str]:
+        """``ssh`` to ``node`` running the script it reads from stdin: a start script
+        exports the task's secrets, which must not be in an argv (``ps`` on either
+        end, a ``TimeoutExpired`` message). The remote bash reads the whole script
+        before it runs, so nothing in it can consume the rest of it."""
+        return ["ssh", *SSH_OPTIONS, *node.ssh_options(), node.host, "bash", "-lc", shlex.quote(READ_SCRIPT)]
 
     def run(self, node: Node, script: str, *, timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(self.command(node, script), text=True, capture_output=True, timeout=timeout)
+        return subprocess.run(self.command(node), input=script, text=True, capture_output=True, timeout=timeout)
 
     def start(self, node: Node, script: str) -> Any:
-        return subprocess.Popen(self.command(node, script), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, text=True, bufsize=1)
+        proc = subprocess.Popen(self.command(node), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.PIPE, text=True, bufsize=1)
+        try:
+            proc.stdin.write(script)
+            proc.stdin.close()
+        except BrokenPipeError:  # ssh already ended: its stream and exit code tell why
+            pass
+        return proc
 
 
 @dataclass
