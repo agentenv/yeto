@@ -487,7 +487,7 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
-    print(f"WARNING: {SHARED_BASE_WARNING.format(base=cfg['shard_base'])}")
+    print(f"note: {SHARED_BASE_WARNING.format(base=cfg['shard_base'])}")
     for note in notes:
         print(f"note: {note}")
     for problem in problems:
@@ -598,7 +598,12 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
                 pool.events("tick_failed", error=repr(error)[:300])
             if retry_path(cfg).exists():
                 _retry_in_loop(pool, config_path)
-            pool.save(state)
+            # a failed save (disk full, read-only) must not end the loop that supervises billed
+            # nodes: logged + state_save_failing, tried again next tick
+            if pool.state_path == state:
+                pool._save_now()  # noqa: SLF001
+            else:
+                pool.save(state)
             if signals.name is None and not stop_path(cfg).exists():
                 pool.wait(signals.wake, interval)  # a pause / resume / scale ends it at once
             if signals.name is not None or stop_path(cfg).exists():

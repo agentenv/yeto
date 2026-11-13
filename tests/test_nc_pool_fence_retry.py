@@ -407,3 +407,27 @@ def test_a_successor_waits_while_the_fence_success_cannot_be_saved(tmp_path):
     restored = IslandPool.restore(path, PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), cloud, clock=clock,
                                   log=lambda x: None, events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
     assert all(r.fence_pending is None for r in restored.members)
+
+
+def test_a_state_file_that_cannot_be_saved_is_reported_once_per_streak(tmp_path):
+    """Saves that keep failing (disk full, read-only) hold successors back: an explicit
+    state_save_failing event once per streak, state_save_recovered when a save holds."""
+    clock, cloud, pool, m = _setup()
+    pool.state_path = tmp_path / "pool.json"
+    real_save, broken = pool.save, {"on": True}
+
+    def save(p):
+        if broken["on"]:
+            raise OSError("disk full")
+        real_save(p)
+
+    pool.save = save
+    for _ in range(5):
+        assert pool._save_now() is False
+    assert _names(pool).count("state_save_failing") == 1
+    broken["on"] = False
+    assert pool._save_now() is True and pool._save_now() is True
+    assert _names(pool).count("state_save_recovered") == 1
+    broken["on"] = True
+    pool._save_now()
+    assert _names(pool).count("state_save_failing") == 2

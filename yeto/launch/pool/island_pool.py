@@ -249,6 +249,7 @@ class IslandPool:
     _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
     _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
     _unsaved_fences: set[str] = field(default_factory=set)  # fenced, success not saved: nothing continues them
+    _save_failures: int = 0  # consecutive failed saves (state_save_failing once per streak)
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _executor: Any = None
@@ -548,7 +549,17 @@ class IslandPool:
             self.save(self.state_path)
         except Exception as error:  # noqa: BLE001 - the patrol adopts the ticket anyway
             self.log(f"pool: could not save {self.state_path}: {error!r}")
+            self._save_failures += 1
+            if self._save_failures == 1:  # once per streak: fenced successors and stall restarts wait
+                self.log(f"pool: WARNING: the state file {self.state_path} cannot be saved ({error!r}); "
+                         "successors of fenced shards and in-place engine restarts wait until a save holds")
+                if self.events is not None:
+                    self._event("state_save_failing", path=str(self.state_path), error=repr(error)[:300])
             return False
+        if self._save_failures:
+            if self.events is not None:
+                self._event("state_save_recovered", path=str(self.state_path), failures=self._save_failures)
+            self._save_failures = 0
         return True
 
     def _fail(self, now: float, what: str) -> None:

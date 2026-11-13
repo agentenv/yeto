@@ -142,6 +142,9 @@ class RolloutController:
     def _save(self, slot: PoolSlot) -> None:
         if slot.state_path is None:
             return
+        if slot.pool.state_path == slot.state_path:  # logs, state_save_failing / _recovered events
+            slot.pool._save_now()  # noqa: SLF001
+            return
         try:
             slot.pool.save(slot.state_path)
         except Exception as error:  # noqa: BLE001 - the next tick saves again
