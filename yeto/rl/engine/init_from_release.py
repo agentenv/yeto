@@ -291,7 +291,8 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     from .release_delta import DeltaMirror
 
     # a delta release (--rl-release-delta-full-every) is rebuilt from its chain here
-    mirror = DeltaMirror(out / "mirror", keep=1)
+    # one process per node owns it: surplus copies go before a rebuild, not after
+    mirror = DeltaMirror(out / "mirror", keep=1, exclusive=True)
     # the node's disk outlives a launch: a rebuild killed by an earlier one left a
     # release-sized scratch directory that the mirror's pruning never touches
     for leftover in mirror.clear_interrupted():

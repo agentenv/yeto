@@ -901,3 +901,91 @@ def test_a_restarted_trainer_keeps_the_delta_chain_bound(tmp_path):
     restarted = delta_chain_for(PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=2,
                                                    mirror=DeltaMirror(tmp_path / "mirror2")), 3)
     assert restarted.base() is None
+
+
+def _peak_mirror_dirs(monkeypatch, root: Path) -> list[int]:
+    """Copies of a release in ``root`` (complete ones plus the rebuild's scratch
+    directory) and their bytes, sampled while each rebuild writes its files."""
+    seen = []
+    real = rd.apply_directory
+
+    def counting(base, chain, out, **kw):
+        result = real(base, chain, out, **kw)
+        dirs = [p for p in root.iterdir() if p.is_dir() and (not p.name.startswith(".") or p == Path(out))]
+        seen.append((len(dirs), sum(f.stat().st_size for d in dirs for f in d.rglob("*") if f.is_file())))
+        return result
+
+    monkeypatch.setattr(rd, "apply_directory", counting)
+    return seen
+
+
+@needs_zstd
+@pytest.mark.parametrize("keep", [1, 2])
+def test_an_exclusive_mirror_drops_surplus_copies_before_a_rebuild(tmp_path, monkeypatch, keep):
+    """The trainer node's mirror (one process owns it): copies beyond ``keep`` that
+    the rebuild does not start from go before the rebuild, so the disk never holds
+    ``keep`` old copies plus the new one at once."""
+    _t, releases, words = _v2_chain(tmp_path, monkeypatch, versions=5)
+    root = tmp_path / "mirror"
+    reader = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                mirror=rd.DeltaMirror(root, keep=keep, workers=1, exclusive=True))
+    for release in releases[1:3]:
+        reader.resolve(release)
+    seen = _peak_mirror_dirs(monkeypatch, root)
+    size = words[0].nbytes
+    for index in (3, 4):
+        rebuilt = reader.resolve(releases[index])
+        assert (rebuilt / "model.safetensors").read_bytes() == words[index].astype("<u2").tobytes()
+    # each rebuild starts from the previous copy (kept) and writes one new one: no third copy
+    assert [count for count, _ in seen] == [2, 2]
+    assert all(total < 2.5 * size for _, total in seen)
+    left = sorted(p.name for p in root.iterdir() if p.is_dir())
+    assert left == sorted(r.path for r in releases[5 - keep:])
+
+
+@needs_zstd
+def test_an_exclusive_mirror_never_drops_the_copy_it_rebuilds_from(tmp_path, monkeypatch):
+    _t, releases, words = _v2_chain(tmp_path, monkeypatch, versions=4)
+    root = tmp_path / "mirror"
+    reader = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                mirror=rd.DeltaMirror(root, keep=1, workers=1, exclusive=True))
+    reader.resolve(releases[1])
+    applied = []
+    real = rd.apply_directory
+    monkeypatch.setattr(rd, "apply_directory",
+                        lambda base, *a, **k: (applied.append(Path(base)), real(base, *a, **k))[1])
+    rebuilt = reader.resolve(releases[3])  # two deltas on top of the mirror's r1 copy
+    assert applied == [root / releases[1].path]
+    assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
+
+
+@needs_zstd
+def test_a_shared_mirror_keeps_its_copies_until_the_rebuild_is_done(tmp_path, monkeypatch):
+    """A sampler's mirror (default_mirror) is shared: an engine may still serve an
+    older copy, so nothing goes before the rebuild has landed."""
+    _t, releases, _words_ = _v2_chain(tmp_path, monkeypatch, versions=4)
+    root = tmp_path / "mirror"
+    reader = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                mirror=rd.DeltaMirror(root, keep=2, workers=1))
+    for release in releases[1:3]:
+        reader.resolve(release)
+    seen = _peak_mirror_dirs(monkeypatch, root)
+    reader.resolve(releases[3])
+    assert [count for count, _ in seen] == [3]
+    assert not rd.default_mirror({rd.MIRROR_ENV: str(root)}).exclusive
+
+
+@needs_zstd
+def test_an_exclusive_mirror_drops_a_stale_copy_before_rebuilding_from_the_store(tmp_path, monkeypatch):
+    """keep=1 (the trainer node): a copy left by an earlier launch that the rebuild
+    does not start from goes first; the rebuild never sits beside it."""
+    _t, releases, words = _v2_chain(tmp_path, monkeypatch, versions=4)
+    root = tmp_path / "mirror"
+    reader = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                mirror=rd.DeltaMirror(root, keep=1, workers=1, exclusive=True))
+    reader.resolve(releases[2])
+    seen = _peak_mirror_dirs(monkeypatch, root)
+    rebuilt = reader.resolve(releases[3], from_store=True)  # from the full r0 in the store
+    assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
+    assert [count for count, _ in seen] == [1]
+    assert sorted(p.name for p in root.iterdir() if p.is_dir()) == [releases[3].path]
