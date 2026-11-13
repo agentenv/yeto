@@ -489,3 +489,49 @@ def test_the_k31_trainer_example_argv_passes_the_launch_checks(tmp_path, env_ove
     args = cli.build_parser().parse_args(argv)
     assert args.rl_round_cuts == "off"
     launcher._check_resume_launch_flags(args)
+
+
+# ------------------------------------------------------------------ stale overlay / node records
+def test_no_release_removes_an_earlier_overlay(tmp_path):
+    from yeto.rl.engine.init_from_release import MODEL_SUBDIR, NO_RELEASE, prepare_if_released
+
+    out = tmp_path / "out"
+    stale = out / MODEL_SUBDIR
+    stale.mkdir(parents=True)
+    (stale / "release-model-00001.safetensors").write_bytes(b"old")
+    (out / ".model.tmp-1").mkdir()  # an interrupted preparation
+    assert prepare_if_released(_release_store(tmp_path), lambda: str(tmp_path), out) is None
+    assert (out / NO_RELEASE).is_file() and not stale.exists() and not (out / ".model.tmp-1").exists()
+
+
+def test_a_full_release_removes_an_earlier_overlay(tmp_path):
+    from yeto.rl.engine.init_from_release import MODEL_SUBDIR, prepare_if_released
+
+    out = tmp_path / "out"
+    (out / MODEL_SUBDIR).mkdir(parents=True)
+    record = prepare_if_released(_release_store(tmp_path, (1,)), lambda: str(tmp_path), out)
+    assert not record["partial"] and not (out / MODEL_SUBDIR).exists()
+
+
+def test_nodes_that_prepared_different_releases_are_refused(tmp_path):
+    from yeto.rl.adapters.miles.entry import check_island_init_releases
+    from yeto.rl.engine.init_from_release import (InitFromReleaseError, check_nodes_agree, node_release,
+                                                  prepare_if_released)
+
+    head_dir, worker_dir = tmp_path / "head", tmp_path / "worker"
+    record = prepare_if_released(_release_store(tmp_path / "a", (1, 2)), lambda: str(tmp_path), head_dir)
+    prepare_if_released(_release_store(tmp_path / "b", (1,)), lambda: str(tmp_path), worker_dir)
+    check_nodes_agree(record, {"head": node_release(head_dir)})
+    with pytest.raises(InitFromReleaseError, match="nodes prepared different releases.*worker: .*'version': 1"):
+        check_nodes_agree(record, {"head": node_release(head_dir), "worker": node_release(worker_dir)})
+    base_dir = tmp_path / "base-node"
+    prepare_if_released(_release_store(tmp_path / "c"), lambda: str(tmp_path), base_dir)
+    with pytest.raises(InitFromReleaseError, match="nodes prepared different releases.*no release"):
+        check_nodes_agree(record, {"worker": node_release(base_dir)})
+    with pytest.raises(InitFromReleaseError, match="nodes prepared different releases.*did not prepare"):
+        check_nodes_agree(None, {"worker": node_release(tmp_path / "missing")})
+    args = SimpleNamespace(yeto_rl_init_from_release_dir="~/x", yeto_rl_init_release=record)
+    with pytest.raises(InitFromReleaseError, match="nodes prepared different releases"):
+        check_island_init_releases(args, node_releases=lambda d: {"w": node_release(worker_dir)})
+    check_island_init_releases(args, node_releases=lambda d: {"h": node_release(head_dir)})
+    check_island_init_releases(SimpleNamespace(), node_releases=None)  # not an init-release island

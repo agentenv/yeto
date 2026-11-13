@@ -159,6 +159,17 @@ def test_launcher_prepares_the_release_on_every_node_before_ray():
     assert init_release_block(SimpleNamespace(rl_init_from_release=None), "m") == ""
 
 
+def test_prepare_replaces_an_earlier_overlay(tmp_path, store):
+    base = _base(tmp_path)
+    out = tmp_path / "init"
+    (out / "model").mkdir(parents=True)
+    (out / "model" / "release-stale.safetensors").write_bytes(b"old")
+    prepare(store, "latest", base, out, expected_selection_sha256=SEL)
+    model = out / "model"
+    assert not (model / "release-stale.safetensors").exists()
+    assert sorted(p.name for p in out.iterdir() if p.name.startswith(".model")) == []
+
+
 def test_cli_prepares_a_delta_release(tmp_path, monkeypatch):
     """--rl-release-delta-full-every: the newest release is usually a delta of the one
     before it; a relaunch (--rl-init-from-release latest) must rebuild it from its chain."""

@@ -2115,6 +2115,7 @@ def run_miles(
     miles_args.yeto_rl_expert_selection = getattr(args, "rl_expert_selection", None) or None
     # --rl-init-from-release: the loaded release (sampler_island._resume_single_trainer)
     miles_args.yeto_rl_init_release = getattr(args, "rl_init_release", None)
+    miles_args.yeto_rl_init_from_release_dir = getattr(args, "rl_init_from_release_dir", None)
     miles_args.yeto_rl_release_manifest = release_manifest(args, provider)
     if yeto_policy_sync:
         if full_parameter_sync:
