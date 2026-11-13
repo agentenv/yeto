@@ -50,3 +50,12 @@ def test_the_guide_template_sections_load(tmp_path):
 def test_a_bad_section_value_is_refused_at_load(tmp_path, extra, field):
     with pytest.raises(ValueError, match=field.replace(".", r"\.")):
         up.load_config(_write(tmp_path, **extra))
+
+
+def test_a_retired_budget_key_still_loads(tmp_path):
+    """``budget.silence_grace_min`` (read by an earlier run up, still in existing run configs)
+    is ignored, not refused: the run's next ``run up`` must load its config."""
+    cfg = up.load_config(_write(tmp_path, budget={"silence_min": 30, "silence_grace_min": 50}))
+    assert cfg["budget"]["silence_min"] == 30
+    with pytest.raises(ValueError, match="silence_grace_mni"):
+        up.load_config(_write(tmp_path, budget={"silence_grace_mni": 50}))

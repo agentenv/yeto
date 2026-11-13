@@ -136,13 +136,21 @@ def load_config(path: str) -> dict[str, Any]:
     return cfg
 
 
+# Keys an earlier ``run up`` read and run configs still carry: ignored (with a log line), not
+# refused, so an existing run's config still loads for its next ``run up`` / ``run down``.
+RETIRED_KEYS = {"budget": {"silence_grace_min"}}
+
+
 def _section(cfg: dict[str, Any], name: str, keys: set[str]) -> dict[str, Any]:
     section = cfg.get(name)
     if section is None:
         return {}
     if not isinstance(section, dict):
         raise ValueError(f"run config: {name} must be an object")
-    unknown = set(section) - keys
+    retired = set(section) & RETIRED_KEYS.get(name, set())
+    if retired:
+        _log(f"run config: {name} keys {sorted(retired)} are no longer read (ignored)")
+    unknown = set(section) - keys - retired
     if unknown:
         raise ValueError(f"run config: unknown {name} keys {sorted(unknown)} (known: {sorted(keys)})")
     return section
