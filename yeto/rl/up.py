@@ -576,6 +576,19 @@ class Run:
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
 
+    def drain_controller(self) -> None:
+        """The exit drain of the in-process controller (``rollout.drain_on_exit``), run
+        while ``main`` still runs. Left to the ``atexit`` hook it ran during interpreter
+        shutdown, after the Modal client had closed: a tick in flight failed with
+        ``ClientClosed``, the drain waited on it forever, and the process hung holding
+        the pool with its sampler still billing."""
+        controller = getattr(self, "controller", None)
+        if controller is None or controller.stopped or not controller.drain_on_exit:
+            return
+        from yeto.launch.pool.controller import drain_active  # noqa: PLC0415
+
+        drain_active("process exit")
+
     def _restart_stopped_pool(self, name: str, pool: Any) -> None:
         """A pool an earlier stop of this run left stopped (``yeto run down``, a process
         exit drain) and with no live member: this ``run up`` drives it again. Kept
@@ -1811,6 +1824,14 @@ def main(args: Any) -> int:
         # path (the drain, or with drain_on_exit false the undriven banner) runs
         signal.signal(signal.SIGTERM, _exit_on_sigterm)
     run.pool()
+    try:
+        return _drive(run, args)
+    finally:
+        if run.in_process:
+            run.drain_controller()
+
+
+def _drive(run: Run, args) -> int:
     if getattr(args, "trainer_now", False):
         _log("--trainer-now: the trainer starts now, in parallel with the sampler setup")
     elif not (run.state.get("steps") or {}).get("first_group"):
