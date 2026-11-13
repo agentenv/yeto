@@ -1380,12 +1380,11 @@ class PolicyFollower:
         fetched = None
         if self.background_download:
             fetched = self._ready_fetch()  # reported on disk by prefetch: this one is loaded
-            if fetched is not None:
-                latest = fetched.release  # ``last_seen`` stays the newest; it is fetched next
-            else:
+            if fetched is None:
                 fetched = self._fetched(latest)
             if fetched is None:  # still downloading, or waiting to retry: keep generating
                 return None
+            latest = fetched.release  # may be older than ``last_seen``: the newest is fetched next
         forced = False
         if (self._in_flight or self.hold()) and not self.live_update:
             now = self.timer()
@@ -1452,6 +1451,12 @@ class PolicyFollower:
         if fetch is not None and fetch.release.seq != latest.seq and not fetch.done.is_set():
             self.incomplete = f"downloading r{fetch.release.seq}-v{fetch.release.version}"
             return None  # one download at a time: the newer release follows this one
+        if (fetch is not None and fetch.release.seq != latest.seq and fetch.error is None
+                and fetch.release.seq > self._served_seq()):
+            # finished while a newer release appeared: load it, the newer one is
+            # fetched next. Dropped, a sampler whose download is slower than the
+            # release interval restarted it at every release and never loaded one.
+            return fetch
         if fetch is None or fetch.release.seq != latest.seq:
             self._fetch = fetch = _Fetch(latest)
             fetch.start(self.releases, from_store=self.rebuild_failures > 0, timer=self.timer)
