@@ -70,7 +70,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .object_store import is_absent_store_error
+from .object_store import is_absent_store_error, is_fatal_store_error, store_error_code
 
 LEASE_DIR = "sample-buffer/leases"
 FENCED_EVENT = "rl_sampler_fenced"
@@ -114,6 +114,17 @@ log = logging.getLogger(__name__)
 class LeaseReadError(OSError):
     """A lease record that exists or may exist but could not be read (a timeout,
     a 5xx, a truncated or garbled body): unlike an absent one it is no verdict."""
+
+
+class LeaseStoreFatal(RuntimeError):
+    """:meth:`IncarnationGate.verdict` read a lease and the store refused in a way
+    no retry changes (refused credentials, no such bucket:
+    :func:`~yeto.rl.engine.object_store.is_fatal_store_error`). Unlike
+    :class:`LeaseUnknown` it is not waited out: it ends the trainer (a gate that
+    paused on it would hold the trainer idle forever)."""
+
+
+FATAL_MARK = "incarnation gate: fatal store error"  # logged before LeaseStoreFatal (the head reads it)
 
 
 class LeaseUnknown(Exception):
@@ -376,7 +387,9 @@ class IncarnationGate:
         self.read_failures = 0
 
     def _read(self, sampler: str, now: float) -> dict[str, Any] | None:
-        """Read the lease (cached on success); :class:`LeaseUnknown` on a failure."""
+        """Read the lease (cached on success); :class:`LeaseUnknown` on a failure,
+        :class:`LeaseStoreFatal` when the store refused for good (not caught by the
+        readers: the trainer exits)."""
         failing = self._failing.get(sampler)
         if failing is not None and now - failing[1] < self.retry_s:
             raise LeaseUnknown(f"lease of {sampler} unreadable (retried every {self.retry_s:g} s)")
@@ -384,6 +397,14 @@ class IncarnationGate:
             lease = read_lease(self.store, sampler, strict=True)
         except LeaseReadError as error:
             self.read_failures += 1
+            if is_fatal_store_error(error):
+                cause = error.__cause__ or error
+                code = store_error_code(cause) or type(cause).__name__
+                message = (f"{FATAL_MARK}: lease of shard {sampler} refused by the store ({code}): {error}; "
+                           "no retry changes this: check the run store's credentials (key id, secret, "
+                           "endpoint) and that the bucket exists, then start the trainer again")
+                log.error("%s", message)
+                raise LeaseStoreFatal(message) from error
             if failing is None:
                 failing = self._failing[sampler] = [now, now, -float("inf"), time.time()]
             failing[1] = now

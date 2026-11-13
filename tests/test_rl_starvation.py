@@ -402,6 +402,18 @@ def test_the_alert_names_the_recovery_and_holds_no_stop():
     assert v.state == st.ALERT and "recovering: 2 member(s) starting" in v.reason and "no stop" in v.reason
 
 
+def test_trainer_side_cause_names_a_fatal_store_exit(run_up, tmp_path):
+    from yeto.rl.engine.incarnation_lease import FATAL_MARK
+
+    run = run_up()
+    log = tmp_path / "trainer.log"
+    run.state["procs"] = {"trainer": {"pid": 1, "log": str(log)}}
+    log.write_text("x\nWARNING incarnation gate: training paused: lease of shard s-0 unreadable since t\n"
+                   f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied): ...\n")
+    cause = run.trainer_side_cause()
+    assert "AccessDenied" in cause and "trainer exits" in cause and "fail-closed pause" not in cause
+
+
 # -- the data end: every pool finished, the shards no sampler ended are ended
 def _data_end_run(run_up, tmp_path, monkeypatch, *, finished=True, members=None):
     from yeto.rl.engine.object_store import DirectoryObjectStore
