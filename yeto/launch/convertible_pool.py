@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ from yeto.rl.engine.sample_buffer import (
     FileSampleBuffer,
     merge_shards,
     shard_lengths,
+    trainable_backlog,
 )
 from yeto.rl.engine.sample_roles import convertible_islands, node_name
 from yeto.rl.engine.trainer_remote import RemoteTrainerLifecycle, StoreCutLog, consumed_watermark
@@ -136,11 +137,8 @@ class MergedBacklog:
         # again by the nodes (the cap errs on the side of waiting)
         counted = shard_lengths(self.files, self.nodes)
         merge_shards(self.files, self.nodes)
-        stats = self.inner.backlog(current_version)
-        floor = int(current_version) - int(self.max_policy_age)
-        fresh = sum(n for v, n in (stats.version_histogram or {}).items() if v >= floor)
-        if fresh != stats.samples:
-            stats = replace(stats, samples=fresh, batches=fresh / self.inner.buffer.batch_size)
+        stats = trainable_backlog(self.inner.backlog(current_version), current_version,
+                                  int(self.max_policy_age), self.inner.buffer.batch_size)
         write_pool_backlog(self.files, groups=stats.samples, version=current_version,
                            at=self.clock(), shards=counted)
         return stats

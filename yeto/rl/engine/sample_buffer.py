@@ -1589,6 +1589,22 @@ def merge_shards(files, shards: Iterable[str]) -> int:
     return len(new)
 
 
+def trainable_backlog(stats: BacklogStats, current_version: int, max_policy_age: int | None,
+                      batch_size: int) -> BacklogStats:
+    """``stats`` with ``samples`` / ``batches`` cut down to the samples the trainer can
+    train: behavior version at most ``max_policy_age`` behind ``current_version``
+    (``policy_age.age_floor``). The trainer passes older ones over unread (its sample-age
+    gate), so they must not start a trainer nor keep one running. ``max_policy_age``
+    None: every sample counts. The version fields still describe the whole backlog."""
+    if max_policy_age is None:
+        return stats
+    floor = int(current_version) - int(max_policy_age)
+    fresh = sum(n for v, n in (stats.version_histogram or {}).items() if v >= floor)
+    if fresh == stats.samples:
+        return stats
+    return dataclasses.replace(stats, samples=fresh, batches=fresh / int(batch_size))
+
+
 class CommittedBacklog:
     """The head's view of a buffer the trainer reads elsewhere (rl-trainer-start-stop
     rl-trainer-start-stop). The backlog starts at the consumed watermark the trainer committed
@@ -1597,15 +1613,18 @@ class CommittedBacklog:
     newest cut still count as backlog (at most the rounds between two cuts)."""
 
     def __init__(self, buffer: FileSampleBuffer, watermark: Callable[[], int | None],
-                 *, unmerged: UnmergedShards | None = None) -> None:
+                 *, unmerged: UnmergedShards | None = None, max_policy_age: int | None = None) -> None:
         """``unmerged``: on a sharded object store, the shard records the trainer
-        has not merged yet (they count as backlog)."""
+        has not merged yet (they count as backlog). ``max_policy_age``: count only
+        the samples the trainer can train (:func:`trainable_backlog`); None: all."""
         self.buffer = buffer
         self._watermark = watermark
         self.unmerged = unmerged
+        self.max_policy_age = None if max_policy_age is None else int(max_policy_age)
 
     def backlog(self, current_version: int) -> BacklogStats:
-        return self.buffer.backlog(current_version, start=self._watermark() or 0, unmerged=self.unmerged)
+        stats = self.buffer.backlog(current_version, start=self._watermark() or 0, unmerged=self.unmerged)
+        return trainable_backlog(stats, current_version, self.max_policy_age, self.buffer.batch_size)
 
     def append(self, entry: SampleIndexEntry) -> None:
         self.buffer.append(entry)
