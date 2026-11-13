@@ -44,6 +44,7 @@ other provider without registering it.
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -197,6 +198,21 @@ class MultiProvider:
 # -- provider + route + fencer -> pool ops ---------------------------------------
 
 
+def _takes_ticket(rate: Callable[..., Any]) -> bool:
+    """True when ``rate`` accepts one positional argument (``hourly_cost(ticket)``);
+    False for a no-argument ``hourly_cost()``. Decided by signature, so a TypeError
+    raised inside the rate goes up instead of being read as the other signature."""
+    try:
+        signature = inspect.signature(rate)
+    except (TypeError, ValueError):  # no introspectable signature: the current contract
+        return True
+    try:
+        signature.bind(None)
+    except TypeError:
+        return False
+    return True
+
+
 class ProviderPoolOps:
     """:class:`~.island_pool.PoolOps` from a provider, node routes and a fencer.
 
@@ -261,10 +277,7 @@ class ProviderPoolOps:
         rate = getattr(provider, "hourly_cost", None)
         if rate is None:
             return None
-        try:
-            return rate(member.ticket)
-        except TypeError:
-            return rate()
+        return rate(member.ticket) if _takes_ticket(rate) else rate()
 
     def has_fallback_offer(self) -> bool:
         """True when the provider (any provider of a :class:`MultiProvider`) still has
