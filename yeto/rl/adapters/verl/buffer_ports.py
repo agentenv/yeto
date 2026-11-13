@@ -171,7 +171,8 @@ def delta_chain_for(releases: PolicyReleaseStore, full_every: int, *, emit: Call
                  reason=f"{type(error).__name__}: {error}"[:200],
                  **({} if retried is None else {"first_error": retried}))
     if directory is not None and Path(directory).is_dir():
-        chain.adopt(latest, directory)
+        # a delta LATEST continues its chain: the full_every bound counts its deltas too
+        chain.adopt(latest, directory, since_full=releases.delta_depth(latest, limit=int(full_every)))
         if emit is not None:
             emit("rl_policy_release_delta_base", adopted=True, base_seq=latest.seq,
                  base_version=latest.version, base_path=str(directory), rebuilt=rebuilt,

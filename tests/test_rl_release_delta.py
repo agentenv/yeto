@@ -873,3 +873,31 @@ def test_concurrent_rebuilds_of_one_release_both_succeed(tmp_path, monkeypatch):
     assert not errors and len(out) == 2 and out[0] == out[1]
     assert (out[0] / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
     assert not [p for p in root.iterdir() if p.name.startswith(".")]
+
+
+def test_a_restarted_trainer_keeps_the_delta_chain_bound(tmp_path):
+    """--rl-release-delta-full-every N: a sampler rebuilds at most N-1 deltas. A
+    restarted trainer adopts LATEST as its base; when LATEST is itself the
+    (N-1)-th delta, its next release must be full, else every restart lengthens
+    the chain a cold sampler rebuilds (and the store keeps every base of it)."""
+    from yeto.rl.adapters.verl.buffer_ports import delta_chain_for
+    from yeto.rl.engine.policy_release import DeltaChain, PolicyReleaseStore
+    from yeto.rl.engine.release_delta import DeltaMirror
+    from yeto.rl.engine.resume import CheckpointStore
+
+    store = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=2,
+                               mirror=DeltaMirror(tmp_path / "mirror"))
+    chain = DeltaChain(3)
+    for version in range(1, 4):
+        staged = tmp_path / "staging" / f"v{version}"
+        staged.mkdir(parents=True)
+        data = bytearray(1 << 20)
+        data[version * 8] = version
+        (staged / "model.safetensors").write_bytes(bytes(data))
+        release = store.release_staged(version, f"h{version}", staged, position=lambda: (None, None),
+                                       delta_base=chain.base())
+        chain.advance(release, staged)
+    assert release.delta is not None and chain.base() is None  # the trainer's next release: full
+    restarted = delta_chain_for(PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=2,
+                                                   mirror=DeltaMirror(tmp_path / "mirror2")), 3)
+    assert restarted.base() is None
