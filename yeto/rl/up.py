@@ -657,8 +657,21 @@ class Run:
         now = time.time()
         nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
         rate = float((self.cfg.get("trainer") or {}).get("usd_per_h", 0))
-        tr = (now - self.state.get("trainer_t0", now)) / 3600 * rate
-        return nc + tr
+        return nc + self.trainer_hours(now) * rate
+
+    def trainer_hours(self, now: float | None = None) -> float:
+        """Billed trainer hours: from ``trainer_t0`` (its first launch) to now, counted only
+        inside the ``run up`` periods (``ups``): the stopped gaps between a ``down`` and the
+        next ``up`` bill no trainer. Inside one up: ``now - trainer_t0`` as before."""
+        now = time.time() if now is None else now
+        t0 = self.state.get("trainer_t0")
+        if t0 is None:
+            return 0.0
+        t0 = float(t0)
+        ups = [p for p in self.state.get("ups") or () if p.get("start") is not None]
+        if not ups:  # a run from before the periods were recorded
+            return max(0.0, now - t0) / 3600
+        return sum(max(0.0, up_segments.period_end(p, now) - max(float(p["start"]), t0)) for p in ups) / 3600
 
     def node_usd_per_h(self, i: int = 0) -> float:
         """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config

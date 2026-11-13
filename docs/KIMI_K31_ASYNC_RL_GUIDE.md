@@ -1258,7 +1258,7 @@ and sets `t0` to its own start. The two caps differ:
 |---|---|---|
 | `budget.wall_h` (and the 1.2x wall cap of the NC breaker) | `t0`, the start of the current `up` | yes |
 | Starvation watch; first-group wait (skipped once the run has a first group) | the current `up` process | yes |
-| `budget.usd` (spend estimate) | `run_t0`, the first start of the run; NC nodes billed grant to release | no |
+| `budget.usd` (spend estimate) | `run_t0`, the first start of the run; NC nodes billed grant to release; the trainer from its first launch, inside the up periods only (a stopped gap bills no trainer) | no |
 
 A restart inside the same `up` process (for example the trainer restarted by
 its scheduler) keeps the current `up`'s clock. A run whose state predates the

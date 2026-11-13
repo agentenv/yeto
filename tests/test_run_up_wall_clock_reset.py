@@ -140,3 +140,43 @@ def test_status_and_dashboard_show_the_cumulative_runtime(make_run, monkeypatch)
     assert view["ups"] == 2 and view["cumulative_runtime_h"] == 3.0
     assert view["spend_usd_estimate"] is not None
     assert dash_cost.run_up_view(None, now[0]) is None
+
+
+def _trainer_up(run, now):
+    run.begin_up()
+    run.state.setdefault("trainer_t0", now[0])
+    run.save()
+
+
+def test_a_long_gap_after_down_bills_no_trainer(make_run, monkeypatch):
+    now = _clock(monkeypatch)
+    run = make_run(usd=300)  # trainer usd_per_h 100
+    _no_pool_state(run, monkeypatch)
+    _trainer_up(run, now)
+    now[0] += 2 * H
+    run.down()  # $200
+    now[0] += 10 * H  # stopped: would be $1000 more counted from trainer_t0
+    again = make_run(usd=300)
+    _no_pool_state(again, monkeypatch)
+    _trainer_up(again, now)
+    assert again.spend_usd() == 200.0
+    assert again.breach(trainer=False) is None
+    now[0] += 0.5 * H
+    assert abs(again.spend_usd() - 250.0) < 1e-6
+    now[0] += 0.6 * H
+    assert again.breach(trainer=False).startswith("budget")  # 3.1 trainer hours over the run
+
+
+def test_inside_one_up_the_trainer_spend_is_unchanged(make_run, monkeypatch):
+    now = _clock(monkeypatch)
+    run = make_run()
+    _no_pool_state(run, monkeypatch)
+    run.begin_up()
+    now[0] += 0.25 * H  # the trainer starts after the first group
+    run.state["trainer_t0"] = now[0]
+    run.save()
+    now[0] += 1.5 * H
+    assert abs(run.spend_usd() - (now[0] - run.state["trainer_t0"]) / H * 100) < 1e-6
+    legacy = make_run()
+    legacy.state.pop("ups")
+    assert abs(legacy.trainer_hours(now[0]) - 1.5) < 1e-9
