@@ -48,3 +48,18 @@ def test_silent_connection_is_closed_and_handshake_still_works(syncer_binary, tm
         for sock in silent:
             sock.close()
         syncer.stop()
+
+
+def test_silent_connection_is_closed_with_the_default_timeout(syncer_binary, tmp_path):  # noqa: F811
+    """No flag: the built-in default (30 s) still closes a silent peer, which
+    the syncer before the first-frame timeout held open indefinitely."""
+    syncer = Syncer(syncer_binary, tmp_path, "--dispense-passes", "1", lease_s=600.0)
+    silent = socket.create_connection(("127.0.0.1", syncer.port), timeout=5)
+    try:
+        waited = _closed_within(silent, 45.0)
+        assert waited is not None, "silent connection was never closed"
+        assert 20.0 <= waited <= 45.0, waited
+        assert syncer.proc.poll() is None
+    finally:
+        silent.close()
+        syncer.stop()
