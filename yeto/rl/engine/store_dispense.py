@@ -48,14 +48,18 @@ Rules:
 * the next attempt is an exclusive create of ``claims/<i>/<a+1>``; the old holder
   sees it (:meth:`StoreDispensedPrompts.still_holds`) and neither renews nor
   writes the group;
-* fencing (``yeto.rl.engine.incarnation_lease``; the NC pool's ``fence_shard``):
-  a sampler whose incarnation lease names another incarnation is fenced. It
-  stops renewing and writes no group (its own ``fenced`` check); any scanning
-  sampler that sees a live claim whose holder's lease names another incarnation
-  releases it at once (``release``, reason ``fenced``), without waiting for the
-  lease to run out. A restarted sampler (same id, new incarnation) first settles
+* fencing (``yeto.rl.engine.incarnation_lease``; the NC pool's ``fence_shard``
+  / ``fence_incarnation``): a sampler that lost its shard (another owner in the
+  shard's ownership records, or in its incarnation lease) is fenced. It stops
+  renewing and writes no group (its own ``fenced`` check). Its claims go back at
+  once, without waiting for the lease to run out: the pool's fence retires it
+  (next rule), and a restarted sampler (same id, new incarnation) first settles
   ``trained`` the slots its earlier incarnations wrote to the buffer, then
-  releases the rest of their claims;
+  releases the rest of their claims. A plan of version 2 (a run started by older
+  code) keeps the older rule as well: any scanning sampler that sees a live
+  claim whose holder's lease *record* names another incarnation releases it
+  (``release``, reason ``fenced``). From plan version 3 on nothing in the ledger
+  reads the lease record: it is written for observation only;
 * retire (:func:`retire`, the controller's scale-down / evict): a marker
   ``retired/<holder>/<incarnation>`` plus an immediate ``release`` (reason
   ``retired``) of every open claim of that process. The marker is written
@@ -131,7 +135,12 @@ from .task_dispense import (
 
 logger = logging.getLogger(__name__)
 
-PLAN_VERSION = 2
+# 3: fenced claims are freed by the retire marker and the new incarnation's recover,
+# not by reading the lease record; the samplers write shard ownership records
+# (sample_buffer). A sampler of older code refuses a plan of version 3
+# (DispenseMismatch at open); this code continues a plan of version 2 under its rules.
+PLAN_VERSION = 3
+LEGACY_PLAN_VERSIONS = (2,)
 BACKEND = "store"
 DEFAULT_NAMESPACE = "task-dispense"
 DEFAULT_LEASE_S = 900.0
@@ -589,6 +598,7 @@ class StoreLedger:
         self._leases = list(leases) if leases is not None else None
         # sampler id -> the incarnation its incarnation lease names (None: no lease)
         self.lease_of_holder = lease_of_holder
+        self.plan_version = PLAN_VERSION  # the store's plan (open): a legacy one keeps its rules
         self._bodies: dict[tuple[int, int], dict[str, Any]] = {}  # claim bodies (immutable)
         self.drain_seq: str | None = None  # an open drain request for this holder (last scan)
         self.retired: set[tuple[str, str]] = set()  # retire markers seen by the latest scan
@@ -624,14 +634,20 @@ class StoreLedger:
         """Create or check the plan (every sampler of the run agrees on it)."""
         mine = self.plan()
         if self._create(self.key("plan.json"), json.dumps(mine, sort_keys=True).encode()):
+            self.lease_of_holder = None  # a plan of this version (module doc)
             return mine
         theirs = json.loads(self.objects.read(self.key("plan.json")) or b"{}")
+        if theirs.get("version") in LEGACY_PLAN_VERSIONS:  # a run started by older code: continue it
+            mine["version"] = theirs["version"]
         for name in ("version", "rows", "fingerprint", "seed", "passes", "streams", "holdout_sha256"):
             if theirs.get(name) != mine[name]:
                 raise DispenseMismatch(f"dispense mismatch: {name} is {mine[name]!r} here, "
                                        f"{theirs.get(name)!r} in {self.key('plan.json')}")
         self.max_redo = int(theirs.get("max_redo", self.max_redo))
         self.lease_s = float(theirs.get("lease_s", self.lease_s))
+        self.plan_version = int(theirs["version"])
+        if self.plan_version not in LEGACY_PLAN_VERSIONS:
+            self.lease_of_holder = None  # module doc: retire markers and recover free a fenced claim
         return theirs
 
     def scan(self) -> tuple[dict[int, TaskState], float]:

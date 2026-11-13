@@ -47,6 +47,17 @@ class ObjectStoreError(RuntimeError):
     pass
 
 
+def atomic_create(objects: object) -> bool:
+    """Whether ``objects.create`` is known not to be atomic: a store that declares
+    ``atomic_create = False`` (a check-then-write create, e.g. the OSS relay) or one
+    that found its endpoint refuses conditional writes (``conditional_writes`` False:
+    its create fell back to check-then-write). Unknown counts as atomic; a caller
+    that writes a record others race for must call it after a first create
+    (``trainer_lease.TrainerLease.claim`` probes)."""
+    return (getattr(objects, "atomic_create", True) is not False
+            and getattr(objects, "conditional_writes", True) is not False)
+
+
 @runtime_checkable
 class ObjectStore(Protocol):
     """Whole objects by key. ``read`` returns None for a missing key."""

@@ -509,9 +509,18 @@ class TakeReport:
     source_tokens: dict[str, int] = field(default_factory=dict)
     position_sources: dict[int, str] = field(default_factory=dict)
     quarantined_groups: int = 0
-    # groups of a fenced (superseded) sampler incarnation written after its successor
-    # claimed the shard's lease (incarnation_lease.IncarnationGate): consumed, never read
+    # groups of a fenced (superseded) sampler incarnation written after its successor took
+    # the shard: never read. On a shard with ownership records the merge drops them
+    # (sample_buffer module doc; ``stale_incarnation_shards``: shard, owner epoch, owner,
+    # writer, groups); in a shard's legacy part the lease gate does (IncarnationGate)
     stale_incarnation_groups: int = 0
+    stale_incarnation_shards: list[dict[str, Any]] = field(default_factory=list)
+    # what the buffer's merge found so far (cumulative, FileSampleBuffer.merge_counters):
+    # merged records that repeat an earlier one (passed over), shard records an earlier
+    # merger skipped for good, damaged shard records passed over
+    duplicate_merged_records: int = 0
+    unmerged_shard_gaps: int = 0
+    bad_shard_records: int = 0
     # groups whose sampler's lease could not be read (IncarnationGate fails closed):
     # neither trained nor consumed; they wait (judged again) for a later selection
     # (BatchReader._deferred). Counted once, by the take that first deferred them
@@ -570,6 +579,9 @@ class TakeReport:
                 "sample_buffer/prefetched_groups": float(self.prefetched),
                 "sample_buffer/xhw_quarantined_groups": float(self.quarantined_groups),
                 "sample_buffer/stale_incarnation_groups": float(self.stale_incarnation_groups),
+                "sample_buffer/duplicate_merged_records": float(self.duplicate_merged_records),
+                "sample_buffer/unmerged_shard_gaps": float(self.unmerged_shard_gaps),
+                "sample_buffer/bad_shard_records": float(self.bad_shard_records),
                 "sample_buffer/lease_deferred_groups": float(self.lease_deferred_groups),
                 "sample_buffer/incomplete_groups": float(self.incomplete_groups),
                 "sample_buffer/dropped_small_groups": float(self.dropped_small_groups),
@@ -1319,7 +1331,17 @@ class BatchReader:
         if self.prefetch and not self.buffer.data_ended:
             next_floor = None if current_version is None else floor + 1  # the next take's
             self._start_prefetching(int(groups), next_floor)
-        return out, TakeReport(rollout_id=rollout_id, groups=len(out), stale_groups=stale,
+        # fenced writes the merge dropped since the last take (shard ownership records)
+        take_dropped = getattr(self.buffer, "take_fenced_dropped", None)
+        fenced_shards = list(take_dropped()) if callable(take_dropped) else []
+        fenced += sum(int(d["groups"]) for d in fenced_shards)
+        counters = getattr(self.buffer, "merge_counters", None)
+        merge = dict(counters()) if callable(counters) else {}
+        return out, TakeReport(stale_incarnation_shards=fenced_shards,
+                               duplicate_merged_records=int(merge.get("duplicate_merged_records", 0)),
+                               unmerged_shard_gaps=int(merge.get("unmerged_shard_gaps", 0)),
+                               bad_shard_records=int(merge.get("bad_shard_records", 0)),
+                               rollout_id=rollout_id, groups=len(out), stale_groups=stale,
                                start=start, end=end, behavior_versions=dict(sorted(versions.items())),
                                wait_s=round(self.clock() - started, 3), select_s=round(select_s, 3),
                                read_s=round(read_s, 3), decode_s=round(decode_s, 3),

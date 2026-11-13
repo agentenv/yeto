@@ -646,3 +646,24 @@ def test_a_starvation_stop_downs_the_trainer_by_its_launch_name(run_up, monkeypa
     downs = [argv[-2:] for argv in run.calls if "down" in argv]
     assert downs == [["down", "r1-trainer"]]
     assert not any("pool-stop" in argv for argv in run.calls)
+
+
+def test_the_data_end_seal_takes_an_owned_shard_first(run_up, tmp_path, monkeypatch):
+    """A shard under ownership records takes only its owner's end record: the seal
+    (no writer is left) claims the shard, then ends it; a fenced sampler's own end
+    record would be void."""
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, open_trainer_buffer, shard_index
+    from yeto.rl.engine.trainer_lease import TrainerLease
+
+    run, objects = _data_end_run(run_up, tmp_path, monkeypatch)
+    TrainerLease.claim(objects, incarnation="trainer-1")
+    _write_groups(objects, "s-0", 1, end=True)
+    writer = FileSampleBuffer(objects, batch_size=1, index=shard_index("s-1"))
+    writer.claim_owner("inc-1")
+    writer.claim_owner("pool-fence:t-1", by="pool")  # its sampler was fenced, never ended it
+    assert run.seal_data_end()
+    trainer = open_trainer_buffer(objects, batch_size=1, shards=["s-0", "s-1", "s-2", "s-3"])
+    trainer.refresh()
+    assert trainer.data_ended
+    owners = FileSampleBuffer(objects, batch_size=1, index=shard_index("s-1"))
+    assert owners.owner.incarnation == up.SEAL_OWNER and owners.data_ended

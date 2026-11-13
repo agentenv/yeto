@@ -330,11 +330,11 @@ class ModalPoolOps:
         return pool_data_path(self.cfg, self._fence_store,
                               lambda: self._dispense_ledger() if pool_dispense(self.cfg) is not None else None)
 
-    def fence(self, m) -> None:
-        self.data_path().fence_shard(m.shard, by=m.ticket)
+    def fence(self, m) -> Any:
+        return self.data_path().fence_shard(m.shard, by=m.ticket)
 
-    def fence_incarnation(self, m) -> None:
-        self.data_path().fence_incarnation(m.shard, by=m.ticket)
+    def fence_incarnation(self, m) -> Any:
+        return self.data_path().fence_incarnation(m.shard, by=m.ticket)
 
     def request_drain(self, m) -> None:
         import time as _time  # noqa: PLC0415

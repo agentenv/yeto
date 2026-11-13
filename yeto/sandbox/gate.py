@@ -36,7 +36,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .docker import DockerHost
+from .docker import DockerError, DockerHost
 from .envs import EnvsConfig, HostConfig, parse_envs
 from .ready import ReadyView, read_manifest
 from .trial_labels import OWNER_KEYS, RUN_KEY, Owner, owner_from_env, sweep_shard, sweep_stale
@@ -139,6 +139,21 @@ class SandboxGate:
             return 0
         self._probe = None
         return n
+
+    def check_docker(self) -> None:
+        """``docker info`` on the sampler's host once, at sampler start; raise :class:`DockerError`
+        with what to fix when it fails. Later probes only warn and count the room as 0, so an
+        unreachable daemon would otherwise leave the pool waiting for capacity forever."""
+        if self.docker is None or self.host is None:
+            return
+        try:
+            self.docker.info()
+        except Exception as error:  # noqa: BLE001 - re-raised with the fix
+            raise DockerError(
+                f"sandbox host {self.host.name}: docker at {self.host.docker_host} is unreachable from this "
+                f"sampler ({error}); check that `DOCKER_HOST={self.host.docker_host} docker info` works here "
+                "(for ssh://: the key, known_hosts and user of agentic.setup.sandbox, ssh BatchMode), "
+                "or fix agentic.envs.hosts[].docker_host") from error
 
     def free_groups(self) -> int | None:
         rooms = [r for r in (self._process_free(), self._host_free()) if r is not None]

@@ -288,11 +288,11 @@ class ProviderPoolOps:
     def _probe(self, member: Any) -> Any:
         return self.route_of(member).probe(member)
 
-    def _fence(self, member: Any) -> None:
-        self.fencer.fence_shard(member.shard, by=member.ticket)
+    def _fence(self, member: Any) -> Any:
+        return self.fencer.fence_shard(member.shard, by=member.ticket)
 
-    def _fence_incarnation(self, member: Any) -> None:
-        self.fencer.fence_incarnation(member.shard, by=member.ticket)
+    def _fence_incarnation(self, member: Any) -> Any:
+        return self.fencer.fence_incarnation(member.shard, by=member.ticket)
 
     def _request_drain(self, member: Any) -> None:
         member.drain_seq = self.fencer.request_drain(member.shard, seq=f"{member.ticket}:{self.clock():.3f}")

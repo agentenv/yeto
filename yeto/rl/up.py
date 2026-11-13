@@ -88,6 +88,7 @@ _FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already r
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
 # ``yeto launch --cluster-prefix`` default (yeto.cli): the trainer's run name without the flag
 LAUNCH_DEFAULT_NAME = "yeto"
+SEAL_OWNER = "run-up-data-end"  # the incarnation the data-end seal claims an owned shard as
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
 
@@ -1091,6 +1092,11 @@ class Run:
             for shard in self.data_end_shards():
                 writer = FileSampleBuffer(objects, batch_size=1, index=shard_index(shard))
                 if not writer.data_ended:
+                    if writer.owner is not None:
+                        # a shard under ownership records takes only its owner's end
+                        # (``sample_buffer`` module doc): no writer is left, so the seal
+                        # takes the shard first (a fenced sampler's end record is void)
+                        writer.claim_owner(SEAL_OWNER, by="operator")
                     writer.mark_data_end()
                     sealed.append(shard)
         except Exception as error:  # noqa: BLE001 - tried again next poll

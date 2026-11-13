@@ -73,6 +73,7 @@ class RelayOssObjectStore:
 
     scheme = SCHEME
     buffer_shards = True  # as OssObjectStore: no record depends on create
+    atomic_create = False  # create is exists-then-write (object_store.atomic_create)
 
     def __init__(self, uri: str, relay: Relay, *, runner: Runner | None = None) -> None:
         self.bucket, self.prefix = parse_oss_uri(uri)

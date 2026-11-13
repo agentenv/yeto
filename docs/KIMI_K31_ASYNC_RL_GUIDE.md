@@ -759,8 +759,9 @@ shortest-lease one. Two modes, set per run by `elastic.scale_down` in
 | `fence` | Fenced at once: its task claims go back to the dispenser and the other nodes take them at their next claim, without waiting for the claim lease. Its trials in flight are lost (the tasks are redone elsewhere). Then the same release as above. |
 
 In both modes the groups the node wrote before the fence stay in its shard and
-the trainer reads them as usual; a group written after the fence is dropped by
-the trainer's incarnation gate. No task is given out twice and none is lost.
+the trainer reads them as usual; nothing the node writes after the fence is
+trained (see "What a fence is" in section 5.2). No task is given out twice and
+none is lost.
 
 **The gate fails closed, and pauses training.** To judge a group the gate reads
 its shard's incarnation lease (`sample-buffer/leases/<shard>.json`). A lease
@@ -910,10 +911,69 @@ same run:
 | t + 100 s | `nc_elastic_ordered ... continues_shard=<old shard>` |
 | t + 10 min | `nc_elastic_member_ready`, `rl_sampler_start_on_latest` with the newest release |
 
-The reclaimed node's claims are released by the first sampler that scans the
-dispenser after the fence (a fenced holder's claim is released at once, not
-after `lease_s`). With a single sampler that is the replacement, so the tasks
-continue when it joins.
+The reclaimed node's claims are released by the fence itself (the pool retires
+the sampler in the dispenser ledger; a fenced holder's claim is released at
+once, not after `lease_s`), and the other samplers take them at their next
+claim. With a single sampler that is the replacement, so the tasks continue
+when it joins.
+
+**What a fence is.** Each sampler writes its groups into its own shard of the
+buffer, `sample-buffer/shards/<shard>/<position>.json`, one object per record,
+each created only if the position is still free. A fence is one more record in
+that sequence, an *ownership record*
+(`{"schema": "yeto.rl.sample-buffer/v2", "pos", "owner": {"incarnation",
+"epoch", "by", "claimed_at"}}`): a sampler writes one for itself when it joins
+(`by: sampler`), the pool writes `pool-fence:<ticket>` when it fences a shard
+or restarts a stalled sampler in place (`by: pool`). One rule decides what is
+trained, the same for every reader: a group counts if the last ownership
+record before it names the sampler process (incarnation) that wrote it, or if
+no ownership record precedes it. So:
+
+- every group the node created before the fence record is trained, including
+  the ones written in the last seconds before it;
+- nothing a fenced process writes afterwards is trained. Its write reads the
+  shard first and is refused (`ShardFenced`, nothing is created; the task goes
+  back to the dispenser), and the trainer applies the rule again when it
+  merges the shards, so a process that skipped the check gains nothing
+  (`sample_buffer/stale_incarnation_groups`, event `rl_buffer_merge_skipped`
+  with `reason: stale_incarnation`, the shard and the owner's epoch);
+- a sampler that cannot read its shard several times in a row (5 by default)
+  writes no group until a read succeeds again; such a group's task goes back
+  to the dispenser uncounted (`release`, like a fenced one), so a store
+  outage does not use up `max_redo`;
+- a fenced process cannot mark its shard as ended either. A shard the pool
+  fenced therefore never reads as ended (before, a drained sampler that was
+  then fenced could still write its end mark). Nothing in a K3.1 run waits for
+  that: the trainer is started with the list of shard names
+  (`--rl-buffer-shards`), and the names not in use never end, so the buffer's
+  "every shard has ended" state is not reached by scaling down. The run ends
+  by the trainer's own step count and `yeto run down`;
+- no clock takes part: the control host's and the nodes' clocks may differ by
+  any amount. `claimed_at` is information only.
+
+`rl_shard_owner` (shard, incarnation, epoch, by) is emitted by the sampler at
+its join and by the pool at a fence. A sampler that joined before the trainer
+of a new run was up starts under the older lease record and writes its
+ownership record at one of its next fence polls (`adopted: true` in the
+event; every `incarnation_lease.poll_s`, 30 s by default). `sample-buffer/leases/<shard>.json` is
+still written, for the dashboard and for older readers; it no longer decides
+anything on such a shard.
+
+Storage: one ownership record (about 200 bytes) per sampler start and per
+fence, in the shard it concerns; the merged index holds none. A sampler's
+fence check is the incremental listing of its own shard that every write does
+anyway. A pool fence lists the shard from the last ownership record on (one
+request per 1000 records) and reads one or two records.
+
+The merge also passes over a shard record it cannot read (not JSON, another
+schema, a missing field): `sample_buffer/bad_shard_records`, event
+`rl_buffer_merge_skipped` with `reason: bad_record`; the other groups of that
+shard and all other shards are trained as usual. A shard position that is
+missing while later ones exist (an object deleted from the bucket by hand or by
+a lifecycle rule) is not skipped: the trainer prints a warning and emits
+`reason: missing_shard_position`, and the shard's later groups wait until the
+object is back. A sampler restarted on a shard with a damaged record passes
+over it the same way instead of failing at its start.
 
 ### 5.3 Resuming training
 
@@ -1001,6 +1061,69 @@ accepted when the algorithm's semantic hash is unchanged, and the manifest
 records the old and new pack with your reason. To resume deliberately on the
 pinned pack, use `--rl-code-pack-keep` instead. For algorithm changes,
 Recommended practice: start a new run (another `--cluster-prefix`).
+
+Mixed versions on one run store (the fence format of section 5.2):
+
+| Trainer | Samplers / pool | What happens |
+|---|---|---|
+| new | new | Ownership records fence the shards. A shard that already holds groups from before the upgrade keeps them: its part before the first ownership record is read under the older rule (lease record, 60 s clock margin). |
+| old (no trainer generation lease in the store) | new | The samplers and the pool write no ownership record and use the lease record as before. Nothing changes for the old trainer. |
+| new | old, on a run started by old code | Works as before the upgrade (lease record). Restart the samplers on the new code to get the fence above; the dispenser plan of the run stays at its version. |
+| any | old, on a run started by new code | Refused at the sampler's start: `dispense mismatch: version is 2 here, 3 in .../plan.json`. Use the new sampler image. |
+| old, after a new trainer ran on the store | - | Not supported, and refused: see "No way back" below. |
+| new | new samplers, old pool | Not supported. The old pool fences by the lease record only, which an owned shard ignores: groups the fenced process writes before it stops are trained. Upgrade the pool together with the samplers. |
+| new | old, still running when the new trainer starts | Not supported (see the upgrade order below): a pool fence or a new sampler writes an ownership record into the shard, and the old sampler stops at its next read of it. Nothing is misread. |
+
+**No way back to older trainer code.** Once a shard of the run holds an
+ownership record, code from before ownership records cannot read the run's
+buffer, and it says so instead of misreading it:
+
+| Older code | What it does on such a store |
+|---|---|
+| trainer (and the head's view of the merged index) | Stops at its first read of the merged index: `SampleBufferError: sample buffer: record out of order: {"marker": "shard-ownership", "note": "written by yeto with shard ownership records: code older than them cannot read this buffer", ...}`. It merges and trains nothing, on every restart. The new trainer writes that marker into the merged index before the first group it merges from an owned shard. |
+| sampler on a shard with an ownership record | Stops at its start with the same `record out of order` error, showing the ownership record. With a store dispenser it is refused even earlier: `dispense mismatch: version is 2 here, 3 in .../plan.json`. |
+| the head's count of unmerged shard records (`UnmergedShards`) | `KeyError: 'sample_id'` on the ownership record. Not a clear message; it is not a misread either. |
+| trainer, in the short window after a new sampler joined and before the new trainer merged anything | No marker exists yet. The older trainer copies the shard's records, the ownership record included, into the merged index and then stops with `record out of order` (showing that record). The copied groups were not checked against the ownership rule. The current code reads on from such an index (it passes over the copied record and counts it, `foreign_merged_records`), so going forward again works; do not rely on it. |
+
+The merged group records themselves are unchanged for older readers (two more
+fields, `shard_epoch` and `shard_passed`, that older code ignores). To go back
+to older code, start a new run prefix.
+
+**Upgrade order for a running run: samplers and pool first, the trainer
+last.** Ownership records need an atomic exclusive create: on a store without
+one (an endpoint that refuses `If-None-Match`, the OSS relay) the trainer claims
+no generation and everything stays on the lease record fence. The trainer is the switch: the new format starts when the new trainer
+claims its generation lease in the store (`trainer-lease/<generation>.json`,
+one more at every start of a trainer that merges the shards of an object
+store; a generation is only this format switch, it does not keep two trainers
+from running at once), and from then on the new samplers and the pool write ownership records.
+
+1. Bring the samplers up on the new image (drain the old ones, below) and
+   restart the pool on the control host with the new code. With the old
+   trainer still running they write no ownership record and keep the run's
+   dispenser plan at its version: nothing in the store changes format, and
+   going back to the old samplers and pool is still possible.
+2. Then restart the trainer on the new code (`--rl-code-pack-upgrade`). At its
+   start it claims the generation lease; every new sampler takes its shard with
+   an ownership record at its next lease poll (event `rl_shard_owner`,
+   `adopted: true`; within `incarnation_lease.poll_s`, 30 s by default), and
+   the pool's fences of those shards become ownership records too (a shard
+   that holds none yet is fenced by its lease record, as before).
+
+The other order (trainer first) is not supported: once the new trainer ran, a
+new sampler takes its shard with an ownership record (and the pool's later
+fences of that shard are ownership records too). An old sampler started on such
+a shard cannot read the record: it stops at its start (or at its next write)
+without writing past it, and every restart of it on old code stops again until
+it runs the new image: safe, but the shard does not continue.
+
+**Rollback.** Before step 2: roll the samplers and the pool back as usual.
+After step 2 there is no rollback to older code on the same run store, of the
+trainer, the samplers or the pool (an older pool's lease-only fence does not
+fence an owned shard) ("No way back" above): older code stops on the new
+records instead of misreading them, so a rollback costs the run, not its data.
+To go back, start a new run prefix (another `--cluster-prefix`), from the last
+released policy if you want to keep the training so far.
 
 **Upgrading the samplers: drain the old ones first.** The trainer trains one
 group per dispensed task (`rl_buffer_duplicate_task_skipped`, section 8). It
@@ -2071,8 +2194,8 @@ Daytona deletes a spot sandbox without notice when an on-demand user needs the
 capacity (Started, Deleting, Deleted, with `spotEvictedAt` recorded). The pool
 reads that as an eviction, the same as a National Compute eviction:
 
-1. the shard is fenced, so the trainer frees its claims at once and ignores
-   anything the lost sandbox still writes;
+1. the shard is fenced (section 5.2, "What a fence is"), so its claims are
+   freed at once and nothing the lost sandbox still writes is trained;
 2. the sandbox is confirmed deleted;
 3. a replacement sandbox is created and continues the shard and its data slot.
 
