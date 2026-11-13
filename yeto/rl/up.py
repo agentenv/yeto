@@ -132,7 +132,63 @@ def load_config(path: str) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
     rollout_section(cfg)
+    check_sections(cfg)
     return cfg
+
+
+# Keys an earlier ``run up`` read and run configs still carry: ignored (with a log line), not
+# refused, so an existing run's config still loads for its next ``run up`` / ``run down``.
+RETIRED_KEYS = {"budget": {"silence_grace_min"}}
+
+
+def _section(cfg: dict[str, Any], name: str, keys: set[str]) -> dict[str, Any]:
+    section = cfg.get(name)
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ValueError(f"run config: {name} must be an object")
+    retired = set(section) & RETIRED_KEYS.get(name, set())
+    if retired:
+        _log(f"run config: {name} keys {sorted(retired)} are no longer read (ignored)")
+    unknown = set(section) - keys - retired
+    if unknown:
+        raise ValueError(f"run config: unknown {name} keys {sorted(unknown)} (known: {sorted(keys)})")
+    return section
+
+
+def _number(section: dict[str, Any], field: str, key: str, *, positive: bool = False) -> None:
+    """``section[key]``, when present, is a finite number (> 0 with ``positive``, else >= 0)."""
+    if key not in section:
+        return
+    value = section[key]
+    ok = (not isinstance(value, bool) and isinstance(value, (int, float)) and value == value
+          and value != float("inf") and (value > 0 if positive else value >= 0))
+    if not ok:
+        raise ValueError(f"run config: {field}.{key} must be a number {'> 0' if positive else '>= 0'} "
+                         f"(got {value!r})")
+
+
+def check_sections(cfg: dict[str, Any]) -> None:
+    """The ``first_group``, ``budget``, ``dashboard`` sections and ``rollout.stall_alert_s``:
+    a misspelled key, a null, a string or a negative value is refused here, before anything is
+    ordered (else it crashes the run once the pools bill, or is silently read as the default).
+    ``budget.usd`` / ``budget.wall_h`` (null allowed) are checked by the preflight."""
+    fg = _section(cfg, "first_group", {"timeout_s", "poll_s"})
+    _number(fg, "first_group", "timeout_s", positive=True)
+    _number(fg, "first_group", "poll_s", positive=True)
+    b = _section(cfg, "budget", {"usd", "wall_h", "nc_usd_per_h", "silence_min", "release_nc_on_breach",
+                                 "release_nc_on_finish"})
+    for key in ("nc_usd_per_h", "silence_min"):
+        if b.get(key) is not None:  # null: the default (number_or_default)
+            _number(b, "budget", key)
+    for key in ("release_nc_on_breach", "release_nc_on_finish"):
+        if key in b and not isinstance(b[key], bool):
+            raise ValueError(f"run config: budget.{key} must be true or false (got {b[key]!r})")
+    dash = _section(cfg, "dashboard", {"port", "prices"})
+    if "port" in dash and (isinstance(dash["port"], bool) or not isinstance(dash["port"], int)
+                           or not 0 < dash["port"] < 65536):
+        raise ValueError(f"run config: dashboard.port must be a port number 1-65535 (got {dash['port']!r})")
+    _number(rollout_section(cfg), "rollout", "stall_alert_s")
 
 
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
