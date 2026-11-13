@@ -27,7 +27,7 @@ jobs:
       - run: cargo test --manifest-path syncer/Cargo.toml
 
   # The python suite (~12k tests, ~41 min serial) runs as 4 parallel shards; see
-  # --shard in tests/conftest.py (every collected test runs in exactly one shard).
+  # --shard in tests/conftest.py (whole files; every collected test runs in exactly one shard).
   python-shard:
     name: python-${{ matrix.shard }}
     runs-on: ubuntu-latest

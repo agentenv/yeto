@@ -15,8 +15,8 @@ def pytest_addoption(parser):
         "--shard",
         default=None,
         metavar="I/N",
-        help="run only shard I (0-based) of N: the selected tests sorted by node id, "
-        "dealt round-robin, so every test runs in exactly one shard",
+        help="run only shard I (0-based) of N: whole test files dealt by test count, "
+        "so every test runs in exactly one shard",
     )
 
 
@@ -170,12 +170,21 @@ def _select_shard(config, items):
     index, count = (int(x) for x in spec.split("/"))
     if not 0 <= index < count:
         raise _pytest.UsageError(f"--shard {spec}: need 0 <= I < N")
-    # Round-robin over sorted node ids: deterministic across runners, and the
-    # slow parametrizations of one file spread over all shards.
-    mine = {id(item) for n, item in enumerate(sorted(items, key=lambda i: i.nodeid))
-            if n % count == index}
-    keep = [item for item in items if id(item) in mine]
-    drop = [item for item in items if id(item) not in mine]
+    # Whole files, so each file's tests keep their serial order and module state;
+    # files dealt largest-first to the shard with the fewest tests (ties by name),
+    # which is deterministic across runners.
+    per_file: dict[str, int] = {}
+    for item in items:
+        path = item.nodeid.split("::", 1)[0]
+        per_file[path] = per_file.get(path, 0) + 1
+    load = [0] * count
+    shard_of: dict[str, int] = {}
+    for path, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0])):
+        target = min(range(count), key=lambda s: (load[s], s))
+        shard_of[path] = target
+        load[target] += n
+    keep = [item for item in items if shard_of[item.nodeid.split("::", 1)[0]] == index]
+    drop = [item for item in items if shard_of[item.nodeid.split("::", 1)[0]] != index]
     print(f"\nshard {index}/{count}: {len(keep)} of {len(items)} tests")
     if drop:
         config.hook.pytest_deselected(items=drop)
