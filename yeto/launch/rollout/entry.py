@@ -76,7 +76,11 @@ def scale(args: Any) -> int:
         return nc_cli.main(pool_scale_argv(ref.config, args))
     from yeto.rl import up  # noqa: PLC0415
 
-    run = up.Run(up.load_config(args.config))
+    try:
+        run = up.open_run(args.config)
+    except up.RunConfigError as error:
+        print(f"rollout scale: {error}", file=sys.stderr)
+        return 2
     return run.scale(args.target, args.retire, add=args.add, remove=args.remove, mode=args.mode,
                      force_static=args.force_static, dry_run=args.dry_run, source=args.source, pool=args.pool,
                      provider=args.provider)

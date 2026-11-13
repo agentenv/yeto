@@ -143,8 +143,24 @@ def _log(msg: str) -> None:
     print(f"{_now()} [rl up] {msg}", flush=True)
 
 
+class RunConfigError(ValueError):
+    """The run config (or the run's state directory) cannot be used: one line for the user."""
+
+
 def load_config(path: str) -> dict[str, Any]:
-    cfg = json.loads(Path(path).expanduser().read_text())
+    file = Path(path).expanduser()
+    try:
+        text = file.read_text()
+    except FileNotFoundError:
+        raise RunConfigError(f"run config {file}: not found") from None
+    except OSError as error:
+        raise RunConfigError(f"run config {file}: cannot be read ({error.strerror or error})") from None
+    try:
+        cfg = json.loads(text)
+    except ValueError as error:
+        raise RunConfigError(f"run config {file}: not valid JSON ({error})") from None
+    if not isinstance(cfg, dict):
+        raise RunConfigError(f"run config {file}: must be a JSON object")
     for key in ("run", "store", "trainer"):
         if key not in cfg:
             raise ValueError(f"run config: missing {key!r}")
@@ -2156,8 +2172,31 @@ def ack_forced_stop(run: Run) -> None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
 
 
+def open_run(config: str) -> Run:
+    """``Run(load_config(config))``; a config or state directory that cannot be used raises
+    :class:`RunConfigError` naming the file (the CLI prints it, without a traceback)."""
+    try:
+        cfg = load_config(config)
+    except RunConfigError:
+        raise
+    except ValueError as error:  # a check of the config's content
+        raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
+    state_dir = STATE_ROOT / str(cfg.get("run"))
+    try:
+        if "run" in cfg:
+            state_dir.mkdir(parents=True, exist_ok=True)  # what Run() does first
+    except OSError as error:
+        raise RunConfigError(f"run {cfg.get('run')}: cannot create the state directory {state_dir} "
+                             f"({error.strerror or error}); HOME must be writable") from None
+    return Run(cfg)
+
+
 def main(args: Any) -> int:
-    run = Run(load_config(args.config))
+    try:
+        run = open_run(args.config)
+    except RunConfigError as error:
+        print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
+        return 2
     if args.rl_command == "status":
         print(json.dumps(run.status(), indent=1, default=str))
         return 0
