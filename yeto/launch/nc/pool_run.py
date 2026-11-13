@@ -924,6 +924,15 @@ def pause_pool(cfg: dict[str, Any], config_path: str, tickets: list[str], *, res
                   f"(live: {sorted(t for t in live if t)})")
             return 2
         old = read_scale(cfg) or {}
+        if resume:  # a mistyped ticket must not read as "resumed" while the paused node stays paused
+            # paused in the control file, or held paused by the pool (its state outlives a lost control file)
+            paused_now = list(old.get("paused") or ()) + sorted(
+                m.get("ticket") for m in billed_members(doc) if m.get("paused") and m.get("ticket"))
+            not_paused = [t for t in tickets if t not in paused_now]
+            if not_paused:
+                print(f"{name}: refused, nothing changed: {not_paused} not paused "
+                      f"(paused now: {sorted(set(paused_now)) or 'none'})")
+                return 2
         paused = [t for t in old.get("paused") or () if t in live or resume]
         hold = [t for t in old.get("hold_tasks") or () if t in paused]
         if resume:
