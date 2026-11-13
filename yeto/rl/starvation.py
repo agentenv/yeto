@@ -10,7 +10,12 @@ from two signals it already has:
   previous listing is a new group, or a new index object written with one);
 * the sampler pools' own state (members in ``ready``, the pool loop alive).
 
-Verdicts, both measured from the last new group (or the start of the watch):
+Verdicts, both measured from the last new group (or the start of the watch, or the
+last poll at which every healthy sampler waited for the trainer: its backlog at
+``max_backlog_groups``, e.g. while a restarted trainer loads its weights; the trainer
+then has groups to read and is not starving). That hold lasts ``trainer_wait_max_min``
+at most: a trainer that hangs without exiting (or samplers stuck on a failed post-load
+check, which also count as waiting) must still alert, ``alert_min`` after the hold ends):
 
 * ``alert`` after ``alert_s`` without a new group, once per starved stretch (an
   alert only; agentic trials may run for a long time, so the default is wide);
@@ -34,7 +39,8 @@ DEFAULT_ALERT_MIN = 30.0
 DEFAULT_STOP_MIN = 120.0
 DEFAULT_UNHEALTHY_MIN = 10.0
 DEFAULT_CHECK_S = 300.0  # store listings of the buffer at most this often
-DEFAULT_STOP_GRACE_MIN = 20.0  # after the STOP flag: wait this long for the launcher, then ``yeto down``
+DEFAULT_STOP_GRACE_MIN = 20.0
+DEFAULT_TRAINER_WAIT_MAX_MIN = 120.0  # every sampler waiting for the trainer holds the clock this long at most  # after the STOP flag: wait this long for the launcher, then ``yeto down``
 
 ALERT_EVENT = "trainer_starvation_alert"
 RECOVERED_EVENT = "trainer_starvation_recovered"
@@ -50,6 +56,7 @@ class StarvationConfig:
     unhealthy_s: float = DEFAULT_UNHEALTHY_MIN * 60
     check_s: float = DEFAULT_CHECK_S
     stop_grace_s: float = DEFAULT_STOP_GRACE_MIN * 60
+    trainer_wait_max_s: float = DEFAULT_TRAINER_WAIT_MAX_MIN * 60
 
     @property
     def enabled(self) -> bool:
@@ -60,7 +67,8 @@ class StarvationConfig:
         """The run config's ``starvation`` section (minutes, ``check_s`` in seconds).
         Raises ValueError on a bad value."""
         s = dict(section or {})
-        unknown = sorted(set(s) - {"alert_min", "stop_min", "unhealthy_min", "check_s", "stop_grace_min"})
+        unknown = sorted(set(s) - {"alert_min", "stop_min", "unhealthy_min", "check_s", "stop_grace_min",
+                                 "trainer_wait_max_min"})
         if unknown:
             raise ValueError(f"starvation: unknown key(s) {unknown}")
 
@@ -73,7 +81,8 @@ class StarvationConfig:
         cfg = cls(alert_s=num("alert_min", DEFAULT_ALERT_MIN) * 60, stop_s=num("stop_min", DEFAULT_STOP_MIN) * 60,
                   unhealthy_s=num("unhealthy_min", DEFAULT_UNHEALTHY_MIN) * 60,
                   check_s=num("check_s", DEFAULT_CHECK_S),
-                  stop_grace_s=num("stop_grace_min", DEFAULT_STOP_GRACE_MIN) * 60)
+                  stop_grace_s=num("stop_grace_min", DEFAULT_STOP_GRACE_MIN) * 60,
+                  trainer_wait_max_s=num("trainer_wait_max_min", DEFAULT_TRAINER_WAIT_MAX_MIN) * 60)
         if cfg.check_s <= 0 and cfg.enabled:
             raise ValueError("starvation.check_s must be > 0")
         if cfg.alert_s > 0 and cfg.stop_s > 0 and cfg.stop_s < cfg.alert_s:
@@ -94,11 +103,17 @@ class SamplerHealth:
     # ``elastic.start_timeout_s`` (a replacement under way), and the longest such timeout
     recovering: int = 0
     recover_s: float = 0.0
+    # of the healthy members: those whose newest tape line is an ``rl_sampler_waiting``
+    # heartbeat (backlog at ``max_backlog_groups``, or no release to serve yet): held back
+    # by the trainer, not starving it
+    waiting: int = 0
 
     def phrase(self) -> str:
         if self.healthy is None:
             return f"sampler pools: state unreadable{'; ' + self.detail if self.detail else ''}"
         text = f"{self.healthy} healthy sampler(s), {self.live} live member(s), {self.paused} paused"
+        if self.waiting:
+            text += f", {self.waiting} waiting for the trainer"
         if self.recovering:
             text += f", recovering: {self.recovering} member(s) starting"
         return text + (f" ({self.detail})" if self.detail else "")
@@ -120,6 +135,7 @@ class StarvationWatch:
         self.unhealthy_since: float | None = None
         self.recovering_since: float | None = None  # replacements seen through this unhealthy stretch
         self.alerted = False
+        self.waiting_since: float | None = None  # every healthy sampler waits for the trainer since
 
     def observe(self, now: float, *, new_groups: int | None, health: SamplerHealth,
                 cause: str | None = None, listed: bool = True) -> Verdict:
@@ -129,10 +145,24 @@ class StarvationWatch:
         fail-closed pause), named in the reason. ``listed``: the latest listing of the
         buffer succeeded; after a failed one there is no stop (no evidence of no group)."""
         recovered = False
+        all_wait = bool(health.healthy and health.waiting >= health.healthy)
         if new_groups:
             self.since = now
             recovered = self.alerted
             self.alerted = False
+            self.waiting_since = None  # a sampler generated: the wait for the trainer ended
+        elif all_wait and self.waiting_since is None:
+            # kept across a poll that does not see every sampler waiting (a tape line other
+            # than the heartbeat), so the hold cannot be renewed forever; only a new group ends it
+            self.waiting_since = now
+        if not new_groups and all_wait and now - self.waiting_since < self.config.trainer_wait_max_s:
+            # every healthy sampler waits for the trainer (its backlog is at the cap: a
+            # trainer that loads its weights after a restart, or trains slowly): the buffer
+            # holds groups the trainer has not read, so no group is missing; the stretch
+            # starts again when a sampler generates. Bounded by ``trainer_wait_max_s``: a
+            # trainer hung without exiting never reads again, and a sampler held by a
+            # failed post-load check (or an unread store) also reports this wait
+            self.since = now
         if health.healthy == 0:
             if self.unhealthy_since is None:
                 self.unhealthy_since = now
@@ -141,6 +171,10 @@ class StarvationWatch:
         starved = max(0.0, now - self.since)
         cfg = self.config
         reason = f"no new group in the buffer for {starved / 60:.0f} min; {health.phrase()}"
+        if all_wait and not new_groups and now - self.waiting_since >= self.config.trainer_wait_max_s:
+            reason += (f"; every healthy sampler has waited for the trainer {(now - self.waiting_since) / 60:.0f} min "
+                       f"(> trainer_wait_max_min {self.config.trainer_wait_max_s / 60:.0f}): is the trainer hung, "
+                       "or a sampler held by a failed post-load check?")
         if cause:
             reason += f"; trainer side: {cause}"
         if not listed:

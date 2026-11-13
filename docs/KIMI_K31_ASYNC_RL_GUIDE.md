@@ -1745,7 +1745,7 @@ new object keys under the store's `sample-buffer/shards/` (listed every
 
 ```json
 "starvation": {"alert_min": 30, "stop_min": 120, "unhealthy_min": 10,
-               "check_s": 300, "stop_grace_min": 20}
+               "check_s": 300, "stop_grace_min": 20, "trainer_wait_max_min": 120}
 ```
 
 | Key | Default | Meaning |
@@ -1755,6 +1755,7 @@ new object keys under the store's `sample-buffer/shards/` (listed every
 | `unhealthy_min` | 10 | How long the pools must report no healthy sampler before a stop. A short gap (a lease-end handoff) does not count. |
 | `check_s` | 300 | Seconds between two incremental listings of the buffer shards. |
 | `stop_grace_min` | 20 | After the STOP flag, how long the monitor waits for the trainer launcher to exit before `yeto down`. |
+| `trainer_wait_max_min` | 120 | While every healthy sampler waits for the trainer (its newest tape line is an `rl_sampler_waiting` heartbeat: backlog at `max_backlog_groups`, e.g. a restarted trainer loading its weights), the starvation clock is held. The hold lasts this long at most from the start of the wait (only a new group ends the wait), so a trainer hung without exiting, or samplers held by a failed post-load check, still alert `alert_min` later. `0`: no hold. |
 
 What never stops the trainer: a healthy sampler (long agentic trials can go
 an hour without a group), a member paused with `yeto run pause` (in any state),

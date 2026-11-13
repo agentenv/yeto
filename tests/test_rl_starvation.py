@@ -667,3 +667,98 @@ def test_the_data_end_seal_takes_an_owned_shard_first(run_up, tmp_path, monkeypa
     assert trainer.data_ended
     owners = FileSampleBuffer(objects, batch_size=1, index=shard_index("s-1"))
     assert owners.owner.incarnation == up.SEAL_OWNER and owners.data_ended
+
+
+# -- samplers held back by the trainer (backlog at the cap) are no starvation -------------
+
+def test_samplers_that_all_wait_for_the_trainer_never_alert():
+    """A trainer restarted over a full backlog loads its weights for a long time: every
+    sampler waits at ``max_backlog_groups`` and writes nothing, yet the trainer is not
+    starving (its buffer holds a full backlog)."""
+    waiting = st.SamplerHealth(2, live=2, waiting=2)
+    w = st.StarvationWatch(_cfg(), now=0)
+    for minute in range(0, 115, 5):  # within trainer_wait_max_min (120)
+        assert w.observe(minute * MIN, new_groups=0, health=waiting).state == st.OK
+    # the trainer reads again, the samplers generate: the clock starts at the last wait
+    assert w.observe(120 * MIN, new_groups=0, health=HEALTHY).state == st.OK
+    assert w.observe(142 * MIN, new_groups=0, health=HEALTHY).state == st.ALERT
+
+
+def test_a_hung_trainer_still_alerts_while_every_sampler_waits():
+    """A trainer that hangs without exiting never reads again: the samplers wait at the cap
+    for ever. The hold ends after ``trainer_wait_max_min``; the alert follows ``alert_min``
+    later and names the wait."""
+    waiting = st.SamplerHealth(2, live=2, waiting=2)
+    w = st.StarvationWatch(_cfg(), now=0)
+    states = {m: w.observe(m * MIN, new_groups=0, health=waiting) for m in range(0, 6 * 60, 5)}
+    assert all(v.state == st.OK for m, v in states.items() if m < 145)
+    first = min(m for m, v in states.items() if v.state == st.ALERT)
+    assert first == 145 and states[first].new_alert
+    assert "waited for the trainer 145 min" in states[first].reason
+    assert all(v.state == st.ALERT for m, v in states.items() if m >= 145)  # never stops: samplers healthy
+    # a new group (the trainer read, a sampler generated) recovers and re-arms the hold
+    v = w.observe(6 * 60 * MIN, new_groups=1, health=waiting)
+    assert v.recovered and v.state == st.OK
+    assert w.observe((6 * 60 + 100) * MIN, new_groups=0, health=waiting).state == st.OK
+
+
+def test_a_poll_that_misses_the_wait_does_not_renew_the_hold():
+    """A tape line other than the heartbeat (one poll sees a sampler not waiting) must not
+    restart the hold: a hung trainer would never alert."""
+    waiting, mixed = st.SamplerHealth(2, live=2, waiting=2), st.SamplerHealth(2, live=2, waiting=1)
+    w = st.StarvationWatch(_cfg(), now=0)
+    first = None
+    for m in range(0, 6 * 60, 5):
+        v = w.observe(m * MIN, new_groups=0, health=mixed if m % 60 == 30 else waiting)
+        if v.state == st.ALERT and first is None:
+            first = m
+    assert first is not None and first <= 150
+
+
+def test_the_trainer_wait_hold_is_configurable():
+    cfg = _cfg(trainer_wait_max_min=0)
+    assert cfg.trainer_wait_max_s == 0
+    w = st.StarvationWatch(cfg, now=0)
+    waiting = st.SamplerHealth(1, live=1, waiting=1)
+    assert w.observe(31 * MIN, new_groups=0, health=waiting).state == st.ALERT
+    assert _cfg().trainer_wait_max_s == 120 * MIN
+    with pytest.raises(ValueError):
+        _cfg(trainer_wait_max_min=-1)
+
+
+def test_one_sampler_that_does_not_wait_keeps_the_watch_on():
+    w = st.StarvationWatch(_cfg(), now=0)
+    v = w.observe(31 * MIN, new_groups=0, health=st.SamplerHealth(2, live=2, waiting=1))
+    assert v.state == st.ALERT and "1 waiting for the trainer" in v.reason
+
+
+def test_sampler_health_counts_the_members_waiting_for_the_trainer(run_up):
+    run = run_up(members=[{"ticket": "a", "state": "ready", "trainer_wait": True},
+                          {"ticket": "b", "state": "ready"},
+                          {"ticket": "c", "state": "ready", "trainer_wait": True, "paused": True},
+                          {"ticket": "d", "state": "gone", "trainer_wait": True}])
+    h = run.sampler_health()
+    assert (h.healthy, h.waiting) == (2, 1)
+
+
+def test_a_restarted_trainer_over_a_full_backlog_is_not_reported_starving(run_up, capsys):
+    run = run_up(members=[{"ticket": "a", "state": "ready", "trainer_wait": True}], keys={"k0"})
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    for _ in range(24):  # 2 h of a trainer loading its weights; the sampler holds at the cap
+        assert run.starvation_check(run.clock.t) is None
+        run.clock.t += 5 * MIN
+    assert "starvation" not in run.state
+    assert "trainer_starvation_alert" not in capsys.readouterr().out
+
+
+def test_a_hung_trainer_over_a_full_backlog_is_still_reported(run_up, capsys):
+    """The trainer process lives but never reads (hung without exiting): the sampler waits
+    at the cap for ever; run up alerts once trainer_wait_max_min + alert_min passed."""
+    run = run_up(members=[{"ticket": "a", "state": "ready", "trainer_wait": True}], keys={"k0"})
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+    for _ in range(40):  # 200 min
+        assert run.starvation_check(run.clock.t) is None  # an alert only: the sampler is healthy
+        run.clock.t += 5 * MIN
+    assert run.state["starvation"]["event"] == "trainer_starvation_alert"
+    assert "waited for the trainer" in run.state["starvation"]["why"]
+    assert "CRITICAL trainer_starvation_alert" in capsys.readouterr().out
