@@ -460,15 +460,27 @@ class Run:
         ups = self.state.setdefault("ups", [])
         if not ups and "t0" in self.state:  # a run started before periods were recorded
             ups.append({"pid": None, "start": float(self.state["t0"]), "seen": None, "end": None, "legacy": True})
-        for period in ups:  # an earlier up that ended without a down: closed at its last poll
+        # an earlier up that ended without a down: closed at its last poll, or now while
+        # the trainer it started still runs (a --no-monitor up, a killed up: the trainer
+        # is a detached process and billed the whole gap; `run down` closes it now too)
+        # (capped at the next period's start: periods never overlap, the spend is their sum)
+        trainer_ran = self._trainer_alive()
+        for i, period in enumerate(ups):
             if period.get("end") is None:
-                period["end"] = up_segments.period_end(period, now)
+                end = now if trainer_ran else up_segments.period_end(period, now)
+                if i + 1 < len(ups) and ups[i + 1].get("start") is not None:
+                    end = max(float(period.get("start") or 0.0), min(end, float(ups[i + 1]["start"])))
+                period["end"] = end
         self.state.setdefault("run_t0", float(self.state.get("t0", now)))
         self.state["t0"] = now
         period = {"pid": os.getpid(), "start": now, "seen": now, "end": None}
         ups.append(period)
         self._up_period = period
         self.save()
+
+    def _trainer_alive(self) -> bool:
+        tr = (self.state.get("procs") or {}).get("trainer")
+        return bool(tr) and _alive(tr.get("pid"))
 
     def up_heartbeat(self) -> None:
         """The monitor's poll: this up's period was seen now; the spend estimate is kept
@@ -736,7 +748,19 @@ class Run:
         ups = [p for p in self.state.get("ups") or () if p.get("start") is not None]
         if not ups:  # a run from before the periods were recorded
             return max(0.0, now - t0) / 3600
-        return sum(max(0.0, up_segments.period_end(p, now) - max(float(p["start"]), t0)) for p in ups) / 3600
+        trainer_ran = None
+
+        def end(i: int, p: dict[str, Any]) -> float:
+            nonlocal trainer_ran
+            e = up_segments.period_end(p, now)
+            if i == len(ups) - 1 and p.get("end") is None:  # an up gone without a down
+                if trainer_ran is None:  # (--no-monitor, killed): its detached trainer bills to now
+                    trainer_ran = self._trainer_alive()
+                if trainer_ran:
+                    e = max(e, now)
+            return e
+
+        return sum(max(0.0, end(i, p) - max(float(p["start"]), t0)) for i, p in enumerate(ups)) / 3600
 
     def node_usd_per_h(self, i: int = 0) -> float:
         """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
