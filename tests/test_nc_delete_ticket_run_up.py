@@ -61,3 +61,18 @@ def test_a_deleted_member_of_a_pool_that_was_not_stopped_lowers_the_target(tmp_p
     _delete(monkeypatch, path, member.ticket, provider)
     scale = json.loads(pool_run.scale_path(cfg).read_text())
     assert scale["target"] == 0 and member.ticket in scale["manual_released"]
+
+
+def test_deleting_the_same_member_twice_lowers_the_target_once(tmp_path, monkeypatch):
+    """A rerun of ``delete-ticket`` (the delete answers ``already``) finds the release
+    recorded: the target is not lowered a second time."""
+    cfg, path, _clock, provider, member = _stopped_pool_with_a_leftover(tmp_path, stopped=None)
+    for t in ("a", "b"):  # two other releases recorded, then the target raised to 3 by hand
+        pool_run.record_manual_release(cfg, t)
+    scale = json.loads(pool_run.scale_path(cfg).read_text())
+    pool_run.scale_path(cfg).write_text(json.dumps({**scale, "target": 3, "seq": scale["seq"] + 1}))
+    assert pool_run.current_target(cfg, {}) == 3
+    _delete(monkeypatch, path, member.ticket, provider)
+    _delete(monkeypatch, path, member.ticket, provider)
+    scale = json.loads(pool_run.scale_path(cfg).read_text())
+    assert scale["target"] == 2 and set(scale["manual_released"]) == {"a", "b", member.ticket}

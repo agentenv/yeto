@@ -987,9 +987,12 @@ def record_manual_release(cfg: dict[str, Any], ticket: str, *, lower: bool = Tru
         except (OSError, ValueError):
             doc = {}
         old = read_scale(cfg) or {}
-        target = max(0, current_target(cfg, doc) - (1 if lower else 0))
         released = dict(old.get("manual_released") or {})
-        released[ticket] = {"target_lowered": True, "at": time.time()}
+        # once per ticket: a rerun (`delete-ticket` again after a crash, `nc down` twice)
+        # finds it recorded and does not lower the target a second time
+        again = ticket in released
+        target = max(0, current_target(cfg, doc) - (1 if lower and not again else 0))
+        released[ticket] = released.get(ticket) or {"target_lowered": True, "at": time.time()}
         new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
                "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
                "previous": current_target(cfg, doc), "source": "manual", "manual_at": time.time(),
