@@ -974,6 +974,34 @@ def pool_of_ticket(ticket: str) -> tuple[dict[str, Any], str, dict[str, Any]] | 
     return None
 
 
+def record_manual_release(cfg: dict[str, Any], ticket: str, *, lower: bool = True) -> int:
+    """Write a manual release of pool member ``ticket`` to the pool's control file
+    (``manual_released[ticket]``, and target - 1 when ``lower``), for a delete sent while
+    no loop runs: a later start does not lower the target again, and ``run up`` does not
+    take the member for a live one of an unfinished stop. ``lower`` False: a leftover of
+    a stopped pool; the next start fills the pool's target as before. Returns the target."""
+    with open(scale_lock_path(cfg), "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            doc = json.loads(cli.pool_state_path(cfg).read_text())
+        except (OSError, ValueError):
+            doc = {}
+        old = read_scale(cfg) or {}
+        target = max(0, current_target(cfg, doc) - (1 if lower else 0))
+        released = dict(old.get("manual_released") or {})
+        released[ticket] = {"target_lowered": True, "at": time.time()}
+        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
+               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
+               "previous": current_target(cfg, doc), "source": "manual", "manual_at": time.time(),
+               "manual_released": released}
+        path = scale_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(new, indent=1))
+        tmp.replace(path)
+    return target
+
+
 def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
     """``nc down --ticket T`` for a member of a pool: a manual removal through the pool's
     control file (target - 1, retire T), so the pool does not order a node in its place.
@@ -989,25 +1017,7 @@ def down_member(ticket: str, *, mode: str | None = "fence") -> int | None:
               f"which it would replace; the pool releases it and confirms the ticket ended")
         return scale_pool(cfg, config_path, remove=[ticket], mode=mode, force_static=True)
     # no loop: delete here, and record it so a later start keeps the lowered target
-    with open(scale_lock_path(cfg), "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            doc = json.loads(cli.pool_state_path(cfg).read_text())
-        except (OSError, ValueError):
-            doc = {}
-        old = read_scale(cfg) or {}
-        target = max(0, current_target(cfg, doc) - 1)
-        released = dict(old.get("manual_released") or {})
-        released[ticket] = {"target_lowered": True, "at": time.time()}
-        new = {**{k: v for k, v in old.items() if k in MANUAL_KEYS}, "run": cli.run_id(cfg), "target": target,
-               "seq": int(old.get("seq", 0)) + 1, "retire": [], "mode": None, "requested": time.time(),
-               "previous": current_target(cfg, doc), "source": "manual", "manual_at": time.time(),
-               "manual_released": released}
-        path = scale_path(cfg)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(new, indent=1))
-        tmp.replace(path)
+    target = record_manual_release(cfg, ticket)
     print(f"down: ticket {ticket} belongs to pool {config_path}, whose loop is not running: deleting it here; "
           f"the pool target is lowered to {target}, so a restarted pool does not order a node in its place")
     return None
@@ -1195,15 +1205,19 @@ def protected_accounts(cfg: dict[str, Any]) -> frozenset[int]:
     return PROTECTED_NC_ACCOUNTS | {int(a) for a in cfg.get("protected_accounts") or ()}
 
 
+def _pool_state_doc(cfg: dict[str, Any]) -> dict[str, Any]:
+    try:
+        doc = json.loads(cli.pool_state_path(cfg).read_text())
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
 def _ticket_evidence(cfg: dict[str, Any], ticket: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The ledger rows of this run and the pool state members that name ``ticket``."""
     run = cli.run_id(cfg)
     rows = [r for r in cli.ledger().load() if r.get("ticket") == ticket and r.get("run") == run]
-    try:
-        doc = json.loads(cli.pool_state_path(cfg).read_text())
-    except (OSError, ValueError):
-        doc = {}
-    members = [m for m in doc.get("members", []) if m.get("ticket") == ticket]
+    members = [m for m in _pool_state_doc(cfg).get("members", []) if m.get("ticket") == ticket]
     return rows, members
 
 
@@ -1263,5 +1277,11 @@ def delete_own_ticket(cfg: dict[str, Any], config_path: str, ticket: str, *, yes
         return 1
     events("ticket_deleted", ticket=ticket, account=account, state=state, end_reason=reason,
            already=bool(result.get("already")), source="manual")
+    if any(m.get("state") != "gone" for m in members):  # a pool member: the pool sees a manual release
+        stopped = bool(_pool_state_doc(cfg).get("stopped"))  # a leftover of a stopped pool: target kept
+        target = record_manual_release(cfg, ticket, lower=not stopped)
+        print(f"delete-ticket: ticket {ticket} was a member of the pool state: recorded as released by hand "
+              f"(pool target {target}" + ("; the pool is stopped, its next start fills the target)" if stopped
+                                          else ", no node is ordered in its place)"))
     print(f"delete-ticket: ticket {ticket} on account {account}: state={state} end_reason={reason}")
     return 0

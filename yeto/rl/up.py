@@ -618,8 +618,12 @@ class Run:
         it is (the stop has not finished), and so is one that finished its run."""
         if not pool.stopped or getattr(pool, "finished", None):
             return
-        if pool.live():
-            tickets = [m.ticket for m in pool.live()]
+        released = getattr(pool, "manual_released", None) or {}
+        # a member released by hand (`nc down` / `delete-ticket` with no loop running) is no
+        # unfinished stop: the first tick reads its ticket ended and drops it
+        live = [m for m in pool.live() if m.ticket not in released]
+        if live:
+            tickets = [m.ticket for m in live]
             raise RunUpRefused(
                 f"pool {name} is stopped ({pool.stopped}) but still holds live member(s) {tickets}: an earlier "
                 "stop has not finished releasing them, and a stopped pool orders nothing, so the trainer would "
