@@ -1363,3 +1363,52 @@ def test_a_background_start_that_fails_because_its_node_was_evicted_is_not_a_fai
     pool.tick()
     assert m.state == GONE and "evicted" in _names(pool)
     assert pool.breaker.failures == 0
+
+
+def _background_start_that_fails(cloud):
+    import threading  # noqa: PLC0415
+
+    gate = threading.Event()
+
+    def start(m, shards):
+        gate.wait(5)
+        raise RuntimeError("model pull failed: connection closed")
+
+    cloud.start = start
+    cloud.start_in_background = True
+    return gate
+
+
+def test_a_background_start_that_fails_on_a_live_node_still_counts_as_a_failure():
+    """The guard against a bad node: the start fails and its ticket is still active, so
+    the breaker counts it (else a bad node is ordered again and again)."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    gate = _background_start_that_fails(cloud)
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    assert m.state != "starting" and pool.breaker.failures == 1
+
+
+def test_a_background_start_failure_whose_lease_status_cannot_be_read_still_counts():
+    """The lease status read fails after a failed start: the pool cannot tell an eviction,
+    so the failure counts (an unknown status never hides a bad node)."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    gate = _background_start_that_fails(cloud)
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    real_poll = cloud.poll
+    cloud.poll = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("control plane down"))
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    cloud.poll = real_poll
+    assert m.state != "starting" and pool.breaker.failures == 1
