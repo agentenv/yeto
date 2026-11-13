@@ -52,7 +52,8 @@ Run config (JSON; paths may use ``~``)::
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
 whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
-that dies with its process); an in-process ``up`` removes a STOP flag an earlier stop left.
+that dies with its process; ``run down`` takes it as well, stopping a running ``up`` first and
+going on without the lock after a grace period); an in-process ``up`` removes a STOP flag an earlier stop left.
 
 ``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
 changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
@@ -194,8 +195,9 @@ class Run:
         self.dir = STATE_ROOT / self.run
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.dir / "state.json"
-        self.state: dict[str, Any] = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-        self._state_base: dict[str, Any] = copy.deepcopy(self.state)
+        self.state: dict[str, Any] = {}
+        self._state_base: dict[str, Any] = {}
+        self.reload_state(strict=True)
         self.env = dict(os.environ)
         self.env.update({k: os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
         self.env.setdefault("YETO_RESOURCE_LEDGER", str(Path(f"~/.yeto/runs/{self.run}/resources.jsonl").expanduser()))
@@ -211,6 +213,23 @@ class Run:
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
 
     # -- state
+    def reload_state(self, *, strict: bool = False) -> bool:
+        """Read ``state.json`` again into ``self.state`` and make it the merge base of
+        :meth:`save` too (else what another process appended since our last read, e.g. a
+        ``run scale``'s ``scales``, counts as our own change and is appended twice). An
+        unreadable file (truncated JSON, I/O error) keeps the state in memory and returns
+        False, unless ``strict`` (the first read: nothing in memory to fall back to)."""
+        try:
+            state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        except (ValueError, OSError) as exc:
+            if strict:
+                raise
+            _log(f"{self.state_path}: unreadable ({type(exc).__name__}: {exc}); keeping the state in memory")
+            return False
+        self.state = state
+        self._state_base = copy.deepcopy(state)
+        return True
+
     def save(self) -> None:
         """Write ``state.json`` as a read-modify-write under ``state.lock`` (``flock``):
         several processes of a run write it (``run up``'s monitor, ``run scale``, ``run
@@ -237,12 +256,15 @@ class Run:
         self.state.setdefault("steps", {})[step] = {"at": _now(), **fields}
         self.save()
 
-    def lock_up(self) -> int | None:
+    def lock_up(self, role: str = "up") -> int | None:
         """Hold ``up.lock`` of the run for the life of this process: a second ``yeto run up``
         of the same run while one still runs would start a second monitor (two breakers,
         two starvation stops) and both rewrite ``state.json`` from their own copy. An
         ``flock`` dies with its process, so a crashed ``up`` leaves no stale lock. None:
-        the lock is ours; else the PID of the ``up`` that holds it (0: unknown)."""
+        the lock is ours; else the PID of the process that holds it (0: unknown), whose
+        role (``up`` / ``down``) is then in ``self.lock_holder``. The file names the holder
+        as JSON ``{"role", "pid", "start"}`` (``start``: the process start time, so a PID
+        reused by another process is not taken for the holder)."""
         if getattr(self, "_up_lock", None) is not None:
             return None
         fh = open(self.dir / "up.lock", "a+")
@@ -252,10 +274,11 @@ class Run:
             fh.seek(0)
             text = fh.read().strip()
             fh.close()
-            return int(text) if text.isdigit() else 0
+            self.lock_holder = _parse_lock_holder(text)
+            return self.lock_holder["pid"]
         fh.seek(0)
         fh.truncate()
-        fh.write(str(os.getpid()))
+        fh.write(json.dumps({"role": role, "pid": os.getpid(), "start": _proc_start(os.getpid())}))
         fh.flush()
         self._up_lock = fh
         return None
@@ -1345,7 +1368,52 @@ class Run:
             time.sleep(poll_s)
 
     # -- down
+    def lock_for_down(self, grace_s: float | None = None, poll_s: float = 1.0) -> bool:
+        """``yeto run down`` takes ``up.lock`` too, so a ``run up`` of the run cannot order
+        nodes or spawn a trainer while down stops them (and none starts during down). A
+        running ``up`` holding the lock gets SIGTERM (its exit path runs); another ``run
+        down`` holding it is only waited for. Down waits up to ``grace_s`` (default
+        ``$YETO_RUN_DOWN_GRACE_S`` or 60 s) for the lock; past that down goes on without
+        it: shutting the run down wins over the lock. Then the state is reloaded (the up
+        may have spawned processes since this process read it). True: down holds the lock."""
+        if grace_s is None:
+            try:
+                grace_s = float(os.environ.get("YETO_RUN_DOWN_GRACE_S", "") or DOWN_GRACE_S)
+            except ValueError:
+                grace_s = DOWN_GRACE_S
+        holder = self.lock_up(role="down")
+        if holder is not None:
+            info = getattr(self, "lock_holder", None) or {"role": "up", "pid": holder, "start": None}
+            role = info.get("role") or "up"
+            same = holder and holder != os.getpid() and _alive(holder) and (
+                not info.get("start") or info["start"] == _proc_start(holder))
+            if role == "down":
+                _log(f"down: another `yeto run down` of run {self.run} (PID {holder or '?'}) holds "
+                     f"{self.dir / 'up.lock'}: waiting up to {grace_s:.0f}s for it")
+            else:
+                _log(f"down: `yeto run up` of run {self.run} is running (PID {holder or '?'}; "
+                     f"{self.dir / 'up.lock'}): stopping it (SIGTERM), waiting up to {grace_s:.0f}s for its lock")
+                if same:
+                    try:
+                        os.kill(holder, signal.SIGTERM)
+                    except OSError:
+                        pass
+            for _ in range(max(1, int(grace_s / poll_s))):
+                time.sleep(poll_s)
+                holder = self.lock_up(role="down")
+                if holder is None:
+                    break
+        if holder is not None:
+            _log(f"down: PID {holder or '?'} still holds {self.dir / 'up.lock'} after "
+                 f"{grace_s:.0f}s: going on without the lock (shutdown first); run `yeto run down` "
+                 "again once it exited to stop what it started meanwhile")
+        else:
+            _log("down: holding up.lock (no run up of this run starts until down ends)")
+        self.reload_state()
+        return holder is None
+
     def down(self) -> bool:
+        self.lock_for_down()
         ok = True
         self._cmd(self.yeto("dashboard", "export", *self.dashboard_args(), "-o",
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy
@@ -1530,6 +1598,34 @@ def _worker_alive(run: str) -> bool:
         return False
 
 
+DOWN_GRACE_S = 60.0
+
+
+def _parse_lock_holder(text: str) -> dict[str, Any]:
+    """The holder named in ``up.lock``: JSON ``{"role", "pid", "start"}``, or a bare PID
+    (written by an older yeto: an ``up``)."""
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if isinstance(doc, dict):
+        pid = doc.get("pid")
+        return {"role": str(doc.get("role") or "up"), "pid": pid if isinstance(pid, int) else 0,
+                "start": doc.get("start")}
+    return {"role": "up", "pid": int(text) if text.isdigit() else 0, "start": None}
+
+
+def _proc_start(pid: int) -> str | None:
+    """Start time of ``pid`` in clock ticks since boot (``/proc/<pid>/stat`` field 22);
+    None: unknown (no ``/proc``, e.g. macOS: the PID alone is trusted). Two processes
+    with the same PID have different start times."""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        return stat.rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _alive(pid: Any) -> bool:
     """``pid`` runs. A child of this process that exited is reaped here first: ``run up``
     starts the trainer with Popen and never waits on it, so the finished launcher stays
@@ -1632,8 +1728,9 @@ def main(args: Any) -> int:
         return 2
     holder = run.lock_up()
     if holder is not None:
-        _log(f"another `yeto run up` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
-             "nothing started; it already drives this run")
+        role = (getattr(run, "lock_holder", None) or {}).get("role", "up")
+        _log(f"another `yeto run {role}` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
+             "nothing started" + ("; it already drives this run" if role == "up" else ""))
         return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")
