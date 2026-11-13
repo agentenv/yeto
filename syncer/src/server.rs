@@ -104,6 +104,10 @@ pub struct Config {
     pub quorum_timeout_s: u64,
     /// Bounded wait for learners to apply and acknowledge the terminal cut.
     pub final_ack_timeout_s: u64,
+    /// Close an accepted connection that has not delivered its complete
+    /// first frame within this long (half-open peers, port scanners, stuck
+    /// clients). Transport only: not part of the semantic profile.
+    pub first_frame_timeout_s: u64,
     /// Graceful stop (`crate::shutdown`); None: signals keep their default action.
     pub shutdown: Option<Arc<crate::shutdown::Shutdown>>,
     pub total_steps: u64,
@@ -2265,10 +2269,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     }
     let accept_relay = relay.clone();
     let accept_members = members.clone();
+    let first_frame_timeout = Duration::from_secs(cfg.first_frame_timeout_s.max(1));
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
+                    enable_keepalive(&stream, &peer);
                     let reg = accept_registry.clone();
                     let session = accept_session.clone();
                     let budget_cutoff = accept_budget_cutoff.clone();
@@ -2293,10 +2299,15 @@ pub async fn run(cfg: Config) -> Result<()> {
                             hello_auth,
                             dispense,
                             relay,
+                            first_frame_timeout,
                         )
                         .await
                         {
-                            warn!(%peer, "connection ended: {e:#}");
+                            if e.downcast_ref::<FirstFrameTimeout>().is_some() {
+                                FIRST_FRAME_TIMEOUT_LOG.note(&peer, first_frame_timeout);
+                            } else {
+                                warn!(%peer, "connection ended: {e:#}");
+                            }
                         }
                     });
                 }
@@ -2558,6 +2569,80 @@ fn parse_data_hello(payload: &[u8]) -> Result<(Member, u16)> {
     Ok((member, stream_idx))
 }
 
+/// Default for [`Config::first_frame_timeout_s`]: far above any real
+/// client's connect-to-first-frame time (a HELLO is sent right after connect).
+pub const DEFAULT_FIRST_FRAME_TIMEOUT_S: u64 = 30;
+/// Idle time before the kernel probes an accepted connection; a dead peer is
+/// dropped after roughly `TIME + INTERVAL * RETRIES`.
+const KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 6;
+
+/// The peer did not deliver its first frame in time.
+#[derive(Debug)]
+struct FirstFrameTimeout(Duration);
+
+impl std::fmt::Display for FirstFrameTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no first frame within {:?}", self.0)
+    }
+}
+
+impl std::error::Error for FirstFrameTimeout {}
+
+async fn read_first_frame<F: Future<Output = Result<Frame>>>(timeout: Duration, read: F) -> Result<Frame> {
+    match tokio::time::timeout(timeout, read).await {
+        Ok(read) => read,
+        Err(_) => Err(FirstFrameTimeout(timeout).into()),
+    }
+}
+
+/// Kernel TCP keepalive on an accepted socket so a peer that vanished
+/// (half-open connection) is eventually reset instead of held forever.
+fn enable_keepalive(stream: &TcpStream, peer: &std::net::SocketAddr) {
+    let keepalive = socket2::TcpKeepalive::new().with_time(KEEPALIVE_TIME);
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "android", target_os = "freebsd"))]
+    let keepalive = keepalive.with_interval(KEEPALIVE_INTERVAL).with_retries(KEEPALIVE_RETRIES);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        warn!(%peer, "enabling TCP keepalive failed: {e}");
+    }
+}
+
+/// Rate-limited log of first-frame timeouts: at most one line per window,
+/// carrying the count suppressed since the last line.
+struct RateLimitedLog {
+    last_ms: AtomicU64,
+    suppressed: AtomicU64,
+}
+
+const FIRST_FRAME_LOG_WINDOW_MS: u64 = 10_000;
+static FIRST_FRAME_TIMEOUT_LOG: RateLimitedLog =
+    RateLimitedLog { last_ms: AtomicU64::new(0), suppressed: AtomicU64::new(0) };
+
+impl RateLimitedLog {
+    /// Returns `Some(suppressed)` when a line should be written now.
+    fn admit(&self, now_ms: u64) -> Option<u64> {
+        let last = self.last_ms.load(Ordering::Relaxed);
+        if (last == 0 || now_ms.saturating_sub(last) >= FIRST_FRAME_LOG_WINDOW_MS)
+            && self.last_ms.compare_exchange(last, now_ms.max(1), Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            return Some(self.suppressed.swap(0, Ordering::Relaxed));
+        }
+        self.suppressed.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    fn note(&self, peer: &std::net::SocketAddr, timeout: Duration) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
+        if let Some(suppressed) = self.admit(now_ms) {
+            warn!(%peer, suppressed, "closed connection: no first frame within {timeout:?}");
+        }
+    }
+}
+
 async fn handle_connection(
     stream: TcpStream,
     peer: Option<std::net::SocketAddr>,
@@ -2573,21 +2658,24 @@ async fn handle_connection(
     hello_auth: Arc<HelloAuth>,
     dispense: Option<Arc<crate::dispense_service::DispenseService>>,
     relay: Option<Arc<crate::sample_relay::RelayHub>>,
+    first_frame_timeout: Duration,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
-    let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
+    let first = match read_first_frame(first_frame_timeout, read_frame_limited(&mut rd, |msg_type| match msg_type {
         MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE | MSG_SUBSCRIBE => Ok(MAX_HELLO_FRAME),
         MSG_TASK_HELLO => Ok(crate::protocol::MAX_TASK_HELLO),
         crate::sample_relay::MSG_RELAY_HELLO => Ok(1024),
         crate::member_retire::MSG_MEMBER_RETIRE => Ok(crate::member_retire::MAX_MEMBER_RETIRE),
         other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE/TASK_HELLO/SUBSCRIBE/RELAY_HELLO/MEMBER_RETIRE, got {other}"),
-    })
+    }))
     .await
     {
         Ok(frame) => frame,
         Err(error) => {
-            if error.downcast_ref::<std::io::Error>().is_none() {
+            if error.downcast_ref::<std::io::Error>().is_none()
+                && error.downcast_ref::<FirstFrameTimeout>().is_none()
+            {
                 let _ = send_direct(
                     &mut wr,
                     MSG_ERROR,
@@ -9680,6 +9768,7 @@ mod tests {
             delta_correction: false,
             quorum_timeout_s: 1,
             final_ack_timeout_s: 1,
+            first_frame_timeout_s: DEFAULT_FIRST_FRAME_TIMEOUT_S,
             shutdown: None,
             total_steps,
             policy_sweep_fragments: None,
@@ -13140,6 +13229,46 @@ mod tests {
         assert_eq!(received.recv().await, Some("disconnected"));
         // No data stream may start reading after the control connection closed.
         assert!(gate.enter().is_none());
+    }
+
+    #[tokio::test]
+    async fn silent_peer_hits_first_frame_timeout_but_prompt_one_does_not() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _silent = TcpStream::connect(address).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        enable_keepalive(&server, &peer);
+        assert!(socket2::SockRef::from(&server).keepalive().unwrap());
+        let (mut rd, _wr) = server.into_split();
+        let err = read_first_frame(Duration::from_millis(50), read_frame_limited(&mut rd, |_| Ok(1024)))
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<FirstFrameTimeout>().is_some());
+
+        let mut prompt = TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (mut rd, _wr) = server.into_split();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&MAGIC.to_le_bytes());
+        frame.push(MSG_ERROR);
+        frame.extend_from_slice(&3u64.to_le_bytes());
+        frame.extend_from_slice(b"why");
+        tokio::io::AsyncWriteExt::write_all(&mut prompt, &frame).await.unwrap();
+        let got = read_first_frame(Duration::from_secs(5), read_frame_limited(&mut rd, |_| Ok(1024)))
+            .await
+            .unwrap();
+        assert_eq!(got.msg_type, MSG_ERROR);
+        assert_eq!(&got.payload[..], b"why");
+    }
+
+    #[test]
+    fn first_frame_timeout_log_is_rate_limited() {
+        let log = RateLimitedLog { last_ms: AtomicU64::new(0), suppressed: AtomicU64::new(0) };
+        assert_eq!(log.admit(1_000), Some(0));
+        assert_eq!(log.admit(1_001), None);
+        assert_eq!(log.admit(5_000), None);
+        assert_eq!(log.admit(1_000 + FIRST_FRAME_LOG_WINDOW_MS), Some(2));
+        assert_eq!(log.admit(1_000 + FIRST_FRAME_LOG_WINDOW_MS + 1), None);
     }
 
     #[tokio::test]
