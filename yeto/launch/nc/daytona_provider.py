@@ -387,7 +387,10 @@ class DaytonaProvider:
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
         sandbox = self._get(ticket)
-        if not self._ours(ticket, sandbox):
+        # a sandbox Daytona no longer has (an adopted, unrecorded one evicted or deleted)
+        # leaves nothing to delete: only its name must be in this run's name space
+        gone = sandbox is None and ticket.startswith(self.prefix + "-")
+        if not gone and not self._ours(ticket, sandbox):
             raise PermissionError(f"sandbox {ticket} was not created by this provider for run {self.run_id}")
         if sandbox is not None and _state(getattr(sandbox, "state", None)) not in GONE:
             self._call(self.client.delete, sandbox, timeout=self.delete_timeout_s, wait=True)

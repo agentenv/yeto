@@ -440,3 +440,27 @@ def test_sandboxes_go_to_the_resource_ledger_and_yeto_cleanup_deletes_them(tmp_p
     acts = cleanup.cleanup(ResourceLedger(path), ops)
     assert [x.ok for x in acts] == [True] and deleted == [a]
     assert ResourceLedger(path).open_resources() == []
+
+
+def test_an_adopted_sandbox_that_vanished_is_released_without_a_delete():
+    """A labelled orphan the pool adopted (no local record row) that Daytona then drops
+    (evicted past the 24 h it stays readable, or a deleted on-demand sandbox reading not
+    found): nothing is left to delete, so its release succeeds instead of refusing it as
+    foreign every tick (the member stayed draining, and billed, forever)."""
+    t = [0.0]
+    dt = FakeDaytona()
+    pool, ops, events = _pool(dt, t)
+    name = "yeto-smp-run-d-50"
+    dt.boxes[name] = FakeSandbox(name, {LABEL_RUN: "run-d", LABEL_SLOT: "1"}, state="started")
+    pool.tick()
+    assert any(e["event"] == "nc_elastic_adopted" and e["ticket"] == name for e in events.events)
+    del dt.boxes[name]
+    pool.stop("test")
+    member = next(m for m in pool.members if m.ticket == name)
+    assert member.state == GONE
+    assert not any(e["event"].endswith("drain_failed") for e in events.events)
+    assert not [c for c in dt.calls if c[0] == "delete"]
+    p = _provider(dt)
+    p.release(1, "yeto-smp-run-d-51")  # never existed, never recorded: nothing to delete
+    with pytest.raises(PermissionError):
+        p.release(1, "yeto-smp-run-x-1")  # another run's name space is still refused
