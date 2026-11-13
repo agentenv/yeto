@@ -571,3 +571,38 @@ def test_a_task_image_pull_is_retried(world):
     _prepare(world)
     doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
     assert doc["tasks"]["tb_b"]["hosts"]["h1"]["prepared"] and fails["left"] == 0
+
+
+def _ssh_255(argv, env, stdin):
+    return 255, "", "ssh: connect to host h1 port 22: Connection refused"
+
+
+def test_gate_docker_check_fails_with_the_fix_when_ssh_is_refused(tmp_path):
+    from yeto.sandbox.docker import DockerError
+
+    spec = {"sampling": {"n": 8}, "agentic": {"envs": {
+        "run": "r1", "hosts": [{"name": "h1", "docker_host": "ssh://a@h1", "max_sandboxes": 64}]}}}
+    g = gate_from_spec(spec, sd.DirObjects(tmp_path), environ={},
+                       docker_factory=lambda h: DockerHost(h.docker_host, runner=_ssh_255))
+    with pytest.raises(DockerError, match=r"h1.*unreachable.*rc=255.*DOCKER_HOST=ssh://a@h1 docker info"):
+        g.check_docker()
+    ok = gate_from_spec(spec, sd.DirObjects(tmp_path), environ={},
+                        docker_factory=lambda h: DockerHost(h.docker_host, runner=FakeDaemon()))
+    ok.check_docker()  # a reachable daemon passes
+
+
+def test_sampler_start_exits_when_the_sandbox_docker_is_unreachable(tmp_path, monkeypatch):
+    import yeto.sandbox.gate as gate_mod
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.task_dispense import SAMPLER_INCARNATION_ENV
+
+    monkeypatch.setattr(gate_mod, "DockerHost", lambda dh: DockerHost(dh, runner=_ssh_255))
+    path = tmp_path / "p.jsonl"
+    path.write_text("".join(json.dumps({"text": f"q{i}", "label": "a"}) + "\n" for i in range(2)))
+    spec = {"sampler_id": "nc-0", "store": str(tmp_path / "store"),
+            "prompts": {"path": str(path), "input_key": "text", "label_key": "label", "groups_per_round": 2,
+                        "dispense": {"backend": "store", "namespace": "task-dispense"}},
+            "agentic": {"envs": {"run": "r1",
+                                 "hosts": [{"name": "h1", "docker_host": "ssh://a@h1", "max_sandboxes": 64}]}}}
+    with pytest.raises(entry.SamplerSpecError, match="unreachable.*docker info"):
+        entry.store_dispensed_prompts(spec, environ={SAMPLER_INCARNATION_ENV: "inc-1"})
