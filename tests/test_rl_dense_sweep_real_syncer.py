@@ -28,6 +28,7 @@ from yeto.protocol import (
     DTYPE_F32_PUSH_BF16,
     DTYPE_F32_PUSH_I8,
     DTYPE_FLAG_BCAST_DELTA,
+    MSG_BCAST_FRAGMENT,
     SyncerClient,
 )
 
@@ -186,6 +187,13 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
         client.start()
         for fid in range(FRAGMENTS):
             client.send_init(fid, _f32([float(fid) + 0.125 * i for i in range(NUMEL)]))
+        def push(permit, sweep: int) -> None:
+            fid = permit.fragment_id
+            base = 0 if sweep == 1 else (sweep - 2) * FRAGMENTS + fid + 1
+            delta = [0.5 + fid + 0.03125 * sweep + 0.001 * i for i in range(NUMEL)]
+            client.push_fragment(fid, permit.global_step, permit.round_attempt, base, sweep, 1, 7, _f32(delta))
+            permit.pushed = True
+
         for sweep in range(1, sweeps + 1):
             permits: dict[int, object] = {}
 
@@ -199,8 +207,14 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
                 arrived = early + list(client.drain_pulls())
                 early.clear()
                 for permit in arrived:
-                    if (permit.global_step - 1) // FRAGMENTS + 1 == sweep:
+                    of = (permit.global_step - 1) // FRAGMENTS + 1
+                    if of == sweep:
                         permits[permit.fragment_id] = permit
+                    elif of < sweep:
+                        # A PULL of a sweep already pushed: the push was lost
+                        # with a dropped connection and the syncer rebound
+                        # the round to the new one. Answer it again.
+                        push(permit, of)
                     else:
                         early.append(permit)
                 return any(not getattr(p, "pushed", False) for p in permits.values())
@@ -213,14 +227,9 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
                                                  for p in permits.values()))
                 # Push only what is permitted now; the serial profile then
                 # releases the next fragment's PULL after this commit.
-                for fid, permit in sorted(permits.items()):
-                    if getattr(permit, "pushed", False):
-                        continue
-                    base = 0 if sweep == 1 else (sweep - 2) * FRAGMENTS + fid + 1
-                    delta = [0.5 + fid + 0.03125 * sweep + 0.001 * i for i in range(NUMEL)]
-                    client.push_fragment(fid, permit.global_step, permit.round_attempt,
-                                         base, sweep, 1, 7, _f32(delta))
-                    permit.pushed = True
+                for _, permit in sorted(permits.items()):
+                    if not getattr(permit, "pushed", False):
+                        push(permit, sweep)
             if after_sweep is not None:
                 after_sweep(client, sweep)
         manifest, finals = client.wait_for_final_fragments(timeout=30)
@@ -367,10 +376,17 @@ def test_bf16_downlink_tracks_the_exact_broadcasts_and_leaves_the_merge_exact(sy
     assert [kinds[(1, v)] for v in (0, 2, 4, 6)] == ["full", "full", "delta", "delta"]
 
 
-def test_bf16_downlink_anchor_mismatch_reconnects_and_resyncs_with_f32(syncer_binary, tmp_path):
+@pytest.mark.parametrize("pulls_first", [False, True], ids=["as-it-comes", "next-pulls-before-mismatch"])
+def test_bf16_downlink_anchor_mismatch_reconnects_and_resyncs_with_f32(syncer_binary, tmp_path, pulls_first):
     """Fallback: a learner whose anchor drifted fails the digest check,
     reconnects, receives the shared anchor as FULL, and the run finishes
-    with the same exact result."""
+    with the same exact result.
+
+    ``pulls_first``: the BCAST that fails the digest check is read only after
+    the next sweep's PULLs (sent when the round commits, on the control
+    stream) reached the client. The client drops those PULLs' pushes with the
+    connection; the syncer rebinds the rounds and PULLs them again on the new
+    connection, and the island must answer that PULL again."""
     exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
     exact_dir.mkdir()
     delta_dir.mkdir()
@@ -387,6 +403,26 @@ def test_bf16_downlink_anchor_mismatch_reconnects_and_resyncs_with_f32(syncer_bi
         held.values = held.values.copy()
         held.values[0] += 1e-3
         corrupted.append(client.connection_generation)
+        if pulls_first:
+            dispatch, first_gen = client._dispatch, client._gen
+
+            def delayed(gen, msg_type, payload, *args):
+                if msg_type == MSG_BCAST_FRAGMENT and gen == first_gen and payload[:4] == b"\0\0\0\0":
+                    time.sleep(0.5)  # the PULLs of the next sweep arrive first
+                return dispatch(gen, msg_type, payload, *args)
+
+            client._dispatch = delayed
+            push = client.push_fragment
+
+            def lost_with_the_connection(fid, step, *args, **kwargs):
+                # A push queued on the connection that the mismatch drops is
+                # dropped with it (as the client's send queues are).
+                if client._gen == first_gen and step > FRAGMENTS * 2:
+                    _wait(lambda: client._gen != first_gen, "the digest mismatch did not drop the connection")
+                    return False
+                return push(fid, step, *args, **kwargs)
+
+            client.push_fragment = lost_with_the_connection
 
     delta, _ = _downlink_run(syncer_binary, delta_dir, 100, sweeps=4, after_sweep=corrupt,
                              max_reconnects=5)
