@@ -1084,7 +1084,7 @@ class Run:
         from yeto.launch.pool.status import ElasticConfig  # noqa: PLC0415
 
         now = time.time() if now is None else now
-        healthy = paused = live = recovering = 0
+        healthy = paused = live = recovering = waiting = 0
         recover_s = 0.0
         readable = False
         unreadable = False
@@ -1113,6 +1113,7 @@ class Run:
                 notes.append(f"{ref.name}: pool loop not running")
                 continue
             healthy += sum(1 for m in ready if not m.get("paused"))
+            waiting += sum(1 for m in ready if not m.get("paused") and m.get("trainer_wait"))
             try:
                 timeout = float(ElasticConfig.from_dict(ref.load().get("elastic")).start_timeout_s)
             except Exception:  # noqa: BLE001
@@ -1128,7 +1129,7 @@ class Run:
         if not readable or (unreadable and healthy == 0):  # an unread pool may hold the healthy ones
             return SamplerHealth(None, paused=paused, live=live, detail="; ".join(notes))
         return SamplerHealth(healthy, paused=paused, live=live, detail="; ".join(notes),
-                             recovering=recovering, recover_s=recover_s)
+                             recovering=recovering, recover_s=recover_s, waiting=waiting)
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails

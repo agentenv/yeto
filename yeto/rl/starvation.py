@@ -10,7 +10,10 @@ from two signals it already has:
   previous listing is a new group, or a new index object written with one);
 * the sampler pools' own state (members in ``ready``, the pool loop alive).
 
-Verdicts, both measured from the last new group (or the start of the watch):
+Verdicts, both measured from the last new group (or the start of the watch, or the
+last poll at which every healthy sampler waited for the trainer: its backlog at
+``max_backlog_groups``, e.g. while a restarted trainer loads its weights; the trainer
+then has groups to read and is not starving):
 
 * ``alert`` after ``alert_s`` without a new group, once per starved stretch (an
   alert only; agentic trials may run for a long time, so the default is wide);
@@ -94,11 +97,17 @@ class SamplerHealth:
     # ``elastic.start_timeout_s`` (a replacement under way), and the longest such timeout
     recovering: int = 0
     recover_s: float = 0.0
+    # of the healthy members: those whose newest tape line is an ``rl_sampler_waiting``
+    # heartbeat (backlog at ``max_backlog_groups``, or no release to serve yet): held back
+    # by the trainer, not starving it
+    waiting: int = 0
 
     def phrase(self) -> str:
         if self.healthy is None:
             return f"sampler pools: state unreadable{'; ' + self.detail if self.detail else ''}"
         text = f"{self.healthy} healthy sampler(s), {self.live} live member(s), {self.paused} paused"
+        if self.waiting:
+            text += f", {self.waiting} waiting for the trainer"
         if self.recovering:
             text += f", recovering: {self.recovering} member(s) starting"
         return text + (f" ({self.detail})" if self.detail else "")
@@ -133,6 +142,12 @@ class StarvationWatch:
             self.since = now
             recovered = self.alerted
             self.alerted = False
+        elif health.healthy and health.waiting >= health.healthy:
+            # every healthy sampler waits for the trainer (its backlog is at the cap: a
+            # trainer that loads its weights after a restart, or trains slowly): the buffer
+            # holds groups the trainer has not read, so no group is missing; the stretch
+            # starts again when a sampler generates
+            self.since = now
         if health.healthy == 0:
             if self.unhealthy_since is None:
                 self.unhealthy_since = now
