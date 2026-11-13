@@ -326,6 +326,7 @@ class PortReleaseLoader:
         self.ready = False  # True after a load whose checks all passed
         self.failures = 0
         self._restart = False  # a failed load or check left the engine in an unknown state
+        self.unchecked_loads = 0  # loads or checks that failed after touching the engine (lifetime)
         self.last_load: dict[str, Any] | None = None  # reload_mode, pause_s, checks
 
     @property
@@ -397,6 +398,7 @@ class PortReleaseLoader:
         """A load or check failed: the engine holds unchecked weights, so it stops serving."""
         self.ready = False
         self._restart = True
+        self.unchecked_loads += 1
         self._count_failure(version, step, detail, engine_touched=True)
         raise ReleaseNotLoaded(f"v{version}: {step} failed: {str(detail)[:300]}",
                                reason=f"check_failed:{step}")
@@ -461,6 +463,17 @@ class PortReleaseLoader:
                           "load_and_check_s": round(self.clock() - started, 3),
                           "scheme": self.scheme, "checks": results, **dict(report.detail)}
         self.emit(LOAD_CHECKED_EVENT, policy_version=version, **self.last_load)
+
+    def weights_state(self) -> tuple[bool, int]:
+        """(clean, ``unchecked_loads``): a streaming round drops a group whose trials
+        ran across a load that failed after touching the engine (``AgenticRound.weights_state``).
+        clean is False only while a failed load awaits its restart: a load in progress is not
+        a taint (a live engine pauses its trials and continues on the new checked weights;
+        should it fail, ``unchecked_loads`` moves and the groups that ran across it are dropped)."""
+        # the count first: _fail sets _restart before it counts, so a reader on another
+        # thread that races a failure sees either the old count (compared at settle) or the taint
+        failed = self.unchecked_loads
+        return not self._restart, failed
 
     def loaded_fields(self) -> dict[str, Any]:
         """Extra fields of ``rl_sampler_policy_loaded`` (``SamplerLoop.loaded_fields``)."""

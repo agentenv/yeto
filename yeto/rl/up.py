@@ -51,7 +51,8 @@ Run config (JSON; paths may use ``~``)::
                 "silence_min": 30, "release_nc_on_breach": false}}
 
 State: ``~/.yeto/rl-up/<run>/state.json`` (pids, logs, step times). ``up`` resumes: a step
-whose process is alive is not started again.
+whose process is alive is not started again. One ``up`` per run at a time (``up.lock``, an ``flock``
+that dies with its process); an in-process ``up`` removes a STOP flag an earlier stop left.
 
 ``yeto run scale --config F (--samplers N | --add K | --remove TICKET) [--drain | --fence]``
 changes the NC sampler count while the run trains (``pool-scale`` on the run's pool; the
@@ -65,6 +66,7 @@ finds the pool holding T); ``yeto rollout scale`` is the same command.
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -75,6 +77,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from yeto.rl import up_consistency
+
 STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 # the launcher's last line (yeto.cli): ``[yeto] run '<run>' finished: <state> (exit code <n>)``
 # a budget / wall-clock breach stops the trainer only; the NC pool is released by force
@@ -82,6 +86,8 @@ STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
 FORCE_FACTOR = 1.2
 _FORMAT_WARNED: set[str] = set()  # pool state files of a newer format already reported
 DEFAULT_STALL_TIMEOUT_S = 900.0  # yeto.launch.fleet.DEFAULT_RL_STALL_TIMEOUT_S
+# ``yeto launch --cluster-prefix`` default (yeto.cli): the trainer's run name without the flag
+LAUNCH_DEFAULT_NAME = "yeto"
 FINISHED = re.compile(r"finished: (\S+).*?\(exit code (-?\d+)\)")
 
 
@@ -184,6 +190,29 @@ class Run:
         self.state.setdefault("steps", {})[step] = {"at": _now(), **fields}
         self.save()
 
+    def lock_up(self) -> int | None:
+        """Hold ``up.lock`` of the run for the life of this process: a second ``yeto run up``
+        of the same run while one still runs would start a second monitor (two breakers,
+        two starvation stops) and both rewrite ``state.json`` from their own copy. An
+        ``flock`` dies with its process, so a crashed ``up`` leaves no stale lock. None:
+        the lock is ours; else the PID of the ``up`` that holds it (0: unknown)."""
+        if getattr(self, "_up_lock", None) is not None:
+            return None
+        fh = open(self.dir / "up.lock", "a+")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            text = fh.read().strip()
+            fh.close()
+            return int(text) if text.isdigit() else 0
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+        self._up_lock = fh
+        return None
+
     # -- processes
     def _cmd(self, argv: list[str], *, log: str, timeout: float | None = None) -> int:
         path = self.dir / log
@@ -280,7 +309,7 @@ class Run:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
                 return False
-            problem = self.rollout_fields_problem(i)
+            problem = self.rollout_fields_problem(i) or self.consistency_problem(i)
             if problem is not None:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
@@ -314,6 +343,10 @@ class Run:
 
         os.environ.update({k: v for k, v in self.env.items() if k.startswith(("YETO_NC_", "NC_"))})
         if self.in_process:
+            flag = self.dir / "STOP"
+            if flag.exists():  # left by an earlier stop: the new controller would drain every pool at once
+                _log(f"removing the STOP flag {flag} an earlier stop left: this run up drives the pools again")
+                flag.unlink(missing_ok=True)
             self.start_controller()
             self.state.setdefault("t0", time.time())
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
@@ -426,7 +459,8 @@ class Run:
         names the trainer's GPU, so its cost is priced), the cost bar's cap
         (``budget.usd``) and an optional price table (``dashboard.prices``)."""
         dash = self.cfg.get("dashboard") or {}
-        argv = ["--store", self.cfg["store"], "--run", self.run]
+        # the launcher writes its records under ~/.yeto/runs/<its --cluster-prefix>
+        argv = ["--store", self.cfg["store"], "--run", self.trainer_launch_name()]
         usd = (self.cfg.get("budget") or {}).get("usd")
         if usd:
             argv += ["--budget", str(usd)]
@@ -448,8 +482,19 @@ class Run:
         return nc + tr
 
     def node_usd_per_h(self, i: int = 0) -> float:
-        """One node hour of pool ``i``: its ``usd_per_h``, else ``budget.nc_usd_per_h``."""
+        """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
+        states (``price_usd_h`` of a Modal / Daytona / Sky pool, the one the pool's own budget
+        charges), else ``budget.nc_usd_per_h``."""
         price = self.pools[i].usd_per_h
+        if price is None:
+            try:
+                from yeto.launch.nc.cli import pool_price  # noqa: PLC0415
+
+                price, currency = pool_price(self.pools[i].load())
+                if currency == "ucr":  # National Compute: its rate stays budget.nc_usd_per_h
+                    price = None
+            except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
+                price = None
         return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
 
     def nc_node_hours(self, now: float | None = None) -> float:
@@ -615,7 +660,7 @@ class Run:
             return controller.check()
         if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
             why = "wall clock"
-        elif self.spend_usd() > float(b.get("usd", 1e9)):
+        elif self.spend_usd() > up_consistency.budget_usd(b):
             why = f"budget ${self.spend_usd():.0f}"
         # the trainer: only its launcher's exit. An OOM or a fatal island error ends the
         # launcher; a hang is Miles' --rl-stall-timeout and the launcher's own business.
@@ -628,7 +673,7 @@ class Run:
             done = FINISHED.findall(tail)
             if done and done[-1][0] == "SUCCEEDED" and done[-1][1] == "0":
                 self.state["trainer_finished"] = self.state.get("trainer_finished") or _now()
-            if not done and not _worker_alive(self.run):  # a killed log streamer: the worker may still run
+            if not done and not _worker_alive(self.trainer_launch_name()):  # a killed log streamer: the worker may still run
                 why = "trainer: launcher exited without a result"
             elif done and (done[-1][0] == "FAILED" or done[-1][1] != "0"):
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
@@ -715,14 +760,44 @@ class Run:
                     f"set it to {want} (the trainer would fail on its first group)")
         return None
 
+    def consistency_problem(self, pool: int = 0) -> str | None:
+        """The values the trainer and this pool's samplers must share (group size,
+        row widths, R3, expert selection, store, release directory;
+        :mod:`yeto.rl.up_consistency`). Each side's own dry run passes a mismatch;
+        it would surface after the trainer island loaded its weights, or never."""
+        from yeto.rl import up_consistency  # noqa: PLC0415
+
+        try:
+            pool_cfg = self.pools[pool].load()
+        except (OSError, ValueError):
+            return None  # the pool dry-run reports an unreadable pool config
+        found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
+                                        pool_cfg, data_path=self.pools[pool].data_path)
+        return "; ".join(found) if found else None
+
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's
         template value) with a price set, so the first estimated dollar is a breach."""
         b = self.cfg.get("budget") or {}
+        try:
+            capped = up_consistency.budget_capped(b)
+        except ValueError as exc:
+            return str(exc)
+        if "usd" in b and b["usd"] is None:
+            _log("preflight: budget.usd is null: no spend cap (as if unset); the wall clock still applies")
         priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
-        if "usd" in b and float(b["usd"]) <= 0 and priced:
+        if capped and up_consistency.budget_usd(b) <= 0 and priced:
             return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
+        if capped:
+            for ref in self.pools:
+                try:
+                    pool_cfg = ref.load()
+                except (OSError, ValueError):
+                    continue  # the pool dry-run reports an unreadable pool config
+                problem = up_consistency.price_problem(ref.name, ref.usd_per_h, pool_cfg)
+                if problem is not None:
+                    return problem
         return None
 
     def stall_timeout_s(self) -> float:
@@ -781,7 +856,7 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        self._cmd(self.yeto("down", self.run), log="down.log", timeout=900)
+        self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
         stops = " / ".join(f"python -m yeto.launch.nc pool-stop --config {path}" for path in self.pool_configs)
         _log(f"trainer stopped ({why}); {self.pools_phrase()} and the sandboxes are KEPT and still bill. "
@@ -936,17 +1011,134 @@ class Run:
 
     def trainer_side_cause(self) -> str | None:
         """What the trainer log says about a pause of its own: the incarnation gate fails
-        closed while a lease is unreadable (groups wait in the buffer, nothing trains)."""
+        closed while a lease is unreadable (groups wait in the buffer, nothing trains), or
+        it ended the trainer on a store refusal no retry changes (credentials, bucket)."""
         log = ((self.state.get("procs") or {}).get("trainer") or {}).get("log")
         try:
             tail = Path(log).read_bytes()[-200_000:].decode("utf-8", "replace") if log else ""
         except OSError:
             return None
+        from yeto.rl.engine.incarnation_lease import FATAL_MARK  # noqa: PLC0415
+
         paused = tail.rfind("incarnation gate: training paused")
+        fatal = tail.rfind(FATAL_MARK)
+        if fatal >= 0 and fatal > paused:
+            line = tail[fatal:].splitlines()[0]
+            return f"{line[:400]} (the trainer exits on it: not starvation, not a gate pause)"
         if paused < 0 or tail.rfind("incarnation gate: lease of", paused + 1) > paused:
             return None
         line = tail[paused:].splitlines()[0]
         return f"{line[:300]} (fail-closed pause, not starvation)"
+
+    # -- the data end (every sampler pool finished)
+    def pools_data_ended(self) -> bool:
+        """Every sampler pool finished (a sampler exited 0 on the end of the data:
+        ``IslandPool.finished``) and holds no member that is not gone: no sampler of
+        this run runs or will start, so no shard gets another group. Only pools whose
+        samplers write the run's store (``data_path`` r2, no other store): an end
+        record the trainer does not read would only switch the starvation watch off."""
+        if not self.pools:
+            return False
+        from yeto.rl.up_consistency import _norm_store, pool_store  # noqa: PLC0415
+
+        for i in range(len(self.pools)):
+            if self.pools[i].data_path != "r2":
+                return False  # its samplers write through the syncer relay: the trainer reads no store shard
+            try:
+                written = pool_store(self.pools[i].load())
+            except Exception:  # noqa: BLE001
+                return False
+            if written is not None and written != _norm_store(self.cfg["store"]):
+                return False  # its samplers write another store (a synced trainer's substore): not sealed here
+            doc = self.pool_doc(i)
+            if not doc or not doc.get("finished"):
+                return False
+            if any(m.get("state") != "gone" for m in doc.get("members") or ()):
+                return False
+        return True
+
+    def data_end_shards(self) -> list[str]:
+        """The shards whose end the trainer waits for: its ``--rl-buffer-shards`` (every
+        shard index the pools may have used), else the shards the store names."""
+        named = self._trainer_flag("--rl-buffer-shards")
+        if named is not None:
+            return [s.strip() for s in named.split(",") if s.strip()]  # as the trainer reads it
+        from yeto.rl.engine.sample_buffer import shard_names  # noqa: PLC0415
+
+        return list(shard_names(self._objects()))
+
+    def seal_data_end(self) -> bool:
+        """Once every pool finished, end every shard the trainer reads that did not end.
+
+        A sampler writes its shard's end record only when it ends on the data end (or
+        hands its shard off); a shard whose sampler was fenced, lost or replaced, and a
+        shard index of ``--rl-buffer-shards`` no node ever took, never ends, so the
+        trainer's merged index never ends and the trainer waits for groups that cannot
+        come (the starvation stop then ends it as a failure). No writer of these shards
+        is left (every member is gone), so the end record (the format a sampler writes)
+        is safe here. True once every shard ended (``state["data_ended"]``)."""
+        if self.state.get("data_ended"):
+            return True
+        if not self.pools_data_ended():
+            return False
+        if not self.dispense_settled():
+            return False
+        from yeto.rl.engine.sample_buffer import FileSampleBuffer, shard_index  # noqa: PLC0415
+
+        sealed = []
+        try:
+            objects = self._objects()
+            for shard in self.data_end_shards():
+                writer = FileSampleBuffer(objects, batch_size=1, index=shard_index(shard))
+                if not writer.data_ended:
+                    writer.mark_data_end()
+                    sealed.append(shard)
+        except Exception as error:  # noqa: BLE001 - tried again next poll
+            _log(f"data end: could not end the buffer shards: {type(error).__name__}: {error}"[:300])
+            return False
+        _log(f"data end: every sampler pool finished; ended {len(sealed)} shard(s) no sampler ended "
+             f"({', '.join(sealed[:8])}{' ...' if len(sealed) > 8 else ''}); the trainer trains the full "
+             "batches left and finishes")
+        self.state["data_ended"] = {"at": _now(), "sealed": sealed}
+        self.state.pop("starvation", None)
+        self.save()
+        return True
+
+    def dispense_settled(self) -> bool:
+        """The run's finite data is settled: every pool's store dispenser
+        (``store_dispense.status``) counts every slot trained / exhausted / dropped
+        (``totals["ended"]``), none queued, running, stale or unclaimed. A pool finished
+        with tasks left (a sampler ended early, the rest went at their lease end) is no
+        data end: a CRITICAL ``data_end_incomplete`` is logged (once per count) and the
+        starvation watch stays on. A status that does not read: not settled."""
+        from yeto.rl.engine import store_dispense  # noqa: PLC0415
+
+        left, pools = 0, []
+        try:
+            objects = store_dispense.ledger_objects(self._objects())
+            for i in range(len(self.pools)):
+                cfg = self.pools[i].load()
+                ns = str(((cfg.get("sampler") or {}).get("dispense") or {}).get("namespace") or "task-dispense")
+                totals = store_dispense.status(objects, ns, details=False, settled=False)["totals"]
+                if not totals.get("ended"):
+                    n = sum(int(totals.get(k) or 0) for k in ("queued", "running", "stale", "unclaimed"))
+                    left += n if n else 1  # no plan / no slots: not known to be settled
+                    pools.append({"pool": self.pools[i].name, "namespace": ns, "totals": totals,
+                                  "finished": (self.pool_doc(i) or {}).get("finished")})
+        except Exception as error:  # noqa: BLE001 - asked again next poll
+            _log(f"data end: the dispenser status did not read ({type(error).__name__}: {error}"[:300]
+                 + "): not sealed")
+            return False
+        if not left:
+            self.state.pop("data_end_incomplete", None)
+            return True
+        if (self.state.get("data_end_incomplete") or {}).get("left") != left:
+            _log(f"CRITICAL data_end_incomplete: every sampler pool finished but {left} task(s) are not "
+                 f"sampled ({json.dumps(pools, sort_keys=True)[:600]}): check why the pool finished; "
+                 "`yeto run up` starts the pool again (the trainer's starvation watch stays on)")
+            self.state["data_end_incomplete"] = {"at": _now(), "left": left, "pools": pools}
+            self.save()
+        return False
 
     def starvation_check(self, now: float) -> str | None:
         """Alert on a starving trainer; the reason to stop it, else None."""
@@ -986,14 +1178,16 @@ class Run:
         return verdict.reason if verdict.state == STOP else None
 
     def trainer_launch_name(self) -> str:
-        """The trainer launch's run name (its ``--cluster-prefix``; the run name without one)."""
+        """The trainer launch's run name: its ``--cluster-prefix`` (``yeto launch`` names the
+        run ``yeto`` without one). ``yeto down`` / the STOP flag / the worker check use it."""
         argv = [str(a) for a in self.cfg["trainer"]["argv"]]
-        for i, a in enumerate(argv):
+        name = LAUNCH_DEFAULT_NAME
+        for i, a in enumerate(argv):  # argparse: the last one wins
             if a == "--cluster-prefix" and i + 1 < len(argv):
-                return argv[i + 1]
-            if a.startswith("--cluster-prefix="):
-                return a.split("=", 1)[1]
-        return self.run
+                name = argv[i + 1]
+            elif a.startswith("--cluster-prefix="):
+                name = a.split("=", 1)[1]
+        return name
 
     def starvation_stop(self, why: str, poll_s: float = 30.0) -> None:
         """Stop a starving trainer the way a budget stop does: the run's STOP flag (``yeto
@@ -1027,7 +1221,10 @@ class Run:
                     self.watch_nc_after_breach(why, poll_s)
                 return
             tr = (self.state.get("procs") or {}).get("trainer")
-            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished"):
+            # the data ended: no new group is the normal end, not starvation (the trainer
+            # finishes on the ended shards; its own stall timeout still bounds a hang)
+            ended = self.seal_data_end()
+            if tr and _alive(tr["pid"]) and not self.state.get("trainer_finished") and not ended:
                 why = self.starvation_check(time.time())
                 if why:
                     self.starvation_stop(why)
@@ -1071,7 +1268,7 @@ class Run:
         ``FORCE_FACTOR`` x ``budget.usd`` (or the wall time ``FORCE_FACTOR`` x ``wall_h``)
         release the pool (``pool-stop``). Returns when no member bills any more."""
         b = self.cfg.get("budget") or {}
-        usd_cap = float(b.get("usd", 1e9)) * FORCE_FACTOR
+        usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
         wall_cap = float(b.get("wall_h", 3)) * 3600 * FORCE_FACTOR
         while True:
             members = self.pool_members()
@@ -1107,7 +1304,7 @@ class Run:
         if tr and _alive(tr["pid"]):
             os.kill(int(tr["pid"]), signal.SIGINT)
             time.sleep(10)
-        ok &= self._cmd(self.yeto("down", self.run), log="down.log", timeout=900) == 0
+        ok &= self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) == 0
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800) == 0
         if self.envs:
@@ -1210,7 +1407,7 @@ class Run:
             return (f"the run's breaker fired ({breaker.get('why')} at {breaker.get('at')}): no node is added "
                     f"to a stopped run")
         b = self.cfg.get("budget") or {}
-        cap = float(b.get("usd", 1e9))
+        cap = up_consistency.budget_usd(b)
         spent = self.spend_usd()
         add = new * self.node_usd_per_h(i)
         if spent + add > cap:
@@ -1380,6 +1577,11 @@ def main(args: Any) -> int:
     if run.in_process and args.no_monitor:
         _log("controller in_process: the pools run in this process, so it must stay up; drop --no-monitor "
              "(or set controller: subprocess)")
+        return 2
+    holder = run.lock_up()
+    if holder is not None:
+        _log(f"another `yeto run up` of run {run.run} is running (PID {holder or '?'}; {run.dir / 'up.lock'}): "
+             "nothing started; it already drives this run")
         return 2
     if not args.skip_preflight and not run.preflight():
         _log("preflight failed: nothing ordered (see preflight.log)")

@@ -25,7 +25,7 @@ def make_run(tmp_path, monkeypatch):
 
     def build(**budget):
         cfg = {"run": "r1", "store": "s3://b/runs/r1", "pool": {"config": str(pool_cfg)},
-               "trainer": {"argv": ["--gpu", "modal:2x8xb300"], "usd_per_h": 100},
+               "trainer": {"argv": ["--gpu", "modal:2x8xb300", "--cluster-prefix", "r1-trainer"], "usd_per_h": 100},
                "first_group": {"timeout_s": 0, "poll_s": 0}, "budget": budget}
         run = up.Run(cfg)
         run.calls = []
@@ -53,7 +53,7 @@ def _stops_pool(run) -> bool:
 
 
 def _stops_trainer(run) -> bool:
-    return any(argv[-2:] == ["down", "r1"] for argv in run.calls)
+    return any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)
 
 
 @pytest.mark.parametrize("why", ["budget $600", "wall clock", "trainer: Traceback / OOM",
@@ -386,7 +386,7 @@ def test_dashboard_gets_the_run_name_budget_and_prices(make_run, tmp_path):
     """The dashboard of ``up`` names the run, prices the trainer from the launcher's
     fleet record (``--run``) and draws the cost bar against ``budget.usd``."""
     run = make_run(usd=60)
-    assert run.dashboard_args() == ["--store", "s3://b/runs/r1", "--run", "r1", "--budget", "60"]
+    assert run.dashboard_args() == ["--store", "s3://b/runs/r1", "--run", "r1-trainer", "--budget", "60"]
     run.cfg["dashboard"] = {"port": 1, "prices": str(tmp_path / "prices.json")}
     assert run.dashboard_args()[-2:] == ["--prices", str(tmp_path / "prices.json")]
     run.cfg["budget"] = {}
@@ -441,3 +441,22 @@ def test_status_counts_what_the_trainer_reader_passed_over(make_run, tmp_path):
     assert (counts["unidentified_policy_groups"], counts["stale_groups"]) == (5, 2)
     assert counts["unidentified_starved"] == {"time_unix": 13.0, "rollout_id": 9, "selections": 3,
                                               "unidentified_policy_groups_total": 5}
+
+
+def test_a_modal_pools_spend_uses_its_provider_price_not_the_nc_rate(make_run, tmp_path, monkeypatch):
+    run = make_run(nc_usd_per_h=24)
+    run.cfg["trainer"]["usd_per_h"] = 0
+    up.Path(run.pool_config).write_text(json.dumps(
+        {"shard_base": "s", "provider": {"kind": "modal", "gpu": "B300", "gpus": 8, "price_usd_h": 68}}))
+    now = 100_000.0
+    monkeypatch.setattr(up.time, "time", lambda: now)
+    run.state["t0"] = now - 7200
+    _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": now - 3600}])
+    assert run.node_usd_per_h() == pytest.approx(68.0)
+    assert run.spend_usd() == pytest.approx(68.0)
+
+
+def test_an_nc_pool_keeps_the_nc_rate_even_with_a_price_in_its_provider(make_run, tmp_path, monkeypatch):
+    run = make_run(nc_usd_per_h=24)
+    up.Path(run.pool_config).write_text(json.dumps({"shard_base": "s", "provider": {"kind": "nc", "price_usd_h": 3}}))
+    assert run.node_usd_per_h() == pytest.approx(24.0)

@@ -12,7 +12,7 @@ import pytest
 from tests.test_rl_sampler_island import _launch_args, _State
 from yeto.rl.adapters.miles import sampler_island as si
 from yeto.rl.engine import sample_roles
-from yeto.rl.engine.policy_release import BackgroundReleaser, PolicyReleaseStore
+from yeto.rl.engine.policy_release import BackgroundReleaser, PolicyReleaseError, PolicyReleaseStore
 from yeto.rl.engine.resume import CheckpointStore
 
 
@@ -156,3 +156,22 @@ def test_the_dashboard_charts_policy_age_and_the_is_clip_share():
     assert first_finite(record, paths["policy_age_max"]) == 6
     assert first_finite(record, paths["is_clip"]) == 0.01
     assert first_finite(record, paths["is_weight"]) == 0.99
+
+
+def test_a_failed_upload_stops_the_trainer_at_its_next_publish_whatever_the_cadence(tmp_path, monkeypatch):
+    # v2's upload fails (R2 throttling past every retry). v3 is not a release
+    # version (release_every=2): the trainer must still learn of the failure at
+    # v3's publish instead of training on while the samplers stay at v0.
+    events = []
+
+    def fail(self, *args, **kw):
+        raise OSError("SlowDown: retries exhausted")
+
+    monkeypatch.setattr(PolicyReleaseStore, "release_staged", fail)
+    publisher = _publisher(tmp_path, events, release_every=2)
+    publisher.publish(_State(1, "h1"))
+    publisher.publish(_State(2, "h2"))  # its upload fails on the worker
+    publisher.releaser._thread.join()
+    with pytest.raises(PolicyReleaseError, match="SlowDown"):
+        publisher.publish(_State(3, "h3"))
+    assert (3, "release_every") not in _skipped(events)

@@ -388,8 +388,8 @@ list, one entry per pool (set one of the two keys, not both):
   {"name": "nc", "provider": "nc", "config": "<pool.json>", "interval_s": 30},
   {"name": "modal", "provider": {"kind": "modal", "image": "<sampler-image>", "secret": "<modal-secret>",
                                  "bucket": "<bucket>", "gpu": "B300", "gpus": 8,
-                                 "model_volume": "<volume>", "price_usd_h": 0},
-   "data_path": "r2", "usd_per_h": 0, "target": 1, "slots": [1, 2],
+                                 "model_volume": "<volume>", "price_usd_h": "<USD per island hour: required>"},
+   "data_path": "r2", "target": 1, "slots": [1, 2],
    "shard_base": "<run>-modal", "spec": "<sampler-spec.json>", "run_prefix": "<run>",
    "r2_env_file": "<store.env>", "sampler": {"dispense": {"backend": "store", "namespace": "<run>/dispense"}}}
 ]
@@ -404,6 +404,18 @@ list, one entry per pool (set one of the two keys, not both):
 | `data_path` | `r2` (default: buffer shards and policy releases in the run store) or `syncer` (the sampler spec takes weights from the syncer and returns samples through the relay; the pool then fences nothing in the store, the syncer retires a stopped member). All pools of a run use one data path. |
 | `interval_s` | Seconds between the pool's control ticks (default 30). |
 | `usd_per_h` | Price of one island hour of this pool, for the spend estimate and the scale-up budget check (default `budget.nc_usd_per_h`). |
+
+**Prices of Modal / Daytona / Sky pools must be real.** These providers bill in USD,
+and the run's spend estimate counts their islands at the entry's `usd_per_h`, else the
+provider section's `price_usd_h` (Sky: or `offers[0].price_usd_h`). The placeholder
+above is not a price: replace it with your actual rate (Modal: the GPU price per
+second on modal.com/pricing x 3600 x `gpus`, plus CPU / memory; Daytona: your contract
+or dashboard rate; Sky: the instance price). When `budget.usd` is set, `yeto run up`
+preflight refuses a USD-priced pool whose price is missing, not a number, or `<= 0`
+(it would be counted at $0 and the budget guard would never stop it). National
+Compute pools are priced by `budget.nc_usd_per_h` and are not affected.
+`"budget": {"usd": null}` (or no `usd`) means no spend cap: preflight says so and
+only the wall clock stops the run.
 
 Each pool keeps its own state under its `shard_base`, so `shard_base` must
 differ between pools, and the trainer's `--rl-buffer-shards` must name the

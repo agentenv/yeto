@@ -132,6 +132,12 @@ Pool configuration for 16:
               "create_wait_s": 5, "api_attempts": 6}}
 ```
 
+`price_usd_h` must be your real Daytona rate for the sandbox class (contract or
+dashboard price, spot or on-demand). With a run spend cap (`budget.usd` in
+`run.json`) `yeto run up` preflight refuses a Daytona pool whose price is missing
+or `<= 0`: its sandboxes would be counted at $0 and the budget guard would not
+stop them.
+
 `slots` (`accounts` is accepted as an alias) are plain indexes, not accounts: give at least `target` + the number of replacements you allow in
 flight (24 for 16 samplers). Each replacement takes the next shard number, so the trainer's
 `--rl-buffer-shards` and the tunnel port range must cover every shard you expect over the run. Logs, pool events, `yeto rollout status` and the dashboard name these `slot` (for example `slot=2`); only National Compute pools say `account`, because there the slot is an NC account. Event JSON also keeps an `account` field with the same value for older readers.

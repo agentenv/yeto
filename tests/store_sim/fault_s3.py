@@ -96,6 +96,7 @@ class FaultConfig:
     slow_max_s: float = 20.0
     body_cut: float = 0.0  # a GET body ends early
     upload_outage: float = 0.0  # a multipart part or complete fails on every attempt (a half upload)
+    create_answer_lost: float = 0.0  # a claim create is applied, then every attempt fails (the call raises)
     preempt: float = 0.0  # another participant acts in the middle of the call
     crash: float = 0.0  # per scheduler action: the actor dies at one of its next calls
     partition: float = 0.0  # per scheduler step: a node loses the store for a while
@@ -122,6 +123,8 @@ PRESETS: dict[str, dict[str, Any]] = {
                 "body_cut": 0.01, "preempt": 0.05},
     # lost answers only (the PR #354 class), densely
     "lost-response": {"lost_response": 0.08, "preempt": 0.03},
+    # a claim create applied whose call raised (the PR #380 class), with pool drains
+    "create-answer-lost": {"create_answer_lost": 0.3, "control": 0.2},
     # processes die and restart, nodes are partitioned, the pool acts
     "process": {"crash": 0.03, "partition": 0.01, "control": 0.02, "trainer_restart": 0.01,
                 "preempt": 0.05, "clock_skew_s": 5.0},
@@ -308,6 +311,11 @@ class Injector:
                 self._count("upload_outage")
                 self.trace("upload_outage", actor=actor, op=op, key=key, applied=applied)
                 return "outage", applied
+            if not attempt and f.create_answer_lost and op == "create" and "/claims/" in key \
+                    and self.rng.random() < f.create_answer_lost:
+                self._count("create_answer_lost")
+                self.trace("create_answer_lost", actor=actor, op=op, key=key)
+                return "outage", True
             r = self.rng.random()
             if attempt:
                 return (self.rng.choice(("reset", "5xx", "429")), False) if r < f.retry_fault else None
