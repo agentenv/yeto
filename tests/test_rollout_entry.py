@@ -525,3 +525,29 @@ def test_a_finished_trainer_names_and_releases_every_pool(tmp_path, monkeypatch,
     monkeypatch.setattr(up, "_alive", lambda pid: False)
     assert run.on_trainer_finished() is True
     assert [a[a.index("--config") + 1] for a in calls if "pool-stop" in a] == run.pool_configs
+
+
+def test_run_up_drives_a_pool_an_earlier_stop_left_stopped(tmp_path, monkeypatch):
+    """run down (or a process exit) drains the pools and saves them stopped; the next
+    run up must order samplers again instead of skipping the stopped pool forever."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    cfg = dict(run_cfg, controller="in_process")
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    c = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    assert all(pool.live() for pool in c.pools.values())
+    c.stop("process exit")
+    assert all(pool.stopped and not pool.live() for pool in c.pools.values())
+    again = up.Run(cfg).start_controller(ops=ops, thread_cls=_NoThread)
+    try:
+        assert not any(pool.stopped for pool in again.pools.values())
+        again.tick()
+        assert all(pool.live() for pool in again.pools.values())
+        assert sum(len(p.orders) for p in providers.values()) == 4
+    finally:
+        again.stop("test")

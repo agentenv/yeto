@@ -461,6 +461,7 @@ class Run:
         try:
             for ref in self.pools:
                 slots[ref.name] = nc_pool(ref.load(), ref.config, ops=(ops or {}).get(ref.name))
+                self._restart_stopped_pool(ref.name, slots[ref.name].pool)
         except BaseException:
             for slot in slots.values():
                 if slot.lock is not None:
@@ -574,6 +575,19 @@ class Run:
             self.state.pop(key, None)
         self.state.setdefault("trainer_t0", time.time())
         self.mark("trainer")
+
+    def _restart_stopped_pool(self, name: str, pool: Any) -> None:
+        """A pool an earlier stop of this run left stopped (``yeto run down``, a process
+        exit drain) and with no live member: this ``run up`` drives it again. Kept
+        stopped, the controller skips it at every tick, so no sampler is ordered and the
+        trainer waits for samples that never come. A pool with live members is left as
+        it is (the stop has not finished), and so is one that finished its run."""
+        if not pool.stopped or pool.live() or getattr(pool, "finished", None):
+            return
+        _log(f"pool {name}: its state says stopped ({pool.stopped}) by an earlier stop of this run and no "
+             "member is live: this run up drives it again")
+        pool.stopped = None
+        pool._event("pool_restarted", why="run up")  # noqa: SLF001
 
     def dashboard_args(self) -> list[str]:
         """``--store`` plus the run's local records (``--run``: the launcher's fleet record
