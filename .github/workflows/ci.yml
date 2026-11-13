@@ -78,3 +78,32 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: PYTHONPATH=. python -m pytest tests -q -p no:cacheprovider -rfEs --timeout=600 --durations=25
 
+
+  # Boat/sandbox tests import harbor, which needs Python >= 3.12 and conflicts
+  # with the skypilot pin in the `test` extra (uvicorn), so the 3.11 `python`
+  # job skips them. This job installs the Harbor build yeto is verified
+  # against (docker/harbor-layer/versions.json) and runs only those files.
+  harbor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install CPU torch, yeto, dev tools and pinned Harbor
+        run: |
+          HARBOR_REQ=$(python -c "import json; print(json.load(open('docker/harbor-layer/versions.json'))['harbor']['requirement'])")
+          uv pip install --system --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            "torch==2.8.0+cpu" -r pyproject.toml --extra dev "$HARBOR_REQ"
+      - name: Harbor tests
+        run: |
+          # Every test file that mentions harbor: some import it only through yeto
+          # modules (e.g. yeto.rl.harness.harbor) behind importorskip.
+          FILES=$(grep -rl harbor tests --include='test_*.py' | sort)
+          python -c "import harbor"
+          PYTHONPATH=. python -m pytest $FILES -q -p no:cacheprovider -rfEs --timeout=600
