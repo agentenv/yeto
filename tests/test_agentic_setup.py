@@ -262,7 +262,7 @@ def test_a_task_source_sandbox_prepare_stages_is_no_dry_run_problem(tmp_path, mo
     assert any("is not a directory" in p for p in su.local_problems(s))
 
 
-@pytest.mark.parametrize("value", ["-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+@pytest.mark.parametrize("value", ["-----BEGIN OPENSSH " + "PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
                                    {"path": "", "inline": "tok-0123456789abcdef"}])
 def test_secret_ref_error_never_quotes_an_inline_secret(value):
     with pytest.raises(ValueError) as err:
