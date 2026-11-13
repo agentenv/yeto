@@ -491,6 +491,12 @@ class BufferReleasePublisher:
         """The end of the run: the release in flight goes out before the island reports done."""
         self.flush()
 
+    def drain_releases(self) -> None:
+        """The driver's and the commanded island's end-of-run drain (``IslandDriver``,
+        ``trainer_remote.IslandTrainerAgent``): a commanded island reports STOPPED,
+        and the head releases it, before ``close`` runs."""
+        self.flush()
+
     # -- records ------------------------------------------------------------
     def _record(self, state: Any, version: int, param_version: int, digest: str,
                 position: int | None, shards: dict[str, int] | None, release: Any,

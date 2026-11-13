@@ -1228,10 +1228,8 @@ def run_commanded_trainer(driver: Any) -> Any:
     if store is None:
         raise RuntimeError("a trainer started by the head's scheduler needs round cuts "
                            "(a checkpoint store and no outer syncer)")
+    # the agent drains a staged policy release still uploading before its STOPPED event
     run_commanded_island(driver, store=store)
-    drain = getattr(driver.publisher, "drain_releases", None)
-    if callable(drain):  # a staged policy release still uploading reaches the store
-        drain()
     return driver.published_state
 
 

@@ -81,6 +81,11 @@ DEFAULT_EXIT_GRACE_S = 60.0
 # after interrupt(): max seconds a stop waits for the trainer's cut before the
 # island is released without one (its rounds after the last cut are trained again)
 DEFAULT_INTERRUPTED_DRAIN_S = 600.0
+# max seconds a commanded island waits for its policy release upload before STOPPED:
+# the head releases (stops billing) the island only on that event, so an upload that
+# hangs must not hold it forever; past the bound STOPPED goes out with the error
+RELEASE_DRAIN_ENV = "YETO_TRAINER_RELEASE_DRAIN_S"
+DEFAULT_RELEASE_DRAIN_S = 1800.0
 
 RUN, STOP = "run", "stop"
 
@@ -280,7 +285,11 @@ class IslandTrainerAgent:
     def __init__(self, driver: Any, *, commands: CommandReader, incarnation: int,
                  resume_from: CutRef | None, emit: Callable[..., Any], cuts: CutLog | None = None,
                  watermark: Callable[[int], int | None] | None = None,
-                 poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep) -> None:
+                 poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
+                 release_drain_s: float | None = None) -> None:
+        self.driver = driver
+        self.release_drain_s = float(os.environ.get(RELEASE_DRAIN_ENV) or DEFAULT_RELEASE_DRAIN_S) \
+            if release_drain_s is None else float(release_drain_s)
         self.lifecycle = DriverLifecycle(lambda _handle: driver, cuts=cuts,
                                          first_incarnation=int(incarnation))
         self.commands = commands
@@ -306,10 +315,41 @@ class IslandTrainerAgent:
                 self._apply(command)
                 if handle.state is LifecycleState.STOPPED:
                     break
+        self._drain_releases(handle)
         self._event(STOPPED)
         if handle.error is not None:
             raise handle.error
         return handle
+
+    def _drain_releases(self, handle: TrainerHandle) -> None:
+        """The staged policy release still uploading (and a version the release
+        cadence held back) reaches the store before STOPPED: on that event the head
+        releases the island, which would kill the upload and leave the samplers on
+        an older release. A failed upload is the incarnation's error, and so is one
+        still running after ``release_drain_s``: STOPPED then goes out without it, so
+        a hung upload never keeps the head from releasing (and billing) the island."""
+        if handle.error is not None:
+            return
+        drain = getattr(getattr(self.driver, "publisher", None), "drain_releases", None)
+        if not callable(drain):
+            return
+        failed: list[BaseException] = []
+
+        def body() -> None:
+            try:
+                drain()
+            except BaseException as error:  # noqa: BLE001 - carried by the stopped event
+                failed.append(error)
+
+        worker = threading.Thread(target=body, name="release-drain", daemon=True)
+        worker.start()
+        worker.join(self.release_drain_s)
+        if worker.is_alive():
+            handle.error = RemoteTrainerError(
+                f"policy release upload still running {self.release_drain_s:.0f} s after the stop; "
+                "stopped without it (the samplers keep the previous release)")
+        elif failed:
+            handle.error = failed[0]
 
     def _apply(self, command: Command) -> None:
         lc, handle = self.lifecycle, self.handle

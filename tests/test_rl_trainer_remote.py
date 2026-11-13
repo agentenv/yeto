@@ -88,6 +88,7 @@ class _FakeIslands:
         self.released: list[int] = []
         self.agents: list = []
         self.die_at: int | None = None
+        self.on_driver = None  # hook(driver, job) after the island's driver is built
 
     def published(self):
         return None if self.engine is None or self.engine.published is None else self.engine.published[0]
@@ -113,6 +114,8 @@ class _FakeIslands:
             job["events"].feed(event_echo.format_record(
                 {"island_id": 0, "time_unix": 0.0, "event": event, **fields}))
 
+        if self.on_driver is not None:
+            self.on_driver(driver, job)
         files = LocalStoreFiles(store)
         agent = IslandTrainerAgent(driver, commands=CommandReader(files, incarnation),
                                    incarnation=int(env["YETO_TRAINER_INCARNATION"]),
@@ -222,6 +225,99 @@ def test_remote_start_stop_to_the_data_end(tmp_path):
     sent = json.loads((tmp_path / "store" / command_path(0)).read_text().splitlines()[-1])
     assert sent == {"seq": 3, "verb": "stop", "rounds": None, "reason": "STOPPED"}
     journal.close()
+
+
+class _UploadingPublisher:
+    """A trainer publisher whose last staged release is still uploading at the stop:
+    ``drain_releases`` notes whether the island had already reported STOPPED (the
+    head releases the island -- and kills the upload -- on that event)."""
+
+    def __init__(self, inner, job, log, fail=False, hang=None):
+        self.inner, self.job, self.log, self.fail, self.hang = inner, job, log, fail, hang
+        feed = job["events"].feed
+
+        def watched(line):
+            if '"phase": "stopped"' in line or '"phase":"stopped"' in line:
+                self.log.append("stopped_event")
+            return feed(line)
+
+        job["events"].feed = watched
+
+    def drain_releases(self):
+        self.log.append("drain")
+        if self.hang is not None:
+            self.hang.wait(30)
+        if self.fail:
+            raise RuntimeError("background policy release failed: upload error")
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_stop_drains_the_release_upload_before_the_stopped_event(tmp_path, fail):
+    """Run down / budget STOP: the island reports STOPPED only after its last staged
+    policy release reached the store; a failed upload is the incarnation's error."""
+    clock = _Clock()
+    islands, lifecycle, cuts, head_buffer = _setup(tmp_path)
+    log: list[str] = []
+
+    def wrap(driver, job):
+        driver.publisher = _UploadingPublisher(driver.publisher, job, log, fail=fail)
+
+    islands.on_driver = wrap
+    journal = Journal(tmp_path / "head" / "journal")
+    loop = _loop(islands, lifecycle, cuts, head_buffer, clock, journal)
+    sampler = FakeSampler(islands.sampler_buffer, islands.published)
+    _ticks(loop, 1)
+    sampler.produce(2 * BATCH)
+    assert _ticks(loop, 3) == [Start, Hold, Hold]
+    assert _ticks(loop, 1) == [Hold]
+    clock.now += T_S
+    assert _ticks(loop, 1) == [Stop]
+    assert loop.state is LifecycleState.STOPPED
+    assert log[:2] == ["drain", "stopped_event"], log
+    if fail:
+        assert loop.handle.error is not None and "upload error" in str(loop.handle.error)
+    else:
+        assert loop.handle.error is None
+    journal.close()
+
+
+def test_hung_release_upload_still_reports_stopped(tmp_path, monkeypatch):
+    """An upload that never ends must not hold STOPPED (the head releases -- stops
+    billing -- the island only on it): past the drain bound STOPPED goes out with the error."""
+    import threading
+
+    from yeto.rl.engine import trainer_remote
+
+    monkeypatch.setenv(trainer_remote.RELEASE_DRAIN_ENV, "0.2")
+    clock = _Clock()
+    islands, lifecycle, cuts, head_buffer = _setup(tmp_path)
+    log: list[str] = []
+    hang = threading.Event()
+
+    def wrap(driver, job):
+        driver.publisher = _UploadingPublisher(driver.publisher, job, log, hang=hang)
+
+    islands.on_driver = wrap
+    journal = Journal(tmp_path / "head" / "journal")
+    loop = _loop(islands, lifecycle, cuts, head_buffer, clock, journal)
+    sampler = FakeSampler(islands.sampler_buffer, islands.published)
+    try:
+        _ticks(loop, 1)
+        sampler.produce(2 * BATCH)
+        assert _ticks(loop, 3) == [Start, Hold, Hold]
+        assert _ticks(loop, 1) == [Hold]
+        clock.now += T_S
+        assert _ticks(loop, 1) == [Stop]
+        assert loop.state is LifecycleState.STOPPED
+        assert log[:2] == ["drain", "stopped_event"], log
+        assert islands.released, "the head released the island"
+        assert loop.handle.error is not None and "still running" in str(loop.handle.error)
+    finally:
+        hang.set()
+        journal.close()
 
 
 def test_island_that_dies_is_failed_and_released(tmp_path):
