@@ -520,12 +520,20 @@ class DeltaMirror:
     differ from the directory it was rebuilt from (:data:`CHANGES_MANIFEST`:
     ``base_dir``, ``base_stamp``, ``files`` = {name: changed words or None};
     the indexes under :data:`CHANGES_DIR`). An engine that serves ``base_dir``
-    can then update only the changed weights (:func:`read_changes`)."""
+    can then update only the changed weights (:func:`read_changes`).
+
+    ``exclusive``: one process owns the mirror (the trainer node's
+    ``init_from_release`` mirror). Before a rebuild it drops the copies beyond
+    ``keep - 1`` that the rebuild does not start from, so the disk holds at most
+    ``keep`` copies plus the scratch one. A shared mirror (a sampler's
+    :func:`default_mirror`) keeps them until the rebuild has landed: an engine may
+    still serve one."""
 
     def __init__(self, root: str | os.PathLike[str], *, keep: int = 2,
                  workers: int = DEFAULT_WORKERS, scope: str | None = None,
-                 track_changes: bool = False) -> None:
+                 track_changes: bool = False, exclusive: bool = False) -> None:
         self.root = Path(root).expanduser()
+        self.exclusive = bool(exclusive)
         self.track_changes = bool(track_changes)
         self.keep = max(1, int(keep))
         self.workers = int(workers)
@@ -573,6 +581,9 @@ class DeltaMirror:
         if not chain:
             return base
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.exclusive:  # before the free-space check: what it frees counts
+            self._prune(newest=release.path, keep=self.keep - 1,
+                        spare=link.path if held(link) else None)
         from . import disk_space  # before the scratch directory: no ENOSPC half way
 
         disk_space.check_free(self.root, sum(entry.size for entry in entries_of(release.delta).values()),
@@ -626,9 +637,11 @@ class DeltaMirror:
                 removed.append(path)
         return removed
 
-    def _prune(self, newest: str) -> None:
-        """Keep the newest ``keep`` copies stamped for this mirror's scope; directories
-        stamped for another scope (or unstamped) belong to someone else and stay."""
+    def _prune(self, newest: str, *, keep: int | None = None, spare: str | None = None) -> None:
+        """Keep the newest ``keep`` (default: ``self.keep``) copies stamped for this
+        mirror's scope, plus ``newest`` and ``spare``; directories stamped for another
+        scope (or unstamped) belong to someone else and stay."""
+        keep = self.keep if keep is None else max(0, int(keep))
         mine = []
         for path in self.root.iterdir():
             if not path.is_dir() or path.name.startswith("."):
@@ -636,9 +649,9 @@ class DeltaMirror:
             stamp = self._read_stamp(path)
             if stamp is not None and stamp.get("scope") == self.scope:
                 mine.append((int(stamp.get("seq", -1)), path))
-        kept = {path for _, path in sorted(mine, key=lambda item: item[0])[-self.keep:]}
+        kept = {path for _, path in sorted(mine, key=lambda item: item[0])[max(0, len(mine) - keep):]} if keep else set()
         for _, path in mine:
-            if path not in kept and path.name != newest:
+            if path not in kept and path.name not in (newest, spare):
                 shutil.rmtree(path, ignore_errors=True)
 
 
