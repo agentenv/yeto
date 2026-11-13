@@ -783,6 +783,11 @@ class ReleasingPublisher:
         return weight_view_digest(list(checksums.values()), lora=self.weights == LORA)
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
+        if self.releaser is not None and not self.releaser.busy:
+            # A staged upload that already failed stops the trainer here, at every
+            # publish: a cadence skip (release_every) never waits for the releaser,
+            # so the error would stay hidden while the samplers stay on an old release.
+            self.releaser.wait()
         started = self.timer()
         result = self.inner.publish(state, **kwargs)
         publish_s = round(self.timer() - started, 3)  # the trainer's own engines
