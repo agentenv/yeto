@@ -148,3 +148,35 @@ def test_pruned_cleanup_never_removes_the_release_latest_names(tmp_path, monkeyp
     releaser.sync()
     latest = target.latest()
     assert latest is not None and (target.root / latest.path).is_dir()
+
+
+def test_verl_tier2_releaser_runs_in_the_trainer_process(tmp_path, monkeypatch):
+    """The pin is in-process: the verl tier-2 releaser must start beside the trainer's
+    release store (buffer_trainer_runner), not in the island entry that only spawns it."""
+    import pytest
+
+    from yeto.rl.adapters.verl import island_entry
+    from yeto.rl.quant import release as release_mod
+
+    with pytest.raises(SystemExit):
+        island_entry.trainer_releaser_plan(None, tmp_path / "base", tmp_path / "tpl")
+    section = {"store": str(tmp_path / "store")}
+    island_entry.trainer_releaser_plan(section, tmp_path / "base", tmp_path / "tpl")
+    assert section[island_entry.TRAINER_FP8_KEY] == {"base_dir": str(tmp_path / "base"),
+                                                     "template_dir": str(tmp_path / "tpl")}
+
+    trainer, source, target = _stores(tmp_path)
+    seen = {}
+
+    def fake_scoped(store, base_dir, template_dir, scheme):
+        seen.update(store=store, base_dir=base_dir, template_dir=template_dir)
+        return RequantReleaser(source, target, lambda s, o: {}, log=lambda m: None)
+
+    monkeypatch.setattr(release_mod, "scoped_releaser", fake_scoped)
+    stop = threading.Event()
+    stop.set()
+    island_entry.start_trainer_releaser(trainer.store, section[island_entry.TRAINER_FP8_KEY], stop).join(5)
+    assert seen["store"] is trainer.store
+    assert str(seen["template_dir"]) == str(tmp_path / "tpl")
+    source_prefixed = PolicyReleaseStore(seen["store"], keep=2)
+    assert source_prefixed._pin_key() == trainer._pin_key()

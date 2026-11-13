@@ -25,6 +25,7 @@ in the CPU-tested :mod:`.buffer_feed` and :mod:`.buffer_ports`.
 from __future__ import annotations
 
 import os
+import threading
 
 import numpy as np
 import ray
@@ -143,6 +144,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
 
         from .buffer_feed import RowShape
         from .buffer_ports import install_buffer_ports, release_weights_for
+        from .island_entry import TRAINER_FP8_KEY, start_trainer_releaser
         from .relay_trainer import RELAY_SECTION_KEY, install_relay_ports, relay_buffer
         from .trainer import run_fully_async_island
 
@@ -217,5 +219,12 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # account above the store's newest release
                                         resume_versions=plan["sync"] == "none")
 
-        return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
-                                      buffer_ports=ports)
+        stop_releaser = threading.Event()
+        fp8 = section.get(TRAINER_FP8_KEY)
+        if fp8:  # tier 2 in this process: its pin keeps the source it converts from this trainer's prune
+            start_trainer_releaser(releases.store, fp8, stop_releaser)
+        try:
+            return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
+                                          buffer_ports=ports)
+        finally:
+            stop_releaser.set()
