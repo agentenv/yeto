@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 import threading
 from collections.abc import Callable
@@ -117,13 +118,39 @@ class RequantReleaser:
         def write(out: Path) -> None:
             stats["requant"] = self.requantize(directory, out)
 
-        record = self.target.release(src.version, f"{src.policy_hash}+{self.scheme}", write,
-                                     buffer_selected=src.buffer_selected, buffer_shards=src.buffer_shards,
-                                     derived_from=derived, manifest=src.manifest)
+        before = self._target_dirs()
+        try:
+            record = self.target.release(src.version, f"{src.policy_hash}+{self.scheme}", write,
+                                         buffer_selected=src.buffer_selected, buffer_shards=src.buffer_shards,
+                                         derived_from=derived, manifest=src.manifest)
+        except Exception as error:  # noqa: BLE001 - re-raised unless the source was pruned
+            if not self._pruned_during_conversion(src):
+                raise
+            # The trainer released newer versions and pruned this one (``keep``) while it
+            # was read: drop the partial target and convert the newer release next time.
+            for name in self._target_dirs() - before:
+                shutil.rmtree(self.target.root / name, ignore_errors=True)
+            self.waiting = (f"BF16 {src.path} was pruned during its conversion "
+                            f"({type(error).__name__}: {error}); the newer release is converted next")
+            self.log(f"[requant] {self.waiting}")
+            return None
         if record is not None:
             self.log(f"[requant] BF16 r{src.seq}-v{src.version} -> {self.target.release_dir}/{record.path} "
                      f"{json.dumps(stats.get('requant'), default=str)}")
         return record
+
+    def _target_dirs(self) -> set[str]:
+        root = self.target.root
+        return {p.name for p in root.iterdir() if p.is_dir()} if root.is_dir() else set()
+
+    def _pruned_during_conversion(self, src: PolicyRelease) -> bool:
+        """``src`` is gone from the source store and a newer BF16 release replaced it."""
+        try:
+            newer = self.source.latest()
+            return (newer is not None and newer.seq > src.seq
+                    and src.path not in self.source._listed_names())
+        except Exception:  # noqa: BLE001 - unknown: the original error stands
+            return False
 
     def run(self, stop: threading.Event, poll_s: float = 10.0) -> None:
         """:meth:`sync` until ``stop`` is set (a failed conversion ends the loop)."""
