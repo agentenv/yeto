@@ -809,3 +809,26 @@ def test_trainer_side_cause_reads_a_log_truncated_below_its_offset(run_up, tmp_p
     log.write_text(f"ERROR {FATAL_MARK}: lease of shard s-0 refused by the store (AccessDenied)\n")
     run.state["procs"] = {"trainer": {"pid": 1, "log": str(log), "offset": 10_000}}
     assert FATAL_MARK in (run.trainer_side_cause() or "")
+
+
+def test_a_starvation_stop_still_downs_the_trainer_when_the_stop_flag_cannot_be_written(run_up, monkeypatch):
+    """The STOP flag write fails (ENOSPC): the trainer is still downed, at once (no graceful
+    drain to wait for), and the monitor ends normally instead of raising."""
+    import errno
+
+    from yeto import runs
+
+    run = run_up(members=[{"ticket": "a", "state": "gone"}], keys={"k0"})
+    run.state["procs"] = {"trainer": {"pid": 42, "log": "/nonexistent"}}
+
+    def full(name):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(runs, "request_stop", full)
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    killed, slept = [], []
+    monkeypatch.setattr(up.os, "kill", lambda pid, sig: killed.append(pid))
+    monkeypatch.setattr(up.time, "sleep", slept.append)
+    run.starvation_stop("no sampler", poll_s=60)
+    assert killed == [42] and 60 not in slept  # no grace wait for a drain that was never asked for
+    assert [argv[-2:] for argv in run.calls if "down" in argv] == [["down", "r1-trainer"]]

@@ -314,6 +314,15 @@ def _merge_state(base: Any, mine: Any, disk: Any) -> Any:
 
 
 
+def _close_quietly(fh: Any) -> None:
+    if fh is None:
+        return
+    try:
+        fh.close()
+    except OSError:  # the buffered tail did not fit on a full disk
+        pass
+
+
 def _killpg(proc: subprocess.Popen) -> None:
     """SIGKILL ``proc``'s process group (it leads its own session) and reap it."""
     try:
@@ -374,17 +383,36 @@ class Run:
         or wrote the file is applied to what is on disk now (a list it appended to gets the
         appended items), so one writer no longer drops another's ``scales`` / ``steps`` /
         ``procs``. The write is atomic (temp file + rename): a reader never sees half a file."""
-        with open(self.dir / "state.lock", "a+") as lk:
-            fcntl.flock(lk, fcntl.LOCK_EX)
+        tmp = self.state_path.with_name(f".state.json.{os.getpid()}.tmp")
+        try:
+            with open(self.dir / "state.lock", "a+") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                try:
+                    disk = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+                except ValueError:
+                    disk = {}
+                base = getattr(self, "_state_base", None)
+                merged = _merge_state(base if base is not None else disk, self.state, disk)
+                tmp.write_text(json.dumps(merged, indent=1, sort_keys=True))
+                os.replace(tmp, self.state_path)
+        except OSError as error:
+            if not getattr(self, "soft_save", False):
+                raise
+            # the monitor (budget / wall-clock breaker, forced pool-stop) must outlive a full
+            # or read-only disk: the state stays in memory (merged again at the next save)
             try:
-                disk = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-            except ValueError:
-                disk = {}
-            base = getattr(self, "_state_base", None)
-            merged = _merge_state(base if base is not None else disk, self.state, disk)
-            tmp = self.state_path.with_name(f".state.json.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(merged, indent=1, sort_keys=True))
-            os.replace(tmp, self.state_path)
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            failure = f"{type(error).__name__}: {error}"
+            if getattr(self, "save_error", None) != failure:
+                _log(f"CRITICAL state_write_failed: {self.state_path}: {failure}; the monitor goes on "
+                     "with the state in memory")
+            self.save_error = failure
+            return
+        if getattr(self, "save_error", None):
+            _log(f"state_write_recovered: {self.state_path} written again")
+            self.save_error = None
         self.state.clear()  # in place: callers may hold self.state
         self.state.update(merged)
         self._state_base = copy.deepcopy(merged)
@@ -423,25 +451,42 @@ class Run:
     # -- processes
     def _cmd(self, argv: list[str], *, log: str, timeout: float | None = None) -> int:
         path = self.dir / log
-        with open(path, "a") as fh:
+        fh: Any = None
+        try:
+            fh = open(path, "a")
             fh.write(f"\n### {_now()} {' '.join(argv)}\n")
             fh.flush()
+        except OSError as error:
+            # a full / read-only disk must not stop the command itself (a pool-stop, a down):
+            # it runs without its log
+            _log(f"{path}: log not writable ({type(error).__name__}: {error}); "
+                 f"running {' '.join(argv[:6])} ... without it")
+            _close_quietly(fh)
+            fh = None
+        try:
             # its own process group: a timeout kills the whole tree (a `yeto down` hangs in the
             # modal / ssh child it spawned; killing the direct child only would leave that one
             # running and still tearing down / billing after run down moved on)
-            proc = subprocess.Popen(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(argv, env=self.env, stdout=fh if fh is not None else subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 # a hung step (dashboard export, Modal teardown) fails that step only: raised,
                 # it ended run down before the pool-stop and the sampler nodes kept billing
                 _killpg(proc)
-                fh.write(f"\n### {_now()} TIMED OUT after {timeout:.0f}s (process group killed)\n")
+                if fh is not None:
+                    try:
+                        fh.write(f"\n### {_now()} TIMED OUT after {timeout:.0f}s (process group killed)\n")
+                    except OSError:
+                        pass
                 _log(f"{' '.join(argv[:6])} ... TIMED OUT after {timeout:.0f}s (log {path})")
                 return 124
             except BaseException:  # Ctrl-C / SIGTERM of this process: its own session does not get it
                 _killpg(proc)
                 raise
+        finally:
+            _close_quietly(fh)
         _log(f"{' '.join(argv[:6])} ... rc={proc.returncode} (log {path})")
         return proc.returncode
 
@@ -1698,10 +1743,14 @@ class Run:
         _log(f"CRITICAL {STOP_EVENT}: {why}; stopping the trainer (STOP flag, then yeto down)")
         self.state["starvation"] = {"at": _now(), "event": STOP_EVENT, "why": why}
         self.save()
-        flag = runs.request_stop(self.trainer_launch_name())
-        _log(f"{STOP_EVENT}: STOP flag written: {flag}")
         tr = (self.state.get("procs") or {}).get("trainer")
         deadline = time.time() + self.starvation_config.stop_grace_s
+        try:
+            flag = runs.request_stop(self.trainer_launch_name())
+            _log(f"{STOP_EVENT}: STOP flag written: {flag}")
+        except OSError as error:  # no graceful drain to wait for: the yeto down below still stops it
+            _log(f"{STOP_EVENT}: STOP flag not written ({type(error).__name__}: {error}); stopping the trainer now")
+            deadline = time.time()
         while tr and _alive(tr["pid"]) and time.time() < deadline:
             time.sleep(poll_s)
         self.trainer_down(f"{STOP_EVENT}: {why}")
@@ -1709,6 +1758,9 @@ class Run:
              "the trainer from its latest cut")
 
     def monitor(self, poll_s: float = 60.0) -> None:
+        # from here a state.json write that fails (ENOSPC / EROFS / EIO) is logged and kept
+        # in memory: raised, it ended the monitor (breaker, forced pool-stop) with nodes billing
+        self.soft_save = True
         while True:
             self.up_heartbeat()
             self.rollout_stall_alert()
