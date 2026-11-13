@@ -909,6 +909,29 @@ def test_restore_reruns_a_start_the_restart_cut_off_before_the_sampler(tmp_path)
     assert cloud.tickets[m.ticket]["starts"] == 2 and len(cloud.kinds("order")) == 1
 
 
+def test_a_start_rerun_after_a_pool_restart_gets_the_whole_start_window(tmp_path):
+    """The pool loop died mid-start (killed monitor, host reboot) and came back 50 min
+    after the order with no sampler on the node: the start runs again from scratch. Its
+    start timeout counts from that start (as an in-place restart's does), not from the
+    order: the rerun is not timed out after a few minutes and the node is not retired."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, accounts=(1,))
+    _run(pool, clock, 300)
+    m = pool.members[0]
+    assert m.state == "starting" and not m.joined
+    cloud.tickets[m.ticket]["sampler"] = "absent"  # the start died with the pool loop
+    path = tmp_path / "pool.json"
+    pool.save(path)
+    clock.t = 3000.0  # the loop is back 50 min after the order
+    again = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None,
+                               events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
+    _run(again, clock, 3000.0 + 1500)  # the rerun start needs ready_after (1200 s)
+    assert cloud.tickets[m.ticket]["starts"] == 2
+    assert "start_timeout" not in _names(again), _names(again)
+    assert again.members[0].state == READY and len(cloud.kinds("order")) == 1
+
+
 def test_a_handed_off_predecessor_exiting_zero_does_not_end_the_pool():
     clock = Clock()
     cloud = Cloud(clock)
@@ -1412,3 +1435,27 @@ def test_a_background_start_failure_whose_lease_status_cannot_be_read_still_coun
     pool.tick()
     cloud.poll = real_poll
     assert m.state != "starting" and pool.breaker.failures == 1
+
+def test_a_start_cut_off_by_every_pool_restart_is_still_timed_out(tmp_path):
+    """The pool loop keeps dying mid-start (the start itself takes it down): each rerun
+    gets a fresh start window only up to max_sampler_restarts times; past that the
+    timeout counts on from the earlier start and the node is retired, not kept forever."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    pool = _pool(clock, cloud, accounts=(1,), start_timeout_s=1800)
+    _run(pool, clock, 300)
+    ticket = pool.members[0].ticket
+    path = tmp_path / "pool.json"
+    events = []
+    for _ in range(8):
+        m = next(m for m in pool.members if m.ticket == ticket)
+        if m.state == "gone":
+            break
+        cloud.tickets[ticket]["sampler"] = "absent"
+        pool.save(path)
+        pool = IslandPool.restore(path, pool.config, cloud, clock=clock, log=lambda x: None,
+                                  events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
+        _run(pool, clock, clock.t + 900)  # dies again before ready_after (1200 s)
+        events += _names(pool)
+    assert "start_timeout" in events, events
+    assert "start_rerun_window_spent" in events

@@ -205,6 +205,15 @@ def _merge_state(base: Any, mine: Any, disk: Any) -> Any:
     return mine
 
 
+
+def _killpg(proc: subprocess.Popen) -> None:
+    """SIGKILL ``proc``'s process group (it leads its own session) and reap it."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    proc.wait()
+
 class Run:
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = cfg
@@ -306,8 +315,22 @@ class Run:
         with open(path, "a") as fh:
             fh.write(f"\n### {_now()} {' '.join(argv)}\n")
             fh.flush()
-            proc = subprocess.run(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout,
-                                  check=False)
+            # its own process group: a timeout kills the whole tree (a `yeto down` hangs in the
+            # modal / ssh child it spawned; killing the direct child only would leave that one
+            # running and still tearing down / billing after run down moved on)
+            proc = subprocess.Popen(argv, env=self.env, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # a hung step (dashboard export, Modal teardown) fails that step only: raised,
+                # it ended run down before the pool-stop and the sampler nodes kept billing
+                _killpg(proc)
+                fh.write(f"\n### {_now()} TIMED OUT after {timeout:.0f}s (process group killed)\n")
+                _log(f"{' '.join(argv[:6])} ... TIMED OUT after {timeout:.0f}s (log {path})")
+                return 124
+            except BaseException:  # Ctrl-C / SIGTERM of this process: its own session does not get it
+                _killpg(proc)
+                raise
         _log(f"{' '.join(argv[:6])} ... rc={proc.returncode} (log {path})")
         return proc.returncode
 
@@ -438,13 +461,20 @@ class Run:
             self.begin_up()
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
             return
+        down = []
         for i, ref in enumerate(self.pools):
             proc = pool_run.pool_process(ref.load())
             if proc and proc.get("alive"):
                 _log(f"pool {ref.name}: loop already running (PID {proc.get('pid')})")
             else:
-                self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
-                                                        "--interval", str(int(ref.interval_s))))
+                down.append((i, ref))
+        # every stopped pool is checked before any is restarted or spawned: a refusal of a
+        # later pool must not leave an earlier one's loop running (ordering nodes for a run
+        # up that refused), as in_process restarts nothing until every pool passed
+        self._restart_stopped_pool_states([ref for _, ref in down])
+        for i, ref in down:
+            self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
+                                                    "--interval", str(int(ref.interval_s))))
         self.begin_up()
         self.mark("pool")
 
@@ -460,15 +490,27 @@ class Run:
         ups = self.state.setdefault("ups", [])
         if not ups and "t0" in self.state:  # a run started before periods were recorded
             ups.append({"pid": None, "start": float(self.state["t0"]), "seen": None, "end": None, "legacy": True})
-        for period in ups:  # an earlier up that ended without a down: closed at its last poll
+        # an earlier up that ended without a down: closed at its last poll, or now while
+        # the trainer it started still runs (a --no-monitor up, a killed up: the trainer
+        # is a detached process and billed the whole gap; `run down` closes it now too)
+        # (capped at the next period's start: periods never overlap, the spend is their sum)
+        trainer_ran = self._trainer_alive()
+        for i, period in enumerate(ups):
             if period.get("end") is None:
-                period["end"] = up_segments.period_end(period, now)
+                end = now if trainer_ran else up_segments.period_end(period, now)
+                if i + 1 < len(ups) and ups[i + 1].get("start") is not None:
+                    end = max(float(period.get("start") or 0.0), min(end, float(ups[i + 1]["start"])))
+                period["end"] = end
         self.state.setdefault("run_t0", float(self.state.get("t0", now)))
         self.state["t0"] = now
         period = {"pid": os.getpid(), "start": now, "seen": now, "end": None}
         ups.append(period)
         self._up_period = period
         self.save()
+
+    def _trainer_alive(self) -> bool:
+        tr = (self.state.get("procs") or {}).get("trainer")
+        return bool(tr) and _alive(tr.get("pid"))
 
     def up_heartbeat(self) -> None:
         """The monitor's poll: this up's period was seen now; the spend estimate is kept
@@ -676,8 +718,12 @@ class Run:
         it is (the stop has not finished), and so is one that finished its run."""
         if not pool.stopped or getattr(pool, "finished", None):
             return
-        if pool.live():
-            tickets = [m.ticket for m in pool.live()]
+        released = getattr(pool, "manual_released", None) or {}
+        # a member released by hand (`nc down` / `delete-ticket` with no loop running) is no
+        # unfinished stop: the first tick reads its ticket ended and drops it
+        live = [m for m in pool.live() if m.ticket not in released]
+        if live:
+            tickets = [m.ticket for m in live]
             raise RunUpRefused(
                 f"pool {name} is stopped ({pool.stopped}) but still holds live member(s) {tickets}: an earlier "
                 "stop has not finished releasing them, and a stopped pool orders nothing, so the trainer would "
@@ -696,6 +742,39 @@ class Run:
              "member is live: this run up drives it again")
         pool.stopped = None
         pool._event("pool_restarted", why="run up")  # noqa: SLF001
+
+    def _restart_stopped_pool_states(self, refs: list[Any]) -> None:
+        """``controller: subprocess``: :meth:`_restart_stopped_pool` on each pool's state
+        file before its ``nc pool`` loop is spawned (that loop exits at once on a state that
+        says stopped, so no sampler would be ordered). Every pool is checked under its pool
+        lock first; the states are written only once none refused (a refusal raises with no
+        state changed). A pool whose lock is held runs already and is left alone."""
+        from yeto.launch.nc import cli, pool_run  # noqa: PLC0415
+        from yeto.launch.pool.island_pool import IslandPool  # noqa: PLC0415
+
+        held: list[tuple[Any, Any, Path]] = []
+        locks = []
+        try:
+            for ref in refs:
+                cfg = ref.load()
+                state = cli.pool_state_path(cfg)
+                if not state.exists():
+                    continue
+                lock = pool_run.acquire_lock(pool_run.lock_path(cfg), run=cli.run_id(cfg), role="run-up")
+                if lock is None:
+                    continue
+                locks.append(lock)
+                pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), None,  # type: ignore[arg-type]
+                                          log=cli._log, events=pool_run.event_log(cfg))  # noqa: SLF001
+                if not pool.stopped or getattr(pool, "finished", None):
+                    continue
+                self._restart_stopped_pool(ref.name, pool)  # raises before it changes anything
+                held.append((ref, pool, state))
+            for _, pool, state in held:
+                pool.save(state)
+        finally:
+            for lock in locks:
+                lock.close()
 
     def dashboard_args(self) -> list[str]:
         """``--store`` plus the run's local records (``--run``: the launcher's fleet record
@@ -721,7 +800,7 @@ class Run:
     def spend_usd(self) -> float:
         now = time.time()
         nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
-        rate = float((self.cfg.get("trainer") or {}).get("usd_per_h", 0))
+        rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
         return nc + self.trainer_hours(now) * rate
 
     def trainer_hours(self, now: float | None = None) -> float:
@@ -736,7 +815,19 @@ class Run:
         ups = [p for p in self.state.get("ups") or () if p.get("start") is not None]
         if not ups:  # a run from before the periods were recorded
             return max(0.0, now - t0) / 3600
-        return sum(max(0.0, up_segments.period_end(p, now) - max(float(p["start"]), t0)) for p in ups) / 3600
+        trainer_ran = None
+
+        def end(i: int, p: dict[str, Any]) -> float:
+            nonlocal trainer_ran
+            e = up_segments.period_end(p, now)
+            if i == len(ups) - 1 and p.get("end") is None:  # an up gone without a down
+                if trainer_ran is None:  # (--no-monitor, killed): its detached trainer bills to now
+                    trainer_ran = self._trainer_alive()
+                if trainer_ran:
+                    e = max(e, now)
+            return e
+
+        return sum(max(0.0, end(i, p) - max(float(p["start"]), t0)) for i, p in enumerate(ups)) / 3600
 
     def node_usd_per_h(self, i: int = 0) -> float:
         """One node hour of pool ``i``: its ``usd_per_h``, else the price its provider config
@@ -752,7 +843,7 @@ class Run:
                     price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
                 price = None
-        return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
+        return up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", 24) if price is None else price
 
     def nc_node_hours(self, now: float | None = None) -> float:
         """Billed rollout node hours of this run, every pool (see :meth:`node_hours`)."""
@@ -1058,7 +1149,8 @@ class Run:
                  "or to null for no wall-clock cap")
         elif wall_h is None:
             _log("preflight: budget.wall_h is null: no wall-clock cap; only budget.usd (if set) stops the run")
-        priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
+        priced = (up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0
+                  or up_consistency.number_or_default(b, "nc_usd_per_h", 24) > 0)
         if capped and up_consistency.budget_usd(b) <= 0 and priced:
             return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
@@ -1089,7 +1181,7 @@ class Run:
 
     def silence_limit_s(self) -> float:
         b = self.cfg.get("budget") or {}
-        return max(4 * self.stall_timeout_s(), float(b.get("silence_min", 30)) * 60)
+        return max(4 * self.stall_timeout_s(), up_consistency.number_or_default(b, "silence_min", 30) * 60)
 
     def progress_paths(self) -> list[Path]:
         """What grows while the trainer works: its launcher log and any
@@ -1551,6 +1643,7 @@ class Run:
         usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
         wall_h = up_consistency.budget_wall_h(b)
         wall_cap = float("inf") if wall_h is None else wall_h * 3600 * FORCE_FACTOR
+        forced: set[str] = set()
         while True:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
@@ -1570,8 +1663,14 @@ class Run:
                 _log(f"BREAKER: {cap} ({FORCE_FACTOR}x the budget): forcing pool-stop")
                 rc = max(self._cmd(self.nc("pool-stop", "--config", path), log="down.log", timeout=1800)
                          for path in self.pool_configs)
-                self.mark("nc_forced_stop", why=cap, rc=rc)
-                return
+                if "nc_forced_stop" not in forced:
+                    self.mark("nc_forced_stop", why=cap, rc=rc)
+                    forced.add("nc_forced_stop")
+                if rc == 0:
+                    return
+                # a pool-stop that failed or timed out (rc 124) has not released the machines:
+                # keep watching (the loop ends once none bills) and try the stop again next poll
+                _log(f"BREAKER: pool-stop rc={rc}: the machines may still bill; retrying next poll")
             time.sleep(poll_s)
 
     # -- down

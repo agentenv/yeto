@@ -180,3 +180,69 @@ def test_inside_one_up_the_trainer_spend_is_unchanged(make_run, monkeypatch):
     legacy = make_run()
     legacy.state.pop("ups")
     assert abs(legacy.trainer_hours(now[0]) - 1.5) < 1e-9
+
+
+def test_an_up_that_ended_without_a_down_bills_the_trainer_it_left_running(make_run, monkeypatch):
+    """A ``run up --no-monitor`` (or a killed up) leaves its detached trainer running:
+    the next up closes that period now, not at its last poll, the same as ``run down``."""
+    now = _clock(monkeypatch)
+    first = make_run(usd=10_000)
+    _no_pool_state(first, monkeypatch)
+    first.state["trainer_t0"] = now[0]
+    first.state.setdefault("procs", {})["trainer"] = {"pid": os.getpid()}  # still running
+    first.begin_up()
+    first.state["ups"][-1]["pid"] = 2**22 + 12345  # the up process has exited
+    first.save()
+    now[0] += 5 * H
+    again = make_run(usd=10_000)
+    _no_pool_state(again, monkeypatch)
+    again.begin_up()
+    now[0] += 1 * H
+    assert again.trainer_hours() == 6.0
+
+
+def test_an_up_that_crashed_with_its_trainer_is_closed_at_its_last_poll(make_run, monkeypatch):
+    now = _clock(monkeypatch)
+    first = make_run(usd=10_000)
+    _no_pool_state(first, monkeypatch)
+    first.state["trainer_t0"] = now[0]
+    first.begin_up()
+    first.state["ups"][-1].update(pid=2**22 + 12345, seen=now[0] + 1 * H)
+    first.save()
+    now[0] += 5 * H
+    again = make_run(usd=10_000)
+    _no_pool_state(again, monkeypatch)
+    again.begin_up()
+    assert again.trainer_hours() == 1.0
+
+
+def test_a_no_monitor_up_bills_its_running_trainer_before_the_next_up(make_run, monkeypatch):
+    """``run status`` between a ``--no-monitor`` up and the next up: the trainer still
+    runs, so its spend counts to now, not to the up's last poll."""
+    now = _clock(monkeypatch)
+    first = make_run(usd=10_000)
+    _no_pool_state(first, monkeypatch)
+    first.state["trainer_t0"] = now[0]
+    first.state.setdefault("procs", {})["trainer"] = {"pid": os.getpid()}
+    first.begin_up()
+    first.state["ups"][-1]["pid"] = 2**22 + 12345
+    first.save()
+    now[0] += 3 * H
+    assert make_run(usd=10_000).trainer_hours() == 3.0
+
+
+def test_stale_open_periods_are_closed_without_overlap(make_run, monkeypatch):
+    now = _clock(monkeypatch)
+    run = make_run(usd=10_000)
+    _no_pool_state(run, monkeypatch)
+    run.state["trainer_t0"] = now[0]
+    run.state.setdefault("procs", {})["trainer"] = {"pid": os.getpid()}
+    dead = 2**22 + 12345
+    run.state["ups"] = [{"pid": dead, "start": now[0], "seen": now[0], "end": None},
+                        {"pid": dead, "start": now[0] + 2 * H, "seen": now[0] + 2 * H, "end": None}]
+    run.save()
+    now[0] += 5 * H
+    again = make_run(usd=10_000)
+    _no_pool_state(again, monkeypatch)
+    again.begin_up()
+    assert again.trainer_hours() == 5.0

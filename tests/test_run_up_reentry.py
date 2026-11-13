@@ -341,3 +341,48 @@ def test_run_down_names_the_check_that_did_not_verify(make_run, capsys):
     assert "pool-status" not in text.split("NOT verified", 1)[1]
     run._cmd = lambda argv, *, log, timeout=None: 0
     assert run.down() is True
+
+
+def test_run_down_goes_on_past_a_step_that_hangs(make_run, monkeypatch):
+    """A step of run down that hits its timeout (a hung dashboard export or Modal
+    teardown) must not abort the down: the sampler pools are still stopped (else they
+    keep billing), and the down is recorded as not verified."""
+    run = make_run()
+    real = up.Run._cmd
+    seen = []
+
+    def cmd(argv, *, log, timeout=None):
+        seen.append(argv)
+        if "export" in argv or argv[-2:] == ["down", "r1-trainer"]:
+            return real(run, ["sleep", "30"], log=log, timeout=0.2)
+        return 0
+
+    run._cmd = cmd
+    monkeypatch.setattr(up, "_alive", lambda pid: False)
+    assert run.down() is False
+    assert any("pool-stop" in argv for argv in seen)
+    assert run.state["steps"]["down"]["ok"] is False
+
+
+def test_a_timed_out_step_is_killed_with_the_processes_it_spawned(make_run, tmp_path):
+    """The hang is usually in a child of the step (the modal / ssh process `yeto down`
+    runs): a timeout kills the step's whole process group, not the direct child only,
+    so nothing of it keeps running after run down moved on."""
+    import os  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    run = make_run()
+    pidfile = tmp_path / "grandchild.pid"
+    script = f"sleep 60 & echo $! > {pidfile}; wait"
+    assert up.Run._cmd(run, ["sh", "-c", script], log="down.log", timeout=0.5) == 124
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError(f"grandchild {pid} still runs after the step timed out")
+    assert "TIMED OUT" in (run.dir / "down.log").read_text()
+    assert up.Run._cmd(run, ["sh", "-c", "exit 3"], log="down.log", timeout=5) == 3

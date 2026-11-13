@@ -761,3 +761,74 @@ def test_an_allowed_run_up_that_orders_nothing_does_not_acknowledge_the_forced_s
     assert not any(p.orders for p in providers.values())
     assert "nc_forced_stop_ack" not in run.state["steps"]
     assert up.forced_stop_refusal(run, False) is not None
+
+
+def test_subprocess_run_up_drives_a_pool_an_earlier_stop_left_stopped(tmp_path, monkeypatch):
+    """controller subprocess (the default): run down saves each pool stopped; the next
+    run up spawns `nc pool`, which exits at once on a stopped state ("move it away"), so
+    no sampler is ordered. run up must clear the stop first, as in_process does."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    c = up.Run(dict(run_cfg, controller="in_process")).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    c.stop("run down")
+    run = up.Run(dict(run_cfg))
+    assert all(run.pool_doc(i)["stopped"] for i in range(2))
+    spawned = []
+    monkeypatch.setattr(run, "_spawn", lambda name, argv: spawned.append(name) or 1)
+    run.pool()
+    assert len(spawned) == 2
+    assert not any(run.pool_doc(i)["stopped"] for i in range(2))
+
+
+def test_subprocess_run_up_refuses_a_stopped_pool_with_live_members(tmp_path, monkeypatch):
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    c = up.Run(dict(run_cfg, controller="in_process")).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    c.stop("run down")
+    run = up.Run(dict(run_cfg))
+    path = nc_cli.pool_state_path(run.pools[0].load())
+    doc = json.loads(path.read_text())
+    doc["members"][0]["state"] = "ready"  # stopped, but a release has not finished
+    path.write_text(json.dumps(doc))
+    monkeypatch.setattr(run, "_spawn", lambda name, argv: 1)
+    with pytest.raises(up.RunUpRefused):
+        run.pool()
+
+
+def test_subprocess_run_up_refused_on_a_later_pool_restarts_and_spawns_no_pool(tmp_path, monkeypatch):
+    """The second pool is refused (live members of an unfinished stop): the first pool,
+    checked fine, must not be left restarted with its loop spawned (it would order nodes
+    for a run up that refused), as in_process restarts nothing until every pool passed."""
+    from tests.test_rollout_island_pool import Clock, FakeFencer, FakeProvider, FakeRoute  # noqa: PLC0415
+    from yeto.launch.pool.provider import ProviderPoolOps  # noqa: PLC0415
+
+    run_cfg, _, _ = _two_pools(tmp_path)
+    clock = Clock()
+    providers = {name: FakeProvider(name, clock) for name in ("nc", "modal")}
+    ops = {name: ProviderPoolOps(p, FakeRoute(), FakeFencer()) for name, p in providers.items()}
+    c = up.Run(dict(run_cfg, controller="in_process")).start_controller(ops=ops, thread_cls=_NoThread)
+    c.tick()
+    c.stop("run down")
+    run = up.Run(dict(run_cfg))
+    path = nc_cli.pool_state_path(run.pools[1].load())
+    doc = json.loads(path.read_text())
+    doc["members"][0]["state"] = "ready"
+    path.write_text(json.dumps(doc))
+    spawned = []
+    monkeypatch.setattr(run, "_spawn", lambda name, argv: spawned.append(name) or 1)
+    with pytest.raises(up.RunUpRefused):
+        run.pool()
+    assert spawned == []
+    assert all(run.pool_doc(i)["stopped"] for i in range(2))

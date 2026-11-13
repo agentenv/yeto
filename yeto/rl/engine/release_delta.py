@@ -607,6 +607,21 @@ class DeltaMirror:
         self._prune(newest=release.path)
         return target
 
+    def clear_interrupted(self) -> list[Path]:
+        """Remove the scratch directories (``.<release>.<pid>.<id>.partial`` / ``.stale``)
+        of rebuilds that were killed mid-way. Only for a mirror one process owns (the
+        trainer node's ``init_from_release`` mirror, prepared once per launch): a shared
+        sampler mirror may hold another process's rebuild in progress."""
+        removed = []
+        for path in self.root.iterdir() if self.root.is_dir() else ():
+            if path.name.startswith(".") and path.name.endswith((".partial", ".stale")):
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+                removed.append(path)
+        return removed
+
     def _prune(self, newest: str) -> None:
         """Keep the newest ``keep`` copies stamped for this mirror's scope; directories
         stamped for another scope (or unstamped) belong to someone else and stay."""
