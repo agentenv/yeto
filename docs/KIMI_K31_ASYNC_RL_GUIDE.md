@@ -504,7 +504,7 @@ Key fields (the complete list is in
 | `shard_base` | Shard prefix: nodes write `<shard_base>-0`, `<shard_base>-1`, ... Also names the pool state file `pool-<shard_base>.json`. |
 | `shard_limit` | How many shard indexes the run may take; set it to the number of shards in the trainer's `--rl-buffer-shards`. The usable range is also bounded by the port range of `agentic.setup.tunnel.listen` (one port per shard). Shard indexes are not reused, so replacements consume new indexes. |
 | `elastic.max_nodes` | Most billed nodes at once (default `2 x target`). |
-| `elastic.max_orders` | Most orders over the whole run. |
+| `elastic.max_orders` | Most orders over the whole run, counted cumulatively across every `yeto run up` of the run (the count lives in the pool state, so a restart does not reset it; `max_run_spend_ucr` / `max_run_spend_usd` likewise). |
 | `elastic.engine_stall_s` | Seconds without generated tokens while requests are pending before an engine counts as stalled (default 600). |
 | `elastic.max_sampler_restarts` | In-place restarts of a crashed sampler before its node is replaced (default 2). Restarts during node setup (before the first join) and before a `pool-retry` do not count, and the count starts again after `elastic.sampler_restart_reset_s` (default 1800) of healthy running. |
 | `elastic.scale_down` | `drain` (default) or `fence`: how a scale down removes a node (section 5.1). |
@@ -1788,6 +1788,12 @@ monitor stays up and prints the billing banner on every poll. Once the spend
 passes `1.2 x budget.usd`, or the wall time passes `1.2 x wall_h`, it runs
 `pool-stop` itself. It exits when no node bills.
 
+The forced stop is recorded in the run state (`nc_forced_stop`). A later
+`yeto run up` of the same run refuses to start until you confirm it with
+`yeto run up --config <run.json> --allow-after-forced-stop` (raise `budget.usd` /
+`budget.wall_h` first if the run should go on). The confirmation is recorded,
+so later restarts go on until the breaker forces another stop.
+
 **Opt-in full stop.** Set `"release_nc_on_breach": true` in `budget` to make a
 budget or wall-clock breach perform the full `yeto run down` immediately.
 
@@ -1993,6 +1999,12 @@ whose payload holds an older policy version: the payload decides.
 | A second `yeto run up` of the same run exits at once | Another `up` of this run still holds `up.lock` | Use the running one, or stop it first |
 | The trainer stops at start with `RoundCutsOffRestartError` | `--rl-round-cuts off`, the store holds policy releases, but the trainer loaded the base checkpoint (no `--rl-init-from-release`, e.g. an island command started by hand) | Relaunch through `yeto run up` / `yeto launch`, or add `--rl-init-from-release latest`; to start over, use a new run prefix / store (section 5.3) |
 | A running `yeto run up` ends on SIGTERM | A `yeto run down` of the same run interrupted it (#402) | Expected; run `yeto run up` again after the `down` if training should go on |
+| `CRITICAL: the exit drain of the sampler pools FAILED` / `may STILL BE BILLING` | The in-process exit drain raised (provider client error, network) | Run `yeto run down --config <run.json>` and check it reports verified; the drain is not retried at interpreter exit |
+| `SIGTERM during the exit drain ... ignored` | A stop signal arrived while `run up` was draining its pools | Expected; wait for the drain to end (allow for it in `TimeoutStopSec`) |
+| `run up refused: pool <name> is stopped ... but still holds live member(s)` | An earlier stop has not finished releasing its machines | Run `yeto run down --config <run.json>`, then `yeto run up` again |
+| `run up refused: pool <name> would refuse every order: N orders placed, max_orders M` (or `max_run_spend_*`) | The pool limits count over the whole run, every earlier `run up` included | Raise `elastic.max_orders` / `max_run_spend_*` in the pool config, or start a new run name |
+| `run up` exits with `an earlier run up ... FORCED the sampler pool down` | The 1.2x budget breaker fired (`nc_forced_stop` in the run state) | Check the spend, raise `budget.usd` / `wall_h` if needed, rerun with `--allow-after-forced-stop` |
+| Pool log `pool: N orders placed, max_orders M: not ordering` (or `max_nodes`, `max_run_spend_*`) | A pool budget limit refuses new orders | Raise the limit in the pool config |
 | Trainer exits with `incarnation gate: fatal store error` | The store refuses the trainer's credentials or the bucket does not exist | Fix the trainer's store env; this is not a pause or starvation |
 
 **The tape shows `rl_buffer_duplicate_task_skipped`.**
@@ -2407,7 +2419,7 @@ that process exits is set by `rollout.drain_on_exit`:
 
 | `rollout.drain_on_exit` | When the `yeto run up` process exits (normal exit, Ctrl-C, SIGTERM) |
 |---|---|
-| `true` (default) | Every pool is drained: samplers stopped, machines released and confirmed ended. |
+| `true` (default) | Every pool is drained: samplers stopped, machines released and confirmed ended. A SIGTERM during the drain is logged and ignored until the drain ends. If the drain fails, the exit prints a `CRITICAL ... may STILL BE BILLING` banner and does not retry; run `yeto run down`. |
 | `false` | Nothing is drained. The machines keep running and billing, and no pool drives them (no refill, no breaker, no budget cap) until the next `yeto run up --config <run.json>` adopts them from the pool state files. The exit prints the tickets still billing. |
 
 Use `false` only with a supervisor that restarts the process at once, for
