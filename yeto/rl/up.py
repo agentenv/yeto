@@ -461,13 +461,20 @@ class Run:
             self.begin_up()
             self.mark("pool", controller="in_process", pools=[r.name for r in self.pools])
             return
+        down = []
         for i, ref in enumerate(self.pools):
             proc = pool_run.pool_process(ref.load())
             if proc and proc.get("alive"):
                 _log(f"pool {ref.name}: loop already running (PID {proc.get('pid')})")
             else:
-                self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
-                                                        "--interval", str(int(ref.interval_s))))
+                down.append((i, ref))
+        # every stopped pool is checked before any is restarted or spawned: a refusal of a
+        # later pool must not leave an earlier one's loop running (ordering nodes for a run
+        # up that refused), as in_process restarts nothing until every pool passed
+        self._restart_stopped_pool_states([ref for _, ref in down])
+        for i, ref in down:
+            self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
+                                                    "--interval", str(int(ref.interval_s))))
         self.begin_up()
         self.mark("pool")
 
@@ -735,6 +742,39 @@ class Run:
              "member is live: this run up drives it again")
         pool.stopped = None
         pool._event("pool_restarted", why="run up")  # noqa: SLF001
+
+    def _restart_stopped_pool_states(self, refs: list[Any]) -> None:
+        """``controller: subprocess``: :meth:`_restart_stopped_pool` on each pool's state
+        file before its ``nc pool`` loop is spawned (that loop exits at once on a state that
+        says stopped, so no sampler would be ordered). Every pool is checked under its pool
+        lock first; the states are written only once none refused (a refusal raises with no
+        state changed). A pool whose lock is held runs already and is left alone."""
+        from yeto.launch.nc import cli, pool_run  # noqa: PLC0415
+        from yeto.launch.pool.island_pool import IslandPool  # noqa: PLC0415
+
+        held: list[tuple[Any, Any, Path]] = []
+        locks = []
+        try:
+            for ref in refs:
+                cfg = ref.load()
+                state = cli.pool_state_path(cfg)
+                if not state.exists():
+                    continue
+                lock = pool_run.acquire_lock(pool_run.lock_path(cfg), run=cli.run_id(cfg), role="run-up")
+                if lock is None:
+                    continue
+                locks.append(lock)
+                pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), None,  # type: ignore[arg-type]
+                                          log=cli._log, events=pool_run.event_log(cfg))  # noqa: SLF001
+                if not pool.stopped or getattr(pool, "finished", None):
+                    continue
+                self._restart_stopped_pool(ref.name, pool)  # raises before it changes anything
+                held.append((ref, pool, state))
+            for _, pool, state in held:
+                pool.save(state)
+        finally:
+            for lock in locks:
+                lock.close()
 
     def dashboard_args(self) -> list[str]:
         """``--store`` plus the run's local records (``--run``: the launcher's fleet record
