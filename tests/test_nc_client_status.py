@@ -196,3 +196,23 @@ def test_a_delete_call_the_tool_refused_is_a_failed_release(tmp_path):
     with pytest.raises(ncc.NcError, match="gateway"):
         c.delete("abc")
     assert [r["ticket"] for r in c.ledger.run_rows("run-a")] == ["abc"]
+
+
+def test_nc_error_redacts_credentials_in_nc_manage_stderr(tmp_path):
+    """A failing ``nc-manage`` call's stderr reaches the error text (and the pool's
+    event log): without credentials, with the diagnostics."""
+    sig = "Zm9vYmFy" + "c2lnbmF0dXJl"
+    secret = "wJalr" + "XUtnFEMI" + "K7MDENG"
+    userinfo = "admin:" + "hunt" + "er2pass"
+    stderr = (f"upload https://bucket.r2.example/o?X-Amz-Signature={sig} failed\n"
+              f"aws_secret_access_key={secret}\nproxy https://{userinfo}@proxy.example refused\n")
+
+    def run(argv, **kw):
+        return answer(code=2, stdout="", stderr=stderr)
+
+    with pytest.raises(ncc.NcError) as err:
+        client(run, tmp_path)._call(["nc-manage", "delete"])
+    msg = str(err.value)
+    for value in (sig, secret, userinfo):
+        assert value not in msg
+    assert "nc-manage exit 2" in msg and "https://bucket.r2.example/o?" in msg and "proxy.example refused" in msg

@@ -62,18 +62,22 @@ _SECRET_PAIR = re.compile(r"((?:secret|token|password|passwd|credential|signatur
 _SECRET_ENV = re.compile(r"SECRET|TOKEN|PASSWORD|KEY|CREDENTIAL", re.I)
 
 
-def redact_reason(text: str, environ: Mapping[str, str] | None = None) -> str:
-    """``text`` as one line without credentials (secret env values, URL queries such
-    as presigned signatures, URL userinfo, ``key=value`` secrets), at most
-    :data:`FAILURE_REASON_MAX` characters."""
+def redact_text(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """``text`` without credentials (secret env values, URL queries such as presigned
+    signatures, URL userinfo, ``key=value`` secrets); lines and length kept otherwise."""
     env = os.environ if environ is None else environ
     for name, value in env.items():
         if value and len(value) >= 8 and _SECRET_ENV.search(name):
             text = text.replace(value, "<redacted>")
     text = _URL_QUERY.sub(r"\1?<redacted>", text)
     text = _URL_USERINFO.sub(r"\1<redacted>@", text)
-    text = _SECRET_PAIR.sub(r"\1<redacted>", text)
-    text = " ".join(text.split())
+    return _SECRET_PAIR.sub(r"\1<redacted>", text)
+
+
+def redact_reason(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """:func:`redact_text` of ``text`` as one line, at most :data:`FAILURE_REASON_MAX`
+    characters."""
+    text = " ".join(redact_text(text, environ).split())
     return text if len(text) <= FAILURE_REASON_MAX else text[:FAILURE_REASON_MAX - 3] + "..."
 
 
