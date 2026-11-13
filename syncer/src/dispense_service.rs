@@ -321,13 +321,16 @@ impl DispenseService {
             info!(path = %path.display(), next = dispenser.next_position(), queued = dispenser.queued(), "dispenser record restored");
         }
         let log = match &log_path {
-            Some(path) => Some(
+            Some(path) => Some({
+                if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+                }
                 std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .with_context(|| format!("open {}", path.display()))?,
-            ),
+                    .with_context(|| format!("open {}", path.display()))?
+            }),
             None => None,
         };
         let service = Self { inner: Mutex::new(Inner { dispenser, log }), log_path, syncer_epoch, hmac_key };
@@ -479,6 +482,27 @@ pub async fn serve(mut rd: OwnedReadHalf, mut wr: OwnedWriteHalf, first: &[u8], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh host has no ~/yeto-output: the log's directory is created, not
+    /// a reason to exit at start.
+    #[test]
+    fn dispense_log_in_a_missing_directory_is_created() {
+        let root = std::env::temp_dir().join(format!("yeto-dispense-log-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("yeto-output").join("task-dispense.jsonl");
+        let service = DispenseService::new(
+            DispenseConfig { passes: Some(1), ..DispenseConfig::default() },
+            Some(path.clone()),
+            1,
+            None,
+            None,
+            crate::members::shared(std::time::Duration::from_secs(300)),
+        )
+        .unwrap();
+        drop(service);
+        assert!(path.is_file());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
