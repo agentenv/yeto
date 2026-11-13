@@ -54,6 +54,7 @@ DRIVER_KEYS: frozenset[str] = frozenset({
     "rl_full_parameter_config",
     "rl_heartbeat_interval_s",
     "rl_hf_exports",
+    "rl_init_from_release_dir",
     "rl_init_release",
     "rl_initial_adapter",
     "rl_initial_adapter_sha256",
