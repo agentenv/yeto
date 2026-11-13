@@ -606,3 +606,25 @@ def test_sampler_start_exits_when_the_sandbox_docker_is_unreachable(tmp_path, mo
                                  "hosts": [{"name": "h1", "docker_host": "ssh://a@h1", "max_sandboxes": 64}]}}}
     with pytest.raises(entry.SamplerSpecError, match="unreachable.*docker info"):
         entry.store_dispensed_prompts(spec, environ={SAMPLER_INCARNATION_ENV: "inc-1"})
+
+
+def test_teardown_unreachable_host_is_reported_and_the_other_hosts_are_torn_down(world):
+    """One sandbox host down must not abort ``yeto sandbox teardown``: the reachable
+    hosts are still cleaned, their ready state is still written, and the
+    unreachable host is named (exit code 1 from the CLI)."""
+    section = dict(world["section"], hosts=[{"name": "h0", "docker_host": "ssh://u@h0"}] + world["section"]["hosts"])
+    _prepare(world)
+    cfg = parse_envs(section)
+    good = world["daemon"]
+
+    def factory(h):
+        if h.name == "h0":
+            return DockerHost(h.docker_host, runner=lambda a, e, s: (255, "", "ssh: connect refused"))
+        return DockerHost(h.docker_host, ssh=h.ssh, runner=good)
+
+    out = ops.teardown(cfg, world["store"], factory=factory)
+    assert "connect refused" in out["h0"]["error"]
+    assert len(out["h1"]["containers"]) == 2
+    assert not any(c["Config"]["Labels"].get(LABEL_RUN) == "r1" for c in good.containers.values())
+    doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
+    assert doc["tasks"]["cg_1"]["hosts"]["h1"]["prepared"] is False
