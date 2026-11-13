@@ -165,6 +165,28 @@ def test_gate_refuses_late_groups_of_a_superseded_incarnation(tmp_path):
     assert gate.verdict(entries[3], 3) == verdicts[3]
 
 
+
+def test_gate_trains_exactly_the_sealed_entries_and_not_one_more(tmp_path):
+    """The seal boundary itself: a superseded incarnation's entries up to ``sealed`` train,
+    the first one past it (written after the new claim) does not. On the legacy part of a
+    shard (owner epoch 0, e.g. after the data end) only the gate judges this; the fence-zombie
+    store simulation owns every shard, so this is the check that catches an off-by-one."""
+    store = CheckpointStore(tmp_path)
+    entries = [_entry("s", "aaaa", 10.0), _entry("s", "aaaa", 20.0), _entry("s", "aaaa", 100.0),
+               _entry("s", "aaaa", 110.0)]
+    IncarnationLease(store, "s", "aaaa", clock=lambda: 0.0).claim()
+    record = IncarnationLease(store, "s", "bbbb", clock=lambda: 50.0).claim(entries[:2])  # saw 2 of aaaa
+    assert record["sealed"] == {"aaaa": 2}
+    for owner_epoch in (None, lambda position: 0):
+        gate = IncarnationGate(store, lambda: entries, clock_margin_s=5.0, owner_epoch=owner_epoch)
+        verdicts = [gate.verdict(e, i) for i, e in enumerate(entries)]
+        assert verdicts[:2] == [None, None]  # sealed: trained
+        assert verdicts[2] and "entry 3 of it, 2 sealed" in verdicts[2]  # one past the seal: stale
+        assert verdicts[3] and gate.stale == 2
+    owned = IncarnationGate(store, lambda: entries, clock_margin_s=5.0, owner_epoch=lambda position: 1)
+    assert [owned.verdict(e, i) for i, e in enumerate(entries)] == [None] * 4  # the merge decided
+
+
 def test_buffer_feed_drops_stale_incarnation_groups(tmp_path):
     from yeto.rl.adapters.verl.buffer_feed import BufferFeed, RowShape
     from yeto.rl.engine.buffer_payload import GroupWriter

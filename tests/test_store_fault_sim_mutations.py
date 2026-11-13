@@ -355,7 +355,8 @@ _LEASE_RULES = (("legacy_samplers", 3),) if MERGE_DROPS_FENCED_WRITES else ()
 # nothing there (owned positions are the merge's), and with every sampler on the lease rules
 # the preset shows the gate's known clock-margin window without any mutation
 _GATE_SKIP = ("the shard ownership records fence every shard of the preset; the gate judges only "
-              "the legacy part of a shard") if MERGE_DROPS_FENCED_WRITES else None
+              "the legacy part of a shard; the seal boundary is covered by tests/test_incarnation_lease_fence.py::"
+              "test_gate_trains_exactly_the_sealed_entries_and_not_one_more") if MERGE_DROPS_FENCED_WRITES else None
 _GATE = ("stale_incarnation_group_trained",) if not MERGE_DROPS_FENCED_WRITES else ("fenced_writer_group_trained",)
 MUTATIONS = [
     # -- the dispenser: one holder per task, the holder knows when it lost the task
