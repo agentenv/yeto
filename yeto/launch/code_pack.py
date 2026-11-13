@@ -85,6 +85,32 @@ def _semantic_sha256(args) -> str | None:
     return AlgorithmSpec.from_dict(json.loads(raw)).semantic_sha256()
 
 
+def run_code_pack_problem(args, *, repo: str | Path | None = None) -> str | None:
+    """The refusal :func:`prepare_run_code_pack` would raise for this launch (a local
+    tree that drifted from the run's pinned pack, a release/git-patch mode switch),
+    found without storing or unpacking a pack. ``yeto launch --dry-run`` reports it,
+    so ``yeto run up``'s preflight fails before ordering anything."""
+
+    mode = code_pack_mode(args)
+    if mode == CODE_PACK_OFF or getattr(args, "training_mode", "sft") != "rl":
+        return None
+    from .. import codepack
+
+    release = mode == CODE_PACK_RELEASE
+    try:
+        problem = codepack.run_pack_problem(
+            previous=_previous_manifest(args.cluster_prefix), repo=repo or REPO_ROOT,
+            store_base=None if release else str(getattr(args, "rl_checkpoint_store", None) or "") or None,
+            upgrade_reason=getattr(args, "rl_code_pack_upgrade", None),
+            release_image=str(getattr(args, "rl_image", None) or "") if release else None,
+            keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)))
+    except codepack.CodePackError as e:
+        problem = str(e)
+    if problem is None:
+        return None
+    return f"--rl-code-pack {mode}: {problem}"
+
+
 def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
                           cache_root: str | Path | None = None) -> None:
     """Resolve the run pack and point the launch at it (sets ``args.code_pack``,

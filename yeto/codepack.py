@@ -604,16 +604,52 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         log(f"[codepack] upgrade {old.digest[:16]} -> {new.digest[:16]}: {upgrade_reason}")
         return RunPack(new, unpack(data, new.digest, cache_root), reused=False)
     if not keep_pinned:
-        local, _ = build_pack(repo)
-        if local.digest != old.digest:
-            raise CodePackError(
-                f"the run manifest pins code pack {old.digest[:16]} (commit {(old.commit or '?')[:12]}"
-                f"{', dirty' if old.dirty else ''}), but the local tree is {local.digest[:16]} "
-                f"(commit {local.commit[:12]}{', dirty' if local.dirty else ''}). Resume on the "
-                "pinned code with --rl-code-pack-keep, move the run to the local tree with "
-                "--rl-code-pack-upgrade REASON, or start a new run (another --cluster-prefix)")
+        problem = _drift_problem(old, build_pack(repo)[0])
+        if problem is not None:
+            raise CodePackError(problem)
     log(f"[codepack] reusing run pack {old.digest[:16]} from the run manifest")
     return RunPack(old, fetch_tree(old, store, cache_root), reused=True)
+
+
+def _drift_problem(old: CodePack, local: CodePack) -> str | None:
+    if local.digest == old.digest:
+        return None
+    return (f"the run manifest pins code pack {old.digest[:16]} (commit {(old.commit or '?')[:12]}"
+            f"{', dirty' if old.dirty else ''}), but the local tree is {local.digest[:16]} "
+            f"(commit {local.commit[:12]}{', dirty' if local.dirty else ''}). Resume on the "
+            "pinned code with --rl-code-pack-keep, move the run to the local tree with "
+            "--rl-code-pack-upgrade REASON, or start a new run (another --cluster-prefix)")
+
+
+def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathLike[str],
+                     store_base: str | None, upgrade_reason: str | None = None,
+                     release_image: str | None = None, keep_pinned: bool = False) -> str | None:
+    """What :func:`resolve_run_pack` would refuse, checked without storing, fetching
+    or unpacking anything (``yeto launch --dry-run``, so ``yeto run up``'s preflight
+    sees a pinned-pack drift before any machine is ordered). None: it would pass.
+    Never loosens the refusal itself; the launch still runs :func:`resolve_run_pack`."""
+
+    old_record = (previous or {}).get("code_pack")
+    if not old_record or upgrade_reason is not None:
+        return None  # a new run pack, or an upgrade (upgrade_record checks it at launch)
+    old = CodePack.from_record(old_record)
+    if release_image is not None:
+        candidate = release_pack(release_image)
+        if old.digest == candidate.digest and old.mode == candidate.mode:
+            return None
+        return (f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
+                f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")
+    old_uri = old_record.get("pack_uri")
+    if (old_uri and store_base and old.mode != CODE_PACK_MODE_RELEASE
+            and not str(old_uri).startswith(store_base.rstrip("/") + "/")):
+        return None  # another store: a new run, not this run's resume
+    if old.mode == CODE_PACK_MODE_RELEASE:
+        return (f"this run uses the release image {old.pack_uri}; resume it with "
+                "--rl-code-pack release and that --rl-image, or switch with "
+                "--rl-code-pack-upgrade")
+    if keep_pinned:
+        return None
+    return _drift_problem(old, build_pack(repo)[0])
 
 
 def _resolve_release_pack(old_record, previous, release_image: str, *,
