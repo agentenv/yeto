@@ -122,7 +122,27 @@ def overrides_of(args, num_islands: int) -> dict[int, dict[str, Any]]:
     if not getattr(args, "rl_negative_test_run", False):
         raise ValueError("--rl-island-override needs --rl-negative-test-run: a per-island override "
                          "is only for negative tests")
-    return parse_overrides(items, num_islands)
+    out = parse_overrides(items, num_islands)
+    _refuse_age_on_scheduled_trainer(args, out)
+    return out
+
+
+def _refuse_age_on_scheduled_trainer(args, out: dict[int, dict[str, Any]]) -> None:
+    """The head's trainer scheduler counts its backlog (and its age limit) with the
+    GLOBAL ``rl_max_policy_age``; a different age on the trainer it drives would
+    make the head wait for (or start the trainer on) samples the trainer's
+    reader passes over.  A convertible pool: any island may become the trainer."""
+    from .launch import trainer_loop
+
+    if not trainer_loop.enabled(args):
+        return
+    pool = trainer_loop.convertible_pool(args)
+    held = getattr(args, "rl_trainer_island", None)
+    for island, kv in sorted(out.items()):
+        if "rl_max_policy_age" in kv and (pool or island == held):
+            raise ValueError(f"--rl-island-override {island}:rl_max_policy_age: island {island} is "
+                             "driven by the trainer scheduler, whose backlog uses the global "
+                             "--rl-max-policy-age; change --rl-max-policy-age instead")
 
 
 def _old_value(args, key: str):
