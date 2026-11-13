@@ -410,3 +410,28 @@ def test_a_stalled_engine_that_recovers_by_itself_keeps_the_fence_note_and_its_e
     _run(pool, clock, clock.t + 2 * MIN)
     assert pool.finished is None and pool.stopped is None and len(cloud.kinds("restart")) == 1
     assert not first.fenced_for_restart and "sampler_left_fenced" in _names(pool)
+
+
+def test_a_stalled_engine_is_neither_fenced_nor_restarted_while_its_fence_note_cannot_be_saved(tmp_path):
+    """The fence note is saved before the incarnation fence and the restart; a save that
+    fails holds both back (a pool killed during the restart would forget the note) until
+    a save holds."""
+    clock, cloud, pool, m = _setup()
+    pool.state_path = tmp_path / "pool.json"
+    real_save, broken = pool.save, {"on": True}
+
+    def save(p):
+        if broken["on"]:
+            raise OSError("disk full")
+        real_save(p)
+
+    pool.save = save
+    cloud.eng(m.ticket).update(running=8, rate=5000.0)
+    _run(pool, clock, clock.t + 5 * MIN)
+    cloud.eng(m.ticket).update(running=8, queued=3, rate=0.0)
+    _run(pool, clock, clock.t + 15 * MIN)
+    assert cloud.fenced_incarnations == [] and not cloud.kinds("restart")
+    assert not m.fenced_for_restart and m.state == READY
+    broken["on"] = False
+    _run(pool, clock, clock.t + 2 * MIN)
+    assert cloud.fenced_incarnations == [m.ticket] and len(cloud.kinds("restart")) == 1

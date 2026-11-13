@@ -62,6 +62,11 @@ CLOUD_WARNING = ("Cloud rollout islands ({kind}) bill until they are released: k
                  "or release them with `python -m yeto.launch.nc pool-stop --config <file>`.")
 
 
+SHARED_BASE_WARNING = ("only one pool may run shard_base {base!r}: the pool lock is an flock in this host's state "
+                       "directory, so a second pool with the same shard_base on another machine is NOT detected; "
+                       "both would order nodes, fence and continue the same shards of the same store")
+
+
 def lease_warning(cfg: dict[str, Any], config_path: str) -> str:
     """The billing warning of the pool's provider (a National Compute lease, a sandbox, a cloud island)."""
     kind = provider_kind(cfg)
@@ -482,6 +487,7 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
     print(f"WARNING: {lease_warning(cfg, config_path)}")
     print("The control loop runs in the foreground on this host: keep it up for the whole run "
           "(tmux / systemd on an always-on machine).")
+    print(f"note: {SHARED_BASE_WARNING.format(base=cfg['shard_base'])}")
     for note in notes:
         print(f"note: {note}")
     for problem in problems:
@@ -592,7 +598,12 @@ def _run_pool_locked(cfg: dict[str, Any], config_path: str, pc, *, interval: flo
                 pool.events("tick_failed", error=repr(error)[:300])
             if retry_path(cfg).exists():
                 _retry_in_loop(pool, config_path)
-            pool.save(state)
+            # a failed save (disk full, read-only) must not end the loop that supervises billed
+            # nodes: logged + state_save_failing, tried again next tick
+            if pool.state_path == state:
+                pool._save_now()  # noqa: SLF001
+            else:
+                pool.save(state)
             if signals.name is None and not stop_path(cfg).exists():
                 pool.wait(signals.wake, interval)  # a pause / resume / scale ends it at once
             if signals.name is not None or stop_path(cfg).exists():
