@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -101,11 +102,13 @@ def prepare(releases: PolicyReleaseStore, selector: str, base_dir: str | os.Path
     weights = releases.resolve(release)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    (out / RECORD).unlink(missing_ok=True)
     if is_partial_release(release.manifest):
         # the record stays outside the model directory: the trainer's exports copy
         # its non-weight files into every release
-        directory = overlay_release(base_dir, weights, out / MODEL_SUBDIR)
+        directory = _replace_model_dir(out, lambda tmp: overlay_release(base_dir, weights, tmp))
     else:
+        _remove_model_dir(out)  # an earlier overlay must not outlive this preparation
         directory = Path(weights)
     record = {"path": release.path, "seq": int(release.seq), "version": int(release.version),
               "policy_hash": release.policy_hash, "model_dir": str(directory),
@@ -115,6 +118,37 @@ def prepare(releases: PolicyReleaseStore, selector: str, base_dir: str | os.Path
     return record
 
 
+_TMP_PREFIX = f".{MODEL_SUBDIR}.tmp-"
+_OLD_PREFIX = f".{MODEL_SUBDIR}.old-"
+
+
+def _remove_model_dir(out: Path) -> None:
+    """Remove the overlay :data:`MODEL_SUBDIR` of an earlier preparation and any
+    leftover of an interrupted one (the node's disk may outlive a launch)."""
+    for child in out.iterdir() if out.is_dir() else ():
+        if child.name == MODEL_SUBDIR or child.name.startswith((_TMP_PREFIX, _OLD_PREFIX)):
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            else:
+                shutil.rmtree(child)  # holds symlinks to the base and the release: not followed
+
+
+def _replace_model_dir(out: Path, build: Callable[[Path], Any]) -> Path:
+    """Build the overlay in a temporary directory beside :data:`MODEL_SUBDIR`, then
+    rename it into place: a reader never sees a half-written or an earlier overlay
+    under that name."""
+    _remove_model_dir(out)
+    tmp = out / f"{_TMP_PREFIX}{os.getpid()}"
+    build(tmp)
+    final = out / MODEL_SUBDIR
+    if final.exists():  # a concurrent writer; move it aside, then swap
+        old = out / f"{_OLD_PREFIX}{os.getpid()}"
+        final.rename(old)
+        shutil.rmtree(old)
+    tmp.rename(final)
+    return final
+
+
 def prepare_if_released(releases: PolicyReleaseStore, base_dir: str | os.PathLike[str] | Callable[[], str],
                         out_dir: str | os.PathLike[str], *,
                         expected_selection_sha256: str | None = None) -> dict[str, Any] | None:
@@ -122,12 +156,13 @@ def prepare_if_released(releases: PolicyReleaseStore, base_dir: str | os.PathLik
     release when the store holds a trained one (a relaunch: :func:`prepare` with
     ``latest``), else write :data:`NO_RELEASE` (the run's first start, from the base).
     ``base_dir`` may be a callable (resolved only when a release is laid over it).
-    A record of an earlier preparation in ``out_dir`` is removed first. Returns the
-    release record, or None."""
+    A record and overlay of an earlier preparation in ``out_dir`` are removed first
+    (a node's disk may outlive a launch). Returns the release record, or None."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for name in (RECORD, NO_RELEASE):
         (out / name).unlink(missing_ok=True)
+    _remove_model_dir(out)
     if not trained_releases(releases.records()):
         (out / NO_RELEASE).write_text(json.dumps({"selector": LATEST_SELECTOR, "release": None}))
         print("[yeto-init-release] --rl-round-cuts off: the store holds no policy release yet; "
@@ -159,6 +194,39 @@ def island_model_path(out_dir: str | os.PathLike[str],
         raise InitFromReleaseError(f"{record['path']} was laid over {record['base_dir']}, "
                                    f"the island's base is {base_path}")
     return str(record["model_dir"]), record
+
+
+RELEASE_KEY = ("path", "seq", "version", "policy_hash")
+
+
+def release_key(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """What every node of an island must have prepared alike (None: the base)."""
+    return None if record is None else {k: record.get(k) for k in RELEASE_KEY}
+
+
+def node_release(out_dir: str | os.PathLike[str]) -> dict[str, Any]:
+    """This node's preparation: ``{"release": key-or-None}`` or ``{"error": ...}``."""
+    out = Path(out_dir).expanduser()
+    try:
+        if not (out / RECORD).is_file() and (out / NO_RELEASE).is_file():
+            return {"release": None}
+        return {"release": release_key(read_record(out))}
+    except (OSError, ValueError) as exc:  # InitFromReleaseError, a torn json
+        return {"error": str(exc)}
+
+
+def check_nodes_agree(head: Mapping[str, Any] | None, nodes: Mapping[str, Mapping[str, Any]]) -> None:
+    """Every node loads the release the head selected (``head``: the head's record,
+    None for the start from the base); ``nodes``: :func:`node_release` per node."""
+    want = release_key(head)
+    bad = {node: row.get("error") or row.get("release") for node, row in nodes.items()
+           if "error" in row or row.get("release") != want}
+    if bad:
+        name = "the base checkpoint (no release)" if want is None else want
+        rows = "; ".join(f"{node}: {got if got is not None else 'the base checkpoint (no release)'}"
+                         for node, got in sorted(bad.items()))
+        raise InitFromReleaseError(f"nodes prepared different releases: the head loads {name}, "
+                                   f"but {rows}")
 
 
 def check_resumed(record: Mapping[str, Any], base_version: int | None, history: Iterable[tuple[int, str]]) -> None:

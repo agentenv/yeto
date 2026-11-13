@@ -1936,6 +1936,40 @@ def _ray_live_incarnations(topology: Any, observed_flat: Sequence[str]) -> dict[
     return live
 
 
+def _ray_node_releases(out_dir: str) -> dict[str, dict[str, Any]]:
+    """:func:`init_from_release.node_release` on every live GPU node (a Ray task per node)."""
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    nodes = [n for n in ray.nodes() if n.get("Alive") and (n.get("Resources") or {}).get("GPU", 0)]
+
+    @ray.remote(num_cpus=0, num_gpus=0)
+    def _read(directory: str) -> dict[str, Any]:
+        from yeto.rl.engine.init_from_release import node_release
+
+        return node_release(directory)
+
+    refs = [_read.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+        node_id=n["NodeID"], soft=False)).remote(out_dir) for n in nodes]
+    names = [str(n.get("NodeManagerAddress") or n["NodeID"]) for n in nodes]
+    return dict(zip(names, ray.get(refs, timeout=120)))
+
+
+def check_island_init_releases(miles_args: Any, *,
+                               node_releases: Callable[[str], Mapping[str, Mapping[str, Any]]] | None = None
+                               ) -> None:
+    """``--rl-init-from-release-dir``: each node prepared its own copy of the release
+    before its Ray started; the record the head loaded (None: the base checkpoint) must
+    be every node's, else the trainer ranks would train different weights."""
+    out_dir = getattr(miles_args, "yeto_rl_init_from_release_dir", None)
+    if not out_dir:
+        return
+    from yeto.rl.engine.init_from_release import check_nodes_agree
+
+    check_nodes_agree(getattr(miles_args, "yeto_rl_init_release", None),
+                      (node_releases or _ray_node_releases)(str(out_dir)))
+
+
 def _ray_write_incarnation_markers(topology: Any, observed: Sequence[Sequence[str]], incarnation: str) -> None:
     """Write this incarnation's marker for every bound GPU on its node (the learner pid on
     the head stands for the whole incarnation: its Ray job owns every worker process)."""
@@ -2234,6 +2268,8 @@ def run_ports_island(
     # fill the remote-code module cache on every island node before any
     # engine or trainer actor imports from it (concurrent first imports raced).
     prewarm_remote_code(miles_args, emit=lambda event: append_tape_event(miles_args, event))
+    # every node loads the release the head selected, not one an earlier launch left
+    check_island_init_releases(miles_args)
 
     from miles.ray.placement_group import (
         create_rollout_components,
