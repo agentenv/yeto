@@ -86,7 +86,10 @@ from .trainer_island import (
 
 KILL_GRACE_S = 30
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30")
-READ_SCRIPT = 'eval "$(cat)"'  # the remote command: the script comes on stdin
+# The remote command: the script comes on stdin. stdin moves to fd 3 and the login
+# shell starts on /dev/null, so a profile (/etc/profile.d, ~/.bash_profile) that reads
+# stdin cannot eat the script; the script then runs without fd 3.
+READ_SCRIPT = "exec 3<&0 </dev/null; exec bash -lc 'eval \"$(cat <&3)\" 3<&-'"
 STATE_DIR = ".yeto/trainer-islands"  # under the remote $HOME
 CONTAINER_STATE_DIR = "/yeto-island-state"  # the incarnation's state dir inside a docker trainer
 
@@ -317,8 +320,9 @@ class SshOps:
         """``ssh`` to ``node`` running the script it reads from stdin: a start script
         exports the task's secrets, which must not be in an argv (``ps`` on either
         end, a ``TimeoutExpired`` message). The remote bash reads the whole script
-        before it runs, so nothing in it can consume the rest of it."""
-        return ["ssh", *SSH_OPTIONS, *node.ssh_options(), node.host, "bash", "-lc", shlex.quote(READ_SCRIPT)]
+        before it runs, so nothing in it (or in a login profile) can consume the rest
+        of it."""
+        return ["ssh", *SSH_OPTIONS, *node.ssh_options(), node.host, "bash", "-c", shlex.quote(READ_SCRIPT)]
 
     def run(self, node: Node, script: str, *, timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(self.command(node), input=script, text=True, capture_output=True, timeout=timeout)

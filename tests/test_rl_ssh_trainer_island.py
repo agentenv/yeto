@@ -20,6 +20,7 @@ from tests.test_rl_quant_requant import world  # noqa: F401 - fixture
 from yeto.hw import card_tools
 from yeto.launch.node_inventory import Node
 from yeto.launch.ssh_trainer_island import (
+    READ_SCRIPT,
     SshIslandError,
     SshOps,
     SshTrainerIslands,
@@ -208,7 +209,7 @@ class LocalOps(SshOps):
         self.home = home
 
     def command(self, n):
-        return ["env", f"HOME={self.home}", "bash", "-c", 'eval "$(cat)"']
+        return ["env", f"HOME={self.home}", "bash", "-c", READ_SCRIPT]
 
 
 @needs_setsid
@@ -410,3 +411,20 @@ def test_ssh_argv_never_carries_the_start_script_secrets(monkeypatch, tmp_path):
     for argv, sent in seen:
         assert secret not in " ".join(argv)
         assert sent == script
+
+
+def test_the_remote_command_runs_the_whole_stdin_script_past_a_profile_that_reads_stdin(tmp_path):
+    """The script is read before the login shell starts: a profile that reads stdin
+    (a vendor /etc/profile.d script, a ~/.bash_profile) gets /dev/null, not the
+    script's first line; quoting, heredocs and a long script come through intact."""
+    (tmp_path / ".bash_profile").write_text("read -r eaten || true\nexport FROM_PROFILE=yes\n")
+    value = "a'b\"c $HOME `x` \\ \nline2 $(echo no)"
+    script = (f"echo first\nset -eu\nexport V={shlex.quote(value)}\n"
+              "cat <<'EOT'\nliteral $V\nEOT\n"
+              'printf "%s|%s\\n" "$FROM_PROFILE" "$V"\n'
+              "read -r more && echo leak || echo eof\n"
+              + "x=0\n" + "x=$((x+1))\n" * 20000 + "echo $x\n")
+    done = subprocess.run(["env", f"HOME={tmp_path}", "bash", "-c", READ_SCRIPT], input=script,
+                          text=True, capture_output=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == f"first\nliteral $V\nyes|{value}\neof\n20000\n"
