@@ -111,14 +111,27 @@ def test_launch_checks_policy_age_against_the_cadence():
     with pytest.raises(ValueError, match="--rl-max-policy-age >= 3 for --rl-release-skip-busy"):
         sample_roles.check_launch(_trainer(rl_release_skip_busy=True))
     sample_roles.check_launch(_launch_args(rl_sample_role="trainer", rl_max_policy_age=3,
-                                           rl_release_skip_busy=True))
+                                           rl_release_skip_busy=True, tuning="full"))
     with pytest.raises(ValueError, match="no --rl-release-inline"):
         sample_roles.check_launch(_launch_args(rl_sample_role="trainer", rl_max_policy_age=3,
-                                               rl_release_skip_busy=True, rl_release_inline=True))
+                                               rl_release_skip_busy=True, rl_release_inline=True,
+                                               tuning="full"))
     with pytest.raises(ValueError, match="--rl-backend miles"):
         sample_roles.check_launch(_trainer(rl_release_every=2, rl_backend="verl"))
     with pytest.raises(ValueError, match="need --rl-sample-role trainer"):
         sample_roles.check_launch(_launch_args(rl_release_every=2))
+
+
+def test_skip_busy_is_refused_where_releases_are_not_staged():
+    """A LoRA trainer writes each release inline (sampler_island: staged only for full
+    weights), so ``--rl-release-skip-busy`` would be dropped without a word: refused."""
+    with pytest.raises(ValueError, match="full-weight releases"):
+        sample_roles.check_launch(_launch_args(rl_sample_role="trainer", rl_max_policy_age=3,
+                                               rl_release_skip_busy=True, tuning="lora"))
+    with pytest.raises(ValueError, match="full-weight releases"):
+        sample_roles.check_launch(_launch_args(rl_sample_role="trainer", rl_max_policy_age=3,
+                                               rl_release_skip_busy=True, tuning="full",
+                                               expert_full_count=2))
 
 
 def test_cadence_flags_reach_the_trainer_island_only():

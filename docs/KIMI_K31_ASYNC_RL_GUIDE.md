@@ -475,7 +475,7 @@ The full trainer command, with comments for every flag, is in
 | `--rl-round-cuts {auto,off}` | `auto` (default): round cuts as the store and the cut flags give them. `off`: no round cut is wired, written or read; a relaunch continues from the newest policy release. The K3.1 examples use `off` (one full-parameter cut is about 5 TB). Refused together with `--rl-cut-every`, `--rl-cut-auto-mtbf-s`, `--rl-cut-max-interval-s`, `--rl-cut-keep`, `--rl-stop-after-rounds` and `--rl-resume-allow-config-change`. See section 5.3. |
 | `--rl-cut-every N` | Keep a round cut every `N` rounds (plus the last round). Not with `--rl-round-cuts off`. See also `--rl-cut-keep`, `--rl-cut-auto-mtbf-s`. |
 | `--rl-release-every N` | Release every N-th policy version to the samplers (default 1). Needs `--rl-max-policy-age >= N`. |
-| `--rl-release-skip-busy` | Skip a release while the previous upload is still in flight (latest wins; the trainer never waits for an upload). Needs staged releases (no `--rl-release-inline`) and `--rl-max-policy-age >= 3`. See section 3.5. |
+| `--rl-release-skip-busy` | Skip a release while the previous upload is still in flight (latest wins; the trainer never waits for an upload). Needs staged full-weight releases (`--tuning full`, no `--rl-release-inline`) and `--rl-max-policy-age >= 3`. See section 3.5. |
 | `--rl-stall-timeout` | Trainer hang detection in seconds. `yeto run up` refuses `0`. |
 | `--rl-stop-after-rounds N` | Stop after N rounds with a final cut. |
 
