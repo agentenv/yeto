@@ -432,11 +432,12 @@ def test_a_restarted_trainer_rebuilds_a_delta_release_as_its_base(tmp_path):
     assert delta_chain_for(plain, 2, emit=lambda n, **f: events.append(f)).base() is None
     assert events[-1]["adopted"] is False and events[-1]["rebuilt"] is True
 
-    # the same process with a mirror: the release is rebuilt and adopted
+    # the same process with a mirror: the release is rebuilt and adopted (full_every 3:
+    # v1 is the first delta of its chain, so the next release may be the second)
     events.clear()
     mirrored = PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
                                   mirror=DeltaMirror(tmp_path / "mirror"))
-    chain2 = delta_chain_for(mirrored, 2, emit=lambda n, **f: events.append(f))
+    chain2 = delta_chain_for(mirrored, 3, emit=lambda n, **f: events.append(f))
     assert events[-1] == {"adopted": True, "base_seq": v1.seq, "base_version": 1,
                           "base_path": events[-1]["base_path"], "rebuilt": True}
     adopted = chain2.base()

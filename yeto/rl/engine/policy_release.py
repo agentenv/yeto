@@ -429,7 +429,8 @@ class DeltaChain:
             return None
         return self._base
 
-    def adopt(self, release: PolicyRelease, directory: str | os.PathLike[str]) -> None:
+    def adopt(self, release: PolicyRelease, directory: str | os.PathLike[str], *,
+              since_full: int = 0) -> None:
         """Start the chain from a release that is already in the store and whose
         files are readable at ``directory``: the trainer's first
         release of the process is then a delta against it instead of a full
@@ -437,12 +438,14 @@ class DeltaChain:
         hold -- the sampler's own copy of the base checkpoint -- so the first
         cross-cloud update sends only the words the first optimizer step moved.
         ``advance`` deletes a base this chain staged itself, never an adopted
-        directory."""
+        directory. ``since_full``: the deltas from the last full release up to
+        and including ``release`` (``PolicyReleaseStore.delta_depth``), so a
+        restarted trainer keeps the ``full_every`` bound of the chain it continues."""
         if self._base is not None:
             raise ValueError("the delta chain already has a base")
         self._base = DeltaBase(release, Path(directory))
         self._adopted = Path(directory)
-        self._since_full = 0
+        self._since_full = max(0, int(since_full))
 
     def advance(self, release: PolicyRelease | None, staged: Path) -> bool:
         """Record the upload of ``staged`` (``release``: what the store now holds;
@@ -539,6 +542,19 @@ class PolicyReleaseStore:
             check_complete(release, directory)
             return directory
         return self._download(objects, release, prune_cache=prune_cache)
+
+    def delta_depth(self, release: PolicyRelease, *, limit: int) -> int:
+        """The deltas from the last full release up to and including ``release``
+        (0 for a full release), following the records' bases; ``limit`` when the
+        chain is at least that long or a base record cannot be read."""
+        depth, link = 0, release
+        while link.delta is not None and depth < limit:
+            depth += 1
+            try:
+                link = self._record_at(str(link.delta["base_path"]))
+            except Exception:  # noqa: BLE001 -- unknown depth: the caller's bound applies
+                return limit
+        return min(depth, limit)
 
     def _record_at(self, path: str) -> PolicyRelease:
         """The record in release directory ``path`` (a delta's base)."""
