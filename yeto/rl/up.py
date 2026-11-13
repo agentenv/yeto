@@ -443,6 +443,7 @@ class Run:
             if proc and proc.get("alive"):
                 _log(f"pool {ref.name}: loop already running (PID {proc.get('pid')})")
             else:
+                self._restart_stopped_pool_state(ref)
                 self._spawn(self._proc_name(i), self.nc("pool", "--config", ref.config,
                                                         "--interval", str(int(ref.interval_s))))
         self.begin_up()
@@ -696,6 +697,31 @@ class Run:
              "member is live: this run up drives it again")
         pool.stopped = None
         pool._event("pool_restarted", why="run up")  # noqa: SLF001
+
+    def _restart_stopped_pool_state(self, ref: Any) -> None:
+        """``controller: subprocess``: :meth:`_restart_stopped_pool` on the pool's state
+        file before its ``nc pool`` loop is spawned (that loop exits at once on a state that
+        says stopped, so no sampler would be ordered). Done under the pool lock; a loop that
+        holds it runs already and is left alone."""
+        from yeto.launch.nc import cli, pool_run  # noqa: PLC0415
+        from yeto.launch.pool.island_pool import IslandPool  # noqa: PLC0415
+
+        cfg = ref.load()
+        state = cli.pool_state_path(cfg)
+        if not state.exists():
+            return
+        lock = pool_run.acquire_lock(pool_run.lock_path(cfg), run=cli.run_id(cfg), role="run-up")
+        if lock is None:
+            return
+        try:
+            pool = IslandPool.restore(state, cli.pool_config(cfg, allowed=None), None,  # type: ignore[arg-type]
+                                      log=cli._log, events=pool_run.event_log(cfg))  # noqa: SLF001
+            if not pool.stopped or getattr(pool, "finished", None):
+                return
+            self._restart_stopped_pool(ref.name, pool)
+            pool.save(state)
+        finally:
+            lock.close()
 
     def dashboard_args(self) -> list[str]:
         """``--store`` plus the run's local records (``--run``: the launcher's fleet record
