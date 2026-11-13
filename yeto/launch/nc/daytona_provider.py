@@ -104,7 +104,7 @@ from typing import Any
 
 from ..pool.provider import ProviderCaps
 from ..pool.status import LeaseStatus
-from .client import NodeLease
+from .client import NodeLease, state_file_lock, write_json_atomic
 from .tunnel import state_dir
 
 SSH_HOST = "ssh.app.daytona.io"
@@ -232,16 +232,18 @@ class DaytonaProvider:
         except (OSError, ValueError):
             return {}
 
+    def _locked(self):
+        """The record's thread and process lock (a manual release may run in another
+        process while the pool runs); not reentrant: never nest it."""
+        return state_file_lock(self.record)
+
     def _save(self, rows: dict[str, dict[str, Any]]) -> None:
-        with self._lock:
-            self.record.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.record.with_suffix(f".{threading.get_ident()}.tmp")
-            tmp.write_text(json.dumps(rows, indent=1))
-            tmp.replace(self.record)
+        """Replace the record (a temporary file of its own); callers hold :meth:`_locked`."""
+        write_json_atomic(self.record, rows)
 
     def _update(self, ticket: str, **fields: Any) -> None:
         """Set ``fields`` on the record row of ``ticket`` (read-modify-write under the lock)."""
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             rows.setdefault(ticket, {}).update(fields)
             self._save(rows)
@@ -286,7 +288,7 @@ class DaytonaProvider:
     # -- IslandProvider
     def order(self, account: int) -> str:
         client = self.client  # a missing key fails here, before anything is recorded
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             n = 1 + max([int(r.get("n", 0)) for r in rows.values()] or [0])
             name = f"{self.prefix}-{n}"
@@ -387,14 +389,17 @@ class DaytonaProvider:
 
     def release(self, account: int, ticket: str) -> dict[str, Any]:
         sandbox = self._get(ticket)
-        if not self._ours(ticket, sandbox):
+        # a sandbox Daytona no longer has (an adopted, unrecorded one evicted or deleted)
+        # leaves nothing to delete: only its name must be in this run's name space
+        gone = sandbox is None and ticket.startswith(self.prefix + "-")
+        if not gone and not self._ours(ticket, sandbox):
             raise PermissionError(f"sandbox {ticket} was not created by this provider for run {self.run_id}")
         if sandbox is not None and _state(getattr(sandbox, "state", None)) not in GONE:
             self._call(self.client.delete, sandbox, timeout=self.delete_timeout_s, wait=True)
             after = self._get(ticket)
             if after is not None and _state(getattr(after, "state", None)) not in GONE:
                 raise RuntimeError(f"sandbox {ticket}: delete sent but it reads {_state(after.state)}")
-        with self._lock:
+        with self._locked():
             rows = self._rows()
             row = rows.setdefault(ticket, {"slot": account, "n": 0})
             row.update(open=False, released=True)
@@ -465,10 +470,11 @@ class DaytonaProvider:
         os.chmod(tmp, 0o600)
         tmp.replace(ours)  # a concurrent ssh never reads a half-written config
         node_pool.include_ours(ours)  # without it ``ssh <alias>`` does not resolve on a fresh pool host
-        rows = self._rows()
-        if ticket in rows:
-            rows[ticket]["ssh_expires_at"] = expires
-            self._save(rows)
+        with self._locked():
+            rows = self._rows()
+            if ticket in rows:
+                rows[ticket]["ssh_expires_at"] = expires
+                self._save(rows)
 
     def _renew_ssh(self, ticket: str, sandbox: Any) -> None:
         row = self._rows().get(ticket) or {}
