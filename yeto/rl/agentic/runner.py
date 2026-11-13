@@ -89,17 +89,31 @@ _SUSPENDED_RECHECK_S = 1.0
 
 
 async def _capped(coro, cap_s: float, ledger: SuspendLedger | None):
-    """``coro`` under a ``cap_s`` budget that does not count the ledger's suspended time."""
-    if ledger is None:
-        return await asyncio.wait_for(coro, timeout=cap_s)
+    """``coro`` under a ``cap_s`` budget that does not count the ledger's suspended time.
+
+    ``coro`` runs in its own task. When this call is cancelled again while it waits
+    for a cancelled run that ignores the cancel (a sandbox tool call, then the island
+    closing), the run's later error is still retrieved and logged, never left to
+    asyncio as "Task exception was never retrieved" (``asyncio.wait_for`` of
+    Python 3.11 drops it so)."""
     run = asyncio.ensure_future(coro)
+    waiting = [True]
+
+    def take_error(run: asyncio.Future) -> None:
+        # retrieved here; a caller still waiting re-reads it with result()
+        error = None if run.cancelled() else run.exception()
+        if error is not None and not waiting[0]:
+            logger.warning("agent run ended with %r after its trial was cancelled", error)
+
+    run.add_done_callback(take_error)
     loop = asyncio.get_running_loop()
     started = loop.time()
     try:
         while True:
-            remaining = started + cap_s + ledger.suspended_seconds - loop.time()
+            suspended = ledger.suspended_seconds if ledger is not None else 0.0
+            remaining = started + cap_s + suspended - loop.time()
             if remaining <= 0:
-                if not ledger.waiting:
+                if ledger is None or not ledger.waiting:
                     raise asyncio.TimeoutError
                 remaining = _SUSPENDED_RECHECK_S  # the wait in progress is not counted yet
             done, _ = await asyncio.wait({run}, timeout=remaining)
@@ -108,7 +122,10 @@ async def _capped(coro, cap_s: float, ledger: SuspendLedger | None):
     finally:
         if not run.done():
             run.cancel()
-            await asyncio.gather(run, return_exceptions=True)
+            try:
+                await asyncio.gather(run, return_exceptions=True)
+            finally:
+                waiting[0] = run.done()
 
 
 def _aborted(task: AgentTask, reason: str, *, policy_version: int | None) -> AgentTrajectory:

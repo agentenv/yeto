@@ -588,3 +588,46 @@ def test_test_only_hold_is_off_by_default_and_delays_the_reopen(monkeypatch):
     monkeypatch.setenv(mod.TEST_HOLD_EXTRA_ENV, "420")
     asyncio.run(mod.resume(None))
     assert events == [("open", []), ("open", [420.0])]  # opened only after the extra hold
+
+
+
+@pytest.mark.parametrize("with_ledger", [False, True])
+def test_capped_takes_the_error_of_a_run_that_ends_after_a_second_cancel(with_ledger):
+    """The trial is cancelled (drain), then cancelled again (close) while the harness
+    still ignores the cancel; the harness then fails: its error must be retrieved,
+    not logged by asyncio as "Task exception was never retrieved"."""
+    import gc
+
+    from yeto.rl.agentic.runner import _capped
+
+    async def main():
+        loop = asyncio.get_running_loop()
+        unretrieved = []
+        loop.set_exception_handler(lambda _loop, ctx: unretrieved.append(ctx))
+        release, entered = asyncio.Event(), asyncio.Event()
+
+        async def stubborn():
+            entered.set()
+            while not release.is_set():
+                try:
+                    await asyncio.sleep(0.001)
+                except asyncio.CancelledError:
+                    pass  # e.g. blocked in a sandbox tool call
+            raise RuntimeError("sandbox gone")
+
+        outer = asyncio.ensure_future(_capped(stubborn(), 60.0, SuspendLedger("t") if with_ledger else None))
+        await entered.wait()
+        outer.cancel()  # the drain
+        await asyncio.sleep(0.01)
+        outer.cancel()  # close: interrupts _capped's wait for the stubborn run
+        await asyncio.sleep(0.01)
+        release.set()
+        await asyncio.wait({outer}, timeout=5)
+        assert outer.cancelled()
+        for _ in range(5):
+            await asyncio.sleep(0.005)
+        gc.collect()
+        await asyncio.sleep(0)
+        return unretrieved
+
+    assert asyncio.run(main()) == []
