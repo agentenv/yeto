@@ -494,7 +494,7 @@ class Run:
         now = time.time() if now is None else now
         out = up_segments.uptime_summary(self.state, now)
         out["spend_usd_estimate"] = round(self.spend_usd(), 1)
-        wall_h = float((self.cfg.get("budget") or {}).get("wall_h", 3))
+        wall_h = up_consistency.number_or_default(self.cfg.get("budget"), "wall_h", 3)
         out["wall_h"] = wall_h
         if out["current_up_open"] and "t0" in self.state:
             out["wall_h_left"] = round(wall_h - (now - float(self.state["t0"])) / 3600, 4)
@@ -918,7 +918,7 @@ class Run:
         controller = getattr(self, "controller", None)
         if controller is not None and controller.check():  # the in-process pools stopped being driven
             return controller.check()
-        if "t0" in self.state and time.time() - self.state["t0"] > float(b.get("wall_h", 3)) * 3600:
+        if "t0" in self.state and time.time() - self.state["t0"] > up_consistency.number_or_default(b, "wall_h", 3) * 3600:
             why = "wall clock"
         elif self.spend_usd() > up_consistency.budget_usd(b):
             why = f"budget ${self.spend_usd():.0f}"
@@ -1537,7 +1537,7 @@ class Run:
         release the pool (``pool-stop``). Returns when no member bills any more."""
         b = self.cfg.get("budget") or {}
         usd_cap = up_consistency.budget_usd(b) * FORCE_FACTOR
-        wall_cap = float(b.get("wall_h", 3)) * 3600 * FORCE_FACTOR
+        wall_cap = up_consistency.number_or_default(b, "wall_h", 3) * 3600 * FORCE_FACTOR
         while True:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]

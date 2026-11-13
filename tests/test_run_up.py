@@ -471,3 +471,11 @@ def test_null_prices_and_silence_take_their_defaults_instead_of_crashing_the_mon
     assert run.node_usd_per_h(0) == pytest.approx(24.0)
     assert run.spend_usd() >= 0.0
     assert run.silence_limit_s() >= 30 * 60
+
+
+def test_null_wall_h_takes_the_default_instead_of_crashing_the_monitor(make_run):
+    run = make_run(usd=100)
+    run.cfg["budget"]["wall_h"] = None
+    run.state["t0"] = up.time.time()
+    assert run.uptime()["wall_h"] == pytest.approx(3.0)
+    assert run.breach() is None
