@@ -97,13 +97,19 @@ class RequantReleaser:
 
     def sync(self) -> PolicyRelease | None:
         """Convert the newest BF16 release once; returns the release written,
-        or None (no BF16 release, already converted, or not complete yet)."""
+        or None (no BF16 release, already converted, or not complete yet).
+        The source is pinned while it is read: a trainer in this process does not
+        prune it (a conversion may outlast ``keep`` trainer releases)."""
         src = self.source.latest()
         if src is None or self.done_for(src):
             return None
         if src.weights != FULL:
             raise PolicyReleaseError(f"release r{src.seq}: {src.weights!r} weights cannot be re-quantized "
                                      "(full-parameter BF16 releases only)")
+        with self.source.pinned(src):
+            return self._convert(src)
+
+    def _convert(self, src: PolicyRelease) -> PolicyRelease | None:
         try:
             directory = self.source.resolve(src)
         except ReleaseIncomplete as error:
@@ -128,7 +134,8 @@ class RequantReleaser:
                 raise
             # The trainer released newer versions and pruned this one (``keep``) while it
             # was read: drop the partial target and convert the newer release next time.
-            for name in self._target_dirs() - before:
+            # never the release the target's LATEST names (a failure after its commit)
+            for name in self._partial_target_dirs(before):
                 shutil.rmtree(self.target.root / name, ignore_errors=True)
             self.waiting = (f"BF16 {src.path} was pruned during its conversion "
                             f"({type(error).__name__}: {error}); the newer release is converted next")
@@ -138,6 +145,15 @@ class RequantReleaser:
             self.log(f"[requant] BF16 r{src.seq}-v{src.version} -> {self.target.release_dir}/{record.path} "
                      f"{json.dumps(stats.get('requant'), default=str)}")
         return record
+
+    def _partial_target_dirs(self, before: set[str]) -> set[str]:
+        """Target directories this conversion created that LATEST does not name
+        (none when LATEST cannot be read: a published release is never removed)."""
+        try:
+            latest = self.target.latest()
+        except Exception:  # noqa: BLE001 - unknown: keep them
+            return set()
+        return self._target_dirs() - before - ({latest.path} if latest is not None else set())
 
     def _target_dirs(self) -> set[str]:
         root = self.target.root

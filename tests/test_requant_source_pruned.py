@@ -8,6 +8,7 @@ release (no partial target release, thread alive) and convert the newer one.
 
 from __future__ import annotations
 
+import shutil
 import threading
 from pathlib import Path
 
@@ -36,9 +37,10 @@ def test_source_pruned_mid_conversion_is_skipped_then_newer_converted(tmp_path):
     calls: list[str] = []
 
     def requantize(src: Path, out: Path) -> dict:
-        if not calls:  # the trainer publishes two releases during this conversion
+        if not calls:  # a trainer in another process (no pin) releases twice and prunes r1
             trainer.release(2, "h2", _bf16_write("v2"))
             trainer.release(3, "h3", _bf16_write("v3"))
+            shutil.rmtree(src)
         calls.append(src.name)
         (out / "model.safetensors").write_text("q:" + (src / "model.safetensors").read_text())
         return {}
@@ -94,3 +96,55 @@ def test_converter_error_on_the_live_release_still_stops(tmp_path):
 
     with pytest.raises(ValueError, match="bad layout"):
         RequantReleaser(source, target, broken, log=lambda m: None).sync()
+
+
+def test_conversion_slower_than_two_releases_still_publishes(tmp_path):
+    """Livelock guard: the trainer releases twice during *every* conversion (release
+    interval < conversion time / keep). Without a pin each source is pruned mid-read
+    and the quantized side never publishes; the pin keeps the source until done."""
+    trainer, source, target = _stores(tmp_path)
+    trainer.release(1, "h1", _bf16_write("v1"))
+    version = [1]
+
+    def requantize(src: Path, out: Path) -> dict:
+        for _ in range(2):
+            version[0] += 1
+            trainer.release(version[0], f"h{version[0]}", _bf16_write(f"v{version[0]}"))
+        (out / "model.safetensors").write_text("q:" + (src / "model.safetensors").read_text())
+        return {}
+
+    releaser = RequantReleaser(source, target, requantize, log=lambda m: None)
+    published = [r for r in (releaser.sync() for _ in range(3)) if r is not None]
+    assert published and published[0].version == 1, releaser.waiting
+    # the pin is released: the trainer prunes the converted source at its next release
+    trainer.release(99, "h99", _bf16_write("v99"))
+    assert len([p for p in trainer.root.iterdir() if p.is_dir()]) == 2
+
+
+def test_pruned_cleanup_never_removes_the_release_latest_names(tmp_path, monkeypatch):
+    """A failure after the target's LATEST commit (e.g. its prune) with a pruned source:
+    the cleanup must not delete the quantized release LATEST already names."""
+    from yeto.rl.engine import policy_release
+
+    trainer, source, target = _stores(tmp_path)
+    trainer.release(1, "h1", _bf16_write("v1"))
+
+    def requantize(src: Path, out: Path) -> dict:
+        (out / "model.safetensors").write_text("q")
+        return {}
+
+    real_prune = policy_release.PolicyReleaseStore._prune
+
+    def prune(self):
+        if self is target:  # the source is gone (another writer) and the target prune fails
+            for d in [p for p in trainer.root.iterdir() if p.is_dir()]:
+                shutil.rmtree(d)
+            trainer.release(2, "h2", _bf16_write("v2"))
+            raise OSError("commit failed")
+        return real_prune(self)
+
+    monkeypatch.setattr(policy_release.PolicyReleaseStore, "_prune", prune)
+    releaser = RequantReleaser(source, target, requantize, log=lambda m: None)
+    releaser.sync()
+    latest = target.latest()
+    assert latest is not None and (target.root / latest.path).is_dir()
