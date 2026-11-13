@@ -248,6 +248,7 @@ class IslandPool:
     _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
     _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
     _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
+    _unsaved_fences: set[str] = field(default_factory=set)  # fenced, success not saved: nothing continues them
     _short: Any = None  # the halted slots of the last ``slots_below_target`` alert
     _starts: dict[str, Any] = field(default_factory=dict)  # ticket -> Future of a background start
     _executor: Any = None
@@ -537,15 +538,18 @@ class IslandPool:
                     continues_shard=continues, replaces=replaces.ticket if replaces else None)
         return member
 
-    def _save_now(self) -> None:
+    def _save_now(self) -> bool:
         """Persist the state now (after an order): a crash before the tick's save must
-        not leave a billed ticket that no state file knows."""
+        not leave a billed ticket that no state file knows. False: the save failed (logged);
+        a caller whose next step relies on the saved state does not take it."""
         if self.state_path is None:
-            return
+            return True
         try:
             self.save(self.state_path)
         except Exception as error:  # noqa: BLE001 - the patrol adopts the ticket anyway
-            self.log(f"pool: could not save {self.state_path} after an order: {error!r}")
+            self.log(f"pool: could not save {self.state_path}: {error!r}")
+            return False
+        return True
 
     def _fail(self, now: float, what: str) -> None:
         outcome = self.breaker.failure(now, self.ecfg)
@@ -700,11 +704,14 @@ class IslandPool:
         m.fence_pending, m.fence_failures, m.fence_since = None, 0, None
         if "fence_stuck" in m.alerted:
             m.alerted.remove("fence_stuck")
-        if owed:
+        if owed and not self._save_now():
             # saved before anything continues the shard: the syncer fence retires the
             # shard's member id (its current incarnation), so a pool killed later in this
-            # tick must not restore the fence as owed and send it after the successor joined
-            self._save_now()
+            # tick must not restore the fence as owed and send it after the successor joined.
+            # Unsaved: nothing continues the shard until a save holds (_fence_blocker)
+            if m.ticket not in self._unsaved_fences:
+                self._event("fence_unsaved", ticket=m.ticket, shard=m.shard)
+            self._unsaved_fences.add(m.ticket)
         self._owner_event(m, lease)
         return True
 
@@ -719,8 +726,10 @@ class IslandPool:
     def _fence_blocker(self, m: Member) -> Member | None:
         """The member whose slot / shard ``m`` took over and whose fence is still owed."""
         origins = {t for t in (m.continues_from, m.replaces) if t}
-        return next((p for p in self.members if p is not m and p.fence_pending is not None
-                     and p.ticket in origins), None)
+        if self._unsaved_fences & origins and self._save_now():
+            self._unsaved_fences.clear()
+        return next((p for p in self.members if p is not m and (p.fence_pending is not None
+                     or p.ticket in self._unsaved_fences) and p.ticket in origins), None)
 
     def _handoff_waits_for_fence(self, handoff: dict[str, Any], now: float) -> bool:
         """The member ``handoff`` comes from still owes its fence, for longer than
@@ -1852,8 +1861,11 @@ class IslandPool:
         if fence is not None:  # the stuck incarnation's claims go back at once
             # noted before the call (a fence can take effect and still raise: a lost answer)
             # and saved before the restart (a pool killed during its ssh must not forget it)
+            before = m.fenced_for_restart, m.fence_tokens
             m.fenced_for_restart, m.fence_tokens = True, probe.gen_tokens
-            self._save_now()
+            if not self._save_now():  # fail closed: neither fenced nor restarted; tried again next tick
+                m.fenced_for_restart, m.fence_tokens = before
+                return False
             try:
                 self._owner_event(m, fence(m))
                 self._event("incarnation_fenced", ticket=m.ticket, shard=m.shard, why="engine stalled")

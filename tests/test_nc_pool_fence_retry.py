@@ -375,3 +375,35 @@ def test_a_pool_killed_after_a_fence_succeeded_does_not_fence_the_successor_agai
     clock.t += 60
     again.tick()
     assert len(cloud.kinds("fence")) == 1  # the one before the successor started; none after
+
+
+def test_a_successor_waits_while_the_fence_success_cannot_be_saved(tmp_path):
+    """An owed fence that succeeded is saved before anything continues the shard. When
+    that save fails, a pool killed then would restore the fence as owed and send it after
+    the successor joined (retiring the successor): fail closed, the successor does not
+    start until the state file holds the fence's success."""
+    clock, cloud, pool, m = _setup()
+    path = pool.state_path = tmp_path / "pool.json"
+    cloud.fence_errors = 3
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    assert m.fence_pending == "evicted"
+    real_save, broken = pool.save, {"on": True}
+
+    def save(p):
+        if broken["on"]:
+            raise OSError("disk full")
+        real_save(p)
+
+    pool.save = save
+    _run(pool, clock, clock.t + 1800)
+    assert cloud.kinds("fence") and m.fence_pending is None
+    successor = next(s for s in pool.members if s.continues_from == m.ticket)
+    assert successor.started is None and successor.ticket not in [e[1] for e in cloud.kinds("start")]
+    assert "fence_unsaved" in _names(pool)
+    broken["on"] = False
+    _run(pool, clock, clock.t + 1800)
+    assert successor.started is not None and successor.state == READY
+    restored = IslandPool.restore(path, PoolConfig(target=1, accounts=[1, 4], shard_base="nc"), cloud, clock=clock,
+                                  log=lambda x: None, events=el.EventLog(log=lambda x: None, clock=clock, run="run-a"))
+    assert all(r.fence_pending is None for r in restored.members)

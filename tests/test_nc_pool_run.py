@@ -83,6 +83,7 @@ def test_dry_run_prints_orders_and_spend_and_orders_nothing(tmp_path, capsys):
     assert "steady 48000000 ucr/h" in out
     assert "does NOT end a lease at lease_until" in out and f"pool-stop --config {path}" in out
     assert "nothing ordered" in out
+    assert "only one pool may run shard_base 'nc'" in out and "on another machine is NOT detected" in out
     assert not (tmp_path / "state" / "tickets.json").exists()
 
 
