@@ -628,3 +628,24 @@ def test_teardown_unreachable_host_is_reported_and_the_other_hosts_are_torn_down
     assert not any(c["Config"]["Labels"].get(LABEL_RUN) == "r1" for c in good.containers.values())
     doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
     assert doc["tasks"]["cg_1"]["hosts"]["h1"]["prepared"] is False
+
+
+def test_teardown_host_failing_after_removal_still_clears_its_ready_state(world):
+    """Containers already removed when a later step on the same host fails (image
+    listing here): the host reports the error, but the ready manifest must not keep
+    saying its tasks are prepared there."""
+    _prepare(world)
+    cfg = parse_envs(world["section"])
+    good = world["daemon"]
+
+    def runner(a, e, s):
+        if "images" in a:
+            return 255, "", "ssh: connection reset"
+        return good(a, e, s)
+
+    out = ops.teardown(cfg, world["store"], images=True,
+                       factory=lambda h: DockerHost(h.docker_host, ssh=h.ssh, runner=runner))
+    assert "connection reset" in out["h1"]["error"]
+    assert not any(c["Config"]["Labels"].get(LABEL_RUN) == "r1" for c in good.containers.values())
+    doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
+    assert doc["tasks"]["cg_1"]["hosts"]["h1"]["prepared"] is False

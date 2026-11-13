@@ -538,6 +538,10 @@ def teardown(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = Non
                 labels = ((detail or {}).get("Config") or {}).get("Labels") or {}
                 if labels.get(LABEL_RUN) == cfg.run:  # the filter's answer is checked again, per container
                     mine.append((cid, labels.get(LABEL_TASK)))
+            for _, tid in mine:  # marked before removal: a step failing later on this host keeps it
+                if tid and not dry_run:
+                    task_updates.setdefault(tid, {"hosts": {}})["hosts"][host.name] = {
+                        "prepared": False, "error": "torn down"}
             if not dry_run:
                 dk.remove([cid for cid, _ in mine])
             removed_images = []
@@ -546,10 +550,6 @@ def teardown(cfg: EnvsConfig, objects: Any, *, hosts: Sequence[str] | None = Non
                 removed_images = sorted({i for i in lines.split() if i})
                 if removed_images and not dry_run:
                     dk.docker("rmi", "-f", *removed_images, check=False)
-            for _, tid in mine:
-                if tid and not dry_run:
-                    task_updates.setdefault(tid, {"hosts": {}})["hosts"][host.name] = {
-                        "prepared": False, "error": "torn down"}
             from .trial_labels import sweep_run  # noqa: PLC0415
 
             trials = sweep_run(dk, cfg.run, dry_run=dry_run)
