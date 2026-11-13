@@ -86,6 +86,17 @@ def pool_ts(r: dict) -> float | None:
     return _f(r.get("t"))
 
 
+def pool_state_event(p: dict) -> bool:
+    """A pool event that :meth:`AsyncState.pool_scale` or :meth:`AsyncState.pool_exit`
+    folds into state: a target change, a shard coming up / draining / leaving, the pool
+    stop, a person's operation, an order (``replaced_by``) or any event tying a ticket to
+    a shard. The rest (retries, refusals, warnings) only fill the event table."""
+    ev = str(p.get("event"))
+    return (ev in POOL_LEFT or ev in POOL_UP or ev in (POOL_TARGET, POOL_DRAINING, POOL_STOPPED,
+                                                       "nc_elastic_ordered")
+            or ev.startswith(POOL_MANUAL_PREFIX) or (p.get("shard") is not None and bool(p.get("ticket"))))
+
+
 class AsyncState:
     def __init__(self) -> None:
         self.roles: dict[str, str] = {}
@@ -94,6 +105,8 @@ class AsyncState:
         self.releases: list[dict] = []
         self.loads: list[dict] = []
         self.pool: list[dict] = []
+        self.pool_shards: set[str] = set()  # every shard a pool event named (trimmed events too)
+        self._pool_kept = 0  # self.pool[:_pool_kept] are all state events: the trim scan starts here
 
     # -- folding ----------------------------------------------------------------
     def _s(self, iid: str) -> dict:
@@ -114,9 +127,20 @@ class AsyncState:
         return t
 
     def fold_pool(self, r: dict) -> None:
-        if len(self.pool) < POOL_MAX:
-            self.pool.append({"ts": pool_ts(r), "event": r.get("event"),
-                              **{k: r.get(k) for k in POOL_KEYS if r.get(k) is not None}})
+        """Every pool event is kept until there are ``POOL_MAX``; past it the oldest event
+        that no view folds into state (:func:`pool_state_event`) is dropped, so a long run's
+        later member_ready / exit / target change still reaches the sampler count."""
+        p = {"ts": pool_ts(r), "event": r.get("event"), **{k: r.get(k) for k in POOL_KEYS if r.get(k) is not None}}
+        self.pool.append(p)
+        if p.get("shard") is not None:
+            self.pool_shards.add(str(p["shard"]))
+        if len(self.pool) > POOL_MAX:
+            i = self._pool_kept
+            while i < len(self.pool) and pool_state_event(self.pool[i]):
+                i += 1
+            self._pool_kept = i
+            if i < len(self.pool):
+                del self.pool[i]
 
     def fold(self, r: dict, iid: str, ts: float | None) -> None:
         ev = r.get("event")

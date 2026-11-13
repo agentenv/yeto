@@ -44,6 +44,7 @@ MAX_EVENTS = 20000
 # rl-spot-cost-saving 2.5: reclaim events and replacement advice shown as one table
 SPOT_EVENTS = frozenset({"spot_reclaim", "spot_replace_advice", "spot_replace_launch", "spot_budget_cap"})
 SPOT_MAX = 500
+FLEET_VIEW_MAX = 500  # fleet records / cost ticks the fleet view shows (the last ones)
 NO_DATA = None
 
 # Overlay-chart metrics (v7 tabs): series key -> (label, extractor field paths).
@@ -254,9 +255,9 @@ class Reducer:
         self.resends: dict[int, int] = {}
         self.applies: dict[int, set[str]] = {}
         self.publications: dict[int, set[str]] = {}
-        self.fleet_records: list[dict] = []
+        self.fleet_records: deque = deque(maxlen=FLEET_VIEW_MAX)  # the view shows the last ones
         self.spot: deque = deque(maxlen=SPOT_MAX)
-        self.cost_ticks: list[dict] = []
+        self.cost_ticks: deque = deque(maxlen=FLEET_VIEW_MAX)
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.event_seq = 0
         self.max_ts: float | None = None
@@ -1161,7 +1162,7 @@ class Reducer:
         tpN) and the NC pool naming its shard; a trainer from its tape launch dir
         (``l0-modal-...``), its NVML samples (per-GPU memory -> model, GPUs per node)
         and the node count of remote_code_prewarm. Marked ``hw_inferred``."""
-        pool_shards = {str(p.get("shard")) for p in self.async_.pool if p.get("shard") is not None}
+        pool_shards = self.async_.pool_shards
         for iid, isl in self.islands.items():
             if isl["cloud"] is not None and isl["gpu"] is not None and not isl.get("hw_inferred"):
                 continue
@@ -1360,7 +1361,7 @@ class Reducer:
 
     def fleet_view(self, *, live: bool = False, now: float | None = None) -> dict:
         now = self.now(live) if now is None else now
-        return {"records": self.fleet_records[-500:], "cost_ticks": self.cost_ticks[-500:],
+        return {"records": list(self.fleet_records), "cost_ticks": list(self.cost_ticks),
                 "prices_source": self.prices.get("_source"), "prices_note": self.prices.get("_note"),
                 "cost": self.cost(now)}
 
