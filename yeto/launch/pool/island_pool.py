@@ -696,9 +696,15 @@ class IslandPool:
             return False
         detail = {"after_failures": m.fence_failures} if m.fence_failures else {}
         self._event("shard_fenced", ticket=m.ticket, shard=m.shard, why=why, **detail)
+        owed = m.fence_pending is not None
         m.fence_pending, m.fence_failures, m.fence_since = None, 0, None
         if "fence_stuck" in m.alerted:
             m.alerted.remove("fence_stuck")
+        if owed:
+            # saved before anything continues the shard: the syncer fence retires the
+            # shard's member id (its current incarnation), so a pool killed later in this
+            # tick must not restore the fence as owed and send it after the successor joined
+            self._save_now()
         self._owner_event(m, lease)
         return True
 
