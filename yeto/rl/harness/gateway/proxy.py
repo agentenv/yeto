@@ -28,8 +28,9 @@ Access (threat model: every sandbox on a sampler is hostile to every other):
   a second layer in front of all of this.
 
 The sampling fields stay signed by the gateway (a request may not change them).
-Errors fail closed: an invalid trajectory answers 409, an unsupported request
-400, a draining member 503.
+Errors fail closed: an invalid trajectory answers 409, an unsupported or
+malformed request 400, a draining member 503, a failed engine call 502
+(nothing is recorded for it, so the agent may retry the same request).
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from yeto.rl.compaction import CompactionConfig
-from yeto.rl.engine.sampler_engine import TokenSamplerEngine
+from yeto.rl.engine.sampler_engine import SamplerEngineError, TokenSamplerEngine
 from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError
 
 from .core import AdmissionClosed, Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid
@@ -205,13 +206,18 @@ class RecordsProxy:
                     return _error(403, exc)
                 try:
                     body = await request.json()
+                    if not isinstance(body, dict):
+                        raise UnsupportedShape(f"request body must be a JSON object, got {type(body).__name__}")
                     result = await self.handle(entry, body, trajectory_id=trajectory_id)
-                except (UnsupportedShape, SamplingOverrideError, TemplateError, json.JSONDecodeError) as exc:
+                except (UnsupportedShape, SamplingOverrideError, TemplateError, json.JSONDecodeError,
+                        UnicodeDecodeError) as exc:
                     return _error(400, exc)
                 except AdmissionClosed as exc:
                     return _error(503, exc)
                 except (TrajectoryInvalid, GatewayError) as exc:
                     return _error(409, exc)
+                except SamplerEngineError as exc:  # upstream timeout / bad reply; nothing recorded, retryable
+                    return _error(502, exc)
                 if not body.get("stream"):
                     return web.json_response(result)
                 self._responses += 1

@@ -513,3 +513,45 @@ def test_qwen3_without_thinking_continues_past_the_dropped_prefill(qwen):
     assert len(prompts) == 3 and all(list(p) == ids[:len(p)] for p in prompts)
     # every engine prompt ends in the prefill the engine saw, and the stream keeps it
     assert all(template.decode(p).endswith("<|im_start|>assistant\n" + prefill) for p in prompts)
+
+
+def test_http_shell_answers_bad_bodies_400_and_engine_failures_502_then_serves_the_retry(qwen):
+    """Sandbox input that is JSON but not an object (or not UTF-8) is a bad
+    request, not a proxy crash; an upstream engine failure (timeout, garbage
+    reply) answers a JSON 502 the agent can retry, and the retry with the same
+    history is served on the same trajectory (nothing half-recorded)."""
+    pytest.importorskip("aiohttp")
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from yeto.rl.engine.sampler_engine import SamplerEngineError
+
+    engine = engine_for(ScriptedModel(qwen, copy.deepcopy(SCRIPT)))
+    proxy = RecordsProxy(engine, qwen, model="policy", signed_sampling=SIGNED, max_chains=1)
+    tid = proxy.open("traj-http")
+    real = engine.generate_tokens
+    failures = [SamplerEngineError("sglang POST /generate: HTTP 0: ReadTimeout")]
+
+    def flaky(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return real(*args, **kwargs)
+
+    engine.generate_tokens = flaky
+
+    async def go():
+        async with TestClient(TestServer(proxy.app())) as client:
+            url = f"{proxy.path(tid)}/v1/responses"
+            for raw in (b"[1, 2]", b'"text"', b"\xff\xfe{"):
+                reply = await client.post(url, data=raw, headers={"Content-Type": "application/json"})
+                assert reply.status == 400, (raw, reply.status, await reply.text())
+                assert "error" in await reply.json()
+            body = responses_body([user_item("read a.txt")])
+            reply = await client.post(url, json=body)
+            assert reply.status == 502, await reply.text()
+            assert (await reply.json())["error"]["type"] == "SamplerEngineError"
+            reply = await client.post(url, json=body)
+            assert reply.status == 200, await reply.text()
+            assert (await reply.json())["output"]
+
+    asyncio.run(go())
+    assert not proxy.gateway.snapshot(tid).get("invalidated")

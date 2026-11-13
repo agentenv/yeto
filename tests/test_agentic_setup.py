@@ -225,6 +225,34 @@ def test_tunnel_loop_reconnects_and_emits(tmp_path):
     assert recs[1]["stderr"] == "Connection reset" and len(sleeps) == 3 and sleeps[1] > sleeps[0]
 
 
+def test_tunnel_loop_survives_a_full_disk_under_the_events_file(tmp_path, monkeypatch, capsys):
+    """The events file is bookkeeping: ENOSPC on it must not kill the loop
+    (the container would restart and drop a working reverse forward of the
+    records proxy every few seconds while the disk stays full)."""
+    import errno
+
+    class Proc:
+        returncode = None
+        stderr = SimpleNamespace(read=lambda: "")
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("ssh", timeout)
+            self.returncode = 255
+            return 255
+
+    def full_disk(*_a, **_k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(agent, "open", full_disk, raising=False)
+    started = []
+    assert agent.tunnel_loop(["ssh", "-N"], tmp_path / "t.jsonl",
+                             popen=lambda *a, **k: started.append(1) or Proc(), sleep=lambda s: None,
+                             clock=iter(range(0, 1000, 7)).__next__, max_attempts=2) == 0
+    assert len(started) == 2
+    assert "No space left on device" in capsys.readouterr().err
+
+
 def test_start_sampler_runs_setup_and_layers_env_files(tmp_path, monkeypatch):
     from yeto.launch.nc import client as ncc
     from yeto.launch.nc import ssh_sampler as ss

@@ -31,9 +31,15 @@ TUNNEL_EVENT = "rl_agentic_tunnel"
 
 
 def append_event(path: str | Path, record: dict[str, Any], *, clock: Callable[[], float] = time.time) -> None:
+    """Best effort: the events file is bookkeeping. A failed write (full disk,
+    unmounted volume) goes to stderr instead of ending the loop, which would
+    drop a working forward and restart the container over and over."""
     line = json.dumps({"ts": round(clock(), 3), **record}, sort_keys=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(line + "\n")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as exc:
+        print(f"agentic_node_agent: events file {path} not written ({exc}): {line}", file=sys.stderr, flush=True)
 
 
 # -- tunnel --------------------------------------------------------------------
