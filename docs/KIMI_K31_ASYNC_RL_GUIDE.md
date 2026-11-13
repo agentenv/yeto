@@ -716,7 +716,7 @@ Status at any time:
 yeto run status --config <run.json>
 ```
 
-It prints the step history, process liveness, buffer object count, the spend
+It prints the step history, process liveness, buffer object count (`null` when the store listing failed, e.g. no store credentials on this host), the spend
 estimate, `pool-status`, the dispenser status, and the sampler target/nodes.
 
 ## 5. Operating a running job

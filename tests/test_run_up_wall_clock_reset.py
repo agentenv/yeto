@@ -128,7 +128,7 @@ def test_status_and_dashboard_show_the_cumulative_runtime(make_run, monkeypatch)
     run.begin_up()
     now[0] += 1 * H
     run.up_heartbeat()
-    monkeypatch.setattr(run, "buffer_objects", lambda: 0)
+    monkeypatch.setattr(run, "buffer_keys", set)  # status lists the store via buffer_keys
     monkeypatch.setattr(run, "run_containers", lambda: 0)
     monkeypatch.setattr(up.subprocess, "run", lambda *a, **k: types.SimpleNamespace(stdout="{}", stderr=""))
     st = json.loads(json.dumps(run.status(), default=str))

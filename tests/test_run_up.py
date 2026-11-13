@@ -544,3 +544,18 @@ def test_a_forced_pool_stop_that_times_out_is_retried_until_no_node_bills(make_r
     run.watch_nc_after_breach("budget", poll_s=60)
     assert sum("pool-stop" in argv for argv in run.calls) == 2
     assert run.state["steps"]["nc_forced_stop"]["rc"] == 124  # the first forced stop is the one recorded
+
+
+def test_status_reports_unknown_buffer_count_when_the_store_listing_fails(make_run, monkeypatch):
+    """A control host without store credentials: ``run status`` must not claim an
+    empty buffer (0 objects) when it could not list the store at all."""
+    run = make_run()
+
+    def no_creds():
+        raise RuntimeError("Unable to locate credentials")
+
+    monkeypatch.setattr(run, "_objects", no_creds)
+    monkeypatch.setattr(run, "run_containers", lambda: None)
+    monkeypatch.setattr(up.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(stdout="", stderr="", returncode=1))
+    assert run.status()["buffer_objects"] is None

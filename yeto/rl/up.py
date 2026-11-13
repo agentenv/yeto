@@ -1858,7 +1858,9 @@ class Run:
         return bool(ok)
 
     def status(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"run": self.run, "state": self.state, "buffer_objects": self.buffer_objects(),
+        keys = self.buffer_keys()  # None: the listing failed (no credentials, ...): unknown, not 0
+        out: dict[str, Any] = {"run": self.run, "state": self.state,
+                               "buffer_objects": None if keys is None else len(keys),
                                "spend_usd_estimate": round(self.spend_usd(), 1), "uptime": self.uptime(),
                                "procs": {k: dict(v, alive=_alive(v["pid"])) for k, v in
                                          (self.state.get("procs") or {}).items()}}
