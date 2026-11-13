@@ -591,3 +591,53 @@ def test_status_redacts_credentials_in_subprocess_stderr(make_run, monkeypatch):
     for field in (out["pool"], out["dispense"]):
         assert "pool-status: no node answered" in field and "\n" in field
         assert "https://bucket.r2.example/obj?" in field and "store.example/run refused" in field
+
+
+@pytest.fixture
+def read_only(tmp_path):
+    """A directory made read-only (the monitor's state dir on an EROFS / full disk);
+    writable again after the test so tmp_path cleans up."""
+    made = []
+
+    def make(path):
+        path.chmod(0o500)
+        made.append(path)
+
+    yield make
+    for path in made:
+        path.chmod(0o700)
+
+
+def test_a_state_write_failure_does_not_end_the_breaker_or_the_forced_pool_stop(make_run, tmp_path, monkeypatch,
+                                                                                read_only, capsys):
+    """state.json not writable (ENOSPC / EROFS) while the run bills: the monitor still
+    detects the budget breach, stops the trainer and forces the pool-stop past 1.2x."""
+    run = make_run(usd=100, nc_usd_per_h=10, wall_h=100)
+    run.cfg["trainer"]["usd_per_h"] = 0
+    clock = {"t": 100_000.0}
+    monkeypatch.setattr(up.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(up.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + 3600))
+    run.state["t0"] = clock["t"] - 11 * 3600
+    _pool_state(tmp_path, monkeypatch, run, [{"state": "ready", "granted": clock["t"] - 11 * 3600}])
+    run.save()
+    read_only(run.dir)
+    run.monitor(poll_s=60)
+    assert _stops_trainer(run) and _stops_pool(run)
+    assert run.state["breaker"]["why"].startswith("budget")  # kept in memory
+    assert "CRITICAL state_write_failed" in capsys.readouterr().out
+    run.soft_save = False
+    with pytest.raises(OSError):  # outside the monitor (run down, run scale) a failed write still raises
+        run.save()
+
+
+def test_a_command_runs_when_its_log_cannot_be_written(make_run, tmp_path, read_only):
+    """A pool-stop / down whose log file cannot be opened still runs (and returns its rc)."""
+    import sys
+
+    run = make_run(usd=100)
+    read_only(run.dir)
+    marker = tmp_path / "ran"
+    rc = up.Run._cmd(run, [sys.executable, "-c", f"open({str(marker)!r}, 'w').write('x'); print('out')"],
+                     log="down.log", timeout=60)
+    assert rc == 0 and marker.exists()
+    assert not (run.dir / "down.log").exists()
