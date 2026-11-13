@@ -197,9 +197,16 @@ def test_cli_prepares_a_delta_release(tmp_path, monkeypatch):
         chain.advance(release, staged)
     assert trainer.latest().delta is not None
     base, out = _base(tmp_path), tmp_path / "init"
+    # a rebuild killed mid-way by an earlier launch (the node's disk outlives it): a
+    # release-sized scratch copy that nothing else ever removes
+    leftovers = [out / "mirror" / ".r3-v3.4242.0f0f.partial", out / "mirror" / ".r2-v2.4242.0e0e.stale"]
+    for leftover in leftovers:
+        leftover.mkdir(parents=True)
+        (leftover / "model.safetensors").write_bytes(b"half")
     for if_released in ([], ["--if-released"]):
         assert main(["--release", "latest", "--store", str(tmp_path / "store"), "--model", str(base),
                      "--out", str(out), *if_released], environ={}) == 0
         record = read_record(out)
         assert record["path"] == "r3-v3"
         assert (Path(record["model_dir"]) / "model.safetensors").read_bytes() == words[-1].astype("<u2").tobytes()
+    assert not any(leftover.exists() for leftover in leftovers)
