@@ -282,6 +282,36 @@ def test_foreign_container_on_a_stale_bridge_address_is_an_error_and_left_alone(
     assert cid in d.containers and not [c for c in d.calls if c[:2] == ["docker", "rm"]]
 
 
+def test_declared_health_without_ssh_fails_instead_of_passing(world):
+    world["factory"] = lambda h: DockerHost(h.docker_host, runner=world["daemon"])  # no hosts[].ssh
+    report = _prepare(world)
+    failed = {f["task_id"]: f["error"] for f in report["failed"]}
+    assert set(failed) == {"cg_1", "cg_2"} and "hosts[].ssh" in failed["cg_1"]
+    doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
+    assert doc["tasks"]["tb_a"]["hosts"]["h1"]["prepared"]  # no sidecar health declared: unchanged
+
+
+def test_unknown_bridge_address_fails_the_whole_host(world):
+    world["daemon"].bridge = ""
+    report = _prepare(world)
+    assert report["hosts"]["h1"]["prepared"] == 0 and not report["ok"]
+    assert "bridge" in report["host_facts"]["h1"]["error"]
+    assert not [c for c in world["daemon"].calls if c[:2] == ["docker", "run"]]
+
+
+def test_own_running_sidecar_on_a_stale_bridge_address_is_not_reused(world):
+    _prepare(world)
+    d = world["daemon"]
+    ours = [c for c in d.containers.values() if c["Config"]["Labels"].get(LABEL_RUN) == "r1"]
+    for c in ours:  # the daemon's bridge moved after the first prepare
+        for b in c["HostConfig"]["PortBindings"]["9111/tcp"]:
+            b["HostIp"] = "172.17.0.1"
+    report = _prepare(world)
+    failed = {f["task_id"]: f["error"] for f in report["failed"]}
+    assert set(failed) == {"cg_1", "cg_2"}
+    assert "172.17.0.1" in failed["cg_1"] and "docker rm" in failed["cg_1"] and "10.9.0.1" in failed["cg_1"]
+
+
 def test_foreign_container_on_the_bridge_address_is_adopted(world):
     d = world["daemon"]
     d.images["ts:cg-1"] = "sha256:ts1"
