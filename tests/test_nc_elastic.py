@@ -1314,3 +1314,52 @@ def test_a_failing_lease_end_fence_does_not_hold_the_node_past_its_lease():
     _run(pool, clock, m.lease_until + 120)
     assert m.state == GONE and m.fence_pending == "lease end"
     assert [e for e in cloud.kinds("drain") if e[1] == m.ticket][0][2] <= m.lease_until
+
+
+def test_a_member_evicted_during_a_start_retry_does_not_count_as_a_failure():
+    """A granted member waits out a transient start retry (state provisioning again)
+    and the provider evicts its node: an eviction of a running node, not a ticket lost
+    before its grant, so the breaker does not count it."""
+    clock = Clock()
+    cloud = Cloud(clock)
+
+    def down(m, shards):
+        raise subprocess.CalledProcessError(255, ["ssh", "yeto-nc-x"], stderr="read timeout")
+
+    cloud.start = down
+    pool = _pool(clock, cloud, accounts=(1,))
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    assert m.state == "provisioning" and m.granted is not None and m.start_retries == 1
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    assert m.state == GONE and "evicted" in _names(pool)
+    assert pool.breaker.failures == 0
+
+
+def test_a_background_start_that_fails_because_its_node_was_evicted_is_not_a_failure():
+    """The node is evicted while its background start runs; the start then fails (its
+    ssh went away). The member is handled as evicted, not counted as a failed start too."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    import threading  # noqa: PLC0415
+
+    gate = threading.Event()
+
+    def start(m, shards):
+        gate.wait(5)
+        raise RuntimeError("model pull failed: connection closed")
+
+    cloud.start = start
+    cloud.start_in_background = True
+    pool = _pool(clock, cloud, accounts=(1,))
+    pool.start_retries = 0
+    _run(pool, clock, 120)
+    m = pool.members[0]
+    assert m.state == "starting"
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    gate.set()
+    pool._starts[m.ticket].exception(timeout=5)  # noqa: SLF001
+    pool.tick()
+    assert m.state == GONE and "evicted" in _names(pool)
+    assert pool.breaker.failures == 0
