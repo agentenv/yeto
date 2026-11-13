@@ -172,6 +172,100 @@ def test_runner_aborts_on_harness_failure_wall_clock_and_drain():
     assert gate.metrics.snapshot()["harness_outcome_aborted_total"] == 3
 
 
+class _IgnoresCancel:
+    """A harness stuck in teardown: it swallows cancellation until ``release`` is set."""
+
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.cancels = 0
+
+    async def run(self, task, endpoint):
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancels += 1
+        return TrialVerdict(rewards={"reward": 1})
+
+
+def test_runner_returns_when_harness_ignores_cancel_but_keeps_its_slot(monkeypatch):
+    from yeto.rl.agentic import runner
+
+    monkeypatch.setattr(runner, "_CANCEL_GRACE_S", 0.05, raising=False)
+    gate = AdmissionGate(1)
+    harness = _IgnoresCancel()
+    task = _task(budget=AgentBudget(wall_clock_s=0.05))
+
+    async def go():
+        first = asyncio.ensure_future(run_agent_task(task, harness, "u", gate))
+        await asyncio.wait({first}, timeout=2.0)  # no cancel: main would wait on the harness forever
+        if not first.done():
+            harness.release.set()
+            await first
+            pytest.fail("run_agent_task waited for a harness that ignores cancellation")
+        traj = first.result()
+        assert (traj.outcome, traj.reason) == (Outcome.ABORTED, "wall_clock_cap")
+        assert harness.cancels >= 1
+        snap = gate.metrics.snapshot()
+        # the stuck harness still holds its sandbox: the slot is not released
+        assert snap["harness_in_flight"] == 1 and snap["env_live"] == 1
+        assert snap["harness_stuck"] == 1 and snap["harness_stuck_total"] == 1
+        nxt = asyncio.ensure_future(run_agent_task(_task(), _Harness(TrialVerdict(rewards={"reward": 0})), "u", gate))
+        await asyncio.sleep(0.1)
+        assert not nxt.done()  # no second sandbox while the stuck one lives
+        harness.release.set()
+        traj2 = await asyncio.wait_for(nxt, timeout=2.0)
+        assert traj2.outcome == Outcome.OK
+        snap = gate.metrics.snapshot()
+        assert snap["harness_in_flight"] == 0 and snap["harness_stuck"] == 0 and snap["harness_stuck_total"] == 1
+
+    _run(go())
+
+
+def test_stuck_harness_keeps_its_slot_when_the_trajectory_is_cancelled_during_the_grace(monkeypatch):
+    from yeto.rl.agentic import runner
+
+    monkeypatch.setattr(runner, "_CANCEL_GRACE_S", 5.0, raising=False)
+    gate = AdmissionGate(1)
+    harness = _IgnoresCancel()
+
+    async def go():
+        first = asyncio.ensure_future(run_agent_task(_task(budget=AgentBudget(wall_clock_s=0.05)), harness, "u", gate))
+        try:
+            await asyncio.sleep(0.2)  # cap hit, now inside the cancel grace
+            first.cancel()  # the island closes
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            snap = gate.metrics.snapshot()
+            assert snap["harness_in_flight"] == 1 and snap["harness_stuck"] == 1
+            nxt = asyncio.ensure_future(run_agent_task(_task(), _Harness(TrialVerdict(rewards={"reward": 0})), "u", gate))
+            await asyncio.sleep(0.1)
+            assert not nxt.done()  # no second sandbox while the stuck one lives
+        finally:
+            harness.release.set()  # never leave a cancel-ignoring task to the loop shutdown
+        assert (await asyncio.wait_for(nxt, timeout=2.0)).outcome == Outcome.OK
+        snap = gate.metrics.snapshot()
+        assert snap["harness_in_flight"] == 0 and snap["harness_stuck"] == 0
+
+    _run(go())
+
+
+def test_admission_releases_the_slot_when_reading_the_policy_version_fails():
+    def boom():
+        raise RuntimeError("version unavailable")
+
+    gate = AdmissionGate(1, policy_version=boom)
+
+    async def go():
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(gate.admit().__aenter__(), timeout=1.0)
+        assert gate.metrics.snapshot()["harness_in_flight"] == 0
+        assert not gate._slots.locked()
+
+    _run(go())
+
+
 def test_runner_raises_configuration_and_trust_errors():
     gate = AdmissionGate(1)
     with pytest.raises(HarnessConfigError):
