@@ -80,6 +80,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -87,7 +88,8 @@ from typing import Any
 
 from yeto.rl import up_consistency, up_segments
 
-STATE_ROOT = Path("~/.yeto/rl-up").expanduser()
+# ``YETO_STATE_DIR`` moves it (read once, at import); the default is ``~/.yeto/rl-up``.
+STATE_ROOT = Path(os.environ.get("YETO_STATE_DIR") or "~/.yeto/rl-up").expanduser()
 # the launcher's last line (yeto.cli): ``[yeto] run '<run>' finished: <state> (exit code <n>)``
 # a budget / wall-clock breach stops the trainer only; the NC pool is released by force
 # once the spend (or the wall time) passes this multiple of the budget
@@ -311,10 +313,13 @@ def _killpg(proc: subprocess.Popen) -> None:
     proc.wait()
 
 class Run:
-    def __init__(self, cfg: dict[str, Any]):
+    def __init__(self, cfg: dict[str, Any], state_root: Path | None = None):
         self.cfg = cfg
         self.run = str(cfg["run"])
-        self.dir = STATE_ROOT / self.run
+        self.dir = (state_root or STATE_ROOT) / self.run
+        # Set when this run had no local state directory (``run down`` from another host):
+        # down still stops what the config names, but cannot claim the run is verified down.
+        self.no_local_state: Path | None = None
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.dir / "state.json"
         self.state: dict[str, Any] = {}
@@ -1851,6 +1856,8 @@ class Run:
         for path in self.pool_configs:
             if self._cmd(self.nc("pool-status", "--config", path), log="down.log", timeout=300) != 0:
                 failed.append(f"pool-status {path}")
+        if self.no_local_state is not None:  # pids, step times, launch state of the run unknown here
+            failed.append(f"no local state ({self.no_local_state} missing): only what the config names was stopped")
         ok = not failed
         self.end_up()
         self.mark("down", ok=ok)
@@ -2174,9 +2181,14 @@ def ack_forced_stop(run: Run) -> None:
         run.mark("nc_forced_stop_ack", of=forced.get("at"))
 
 
-def open_run(config: str) -> Run:
+def open_run(config: str, create: bool = True, missing: str | None = None) -> Run:
     """``Run(load_config(config))``; a config or state directory that cannot be used raises
-    :class:`RunConfigError` naming the file (the CLI prints it, without a traceback)."""
+    :class:`RunConfigError` naming the file (the CLI prints it, without a traceback).
+    ``create=False`` (read-only commands) refuses a run whose state directory does not exist
+    instead of creating it: the run name is most likely misspelled. ``missing="temp"``
+    (``run down``) neither refuses nor creates it: the run is opened on a fresh temporary
+    state directory, so the stop steps the config drives (trainer down, pool-stop, sandbox
+    teardown) still run on a control host that lost (or never had) the run's state."""
     try:
         cfg = load_config(config)
     except RunConfigError:
@@ -2184,6 +2196,16 @@ def open_run(config: str) -> Run:
     except ValueError as error:  # a check of the config's content
         raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
     state_dir = STATE_ROOT / str(cfg.get("run"))
+    if missing == "temp" and "run" in cfg and not state_dir.is_dir():
+        tmp = Path(tempfile.mkdtemp(prefix=f"yeto-run-down-{cfg.get('run')}-"))
+        print(f"{_now()} [rl up] no local state for {cfg.get('run')} ({state_dir}): stopping what the config "
+              f"names; logs in {tmp / str(cfg.get('run'))}", file=sys.stderr, flush=True)
+        run = Run(cfg, state_root=tmp)
+        run.no_local_state = state_dir
+        return run
+    if not create and "run" in cfg and not state_dir.is_dir():
+        raise RunConfigError(f"run {cfg.get('run')}: no state directory {state_dir}; it was never brought up "
+                             "here (`yeto run up`), or the run name is misspelled")
     try:
         if "run" in cfg:
             state_dir.mkdir(parents=True, exist_ok=True)  # what Run() does first
@@ -2195,7 +2217,8 @@ def open_run(config: str) -> Run:
 
 def main(args: Any) -> int:
     try:
-        run = open_run(args.config)
+        run = open_run(args.config, create=args.rl_command != "status",
+                       missing="temp" if args.rl_command == "down" else None)
     except RunConfigError as error:
         print(f"{_now()} [rl up] {error}", file=sys.stderr, flush=True)
         return 2
