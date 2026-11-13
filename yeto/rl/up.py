@@ -720,7 +720,7 @@ class Run:
     def spend_usd(self) -> float:
         now = time.time()
         nc = sum(self.node_hours(i, now) * self.node_usd_per_h(i) for i in range(len(self.pools)))
-        rate = float((self.cfg.get("trainer") or {}).get("usd_per_h", 0))
+        rate = up_consistency.number_or_default(self.cfg.get("trainer"), "usd_per_h", 0)
         return nc + self.trainer_hours(now) * rate
 
     def trainer_hours(self, now: float | None = None) -> float:
@@ -751,7 +751,7 @@ class Run:
                     price = None
             except Exception:  # noqa: BLE001 - an unreadable pool config: the NC rate
                 price = None
-        return float((self.cfg.get("budget") or {}).get("nc_usd_per_h", 24)) if price is None else price
+        return up_consistency.number_or_default(self.cfg.get("budget"), "nc_usd_per_h", 24) if price is None else price
 
     def nc_node_hours(self, now: float | None = None) -> float:
         """Billed rollout node hours of this run, every pool (see :meth:`node_hours`)."""
@@ -1045,7 +1045,8 @@ class Run:
             return str(exc)
         if "usd" in b and b["usd"] is None:
             _log("preflight: budget.usd is null: no spend cap (as if unset); the wall clock still applies")
-        priced = float(self.cfg["trainer"].get("usd_per_h", 0) or 0) > 0 or float(b.get("nc_usd_per_h", 24)) > 0
+        priced = (up_consistency.number_or_default(self.cfg["trainer"], "usd_per_h", 0) > 0
+                  or up_consistency.number_or_default(b, "nc_usd_per_h", 24) > 0)
         if capped and up_consistency.budget_usd(b) <= 0 and priced:
             return (f"budget.usd is {b['usd']} while prices are set (trainer.usd_per_h / budget.nc_usd_per_h): "
                     "the first estimated dollar would stop the run; set the spend cap")
@@ -1076,7 +1077,7 @@ class Run:
 
     def silence_limit_s(self) -> float:
         b = self.cfg.get("budget") or {}
-        return max(4 * self.stall_timeout_s(), float(b.get("silence_min", 30)) * 60)
+        return max(4 * self.stall_timeout_s(), up_consistency.number_or_default(b, "silence_min", 30) * 60)
 
     def progress_paths(self) -> list[Path]:
         """What grows while the trainer works: its launcher log and any

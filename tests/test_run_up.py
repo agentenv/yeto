@@ -461,3 +461,13 @@ def test_an_nc_pool_keeps_the_nc_rate_even_with_a_price_in_its_provider(make_run
     run = make_run(nc_usd_per_h=24)
     up.Path(run.pool_config).write_text(json.dumps({"shard_base": "s", "provider": {"kind": "nc", "price_usd_h": 3}}))
     assert run.node_usd_per_h() == pytest.approx(24.0)
+
+
+def test_null_prices_and_silence_take_their_defaults_instead_of_crashing_the_monitor(make_run, monkeypatch):
+    # trainer.usd_per_h: null passed preflight (``or 0``) but crashed spend_usd mid-run
+    run = make_run(usd=100, nc_usd_per_h=None, silence_min=None)
+    run.cfg["trainer"]["usd_per_h"] = None
+    assert run.budget_problem() is None
+    assert run.node_usd_per_h(0) == pytest.approx(24.0)
+    assert run.spend_usd() >= 0.0
+    assert run.silence_limit_s() >= 30 * 60

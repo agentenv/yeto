@@ -264,6 +264,13 @@ PRICE_SOURCES = {
 NO_CAP_USD = 1e9  # budget.usd absent or null: no spend cap (the monitor's default)
 
 
+def number_or_default(section: dict[str, Any] | None, key: str, default: float) -> float:
+    """``section[key]`` as a float; absent or ``null`` gives ``default`` (a run config's
+    ``trainer.usd_per_h: null`` must not crash the monitor's spend estimate mid-run)."""
+    value = (section or {}).get(key)
+    return float(default) if value is None else float(value)
+
+
 def budget_usd(budget: dict[str, Any] | None) -> float:
     """The spend cap ``budget.usd``; absent or ``null`` means no cap (:data:`NO_CAP_USD`).
     A value that is not a number raises ValueError naming the field."""
