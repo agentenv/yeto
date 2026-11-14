@@ -147,6 +147,23 @@ DEFAULT_LEASE_S = 900.0
 DEFAULT_MAX_REDO = 2
 DEFAULT_SCAN_S = 30.0
 DEFAULT_MAX_SCAN_S = 120.0
+#: Every key :meth:`StoreDispensedPrompts.open` and the pool read of a store
+#: dispenser config (``prompts.dispense`` with ``backend: store``).
+STORE_CONFIG_KEYS = frozenset({
+    "backend", "namespace", "store", "seed", "passes", "lease_s", "max_redo", "holdout", "holdout_ids",
+    "require_holdout", "mix", "by_label", "labels", "scan_s", "max_scan_s", "full_scan"})
+
+
+def check_store_config(config: Any) -> None:
+    """Refuse a store dispenser config that is not an object or has an unknown key
+    (a misspelled ``holdout_ids`` would otherwise train on the hold-out, a
+    misspelled ``namespace`` share the default ledger with another run)."""
+    if not isinstance(config, Mapping):
+        raise DispenseError(f"prompts.dispense must be an object, not {type(config).__name__}")
+    unknown = set(config) - STORE_CONFIG_KEYS
+    if unknown:
+        raise DispenseError(f"prompts.dispense (backend store): unknown keys {sorted(unknown)} "
+                            f"(known: {sorted(STORE_CONFIG_KEYS)})")
 CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
 # A scan lists two unsettled slots in one range when at most this many settled slots
 # lie between them: reading past them (about 3 keys a slot, 1000 keys a request) costs
@@ -941,6 +958,7 @@ class StoreDispensedPrompts:
         ``mix`` / ``by_label`` / ``labels`` (streams), ``scan_s`` / ``max_scan_s``,
         ``full_scan`` (true: every scan lists the whole namespace; default: only the
         unsettled slots, :data:`FULL_SCAN_ENV` overrides the default)."""
+        check_store_config(config)
         with open(os.path.expanduser(str(path)), encoding="utf-8") as handle:
             rows = [json.loads(line) for line in handle if line.strip()]
         count, digest = file_fingerprint(path)
