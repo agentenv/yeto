@@ -48,8 +48,15 @@ _CHUNK_ENV = "YETO_CROSS_NODE_GLOO_CHUNK_MB"
 # a *fixed* ceiling a large model can break: a 240 GB (120B bf16) collective at
 # the measured ~0.9 GB/s allreduce rate is already 4.4 min, and the f32 master
 # copy of a 200B MoE is over an hour. The staged path is also host-memory bound,
-# so a slow host makes it worse. Default 6 h, overridable.
+# so a slow host makes it worse. With the large-island switch below the default
+# is 6 h; without it the timeout is torch's own, as before. Either way an
+# explicit value here wins.
 _TIMEOUT_ENV = "YETO_CROSS_NODE_GLOO_TIMEOUT_S"
+# Large-island switch (off by default): the 6 h group timeout and the
+# shard-at-a-time reduce_scatter (host memory one shard instead of the whole
+# input, at the cost of w gloo ``reduce`` calls instead of one ``all_reduce``).
+# Off, both behave exactly as before.
+_LARGE_ENV = "YETO_CROSS_NODE_GLOO_LARGE"
 ENV_NAME = _ENV  # public name for callers that decide whether to install the shim
 # For yeto.rl.worker_setup: a Ray worker of a verl island installs the shim
 # through this entry, before it builds any process group.
@@ -66,10 +73,20 @@ def _chunk_bytes() -> int:
     return max(1, int(mb * 1024 * 1024))
 
 
+def _large() -> bool:
+    return os.environ.get(_LARGE_ENV) == "1"
+
+
 def _timeout():
+    """The gloo group timeout, or None (torch's default) when nothing asks for one."""
     import datetime
 
-    return datetime.timedelta(seconds=float(os.environ.get(_TIMEOUT_ENV) or 6 * 3600))
+    raw = os.environ.get(_TIMEOUT_ENV)
+    if raw:
+        return datetime.timedelta(seconds=float(raw))
+    if _large():
+        return datetime.timedelta(seconds=6 * 3600)
+    return None
 
 
 def _local_world() -> int:
@@ -91,7 +108,9 @@ def _job_spans_nodes() -> bool:
 def _get_world_gloo():
     global _world_gloo
     if _world_gloo is None:
-        _world_gloo = _orig["new_group"](backend="gloo", timeout=_timeout())
+        t = _timeout()
+        _world_gloo = (_orig["new_group"](backend="gloo", timeout=t) if t is not None
+                       else _orig["new_group"](backend="gloo"))
         _cross[id(_world_gloo)] = _world_gloo
     return _world_gloo
 
@@ -110,7 +129,8 @@ def _new_group(ranks=None, timeout=None, backend=None, pg_options=None, **kwargs
         wants_device = backend is None or "gloo" not in str(backend).lower()
         if spans_nodes(list(rr)) and wants_device:
             kwargs.pop("device_id", None)
-            g = _orig["new_group"](ranks, timeout=timeout or _timeout(), backend="gloo", **kwargs)
+            g = _orig["new_group"](ranks, timeout=timeout if timeout is not None else _timeout(),
+                                   backend="gloo", **kwargs)
             if g is not None and g is not c10d.GroupMember.NON_GROUP_MEMBER:
                 _cross[id(g)] = g
             return g
@@ -272,6 +292,18 @@ def _run_on_host(name, a):
                 oflat[r * n + lo:r * n + hi].copy_(parts[r])
         if oflat.data_ptr() != out.data_ptr():  # staged through a copy
             out.copy_(oflat.reshape(out.shape))
+    elif name in ("reduce_scatter_tensor", "_reduce_scatter_base") and not _large():
+        out, inp = a["output"], a["input"]
+        h = _host(inp).clone()
+        avg = _avg_fix(a)
+        stats["coll_bytes"] += _bytes([h])
+        o["all_reduce"](h, op=a.get("op", dist.ReduceOp.SUM), group=g)
+        if avg:
+            h.div_(g.size())
+        r = g.rank()
+        flat = h.reshape(-1)
+        n = out.numel()
+        out.copy_(flat[r * n:(r + 1) * n].reshape(out.shape))
     elif name in ("reduce_scatter_tensor", "_reduce_scatter_base"):
         out, inp = a["output"], a["input"]
         avg = _avg_fix(a)

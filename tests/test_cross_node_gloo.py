@@ -99,7 +99,8 @@ def _chunked_worker(rank, port, q):
     try:
         os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
                           YETO_CROSS_NODE_LOCAL_WORLD=str(LOCAL),
-                          YETO_CROSS_NODE_GLOO_CHUNK_MB="0.00002")  # ~20 bytes: 5 floats
+                          YETO_CROSS_NODE_GLOO_CHUNK_MB="0.00002",  # ~20 bytes: 5 floats
+                          YETO_CROSS_NODE_GLOO_LARGE="1")  # shard-at-a-time reduce_scatter
         dist.init_process_group("gloo", rank=rank, world_size=WORLD)
         X.install()
         pps = [dist.new_group([i + n * LOCAL for n in range(WORLD // LOCAL)]) for i in range(LOCAL)]
@@ -145,3 +146,15 @@ def test_chunked_staging_keeps_results():
     for p in procs:
         p.join(30)
     assert res == {r: "ok" for r in range(WORLD)}
+
+
+def test_timeout_is_torch_default_unless_switched_on(monkeypatch):
+    import datetime
+
+    monkeypatch.delenv("YETO_CROSS_NODE_GLOO_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YETO_CROSS_NODE_GLOO_LARGE", raising=False)
+    assert X._timeout() is None  # as on main: torch's own default
+    monkeypatch.setenv("YETO_CROSS_NODE_GLOO_LARGE", "1")
+    assert X._timeout() == datetime.timedelta(hours=6)
+    monkeypatch.setenv("YETO_CROSS_NODE_GLOO_TIMEOUT_S", "60")
+    assert X._timeout() == datetime.timedelta(seconds=60)

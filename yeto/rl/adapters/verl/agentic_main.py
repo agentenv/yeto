@@ -111,12 +111,14 @@ def runtime_env(environ: dict[str, str] | None = None, *, fully_async: bool = Fa
     from yeto.rl import worker_setup
     from yeto.swift_megatron import cross_node_gloo
 
-    # One Ray hook, several yeto hooks: an island on nodes without RoCE also
-    # installs the cross-node gloo shim in every worker.
+    # Only an island on nodes without RoCE needs the chain (the gloo shim must be
+    # installed in every worker as well); otherwise the single hook, as before.
     if environ.get(cross_node_gloo.ENV_NAME) == "1":
         worker_setup.add_hook(env["env_vars"], cross_node_gloo.SETUP_HOOK)
-    worker_setup.add_hook(env["env_vars"], SETUP_HOOK)
-    env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
+        worker_setup.add_hook(env["env_vars"], SETUP_HOOK)
+        env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
+    else:
+        env["worker_process_setup_hook"] = SETUP_HOOK
     return env
 
 
