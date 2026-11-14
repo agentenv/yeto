@@ -502,3 +502,21 @@ def test_step_log_carries_the_host_memory_census_only_when_asked(make, monkeypat
     with_census = rows("1")[0]
     assert with_census.keys() > plain[0].keys()
     assert with_census["rss_gib"] > 0 and with_census["node_memavailable_gib"] > 0
+
+
+def test_counted_loss_tokens_replace_metric_tokens(make):
+    # ms-swift GRPO's loss metrics carry no token count; rl_buffer.py counts the
+    # completion tokens on the trainer instead (swift_plugin.LOSS_TOKENS_ATTR).
+    trainer, cb = make([([0], True), ([0], True)])
+    counts = iter([5, 7])
+    inner = trainer.train_step
+
+    def grpo_step(it):
+        out = inner(it)
+        setattr(trainer, sp.LOSS_TOKENS_ATTR, next(counts))
+        return [{"loss": 0.1}], out[1], out[2]
+
+    trainer.train_step = grpo_step
+    cb._wrap_train_step()
+    trainer.train()
+    assert FakeSync.instances[0].calls == [(1, 10), (2, 14)]
