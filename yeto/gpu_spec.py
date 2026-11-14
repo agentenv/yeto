@@ -127,6 +127,10 @@ HW_FAMILIES: tuple[HwFamily, ...] = (
     # torch on ROCm also reports "cuda" and its NCCL backend is RCCL.
     HwFamily("rocm", "amd", "cuda", "nccl", "GPU", "amd-smi",
              "HIP_VISIBLE_DEVICES", "rocm"),
+    # Historical values, not a claim about CPU hardware: before this table a
+    # CPU rank already reported vendor "nvidia" (identity default) and used the
+    # "cuda"/NVML collector, and "GPU" is the Ray default. Kept so no
+    # externally visible value changes; only device_type/dist_backend matter.
     HwFamily("cpu", "nvidia", "cpu", "gloo", "GPU", "", None, "cuda"),
 )
 #: Launcher device families (no ``cpu``): the inventory/``--gpu`` dimension.

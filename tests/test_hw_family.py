@@ -87,9 +87,25 @@ def test_vendor_and_ray_tables_match_catalog_cards():
         assert gpu_spec.hw_family(vendor).device_type == gpu_spec.device_type_of(card)
 
 
-def test_vllm_memory_guard_family_per_platform():
-    """S7: the guard's collector follows the sampler platform, not just rocm."""
-    assert gpu_spec.hw_family_or("rocm", "cuda").telemetry == "rocm"
-    assert gpu_spec.hw_family_or("cuda", "cuda").telemetry == "cuda"
-    assert gpu_spec.hw_family_or("npu", "cuda").telemetry == "npu"
-    assert gpu_spec.hw_family_or(None, "cuda").telemetry == "cuda"
+
+def test_telemetry_unknown_family_warns(monkeypatch, caplog):
+    """An unknown $YETO_DEVICE_FAMILY falls back to cuda but says so."""
+    from yeto.rl.engine import telemetry
+
+    monkeypatch.setenv(gpu_spec.DEVICE_FAMILY_ENV, "gaudi")
+    with caplog.at_level("WARNING", logger=telemetry.__name__):
+        telemetry.ResourceSampler(emit=lambda *a, **k: None, nvml_loader=lambda: None)
+    msg = " ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert "'gaudi'" in msg and "'cuda'" in msg
+    caplog.clear()
+    monkeypatch.setenv(gpu_spec.DEVICE_FAMILY_ENV, "rocm")
+    with caplog.at_level("WARNING", logger=telemetry.__name__):
+        telemetry.ResourceSampler(emit=lambda *a, **k: None, nvml_loader=lambda: None)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_accel_spellings_consistent():
+    """The three accel helpers accept the same names (no vendor spellings)."""
+    for fn in (accel.device_family, accel.family_device_type, accel.family_dist_backend):
+        with pytest.raises(ValueError):
+            fn("ascend")

@@ -19,7 +19,7 @@ from types import ModuleType
 
 import torch
 
-from .gpu_spec import DEVICE_FAMILY_ENV, HW_FAMILIES, hw_family
+from .gpu_spec import DEVICE_FAMILY_ENV, HW_FAMILIES
 
 # Everything below derives from gpu_spec.HW_FAMILIES, the single hardware
 # table (family / vendor / torch device type / collective / Ray resource /
@@ -130,8 +130,14 @@ def family_device_type(family: str) -> str:
 
 
 def family_dist_backend(family: str) -> str:
-    """torch.distributed backend of a device family (nccl, hccl or gloo)."""
-    return hw_family(family).dist_backend
+    """torch.distributed backend of a device family (nccl, hccl or gloo).
+
+    Accepts the same spellings as :func:`device_family` and
+    :func:`family_device_type` (launcher family names plus ``cpu``, exact
+    case); an identity vendor spelling such as ``"ascend"`` is refused here
+    too. Normalize with ``gpu_spec.normalize_family`` first if needed.
+    """
+    return _DIST_BACKENDS[family_device_type(family)]
 
 
 def bind_family_device(family: str, local_rank: int | None = None) -> torch.device:

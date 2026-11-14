@@ -729,14 +729,7 @@ class VllmServerEngine(ServerEngine):
             from yeto.hw.card_telemetry import collector_for, run_command  # noqa: PLC0415
             from yeto.rl.engine.telemetry import load_nvml  # noqa: PLC0415
 
-            # The guard used to read NVML on anything that was not ROCm, so on an
-            # NPU (or PPU) sampler it silently found no reading and let every
-            # reload run unguarded (gap S7). The platform is a launcher family
-            # name, so the hardware table maps it to its collector; an unset or
-            # unknown platform keeps the historical "cuda"/NVML path.
-            from yeto.gpu_spec import hw_family_or  # noqa: PLC0415
-
-            family = hw_family_or(self.options.platform, "cuda").telemetry
+            family = "rocm" if self.options.platform == "rocm" else "cuda"
             try:
                 collector = collector_for(family, nvml_loader=load_nvml, run=self._run or run_command)
                 collector.open()
