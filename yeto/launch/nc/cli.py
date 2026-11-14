@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -864,14 +865,25 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if cfg.get("route", "ssh") not in ("ssh", "sky"):
         raise ValueError(f"pool config: route {cfg.get('route')!r} is not ssh or sky")
     run_id(cfg)
+    lead, margin = (_seconds(cfg, "replace_lead_s", 3600), _seconds(cfg, "end_margin_s", 600))
+    price = pool_price(cfg)[0]
+    if price is not None and not (math.isfinite(price) and price >= 0):
+        raise ValueError(f"pool config: provider price_usd_h {price!r} must be a finite number >= 0")
     return PoolConfig(target=target, accounts=accounts, shard_base=cfg["shard_base"],
                       shard_limit=pool_shard_limit(cfg),
-                      replace_lead_s=float(cfg.get("replace_lead_s", 3600)),
-                      end_margin_s=float(cfg.get("end_margin_s", 600)),
+                      replace_lead_s=lead, end_margin_s=margin,
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
                       data_slots=slots, elastic=island_status.ElasticConfig.from_dict(cfg.get("elastic")),
                       hourly_cost=pool_hourly_ucr(cfg), slot_name=label)
+
+
+def _seconds(cfg: dict[str, Any], key: str, default: float) -> float:
+    """A pool duration: a finite number >= 0 (not a bool, a string or nan)."""
+    value = cfg.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"pool config: {key} must be a finite number of seconds >= 0, not {value!r}")
+    return float(value)
 
 
 def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
@@ -892,7 +904,14 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
             price = offers_from_config(section)[0].price_usd_h
         except ValueError:
             price = None
-    return (None if price is None else float(price)), currency
+    if price is None:
+        return None, currency
+    if isinstance(price, bool):
+        raise ValueError(f"pool config: provider price_usd_h must be a number, not {price!r}")
+    try:
+        return float(price), currency
+    except (TypeError, ValueError):
+        raise ValueError(f"pool config: provider price_usd_h must be a number, not {price!r}") from None
 
 
 def pool_hourly_ucr(cfg: dict[str, Any]) -> float:

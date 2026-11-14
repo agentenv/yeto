@@ -15,6 +15,7 @@ National Compute; the field names keep that suffix for the state file).
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, fields
@@ -213,6 +214,7 @@ class ElasticConfig:
         if unknown:
             raise ValueError(f"elastic config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
         cfg = cls(**doc)
+        _check_numbers(cfg)
         for name in ("unreachable_grace_s", "control_plane_alert_s", "start_timeout_s", "overdue_grace_s",
                      "lost_handoff_wait_s", "breaker_cooldown_s", "breaker_max_cooldown_s"):
             if float(getattr(cfg, name)) < 0:
@@ -262,6 +264,34 @@ EXPIRED = "expired"  # ended at / after its lease end
 OVERDUE = "overdue"  # active past lease_until (still billed)
 BALANCE = "balance"  # ended for the balance
 RELEASED = "released"  # ended released (by us, or a person in the console)
+
+
+# an elastic value a cap or timer compares: a real number (not a bool, a string, nan or inf)
+_INT_FIELDS = ("max_stall_restart_failures", "max_sampler_restarts", "breaker_failures", "breaker_max_trips",
+               "fence_alert_failures")
+_INT_CAPS = ("max_run_spend_ucr", "max_nodes", "max_orders")  # None: no cap
+
+
+_NOT_NUMBERS = frozenset({"metrics_port", "stop_on_finish", "scale_down", "external_release"})
+
+
+def _check_numbers(cfg: ElasticConfig) -> None:
+    """Refuses a number field of the wrong type or a non-finite value: a string (``"30"``)
+    breaks the comparisons, a bool reads as 0/1, and ``x > nan`` is always False (a NaN
+    cap never refuses an order). Limits must be >= 0 (0 refuses every order); ``max_nodes`` >= 1."""
+    for f in fields(cfg):
+        value = getattr(cfg, f.name)
+        if f.name in _NOT_NUMBERS or value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"elastic config: {f.name} must be a finite number, not {value!r}")
+        if (f.name in _INT_FIELDS or f.name in _INT_CAPS) and value != int(value):
+            raise ValueError(f"elastic config: {f.name} must be a whole number, not {value!r}")
+    for name in ("max_run_spend_ucr", "max_run_spend_usd", "max_orders", "max_sampler_restarts"):
+        if getattr(cfg, name) is not None and getattr(cfg, name) < 0:
+            raise ValueError(f"elastic config: {name} must be >= 0")
+    if cfg.max_nodes is not None and cfg.max_nodes < 1:
+        raise ValueError("elastic config: max_nodes must be >= 1 (or null: 2 x target)")
 
 
 @dataclass(frozen=True)
