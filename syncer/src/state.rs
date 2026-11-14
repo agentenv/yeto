@@ -502,10 +502,12 @@ impl GlobalState {
         account_local_progress: bool,
     ) {
         let e = self.ledger.entry(learner_id).or_default();
-        e.merges += 1;
+        // c_steps/c_tokens come verbatim from the wire: saturate rather than
+        // overflow (a debug panic, or silent wrap in release).
+        e.merges = e.merges.saturating_add(1);
         if account_local_progress {
-            e.steps += c_steps as u64;
-            e.tokens += c_tokens;
+            e.steps = e.steps.saturating_add(u64::from(c_steps));
+            e.tokens = e.tokens.saturating_add(c_tokens);
         }
     }
 
@@ -2226,6 +2228,20 @@ mod tests {
         assert!(st2.checkpoint_layout_verified);
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ledger_saturates_on_untrusted_push_counters() {
+        // c_steps/c_tokens are taken verbatim from PUSH_FRAGMENT; a learner
+        // reporting u64::MAX tokens twice must not overflow the ledger (a
+        // panic in the coordinator would take down the whole syncer).
+        let mut st = state_with_fingerprint(layout2(), 0x11);
+        st.record_merge(0, u32::MAX, u64::MAX);
+        st.record_merge(0, u32::MAX, u64::MAX);
+        let ledger = st.ledger.get(&0).unwrap();
+        assert_eq!(ledger.tokens, u64::MAX);
+        assert_eq!(ledger.steps, 2 * u64::from(u32::MAX));
+        assert_eq!(ledger.merges, 2);
     }
 
     #[test]
