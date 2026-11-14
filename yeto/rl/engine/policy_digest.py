@@ -270,8 +270,8 @@ def stage_f32_on_host(tensors: Mapping[str, Any], staging: HostStaging | None = 
         offset += source.numel()
     device = next(iter(devices))
     ok = bool(torch.stack(finite).all().item()) if finite else True
-    if device.type == "cuda":
-        torch.cuda.current_stream(device).synchronize()  # the copies to the host are complete
+    if device.type in ("cuda", "npu"):  # the copies to the host are complete
+        getattr(torch, device.type).current_stream(device).synchronize()
     if not ok:
         for name, check in zip(names, finite):
             if not bool(check.item()):

@@ -18,7 +18,7 @@ Rank file ``rank<NNNNN>.pt`` (``torch.save``):
   changes, so the freshly built trainer already has it;
 * ``optim`` -- the optimizer state dict keyed by parameter name, DTensor
   entries stored as local shards; ``dtensor`` lists which entries were DTensors;
-* ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA) RNG.
+* ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA or NPU) RNG.
 
 Restore needs the same world size (FSDP2 shards are per rank; a DP change is
 refused before any rank writes). Each rank checks its file checksum, loads it
@@ -192,26 +192,38 @@ def _digest(handles: TrainHandles) -> str:
 
 
 def _rng_state() -> dict[str, Any]:
+    """CPU RNG, plus the current device's under its torch device type: ``cuda``
+    on a CUDA rank (unchanged), ``npu`` on an Ascend rank. An Ascend rank used to
+    save its NPU state only when ``torch.cuda`` was the transfer_to_npu alias
+    (MindSpeed imported), as ``cuda``, and no device state at all otherwise."""
     import torch
 
+    from yeto import accel
+
     rng = {"cpu": torch.get_rng_state()}
-    if torch.cuda.is_available():
-        rng["cuda"] = torch.cuda.get_rng_state()
+    device_type = accel.available_type()
+    if device_type in ("cuda", "npu"):
+        rng[device_type] = getattr(torch, device_type).get_rng_state()
     return rng
 
 
 def _set_rng_state(rng: Mapping[str, Any]) -> None:
+    """Restore what :func:`_rng_state` saved. A ``cuda`` entry written by an
+    Ascend rank under the transfer_to_npu alias restores through the same alias."""
     import torch
 
     torch.set_rng_state(rng["cpu"])
-    if "cuda" in rng:
-        if not torch.cuda.is_available():
-            raise CutError("cut rank file carries a CUDA RNG state but this rank has no CUDA device")
-        torch.cuda.set_rng_state(rng["cuda"])
+    for device_type, label in (("cuda", "CUDA"), ("npu", "NPU")):
+        if device_type not in rng:
+            continue
+        module = getattr(torch, device_type, None)
+        if module is None or not module.is_available():
+            raise CutError(f"cut rank file carries a {label} RNG state but this rank has no {label} device")
+        module.set_rng_state(rng[device_type])
 
 
 def rng_digest(rng: Mapping[str, Any]) -> str:
-    """sha256 of the RNG states (CPU, and CUDA when present): a restore must
+    """sha256 of the RNG states (CPU, and CUDA or NPU when present): a restore must
     re-export the saved one (as the Miles cut summary's ``rng_digest``)."""
     import torch
 
