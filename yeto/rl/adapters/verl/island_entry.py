@@ -1248,6 +1248,9 @@ def megatron_island_plan(args, *, model_path: str, train_file: str, val_file: st
         comm_overlap=bool(getattr(args, "rl_megatron_comm_overlap", False)),
         old_logprob_entropy=not bool(getattr(args, "rl_no_old_logprob_entropy", False)),
         close_mtp_pattern=close_mtp)
+    advice = megatron_engine.expert_parallel_advice(shape)
+    if advice:  # advice only: EP=1 is a legal shape, so the island says this and runs
+        print(f"[yeto-verl] WARNING: {advice}", file=sys.stderr, flush=True)
     max_prompt = max(512, int(args.seq_len) - int(args.rollout_max_response_len))
     run = vconf.VerlRunConfig(
         model_path=model_path, train_file=train_file, val_file=val_file, out_dir=out_dir,

@@ -208,8 +208,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "--expert-parallel",
         type=int,
         default=None,
-        help="megatron backend: expert-parallel degree (default fills the "
-        "island: gpus_per_island / (tensor-parallel x pipeline-parallel))",
+        help="megatron backend: expert-parallel degree. Unset means: the SFT learner "
+        "fills the island (gpus_per_island / (tensor-parallel x pipeline-parallel)), "
+        "the RL verl-Megatron island uses 1 (every expert on every trainer card)",
     )
     tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
     tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
