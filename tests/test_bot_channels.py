@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -447,3 +448,47 @@ def test_multipart_body():
     assert b'name="image_type"\r\n\r\nmessage\r\n' in body
     assert b'filename="c.png"\r\nContent-Type: image/png\r\n\r\nPNGDATA\r\n' in body
     assert body.endswith(f"--{boundary}--\r\n".encode())
+
+
+def test_lark_ws_backoff_resets_after_a_long_healthy_connection(monkeypatch):
+    """A connection that stayed up for an hour must reconnect after the base delay,
+    not after the backoff accumulated by earlier fast failures."""
+    import types
+
+    now = [0.0]
+    calls = [0]
+    stop = threading.Event()
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def start(self):
+            calls[0] += 1
+            if calls[0] == 5:
+                now[0] += 3600.0  # healthy for an hour, then the socket drops
+                return
+            raise RuntimeError("connect refused")
+
+    sleeps: list[float] = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) >= 6:
+            stop.set()
+
+    lark = types.ModuleType("lark_oapi")
+    ws = types.ModuleType("lark_oapi.ws")
+    wsc = types.ModuleType("lark_oapi.ws.client")
+    ws.Client = FakeClient
+    ws.client = wsc
+    lark.ws = ws
+    lark.LogLevel = types.SimpleNamespace(WARNING=0)
+    for name, mod in (("lark_oapi", lark), ("lark_oapi.ws", ws), ("lark_oapi.ws.client", wsc)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(lark_ws, "build_handler", lambda ch: None)
+    ch = types.SimpleNamespace(app_id="a", app_secret="s", domain="d")
+    t = lark_ws.start(ch, stop=stop, sleep=fake_sleep, clock=lambda: now[0])
+    t.join(timeout=10)
+    assert not t.is_alive()
+    assert sleeps == [5.0, 10.0, 20.0, 40.0, 5.0, 10.0]
