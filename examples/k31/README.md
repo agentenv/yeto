@@ -16,3 +16,10 @@ scaling, resume, the dashboard, and cost protection.
 | `sampler-node-nc-mi355x.sh` | Sampler node script |
 | `algorithm-spec.async-age2.json`, `algorithm-spec.async-age2-tis.json` | Algorithm specs for `--rl-max-policy-age 2` |
 | `sampler-spec.cpu-fake.json`, `convertible-spec.cpu-fake.json`, `launch-convertible-modal.sh` | CPU rehearsal and convertible-island examples |
+
+## Health breakers
+
+Run `yeto breaker` on a K3.1 run with `--sampler-tapes <sampler tape dir>` or
+`--sampler-hardware amd`. Without either the sampler hardware is unknown, the
+breaker fails closed to the `nvidia` limits (act 0.052), and the healthy MI355X
+log-prob mismatch (0.076-0.099) trips. See [docs/BREAKER.md](../../docs/BREAKER.md).
