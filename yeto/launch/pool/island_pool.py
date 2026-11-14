@@ -480,8 +480,8 @@ class IslandPool:
             # sit granted, billed and unstarted), except in the first fence_order_ahead_s
             handoff = next((p for p in self.pending if not self._handoff_waits_for_fence(p, now)), None)
             if handoff is None:
-                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing: nothing "
-                           "is ordered to continue an unfenced shard")
+                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing or whose "
+                           "success cannot be saved: nothing is ordered to continue an unfenced shard")
                 if refused != self._refused:
                     self._event("order_refused", why=refused)
                 self._refused = refused
@@ -744,7 +744,14 @@ class IslandPool:
 
     def _handoff_waits_for_fence(self, handoff: dict[str, Any], now: float) -> bool:
         """The member ``handoff`` comes from still owes its fence, for longer than
-        ``fence_order_ahead_s`` (a fence about to succeed does not cost the cold start)."""
+        ``fence_order_ahead_s`` (a fence about to succeed does not cost the cold start), or
+        whose fence success is not saved yet: its successor would wait in
+        :meth:`_fence_blocker`, be released after ``fence_blocked_hold_s`` and be ordered
+        again, a billed node per hold while the save keeps failing."""
+        if handoff.get("from") in self._unsaved_fences:
+            if not self._save_now():
+                return True
+            self._unsaved_fences.clear()
         origin = next((p for p in self.members if p.fence_pending is not None
                        and p.ticket == handoff.get("from")), None)
         if origin is None:
