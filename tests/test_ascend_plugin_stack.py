@@ -693,3 +693,30 @@ def test_island_section_carries_the_recipe_and_refuses_it_alone(tmp_path):
     with pytest.raises(SystemExit, match="needs --rl-ascend-plugin-stack"):
         island_entry.ascend_plugin_stack_section(
             SimpleNamespace(rl_ascend_plugin_stack=None, rl_ascend_plugin_recipe="18.60"), engine=engine)
+
+
+def test_unknown_install_at_position_is_loud_and_keeps_the_default(tmp_path, monkeypatch, capsys):
+    """A hand-typed bisect position with a typo must not read as that position.
+
+    The default position still runs (behaviour unchanged for an island that never sets
+    the variable), and the fallback is named on stderr."""
+    bound = tmp_path / "bound_device.txt"
+    name = _device_touching_plugin(tmp_path, bound)
+    monkeypatch.setattr(stack, "PLUGINS", (name,))
+    monkeypatch.setenv(stack.ENV, str(tmp_path))
+    monkeypatch.setenv(stack.INSTALL_AT_ENV, "init-model")  # a typo: not a known position
+    monkeypatch.setenv(stack.RANK_ENV, "3")
+    monkeypatch.setattr(stack, "LAST_REPORT", None)  # a fresh worker process
+
+    stack.setup_worker()
+
+    err = capsys.readouterr().err
+    assert stack.INSTALL_AT_ENV in err and "init-model" in err
+    assert stack.DEFAULT_INSTALL_AT in err
+    # the default position is "install as soon as the card is known", and the rank is
+    assert bound.read_text() == "3"
+
+
+def test_every_known_install_at_position_is_listed():
+    assert stack.DEFAULT_INSTALL_AT == "worker_init"
+    assert set(stack.INSTALL_AT_POSITIONS) == {"worker_init", "init_model", "after_init_model", "never"}
