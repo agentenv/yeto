@@ -159,12 +159,27 @@ def materialize(layout: FragmentLayout, cut: WeightCut, *, base_model: str | os.
     return target
 
 
+_STAGING = re.compile(r"^\.(?P<name>v\d{8}-[0-9a-f]{12})\.tmp$")
+
+
 def _prune(root: Path, *, keep: int, current: Path) -> None:
+    """Keep the newest ``keep`` finished outputs (and ``current``). A staging
+    directory (``.<name>.tmp``) a killed materialize left behind -- a crash inside
+    ``save_file`` leaves no done marker -- is dropped once it is older than every
+    output kept: a restarted sampler reuses the work dir, and nothing else ever
+    removed it (one model-sized directory per crash). A staging directory at or
+    above the oldest kept output may be another process's write in progress."""
     done = sorted((p for p in root.iterdir() if p.is_dir() and (p / DONE).is_file()),
                   key=lambda p: p.name)
     for old in done[:-max(1, int(keep))]:
         if old != current:
             shutil.rmtree(old, ignore_errors=True)
+    kept = [p.name for p in done[-max(1, int(keep)):]] + [current.name]
+    floor = min(name.lstrip(".").removesuffix(".tmp") for name in kept)
+    for entry in root.iterdir():
+        match = _STAGING.match(entry.name)
+        if match and entry.is_dir() and match.group("name") < floor:
+            shutil.rmtree(entry, ignore_errors=True)
 
 
 def identity_converter(_args: Any, name: str, tensor: Any) -> list[tuple[str, Any]]:
