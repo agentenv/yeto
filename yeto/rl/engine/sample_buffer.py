@@ -143,6 +143,7 @@ import dataclasses
 import fcntl
 import heapq
 import json
+import math
 import os
 import re
 import threading
@@ -721,7 +722,9 @@ class UnmergedShards:
     def __init__(self, objects: ObjectStore) -> None:
         self.objects = objects
         self._readers: dict[str, ObjectIndex] = {}
-        self._records: dict[str, list[tuple[int, SampleIndexEntry]]] = {}  # (shard position, entry)
+        # (shard position, entry, when first read here: -inf on the first read, the history)
+        self._records: dict[str, list[tuple[int, SampleIndexEntry, float]]] = {}
+        self._primed = False
         self._owners: dict[str, ShardOwner | None] = {}
         self._ended: set[str] = set()
 
@@ -729,6 +732,15 @@ class UnmergedShards:
         """(records not merged yet, every named shard has ended). ``merged``: the
         merged position per shard (:meth:`FileSampleBuffer.shard_positions` of
         the index length): the shard records below it are merged."""
+        seen, ended = self.pending_seen(merged)
+        return [entry for entry, _ in seen], ended
+
+    def pending_seen(self, merged: dict[str, int], *, now: float | None = None
+                     ) -> tuple[list[tuple[SampleIndexEntry, float]], bool]:
+        """:meth:`pending` with the time each record was first read here (``now``,
+        the reader's clock; -inf for the records of the first read: the history)."""
+        stamp = -math.inf if not self._primed or now is None else float(now)
+        self._primed = True
         names = shard_names(self.objects)
         for shard in names:
             if shard in self._ended:  # its end record is its last: no LIST per poll for it (a spot
@@ -748,13 +760,13 @@ class UnmergedShards:
                 elif record.get("end"):
                     self._ended.add(shard)
                 else:
-                    self._records[shard].append((int(record["pos"]), _entry(record)))
-        out: list[SampleIndexEntry] = []
+                    self._records[shard].append((int(record["pos"]), _entry(record), stamp))
+        out: list[tuple[SampleIndexEntry, float]] = []
         for shard, records in self._records.items():
             below = int(merged.get(shard, 0))
-            done = next((i for i, (pos, _) in enumerate(records) if pos >= below), len(records))
+            done = next((i for i, (pos, _, _) in enumerate(records) if pos >= below), len(records))
             del records[:done]  # merged: forgotten here
-            out.extend(entry for _, entry in records)
+            out.extend((entry, at) for _, entry, at in records)
         return out, bool(names) and self._ended >= set(names)
 
 
@@ -883,6 +895,12 @@ class FileSampleBuffer:
         self.clock = clock
         self._lock = threading.RLock()
         self._entries: list[SampleIndexEntry] = []
+        # per entry: when this process first read it, on ``clock`` (in memory only).
+        # The arrival rate counts these, never the writer's ``appended_at``: a sampler
+        # on another machine has another wall clock (a skew hides or freezes arrivals,
+        # a non-finite one never compares). The entries of the first refresh are the
+        # history before this process: no arrival (-inf), or a restart reads as a burst.
+        self._seen_at: list[float] = []
         self._ended = False
         self._consumer: str | None = None
         self._read = 0  # next position select() returns
@@ -892,6 +910,7 @@ class FileSampleBuffer:
         self._poller: threading.Thread | None = None
         self._stop_polling = threading.Event()
         self.refresh()
+        self._seen_at = [-math.inf] * len(self._entries)
         self._polled = len(self._entries)
 
     # ---------------------------------------------------------------- writing
@@ -1223,7 +1242,14 @@ class FileSampleBuffer:
             self._absorb(self.index.read_new())
             if self._merge:
                 self._merge_shards()
+            self._observe()
             return len(self._entries)
+
+    def _observe(self) -> None:
+        """Stamp the entries read since the last call with this process's clock."""
+        if len(self._seen_at) < len(self._entries):
+            now = self.clock()
+            self._seen_at.extend([now] * (len(self._entries) - len(self._seen_at)))
 
     def _merge_shards(self) -> None:
         new: list[list[dict[str, Any]]] = []  # per shard, in shard order
@@ -1463,15 +1489,20 @@ class FileSampleBuffer:
                 pending = [e for pos, e in enumerate(pending, start=first) if pos not in self._skipped]
             ended = self._ended
             if unmerged is not None:
-                extra, shards_ended = unmerged.pending(self.shard_positions(len(self._entries)))
+                seen_extra, shards_ended = unmerged.pending_seen(
+                    self.shard_positions(len(self._entries)), now=self.clock())
+                extra = [entry for entry, _ in seen_extra]
                 pending = pending + extra
                 ended = ended or shards_ended
             versions = Counter(e.behavior_version for e in pending)
             oldest = min(versions) if versions else None
+            # on this process's clock only (see ``_seen_at``); a record read as unmerged
+            # first and merged later counts once at any time (it moves from one to the other)
             since = self.clock() - self.arrival_window_s
-            recent = sum(1 for e in self._entries if e.appended_at >= since)
+            recent = sum(1 for pos, seen in enumerate(self._seen_at)
+                         if seen >= since and pos not in self._skipped)
             if unmerged is not None:
-                recent += sum(1 for e in extra if e.appended_at >= since)
+                recent += sum(1 for _, seen in seen_extra if seen >= since)
             return BacklogStats(
                 batches=len(pending) / self.batch_size, samples=len(pending), oldest_version=oldest,
                 version_histogram=dict(sorted(versions.items())),
