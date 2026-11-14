@@ -265,3 +265,74 @@ def test_a_remembered_backfill_failure_is_dropped_when_nothing_is_left_to_backfi
         shutil.rmtree(placed)
     assert sd.backfill_manifest(s3, island, "r2-v2") is False
     assert (str(island), "r2-v2") not in sd._BACKFILL_REFUSED
+
+
+class _Stop(Exception):
+    pass
+
+
+class _DyingServer:
+    """ensure_alive answers from a script: a restart, then given up (healthy False)."""
+
+    def __init__(self, script):
+        self.script, self.healthy, self.restarts, self.deaths_in_a_row = list(script), True, 0, 0
+        self.error, self.port = "OSError('bad fd')", 18555
+
+    def ensure_alive(self, log):
+        step = self.script.pop(0) if self.script else "ok"
+        if step == "restart":
+            self.restarts += 1
+            self.deaths_in_a_row += 1
+            return False
+        if step == "back":
+            self.healthy = True
+            return True
+        if step == "dead":
+            self.deaths_in_a_row += 1
+            self.healthy = False
+            return False
+        return self.healthy
+
+
+def _run_loop(tmp_path, monkeypatch, server, rounds):
+    store = tmp_path / "store"
+    (store / cm.RELEASES).mkdir(parents=True)
+    monkeypatch.setenv("S3_METRICS", str(tmp_path / "metrics.jsonl"))
+    monkeypatch.setattr(sd, "backfill_manifests", lambda s3, store: None)
+    left = [rounds]
+
+    def sleep(_s):
+        left[0] -= 1
+        if left[0] <= 0:
+            raise _Stop
+
+    monkeypatch.setattr(sd.time, "sleep", sleep)
+    s3 = FakeS3.__new__(FakeS3)
+    s3.get_json = lambda key: None
+    with pytest.raises(_Stop):
+        sd.pull_loop(s3, store, 1.0, server=server)
+    path = tmp_path / "metrics.jsonl"
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_pull_loop_records_a_peer_server_that_gave_up(tmp_path, monkeypatch):
+    """healthy=False must reach the metrics tape (patrol / alerts), once, not only a log line."""
+    rows = _run_loop(tmp_path, monkeypatch, _DyingServer(["ok", "restart", "dead", "dead", "dead"]), 6)
+    events = [r["event"] for r in rows]
+    assert events == ["peer_server_restarted", "peer_server_unhealthy"]
+    bad = rows[-1]
+    assert bad["side"] == "serve" and bad["healthy"] is False and bad["port"] == 18555
+    assert bad["restarts"] == 1 and "bad fd" in bad["error"] and bad["time_unix"] > 0
+
+
+def test_pull_loop_survives_a_metrics_tape_it_cannot_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(sd, "metrics", lambda store, row: (_ for _ in ()).throw(OSError(28, "No space left")))
+    assert _run_loop(tmp_path, monkeypatch, _DyingServer(["dead"]), 3) == []
+
+
+def test_pull_loop_records_a_peer_server_serving_again(tmp_path, monkeypatch):
+    """After a restart (or a give-up) the server serves again: a healthy row clears the alert."""
+    rows = _run_loop(tmp_path, monkeypatch, _DyingServer(["restart", "ok", "ok", "dead", "back", "ok"]), 7)
+    assert [r["event"] for r in rows] == ["peer_server_restarted", "peer_server_healthy",
+                                          "peer_server_unhealthy", "peer_server_healthy"]
+    assert rows[-1]["healthy"] is True

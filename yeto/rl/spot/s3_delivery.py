@@ -345,16 +345,40 @@ def backfill_manifests(s3: S3, store: Path) -> list[str]:
     return done
 
 
+def check_server(server: peer_fanout.ReleaseFileServer, store: Path, last: str | None) -> str | None:
+    """Restart a dead serve thread and put what happened on the metrics tape (``side:
+    "serve"`` rows), so patrol and alerts see it, not just a log line: every restart
+    (``peer_server_restarted``), giving up once (``peer_server_unhealthy``, peers fall back
+    to the object store), and serving again after either (``peer_server_healthy``, which
+    clears the alert). Returns the last event recorded (pass it back in)."""
+    if server.ensure_alive(log):
+        event = "peer_server_healthy" if last in ("peer_server_restarted", "peer_server_unhealthy") else None
+    elif server.healthy:
+        event = "peer_server_restarted"
+    else:
+        event = None if last == "peer_server_unhealthy" else "peer_server_unhealthy"
+    if event is None:
+        return last
+    row = {"side": "serve", "event": event, "healthy": bool(server.healthy), "port": server.port,
+           "restarts": server.restarts, "deaths_in_a_row": server.deaths_in_a_row,
+           "error": str(server.error or "")[:300], "time_unix": round(time.time(), 1)}
+    try:
+        metrics(store, row)
+    except OSError as error:  # a full disk must not stop the pull loop
+        log(f"metrics write failed for {event}: {error}")
+    return event
+
+
 def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = (),
               server: peer_fanout.ReleaseFileServer | None = None) -> None:
     try:
         backfill_manifests(s3, store)  # releases an earlier run placed but crashed before recording
     except Exception as error:  # noqa: BLE001 - the pull loop still has to start
         log(f"manifest backfill at start failed: {error}")
-    failures = 0
+    failures, served = 0, None
     while True:
         if server is not None:
-            server.ensure_alive(log)  # a dead serve thread is logged and restarted, never silent
+            served = check_server(server, store, served)
         try:
             pointer = s3.get_json(cm.LATEST)
             if pointer:

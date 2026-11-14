@@ -1352,6 +1352,16 @@ class SGLangServerEngine(ServerEngine):
                     self.call("POST", "/continue_generation", {})
                 except SamplerEngineError as error:  # the patch may be partly written: repair below
                     resumed_error = error
+            # applied (or given up on: the repair reloads the whole release), the patch is
+            # dead weight in /dev/shm until the next update; the element maps stay.
+            # This runs in the finally, so also when the apply call timed out or raised. The
+            # server may then still be running the apply; a rank that has not opened a patch
+            # file yet fails it (files already open stay readable). That is safe: a timeout
+            # surfaces as SamplerEngineError, so the update is already counted as failed and
+            # the full reload below rewrites every weight whatever the apply left behind.
+            import shutil
+
+            shutil.rmtree(root / "patch", ignore_errors=True)
         if resumed_error is not None:
             results = [{"ok": False, "error": f"continue_generation after the sparse write: {resumed_error}"}]
         detail.update({"plan_s": round(planned - began, 3), "update_s": round(updated - paused, 3),

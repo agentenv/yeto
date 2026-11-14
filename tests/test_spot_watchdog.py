@@ -376,3 +376,229 @@ def test_a_hung_sweep_backs_off_and_does_not_slow_the_relaunch(tmp_path):
     # the first pass over the candidates waits on one hung sweep, not one per candidate
     first_pass = [e["t"] for e in _events(tmp_path) if e["event"] == "launch_start"][1:len(cands) + 1]
     assert first_pass[-1] - first_pass[0] < 600.0 + 30.0 * len(cands) + 1
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "No such file or directory", "sky"),
+                                   PermissionError(13, "Permission denied", "sky")])
+def test_ops_launch_reports_an_unrunnable_sky_as_a_config_error(monkeypatch, error):
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(error))
+    with pytest.raises(wd.LaunchConfigError):
+        wd.Ops(yaml="x.yaml", envs=[], secrets=[]).launch("spot-t-h100-1", wd.candidates()[0], 600.0)
+
+
+def test_ops_launch_that_could_not_fork_is_not_started(monkeypatch):
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError(11, "EAGAIN")))
+    with pytest.raises(wd.LaunchNotStarted):
+        wd.Ops(yaml="x.yaml", envs=[], secrets=[]).launch("spot-t-h100-1", wd.candidates()[0], 600.0)
+
+
+def test_a_missing_sky_exits_at_once_with_no_fake_doomed_clusters(tmp_path, monkeypatch):
+    """No sky: config_error before any candidate; no delete, no doomed record, no spend.
+    (Before: every candidate 'failed', its delete failed too, and 50 phantom clusters billed
+    the whole budget into a state file that then broke the restart.)"""
+    monkeypatch.setattr(wd, "SKY", str(tmp_path / "no-such-sky"))
+    monkeypatch.setattr(wd.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "x")))
+    clk = Clock()
+    ops = wd.Ops(yaml="x.yaml", envs=[], secrets=[])
+    cfg = _cfg(tmp_path, budget_usd=500.0)
+    w = wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    assert w.run() == "config_error"
+    state = json.loads(Path(cfg.state).read_text())
+    assert state["doomed"] == {} and state["spent_usd"] == 0.0 and state["cluster"] is None
+    assert [e["event"] for e in _events(tmp_path)] == ["watchdog_start", "exit"]
+    assert wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep).run() == "config_error"
+
+
+def test_a_config_error_from_launch_also_exits_without_doomed(tmp_path):
+    """sky vanished between the preflight and a launch."""
+    clk = Clock()
+
+    class Gone(FakeOps):
+        def launch(self, cluster, cand, timeout_s):
+            self.calls.append(("launch", cluster, cand.key))
+            raise wd.LaunchConfigError("cannot run sky")
+
+    ops = Gone(clk)
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    assert w.run() == "config_error"
+    assert [c[0] for c in ops.calls] == ["launch"] and w.doomed == {} and w.spent == 0.0
+
+
+def test_a_launch_that_never_started_is_not_deleted_or_billed(tmp_path):
+    clk = Clock()
+
+    class NoFork(FakeOps):
+        def launch(self, cluster, cand, timeout_s):
+            self.calls.append(("launch", cluster, cand.key))
+            clk.t += 3600.0
+            raise wd.LaunchNotStarted("could not start sky: EAGAIN")
+
+    ops = NoFork(clk)
+    w = wd.Watchdog(_cfg(tmp_path, max_rounds=1), wd.candidates()[:2], ops, clock=clk, sleep=clk.sleep)
+    assert w.run() == "max_rounds"
+    assert [c[0] for c in ops.calls] == ["launch", "launch"]  # never a down: there is no cluster
+    assert w.doomed == {} and w.spent == 0.0
+    fails = [e for e in _events(tmp_path) if e["event"] == "launch_fail"]
+    assert len(fails) == 2 and all(e["not_started"] for e in fails)
+
+
+def test_a_bug_in_launch_is_not_swallowed(tmp_path):
+    clk = Clock()
+
+    class Buggy(FakeOps):
+        def launch(self, cluster, cand, timeout_s):
+            raise TypeError("a bug")
+
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), Buggy(clk), clock=clk, sleep=clk.sleep)
+    with pytest.raises(TypeError):
+        w.run()
+
+
+def test_a_full_disk_under_the_event_log_does_not_kill_the_watchdog(tmp_path, monkeypatch):
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]}, states=["RUNNING", "STOPPED"])
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    real_open = open
+
+    def full(path, mode="r", *a, **k):
+        if "a" in mode:  # the event log (the state file is written elsewhere)
+            raise OSError(28, "No space left on device")
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr("builtins.open", full)
+    w.acquire()
+    w.watch_once(); w.watch_once()  # RUNNING, then STOPPED -> preempted, deleted
+    assert w.cluster is None and ("down", "spot-t-h100-1") in ops.calls
+    assert w.log_write_errors > 0
+    assert [e["event"] for e in w.history][:2] == ["launch_start", "launch_ok"]  # still kept in memory
+    monkeypatch.undo()
+    w.event("disk_back")  # the log resumes once the disk has room
+    assert _events(tmp_path)[-1]["event"] == "disk_back"
+    assert _events(tmp_path)[-1]["log_write_errors"] == w.log_write_errors
+
+
+def test_a_full_disk_keeps_the_previous_state_file(tmp_path, monkeypatch):
+    """The state (spend, live cluster) is replaced whole or not at all, never truncated."""
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]})
+    cfg = _cfg(tmp_path)
+    w = wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    before = json.loads(Path(cfg.state).read_text())
+    real_write = wd.Path.write_text
+
+    def half(self, data, *a, **k):
+        real_write(self, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(wd.Path, "write_text", half)
+    w.spent += 5.0
+    w.event("x")
+    monkeypatch.undo()
+    assert json.loads(Path(cfg.state).read_text()) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+    assert wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep).cluster == before["cluster"]
+
+
+def _state_disk_full(monkeypatch, until=None):
+    """The state file's temp write fails (ENOSPC) while ``until()`` is true (default: always)."""
+    real_write = wd.Path.write_text
+
+    def full(self, *a, **k):
+        if str(self).endswith(".tmp") and (until is None or until()):
+            raise OSError(28, "No space left on device")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(wd.Path, "write_text", full)
+
+
+def test_an_unwritable_state_holds_launches_but_keeps_the_vm(tmp_path, monkeypatch):
+    """A full disk on the watchdog's machine: no new VM, but the live one stays and is
+    still watched (a preemption is still handled); no exit inside the window."""
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True, True]})
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    _state_disk_full(monkeypatch)
+    w.event("disk_full")
+    for _ in range(20):  # 20 min of polls, well inside the 30 min window
+        assert w.step() is None
+    assert w.cluster == "spot-t-h100-1" and not any(c[0] == "down" for c in ops.calls)
+    ops.states = ["STOPPED"]
+    w.watch_once()  # preempted: deleting a VM that is gone is still fine
+    assert w.cluster is None and ("down", "spot-t-h100-1") in ops.calls
+    assert w.acquire() is None and w.cluster is None  # held: no new launch
+    assert sum(c[0] == "launch" for c in ops.calls) == 1
+    assert any(e["event"] == "launch_held" for e in w.history)
+
+
+def test_an_unwritable_state_exits_after_the_window_and_dumps_the_state(tmp_path, monkeypatch, capsys):
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]})
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    backups = tmp_path / "bak"
+    backups.mkdir()
+    monkeypatch.setattr(wd.tempfile, "gettempdir", lambda: str(backups))
+    _state_disk_full(monkeypatch)
+    started = clk.t
+    assert w.run() == "state_unwritable"
+    assert clk.t - started > 1800.0
+    assert not any(c[0] == "down" for c in ops.calls)  # the VM is left running
+    err = capsys.readouterr().err
+    line = next(x for x in err.splitlines() if "in-memory state:" in x)
+    dumped = json.loads(line.split("in-memory state: ", 1)[1])
+    assert dumped["cluster"] == "spot-t-h100-1" and dumped["seq"] == 1 and dumped["spent_usd"] == w.spent
+    assert json.loads((backups / "wd.state.json.bak").read_text()) == dumped
+    exit_row = w.history[-1]
+    assert exit_row["reason"] == "state_unwritable" and exit_row["backup"] == str(backups / "wd.state.json.bak")
+
+
+def test_the_stop_marker_wins_over_an_unwritable_state(tmp_path, monkeypatch):
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]})
+    cfg = _cfg(tmp_path)
+    w = wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    _state_disk_full(monkeypatch)
+    w.event("disk_full")
+    clk.t += 3600.0  # past the window
+    Path(cfg.stop_file).touch()
+    assert w.run() == "manual_stop" and not any(c[0] == "down" for c in ops.calls)
+
+
+def test_a_short_disk_full_recovers_and_launches_again(tmp_path, monkeypatch):
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True, True]}, states=["STOPPED"] + ["RUNNING"] * 50)
+    w = wd.Watchdog(_cfg(tmp_path, max_rounds=0), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    full_until = clk.t + 600.0  # ten minutes of a full disk
+    _state_disk_full(monkeypatch, until=lambda: clk.t < full_until)
+    w.event("disk_full")
+    w.watch_once()  # preempted while the disk is full: deleted, no relaunch yet
+    assert w.cluster is None and w.acquire() is None and w.cluster is None
+    while clk.t < full_until:
+        clk.sleep(60.0)
+        assert w.step() is None
+    w.step()  # the disk has room again: the state is written, launches resume
+    assert w.state_write_failures == 0 and w.state_unwritable_since is None
+    assert w.cluster == "spot-t-h100-2"
+    assert json.loads(Path(w.cfg.state).read_text())["cluster"] == "spot-t-h100-2"
+
+
+def test_one_failed_state_write_recovers(tmp_path, monkeypatch):
+    clk = Clock()
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), FakeOps(clk), clock=clk, sleep=clk.sleep)
+    real_write, fail = wd.Path.write_text, [True]
+
+    def once(self, *a, **k):
+        if fail:
+            fail.pop()
+            raise OSError(28, "full")
+        return real_write(self, *a, **k)
+
+    monkeypatch.setattr(wd.Path, "write_text", once)
+    w.event("a")
+    assert w.state_write_failures == 1
+    w.event("b")
+    assert w.state_write_failures == 0

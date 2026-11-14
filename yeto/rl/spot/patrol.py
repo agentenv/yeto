@@ -10,6 +10,8 @@ Reads, all optional:
 * ``--sampler-tape`` (repeatable): sampler island tapes (``rl_agentic_group``,
   ``rl_sampler_engine_round``, ``rl_sampler_leave``) -> heartbeat, output, policy lag,
   release delay;
+* ``--delivery-tape`` (repeatable): a VM's ``s3-delivery.jsonl`` -> ``peer_server_unhealthy``
+  (its release file server gave up; its peers fall back to the object store);
 * Nebius instances (``nebius compute instance list --format json``) and boat usage
   (``boat limits``, JSON): run with ``--nebius-cmd`` / ``--boat-cmd`` or from files
   (``--nebius-json`` / ``--boat-json``);
@@ -282,6 +284,20 @@ def sampler_alerts(tapes: dict[str, list[dict[str, Any]]], trainer: list[dict[st
     return alerts
 
 
+def delivery_alerts(tapes: dict[str, list[dict[str, Any]]]) -> list[Alert]:
+    """A release peer server that gave up (its last serve event says unhealthy)."""
+    alerts = []
+    for name, rows in tapes.items():
+        serve = [r for r in rows if r.get("side") == "serve" and r.get("event")]
+        if serve and serve[-1]["event"] == "peer_server_unhealthy":
+            last = serve[-1]
+            alerts.append(Alert("peer_server_unhealthy", "warn",
+                                f"{name}: release peer server on port {last.get('port')} gave up after "
+                                f"{last.get('restarts')} restart(s) ({last.get('error')}); peers use the "
+                                "object store", last.get("restarts"), None, target=name))
+    return alerts
+
+
 def _parse_ts(value: Any) -> float | None:
     if value is None:
         return None
@@ -427,6 +443,7 @@ def patrol(args: argparse.Namespace, *, now: float | None = None, runner: Runner
     trainer = read_events(args.tape)
     consumed = read_events(args.consumed)
     samplers = {Path(p).name: read_events(p) for p in args.sampler_tape or ()}
+    deliveries = {Path(p).name: read_events(p) for p in getattr(args, "delivery_tape", None) or ()}
     errors: list[str] = []
     nebius_doc, err = _json_source(args.nebius_json, args.nebius_cmd, runner)
     errors += [err] if err else []
@@ -434,7 +451,7 @@ def patrol(args: argparse.Namespace, *, now: float | None = None, runner: Runner
     errors += [err] if err else []
     instances = nebius_instances(nebius_doc, args.vm_filter) if nebius_doc is not None else []
     alerts = (trainer_alerts(trainer, now, th) + consumed_alerts(consumed, th)
-              + sampler_alerts(samplers, trainer, now, th) + vm_alerts(instances, now, th)
+              + sampler_alerts(samplers, trainer, now, th) + delivery_alerts(deliveries) + vm_alerts(instances, now, th)
               + boat_alerts(boat_doc, th) + spend_alerts(args.spent_usd, args.budget_usd, th))
     for a in alerts:
         if a.severity == "stop" and a.key not in args.stop_on:
@@ -467,6 +484,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--tape", help="trainer event tape / log")
     p.add_argument("--consumed", help="verl-buffer-consumed-<learner>.jsonl")
     p.add_argument("--sampler-tape", action="append", help="a sampler island tape (repeatable)")
+    p.add_argument("--delivery-tape", action="append",
+                   help="a VM's s3-delivery.jsonl (repeatable): release peer server health")
     p.add_argument("--nebius-json"), p.add_argument("--nebius-cmd",
                                                     help="e.g. 'nebius compute instance list --parent-id P "
                                                          "--format json'")
