@@ -1,5 +1,6 @@
 """A release handed to a spot island through a near store (cut_manifest)."""
 import json
+import os
 import shutil
 
 import pytest
@@ -110,3 +111,79 @@ def test_a_release_name_with_a_path_is_refused(tmp_path, name):
     with pytest.raises(cm.ManifestError, match="plain release directory name"):
         cm.place(manifest, tmp_path / "staged", _far(tmp_path), expected_digest=None)
     assert not (tmp_path / "far" / "policy-releases" / "LATEST.json").exists()
+
+
+def _placed_inputs(tmp_path):
+    store, _ = _store(tmp_path)
+    manifest = cm.make(store, "r2-v2")
+    staged = tmp_path / "staged"
+    shutil.copytree(store / "policy-releases" / "r2-v2", staged)
+    return manifest, staged, _far(tmp_path)
+
+
+def test_every_file_and_directory_is_fsynced_before_the_renames(tmp_path, monkeypatch):
+    """A power cut must never leave a renamed release (or LATEST) over unsynced bytes."""
+    manifest, staged, far = _placed_inputs(tmp_path)
+    log, real_fsync, real_replace = [], cm.os.fsync, cm.os.replace
+
+    def fsync(fd):
+        log.append(("fsync", fd, os.fstat(fd).st_ino))
+        real_fsync(fd)
+
+    def replace(src, dst):
+        log.append(("replace", str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "fsync", fsync)
+    monkeypatch.setattr(cm.os, "replace", replace)
+    target = cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    root = far / "policy-releases"
+    synced = lambda upto: {entry[2] for entry in log[:upto] if entry[0] == "fsync"}  # noqa: E731
+    first = next(i for i, e in enumerate(log) if e[0] == "replace" and e[1] == str(target))
+    need = {p.stat().st_ino for p in [target, *target.iterdir()]}
+    assert need <= synced(first), "release files/dir not fsynced before the rename"
+    latest = next(i for i, e in enumerate(log) if e[0] == "replace" and e[1] == str(root / "LATEST.json"))
+    assert (root / "LATEST.json").stat().st_ino in synced(latest)
+    assert root.stat().st_ino in synced(latest)  # the release rename is durable before LATEST names it
+    assert root.stat().st_ino in synced(len(log)) and log[-1][0] == "fsync"  # and LATEST's rename
+
+
+def test_temporary_names_are_unique_per_writer(tmp_path, monkeypatch):
+    """Two writers placing at once must not share (and so clobber) a temporary path."""
+    manifest, staged, far = _placed_inputs(tmp_path)
+    root = far / "policy-releases"
+    other = root / ".r2-v2.placing"  # what another live writer's staging used to be named
+    other.mkdir()
+    (other / "half").write_bytes(b"x")
+    names, real_replace = [], cm.os.replace
+    monkeypatch.setattr(cm.os, "replace", lambda s, d: (names.append(os.path.basename(s)), real_replace(s, d)))
+    cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert (other / "half").read_bytes() == b"x"  # never removed under the other writer
+    assert all(str(os.getpid()) in name for name in names) and ".LATEST.json.tmp" not in names
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".")) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+def test_losing_a_race_to_place_the_same_release_keeps_the_winner(tmp_path, monkeypatch):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    winner = tmp_path / "winner"
+    shutil.copytree(staged, winner)
+    target = far / "policy-releases" / "r2-v2"
+    real_replace = cm.os.replace
+
+    def replace(src, dst):
+        if str(dst) == str(target) and not target.exists():  # the other writer gets there first
+            shutil.copytree(winner, target)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "replace", replace)
+    assert cm.place(manifest, staged, far, expected_digest=cm.digest(manifest)) == target
+    assert sorted(p.name for p in target.parent.iterdir()) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+def test_a_dead_writers_staging_is_swept(tmp_path):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    root = far / "policy-releases"
+    dead = root / ".r2-v2.placing.999999999.deadbeef"
+    dead.mkdir()
+    cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert not dead.exists()

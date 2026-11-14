@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import sys
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -147,6 +148,53 @@ def _newer_than_latest(record: Mapping[str, Any], latest: Path) -> bool:
     return mine > theirs
 
 
+def _unique() -> str:
+    """A temporary-name suffix no other writer (process or thread) shares."""
+    return f"{os.getpid()}.{uuid.uuid4().hex[:12]}"
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(top: Path) -> None:
+    """fsync every file, then every directory bottom-up (so each entry is durable)."""
+    for dirpath, _dirs, files in os.walk(top, topdown=False):
+        for name in files:
+            fd = os.open(os.path.join(dirpath, name), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_dir(Path(dirpath))
+
+
+def _sweep_dead_staging(root: Path, release: str) -> None:
+    """Remove ``.<release>.placing.<pid>.<id>`` left by a writer that is gone."""
+    prefix = f".{release}.placing."
+    for entry in root.iterdir():
+        if not entry.name.startswith(prefix):
+            continue
+        pid = entry.name[len(prefix):].split(".", 1)[0]
+        if not pid.isdigit() or _alive(int(pid)):
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OverflowError):
+        return True
+    return True
+
+
 def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
           expected_digest: str | None) -> Path:
     """Verify, move ``staged`` to ``store/policy-releases/<release>`` and write
@@ -168,15 +216,32 @@ def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
         verify(manifest, target)
     else:
         verify(manifest, Path(staged))
-        tmp = root / f".{manifest['release']}.placing"
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        shutil.move(str(staged), tmp)
-        os.replace(tmp, target)
+        _sweep_dead_staging(root, manifest["release"])
+        tmp = root / f".{manifest['release']}.placing.{_unique()}"
+        try:
+            shutil.move(str(staged), tmp)
+            _fsync_tree(tmp)  # every byte durable before the name says the release is there
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                if not target.is_dir():
+                    raise
+                verify(manifest, target)  # another writer placed it first; keep theirs
+        finally:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+        _fsync_dir(root)
     if _newer_than_latest(manifest["record"], root / LATEST):
-        latest = root / f".{LATEST}.tmp"
-        latest.write_text(json.dumps(manifest["record"], sort_keys=True))
-        os.replace(latest, root / LATEST)
+        latest = root / f".{LATEST}.{_unique()}.tmp"
+        try:
+            with open(latest, "w") as out:
+                out.write(json.dumps(manifest["record"], sort_keys=True))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(latest, root / LATEST)
+        finally:
+            latest.unlink(missing_ok=True)
+        _fsync_dir(root)
     return target
 
 
