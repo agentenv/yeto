@@ -79,8 +79,12 @@ def decode_item(data: bytes) -> tuple[dict[str, Any], bytes]:
     if 8 + length > len(data):
         raise RelayItemError("relay item header is truncated")
     header = json.loads(data[8:8 + length])
+    if not isinstance(header, dict):
+        raise RelayItemError(f"relay item header is a {type(header).__name__}, not an object")
     if header.get("schema") != HEADER_SCHEMA:
         raise RelayItemError(f"relay item schema {header.get('schema')!r} != {HEADER_SCHEMA}")
+    if "sample_id" not in header:
+        raise RelayItemError("relay item header names no sample_id")
     return header, data[8 + length:]
 
 
