@@ -771,6 +771,9 @@ UNIDENTIFIED_STARVED_SELECTS_ENV = "YETO_BUFFER_UNIDENTIFIED_STARVED_SELECTS"  #
 DEFAULT_UNIDENTIFIED_STARVED_SELECTS = 3
 
 
+SETTLE_WARN_S = 300.0  # _settle warns every this many seconds a read stays open
+
+
 def _starved_selects_limit(environ: Mapping[str, str] | None = None) -> int:
     raw = (os.environ if environ is None else environ).get(UNIDENTIFIED_STARVED_SELECTS_ENV, "").strip()
     try:
@@ -895,6 +898,7 @@ class BatchReader:
         self.prefetch = bool(prefetch) and callable(getattr(buffer, "peek", None))
         self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
         self._prefetcher: threading.Thread | None = None
+        self._stop_lock = threading.Lock()  # executor_set_mode vs reset/take
         self._stop_prefetch = threading.Event()
         # xhw_guard actions {source: {"action", ...}} set by the driver after each step
         self.xhw_actions: dict[str, dict[str, Any]] = {}
@@ -1656,8 +1660,14 @@ class BatchReader:
         if not pending:
             return 0.0
         begun = self.clock()
-        wait(pending)
-        return self.clock() - begun
+        # no deadline: a read that never ends has no safe outcome here (the caller
+        # needs its payload, and a refresh must not overlap it), so warn and keep waiting
+        while True:
+            _, pending = wait(pending, timeout=SETTLE_WARN_S)
+            if not pending:
+                return self.clock() - begun
+            print(f"[sample-buffer] {len(pending)} payload read(s) still open after "
+                  f"{self.clock() - begun:.0f}s; still waiting", flush=True)
 
     # ------------------------------------------------------------ prefetch
     def _start_prefetching(self, groups: int, floor: int | None) -> None:
@@ -1668,11 +1678,14 @@ class BatchReader:
 
     def _stop_prefetching(self) -> None:
         """Stop the prefetch thread and wait for its reads (so a refresh may reload)."""
-        if self._prefetcher is not None:
-            self._stop_prefetch.set()
-            self._prefetcher.join()
-            self._prefetcher = None
-        self._settle(list(self._reads.values()))
+        # ``executor_set_mode`` and ``reset``/``take`` may stop from different threads:
+        # take the thread out under the lock, and finish the stop before the next caller
+        with self._stop_lock:
+            prefetcher, self._prefetcher = self._prefetcher, None
+            if prefetcher is not None:
+                self._stop_prefetch.set()
+                prefetcher.join()
+            self._settle(list(self._reads.values()))
 
     def _prefetch_loop(self, groups: int, floor: int | None) -> None:
         """Read the payloads of the next ``groups`` trainable entries as they appear
