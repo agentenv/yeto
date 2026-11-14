@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shlex
 import sys
@@ -601,8 +602,8 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-declare-cells")
     for name, flag in _ELASTIC_PAUSE_FLAGS + _ELASTIC_TEST_FLAGS:
         value = getattr(args, name, None)
-        if value is not None and not value > 0:
-            raise ValueError(f"{flag} must be positive")
+        if value is not None and not (value > 0 and math.isfinite(value)):
+            raise ValueError(f"{flag} must be positive and finite")
     given += [flag for name, flag in _ELASTIC_TEST_FLAGS if getattr(args, name, None) is not None]
     given += [flag for name, flag, _ in _ELASTIC_TEST_EXPORTS
               if getattr(args, name, None) is not None and getattr(args, name) is not False

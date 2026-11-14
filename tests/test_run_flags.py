@@ -195,6 +195,10 @@ def test_quorum_timeout_is_float_on_both_layers_and_whole_seconds_for_the_syncer
     with pytest.raises(ValueError, match="whole seconds"):
         launcher._syncer_quorum_timeout(types.SimpleNamespace(rl_elastic=True,
                                                               rl_elastic_quorum_timeout_s=1.5))
+    for bad in (0.0, -5.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="positive whole seconds"):
+            launcher._syncer_quorum_timeout(types.SimpleNamespace(rl_elastic=True,
+                                                                  rl_elastic_quorum_timeout_s=bad))
 
 
 # --------------------------------------------------------------------------- split by backend
