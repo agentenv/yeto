@@ -205,6 +205,24 @@ def _island_overrides(args, specs) -> dict:
     return overrides_of(args, len(specs))
 
 
+def _island_engine_args(args, m):
+    """hetero-1114 A22: island m's own image / backend (``--rl-island-engine``),
+    None without the flag (callers then read the run-wide ``args``)."""
+    from .rl.engine import island_engine
+
+    if getattr(args, "training_mode", "sft") != "rl" or not island_engine.requested(args):
+        return None
+    return island_engine.island_args(args, m, rl_island_count(args))
+
+
+def _island_engine_rows(args, m) -> list[dict]:
+    from .rl.engine import island_engine
+
+    if not island_engine.requested(args):
+        return []
+    return [r for r in island_engine.records(args, rl_island_count(args)) if r["island"] == m]
+
+
 def _island_role(args, specs, m) -> str | None:
     """rl-spot-cost-saving phase 2: island m's role (anchor | droppable), None without
     --rl-island-role. Admission already ran in pre_cloud_checks; it is re-run here
@@ -531,7 +549,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if spec.cloud == "modal":
                 from .cloud.droppable import role_args
 
-                cfg = build_modal_island_config(role_args(args, role), spec, m, task, modal_addr)
+                cfg = build_modal_island_config(role_args(args, role), spec, m, task, modal_addr,
+                                                engine_args=_island_engine_args(args, m))
                 print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
                 if name == held_name:
                     held_cfg = cfg  # defined on the app below; the scheduler spawns it
@@ -1235,6 +1254,8 @@ def dry_run_plan(args) -> dict:
                 entry["island_tasks"] = task_plan[learner_id].record()
             if split_plan.several_islands:
                 entry["data_split"] = split_plan.island_record(learner_id)
+            if (engine_rows := _island_engine_rows(args, learner_id)):
+                entry["island_engine"] = engine_rows[0]  # --rl-island-engine (A22)
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 

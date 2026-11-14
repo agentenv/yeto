@@ -472,6 +472,13 @@ _PLACEMENT = (
              "other islands keep --rl-placement / --rl-standby-gpus / "
              "--rl-island-use-gpus-per-node. Different placements need island pool "
              "options (e.g. --rl-sync-island-lease-s)"),
+    # hetero-1114 A22: per-island engine image / training backend (yeto.rl.engine.island_engine)
+    cli_flag("--rl-island-engine", action="append", default=None,
+             metavar="ISLAND:KEY=VALUE",
+             help="give trainer island ISLAND its own engine (repeatable); KEY is image "
+             "(same forms as --rl-image) or backend (miles | verl; a new backend without "
+             "image gets that backend's default image and needs --rl-sync-layout shape-free). "
+             "Other islands keep --rl-image / --rl-backend"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "

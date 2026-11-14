@@ -520,6 +520,11 @@ def validate(*, image: str | None, snapshot: str | None, gpus: Any, gpu_type: An
 
 def from_config(cfg: dict[str, Any], run_id: str, *, sdk: Any = None, client: Any = None) -> DaytonaProvider:
     section = dict(cfg.get("provider") or {})
+    from . import cli as _cli  # noqa: PLC0415
+
+    if not section.get("image") and not section.get("snapshot") and _cli.sampler_engine_requested(cfg):
+        # hetero-1114 A22: the pool's engine / platform picks the default image
+        section["image"] = _cli.pool_sampler_image(cfg)
     section.pop("factory", None)
     unknown = set(section) - CONFIG_KEYS
     if unknown:

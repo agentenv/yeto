@@ -531,6 +531,11 @@ def pool_ops(cfg: dict[str, Any]) -> ModalPoolOps:
 
 def from_config(cfg: dict[str, Any], run_id: str, *, client: Any = None) -> ModalProvider:
     section = dict(cfg.get("provider") or {})
+    from . import cli as _cli  # noqa: PLC0415
+
+    if not section.get("image") and _cli.sampler_engine_requested(cfg):
+        # hetero-1114 A22: the pool's engine / platform picks the default image
+        section["image"] = _cli.pool_sampler_image(cfg)
     unknown = set(section) - CONFIG_KEYS
     if unknown:
         raise ValueError(f"modal provider: unknown keys {sorted(unknown)}")

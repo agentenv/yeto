@@ -60,10 +60,14 @@ def parse_modal_env(items) -> dict[str, str]:
     return out
 
 
-def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str):
+def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str,
+                              engine_args=None):
     """Turn the sky task the factory built for this island into the Modal
     island config: same run script, same envs (syncer address swapped for
-    the Modal-reachable one), image/volume per training mode."""
+    the Modal-reachable one), image/volume per training mode.
+    ``engine_args`` (``--rl-island-engine``): the island's own image / backend;
+    None (the default) reads them from ``args``."""
+    engine_args = args if engine_args is None else engine_args
     from ..modal_runner import (
         MODAL_ISLAND_DEFAULT_ENVS,
         ModalIslandConfig,
@@ -72,7 +76,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     )
 
     rl = getattr(args, "training_mode", "sft") == "rl"
-    registry_login = registry_login_for(args) if rl else None
+    registry_login = registry_login_for(engine_args) if rl else None
     envs = dict(getattr(task, "envs", None) or {})
     # Modal ships cfg.envs as a modal.Secret, so the task's secret envs
     # (split_secret_envs) join them here; registry logins stay out.
@@ -86,7 +90,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # The critic syncer shares the actor syncer's host: swap it too, or a
         # Modal island behind --syncer-public-addr dials the private address.
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
-    if rl and verl_needs_nccl_shm_off(args, spec):
+    if rl and verl_needs_nccl_shm_off(engine_args, spec):
         envs.setdefault("NCCL_SHM_DISABLE", "1")  # --modal-env below still overrides it
     for key, value in MODAL_ISLAND_DEFAULT_ENVS.items():
         envs.setdefault(key, value)  # --modal-env below still overrides it
@@ -147,7 +151,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         gpu_name=getattr(args, "modal_gpu_name", None) or None,
         registry_login=bool(registry_login),
         registry_creds=registry_login,
-        image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
+        image_ref=image_ref_from_rl_image(engine_args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,
         volume_name=volume_name,
