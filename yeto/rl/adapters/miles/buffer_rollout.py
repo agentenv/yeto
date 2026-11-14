@@ -1717,6 +1717,10 @@ class BatchReader:
 
     def reset(self, watermark: int) -> int:
         """Continue at the restored cut's watermark (rounds after it are selected again)."""
+        # the read-ahead of the last take: its reads end before the restore's refresh
+        # (a Volume reload), and it reads ahead of a position that is abandoned now
+        self._stop_prefetching()
+        self._reads.clear()
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
         self._carry = None  # its position is at or past the watermark: selected again
