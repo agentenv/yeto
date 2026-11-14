@@ -24,6 +24,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import statistics
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -60,13 +61,15 @@ def _island_main(spec: FakeIsland, inbox: Any, outbox: Any, hb_s: float) -> None
         if msg[0] == "stop":
             return
         _, version, policy_hash = msg
-        t_end = time.time() + spec.work_s
+        t_start = time.time()
+        t_end = t_start + spec.work_s
         while time.time() < t_end:  # "train", heartbeating meanwhile
             time.sleep(min(hb_s, max(0.0, t_end - time.time())))
             send("heartbeat")
         send("delta", {"island_id": spec.island_id, "outer_version": version,
                        "inner_step": spec.steps_per_round, "policy_hash": policy_hash,
-                       "c_tokens": spec.tokens_per_round, "c_steps": spec.steps_per_round})
+                       "c_tokens": spec.tokens_per_round, "c_steps": spec.steps_per_round},
+             time.time() - t_start)  # the island's own round wall, free of coordinator lag
         send("samples", {"island_id": spec.island_id, "outer_version": version,
                          "inner_step": spec.steps_per_round, "policy_hash": policy_hash, "n": 8,
                          "behavior_logprob": [-0.5] * 4 if spec.behavior_logprob else None})
@@ -96,8 +99,12 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
     ledger = CrossIslandLedger(policy=policy, theta=theta, quorum_min=quorum_min,
                                gamma=gamma, lease_s=lease_s, mode=mode)
     failure: str | None = None
-    base_sent: dict[str, float] = {}
-    round_wall: dict[str, float] = {}
+    # Per-island round walls, measured by the island itself. Advice reads the
+    # median of the last few rounds, and only for islands with that many: one
+    # round of a 50 ms island is dominated by scheduler noise on a loaded host
+    # and does not make it "persistently slow".
+    round_walls: dict[str, list[float]] = {}
+    min_wall_samples = 2
     advised: set[str] = set()
 
     def pool(tx_kind: str, **f: Any) -> None:
@@ -121,7 +128,6 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
 
     def broadcast_base(ids) -> None:
         for i in ids:
-            base_sent.setdefault(i, time.time())
             inboxes[i].put(("base", ledger.outer_version, ledger.published[ledger.outer_version]))
 
     founding = {s.island_id for s in islands if s.join_at_version <= 0}
@@ -161,8 +167,7 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
             elif kind == "delta" and island_id in ledger.members:
                 ledger.heartbeat(island_id, now=now)
                 ledger.submit(DeltaEntry(**payload[0]))
-                if island_id in base_sent:  # time from a base being sent to its delta
-                    round_wall[island_id] = now - base_sent.pop(island_id)
+                round_walls.setdefault(island_id, []).append(payload[1])
             elif kind == "samples" and island_id in ledger.members:
                 raw = dict(payload[0])
                 lp = raw.pop("behavior_logprob")
@@ -186,7 +191,9 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
                 log("outer_step", **{k: step[k] for k in ("arrived", "cap_arrived", "cap_total", "timed_out", "absent", "carried_in")})
                 round_start = time.time()
                 if elastic:  # 0.11: suggestion only, recorded in the tape for a human
-                    live = {i: w for i, w in round_wall.items() if i in ledger.members}
+                    live = {i: statistics.median(w[-min_wall_samples:])
+                            for i, w in round_walls.items()
+                            if i in ledger.members and len(w) >= min_wall_samples}
                     for adv in slow_island_advice(live, now=time.time()):
                         target = adv.target_resource_intent["island_id"]
                         if target not in advised:
