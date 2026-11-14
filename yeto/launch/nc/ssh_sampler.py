@@ -181,6 +181,10 @@ def upload_code(alias: str, *, ref: str = "HEAD", run: Callable[..., Any] = subp
              (f"test -d {dest}/yeto && cat >/dev/null || (mkdir -p {dest}.tmp && tar x -C {dest}.tmp "
              f"&& mv {dest}.tmp {dest})")], stdin=archive.stdout, check=True, timeout=600)
     finally:
+        # Drop the launcher's read end so an ssh that ended early gives
+        # git archive EPIPE instead of a pipe that blocks it forever.
+        if archive.stdout is not None:
+            archive.stdout.close()
         archive.wait()
     return dest
 

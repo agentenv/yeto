@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -58,19 +60,24 @@ def tunnel_loop(ssh_argv: Sequence[str], events: str | Path, *, settle_s: float 
     while max_attempts is None or attempt < max_attempts:
         attempt += 1
         started = clock()
-        proc = popen(list(ssh_argv), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        up = False
-        try:
-            proc.wait(timeout=settle_s)
-        except subprocess.TimeoutExpired:
-            up = True
-            append_event(events, {"event": TUNNEL_EVENT, "state": "up", "attempt": attempt})
-            proc.wait()
-        err = ""
-        try:
-            err = (proc.stderr.read() if proc.stderr else "") or ""
-        except (OSError, ValueError):
-            pass
+        # stderr goes to an unlinked temp file, not a pipe: ssh that runs for
+        # days (keepalive warnings, verbose logs) would fill a pipe nobody reads
+        # until exit and block, wedging the forward without ever exiting.
+        with tempfile.TemporaryFile() as errf:
+            proc = popen(list(ssh_argv), stdout=subprocess.DEVNULL, stderr=errf)
+            up = False
+            try:
+                proc.wait(timeout=settle_s)
+            except subprocess.TimeoutExpired:
+                up = True
+                append_event(events, {"event": TUNNEL_EVENT, "state": "up", "attempt": attempt})
+                proc.wait()
+            err = ""
+            try:
+                errf.seek(max(0, errf.seek(0, os.SEEK_END) - 4096))
+                err = errf.read().decode("utf-8", "replace")
+            except (OSError, ValueError):
+                pass
         lived = clock() - started
         append_event(events, {"event": TUNNEL_EVENT, "state": "down", "attempt": attempt, "was_up": up,
                               "exit": proc.returncode, "lived_s": round(lived, 1),
