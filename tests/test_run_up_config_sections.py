@@ -81,3 +81,31 @@ def test_the_controller_value_is_checked_at_load(tmp_path):
         assert up.load_config(_write(tmp_path, controller=mode))["controller"] == mode
     with pytest.raises(ValueError, match="in-process"):
         up.load_config(_write(tmp_path, controller="in-process"))
+
+
+@pytest.mark.parametrize("extra, field", [
+    # a misspelled price: the spend would count the trainer at $0/h and budget.usd never trip
+    ({"trainer": {"argv": [], "usd_per_hour": 136}}, "trainer"),
+    ({"trainer": {"argv": [], "usd_per_h": "136"}}, r"trainer\.usd_per_h"),
+    ({"trainer": {"argv": "--training-mode rl"}}, r"trainer\.argv"),
+    ({"trainer": {"args": []}}, "trainer"),
+    ({"trainer": {}}, r"trainer\.argv"),
+    ({"trainer": {"argv": [], "progress_paths": "tape.jsonl"}}, r"trainer\.progress_paths"),
+    # a misspelled container cap: the sandbox container alert would be off
+    ({"sandbox": {"max_run_container": 64}}, "sandbox"),
+    ({"sandbox": {"max_run_containers": "64"}}, r"sandbox\.max_run_containers"),
+    ({"pool": {"config": "p.json", "interval": 30}}, "pool"),
+    ({"pool": {"config": "p.json", "interval_s": 0}}, r"pool\.interval_s"),
+    ({"preflight": {"command": [["true"]]}}, "preflight"),
+])
+def test_a_bad_trainer_sandbox_pool_preflight_key_is_refused_at_load(tmp_path, extra, field):
+    with pytest.raises(ValueError, match=field):
+        up.load_config(_write(tmp_path, **extra))
+
+
+def test_the_documented_trainer_sandbox_pool_preflight_keys_load(tmp_path):
+    up.load_config(_write(tmp_path, trainer={"argv": ["--x"], "usd_per_h": 136, "progress_paths": ["t"]},
+                          pool={"config": "p.json", "interval_s": 30},
+                          sandbox={"envs": "e.json", "docker_host": ["ssh://h"], "max_run_containers": 64,
+                                   "max_containers_per_sampler": 20},
+                          preflight={"commands": [["true"]]}))
