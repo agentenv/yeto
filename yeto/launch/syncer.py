@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -165,8 +166,9 @@ def _rl_quorum_timeout_s(args) -> int | None:
     value = getattr(args, "rl_elastic_quorum_timeout_s", None)
     if value is None or not getattr(args, "rl_elastic", False):
         return None
-    if float(value) != int(value):
-        raise ValueError("--rl-elastic-quorum-timeout-s must be whole seconds (syncer u64)")
+    value = float(value)
+    if not (value > 0 and math.isfinite(value)) or value != int(value):
+        raise ValueError("--rl-elastic-quorum-timeout-s must be positive whole seconds (syncer u64)")
     return int(value)
 
 

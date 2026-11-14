@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -244,8 +245,8 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic-cells (the names)")
     for name in _ELASTIC_PAUSE + ("rl_elastic_max_recovery_attempts",):
         value = getattr(args, name, None)
-        if value is not None and not value > 0:
-            raise ValueError(f"--{name.replace('_', '-')} must be positive")
+        if value is not None and not (value > 0 and math.isfinite(value)):
+            raise ValueError(f"--{name.replace('_', '-')} must be positive and finite")
 
 
 def _check_sample_store(args) -> None:

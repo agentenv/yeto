@@ -636,6 +636,22 @@ def test_timeouts_need_elastic_and_positive_values():
         launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")))
 
 
+def test_elastic_timeouts_reject_non_finite_values():
+    """inf passed ``value > 0``: an infinite drain or recovery budget never
+    times out, and an infinite quorum timeout crashed the syncer flag build
+    with OverflowError instead of a clear error."""
+    import pytest
+
+    from test_rl_engine_selection import _cli
+    from yeto import launcher
+
+    for value in ("inf", "nan", "-1"):
+        for flag in ("--rl-elastic-drain-timeout-s", "--rl-elastic-quorum-timeout-s",
+                     "--rl-elastic-recovery-timeout-s"):
+            with pytest.raises(ValueError, match="must be positive"):
+                launcher._check_ports_infra_switches(_cli((flag, value)))
+
+
 def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
     run = island_run(BASE + _elastic(tmp_path) + (
         "--rl-elastic-tool-wait-board", "--rl-test-inject-lora-perturb", "0.01",
