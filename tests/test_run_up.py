@@ -19,7 +19,7 @@ def make_run(tmp_path, monkeypatch):
     # leaks the fake clock into every thread of the test process (a background
     # thread's sleep then advances it, which made the 1.2x breaker test flaky)
     monkeypatch.setattr(up, "time", types.SimpleNamespace(
-        time=time.time, sleep=lambda s: None, gmtime=time.gmtime, strftime=time.strftime))
+        time=time.time, monotonic=time.monotonic, sleep=lambda s: None, gmtime=time.gmtime, strftime=time.strftime))
     pool_cfg = tmp_path / "pool.json"
     pool_cfg.write_text(json.dumps({"shard_base": "s"}))
 

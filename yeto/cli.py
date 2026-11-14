@@ -2315,16 +2315,16 @@ def _cmd_down_clusters(args) -> int:
         print(f"[yeto] stopping worker pid {', '.join(map(str, pids))} (SIGTERM)")
         for p in pids:
             _signal_worker(p, signal.SIGTERM)
-        deadline = time.time() + 10
-        while any(runs.is_alive(p) for p in pids) and time.time() < deadline:
+        deadline = time.monotonic() + 10  # local grace: immune to wall-clock steps
+        while any(runs.is_alive(p) for p in pids) and time.monotonic() < deadline:
             time.sleep(0.2)
         stuck = [p for p in pids if runs.is_alive(p)]
         if stuck:
             print(f"[yeto] worker pid {', '.join(map(str, stuck))} did not exit; sending SIGKILL")
             for p in stuck:
                 _signal_worker(p, signal.SIGKILL)
-            deadline = time.time() + 5
-            while any(runs.is_alive(p) for p in stuck) and time.time() < deadline:
+            deadline = time.monotonic() + 5
+            while any(runs.is_alive(p) for p in stuck) and time.monotonic() < deadline:
                 time.sleep(0.2)
         left = [p for p in pids if runs.is_alive(p)]
         if left:
