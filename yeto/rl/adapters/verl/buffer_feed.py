@@ -98,6 +98,7 @@ from yeto.rl.engine.buffer_payload import (
 )
 
 from yeto.rl.engine.incarnation_lease import STALE_REASON
+from yeto.rl.engine.xhw_guard import source_key
 
 from .fully_async_translate import VerlTranslationError, VersionMap
 
@@ -108,6 +109,8 @@ NONFINITE_REWARD_REASON = "nonfinite_reward"
 TRAINER_CONSUMER = "trainer"  # the buffer's single consumer name (as the Miles reader)
 QUEUE_METHODS = ("yeto_pull_sample", "yeto_keep_last", "yeto_drop_last")
 UID_PREFIX = "buf"
+# a group of a source the xhw guard quarantined (YETO_RL_XHW_GUARD, action=quarantine)
+XHW_QUARANTINE_REASON = "xhw_quarantine"
 
 
 class BufferFeedError(SampleBufferRolloutError):
@@ -304,7 +307,8 @@ class BufferFeed:
                  cursor_log: Any = None, merged: MergedVersions | None = None,
                  group_size: int | None = None, emit: Callable[..., None] | None = None,
                  drop_window: int | None = None, drop_warn_ratio: float | None = None,
-                 drop_stall_warn_s: float | None = None, incarnation_gate: Any = "auto") -> None:
+                 drop_stall_warn_s: float | None = None, incarnation_gate: Any = "auto",
+                 xhw: bool = False, round_of: Callable[[], int] | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor log
         (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
         merged version pairing (module doc). ``emit(event, **fields)`` reports a
@@ -317,8 +321,19 @@ class BufferFeed:
         ``incarnation_lease.IncarnationGate``; a group of a superseded sampler
         incarnation written after the new one claimed the lease is dropped as
         ``stale_incarnation``; ``"auto"`` builds it over the buffer's store
-        (:func:`default_incarnation_gate`), None turns it off."""
+        (:func:`default_incarnation_gate`), None turns it off.
+
+        ``xhw`` (``YETO_RL_XHW_GUARD`` set; default off, nothing changes): the
+        feed counts each round's trained response tokens per source
+        (``xhw_guard.source_key``) for the driver's guard (:meth:`xhw_round`) and
+        drops the groups of a source the guard quarantined (:meth:`set_xhw_actions`)
+        as ``xhw_quarantine`` until ``round_of()`` reaches its ``until_round``."""
         self.buffer = buffer
+        self.xhw = bool(xhw)
+        self.round_of = round_of
+        self.xhw_actions: dict[str, dict[str, Any]] = {}
+        self._xhw_quarantined = 0
+        self._xhw_last: dict[str, Any] | None = None
         self.gate = default_incarnation_gate(buffer) if incarnation_gate == "auto" else incarnation_gate
         self.emit = print_feed_event if emit is None else emit
         self.drop_window = max(1, int(drop_window if drop_window is not None
@@ -428,6 +443,15 @@ class BufferFeed:
                 self.pulled_positions.append(int(item.position))
                 self._dropped(STALE_REASON, int(item.position), stale)
                 continue
+            if self.xhw and self._quarantined(self._source(item.entry, item.position)):
+                detail = "source quarantined by the xhw guard"
+                self.record({"position": int(item.position), "sample_id": item.entry.sample_id,
+                             "kept": False, "dropped": XHW_QUARANTINE_REASON, "detail": detail,
+                             "source": (item.entry.provenance or {}).get("sampler_id")})
+                self.pulled_positions.append(int(item.position))
+                self._xhw_quarantined += 1
+                self._dropped(XHW_QUARANTINE_REASON, int(item.position), detail)
+                continue
             samples = decode_group(self.buffer.read_payload(item.entry.payload_ref))
             if not samples:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
@@ -471,6 +495,28 @@ class BufferFeed:
         return {"uid": f"{UID_PREFIX}{int(item.position)}", "min_steps": local, "max_steps": local,
                 "calls": (None,) * len(samples), "lengths": lengths,
                 "rewards": tuple(float(s.get("reward") or 0.0) for s in samples)}
+
+    def _source(self, entry: Any, position: int) -> str:
+        shard_at = getattr(self.buffer, "shard_at", None)
+        return source_key(entry.provenance, shard_at(int(position)) if callable(shard_at) else None)
+
+    def _quarantined(self, source: str) -> bool:
+        action = self.xhw_actions.get(source) or {}
+        if action.get("action") != "quarantine":
+            return False
+        until = action.get("until_round")
+        if until is None or self.round_of is None:
+            return True
+        return int(self.round_of()) < int(until)
+
+    def set_xhw_actions(self, actions: Mapping[str, Mapping[str, Any]]) -> None:
+        """The driver's guard actions after a trained round (``xhw_actions_sink``)."""
+        self.xhw_actions = {str(k): dict(v) for k, v in dict(actions or {}).items()}
+
+    def xhw_round(self) -> dict[str, Any]:
+        """The closed round's per-source fields for ``RolloutBatchHandle``
+        (``buffer_source_tokens``, ``buffer_xhw_quarantined``); empty with ``xhw`` off."""
+        return dict(self._xhw_last or {}) if self.xhw else {}
 
     def _accepted(self) -> None:
         self.accepted += 1
@@ -599,6 +645,15 @@ class BufferFeed:
         has trained (module doc, "What a relaunch reads again")."""
         if self._last is not None:
             raise BufferFeedError("round closed with a pulled group not kept or dropped")
+        if self.xhw:  # the kept groups (rechecked) of this round, per source
+            tokens: dict[str, int] = {}
+            for position, entry, record in self._kept_pending:
+                source = self._source(entry, position)
+                tokens[source] = tokens.get(source, 0) + int(record.get("response_tokens") or 0)
+            self._xhw_last = {"buffer_source_tokens": tokens,
+                              "buffer_xhw_quarantined": self._xhw_quarantined,
+                              "buffer_xhw_downweighted": 0}
+            self._xhw_quarantined = 0
         self._hand_over()
         self._lease_reads = {}
         kept, self._round_kept = self._round_kept, []
@@ -625,6 +680,22 @@ class BufferFeed:
         sampler that writes its own shard counts its backlog from this
         (``SamplerLoop.backlog``), not from the merged position."""
         return self.buffer.shard_positions(self.buffer.read_cursor) or None
+
+
+def xhw_guard_enabled(environ) -> bool:
+    """``YETO_RL_XHW_GUARD`` on this verl buffer trainer (unset: False, nothing
+    changes). The feed applies ``warn``, ``quarantine`` and ``stop`` (the driver
+    raises); ``downweight`` is refused at start: verl's GRPO advantages are std
+    normalized by default and the feed does not scale them."""
+    from yeto.rl.engine.xhw_guard import ENV, XhwGuard
+
+    guard = XhwGuard.from_env(environ)
+    if guard is None:
+        return False
+    if guard.action == "downweight":
+        raise ValueError(f"{ENV} action=downweight is not available on the verl buffer trainer "
+                         "(use action=quarantine, warn or stop)")
+    return True
 
 
 ASSEMBLE_METHOD = "yeto_assemble"  # the rollout port's call after a round's collection

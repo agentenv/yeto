@@ -228,6 +228,9 @@ class FullyAsyncRolloutPool:
             # over-age discard; 0 when none (known, not None -- an early async run
             # showed null on every round).
             **(discard if collector.discarded else {"aborted_in_flight_groups": 0}),
+            # YETO_RL_XHW_GUARD on a buffer trainer: the round's tokens per source for
+            # the driver's guard (buffer_feed.BufferFeed.xhw_round); off: nothing
+            **_xhw_round_fields(isl),
         )
 
     def _collector(self, rollout_id: int) -> RoundCollector:
@@ -357,7 +360,23 @@ class FullyAsyncTrainerGroup(CutPorts):
             value = self.island.last_metrics.get(key)
             if isinstance(value, (int, float)):
                 out[f"verl/{key}"] = float(value)
+        if getattr(self.island, "xhw_feed", None) is not None:
+            # the guard reads the Miles step names (xhw_guard.METRICS)
+            for name, criterion in XHW_CRITERIA.items():
+                value = self.island.last_criteria.get(criterion)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    out[name] = float(value)
         return out
+
+
+# xhw_guard.METRICS name -> the yeto mismatch criterion verl computes (ports_impl)
+XHW_CRITERIA = {"train_rollout_logprob_abs_diff": "abs_diff", "train_rollout_kl": "k3",
+                "sc_is_clipped": "tis_clipfrac"}
+
+
+def _xhw_round_fields(island) -> dict:
+    feed = getattr(island, "xhw_feed", None)
+    return feed.xhw_round() if feed is not None else {}
 
 
 class FullyAsyncPublisher:

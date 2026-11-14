@@ -28,6 +28,10 @@ loss reads ``rollout_log_probs`` and the rollout top-K directly (Miles
 ``YETO_RL_XHW_GUARD=warn_abs_diff=0.10,act_abs_diff=0.15,warn_kl=0.03,act_kl=0.06,
 warn_clip=0.01,act_clip=0.03,window=3,min_rounds=2,action=quarantine,quarantine_rounds=8,
 weight=0.5`` (every key optional; ``1``/``on`` = defaults). Unset: nothing changes.
+Readers: the Miles buffer reader (every action) and the verl buffer trainer's feed
+(``adapters/verl/buffer_feed.py``: warn, quarantine, stop; downweight is refused there).
+A launch over several device families gets a preflight warning advising this switch
+(``launch_preflight.xhw_family_advice``); it is never turned on for you.
 
 Import-light: no torch, no Miles (numpy only inside :func:`rollout_stats`).
 """
