@@ -236,7 +236,20 @@ class PostLoadChecks:
         if not self.fixed_prompts:
             return {"name": "fixed_prompts", "passed": True, "detail": "no fixed prompts"}
         greedy = SamplingParams(max_tokens=int(self.fixed_max_tokens), temperature=0.0, seed=0).check()
-        groups = engine.generate([p.prompt for p in self.fixed_prompts], greedy)
+        try:
+            groups = engine.generate([p.prompt for p in self.fixed_prompts], greedy)
+        except SamplerEngineError as error:
+            # A probe asking for more output tokens than the engine's whole window
+            # leaves no room for its prompt; the engine's own answer then reads as a
+            # broken model ("maximum context length is 0 tokens"), not as a setting
+            # that does not fit. Name the setting instead (the probe still fails).
+            if int(self.fixed_max_tokens) >= int(engine.max_model_len):
+                raise SamplerEngineError(
+                    f"the post-load probe asks for {int(self.fixed_max_tokens)} output tokens "
+                    f"(checks.fixed_max_tokens) plus its prompt, but the engine serves max_model_len "
+                    f"{engine.max_model_len}; raise the engine limit or lower checks.fixed_max_tokens "
+                    f"(engine said: {error})") from error
+            raise
         answers = []
         for item, group in zip(self.fixed_prompts, groups):
             text = group[0].text if group else ""
