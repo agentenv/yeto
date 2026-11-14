@@ -664,3 +664,48 @@ def test_claims_within_the_probe_ttl_do_not_exceed_the_host_room(tmp_path):
     assert len(first) == 2
     assert p.take(2) == []  # the containers of the first claim are not running yet
     assert len(_claimed(store)) == 2
+
+
+class SlowStartRoom:
+    """Containers of a claim appear only ``delay`` seconds after it (slow image start)."""
+
+    def __init__(self, clock, delay):
+        self.clock, self.delay, self.starts = clock, delay, []
+
+    def count_running(self):
+        return sum(1 for t in self.starts if self.clock() - t >= self.delay)
+
+
+def test_claimed_but_not_started_trials_count_across_probes(tmp_path):
+    """Trials whose containers start slower than ttl_s: the next probe does not see
+    them running yet, so their room must still be counted as taken (in flight)."""
+    store = sd.DirObjects(tmp_path / "store")
+    _manifest(store, {f"t{i}": {"h1": True} for i in range(8)})
+    now = [100.0]
+    room = SlowStartRoom(lambda: now[0], delay=30.0)
+    gate = _gate(store, max_sandboxes=2, running=0)
+    gate.docker, gate.ttl_s, gate.clock = room, 15.0, lambda: now[0]
+    p = _prompts(tmp_path, store, gate, n=8, groups=2)
+    first = p.take(2)
+    assert len(first) == 2
+    room.starts += [now[0]] * 2
+    now[0] += 16.0  # a fresh probe; the containers are still starting
+    assert p.take(2) == []
+    assert len(_claimed(store)) == 2
+    now[0] += 16.0  # the containers are now running: the probe counts them, not twice
+    assert room.count_running() == 2
+    assert p.take(2) == []
+    assert len(_claimed(store)) == 2
+
+
+def test_in_flight_room_expires_when_containers_never_appear(tmp_path):
+    store = sd.DirObjects(tmp_path / "store")
+    now = [100.0]
+    gate = _gate(store, max_sandboxes=2, running=0)
+    gate.ttl_s, gate.clock = 15.0, lambda: now[0]
+    assert gate.free_groups() == 2
+    gate.claimed(2)
+    now[0] += 16.0
+    assert gate.free_groups() == 0
+    now[0] += gate.start_grace_s
+    assert gate.free_groups() == 2  # never started (or already finished): not held forever
