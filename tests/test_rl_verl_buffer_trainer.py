@@ -1157,3 +1157,34 @@ def test_a_round_cut_behind_the_store_continues_above_its_releases(tmp_path):
     records = releases.records()
     assert [r.version for r in records] == [1, 2, 3, 4]  # no version released twice
     assert {r.version: r.policy_hash for r in records if r.version <= 3} == hashes
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_group_with_a_non_finite_log_prob_is_dropped(tmp_path, bad):
+    """verl's off-policy correction (TIS / pi_prox) and old-log-prob reuse take
+    exp(old - rollout_log_probs): one NaN/inf behavior log-prob makes the batch's
+    loss NaN (masked positions too: NaN * 0 is NaN). The feed drops the group as
+    nonfinite_logprob instead of handing it to the trainer."""
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    poisoned = _sample(0, index=1)
+    poisoned["rollout_log_probs"] = list(poisoned["rollout_log_probs"])
+    poisoned["rollout_log_probs"][-1] = bad
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok1")
+    writer.write([_sample(0, index=0), poisoned], group_key="bad")
+    writer.write([_sample(0, index=0), _sample(0, index=1)], group_key="ok2")
+    reader, vmap, added, records, events = _buffer(tmp_path), VersionMap(), [], [], []
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(reader, vmap=lambda: vmap, shape=SHAPE, add_group=added.append,
+                         record=records.append, sleep=lambda s: None, group_size=2,
+                         emit=lambda event, **fields: events.append((event, fields)))
+    for _ in range(2):
+        assert feed.pull() is not None
+        feed("yeto_keep_last")
+    feed.close_round(0)
+    records.sort(key=lambda r: r["position"])
+    assert [(r["position"], r["kept"], r.get("dropped")) for r in records] == [
+        (0, True, None), (1, False, "nonfinite_logprob"), (2, True, None)]
+    assert [rows["non_tensor"]["uid"][0] for rows in added] == ["buf0", "buf2"]
+    dropped = [f for e, f in events if e == "rl_buffer_group_dropped"]
+    assert [(f["reason"], f["position"]) for f in dropped] == [("nonfinite_logprob", 1)]
+    assert feed.dropped == {"nonfinite_logprob": 1}

@@ -67,6 +67,7 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     decode_group,
     encode_group,
     group_entry_fields,
+    nonfinite_logprob,
     passed_over_text,
     payload_is_missing,
     payload_oldest_version,
@@ -543,6 +544,9 @@ class TakeReport:
     # groups with a sample whose reward is missing or not finite (a failed reward call):
     # consumed, never trained (one NaN reward makes the whole group's advantages NaN)
     nonfinite_reward_groups: int = 0
+    # groups with a sample whose behavior log-probs (rollout_log_probs) hold a NaN/inf:
+    # consumed, never trained (TIS / off-policy correction would make the loss NaN)
+    nonfinite_logprob_groups: int = 0
     # groups whose payload is missing or is not a group (cut short, not JSON, another
     # schema): consumed, never trained; one record each in ``damaged_payloads``
     # ({"position", "sample_id", "payload_ref", "reason"[, "dispense_position"]}). A
@@ -590,6 +594,7 @@ class TakeReport:
                 "sample_buffer/padded_samples": float(self.padded_samples),
                 "sample_buffer/padded_fraction": float(self.padded_fraction),
                 "sample_buffer/nonfinite_reward_groups": float(self.nonfinite_reward_groups),
+                "sample_buffer/nonfinite_logprob_groups": float(self.nonfinite_logprob_groups),
                 "sample_buffer/damaged_payload_groups": float(self.damaged_payload_groups),
                 "sample_buffer/stale_payload_groups": float(self.stale_payload_groups),
                 "sample_buffer/duplicate_task_groups": float(self.duplicate_task_groups),
@@ -898,6 +903,7 @@ class BatchReader:
         # trains nothing twice; an unreadable lease pauses the training
         self._deferred: list[tuple[int, Any]] = []
         self._nonfinite = 0
+        self._nonfinite_lp = 0
         # the items the take under way selected, and those of a take that raised (they
         # come first in the next take: the buffer's read cursor is already past them)
         self._taken: list[Any] = []
@@ -1054,6 +1060,7 @@ class BatchReader:
         records), and one log line."""
         counts = {**counts, "stale": counts.get("stale", 0) + len(self._stale_payloads),
                   "stale_payload": len(self._stale_payloads), "nonfinite_reward": self._nonfinite,
+                  "nonfinite_logprob": self._nonfinite_lp,
                   "damaged_payload": len(self._damaged), "duplicate_task": len(self._duplicates)}
         counts = {key: int(value) for key, value in counts.items() if value}
         out = type(error)(f"{error}{passed_over_text(counts)}")
@@ -1136,6 +1143,7 @@ class BatchReader:
         self._floor = floor
         dropped_small = 0
         self._nonfinite = 0  # groups with a missing or non-finite reward (counted by the helpers)
+        self._nonfinite_lp = 0  # groups with a non-finite behavior log-prob (likewise)
         self._unidentified = {"versions": {}, "positions": []}
         carried_in, self._carry = self._carry, None
         if self.tasks is not None:
@@ -1274,7 +1282,7 @@ class BatchReader:
         carried_out = padded = 0
         if self.group_size is not None and chosen:
             skipped: dict[str, Any] = {"stale": 0, "stale_positions": [], "fenced": 0, "quarantined": 0,
-                                       "nonfinite": 0}
+                                       "nonfinite": 0, "nonfinite_logprob": 0}
             # with a group deferred, nothing behind it is selected: the round is padded
             end, carried_out, padded, more_small = self._fill(
                 int(groups) * self.group_size, end, rollout_id, floor, chosen, decoded, accounted, versions,
@@ -1285,6 +1293,7 @@ class BatchReader:
             fenced += skipped["fenced"]
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
+            self._nonfinite_lp += skipped["nonfinite_logprob"]
             incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
             deferred_now += skipped.get("deferred", 0)
         if self._deferred:  # the watermark never passes a group the gate could not judge yet
@@ -1295,13 +1304,15 @@ class BatchReader:
         stale += len(self._stale_payloads)
         stale_positions += [p for p in self._stale_payloads if p is not None]
         nonfinite = self._nonfinite
+        nonfinite_lp = self._nonfinite_lp
         damaged = list(self._damaged)
         duplicates = list(self._duplicates)
         if not out:
             raise self._ended(SampleBufferExhausted(
                 f"rollout {rollout_id}: the sample buffer ended with no trainable group (position {end}, "
                 f"{stale} passed over as too old, {fenced} from fenced incarnations, {dropped_small} too "
-                f"small, {nonfinite} without a finite reward, {len(damaged)} with a damaged payload, "
+                f"small, {nonfinite} without a finite reward, {nonfinite_lp} with a non-finite log-prob, "
+                f"{len(damaged)} with a damaged payload, "
                 f"{len(duplicates)} of a task already trained)"),
                 stale=stale - len(self._stale_payloads), stale_incarnation=fenced, quarantined=quarantined,
                 dropped_small=dropped_small)
@@ -1339,6 +1350,7 @@ class BatchReader:
                                incomplete_groups=incomplete,
                                dropped_small_groups=dropped_small, carried_over_groups=carried_out,
                                padded_samples=padded, nonfinite_reward_groups=nonfinite,
+                               nonfinite_logprob_groups=nonfinite_lp,
                                damaged_payload_groups=len(damaged), damaged_payloads=damaged,
                                stale_payload_groups=len(self._stale_payloads),
                                duplicate_task_groups=len(duplicates),
@@ -1423,6 +1435,9 @@ class BatchReader:
             if not finite_rewards(group):
                 skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
                 continue
+            if nonfinite_logprob(group) is not None:
+                skipped["nonfinite_logprob"] = skipped.get("nonfinite_logprob", 0) + 1
+                continue
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
             oldest = payload_oldest_version(group)
             if oldest is not None:  # what the next take's age gate compares if this group is carried over
@@ -1452,7 +1467,7 @@ class BatchReader:
             return 0
         self._settle([read for _, read in fresh])
         drop: set[int] = set()
-        nonfinite = damaged = duplicate = 0
+        nonfinite = nonfinite_lp = damaged = duplicate = 0
         for position, read in fresh:
             group = self._group_at(position, read)
             if group is not None and self._stale_payload(position, group):
@@ -1461,7 +1476,8 @@ class BatchReader:
                 aged = False
             sized = group is not None and (
                 self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
-            if sized and (self.group_size is None or finite_rewards(group)):
+            bad_lp = sized and nonfinite_logprob(group) is not None
+            if sized and not bad_lp and (self.group_size is None or finite_rewards(group)):
                 # in buffer order, after the payload checks: an earlier group of this
                 # selection that is trained holds the task; one just dropped does not
                 entry = self._entry_of.get(int(position))
@@ -1476,6 +1492,8 @@ class BatchReader:
                 damaged += 1  # not a size drop: counted in the take's stale groups
             elif group is None:
                 damaged += 1
+            elif bad_lp:
+                nonfinite_lp += 1
             elif sized:
                 nonfinite += 1
             drop.add(position)
@@ -1484,7 +1502,8 @@ class BatchReader:
         if drop:
             chosen[:] = [c for c in chosen if c[0] not in drop]
         self._nonfinite += nonfinite
-        return len(drop) - nonfinite - damaged - duplicate
+        self._nonfinite_lp += nonfinite_lp
+        return len(drop) - nonfinite - nonfinite_lp - damaged - duplicate
 
     def _recheck(self, chosen: list, accounts: tuple, lease_reads: dict[str, float]) -> tuple[int, int]:
         """Judge the ``chosen`` groups again, each shard's lease read again (at most

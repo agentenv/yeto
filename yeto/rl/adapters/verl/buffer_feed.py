@@ -88,11 +88,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from yeto.rl.engine.buffer_payload import (
+    NONFINITE_LOGPROB,
     SampleBufferRolloutError,
     complete_prompt_tokens,
     decode_group,
     finite_rewards,
     group_entry_fields,
+    nonfinite_logprob,
 )
 
 from yeto.rl.engine.incarnation_lease import STALE_REASON
@@ -441,6 +443,9 @@ class BufferFeed:
                 too_long = f"{len(samples)} samples, the trainer trains groups of {self.group_size}"
             else:
                 reason = "over_length"
+            if too_long is None:
+                too_long = nonfinite_logprob(samples)
+                reason = NONFINITE_LOGPROB
             if too_long is None:
                 self._accepted()
                 break

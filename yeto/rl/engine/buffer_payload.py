@@ -70,6 +70,60 @@ class DamagedPayloadLimit(SampleBufferRolloutError):
 PASSED_OVER_MARK = "; passed over "
 
 
+NONFINITE_LOGPROB = "nonfinite_logprob"  # the drop reason both trainer readers record
+
+
+def _first_nonfinite(values: Any) -> tuple[int, Any] | None:
+    """(index, value) of the first entry of ``values`` that is not a finite number
+    (None: all are). Fast path: an array's vectorized ``isfinite``, else one
+    ``sum`` (any NaN/inf makes it non-finite; log-probs are bounded, so a finite
+    list does not overflow); only a non-finite or non-numeric sum is located entry
+    by entry (a 1M-token sample costs one C-level sum, not a Python loop)."""
+    import math
+
+    if hasattr(values, "detach"):  # torch.Tensor
+        values = values.detach().cpu().numpy()
+    if type(values).__module__ == "numpy":
+        import numpy
+
+        flat = numpy.asarray(values).reshape(-1)
+        if flat.dtype.kind in "fiub":
+            bad = numpy.flatnonzero(~numpy.isfinite(flat))
+            return None if bad.size == 0 else (int(bad[0]), flat[bad[0]].item())
+        values = flat.tolist()
+    try:
+        if math.isfinite(sum(values)):
+            return None
+    except (TypeError, ValueError, OverflowError):
+        pass
+    for t, value in enumerate(values):
+        try:
+            ok = not isinstance(value, bool) and math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            ok = False
+        if not ok:
+            return t, value
+    return None
+
+
+def nonfinite_logprob(group: Sequence[Mapping[str, Any]]) -> str | None:
+    """Why a decoded group's behavior log-probs cannot be trained (None: they can).
+
+    The trainers take ``exp(old - rollout_log_probs)`` (TIS / off-policy
+    correction, the old-log-prob reuse), so one NaN/inf entry makes the loss NaN,
+    masked positions included (NaN * 0 is NaN). Shared by the Miles reader and
+    the verl feed; a sample without the field is not judged."""
+    for i, sample in enumerate(group):
+        values = sample.get("rollout_log_probs")
+        if values is None:
+            continue
+        bad = _first_nonfinite(values)
+        if bad is not None:
+            return (f"sample {sample.get('index', i)} rollout_log_probs[{bad[0]}] = {bad[1]!r} "
+                    f"is not a finite number")
+    return None
+
+
 def passed_over_text(counts: Mapping[str, int]) -> str:
     """The tail of such an error's text ("" when nothing was passed over)."""
     counts = {key: int(value) for key, value in counts.items() if value}
