@@ -671,10 +671,19 @@ launcher allows expandable segments on a full-parameter trainer island
 yeto run up --config <run.json> --dry-run
 ```
 
-Preflight runs every check and orders nothing:
+Before preflight, the run config itself is loaded: a missing file, invalid
+JSON, an unknown key or a malformed `first_group` / `budget` / `dashboard` /
+`rollout` / `starvation` value ends `yeto run` with one line naming the file
+and the field (`run config <file>: ...`), exit 2.
 
-1. the Modal SDK check (when the trainer targets `modal:`), and a refusal of
-   `--rl-stall-timeout 0`;
+Preflight then runs every check and orders nothing:
+
+1. the Modal SDK check (when the trainer targets `modal:`), then the checks
+   that need no subprocess: `budget.usd` / `budget.wall_h` (a WARNING when
+   `wall_h` is absent; a refusal for a value that is not a positive number or
+   null, for `budget.usd` 0 with prices set, and for a USD-priced pool without
+   a price), the `starvation` section, a refusal of `--rl-stall-timeout 0`, and
+   per pool the shard range and the trainer/sampler consistency checks;
 2. `python -m yeto.launch.nc pool --config <pool.json> --dry-run`: the pool
    config, the accounts, and the sampler spec built locally the way the
    sampler builds it at start (island config, engine adapter, rollout fields,
@@ -1557,6 +1566,10 @@ on the NC event tape they carry the `nc_elastic_` prefix.
 | Data end: once every sampler pool is finished and holds no live member, the monitor writes the end record of every shard the trainer reads that has not ended (fenced, lost or never used shards), so the trainer finishes on the data end; starvation is not checked after that. | - | `state["data_ended"]` | Nothing. |
 | `yeto run down` takes the run's `up.lock` first: a running `run up` of the same run gets SIGTERM and up to `YETO_RUN_DOWN_GRACE_S` seconds to exit before the teardown starts; a `down` that meets another `down` only waits for it (#402). | `YETO_RUN_DOWN_GRACE_S` (60) | the `down` message that it interrupts the running `up` | Nothing: `down` and a running `up` no longer race. To keep training after a `down`, run `yeto run up` again. |
 | The run's `state.json` is read, merged and written under a lock and replaced atomically, so `yeto run scale` and `yeto run up` writing at the same time no longer overwrite each other (#403). | none | - | Nothing. |
+| Local disk check before a release lands on a node: a sampler hot load and a trainer `--rl-init-from-release` (download and delta rebuild) compare the free space with the release record's sizes times a headroom and stop before the first byte instead of failing with ENOSPC part way (#458). A trainer node drops surplus mirror copies before a delta rebuild, so the peak is one release-sized copy lower (#459). | `YETO_RL_DISK_HEADROOM` (1.05; values below 1, `inf` or `nan` fall back to the default) | `InsufficientDiskSpace: <what>: needs about <N> GB on <path> (... headroom), only <M> GB free` | Free the disk or point the cache at a larger one, then retry. |
+| A trainer node that cannot prepare its init release ends with `[yeto-init-release] FAILED: <type>: <message>`, and `yeto run up` quotes that line (credentials, presigned URL queries and URL userinfo redacted, at most 500 characters) (#460, #461-#463). | none | `[yeto-init-release] FAILED: ...` | Fix the cause named in the line. |
+| The `run up` monitor survives a full or read-only control-host disk: a failed `state.json` write is logged once and the state stays in memory, so the budget breaker and the 1.2x forced pool stop keep working (#469). The pool loop emits `state_save_failing` once per streak of failed state saves (and `state_save_recovered`), keeps running, and fails closed before a step that depends on a fence's saved success (#467, #468). | none | `CRITICAL state_write_failed`, `state_save_failing`, `state_save_recovered` | Free the control-host disk. |
+| A commanded trainer island (head-scheduled trainer) waits at most `YETO_TRAINER_RELEASE_DRAIN_S` for its background policy release upload before it reports STOPPED, so an upload that hangs no longer keeps the island billing; past the bound STOPPED goes out with the error (#465). | `YETO_TRAINER_RELEASE_DRAIN_S` (1800) | STOPPED with the upload error | Read the island log for the upload error. |
 
 #### CI
 
