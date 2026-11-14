@@ -561,7 +561,7 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
                      store: PackStore, cache_root: str | os.PathLike[str],
                      semantic_sha256: str | None, upgrade_reason: str | None = None,
                      release_image: str | None = None, keep_pinned: bool = False,
-                     log: Callable[[str], None] = print) -> RunPack:
+                     strict: bool = True, log: Callable[[str], None] = print) -> RunPack:
     """The pack this start of the run uses.
 
     * no pack in ``previous`` (the old run manifest): make, store and unpack one;
@@ -577,13 +577,17 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
     Drift guard: when the local tree (commit + dirty patch, i.e. the pack digest)
     differs from the pinned pack, a plain relaunch is refused instead of silently
     running the old code. ``keep_pinned`` (a deliberate resume on the run's pack)
-    reuses it anyway; ``upgrade_reason`` moves to the local tree."""
+    reuses it anyway; ``upgrade_reason`` moves to the local tree.
+
+    ``strict=False`` (opt-in light hashing, ``--rl-light-hash``): a drifted local tree moves the run to it as an automatic
+    upgrade (recorded in the pack history with a warning) when the semantic hash is
+    known and unchanged; a semantic change is still refused."""
 
     old_record = (previous or {}).get("code_pack")
     if release_image is not None:
         return _resolve_release_pack(old_record, previous, release_image,
                                      semantic_sha256=semantic_sha256,
-                                     upgrade_reason=upgrade_reason, log=log)
+                                     upgrade_reason=upgrade_reason, strict=strict, log=log)
     base = getattr(store, "base", None) or getattr(store, "uri_base", None)
     old_uri = (old_record or {}).get("pack_uri")
     if (old_uri and base and (old_record or {}).get("mode") != CODE_PACK_MODE_RELEASE and not str(old_uri).startswith(base.rstrip("/") + "/")):
@@ -612,10 +616,29 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         return RunPack(new, unpack(data, new.digest, cache_root), reused=False)
     if not keep_pinned:
         problem = _drift_problem(old, build_pack(repo)[0])
+        if problem is not None and not strict and _auto_upgrade_ok(previous, semantic_sha256):
+            candidate, data = make_and_store(repo, store)
+            new = upgrade_record(old, candidate,
+                                 old_semantic=(previous or {}).get("semantic_sha256"),
+                                 new_semantic=semantic_sha256, reason=AUTO_UPGRADE_REASON)
+            log(f"[codepack] WARNING: local tree changed; automatic upgrade "
+                f"{old.digest[:16]} -> {new.digest[:16]} (semantic hash unchanged; "
+                "without --rl-light-hash this is refused)")
+            return RunPack(new, unpack(data, new.digest, cache_root), reused=False)
         if problem is not None:
             raise CodePackError(problem)
     log(f"[codepack] reusing run pack {old.digest[:16]} from the run manifest")
     return RunPack(old, fetch_tree(old, store, cache_root), reused=True)
+
+
+AUTO_UPGRADE_REASON = "auto: local tree changed, semantic hash unchanged (light hash)"
+
+
+def _auto_upgrade_ok(previous: Mapping[str, Any] | None, semantic_sha256: str | None) -> bool:
+    """A non-strict drift may move to the local tree: both semantic hashes are known
+    and equal (:func:`upgrade_record`'s own rule)."""
+    old_semantic = (previous or {}).get("semantic_sha256")
+    return bool(old_semantic) and bool(semantic_sha256) and old_semantic == semantic_sha256
 
 
 def _drift_problem(old: CodePack, local: CodePack) -> str | None:
@@ -630,7 +653,8 @@ def _drift_problem(old: CodePack, local: CodePack) -> str | None:
 
 def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathLike[str],
                      store_base: str | None, upgrade_reason: str | None = None,
-                     release_image: str | None = None, keep_pinned: bool = False) -> str | None:
+                     release_image: str | None = None, keep_pinned: bool = False,
+                     strict: bool = True, semantic_sha256: str | None = None) -> str | None:
     """What :func:`resolve_run_pack` would refuse, checked without storing, fetching
     or unpacking anything (``yeto launch --dry-run``, so ``yeto run up``'s preflight
     sees a pinned-pack drift before any machine is ordered). None: it would pass.
@@ -644,6 +668,8 @@ def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         candidate = release_pack(release_image)
         if old.digest == candidate.digest and old.mode == candidate.mode:
             return None
+        if not strict and _auto_upgrade_ok(previous, semantic_sha256):
+            return None  # non-strict: the launch upgrades automatically
         return (f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
                 f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")
     old_uri = old_record.get("pack_uri")
@@ -654,14 +680,14 @@ def run_pack_problem(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         return (f"this run uses the release image {old.pack_uri}; resume it with "
                 "--rl-code-pack release and that --rl-image, or switch with "
                 "--rl-code-pack-upgrade")
-    if keep_pinned:
-        return None
+    if keep_pinned or (not strict and _auto_upgrade_ok(previous, semantic_sha256)):
+        return None  # non-strict: the launch upgrades automatically (resolve_run_pack)
     return _drift_problem(old, build_pack(repo)[0])
 
 
 def _resolve_release_pack(old_record, previous, release_image: str, *,
                           semantic_sha256: str | None, upgrade_reason: str | None,
-                          log: Callable[[str], None]) -> RunPack:
+                          strict: bool = True, log: Callable[[str], None] = print) -> RunPack:
     candidate = release_pack(release_image)
     if not old_record:
         log(f"[codepack] release run pack {candidate.digest[:16]} = image {candidate.pack_uri}")
@@ -670,6 +696,12 @@ def _resolve_release_pack(old_record, previous, release_image: str, *,
     if old.digest == candidate.digest and old.mode == candidate.mode:
         log(f"[codepack] reusing release run pack {old.digest[:16]} from the run manifest")
         return RunPack(old, None, reused=True)
+    if upgrade_reason is None and not strict and _auto_upgrade_ok(previous, semantic_sha256):
+        # light hashing: a rebuilt release image (a patch bump, a test fix) moves the
+        # run when the algorithm's semantic hash is unchanged
+        upgrade_reason = AUTO_UPGRADE_REASON
+        log(f"[codepack] WARNING: release image changed ({old.digest[:16]} -> "
+            f"{candidate.digest[:16]}); automatic upgrade (--rl-light-hash)")
     if upgrade_reason is None:
         raise CodePackError(f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
                             f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")

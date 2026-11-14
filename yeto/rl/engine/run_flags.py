@@ -1269,7 +1269,24 @@ _AGENT = (
     ),
 )
 
+LIGHT_HASH_ENV = "YETO_RL_LIGHT_HASH"
+
 _SYNC = (
+    # Light identity hashing (hetero-1114, opt-in; off = unchanged behavior): the
+    # island contract binds only what decides a merge (backend identity, LR
+    # schedule, the algorithm's merge-relevant fields); the code pack digest, the
+    # sampling filter and the reward post-processing are recorded and warned
+    # about, and a relaunch on a drifted local tree (or a rebuilt release image)
+    # upgrades the run pack when the semantic hash is unchanged.
+    shared_flag(
+        "--rl-light-hash",
+        action="store_true",
+        default=EnvDefault(LIGHT_HASH_ENV, "0", lambda v: v.strip().lower() in ("1", "true", "yes")),
+        help="opt-in light hashing: leave the code pack digest and the sampling / reward "
+             "post-processing fields out of the island contract (recorded and warned), and "
+             "auto-upgrade the run pack on drift when the semantic hash is unchanged. All "
+             f"islands of a session must agree (env {LIGHT_HASH_ENV}=1 sets it)",
+    ),
     cli_flag("--local-rl-rounds-per-sync", type=int, default=1),
     cli_flag(
         "--rl-sync-mode",

@@ -101,3 +101,34 @@ def test_core_collects_any_backend_description():
     assert rm.missing_interfaces(m, "train", other) == ["absent"]
     with pytest.raises(ValueError, match="unknown backend"):
         rm.runtime_description("nope")
+
+
+def test_light_mode_records_pin_drift_as_warnings():
+    """Another image patch version / a test commit / an unrecorded version is a
+    warning without strict; an unreadable manifest or a missing interface still refuses."""
+    drifted = _manifest(commits={"miles": "d" * 40, "sglang": PINS["sglang"]},
+                        image="docker:ghcr.io/x/miles@sha256:" + "e" * 64,
+                        versions={"torch": "2.9"})
+    out = rm.certify(drifted, PINS, ["ports-partitioned-serial"], strict=False)
+    assert out["certified"] == ["ports-partitioned-serial"]
+    warnings = " ".join(out["pin_warnings"])
+    assert "miles commit" in warnings and "image" in warnings and "peft version" in warnings
+    assert rm.certify(_manifest(), PINS, [], strict=False)["pin_warnings"] == []
+    with pytest.raises(rm.ManifestMismatch, match="schema"):
+        rm.certify(_manifest(schema="v0"), PINS, [], strict=False)
+    no_m1 = _manifest(interfaces={**{n: True for n in MILES_RUNTIME.interfaces},
+                                  "fork_m1_placement_map": False})
+    with pytest.raises(rm.ManifestMismatch, match="fork_m1_placement_map"):
+        rm.certify(no_m1, PINS, ["fixed-partition-standby"], strict=False)
+
+
+def test_cli_refuses_by_default_and_warns_with_light(tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setattr(rm, "expected_pins", lambda runtime=None: PINS)
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(_manifest(image="docker:ghcr.io/x/miles@sha256:" + "e" * 64)))
+    assert rm.main(["--check", str(path), "--light"]) == 0
+    assert "WARNING (pin" in capsys.readouterr().err
+    assert rm.main(["--check", str(path)]) == 2
+    assert "REFUSED" in capsys.readouterr().err

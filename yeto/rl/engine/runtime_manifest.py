@@ -18,7 +18,8 @@ upstream main images); its build is recorded per server by the ``sglang-server``
 adapter in ``server_info`` (``sglang_build_commit`` / ``sglang_pin_match``), not here.
 
 ``python -m yeto.rl.engine.runtime_manifest --image <digest> --out m.json``
-writes the manifest; ``--check m.json`` validates one against the pins.
+writes the manifest; ``--check m.json`` validates one against the pins (``--light`` turns pin
+drift into a warning; a missing interface always refuses).
 """
 
 from __future__ import annotations
@@ -187,12 +188,30 @@ def expected_pins(runtime: RuntimeDescription | None = None) -> dict[str, str]:
 
 def check_manifest(manifest: Mapping[str, Any], pins: Mapping[str, str],
                    runtime: RuntimeDescription | None = None) -> list[str]:
-    """Problems that make the manifest disagree with the pins (empty = consistent)."""
+    """Problems that make the manifest disagree with the pins (empty = consistent).
+
+    Every problem, hard (:func:`schema_problems`) and pin drift (:func:`pin_problems`)."""
+
+    return schema_problems(manifest) + pin_problems(manifest, pins, runtime)
+
+
+def schema_problems(manifest: Mapping[str, Any]) -> list[str]:
+    """Problems no mode tolerates: a manifest this code cannot read."""
+
+    if manifest.get("schema") != MANIFEST_SCHEMA:
+        return [f"unknown manifest schema {manifest.get('schema')!r}"]
+    return []
+
+
+def pin_problems(manifest: Mapping[str, Any], pins: Mapping[str, str],
+                 runtime: RuntimeDescription | None = None) -> list[str]:
+    """Checkout commits, image digest and required versions that differ from the
+    pins. They do not decide what a merge computes (the interface probes do), so
+    :func:`certify` refuses them only when ``strict``; otherwise they are recorded
+    in the result as ``pin_warnings``."""
 
     runtime = _runtime(runtime)
-    problems = []
-    if manifest.get("schema") != MANIFEST_SCHEMA:
-        problems.append(f"unknown manifest schema {manifest.get('schema')!r}")
+    problems: list[str] = []
     commits = manifest.get("commits", {})
     for name in runtime.checkouts:
         if commits.get(name) != pins.get(name):
@@ -218,20 +237,30 @@ def missing_interfaces(manifest: Mapping[str, Any], capability: str,
 
 def certify(
     manifest: Mapping[str, Any], pins: Mapping[str, str], capabilities: Iterable[str],
-    runtime: RuntimeDescription | None = None,
+    runtime: RuntimeDescription | None = None, *, strict: bool = True,
 ) -> dict[str, Any]:
-    """Refuse certification on any pin mismatch or missing interface."""
+    """Refuse certification on a missing interface (or an unreadable manifest).
+
+    ``strict`` (the API default) also refuses any pin mismatch; with
+    ``strict=False`` a pin mismatch (another image patch version, a test commit,
+    an unrecorded version) is returned as ``pin_warnings`` and certification
+    proceeds on the interface probes alone."""
 
     runtime = _runtime(runtime)
-    problems = check_manifest(manifest, pins, runtime)
+    capabilities = list(capabilities)
+    pin_drift = pin_problems(manifest, pins, runtime)
+    problems = schema_problems(manifest) + (pin_drift if strict else [])
     for cap in capabilities:
         missing = missing_interfaces(manifest, cap, runtime)
         if missing:
             problems.append(f"capability {cap!r} lacks {missing}")
     if problems:
         raise ManifestMismatch("; ".join(problems))
-    return {"certified": sorted(capabilities), "image": manifest.get("image"),
-            "commits": dict(manifest.get("commits", {}))}
+    out = {"certified": sorted(capabilities), "image": manifest.get("image"),
+           "commits": dict(manifest.get("commits", {}))}
+    if not strict:
+        out["pin_warnings"] = pin_drift
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -241,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", type=Path, help="validate an existing manifest against pins")
     parser.add_argument("--capability", action="append", default=[])
     parser.add_argument("--backend", default=DEFAULT_BACKEND, choices=sorted(BACKENDS))
+    parser.add_argument("--light", action="store_true",
+                        help="record a pin mismatch (commit, image digest, required version) "
+                             "as a warning instead of refusing; a missing interface still refuses")
     args = parser.parse_args(argv)
     runtime = runtime_description(args.backend)
     if args.check:
@@ -250,10 +282,13 @@ def main(argv: list[str] | None = None) -> int:
         text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         (args.out.write_text(text) if args.out else sys.stdout.write(text))
     try:
-        result = certify(manifest, expected_pins(runtime), args.capability, runtime)
+        result = certify(manifest, expected_pins(runtime), args.capability, runtime,
+                         strict=not args.light)
     except ManifestMismatch as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 2
+    for warning in result.get("pin_warnings", ()):
+        print(f"WARNING (pin, not enforced under --light): {warning}", file=sys.stderr)
     print(json.dumps(result, sort_keys=True))
     return 0
 
