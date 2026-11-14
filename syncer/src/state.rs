@@ -1178,7 +1178,13 @@ impl CheckpointSnapshot {
             let mut partial = sidecar.as_os_str().to_owned();
             partial.push(".tmp");
             let partial = std::path::PathBuf::from(partial);
-            std::fs::write(&partial, &bytes).with_context(|| format!("write {}", partial.display()))?;
+            // Synced before the rename; `persist` syncs the directory.
+            (|| {
+                let mut file = std::fs::File::create(&partial)?;
+                std::io::Write::write_all(&mut file, &bytes)?;
+                file.sync_all()
+            })()
+            .with_context(|| format!("write {}", partial.display()))?;
             std::fs::rename(&partial, &sidecar).with_context(|| format!("write {}", sidecar.display()))?;
         }
         self.persist(path, &path.with_extension("tmp")).map(drop)
