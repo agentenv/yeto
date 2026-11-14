@@ -245,6 +245,9 @@ class IslandPool:
     budget: el.Budget = field(default_factory=el.Budget)
     _refused: str | None = None
     _slot_hold: dict[Any, float] = field(default_factory=dict)  # slot -> its guard refused: not before
+    # slot -> when an order on it last failed: tried after the slots that did not fail, so one
+    # broken slot cannot be first in line every tick and trip the breaker while others idle
+    _order_failed: dict[Any, float] = field(default_factory=dict)
     _slot_halts: dict[Any, dict[str, Any]] = field(default_factory=dict)  # halted slots already reported
     _drain_hold: dict[str, float] = field(default_factory=dict)  # ticket -> no drain retry before
     _drain_on_halt: set[str] = field(default_factory=set)  # held tickets whose slot is halted: retried on lift
@@ -386,7 +389,8 @@ class IslandPool:
         now = self.clock()
         busy = {m.account for m in self.live()}
         can_tell = getattr(self.ops, "slot_halt", None) is not None
-        for account in self.config.accounts:
+        failed = self._order_failed
+        for account in sorted(self.config.accounts, key=lambda a: failed.get(a, float("-inf"))):
             halt = self._slot_halt(account)
             if halt is not None:
                 self._note_halt(account, halt)
@@ -507,12 +511,14 @@ class IslandPool:
                         return None
                     continue
                 self._event("order_failed", account=account, error=repr(error)[:300])
+                self._order_failed[account] = now
                 fallback = getattr(self.ops, "has_fallback_offer", None)
                 if fallback is not None and fallback():  # an (slot, offer) failure: that offer cools down
                     self._event("offer_failed", account=account)
                     return None
                 self._fail(now, f"order on {self.config.slot_name} {account}")
                 return None
+        self._order_failed.pop(account, None)
         if account in self._slot_halts and getattr(self.ops, "slot_halt", None) is None:
             self._halt_lifted(account)  # ops that cannot tell: an order went through again
         self.next_shard += 1
