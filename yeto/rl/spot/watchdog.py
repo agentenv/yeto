@@ -127,9 +127,12 @@ class Ops:
         return p.returncode == 0
 
     def sweep(self, run: str, island: str) -> str:
-        p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
-                            "--island", island], capture_output=True, text=True, timeout=600, cwd=REPO,
-                           env={**os.environ, "PYTHONPATH": str(REPO)})
+        try:
+            p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
+                                "--island", island], capture_output=True, text=True, timeout=600, cwd=REPO,
+                               env={**os.environ, "PYTHONPATH": str(REPO)})
+        except (subprocess.TimeoutExpired, OSError) as error:  # a hung sweep must not end the watchdog
+            return f"{type(error).__name__}: {error}"[:300]
         return (p.stdout + p.stderr).strip()[-300:]
 
     def ready(self, cluster: str, cmd: str) -> bool:
@@ -368,7 +371,11 @@ class Watchdog:
         if self.gone_since is None or self.swept:
             return
         if self.clock() - self.gone_since >= self.cfg.orphan_sweep_min * 60:
-            out = self.ops.sweep(self.cfg.run_id, self.cfg.island)
+            try:
+                out = self.ops.sweep(self.cfg.run_id, self.cfg.island)
+            except Exception as e:  # noqa: BLE001 - the VM loop must go on; the sweep is retried next pass
+                self.event("orphan_sweep_error", err=f"{type(e).__name__}: {e}"[:200])
+                return
             self.swept = True
             self.event("orphan_sweep", run=self.cfg.run_id, island=self.cfg.island,
                        gone_s=round(self.clock() - self.gone_since, 1), out=out)

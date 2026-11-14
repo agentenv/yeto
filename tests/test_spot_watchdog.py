@@ -320,3 +320,32 @@ def test_price_file_and_own_name_are_parameters(tmp_path):
                     "--dry-run"]) == 0
     with pytest.raises(SystemExit):  # the sky task is required for a real run
         wd.main(["--cluster-prefix", "spot-x", "--run-id", "r", "--budget-usd", "1", "--dir", str(tmp_path)])
+
+
+def test_orphan_sweep_error_does_not_kill_the_watchdog(tmp_path, monkeypatch):
+    """A hung ``boat_labels sweep`` (subprocess timeout) or a raising sweep hook used to
+    propagate out of ``run()``: the watchdog died and the island VM ran on unwatched
+    (no budget stop, no preemption recreate)."""
+    import subprocess
+
+    def hung(*a, **kw):
+        raise subprocess.TimeoutExpired(a[0], kw.get("timeout"))
+
+    monkeypatch.setattr(wd.subprocess, "run", hung)
+    out = wd.Ops(yaml="x", envs=[], secrets=[]).sweep("runt", "spot-0")
+    assert "TimeoutExpired" in out
+
+    class Raising(FakeOps):
+        def sweep(self, run, island):
+            self.calls.append(("sweep", run, island))
+            raise RuntimeError("boat api down")
+
+    clk = Clock()
+    ops = Raising(clk, launch={"H100:8@eu-north1/od": [True]}, states=["STOPPED"])
+    w = wd.Watchdog(_cfg(tmp_path, orphan_sweep_min=15, max_rounds=6), wd.candidates(), ops,
+                    clock=clk, sleep=clk.sleep)
+    w.acquire(); w.watch_once()  # preempted
+    assert w.run() == "max_rounds"
+    events = _events(tmp_path)
+    assert any(e["event"] == "orphan_sweep_error" for e in events)
+    assert len([c for c in ops.calls if c[0] == "sweep"]) >= 2  # retried, not given up
