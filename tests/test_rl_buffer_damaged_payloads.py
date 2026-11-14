@@ -487,3 +487,50 @@ def test_driver_tapes_what_the_last_take_passed_over_with_the_buffer_exhausted_e
     events = [json.loads(line) for line in (tmp_path / "e.jsonl").read_text().splitlines()]
     ended = [e for e in events if e["event"] == "rl_buffer_exhausted"]
     assert [e.get("passed_over") for e in ended] == [{"stale": 2}, None]
+
+
+# ------------------------------------------------------------------ one source that writes only bad groups
+def _interleaved(s3: FaultS3, rounds: int) -> dict[str, list[str]]:
+    """``rounds`` groups on each of s0 and s1, alternating in buffer order."""
+    ids: dict[str, list[str]] = {"s0": [], "s1": []}
+    for g in range(rounds):
+        for shard in ("s0", "s1"):
+            s3.now += 1.0
+            ids[shard] += _fill(s3, shard, 1, start=g)
+    return ids
+
+
+def test_a_source_whose_every_group_is_damaged_is_reported_by_name_though_the_run_goes_on(monkeypatch):
+    """Before: one sampler of two that writes only damaged payloads never reached the
+    take's ``max_damaged_run`` (the other sampler's good groups reset the run, and they
+    are not fewer than the damaged ones), and nothing named it: half the samplers were
+    wasted with no warning (only an aggregate per-round count)."""
+    monkeypatch.setenv(br.SOURCE_BAD_STREAK_ENV, "4")
+    s3 = FaultS3()
+    ids = _interleaved(s3, 9)
+    for sample_id in ids["s1"]:
+        _damage(s3, sample_id, "truncated")
+    batch_reader = reader(trainer(s3, ("s0", "s1")))
+    events = []
+    batch_reader.emit = lambda event, **fields: events.append((event, fields))
+    trained, reports = drain(batch_reader)
+    assert _ids(trained) == ids["s0"]  # the run goes on with the good sampler
+    assert [event for event, _ in events] == [br.SOURCE_BAD_STREAK_EVENT] * 2  # at 4 and at 8 in a row
+    fields = events[0][1]
+    assert fields["source"].startswith("s1") and fields["bad_groups"] == 4
+    assert fields["reasons"] == {"damaged_payload": 4}
+    assert events[1][1]["bad_groups"] == 8
+    assert all(not f["source"].startswith("s0") for _, f in events)
+
+
+def test_a_source_that_trains_a_group_again_starts_its_bad_count_over(monkeypatch):
+    monkeypatch.setenv(br.SOURCE_BAD_STREAK_ENV, "3")
+    s3 = FaultS3()
+    ids = _interleaved(s3, 6)
+    for g in (0, 1, 3, 4):  # never three in a row
+        _damage(s3, ids["s1"][g], "missing")
+    batch_reader = reader(trainer(s3, ("s0", "s1")))
+    events = []
+    batch_reader.emit = lambda event, **fields: events.append((event, fields))
+    drain(batch_reader)
+    assert events == []
