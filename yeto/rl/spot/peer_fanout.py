@@ -82,9 +82,19 @@ def peers_from(spec: Any = None, environ: Any = None) -> list[str]:
 
 
 def urllib_fetch(url: str, timeout_s: float) -> bytes:
+    """GET ``url``; ``timeout_s`` bounds the whole transfer, not only each socket
+    read (a peer that drips bytes would otherwise hold the pull forever)."""
+    deadline = time.monotonic() + float(timeout_s)
     try:
         with urllib.request.urlopen(url, timeout=timeout_s) as response:  # noqa: S310 - http to a peer
-            return response.read()
+            parts: list[bytes] = []
+            while True:
+                if time.monotonic() > deadline:
+                    raise PeerError(f"{url}: not delivered within {timeout_s:g} s")
+                part = response.read1(cm.CHUNK)
+                if not part:
+                    return b"".join(parts)
+                parts.append(part)
     except urllib.error.HTTPError as error:
         raise PeerError(f"{url}: HTTP {error.code}") from None
     except (urllib.error.URLError, OSError, TimeoutError) as error:
