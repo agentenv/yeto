@@ -2350,8 +2350,14 @@ class SyncerClient:
                 if gen is not None and gen != self._gen:
                     return False
                 q = self._queues[stream]
-            meter = self._meters[stream]
-            meter.enqueued(len(data))  # before put: the sender may drain it at once
+                live_gen = self._gen
+                meter = self._meters[stream]
+                # Counted before put (the sender may drain it at once) and
+                # under the lock: a teardown's drop_pending then always runs
+                # after it, so a racing outage cannot leave phantom backlog
+                # on the session-long meter (the stall watchdog would drop
+                # the next, healthy group).
+                meter.enqueued(len(data))
             try:
                 q.put(
                     _Outbound(data, sent),
@@ -2359,7 +2365,9 @@ class SyncerClient:
                 )  # bounded wait, then re-check the group
                 return True
             except queue.Full:
-                meter.enqueued(-len(data))
+                with self._lock:
+                    if live_gen == self._gen:  # else drop_pending already zeroed it
+                        meter.enqueued(-len(data))
                 continue
 
     def _next_data_stream(self) -> int:

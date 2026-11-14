@@ -621,3 +621,50 @@ def test_reconnect_budget_counts_consecutive_failures_not_lifetime_redials(monke
     finally:
         client.close()
         listener.close()
+
+
+def test_enqueue_racing_a_teardown_leaves_no_phantom_backlog_for_the_stall_watchdog():
+    """A sender that picked its queue just before a teardown must not leave
+    bytes counted on the (session-long) stream meter after drop_pending: the
+    next group would look stalled and be dropped by the watchdog."""
+    import queue as _queue
+
+    from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
+    from yeto.protocol import DTYPE_F32, SyncerClient
+
+    client = SyncerClient(
+        ("unused", 0), 3,
+        FragmentLayout([Fragment(MERGE_RDA, [("w", 4)])]),
+        dtype=DTYPE_F32, num_streams=0, stream_stall_timeout=5.0,
+    )
+
+    meter = client._meters[0]
+    real_enqueued = meter.enqueued
+    at_meter = threading.Event()
+    torn_down = threading.Event()
+
+    def enqueued_after_teardown(nbytes):
+        if not at_meter.is_set():  # the queue is picked; let the outage land
+            at_meter.set()
+            torn_down.wait(0.5)  # a teardown blocked on the client lock times out
+        real_enqueued(nbytes)
+
+    def teardown():
+        at_meter.wait(5.0)
+        client._teardown_group()
+        torn_down.set()
+
+    meter.enqueued = enqueued_after_teardown
+    client._gen = 1
+    client._connected.set()
+    client._queues = [_queue.Queue()]
+    tearer = threading.Thread(target=teardown)
+    tearer.start()
+    try:
+        client._enqueue(0, b"x" * 64)
+    finally:
+        tearer.join(5.0)
+    assert not tearer.is_alive() and torn_down.is_set()
+    assert meter.idle
+    assert meter.stalled_for(time.monotonic() + 3600) == 0.0
+    assert client.send_progress().queued_chunks == 0
