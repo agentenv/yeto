@@ -1274,9 +1274,17 @@ class Run:
                 why = f"trainer: launcher finished {done[-1][0]} (exit code {done[-1][1]})"
         if why is None and tr and _alive(tr["pid"]):
             why = self.silence(time.time())
-        limit = self.container_limit() if why is None else None
+        limit = n = None
+        if why is None:
+            # a view only: an envs file or pool config that does not read this poll must not
+            # raise out of the breaker (it ended the monitor, and the budget / wall-clock guard)
+            try:
+                limit = self.container_limit()
+                n = self.run_containers() if limit else None
+            except Exception as error:  # noqa: BLE001 - counted again next poll
+                _log(f"sandbox: container count failed: {type(error).__name__}: {error}"[:300])
+                limit = None
         if why is None and limit:
-            n = self.run_containers()
             # an alert, not a breach: the containers belong to the NC samplers, so stopping the
             # trainer frees none of them; an evicted island's trials outlive it while its
             # replacement starts its own, so the count passes the limit in a normal replacement
