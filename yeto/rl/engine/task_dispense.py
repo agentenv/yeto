@@ -992,7 +992,7 @@ class TaskSource:
             self._contact = None
         logger.warning("task dispenser fenced incarnation %016x (%s); %d ready positions dropped",
                        old, error, dropped)
-        self._emit("rl_dispense_fenced", incarnation=f"{old:016x}", dropped_ready=dropped,
+        self._note("rl_dispense_fenced", incarnation=f"{old:016x}", dropped_ready=dropped,
                    error=str(error))
 
     def _want_claim(self) -> bool:
@@ -1069,7 +1069,27 @@ class TaskSource:
             self._cv.notify_all()
         return True
 
+    def _note(self, kind: str, **fields: Any) -> None:
+        """Emit from the worker: a failing emit (a closed tape) must not end it."""
+        try:
+            self._emit(kind, **fields)
+        except Exception as error:  # noqa: BLE001 - observation only
+            logger.warning("task dispenser: emit %s failed: %r", kind, error)
+
     def _run(self) -> None:
+        """The worker; an unexpected error ends the source with that error
+        (``take`` / ``flush`` raise it) instead of killing the thread silently."""
+        try:
+            self._work()
+        except BaseException as error:  # noqa: BLE001 - handed to the takers
+            logger.error("task dispenser worker died: %r", error)
+            with self._cv:
+                if self._fatal is None:
+                    self._fatal = error
+                self._cv.notify_all()
+            self._note("rl_dispense_worker_died", error=f"{type(error).__name__}: {str(error)[:300]}")
+
+    def _work(self) -> None:
         backoff = self._retry_s
         while True:
             with self._cv:
@@ -1094,7 +1114,7 @@ class TaskSource:
                     retired = is_retired_by_controller(error)
                     logger.error("task dispenser: %s: %s", "the controller retired this island" if retired
                                  else "a newer incarnation superseded this island", error)
-                    self._emit("rl_dispense_retired" if retired else "rl_dispense_superseded",
+                    self._note("rl_dispense_retired" if retired else "rl_dispense_superseded",
                                incarnation=f"{self.incarnation:016x}", error=str(error))
                     with self._cv:
                         self._fatal = error
@@ -1107,7 +1127,7 @@ class TaskSource:
                 continue
             except DispenseError as error:
                 logger.error("task dispenser refused this island: %s", error)
-                self._emit("rl_dispense_refused", error=str(error))
+                self._note("rl_dispense_refused", error=str(error))
                 with self._cv:
                     self._fatal = error
                     self._cv.notify_all()
