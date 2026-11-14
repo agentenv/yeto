@@ -216,3 +216,40 @@ def test_sky_island_task_runs_the_island_image(monkeypatch):
                                     "127.0.0.1:29400", {}).resources.image_id
               for m, spec in enumerate(specs)]
     assert images == [args.rl_image, OTHER]
+
+
+def test_island_override_under_release_code_pack_is_refused():
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_image=miles_pins.MILES_NEXT_IMAGE,
+                           rl_code_pack="release", rl_island_engine=[f"1:image={OTHER}"])
+    with pytest.raises(ValueError, match="code-pack"):
+        island_engine.check(args, 2)
+    args.rl_code_pack = "git-patch"
+    island_engine.check(args, 2)
+    # an override that keeps the run-wide image and backend passes under release
+    args.rl_code_pack = "release"
+    args.rl_island_engine = [f"1:image={miles_pins.MILES_NEXT_IMAGE}"]
+    island_engine.check(args, 2)
+
+
+def test_island_backend_change_under_engine_cluster_is_refused():
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_image=miles_pins.MILES_NEXT_IMAGE,
+                           rl_sync_layout="shape-free", rl_engine_cluster="aws:1xa100",
+                           rl_island_engine=["1:backend=verl"])
+    with pytest.raises(ValueError, match="engine-cluster"):
+        island_engine.check(args, 2)
+    args.rl_engine_cluster = None
+    island_engine.check(args, 2)
+
+
+@pytest.mark.parametrize("cfg", [{"engine": "vllm-ascend", "image": "x"},
+                                 {"platform": "ascend", "image": "x"}])
+def test_pool_with_explicit_image_is_accepted(cfg):
+    nc_cli.check_sampler_engine(cfg)
+    assert nc_cli.pool_sampler_image(cfg) == "x"
+
+
+def test_ascend_pool_defaults_to_vllm_ascend():
+    assert nc_cli._sampler_engine({"platform": "ascend"}, "ascend") == "vllm-ascend"
+    assert nc_cli._sampler_engine({"platform": "cuda"}, "cuda") == "vllm"
+    with pytest.raises(ValueError, match="set 'image'"):
+        nc_cli.check_sampler_engine({"platform": "ascend"})

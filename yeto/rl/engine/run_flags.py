@@ -476,8 +476,10 @@ _PLACEMENT = (
     cli_flag("--rl-island-engine", action="append", default=None,
              metavar="ISLAND:KEY=VALUE",
              help="give trainer island ISLAND its own engine (repeatable); KEY is image "
-             "(same forms as --rl-image) or backend (miles | verl; a new backend without "
-             "image gets that backend's default image and needs --rl-sync-layout shape-free). "
+             "(same forms as --rl-image), backend (miles | verl; a new backend without "
+             "image gets that backend's default image and needs --rl-sync-layout shape-free) "
+             "or platform (cuda | rocm | ascend | ppu; without image the island gets that "
+             "family's trainer image for its backend). "
              "Other islands keep --rl-image / --rl-backend"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "

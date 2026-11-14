@@ -178,7 +178,10 @@ def records(args: Any, num_islands: int) -> list[dict[str, Any]]:
 
 def check(args: Any, num_islands: int) -> None:
     """Launch checks before any cloud work: syntax, each island's image form,
-    and a backend change only with ``--rl-sync-layout shape-free``."""
+    a backend change only with ``--rl-sync-layout shape-free``, no image /
+    backend change under ``--rl-code-pack release`` (the release manifest is
+    checked against the run-wide image only) and no backend change under
+    ``--rl-engine-cluster`` (its miles-only check reads the run-wide backend)."""
 
     if not requested(args):
         return
@@ -198,3 +201,13 @@ def check(args: Any, num_islands: int) -> None:
             raise ValueError(f"{FLAG}: island {m} trains with backend {backend!r} but the run "
                              f"uses {run_backend!r}; islands of different backends share a "
                              "syncer session only with --rl-sync-layout shape-free")
+        if backend is not None and backend != run_backend and getattr(args, "rl_engine_cluster", None):
+            raise ValueError(f"{FLAG}: island {m} trains with backend {backend!r} but "
+                             f"--rl-engine-cluster checks only the run-wide backend {run_backend!r}; "
+                             "drop the island backend or --rl-engine-cluster")
+        changed = ((getattr(iargs, "rl_backend", None) or "miles") != run_backend
+                   or getattr(iargs, "rl_image", None) != getattr(args, "rl_image", None))
+        if changed and getattr(args, "rl_code_pack", None) == "release":
+            raise ValueError(f"{FLAG}: island {m} changes its image or backend but --rl-code-pack "
+                             "release checks the release manifest of the run-wide --rl-image only; "
+                             "drop the island override or use another --rl-code-pack mode")

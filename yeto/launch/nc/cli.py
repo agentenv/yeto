@@ -778,9 +778,19 @@ def pool_sampler_image(cfg: dict[str, Any]) -> str | None:
         return str(cfg["image"])
     from yeto.launch import engine_images  # noqa: PLC0415
 
-    engine = str(cfg.get("engine") or DEFAULT_SAMPLER_ENGINE)
     platform = str(cfg.get("platform") or DEFAULT_SAMPLER_PLATFORM)
+    engine = _sampler_engine(cfg, platform)
     return engine_images.default_image(platform, "sampler", engine).removeprefix("docker:")
+
+
+def _sampler_engine(cfg: dict[str, Any], platform: str) -> str:
+    """A pool's ``engine``; unset, ``vllm-ascend`` on the ascend family, else vllm."""
+    if cfg.get("engine"):
+        return str(cfg["engine"])
+    from yeto.launch import engine_images  # noqa: PLC0415
+
+    ascend = engine_images.canonical_device_family(platform) == "ascend"
+    return "vllm-ascend" if ascend else DEFAULT_SAMPLER_ENGINE
 
 
 def check_sampler_engine(cfg: dict[str, Any]) -> None:
@@ -790,12 +800,14 @@ def check_sampler_engine(cfg: dict[str, Any]) -> None:
         return
     from yeto.launch import engine_images  # noqa: PLC0415
 
-    engine = str(cfg.get("engine") or DEFAULT_SAMPLER_ENGINE)
+    platform = engine_images.canonical_device_family(str(cfg.get("platform") or DEFAULT_SAMPLER_PLATFORM))
+    engine = _sampler_engine(cfg, platform)
     if engine not in SAMPLER_ENGINES:
         raise ValueError(f"pool config: engine {engine!r} is not one of {sorted(SAMPLER_ENGINES)}")
-    platform = engine_images.canonical_device_family(str(cfg.get("platform") or DEFAULT_SAMPLER_PLATFORM))
+    if cfg.get("image"):
+        return  # an explicit image needs no default-table row
     row = engine_images.default_image_entry(platform, "sampler", engine)
-    if row.ref is None and not cfg.get("image"):
+    if row.ref is None:
         raise ValueError(f"pool config: platform {platform} engine {engine} has no pinned default "
                          f"image ({row.reason}); set 'image'")
 
