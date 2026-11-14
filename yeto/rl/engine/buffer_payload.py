@@ -70,6 +70,33 @@ class DamagedPayloadLimit(SampleBufferRolloutError):
 PASSED_OVER_MARK = "; passed over "
 
 
+NONFINITE_LOGPROB = "nonfinite_logprob"  # the drop reason both trainer readers record
+
+
+def nonfinite_logprob(group: Sequence[Mapping[str, Any]]) -> str | None:
+    """Why a decoded group's behavior log-probs cannot be trained (None: they can).
+
+    The trainers take ``exp(old - rollout_log_probs)`` (TIS / off-policy
+    correction, the old-log-prob reuse), so one NaN/inf entry makes the loss NaN,
+    masked positions included (NaN * 0 is NaN). Shared by the Miles reader and
+    the verl feed; a sample without the field is not judged."""
+    import math
+
+    for i, sample in enumerate(group):
+        values = sample.get("rollout_log_probs")
+        if values is None:
+            continue
+        for t, value in enumerate(values):
+            try:
+                ok = not isinstance(value, bool) and math.isfinite(float(value))
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                return (f"sample {sample.get('index', i)} rollout_log_probs[{t}] = {value!r} "
+                        f"is not a finite number")
+    return None
+
+
 def passed_over_text(counts: Mapping[str, int]) -> str:
     """The tail of such an error's text ("" when nothing was passed over)."""
     counts = {key: int(value) for key, value in counts.items() if value}

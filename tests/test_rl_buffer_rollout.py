@@ -857,3 +857,28 @@ def test_a_group_that_does_not_convert_to_miles_samples_is_left_out():
     assert [pos for pos, _ in kept] == [0] and len(problems) == 1 and "position 1" in problems[0]
     assert [d["index"] for d in kept[0][1]] == [0, 1] and kept[0][1][0]["rollout_routed_experts"].dtype == numpy.int32
     assert br.miles_groups([(1, bad)], samples_per_group=2)[0] == []
+
+
+def test_a_group_with_a_non_finite_log_prob_is_consumed_not_trained(tmp_path):
+    """Miles' TIS / off-policy correction takes exp(old_log_probs - rollout_log_probs):
+    one NaN/inf behavior log-prob makes the loss NaN. The reader passes such a group
+    over, in the main selection and in the top-up, and counts it apart."""
+    from yeto.rl.engine.buffer_payload import nonfinite_logprob
+
+    written = _buffer(tmp_path)
+    writer = br.GroupWriter(written, "s0")
+    for g, bad in enumerate((None, float("nan"), None, float("-inf"), None, None)):
+        group = _short(g, 1, 4)
+        if bad is not None:
+            group[2]["rollout_log_probs"] = [-0.1, bad, -0.3]
+        writer.write(group, group_key=f"g{g}")
+    written.mark_data_end()
+    reader = _reader(tmp_path)
+    groups, report = reader.take(0, 2, current_version=1)
+    assert [pos for pos, _ in groups] == [0, 2] and report.nonfinite_logprob_groups == 1
+    assert report.nonfinite_reward_groups == 0
+    groups, report = reader.take(1, 2, current_version=1)
+    assert [pos for pos, _ in groups] == [4, 5] and report.nonfinite_logprob_groups == 1
+    assert report.metrics()["sample_buffer/nonfinite_logprob_groups"] == 1.0
+    assert nonfinite_logprob([{"rollout_log_probs": [-1.0]}, {"index": 0}]) is None
+    assert "sample 3" in nonfinite_logprob([{"index": 3, "rollout_log_probs": [float("nan")]}])
