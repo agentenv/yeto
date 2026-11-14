@@ -1499,6 +1499,8 @@ class FileSampleBuffer:
             oldest = min(versions) if versions else None
             # on this process's clock only (see ``_seen_at``); a record read as unmerged
             # first and merged later counts once at any time (it moves from one to the other)
+            # (the merge delay makes the rate slightly overestimated: a record is first
+            # seen when merged, so arrivals delayed by it bunch up later in the window)
             since = self.clock() - self.arrival_window_s
             recent = sum(1 for pos, seen in enumerate(self._seen_at)
                          if seen >= since and pos not in self._skipped)
