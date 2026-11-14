@@ -134,3 +134,55 @@ def test_engine_sampler_upload_off(tmp_path, ports_v1_pin, monkeypatch):
     monkeypatch.setenv("YETO_RL_TAPE_UPLOAD_S", "0")
     assert entry.run(_sampler_spec(tmp_path), resource_sampler=lambda emit: None) == 2
     assert DirectoryObjectStore(tmp_path / "store").list("tapes/") == []
+
+
+def test_uploader_survives_tape_vanishing_between_stat_and_open(tmp_path, monkeypatch):
+    """The tape can be removed / rotated after ``stat`` succeeds; ``open`` then raises.
+    That must not escape ``flush`` (it would kill the upload thread silently and
+    raise out of ``stop`` into the sampler's shutdown)."""
+    import yeto.rl.engine.tape_upload as tu
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    tape = tmp_path / "t.jsonl"
+    _append(tape, _round("s1", 0, T0))
+    real_open, calls, logs = open, [], []
+
+    def vanishing_open(path, *a, **k):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileNotFoundError(2, "No such file or directory", str(path))
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(tu, "open", vanishing_open, raising=False)
+    up = TapeUploader(objects, tape, island="s1", incarnation="a", interval_s=0.01, log=logs.append)
+    assert up.flush() == 0 and up.failures == 1 and logs
+    assert up.flush() > 0  # next tick retries from the same offset
+    assert b"".join(objects.read(k) for k in objects.list("tapes/")) == tape.read_bytes()
+
+
+def test_uploader_thread_keeps_running_after_open_error(tmp_path, monkeypatch):
+    import yeto.rl.engine.tape_upload as tu
+
+    objects = DirectoryObjectStore(tmp_path / "store")
+    tape = tmp_path / "t.jsonl"
+    _append(tape, _round("s1", 0, T0))
+    real_open, calls = open, []
+
+    def vanishing_open(path, *a, **k):
+        calls.append(path)
+        if len(calls) == 1:
+            raise FileNotFoundError(2, "gone", str(path))
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(tu, "open", vanishing_open, raising=False)
+    up = TapeUploader(objects, tape, island="s1", incarnation="a", interval_s=0.01, log=lambda m: None).start()
+    try:
+        for _ in range(500):
+            if objects.list("tapes/"):
+                break
+            up._stop.wait(0.01)
+        assert up._thread.is_alive()
+    finally:
+        up.stop()
+    assert not up._thread.is_alive()
+    assert b"".join(objects.read(k) for k in objects.list("tapes/")) == tape.read_bytes()
