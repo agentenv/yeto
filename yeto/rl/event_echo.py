@@ -67,9 +67,28 @@ def append_record(path, record: dict) -> str:
     line = encode(record)
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
+    data = (line + "\n").encode("utf-8")
     with _WRITE_LOCK:
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        with target.open("a+b", buffering=0) as handle:  # unbuffered: nothing left to flush late
+            start = handle.seek(0, os.SEEK_END)
+            if start:
+                # A writer killed mid-line left an unterminated tail: start a
+                # new line so this record is not glued onto the torn bytes.
+                handle.seek(start - 1)
+                if handle.read(1) != b"\n":
+                    data = b"\n" + data
+            try:
+                view = memoryview(data)
+                while view:  # a raw write may land only part of the bytes
+                    view = view[handle.write(view):]
+            except OSError:
+                # Disk full mid-write: drop the partial bytes so the next
+                # record does not land on a torn line, then report the failure.
+                try:
+                    handle.truncate(start)
+                except OSError:
+                    pass
+                raise
         if echo_enabled():
             _emit(PREFIX + line)
     return line
