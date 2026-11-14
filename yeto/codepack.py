@@ -395,8 +395,9 @@ def pack_store_for(store_uri: str) -> PackStore:
 
 
 class _S3PackStore:
-    """``s3://bucket[/prefix]`` (boto3; also S3-compatible endpoints via the usual
-    AWS environment)."""
+    """``s3://bucket[/prefix]``: the run's object store client
+    (:mod:`yeto.cloud.s3_store`: its endpoint, credentials or profile, timeouts and
+    retries; the plain AWS environment when none of those is set)."""
 
     def __init__(self, store_uri: str) -> None:
         self.base = store_uri.rstrip("/")
@@ -406,19 +407,25 @@ class _S3PackStore:
         bucket, _, key = uri.split("://", 1)[1].partition("/")
         return bucket, key
 
-    def put(self, digest: str, data: bytes) -> str:
-        import boto3
+    @staticmethod
+    def _objects(bucket: str) -> Any:
+        from .cloud import s3_store
 
+        client = s3_store._client(os.environ, require_credentials=False)
+        return s3_store.S3ObjectStore(f"s3://{bucket}", client=client)
+
+    def put(self, digest: str, data: bytes) -> str:
         uri = f"{self.base}/{PACK_DIR}/{digest}.tar"
         bucket, key = self._split(uri)
-        boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data)
+        self._objects(bucket).write(key, data)
         return uri
 
     def get(self, uri: str) -> bytes:
-        import boto3
-
         bucket, key = self._split(uri)
-        return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+        data = self._objects(bucket).read(key)
+        if data is None:
+            raise CodePackError(f"code pack {uri} is missing from the store")
+        return data
 
 
 class _ModalVolumePackStore:
