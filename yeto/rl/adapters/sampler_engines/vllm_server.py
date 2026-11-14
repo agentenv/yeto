@@ -120,6 +120,8 @@ UPSTREAM_HANG_HINT = ("A Kimi-K3.1 load (about 1.56 TB of MXFP4 safetensors) can
                       "On MI355X a hang without an error is the MEC firmware scratch reclaim "
                       "(HSA_NO_SCRATCH_RECLAIM=1).")
 DEFAULT_MAX_LOGPROBS = 20  # vLLM ModelConfig.max_logprobs
+# card_telemetry.collector_for families: the card tool the in-place reload guard reads
+CARD_FAMILIES = ("cuda", "npu", "ppu", "rocm")
 RESUME_ATTEMPTS = 3  # /resume tries after an in-place reload before the paused server is killed
 RESUME_RETRY_S = 2.0
 DEV_MODE_ENV = "VLLM_SERVER_DEV_MODE"  # mounts /collective_rpc and /pause + /resume
@@ -592,6 +594,8 @@ class VllmServerEngine(ServerEngine):
         super().preflight(model_dir)
         if self.options.platform == "rocm":
             self._check_rocm_cards()
+        elif self.options.platform == "npu":
+            self._check_npu_cards()
         note = self.r3_layout_note()
         if note and self._process is None:  # once per start, not per in-place reload
             print(f"[vllm-server] {note}", flush=True)
@@ -602,6 +606,36 @@ class VllmServerEngine(ServerEngine):
                 if self._moe_layers is None:
                     raise SamplerEngineError(f"{model_dir}: config.json gives no MoE layer count; R3 needs "
                                              "VllmOptions.moe_layers to shape the routed experts")
+
+    def npu_chip_count(self) -> int | None:
+        """Chips ``npu-smi info`` lists (None: the tool did not answer).
+
+        ``ASCEND_RT_VISIBLE_DEVICES`` narrows the chips the engine uses but not what
+        ``npu-smi`` prints, so this is an upper bound of what the server gets: it can
+        only catch a node that has fewer chips than TP, never one that hides some."""
+        from yeto.hw.card_telemetry import parse_npu_smi_usage, run_command  # noqa: PLC0415
+
+        run = self._run or run_command
+        try:
+            return len(parse_npu_smi_usage(run(("npu-smi", "info"))))
+        except Exception:  # noqa: BLE001 - no npu-smi in this image: an unknown count, not a failure
+            return None
+
+    def _check_npu_cards(self) -> None:
+        """Refuse a TP larger than the chips the node has, before the start.
+
+        Measured on a 910B4 node: too few chips makes the HCCL setup hang without an
+        error, so the only other signal is ``start_timeout_s`` (default 3600 s), a
+        full hour of a sampler island doing nothing. A node whose ``npu-smi`` cannot
+        be read (the tool is not in the container) is let through with a note."""
+        count = self.npu_chip_count()
+        if count is None:
+            print("[vllm-server] npu-smi did not answer: the TP size is not checked against the node's chips "
+                  "(too few chips hangs the HCCL setup until start_timeout_s)", flush=True)
+            return
+        if count < int(self.options.tp):
+            raise SamplerEngineError(f"vllm on npu: npu-smi lists {count} chip(s), TP {self.options.tp} "
+                                     "needs that many")
 
     def _check_rocm_cards(self) -> None:
         """At least ``tp`` AMD GPUs must be visible before the server starts (a
@@ -721,6 +755,20 @@ class VllmServerEngine(ServerEngine):
             return
         raise SamplerEngineError(note)
 
+    def card_family(self) -> str:
+        """The ``card_telemetry.collector_for`` family of the cards this server runs
+        on: ``ServerConfig.device_family`` when it names one (``npu`` reads
+        ``npu-smi``, ``ppu`` ``ppu-smi``), else the platform's (``rocm`` / ``cuda``).
+
+        It used to be ``"rocm" if platform == "rocm" else "cuda"``: on an Ascend or
+        PPU node that asked NVML for the memory, every reading failed and the
+        in-place reload guard silently read None, i.e. it let a reload stage into
+        memory it had never seen free (gap report S7)."""
+        family = str(self.config.device_family or "").strip().lower()
+        if family in CARD_FAMILIES:
+            return family
+        return "rocm" if self.options.platform == "rocm" else "cuda"
+
     def _free_bytes(self) -> int | None:
         """Free memory of the fullest GPU (None: no reading; the guard then lets the
         reload run as before)."""
@@ -729,7 +777,7 @@ class VllmServerEngine(ServerEngine):
             from yeto.hw.card_telemetry import collector_for, run_command  # noqa: PLC0415
             from yeto.rl.engine.telemetry import load_nvml  # noqa: PLC0415
 
-            family = "rocm" if self.options.platform == "rocm" else "cuda"
+            family = self.card_family()
             try:
                 collector = collector_for(family, nvml_loader=load_nvml, run=self._run or run_command)
                 collector.open()
