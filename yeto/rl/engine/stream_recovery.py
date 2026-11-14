@@ -193,6 +193,9 @@ class RankShardSnapshot:
         # The LR scheduler position every rank reports after a restore (the
         # donor's, in the backend's ``scheduler_samples`` unit); None before.
         self.restored_scheduler_samples: int | None = None
+        # Set once a restore reaches the ranks: from there the trainer is no
+        # longer fresh, whether or not that restore completes.
+        self.restore_started = False
 
     # -- backend verbs ----------------------------------------------------------
     async def rank_layout(self) -> Mapping[str, int]:
@@ -278,6 +281,7 @@ class RankShardSnapshot:
             raise SnapshotIntegrityError(f"peer snapshot has no valid {RANKS}: {exc}") from exc
         if ranks.get("schema") != self.schema or tag != await self.layout_tag():
             raise SnapshotIntegrityError("peer snapshot rank list is from another trainer layout")
+        self.restore_started = True
         results = [dict(r) for r in await self.restore_ranks(directory, files)]
         # Every rank must re-export the donor's digests (as a cut restore
         # checks); else the trainer is not the donor's and must not train.
@@ -341,7 +345,21 @@ class StreamRecoveryIsland:
             # A second source after a redial: the trainer is no longer fresh.
             raise RuntimeError("peer snapshot restored twice; restart the island")
         self.restored = True
-        self._call(self.shards.restore(Path(directory)))
+        try:
+            self._call(self.shards.restore(Path(directory)))
+        except SnapshotIntegrityError as error:
+            started = getattr(self.shards, "restore_started", None)
+            if started is False:
+                # Refused before any rank loaded (its rank list): the trainer
+                # is still fresh, so the syncer's next source may restore.
+                self.restored = False
+            elif started:
+                # Ranks loaded part of it: recover() must not move on to
+                # another source over half-restored state.
+                raise RuntimeError(
+                    f"peer snapshot failed after its ranks started loading ({error}); restart the island"
+                ) from error
+            raise
         return None  # anchors come from the resent fragments (module doc)
 
     def apply_broadcast(self, update: BcastFragment) -> None:
