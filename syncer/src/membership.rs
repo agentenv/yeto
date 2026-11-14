@@ -329,6 +329,12 @@ impl Membership {
         std::mem::take(&mut self.dirty)
     }
 
+    /// Keep the persisted part pending after a failed write, so the next
+    /// `take_dirty` retries it.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Persisted record: magic | syncer_epoch u64 | islands u32 |
     /// per island (id u32 | count u32 | count x generation u64, oldest first).
     /// Islands are written in id order so equal state gives equal bytes.

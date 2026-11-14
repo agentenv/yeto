@@ -1427,7 +1427,8 @@ impl RegistryState {
     }
 
     /// Write the membership record if its persisted part changed. A failed
-    /// write only weakens fencing across a restart, so it is logged.
+    /// write only weakens fencing across a restart, so it is logged and the
+    /// record stays pending: the next membership event writes it again.
     fn persist_membership(&mut self) {
         if !self.membership.take_dirty() {
             return;
@@ -1435,6 +1436,7 @@ impl RegistryState {
         if let Some(path) = &self.membership_record {
             if let Err(error) = write_membership_record(path, &self.membership.encode_persisted()) {
                 warn!(path = %path.display(), "membership record write failed: {error:#}");
+                self.membership.mark_dirty();
             }
         }
     }
@@ -1472,8 +1474,15 @@ fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes)?;
+    // Durable before the rename: a power loss must not leave an empty
+    // record that `--resume` then refuses to restore.
+    let mut file = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -14618,6 +14627,44 @@ mod tests {
         // Without --resume the record is not read.
         cfg.resume = false;
         assert_eq!(initial_membership(&cfg, 2).unwrap().0.syncer_epoch(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_membership_record_write_is_retried_on_the_next_event() {
+        let dir = std::env::temp_dir().join(format!("yeto-membership-retry-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("syncer.ckpt");
+        let record = membership_record_path(&checkpoint);
+        let mut tmp = record.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        let mut cfg = Config { checkpoint_path: Some(checkpoint.clone()), syncer_epoch: 4, ..round_test_config(1) };
+        let (membership, path) = initial_membership(&cfg, 2).unwrap();
+        let mut r = RegistryState { membership_record: path, ..RegistryState::new(membership) };
+        // Injected write failure (a full disk): the temporary cannot be created.
+        std::fs::create_dir_all(&tmp).unwrap();
+        let t0 = Instant::now();
+        let gone = Member { learner_id: 1, generation: 9 };
+        r.register_group(test_group(gone), t0).unwrap();
+        r.unregister(gone);
+        assert!(!record.exists(), "the injected failure blocks the write");
+        // The disk recovers; the next membership event must write the
+        // retirement that the failed write dropped.
+        std::fs::remove_dir_all(&tmp).unwrap();
+        let other = Member { learner_id: 0, generation: 1 };
+        r.register_group(test_group(other), t0).unwrap();
+        assert!(record.exists(), "the pending record is retried");
+        cfg.resume = true;
+        cfg.syncer_epoch = 0;
+        let (membership, _) = initial_membership(&cfg, 2).unwrap();
+        assert_eq!(membership.syncer_epoch(), 4);
+        let mut back = RegistryState::new(membership);
+        assert_eq!(
+            back.register_group_with(test_group(gone), t0, HelloExt::default()).unwrap_err(),
+            RegisterError::Fenced(AdmitError::RetiredGeneration)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
