@@ -476,3 +476,63 @@ def test_push_upload_seconds_are_logged_per_learner():
     m = tape_metrics(record)
     assert m["learner/0/push_recv_seconds"] == 2.5
     assert "learner/1/push_recv_seconds" not in m
+
+
+# --------------------------------------------------------------------------
+# one bad record must not end forwarding for the rest of the run
+
+
+class _FlakyRun(_RecordingRun):
+    """A run whose first log call fails, like a transient W&B error."""
+
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def log(self, metrics):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("transient wandb error")
+        super().log(metrics)
+
+
+def _later(step):
+    return {**REAL_RECORD, "step": step}
+
+
+def test_forwarder_survives_a_malformed_record(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text(
+        "[1, 2]\n"
+        + json.dumps({"step": 3, "fragment": "x", "ms": None}) + "\n"
+        + json.dumps(_later(8)) + "\n"
+    )
+    run = _RecordingRun()
+    forwarder = TapeForwarder(run, tape)
+    forwarder.start()
+    try:
+        assert _wait_for(lambda: any(m.get("global_step") == 8 for m in run.logged))
+    finally:
+        forwarder.stop()
+    assert not forwarder._thread.is_alive()
+
+
+def test_forwarder_survives_a_failing_log_call(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text(json.dumps(_later(7)) + "\n" + json.dumps(_later(8)) + "\n")
+    run = _FlakyRun()
+    forwarder = TapeForwarder(run, tape)
+    forwarder.start()
+    try:
+        assert _wait_for(lambda: any(m.get("global_step") == 8 for m in run.logged))
+    finally:
+        forwarder.stop()
+    assert not forwarder._thread.is_alive()
+
+
+def test_replay_skips_a_non_object_record(tmp_path):
+    tape = tmp_path / "tape.jsonl"
+    tape.write_text("[1, 2]\n" + json.dumps(_later(8)) + "\n")
+    run = _RecordingRun()
+    assert replay(tape, run) == 1
+    assert run.logged[-1]["global_step"] == 8

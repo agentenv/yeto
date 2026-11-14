@@ -58,6 +58,26 @@ def record_metrics(rec: dict, folder: MergeMetricsFolder) -> dict | None:
     return tape_metrics(rec)
 
 
+def forward_record(rec, folder: MergeMetricsFolder, run) -> bool:
+    """Log one tape record; returns whether it was a merge record.
+
+    A record that cannot be turned into metrics (not an object, a field of
+    the wrong type) or a ``run.log`` that raises is skipped with a warning.
+    Either used to escape into the tailing loop and end forwarding for the
+    rest of the run while the job kept looking healthy.
+    """
+    if not isinstance(rec, dict):
+        log.warning("skipping non-object event-tape record: %r", rec)
+        return False
+    try:
+        metrics = record_metrics(rec, folder)
+        if metrics is not None:
+            run.log(metrics)
+    except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
+        log.warning("skipping event-tape record that failed to log: %s", e)
+    return _is_merge_record(rec)
+
+
 def tape_metrics(rec: dict) -> dict:
     """One merge record -> the metrics logged for it.
 
@@ -301,10 +321,7 @@ class TapeForwarder:
                 on_offset=None if self.offsets is None else self.offsets.record,
                 stop=self._stop,
             ):
-                metrics = record_metrics(rec, folder)
-                if metrics is not None:
-                    self.run.log(metrics)
-                if _is_merge_record(rec):
+                if forward_record(rec, folder, self.run):
                     self.records += 1
         except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
             log.warning("event-tape forwarding stopped: %s", e)
@@ -334,10 +351,7 @@ def replay(
             except json.JSONDecodeError as e:
                 log.warning("skipping unparsable event-tape line: %s", e)
                 continue
-            metrics = record_metrics(rec, folder)
-            if metrics is not None:
-                run.log(metrics)
-            if _is_merge_record(rec):
+            if forward_record(rec, folder, run):
                 count += 1
     run.summary({"sync/tape_records": count})
     return count
