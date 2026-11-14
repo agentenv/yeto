@@ -237,25 +237,85 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class ReleaseFileServer:
-    """Serves the store's placed releases to peers (module doc) on a daemon thread."""
+    """Serves the store's placed releases to peers (module doc) on a daemon thread.
 
-    def __init__(self, store: Path, *, host: str = "0.0.0.0", port: int = DEFAULT_PORT) -> None:
-        handler = type("StoreHandler", (_Handler,), {"store": Path(store)})
-        self._server = ThreadingHTTPServer((host, int(port)), handler)
-        self._server.daemon_threads = True
+    The thread can die (an exception out of ``serve_forever``); :meth:`alive`
+    tells, :attr:`error` keeps the cause, and :meth:`ensure_alive` (called by
+    the pull loop every pass) logs it and serves again: on the same socket
+    first, on a freshly bound one after ``rebind_after`` deaths in a row. After
+    ``max_restarts`` deaths in a row (or a failed bind) it gives up and
+    :attr:`healthy` is False; peers fall back to the object store."""
+
+    def __init__(self, store: Path, *, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
+                 poll_interval: float = 0.5, rebind_after: int = 3, max_restarts: int = 6) -> None:
+        self._handler = type("StoreHandler", (_Handler,), {"store": Path(store)})
+        self._server = self._bind(host, int(port))
+        self._address = (host, self.port)  # port 0: keep the port the first bind got
         self._thread: threading.Thread | None = None
+        self._poll = float(poll_interval)
+        self._stopped = False
+        self.rebind_after, self.max_restarts = int(rebind_after), int(max_restarts)
+        self.error: str | None = None
+        self.restarts = 0  # every restart
+        self.deaths_in_a_row = 0  # deaths with no healthy check in between
+        self.healthy = True
+
+    def _bind(self, host: str, port: int) -> ThreadingHTTPServer:
+        server = ThreadingHTTPServer((host, port), self._handler)
+        server.daemon_threads = True
+        return server
 
     @property
     def port(self) -> int:
         return int(self._server.server_address[1])
 
+    def _serve(self) -> None:
+        try:
+            self._server.serve_forever(poll_interval=self._poll)
+        except BaseException as error:  # noqa: BLE001 - recorded for ensure_alive; the thread ends here
+            self.error = f"{type(error).__name__}: {error}"
+
     def start(self) -> "ReleaseFileServer":
-        self._thread = threading.Thread(target=self._server.serve_forever, name="yeto-release-peer", daemon=True)
+        self._thread = threading.Thread(target=self._serve, name="yeto-release-peer", daemon=True)
         self._thread.start()
         return self
 
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def ensure_alive(self, log: Callable[[str], None] = print) -> bool:
+        """True when serving (or stopped on purpose); False when the thread had died
+        (restarted, rebound, or given up: see :attr:`healthy`)."""
+        if self._stopped or not self.healthy:
+            return self._stopped
+        if self.alive():
+            self.deaths_in_a_row = 0
+            return True
+        self.deaths_in_a_row += 1
+        cause = self.error or "no error recorded"
+        if self.deaths_in_a_row > self.max_restarts:
+            self.healthy = False
+            log(f"release peer server unhealthy: died {self.deaths_in_a_row} times in a row ({cause}); "
+                "peers fall back to the object store")
+            return False
+        if self.deaths_in_a_row >= self.rebind_after:
+            try:
+                self._server.server_close()
+                self._server = self._bind(*self._address)
+            except OSError as error:
+                self.healthy = False
+                log(f"release peer server unhealthy: rebind of {self._address} failed: {error}")
+                return False
+            log(f"release peer server rebound after {self.deaths_in_a_row} deaths in a row ({cause})")
+        self.restarts += 1
+        log(f"release peer server thread died ({cause}): restart {self.restarts}")
+        self.start()
+        return False
+
     def stop(self) -> None:
-        self._server.shutdown()
+        self._stopped = True
+        if self.alive():
+            self._server.shutdown()
         self._server.server_close()
         if self._thread is not None:
             self._thread.join(timeout=10)

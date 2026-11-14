@@ -345,13 +345,16 @@ def backfill_manifests(s3: S3, store: Path) -> list[str]:
     return done
 
 
-def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = ()) -> None:
+def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = (),
+              server: peer_fanout.ReleaseFileServer | None = None) -> None:
     try:
         backfill_manifests(s3, store)  # releases an earlier run placed but crashed before recording
     except Exception as error:  # noqa: BLE001 - the pull loop still has to start
         log(f"manifest backfill at start failed: {error}")
     failures = 0
     while True:
+        if server is not None:
+            server.ensure_alive(log)  # a dead serve thread is logged and restarted, never silent
         try:
             pointer = s3.get_json(cm.LATEST)
             if pointer:
@@ -395,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         if server is not None:
             server.stop()
     elif a.cmd == "pull-loop":
-        pull_loop(s3, a.store, a.interval, peers=peers)
+        pull_loop(s3, a.store, a.interval, peers=peers, server=server)
     else:
         print(json.dumps(s3.get_json(cm.LATEST)))
     return 0

@@ -4,6 +4,7 @@ it placed."""
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -148,3 +149,87 @@ def test_peer_with_a_wrong_manifest_or_corrupt_file_never_places(s3env):
     objects["/manifests/r2-v2.json"] = cm.encode(base_first)
     with pytest.raises(pf.PeerError, match="delta base"):
         pf.pull_from_peer("peer", island, "r2-v2", digest=None, fetch=fetch)
+
+
+def test_release_file_server_death_is_detected_and_restarted(tmp_path, monkeypatch):
+    """The serve thread used to die silently (an exception out of serve_forever):
+    peers then fell back to the object store forever with no log line."""
+    import time as _time
+
+    store = tmp_path / "store"
+    (store / cm.RELEASES).mkdir(parents=True)
+    server = pf.ReleaseFileServer(store, host="127.0.0.1", port=0, poll_interval=0.01)
+    boom = {"n": 1}
+    real = server._server.service_actions
+
+    def flaky():
+        if boom["n"]:
+            boom["n"] -= 1
+            raise OSError("select failed")
+        real()
+
+    monkeypatch.setattr(server._server, "service_actions", flaky)
+    server.start()
+    for _ in range(200):
+        if not server.alive():
+            break
+        _time.sleep(0.01)
+    assert not server.alive()
+    assert "select failed" in (server.error or "")
+    assert server.ensure_alive() is False  # was dead: restarted
+    assert server.alive() and server.restarts == 1
+    assert server.ensure_alive() is True
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.urlopen(f"http://127.0.0.1:{server.port}/manifests/nope.json", timeout=5)
+    server.stop()
+    assert server.ensure_alive() is True  # a stopped server is not restarted
+    assert not server.alive()
+
+
+def test_release_file_server_rebinds_then_reports_unhealthy(tmp_path, monkeypatch):
+    """A serve thread that dies again on every restart (a broken socket) is rebound after
+    ``rebind_after`` deaths in a row, and declared unhealthy after ``max_restarts``."""
+    store = tmp_path / "store"
+    (store / cm.RELEASES).mkdir(parents=True)
+    server = pf.ReleaseFileServer(store, host="127.0.0.1", port=0, rebind_after=2, max_restarts=3)
+    binds = []
+    real_bind = server._bind
+
+    def bind(host, port):
+        binds.append((host, port))
+        new = real_bind(host, port)
+        new.serve_forever = lambda poll_interval=0.5: (_ for _ in ()).throw(OSError("bad fd"))
+        return new
+
+    server._server.serve_forever = lambda poll_interval=0.5: (_ for _ in ()).throw(OSError("bad fd"))
+    monkeypatch.setattr(server, "_bind", bind)
+    port, logs = server.port, []
+    server.start()
+    results = []
+    for _ in range(5):
+        server._thread.join(timeout=5)
+        results.append(server.ensure_alive(logs.append))
+    assert results == [False] * 5
+    assert binds == [("127.0.0.1", port), ("127.0.0.1", port)]  # deaths 2 and 3 rebind on the same port
+    assert server.healthy is False and server.restarts == 3
+    assert any("unhealthy" in line for line in logs)
+    server.stop()
+
+
+def test_release_file_server_failed_rebind_is_unhealthy(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    (store / cm.RELEASES).mkdir(parents=True)
+    server = pf.ReleaseFileServer(store, host="127.0.0.1", port=0, rebind_after=1)
+    server._server.serve_forever = lambda poll_interval=0.5: (_ for _ in ()).throw(OSError("bad fd"))
+
+    def no_bind(host, port):
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(server, "_bind", no_bind)
+    server.start()
+    server._thread.join(timeout=5)
+    logs = []
+    assert server.ensure_alive(logs.append) is False
+    assert server.healthy is False and "rebind" in logs[-1]
+    assert server.ensure_alive(logs.append) is False  # stays unhealthy, no restart loop
+    server.stop()
