@@ -4564,6 +4564,7 @@ async fn scheduler(
                 pushes: HashMap::new(),
                 carried: Vec::new(),
                 carry_answers: cfg.carry_answers_round,
+                refused_ahead: Vec::new(),
             });
             if let Some(carry) = late_carry.as_mut() {
                 let round = inflight.last_mut().expect("round just launched");
@@ -4673,13 +4674,23 @@ async fn scheduler(
                         i += 1;
                         continue;
                     }
-                    warn!(
-                        step = r.t,
-                        attempt = r.attempt,
-                        responses = r.pushes.len(),
-                        quorum = r.quorum_size,
-                        "quorum timeout below K; launching a new frozen-membership attempt"
-                    );
+                    if Instant::now() < r.quorum_deadline {
+                        warn!(
+                            step = r.t,
+                            attempt = r.attempt,
+                            refused = r.refused_ahead.len(),
+                            "every expected island pushed from a base ahead of the resumed state; \
+                             launching a new frozen-membership attempt"
+                        );
+                    } else {
+                        warn!(
+                            step = r.t,
+                            attempt = r.attempt,
+                            responses = r.pushes.len(),
+                            quorum = r.quorum_size,
+                            "quorum timeout below K; launching a new frozen-membership attempt"
+                        );
+                    }
                     let required = cfg.membership.min_launch_members(cfg.quorum);
                     if groups.len() < required {
                         warn!(
@@ -4704,6 +4715,7 @@ async fn scheduler(
                         }
                     }
                     r.pushes.clear();
+                    r.refused_ahead.clear();
                     arrival_gaps.forget(r.t, r.p);
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
@@ -5774,6 +5786,14 @@ struct Round {
     carried: Vec<(Member, Push)>,
     /// `Config::carry_answers_round`, frozen at launch.
     carry_answers: bool,
+    /// Expected islands whose push for this attempt was refused as
+    /// `FutureBase`: its base is ahead of this round's, which happens only
+    /// after the syncer resumed from a checkpoint older than the islands'
+    /// anchors. Such an island already answered this attempt's pull and will
+    /// not push for it again (it rebases onto the catch-up instead), so a
+    /// round refused by every expected island is relaunched at once rather
+    /// than after `--quorum-timeout-s` (see `round_action`).
+    refused_ahead: Vec<Member>,
 }
 
 impl Round {
@@ -5891,6 +5911,20 @@ fn round_action(round: &Round, now: Instant) -> RoundAction {
     let responders = round.responders().len();
     if responders > 0 && responders >= round.expected_members.len() {
         return RoundAction::Complete;
+    }
+    // Every expected island pushed against a base the (rewound) syncer does
+    // not have and none will push for this attempt again: relaunch it now
+    // with a pull at the current base. Waiting the quorum timeout out would
+    // stall this round and every later step queued behind it.
+    if responders == 0
+        && round.carried.is_empty()
+        && !round.expected_members.is_empty()
+        && round
+            .expected_members
+            .iter()
+            .all(|member| round.refused_ahead.contains(member))
+    {
+        return RoundAction::Restart;
     }
     if round.quorum_reached() {
         return match round.grace_deadline {
@@ -6131,6 +6165,9 @@ fn route_push(
         return PushDisposition::UnexpectedMember;
     }
     if push.base_version > round.base_version {
+        if !fixed_roster && !round.refused_ahead.contains(&member) {
+            round.refused_ahead.push(member);
+        }
         return PushDisposition::FutureBase;
     }
     if max_base_lag.is_some_and(|limit| round.base_version - push.base_version > limit) {
@@ -10314,6 +10351,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            refused_ahead: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -10399,6 +10437,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            refused_ahead: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -10465,6 +10504,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            refused_ahead: Vec::new(),
             pushes,
         }
     }
@@ -13042,6 +13082,7 @@ mod tests {
             fold: None,
             carried: Vec::new(),
             carry_answers: false,
+            refused_ahead: Vec::new(),
             pushes: HashMap::new(),
         }
     }
@@ -13860,6 +13901,71 @@ mod tests {
         );
         assert_eq!(rounds[0].expected_members, vec![fast]);
         assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn a_round_every_island_refused_as_future_base_relaunches_without_the_quorum_timeout() {
+        // Regression: after a SIGKILL the syncer resumes from an older
+        // checkpoint. Pushes the islands send before taking its catch-up hold
+        // bases ahead of the rewound rounds; when every expected island of a
+        // round was refused that way, the round (and every later step behind
+        // it) waited the full --quorum-timeout-s.
+        let first = member(0, 10);
+        let second = member(1, 20);
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, first, test_push_for(0, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(
+            round_action(&rounds[0], Instant::now()),
+            RoundAction::Wait,
+            "the other island may still answer"
+        );
+        assert_eq!(
+            route_push(&mut rounds, first, test_push_for(0, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(rounds[0].refused_ahead, vec![first]);
+        assert_eq!(
+            route_push(&mut rounds, second, test_push_for(1, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(
+            round_action(&rounds[0], Instant::now()),
+            RoundAction::Restart
+        );
+
+        // One accepted push: the round merges it as usual.
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 1;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, first, test_push_for(0, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(
+            route_push(&mut rounds, second, test_push_for(1, 5), None, false),
+            PushDisposition::Accepted
+        );
+        assert_ne!(
+            round_action(&rounds[0], Instant::now()),
+            RoundAction::Restart
+        );
+
+        // A fixed roster keeps its strict slot semantics.
+        let mut round = test_round(vec![first]);
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, first, test_push_for(0, 6), None, true),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
     }
 
     #[test]
