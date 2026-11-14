@@ -13,8 +13,9 @@ asks before a claim pass:
   sandbox. The smaller of the process cap (``HARBOR_MAX_SANDBOXES`` through
   :mod:`yeto.rl.harness.harbor.capacity`, minus slots held) and the host's
   free room (``max_sandboxes`` of the host minus its running containers,
-  every owner counted, probed at most every ``ttl_s``), divided by the group
-  size. ``None``: no limit known.
+  every owner counted, probed at most every ``ttl_s``, minus the sandboxes
+  claimed whose containers no probe has seen yet, for at most
+  ``start_grace_s``), divided by the group size. ``None``: no limit known.
 
   With an owner (:mod:`.trial_labels`: run label, shard, incarnation) the
   probe classifies the running containers as ``ours`` (this run), ``stale``
@@ -45,13 +46,16 @@ logger = logging.getLogger(__name__)
 
 HOST_ENV = "YETO_SANDBOX_HOST"
 DEFAULT_TTL_S = 15.0
+# how long a claimed sandbox counts as in flight while its container has not appeared
+DEFAULT_START_GRACE_S = 300.0
 
 
 class SandboxGate:
     def __init__(self, objects: Any, cfg: EnvsConfig, *, host: HostConfig | None, group_size: int,
                  provider: str | None = None, docker: DockerHost | None = None,
                  limits: Any = None, ttl_s: float = DEFAULT_TTL_S,
-                 clock: Callable[[], float] = time.monotonic, owner: Owner | None = None) -> None:
+                 clock: Callable[[], float] = time.monotonic, owner: Owner | None = None,
+                 start_grace_s: float = DEFAULT_START_GRACE_S) -> None:
         self.objects, self.cfg, self.host = objects, cfg, host
         self.group_size = max(1, int(group_size))
         self.provider = provider
@@ -62,6 +66,10 @@ class SandboxGate:
         self._probe: tuple[float, int | None] | None = None
         self.owner = owner
         self.last_probe: dict[str, Any] = {}
+        # claimed sandboxes whose containers no probe has seen yet: [claimed_at, count], oldest first
+        self.start_grace_s = float(start_grace_s)
+        self._in_flight: list[list[float]] = []
+        self._seen: int | None = None
 
     @property
     def host_name(self) -> str | None:
@@ -94,7 +102,11 @@ class SandboxGate:
         if self._probe is not None and now - self._probe[0] < self.ttl_s:
             return self._probe[1]
         try:
-            free: int | None = max(0, int(self.host.max_sandboxes) - self._count())
+            running = self._count()
+            pending = self._settle_in_flight(now)
+            free: int | None = max(0, int(self.host.max_sandboxes) - running - pending)
+            if pending:
+                self.last_probe["in_flight"] = pending
         except Exception as error:  # noqa: BLE001 - unknown room: claim nothing until the probe answers
             logger.warning("sandbox gate: container count on %s failed: %r", self.host.name, error)
             free = 0
@@ -104,6 +116,25 @@ class SandboxGate:
                            self.host.max_sandboxes, self.last_probe)
         self._probe = (now, free)
         return free
+
+    def _settle_in_flight(self, now: float) -> int:
+        """Sandboxes claimed but not running yet. Containers that appeared since the
+        last probe (this shard's, or the host's without an owner) retire the oldest
+        claims first; a claim older than ``start_grace_s`` stops counting (its trial
+        never started or already ended), so nothing holds room forever."""
+        seen = int(self.last_probe.get("shard", self.last_probe.get("host_running", 0)))
+        started = 0 if self._seen is None else max(0, seen - self._seen)
+        self._seen = seen
+        kept: list[list[float]] = []
+        for at, n in self._in_flight:
+            if now - at >= self.start_grace_s:
+                continue
+            used = min(started, int(n))
+            started -= used
+            if n - used > 0:
+                kept.append([at, n - used])
+        self._in_flight = kept
+        return int(sum(n for _, n in kept))
 
     def _count(self) -> int:
         """Running containers on the host, this shard's stale incarnations removed first."""
@@ -163,9 +194,14 @@ class SandboxGate:
         """``groups`` were just claimed: spend their sandboxes from the cached host
         probe. Their containers start later, so until the next probe the cached
         room would otherwise be handed out again by every claim inside ``ttl_s``."""
+        n = max(0, int(groups)) * self.group_size
+        if n and self.host is not None and self.host.max_sandboxes is not None and self.docker is not None:
+            if self._seen is None:  # baseline before the first claim, so its containers count as started
+                self._seen = int(self.last_probe.get("shard", self.last_probe.get("host_running", 0)))
+            self._in_flight.append([self.clock(), float(n)])
         if self._probe is not None and self._probe[1] is not None:
             at, free = self._probe
-            self._probe = (at, max(0, free - max(0, int(groups)) * self.group_size))
+            self._probe = (at, max(0, free - n))
 
     def sweep_shard(self, shard: str) -> int:
         """Remove the trial containers of ``shard`` of this run (a predecessor this
