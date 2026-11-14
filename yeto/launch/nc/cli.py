@@ -1381,6 +1381,13 @@ def _overrides(cfg) -> dict:
     unknown = set(cfg) - set(_POOL_KEYS)
     if unknown:
         raise ValueError(f"pool sampler config: unknown keys {sorted(unknown)}")
+    if cfg.get("dispense") is not None:
+        from yeto.rl.engine.store_dispense import check_store_config  # noqa: PLC0415
+
+        try:
+            check_store_config(cfg["dispense"])
+        except Exception as error:  # noqa: BLE001 - DispenseError: a pool config error
+            raise ValueError(f"pool sampler config: dispense: {error}") from error
     return {k: cfg.get(k) for k in _POOL_KEYS}
 
 
