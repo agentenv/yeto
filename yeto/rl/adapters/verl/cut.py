@@ -222,6 +222,16 @@ def _set_rng_state(rng: Mapping[str, Any]) -> None:
         module.set_rng_state(rng[device_type])
 
 
+def _rng_state_as_saved(saved: Mapping[str, Any]) -> dict[str, Any]:
+    """:func:`_rng_state` under the saved cut's key names, so a restore re-exports
+    the digest it was written with: a cut from an Ascend rank under the
+    transfer_to_npu alias keeps its NPU state as ``cuda``."""
+    rng = _rng_state()
+    if "npu" in rng and "npu" not in saved and "cuda" in saved:
+        rng["cuda"] = rng.pop("npu")
+    return rng
+
+
 def rng_digest(rng: Mapping[str, Any]) -> str:
     """sha256 of the RNG states (CPU, and CUDA or NPU when present): a restore must
     re-export the saved one (as the Miles cut summary's ``rng_digest``)."""
@@ -243,7 +253,8 @@ def _rank_and_world() -> tuple[int, int]:
     return 0, 1
 
 
-def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str) -> dict[str, Any]:
+def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str,
+                  saved_rng: Mapping[str, Any] | None = None) -> dict[str, Any]:
     resume = handles_rank_state(handles)
     return {
         "coord": {"rank": rank, "world": world},
@@ -251,7 +262,7 @@ def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str) 
         "has_optimizer_state": any(s.max > 0 for s in resume.adam_steps.values()) or bool(resume.moments),
         "has_rng": True,
         "state_digest": digest,
-        "rng_digest": rng_digest(_rng_state()),
+        "rng_digest": rng_digest(_rng_state() if saved_rng is None else _rng_state_as_saved(saved_rng)),
         "resume": resume.to_dict(),
     }
 
@@ -331,7 +342,8 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
                    options=_state_options(load=True))
     handles.scheduler.load_state_dict(saved["scheduler"])
     _set_rng_state(saved["rng"])
-    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles))}
+    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles),
+                                                saved_rng=saved["rng"])}
 
 
 def resume_rank(handles: TrainHandles) -> dict[str, Any]:

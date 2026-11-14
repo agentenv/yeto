@@ -75,3 +75,33 @@ def test_an_npu_rng_state_needs_an_npu(monkeypatch):
 
 def test_a_cut_without_device_rng_restores_on_cpu():
     vcut._set_rng_state({"cpu": torch.get_rng_state()})
+
+
+def test_an_old_alias_cut_with_a_cuda_rng_key_restores_with_the_same_digest(ascend_alias, monkeypatch):
+    """main, on a MindSpeed (transfer_to_npu) rank, saved the NPU state as ``cuda``."""
+    monkeypatch.setattr(torch.cuda, "set_rng_state", ascend_alias.set_rng_state)  # the alias
+    old = {"cpu": torch.get_rng_state(), "cuda": ascend_alias.state.clone()}
+    vcut._set_rng_state(old)
+    assert torch.equal(ascend_alias.restored, ascend_alias.state)
+    assert vcut.rng_digest(vcut._rng_state_as_saved(old)) == vcut.rng_digest(old)
+    assert set(vcut._rng_state_as_saved({"cpu": old["cpu"], "npu": old["cuda"]})) == {"cpu", "npu"}
+
+
+def test_a_rocm_build_still_reads_as_cuda(monkeypatch):
+    monkeypatch.setattr(torch, "npu", _FakeNpu(), raising=False)
+    monkeypatch.setattr(torch.version, "cuda", None)
+    monkeypatch.setattr(torch.version, "hip", "7.0", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert not accel.cuda_is_npu_alias()
+    assert accel.available_type() == "cuda"
+
+
+def test_a_cuda_cut_rng_keeps_the_cuda_key_and_digest(monkeypatch):
+    state = torch.tensor([1, 2, 3], dtype=torch.uint8)
+    monkeypatch.setattr(torch.version, "cuda", "13.0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_rng_state", lambda: state.clone())
+    rng = vcut._rng_state()
+    assert set(rng) == {"cpu", "cuda"}
+    assert vcut._rng_state_as_saved(rng).keys() == rng.keys()
+    assert vcut.rng_digest(vcut._rng_state_as_saved(rng)) == vcut.rng_digest(rng)
