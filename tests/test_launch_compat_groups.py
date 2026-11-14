@@ -19,6 +19,7 @@ def test_mixed_card_trainers_are_refused():
     specs = parse_gpu_spec("modal:1x1xh100,modal:1x1xl40s")
     with pytest.raises(PreflightError, match="nvidia-h100: islands \\[0\\], nvidia-l40s: islands \\[1\\]"):
         check_compat_groups(_args(), specs)
+    check_compat_groups(_args(rl_identity="relaxed"), specs)  # hetero-1114 opt-in: warning only
 
 
 def test_declared_group_or_one_card_passes():

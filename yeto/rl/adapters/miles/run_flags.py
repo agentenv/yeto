@@ -589,6 +589,15 @@ _ISLAND = (
                 help="declare this compat group on every island instead of the group of each "
                      "island's card, so islands on different cards (e.g. H200 and H100) merge; "
                      "their numeric tolerance is not calibrated"),
+    # hetero-1114: "relaxed" makes device_family / engine / engine commit /
+    # param map / compat_group provenance only (not in the session contract) on
+    # the launcher, every island ($YETO_RL_IDENTITY) and the syncer
+    # (--relaxed-identity). Default "strict" = unchanged behaviour.
+    shared_flag("--rl-identity", choices=("strict", "relaxed"), default="strict",
+                help="strict (default): the session contract binds the full backend identity "
+                     "(engine, commit, device family, param map, compat group). relaxed: only "
+                     "the semantic layout/algorithm, so islands on different hardware or "
+                     "training backends merge (warned; tolerance not calibrated)"),
     # Off-island copy of the state dir (journal/cuts/ledger),
     # synced after every commit point and restored on an empty state dir (machine replaced)
     island_flag("--rl-elastic-checkpoint-store", default=None, metavar="PATH"),

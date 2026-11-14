@@ -122,6 +122,8 @@ def ray_start_accelerator_flag(count: int, device_family_name: str | None = None
 
 # Phase 2 (design D9a): tolerances per (group, group) pair once calibrated.
 # Empty in phase 1: every pair of different groups is "not calibrated".
+# Consulted in the default strict mode; under --rl-identity relaxed compat_group
+# is provenance (hetero-1114) and any pair is admitted with a warning.
 CARD_PAIR_TOLERANCE: dict[frozenset[str], Mapping[str, float]] = {}
 
 COMPAT_GROUP_ENV = "YETO_RL_COMPAT_GROUP"
@@ -222,10 +224,17 @@ def island_compat_group(explicit: str | None = None) -> str:
     return validate_compat_group(value)
 
 
-def compat_refusal(local: str | None, peer: str | None) -> str | None:
-    """Phase-1 comparison: None when the two groups may merge, else the reason.
-    A pair with a calibrated tolerance would be allowed in phase 2; the table
-    is empty now, so any difference is refused."""
+def compat_refusal(local: str | None, peer: str | None, *, strict: bool | None = None) -> str | None:
+    """None when the two groups may merge, else the reason.
+
+    ``--rl-identity relaxed`` (``strict`` False): compat_group is provenance,
+    every pair may merge (the caller warns).  Strict (default; None reads
+    ``$YETO_RL_IDENTITY``): phase-1 comparison, a pair with a calibrated
+    tolerance is allowed; the table is empty now, so any difference is refused."""
+    from yeto.rl.engine.backend_identity import strict_identity
+
+    if not strict_identity(strict):
+        return None
     if local == peer and local is not None:
         return None
     if local is not None and peer is not None and frozenset((local, peer)) in CARD_PAIR_TOLERANCE:
@@ -233,8 +242,8 @@ def compat_refusal(local: str | None, peer: str | None) -> str | None:
     return f"compat_group differs: {local or 'undeclared'} vs {peer or 'undeclared'}, tolerance not calibrated"
 
 
-def check_compat_group(local: str | None, peer: str | None) -> None:
-    reason = compat_refusal(local, peer)
+def check_compat_group(local: str | None, peer: str | None, *, strict: bool | None = None) -> None:
+    reason = compat_refusal(local, peer, strict=strict)
     if reason is not None:
         raise CompatGroupMismatch(reason)
 

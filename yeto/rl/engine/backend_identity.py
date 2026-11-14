@@ -15,17 +15,45 @@ device families or parameter-name maps must not average their deltas.
   handshake, while two islands of the same backend agree as before.
 * :func:`check_identity_match` -- the same comparison where both identities
   are known (launcher, island status), naming both sides in the error.
+
+Relaxed identity (hetero-1114, gap T1-T3; opt-in ``--rl-identity relaxed``,
+``$YETO_RL_IDENTITY=relaxed``): the contract binds only the *semantic* part of the identity (:meth:`BackendIdentity.semantic_sha256`):
+the tensor layout (canonical parameter names and shapes) is already the layout
+fingerprint, the model config, algorithm, LR schedule and code pack are the
+other contract slots.  ``device_family``, ``engine``, ``engine_commit``,
+``param_map_sha256`` and ``compat_group`` are provenance only (recorded on the
+event tape / HELLO, never compared), so an Ascend island and an NVIDIA island,
+or a verl FSDP2 and a verl Megatron island, can share a session.
+The default (strict) keeps the old contract (:meth:`BackendIdentity.sha256`,
+byte-identical), so existing runs, checkpoints and syncer state are unchanged.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 IDENTITY_SCHEMA = "yeto-backend-identity-v2"  # v2: + compat_group (7.7b)
 SESSION_CONTRACT_DOMAIN = b"yeto-rl-session-contract-v2\0"
+SEMANTIC_IDENTITY_SCHEMA = "yeto-backend-semantic-identity-v1"
+# Parameter naming every backend maps to before the wire (yeto canonical / HF names).
+CANONICAL_PARAM_NAMING = "yeto-canonical-hf-names"
+IDENTITY_MODE_ENV = "YETO_RL_IDENTITY"  # "strict" (default) | "relaxed"
+IDENTITY_MODES = ("strict", "relaxed")
+_log = logging.getLogger(__name__)
+
+
+def strict_identity(explicit: bool | None = None) -> bool:
+    """Whether the island compares the full backend identity (default: yes).
+    ``explicit`` None reads ``$YETO_RL_IDENTITY`` (the launcher exports
+    ``relaxed`` for ``--rl-identity relaxed``); anything but ``relaxed`` is strict."""
+    if explicit is not None:
+        return bool(explicit)
+    return os.environ.get(IDENTITY_MODE_ENV, "strict").strip().lower() != "relaxed"
 
 
 class BackendIdentityMismatch(ValueError):
@@ -69,7 +97,23 @@ class BackendIdentity:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
 
     def sha256(self) -> str:
+        """Full (provenance) identity hash; unchanged from schema v2, the strict contract."""
         return hashlib.sha256(self.canonical_json().encode()).hexdigest()
+
+    provenance_sha256 = sha256
+
+    def semantic_sha256(self) -> str:
+        """Hash of what changes the merge semantics: none of the hardware or stack
+        fields.  Every backend ships canonical names, so the value is shared by all
+        backends; layout, model config and algorithm are bound by the other slots."""
+        text = json.dumps({"schema": SEMANTIC_IDENTITY_SCHEMA, "param_naming": CANONICAL_PARAM_NAMING},
+                          sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def contract_sha256(self, strict: bool | None = None) -> str:
+        """What the island binds into its syncer session contract: the semantic
+        hash under ``--rl-identity relaxed``, else the full identity (default)."""
+        return self.sha256() if strict_identity(strict) else self.semantic_sha256()
 
 
 def param_map_sha256(param_map: Mapping[str, Any]) -> str:
@@ -175,12 +219,31 @@ def config_island_contract_sha256(config: Any) -> str | None:
         test_salt=identity_test_salt())
 
 
-def check_identity_match(local: BackendIdentity, peer: BackendIdentity) -> None:
+def provenance_difference(local: BackendIdentity, peer: BackendIdentity) -> dict[str, tuple[str, str]]:
+    """Provenance fields (hardware / stack) that differ between two identities."""
+    a, b = asdict(local), asdict(peer)
+    return {k: (a[k], b[k]) for k in a if a[k] != b[k]}
+
+
+def check_identity_match(local: BackendIdentity, peer: BackendIdentity, *,
+                         strict: bool | None = None) -> dict[str, tuple[str, str]]:
+    """Refuse two identities that must not merge; returns the provenance fields
+    that differ (admitted with a warning in relaxed mode)."""
     from yeto.hw.catalog import check_compat_group
 
-    check_compat_group(local.compat_group, peer.compat_group)  # readable reason first (7.7c)
+    if not strict_identity(strict):
+        if local.semantic_sha256() != peer.semantic_sha256():
+            raise BackendIdentityMismatch(
+                f"backend semantic identity differs: {local.to_dict()} vs {peer.to_dict()}")
+        diff = provenance_difference(local, peer)
+        if diff:
+            _log.warning("cross-backend/hardware merge admitted (--rl-identity relaxed: "
+                         "provenance only): %s", diff)
+        return diff
+    check_compat_group(local.compat_group, peer.compat_group, strict=True)  # readable reason first (7.7c)
     if local.sha256() != peer.sha256():
         raise BackendIdentityMismatch(
             "backend identity differs, islands cannot be merged: "
             f"local {local.to_dict()} ({local.sha256()[:12]}) vs "
             f"peer {peer.to_dict()} ({peer.sha256()[:12]})")
+    return {}

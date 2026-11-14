@@ -10,6 +10,7 @@ import time
 
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group, launch_compat_group
+from ..rl.engine.backend_identity import IDENTITY_MODE_ENV
 from .code_pack import code_pack_island_flag, code_workdir
 from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _rl_backend_module
@@ -541,6 +542,8 @@ def make_miles_island_task(
         # card raises here, before any cloud spend (no default). An explicit
         # --rl-compat-group replaces it on every island (mixed cards, operator decision).
         COMPAT_GROUP_ENV: _island_compat_group(args, spec, learner_id),
+        # hetero-1114: --rl-identity relaxed -> semantic-only session contract
+        **({IDENTITY_MODE_ENV: "relaxed"} if getattr(args, "rl_identity", "strict") == "relaxed" else {}),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.

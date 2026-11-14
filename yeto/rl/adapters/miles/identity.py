@@ -4,7 +4,8 @@ Fixed values: engine ``miles``, the pinned Miles commit (``MILES_NEXT_COMMIT``),
 device family ``nvidia`` (the only family Miles runs on here), and the hash of
 the parameter-name map.  Miles' LoRA tensors already use yeto's canonical
 names (``yeto.rl.core`` canonical specs), so the map is the identity map; it is
-still hashed so a future non-identity map changes the identity.
+still hashed so a future non-identity map changes the identity.  Under
+``--rl-identity relaxed`` (hetero-1114) all fields are provenance only.
 """
 
 from __future__ import annotations

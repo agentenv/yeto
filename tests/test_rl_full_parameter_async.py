@@ -346,7 +346,8 @@ def test_partial_quorum_is_bound_into_the_session_contract(monkeypatch):
     from yeto.rl.adapters.miles.full_parameter import role_stream
 
     monkeypatch.setattr("yeto.rl.adapters.miles.identity.backend_identity",
-                        lambda: type("I", (), {"sha256": lambda self: "0" * 64})())
+                        lambda: type("I", (), {"sha256": lambda self: "0" * 64,
+                                                 "contract_sha256": lambda self, strict=None: "0" * 64})())
     strict = _role_stream_config("actor", 30100)
     digest = role_stream.role_stream_session_contract_hash("1" * 64, strict)
     partial = role_stream.role_stream_session_contract_hash(

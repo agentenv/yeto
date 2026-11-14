@@ -254,6 +254,11 @@ struct Args {
     /// connect no longer decides the contract.
     #[arg(long)]
     expected_island_contract: Option<String>,
+    /// hetero-1114 (opt-in): compat_group is provenance only; a HELLO from
+    /// another card group with the same contract is admitted and logged.
+    /// Default: refused (unchanged behaviour).
+    #[arg(long, default_value_t = false)]
+    relaxed_identity: bool,
     /// Membership lease in seconds (no heartbeat -> removed; the island
     /// must re-JOIN). Unset = no lease.
     #[arg(long)]
@@ -556,6 +561,7 @@ fn main() -> anyhow::Result<()> {
         require_profile_binding: args.require_profile_binding,
         island_hmac_key,
         expected_island_contract,
+        strict_identity: !args.relaxed_identity,
         syncer_epoch: args.syncer_epoch,
         shutdown: Some(std::sync::Arc::new(shutdown::Shutdown::new(std::time::Duration::from_secs(
             args.shutdown_timeout_s,

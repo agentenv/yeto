@@ -523,7 +523,9 @@ def _syncer_expected_contract(args) -> str:
     """secret-handling-hardening: the head pins the island contract
     (--rl-island-contract-sha256) instead of letting the first island decide."""
     pinned = getattr(args, "rl_island_contract_sha256", None)
-    return f" --expected-island-contract {pinned}" if pinned else ""
+    out = f" --expected-island-contract {pinned}" if pinned else ""
+    # hetero-1114: compat_group is provenance at HELLO only under --rl-identity relaxed
+    return out + (" --relaxed-identity" if getattr(args, "rl_identity", "strict") == "relaxed" else "")
 
 
 def _syncer_island_pool(args) -> str:

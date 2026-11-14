@@ -17,7 +17,7 @@ from yeto.rl.engine.policy_age import (
     token_version,
 )
 
-MILES = backend_identity().sha256()
+MILES = backend_identity().contract_sha256()
 
 
 # ---------------------------------------------------------------- 2.1 contract
