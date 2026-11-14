@@ -120,6 +120,11 @@ def cached_endpoint(account: int, port: int = RELAY_PORT) -> Endpoint | None:
 
 # --- WebSocket client framing (RFC 6455, client side masks) -----------------
 
+# relay.mjs sends one frame per TCP read (at most 64 KiB) and a gateway's handshake
+# header is a few hundred bytes; a peer declaring more is refused, not buffered
+MAX_FRAME = 16 << 20
+MAX_HANDSHAKE_HEADER = 64 << 10
+
 def encode_frame(payload: bytes, opcode: int = 2, mask: bytes | None = None) -> bytes:
     mask = os.urandom(4) if mask is None else mask
     n = len(payload)
@@ -153,6 +158,8 @@ class FrameReader:
                 if len(self.buf) < 10:
                     break
                 ln, off = int.from_bytes(self.buf[2:10], "big"), 10
+            if ln > MAX_FRAME:
+                raise TunnelError(f"relay frame of {ln} bytes exceeds the {MAX_FRAME}-byte limit")
             mask = b""
             if masked:
                 mask, off = self.buf[off:off + 4], off + 4
@@ -190,6 +197,9 @@ def open_ws(endpoint: Endpoint, target: str, *, timeout: float = 30.0) -> tuple[
         if not chunk:
             break
         data += chunk
+        if b"\r\n\r\n" not in data and len(data) > MAX_HANDSHAKE_HEADER:
+            sock.close()
+            raise TunnelError(f"relay handshake header exceeds {MAX_HANDSHAKE_HEADER} bytes")
     head, _, rest = data.partition(b"\r\n\r\n")
     status_line = head.split(b"\r\n", 1)[0].decode(errors="replace")
     parts = status_line.split()
