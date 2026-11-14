@@ -592,6 +592,7 @@ dependencies = [
  "clap",
  "half",
  "sha2",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",

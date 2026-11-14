@@ -99,6 +99,10 @@ struct Args {
     /// inherit --quorum-timeout-s for backward compatibility.
     #[arg(long)]
     final_ack_timeout_s: Option<u64>,
+    /// Close an accepted connection that sends no complete first frame
+    /// within this many seconds (half-open peers, scanners, stuck clients).
+    #[arg(long, default_value_t = server::DEFAULT_FIRST_FRAME_TIMEOUT_S)]
+    first_frame_timeout_s: u64,
     /// Total number of outer steps T (each syncs one fragment).
     #[arg(long)]
     total_steps: u64,
@@ -526,6 +530,7 @@ fn main() -> anyhow::Result<()> {
         delta_correction,
         quorum_timeout_s: args.quorum_timeout_s,
         final_ack_timeout_s,
+        first_frame_timeout_s: args.first_frame_timeout_s,
         total_steps: args.total_steps,
         policy_sweep_fragments: args.policy_sweep_fragments,
         outer_lr: args.outer_lr,
