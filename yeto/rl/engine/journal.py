@@ -183,20 +183,47 @@ class Journal:
     def append(self, kind: str, **fields: Any) -> dict[str, Any]:
         if self._fh is None:
             raise JournalError("journal is closed")
-        self._seq += 1
         record = {
-            "seq": self._seq,
+            "seq": self._seq + 1,
             "kind": kind,
             "wall_time": self._wall(),
             "monotonic": self._clock(),
             **fields,
         }
         line = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
-        self._fh.write(line.encode("utf-8") + b"\n")
-        self._fh.flush()
-        os.fsync(self._fh.fileno())
+        start = self._fh.tell()
+        try:
+            self._fh.write(line.encode("utf-8") + b"\n")
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+        except BaseException:
+            # a failed append (disk full mid-write, a failed fsync) leaves no torn bytes:
+            # the next record would be glued onto them and the journal read as corrupt
+            self._rollback(start)
+            raise
+        self._seq += 1
         self._records.append(json.loads(line))
         return record
+
+    def _rollback(self, start: int) -> None:
+        """Cut the journal back to ``start`` bytes; a handle that cannot be cut is closed
+        (the journal refuses further appends; a restart drops a torn tail)."""
+        fh = self._fh
+        try:
+            try:
+                fh.flush()
+            except OSError:
+                pass  # the buffered bytes are discarded by the truncate below
+            fh.truncate(start)
+            fh.seek(start)
+        except OSError:
+            self._fh = None
+            try:
+                fh.close()
+            except OSError:
+                pass
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
 
     def iter_tx(self, tx_id: str) -> Iterator[dict[str, Any]]:
         return (r for r in self._records if r.get("tx_id") == tx_id)
