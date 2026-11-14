@@ -164,6 +164,11 @@ def check_store_config(config: Any) -> None:
     if unknown:
         raise DispenseError(f"prompts.dispense (backend store): unknown keys {sorted(unknown)} "
                             f"(known: {sorted(STORE_CONFIG_KEYS)})")
+    passes = config.get("passes")
+    if passes is not None and (isinstance(passes, bool) or not isinstance(passes, int) or passes < 1):
+        # open() read 0 as 1 pass and 2.5 as 2; -1 was refused only on the node
+        raise DispenseError(f"prompts.dispense (backend store): passes must be a whole number >= 1 "
+                            f"or null (got {passes!r})")
 CLAIM_STAGGER_SLOTS = 64  # a contended claim spreads over this many next candidates
 # A scan lists two unsettled slots in one range when at most this many settled slots
 # lie between them: reading past them (about 3 keys a slot, 1000 keys a request) costs

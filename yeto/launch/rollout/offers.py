@@ -15,6 +15,7 @@ provider config.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,9 +110,8 @@ def offers_from_config(section: dict[str, Any]) -> list[Offer]:
             if unknown:
                 raise ValueError(f"sky provider: offers[{i}]: unknown keys {sorted(unknown)}")
             res = dict(doc["resources"])
-            price = doc.get("price_usd_h")
             out.append(Offer(key=str(doc.get("key") or _key(res)), resources=res,
-                             price_usd_h=None if price is None else float(price)))
+                             price_usd_h=_price(doc.get("price_usd_h"), f"offers[{i}]")))
         if not out:
             raise ValueError("sky provider: offers is empty")
         return out
@@ -129,8 +129,22 @@ def offers_from_config(section: dict[str, Any]) -> list[Offer]:
     if not isinstance(section.get("resources"), dict):
         raise ValueError("sky provider: resources (or offers / candidates) is required")
     res = dict(section["resources"])
-    price = section.get("price_usd_h")
-    return [Offer(key=_key(res), resources=res, price_usd_h=None if price is None else float(price))]
+    return [Offer(key=_key(res), resources=res, price_usd_h=_price(section.get("price_usd_h"), "resources"))]
+
+
+def _price(value: Any, where: str) -> float | None:
+    """An offer's node hour in USD: unset, or a finite number >= 0 (a negative or nan
+    price is what the pool bills a node launched with this offer: the spend cap would
+    never trip)."""
+    if value is None:
+        return None
+    try:
+        price = None if isinstance(value, bool) else float(value)
+    except (TypeError, ValueError):
+        price = None
+    if price is None or not math.isfinite(price) or price < 0:
+        raise ValueError(f"sky provider: {where} price_usd_h must be a finite number >= 0, not {value!r}")
+    return price
 
 
 def _key(resources: dict[str, Any]) -> str:

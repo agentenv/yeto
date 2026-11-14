@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -716,11 +717,24 @@ def slot_list(cfg: dict[str, Any]) -> list[int]:
     if "slots" in cfg:
         if is_national(cfg):
             raise ValueError("pool config: National Compute pools list NC accounts in 'accounts', not 'slots'")
-        return [int(a) for a in cfg["slots"]]
+        return [whole(a, "slots") for a in cfg["slots"]]
     if "accounts" not in cfg:
         raise ValueError("pool config: missing required keys ['accounts']"
                          + ("" if is_national(cfg) else " (or 'slots')"))
-    return [int(a) for a in cfg["accounts"]]
+    return [whole(a, "accounts") for a in cfg["accounts"]]
+
+
+def whole(value: Any, key: str) -> int:
+    """A whole number of a pool config: an int, a whole float (``2.0``) or a decimal
+    string (``"7"``: the guides write account ids as strings); a bool, a fraction, nan or
+    inf is refused (``int()`` read ``true`` as 1 and ``2.5`` as 2, and inf crashed)."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value == int(value):
+        return int(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    raise ValueError(f"pool config: {key} must be a whole number, not {value!r}")
 
 
 def slot_name(cfg: dict[str, Any]) -> str:
@@ -801,6 +815,24 @@ def _unknown(section: str, doc: Any, known: frozenset[str]) -> None:
         raise ValueError(f"pool config: unknown keys {sorted(unknown)} in {section} (known: {sorted(known)})")
 
 
+def _check_backlog(doc: dict[str, Any]) -> None:
+    """``backlog``: ``synced`` true / false (required), ``trainers`` / ``fragments`` /
+    ``local_rounds`` whole numbers >= 1, ``pipeline`` >= 0, ``explicit_rounds`` >= 1 or
+    null. Else the member spec got a negative or nan ``max_backlog_groups``, or a
+    TypeError when it renders (after the node was ordered)."""
+    if not isinstance(doc.get("synced"), bool):
+        raise ValueError(f"pool config: backlog.synced must be true or false (got {doc.get('synced')!r})")
+    for key, low in (("trainers", 1), ("fragments", 1), ("local_rounds", 1), ("pipeline", 0),
+                     ("explicit_rounds", 1)):
+        value = doc.get(key)
+        if value is None and key in doc and key != "explicit_rounds":
+            value = "null"
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < low:
+            raise ValueError(f"pool config: backlog.{key} must be a whole number >= {low} (got {value!r})")
+
+
 def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> PoolConfig:
     """The :class:`PoolConfig` of a pool config file. Refuses unknown keys (also in
     ``sampler``, ``model_pull``, ``node_hooks``, ``backlog``, ``elastic``), missing
@@ -829,7 +861,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         raise ValueError(f"pool config: {label}s must be a non-empty list without repeats")
     if allowed is not None and not set(accounts) <= allowed:
         raise ValueError(f"pool config: accounts {sorted(set(accounts) - allowed)} are not in YETO_NC_ACCOUNTS")
-    target = int(cfg["target"])
+    target = whole(cfg["target"], "target")
     if target < 1:
         raise ValueError("pool config: target must be >= 1")
     if target > len(accounts):
@@ -840,7 +872,9 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
         raise ValueError(f"pool config: target {target} > {len(accounts)} slots; a slot holds one machine "
                          f"at a time, so the pool can run at most {len(accounts)} samplers")
     slots = cfg.get("data_slots")
-    if slots is not None and int(slots) < target:
+    if slots is not None:
+        slots = whole(slots, "data_slots")
+    if slots is not None and slots < target:
         raise ValueError(f"pool config: data_slots {slots} < target {target} (each member holds one slot)")
     _overrides(cfg.get("sampler") or {})
     if cfg.get("model_pull"):
@@ -855,6 +889,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
             raise ValueError(f"pool config: node_hooks[{i}].where must be node or local")
     if cfg.get("backlog"):
         _unknown("backlog", cfg["backlog"], BACKLOG_KEYS)
+        _check_backlog(cfg["backlog"])
     if cfg.get("data_path", "r2") not in DATA_PATHS:
         raise ValueError(f"pool config: data_path {cfg.get('data_path')!r} is not one of {DATA_PATHS}")
     if cfg.get("syncer") is not None:
