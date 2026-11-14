@@ -14,7 +14,9 @@ trainer's recompute by their numerics alone. Its limits come per hardware class
 ``nvidia`` the B300 SGLang baseline. The class is read from the sampler tapes
 (``rl_sampler_engine_round.source``, ``rl_xhw_mismatch`` rows), or given with
 ``--sampler-hardware``. A run with any AMD sampler is judged by the ``amd`` limits
-(the step value mixes every source's tokens); an unknown one too. Per-source rows of
+(the step value mixes every source's tokens). When no tape names a known class the
+breaker fails closed: the strictest class's limits apply (:data:`UNKNOWN_HARDWARE`) and the
+check's note says so; pass ``--sampler-hardware`` to judge such a run. Per-source rows of
 the in-run guard (``rl_xhw_mismatch``) are reported with the level that guard gave.
 """
 
@@ -55,6 +57,9 @@ LOGPROB_LIMITS: dict[str, tuple[float, float]] = {
     "nvidia": (0.04, 0.052),
 }
 HARDWARE = ("auto", *LOGPROB_LIMITS)
+# no tape names the sampler hardware: judge by the strictest limits (fail closed), never
+# silently by the loosest; an unknown sampler next to a known AMD one keeps the amd limits
+UNKNOWN_HARDWARE = min(LOGPROB_LIMITS, key=lambda h: LOGPROB_LIMITS[h][1])
 NOISE_FLOOR_HEADROOM = 1.5  # --noise-floor: act at least this many times the measured floor
 
 
@@ -173,10 +178,11 @@ def evaluate(trainer: Sequence[Mapping[str, Any]], sampler: Sequence[Mapping[str
     known = sorted(h for h in seen if h)
     note = ""
     if hardware == "auto":
-        if "amd" in known or not known:
+        if not known:
+            hw = UNKNOWN_HARDWARE
+            note = f"sampler hardware unknown: strictest ({hw}) limits (pass --sampler-hardware)"
+        elif "amd" in known:
             hw = "amd"
-            if not known:
-                note = "sampler hardware unknown: amd limits (pass --sampler-hardware)"
         else:
             hw = "nvidia"
     else:

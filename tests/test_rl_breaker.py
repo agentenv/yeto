@@ -62,10 +62,33 @@ def test_a_mixed_fleet_is_judged_by_the_amd_limits():
     assert out["hardware"] == "amd" and out["hardware_seen"] == ["amd", "nvidia"] and not out["tripped"]
 
 
-def test_unknown_hardware_uses_amd_limits_and_says_so():
-    out = breaker.evaluate([_trained(i, 0.09) for i in range(3)], [])
+def test_unknown_hardware_fails_closed_to_the_strictest_limits_and_says_so():
+    # no tape names the sampler hardware: a 0.09 mismatch is 3x the B300 baseline and
+    # must not pass silently under the looser amd limits
+    for sampler in ([], [_round("unknown/unknown/x@1/bf16/tp8")], [_round("npu/910B/vllm@0.9/bf16/tp8")]):
+        out = breaker.evaluate([_trained(i, 0.09) for i in range(3)], sampler)
+        c = _checks(out)["logprob_diff"]
+        assert out["hardware"] == "nvidia" and out["hardware_seen"] == []
+        assert "unknown" in c["note"] and "--sampler-hardware" in c["note"]
+        assert c["level"] == "trip" and out["tripped"] == ["logprob_diff"]
+    assert _checks(breaker.evaluate([_trained(i, 0.03) for i in range(3)], []))["logprob_diff"]["level"] == "ok"
+    # the operator's explicit class still decides
+    assert not breaker.evaluate([_trained(i, 0.09) for i in range(3)], [], hardware="amd")["tripped"]
+
+
+def test_unknown_hardware_cli_exits_1_with_the_note(tmp_path, capsys):
+    log = _write(tmp_path / "launcher.log", [_trained(i, 0.09) for i in range(3)], prefix="YETO_RL_EVENT ")
+    assert cli.main(["breaker", "--trainer-log", str(log)]) == 1
+    assert "sampler hardware unknown" in capsys.readouterr().out
+    assert cli.main(["breaker", "--trainer-log", str(log), "--sampler-hardware", "amd"]) == 0
+
+
+def test_mi355x_with_b300_samplers_keeps_the_amd_limits():
+    out = breaker.evaluate([_trained(i, 0.09) for i in range(3)],
+                           [_round(NV_SOURCE), _round(AMD_SOURCE), _round("unknown/unknown/x@1/bf16/tp8")])
     c = _checks(out)["logprob_diff"]
-    assert out["hardware"] == "amd" and "unknown" in c["note"] and c["level"] == "ok"
+    assert out["hardware"] == "amd" and c["limit"] == 0.15 and c["note"] == "amd sampler limits"
+    assert not out["tripped"]
 
 
 def test_hardware_from_the_xhw_rows_when_no_sampler_tape():
