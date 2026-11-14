@@ -42,11 +42,12 @@ class CutError(RuntimeError):
 
 
 def sha256_file(path: str | os.PathLike[str], *, chunk: int = 1 << 20) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        while block := fh.read(chunk):
-            digest.update(block)
-    return digest.hexdigest()
+    """The full sha256 of ``path`` (a shard its writer just wrote); under
+    ``YETO_VERIFY=fast`` it is recorded so a later check of the same unchanged file
+    on this disk need not read it again."""
+    from .file_verify import sha256_file as hash_and_remember
+
+    return hash_and_remember(path, chunk=chunk)
 
 
 def fsync_file(path: str | os.PathLike[str]) -> None:
@@ -467,8 +468,18 @@ def checksum_problems(remote_checksums: Mapping[str, tuple[str, str | None]] | N
 
 
 def file_problems(directory: Path, files: Iterable[CutFile], *,
-                  remote_sizes: Mapping[str, int | None] | None = None) -> list[str]:
+                  remote_sizes: Mapping[str, int | None] | None = None,
+                  mode: str | None = None) -> list[str]:
+    """Problems of the shards ``files`` under ``directory``. Sizes are always
+    compared; sha256 per ``mode`` (``YETO_VERIFY``, :mod:`.file_verify`): ``full``
+    (default) hashes every shard, ``fast`` reuses the digest of a shard unchanged
+    since this disk hashed it (its rank when it wrote it on this node, an earlier
+    restore), ``off`` compares sizes only. Shards are hashed in parallel (a 1.5 TB
+    cut used to be hashed one file at a time on the driver)."""
+    from . import file_verify
+
     out = []
+    to_hash: list[tuple[Path, CutFile]] = []
     for f in files:
         path = directory / f.path
         if not path.is_file():
@@ -485,8 +496,12 @@ def file_problems(directory: Path, files: Iterable[CutFile], *,
         if size != f.bytes:
             out.append(f"shard {f.path} is {size} bytes, manifest says {f.bytes} (truncated?)")
             continue
-        if sha256_file(path) != f.sha256:
-            out.append(f"shard {f.path} checksum mismatch")
+        to_hash.append((path, f))
+    actual = file_verify.digests([p for p, _ in to_hash], mode=mode)
+    for path, f in to_hash:
+        got = actual[os.fspath(path)]
+        if got is not None and got != f.sha256:
+            out.append(f"shard {f.path} checksum mismatch ({path})")
     return out
 
 
