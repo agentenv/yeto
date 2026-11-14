@@ -139,3 +139,48 @@ def test_assume_present_defaults_to_the_base_release(monkeypatch):
     assert sd.assume_present() == set()
     monkeypatch.setenv("S3_ASSUME_PRESENT", "r1-v0,r5-v0")
     assert sd.assume_present() == {"r1-v0", "r5-v0"}
+
+
+def _crash_between_place_and_manifest(tmp_path, monkeypatch):
+    for name, value in (("S3_BUCKET", "test-bucket"), ("S3_ASSUME_PRESENT", "r1-v0"), ("S3_PREFIX", "test-run"),
+                        ("S3_REGION", "test-region"), ("S3_METRICS", str(tmp_path / "m.jsonl"))):
+        monkeypatch.setenv(name, value)
+    trainer, island, bucket = tmp_path / "trainer", tmp_path / "vm", tmp_path / "bucket"
+    (island / cm.RELEASES / "r1-v0").mkdir(parents=True)
+    s3 = FakeS3(bucket)
+    _release(trainer, "r2-v2", 2, "r1-v0")
+    sd.publish(s3, trainer, "r2-v2")
+    real = sd.peer_fanout.save_manifest
+
+    def crash(store, manifest):
+        raise KeyboardInterrupt("killed after place, before save_manifest")
+
+    monkeypatch.setattr(sd.peer_fanout, "save_manifest", crash)
+    with pytest.raises(KeyboardInterrupt):
+        sd.pull(s3, island, "r2-v2")
+    monkeypatch.setattr(sd.peer_fanout, "save_manifest", real)
+    assert (island / cm.RELEASES / "r2-v2").is_dir()
+    assert not sd.peer_fanout.servable(island, "r2-v2")
+    return s3, island
+
+
+def test_next_pull_backfills_the_manifest_a_crash_after_place_lost(tmp_path, monkeypatch):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    assert sd.pull(s3, island, "r2-v2") is None  # already placed: nothing downloaded again
+    assert sd.peer_fanout.servable(island, "r2-v2")
+    saved = json.loads(sd.peer_fanout.manifest_path(island, "r2-v2").read_text())
+    assert saved["release"] == "r2-v2" and saved == json.loads((tmp_path / "bucket/manifests/r2-v2.json").read_text())
+
+
+def test_startup_backfills_every_placed_release_without_a_manifest(tmp_path, monkeypatch):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    assert sd.backfill_manifests(s3, island) == ["r2-v2"]  # r1-v0 has no manifest on S3: left alone
+    assert sd.peer_fanout.servable(island, "r2-v2") and not sd.peer_fanout.servable(island, "r1-v0")
+    assert sd.backfill_manifests(s3, island) == []
+
+
+def test_backfill_refuses_a_placed_release_whose_files_do_not_match(tmp_path, monkeypatch):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    (island / cm.RELEASES / "r2-v2" / "w.bin").write_bytes(b"x" * 5000)
+    assert sd.backfill_manifests(s3, island) == []
+    assert not sd.peer_fanout.servable(island, "r2-v2")  # never advertised to peers

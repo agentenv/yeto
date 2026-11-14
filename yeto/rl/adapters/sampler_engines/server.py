@@ -295,6 +295,7 @@ class ServerEngine:
             raise SamplerEngineError(f"{self.ENGINE} is not running")
         code = self._process.poll()
         if code is not None and not self._stopping:
+            self._end_group(self._process)  # the dead leader's TP workers still hold the GPUs
             self._process = None
             self._version = None
             self.last_exit = {"code": code, "during": "service", "normal": False}
@@ -338,6 +339,9 @@ class ServerEngine:
         while True:
             code = None if self._process is None else self._process.poll()
             if code is not None:
+                # a leader that died while starting leaves its forked TP workers in its
+                # group; once it is reaped reap_stale_server cannot find them any more
+                self._end_group(self._process)
                 self._process = None
                 self.last_exit = {"code": code, "during": "start", "normal": False}
                 raise SamplerEngineError(f"{self.ENGINE} exited with code {code} during start")
