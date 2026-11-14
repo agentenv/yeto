@@ -274,6 +274,12 @@ node starts. Nothing in `yeto run up` installs them:
 | `agentic.setup.sandbox.key.path` | `docker -H ssh://...` from the node (only `docker system dial-stdio`) | `restrict,command="<dial-only script>" <public key>` |
 | `agentic.setup.tunnel.key.path` | the reverse tunnel `-R <listen>` from the node back to its records proxy | `restrict,port-forwarding,permitlisten="<ip>:<port>",... ,command="<dial-only script>" <public key>`, with one `permitlisten` for **every** port of `agentic.setup.tunnel.listen` (shard `k` listens on `lo + k`, and replacements take new shard indexes) |
 
+The tunnel forwards to the sampler's records proxy, so the spec must give
+that proxy a fixed port: set `agentic.proxy.port` (for example
+`"proxy": {"port": 18080}` under `agentic`), or `agentic.setup.tunnel.target_port`
+to the same value. Without it, node setup refuses the spec with
+`agentic.setup.tunnel needs a fixed records proxy port`.
+
 The dial-only script is a forced command that allows only the Docker CLI
 transport and the tunnel's empty command:
 
