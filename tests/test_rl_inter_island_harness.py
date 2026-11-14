@@ -74,3 +74,34 @@ def test_legacy_mode_fixed_roster(tmp_path):
                            rounds=3, quorum_timeout_s=0.5)
     assert bad["failure"] and bad["final"]["outer_version"] == 0
     assert not any(e["kind"] == "pause_advice" for e in res["timeline"] + bad["timeline"])
+
+
+def test_coordinator_stall_does_not_mark_a_fast_island_slow(tmp_path, monkeypatch):
+    """A coordinator hiccup is not island round time.
+
+    The coordinator stalls while handling the first delta, so the other
+    0.05 s island's delta waits in the queue. Timed at the coordinator, that
+    island's single round looked >2x slower than its only peer and drew a
+    rollout-only advice; the advice must target only the really slow island.
+    """
+    import time
+
+    from yeto.rl.engine import island_ledger
+
+    real_submit = island_ledger.CrossIslandLedger.submit
+    stalled: list[str] = []
+
+    def stalling_submit(self, delta):
+        if not stalled:
+            stalled.append(delta.island_id)
+            time.sleep(0.3)
+        return real_submit(self, delta)
+
+    monkeypatch.setattr(island_ledger.CrossIslandLedger, "submit", stalling_submit)
+    islands = [FakeIsland("fast"), FakeIsland("fast2"), FakeIsland("slow", work_s=1.2)]
+    res = run_fake_islands(islands, tmp_path / "run", rounds=6, theta=1.0,
+                           quorum_timeout_s=0.8, lease_s=0.5, hb_s=0.05, deadline_s=60,
+                           mode="elastic")
+    assert stalled and stalled[0] in ("fast", "fast2")
+    advice = [e for e in res["timeline"] if e["kind"] == "pause_advice"]
+    assert [a["target_resource_intent"]["island_id"] for a in advice] == ["slow"]
