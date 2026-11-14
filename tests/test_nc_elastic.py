@@ -1489,3 +1489,25 @@ def test_a_start_cut_off_by_every_pool_restart_is_still_timed_out(tmp_path):
         events += _names(pool)
     assert "start_timeout" in events, events
     assert "start_rerun_window_spent" in events
+
+
+def test_an_account_whose_orders_keep_failing_does_not_starve_the_healthy_ones():
+    """An order that fails on one account (not a guard refusal: something was sent) must
+    not leave that account first in line every tick: the next order tries another free
+    account, so one broken account cannot trip the breaker while a healthy one idles."""
+    clock = Clock()
+    cloud = Cloud(clock)
+    real_order = cloud.order
+
+    def order(account):
+        if account == 1:
+            cloud.log.append(("order_failed", account, clock()))
+            raise ncc.NcError("500 internal error on this account")
+        return real_order(account)
+
+    cloud.order = order
+    pool = _pool(clock, cloud, accounts=(1, 4), breaker_failures=2, breaker_max_trips=2)
+    _run(pool, clock, 1800)
+    assert [m.account for m in pool.live()] == [4], _names(pool)
+    assert not pool.breaker.tripped
+    assert sum(1 for e in cloud.log if e[0] == "order_failed") == 1
