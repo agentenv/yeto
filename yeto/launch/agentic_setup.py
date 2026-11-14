@@ -650,6 +650,8 @@ class SshNode:
                             "-xf - --no-same-owner"], stdin=tar.stdout, capture_output=True, text=True,
                            timeout=timeout, check=False)
         finally:
+            if tar.stdout is not None:  # an early ssh exit must not leave tar blocked on our pipe
+                tar.stdout.close()
             tar.wait()
         if tar.returncode != 0 or out.returncode != 0:
             raise SetupError("tasks", f"copying {src} to the node failed: {(out.stderr or '').strip()[-300:]}")

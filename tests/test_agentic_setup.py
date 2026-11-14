@@ -218,7 +218,11 @@ def test_tunnel_loop_reconnects_and_emits(tmp_path):
     procs = iter([Proc(True), Proc(False), Proc(True)])
     sleeps = []
     events = tmp_path / "t.jsonl"
-    agent.tunnel_loop(["ssh", "-N"], events, popen=lambda *a, **k: next(procs), sleep=sleeps.append,
+    def popen(*a, **k):
+        k["stderr"].write(b"Connection reset")  # ssh writes to the file it was handed
+        return next(procs)
+
+    agent.tunnel_loop(["ssh", "-N"], events, popen=popen, sleep=sleeps.append,
                       clock=iter(range(0, 1000, 7)).__next__, max_attempts=3, stable_s=1000)
     recs = [json.loads(ln) for ln in events.read_text().splitlines()]
     assert [r["state"] for r in recs] == ["up", "down", "down", "up", "down"]

@@ -69,6 +69,18 @@ class SshTapeMirror:
         self.connections += 1
         got = 0
         proc = subprocess.Popen(self.command(off), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Drain stderr while stdout streams: a chatty ssh would otherwise fill
+        # the stderr pipe and block, stalling the stdout stream for good.
+        tail = bytearray()
+
+        def drain() -> None:
+            assert proc.stderr is not None
+            for chunk in iter(lambda: proc.stderr.read(65536), b""):
+                tail.extend(chunk)
+                del tail[:-4096]
+
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
         try:
             with open(self.local, "ab") as out:
                 assert proc.stdout is not None
@@ -85,7 +97,8 @@ class SshTapeMirror:
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
-        err = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
+            drainer.join(5)
+        err = bytes(tail).decode("utf-8", "replace").strip()
         if not self.lost:
             from yeto.rl.engine.init_from_release import redact_text  # noqa: PLC0415
             self.lost = True
