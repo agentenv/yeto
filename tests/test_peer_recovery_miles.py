@@ -362,6 +362,65 @@ def test_other_tensor_parallel_layout_is_refused(tmp_path, stubs):
     assert cut_plugin.RESTORE_CUT_SHARD not in group.calls and client.closed
 
 
+def test_a_snapshot_refused_before_any_rank_loads_lets_the_next_donor_restore(tmp_path, stubs):
+    """A snapshot refused by its rank list (no rank touched) is RECOVERY_FAILED;
+    the trainer is still fresh, so the next donor's snapshot must restore."""
+    store_root = tmp_path / "store"
+    donor_group = FakeGroup(adam_step=17)
+    donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    assert serve(donor_stream(store_root, donor_group, donor_client)) == 1
+    (_, versions, sha256, locator), = donor_client.sent
+    store = DirectorySnapshotStore(store_root)
+    tag = store.manifest(locator, sha256).layout_tag
+    with store.begin() as writer:  # a donor whose rank list has another schema
+        (writer.directory / RANKS).write_text(json.dumps({"schema": "other", "layout_tag": tag, "files": []}))
+        bad_locator, bad_sha256 = writer.commit(versions, tag)
+
+    client = FakeClient(events=[rp.RecoveryClock(5, (3, 4), 1),
+                                rp.RecoverySource(rp.SOURCE_PEER, 1, versions, bad_sha256, bad_locator),
+                                rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator),
+                                rp.RecoveryDone(5, 6, 1, (5, 6))],
+                        updates=[BcastFragment(0, 5, stored(0, 5, "g0"), stored=True),
+                                 BcastFragment(1, 6, stored(1, 6, "g1"), stored=True)])
+    stubs.clients.append(client)
+    group = FakeGroup(adam_step=0)
+    stream = MilesFullParameterRoleStream(config(store_root, recover=True))
+    asyncio.run(stream.initialize(group))
+
+    assert [m[0] for m in client.sent] == ["failed", "restored"]
+    assert group.states == donor_group.states and stream.recovery_outcome.path == "peer"
+    assert stream.fragment_versions == (5, 6)
+
+
+def test_a_snapshot_refused_after_ranks_loaded_stops_the_island(tmp_path, monkeypatch):
+    """Once ranks loaded part of a snapshot the trainer is not fresh: an
+    integrity refusal from there must stop the island, not move on to the
+    next donor or the degraded source with half-restored state."""
+    from yeto.rl.engine.stream_recovery import StreamRecoveryIsland
+    from yeto.rl.peer_recovery import SnapshotIntegrityError
+
+    _install_miles_rebase_stub(monkeypatch)
+    asyncio.run(MilesRankShards(FakeGroup(adam_step=17), LAYOUT_HASH).save(tmp_path))
+    shards = MilesRankShards(FakeGroup(adam_step=0), LAYOUT_HASH)
+
+    async def half_restore(directory, files):
+        raise SnapshotIntegrityError("rank 1 shard truncated after rank 0 loaded")
+
+    monkeypatch.setattr(shards, "restore_ranks", half_restore)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        island = StreamRecoveryIsland(SimpleNamespace(), shards, loop, recovering=True)
+        with pytest.raises(RuntimeError, match="restart the island") as raised:
+            island.read_recovery_snapshot(tmp_path, (3, 4))
+        assert not isinstance(raised.value, SnapshotIntegrityError)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)
+        loop.close()
+
+
 class DigestGroup(FakeGroup):
     """FakeGroup whose save and restore report the cut summary digests, as the
     real cut_plugin does; ``tamper`` makes one rank restore other state."""
