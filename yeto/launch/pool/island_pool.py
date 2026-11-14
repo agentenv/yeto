@@ -480,8 +480,8 @@ class IslandPool:
             # sit granted, billed and unstarted), except in the first fence_order_ahead_s
             handoff = next((p for p in self.pending if not self._handoff_waits_for_fence(p, now)), None)
             if handoff is None:
-                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing: nothing "
-                           "is ordered to continue an unfenced shard")
+                refused = (f"{len(self.pending)} handoff(s) wait for a shard fence that keeps failing or whose "
+                           "success cannot be saved: nothing is ordered to continue an unfenced shard")
                 if refused != self._refused:
                     self._event("order_refused", why=refused)
                 self._refused = refused
