@@ -2276,6 +2276,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         key: cfg.island_hmac_key.clone(),
         expected_contract: cfg.expected_island_contract,
         strict_identity: cfg.strict_identity,
+        event_tape: cfg.event_tape.clone(),
     });
     if hello_auth.key.is_none() {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
@@ -2374,6 +2375,8 @@ pub struct HelloAuth {
     pub key: Option<Vec<u8>>,
     pub expected_contract: Option<[u8; 32]>,
     pub strict_identity: bool,
+    /// Event tape for the `--relaxed-identity` cross-hardware admission record.
+    pub event_tape: Option<std::path::PathBuf>,
 }
 
 /// Domain of the HELLO MAC: HMAC-SHA256(key, domain || hello_body).
@@ -2797,7 +2800,10 @@ async fn handle_connection(
             }
             match admit_session(&session, offered, hello_auth.strict_identity) {
                 Ok(None) => {}
-                Ok(Some(note)) => warn!(learner_id, generation, "{note}"),
+                Ok(Some(note)) => {
+                    warn!(learner_id, generation, "{note}");
+                    append_identity_admission(hello_auth.event_tape.as_deref(), learner_id, generation, &note);
+                }
                 Err(message) => {
                     send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                     warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
@@ -9173,6 +9179,29 @@ fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: 
     }
 }
 
+/// `--relaxed-identity` only: record a cross-hardware HELLO admission on the
+/// event tape so the mixed-hardware session is auditable afterwards.
+fn append_identity_admission(path: Option<&std::path::Path>, learner_id: u32, generation: u64, note: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let line = format!(
+        "{{\"event\":\"rl_identity_cross_hardware_admitted\",\"learner_id\":{learner_id},\"generation\":{generation},\"note\":{},\"time_unix\":{:?}}}\n",
+        crate::dispense::json_str(note),
+        unix_now()
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
 /// Append an idempotent, fsynced accounting cut after a sweep checkpoint has
 /// become authoritative. A crash between the checkpoint rename and the
 /// ordinary per-merge tape append can lose that diagnostic merge record; the
@@ -9697,6 +9726,22 @@ mod tests {
         other_contract.session_contract_hash = [0x50; 32];
         let message = admit_session(&session, other_contract, false).expect_err("must refuse");
         assert!(message.contains("expected session_contract_hash="), "{message}");
+    }
+
+    #[test]
+    fn relaxed_cross_hardware_admission_is_recorded_on_the_tape() {
+        let dir = std::env::temp_dir().join(format!("yeto-identity-tape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        append_identity_admission(None, 1, 2, "ignored");
+        append_identity_admission(Some(&tape), 3, 7, "session \"a\" vs b\n");
+        let text = std::fs::read_to_string(&tape).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.starts_with(
+            "{\"event\":\"rl_identity_cross_hardware_admitted\",\"learner_id\":3,\"generation\":7,\"note\":\"session \\\"a\\\" vs b\\u000a\","
+        ), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -66,7 +66,7 @@ def test_compat_group_is_in_the_identity_hash():
 
 
 def test_comparison_rules():
-    """--rl-strict-identity: phase-1 rule, any different group is refused."""
+    """--rl-identity strict: phase-1 rule, any different group is refused."""
     assert compat_refusal("nvidia-h200", "nvidia-h200", strict=True) is None
     reason = compat_refusal("nvidia-h100", "nvidia-h200", strict=True)
     assert reason.startswith("compat_group differs: nvidia-h100 vs nvidia-h200, tolerance not calibrated")
@@ -84,6 +84,16 @@ def test_compat_group_is_provenance_when_relaxed(monkeypatch):
     monkeypatch.setenv("YETO_RL_IDENTITY", "relaxed")
     assert compat_refusal("nvidia-h100", "ascend-910b4-64g") is None
     check_compat_group("nvidia-h100", "nvidia-h200")
+
+
+def test_default_contract_hash_is_the_full_identity_hash(monkeypatch):
+    """Pin: with $YETO_RL_IDENTITY unset the session contract binds sha256()
+    exactly as before hetero-1114 (default path unchanged)."""
+    monkeypatch.delenv("YETO_RL_IDENTITY", raising=False)
+    for identity in (miles_identity.backend_identity(compat_group="nvidia-h100"),
+                     verl_identity.backend_identity(compat_group="ascend-910b4-64g")):
+        assert identity.contract_sha256() == identity.sha256()
+        assert identity.contract_sha256(None) == identity.sha256()
 
 
 def test_identity_check_names_both_card_types():
