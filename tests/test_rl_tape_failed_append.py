@@ -60,3 +60,51 @@ def test_append_after_crash_torn_tail_starts_a_new_line(tmp_path):
         fh.write('{"event":"cut')
     append_record(tape, _rec(FINALIZED_EVENT, 2))
     assert tape_is_complete(tape)
+
+
+
+def _other_writer(tape):
+    """A second writer with its own open file (as another process has): it
+    follows the same flock protocol as the tape writer."""
+    import fcntl
+
+    with open(tape, "ab", buffering=0) as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        fh.write(b'{"event":"other","island_id":"i0","time_unix":9}\n')
+
+
+def test_rollback_never_cuts_another_writer_record(tmp_path, monkeypatch):
+    """Another writer appends while our write is failing: the rollback must
+    keep its record (the lock covers tail check, write and truncate)."""
+    import json
+    import threading
+
+    tape = tmp_path / "tape.jsonl"
+    append_record(tape, _rec("start", 1))
+    other = threading.Thread(target=_other_writer, args=(tape,))
+    real_open = Path.open
+
+    def torn_open(self, mode="r", *a, **kw):
+        fh = real_open(self, mode, *a, **kw)
+        if "a" in mode:
+            orig_write = fh.write
+
+            def write(data):
+                orig_write(data[: len(data) // 2])
+                other.start()  # interleave: it writes now unless locked out
+                other.join(timeout=0.3)
+                raise OSError(errno.ENOSPC, "No space left on device")
+
+            fh.write = write
+        return fh
+
+    monkeypatch.setattr(Path, "open", torn_open)
+    with pytest.raises(OSError):
+        append_record(tape, _rec("lost", 2))
+    monkeypatch.undo()
+    other.join(timeout=10)
+    assert not other.is_alive()
+
+    append_record(tape, _rec(FINALIZED_EVENT, 3))
+    lines = tape.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(l)["event"] for l in lines] == ["start", "other", FINALIZED_EVENT]

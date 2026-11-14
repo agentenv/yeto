@@ -15,6 +15,7 @@ lines, i.e. byte-identical to the island's file).
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import sys
 import threading
@@ -70,6 +71,10 @@ def append_record(path, record: dict) -> str:
     data = (line + "\n").encode("utf-8")
     with _WRITE_LOCK:
         with target.open("a+b", buffering=0) as handle:  # unbuffered: nothing left to flush late
+            # Several processes of one island append to the same tape: hold an
+            # exclusive lock across the tail check, the write and any rollback,
+            # so a truncate never cuts another writer's record.
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             start = handle.seek(0, os.SEEK_END)
             if start:
                 # A writer killed mid-line left an unterminated tail: start a
