@@ -626,3 +626,53 @@ def test_command_names_carry_no_colon():
     assert ":" not in name and name.startswith(sglang_sparse_loader.PREFIX)
     assert sglang_sparse_loader.parse_command(name) == command
     assert sglang_sparse_loader.parse_command("model.layers.0.mlp.weight") is None
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_during_the_reload_after_the_sparse_probe_is_not_wrapped(tmp_path, interrupt):
+    """``except BaseException`` around the post-probe reload turned Ctrl-C / SystemExit
+    into ``_ProbeReloadFailed`` (a SamplerEngineError a caller may retry)."""
+    fake = FakeSGLangRanks(2)
+    base = _write_release(tmp_path / "v0", _base_tensors())
+    engine = _engine(tmp_path, fake, tp=2)
+    real = fake.__call__
+
+    def http(method, url, body, timeout_s):
+        if url.endswith("/update_weights_from_disk"):
+            raise interrupt()
+        return real(method, url, body, timeout_s)
+
+    engine._http = http
+    with pytest.raises(interrupt):
+        engine.start(base, 0)
+
+
+def test_a_failed_sparse_probe_frees_its_shared_memory(tmp_path):
+    """Sparse updates turned off by a failed probe never use the element maps again,
+    and stop() only removed the directory when ``sparse_off`` was None at start: the
+    maps (one per rank, up to GBs in /dev/shm) stayed in RAM for the server's life."""
+    fake = FakeSGLangRanks(2, shuffle_after_load=True)
+    base = _write_release(tmp_path / "v0", _base_tensors())
+    engine = _engine(tmp_path, fake, tp=2)
+    assert not engine.start(base, 0).detail["sparse_prepare"]["enabled"]
+    assert not engine._sparse_root().exists()
+
+
+def test_a_failed_sparse_plan_frees_the_half_written_patch(started, tmp_path, monkeypatch):
+    """/dev/shm full while the patch is written: the update falls back (nothing touched),
+    and the half-written patch must not stay in shared memory until the next update."""
+    tp, fake, engine, base, _ = started
+    old = _base_tensors()
+    name = L + "self_attn.o_proj.weight"
+    new = _rebuild(tmp_path, base, {**old, name: _bump(old[name], [1, 2])}, "v1", monkeypatch)
+    real = sparse_update.rank_patches
+
+    def full(out, *a, **kw):
+        real(out, *a, **kw)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(sparse_update, "rank_patches", full)
+    detail = engine.load(new, 1).detail
+    assert "sparse_fallback" in detail or detail.get("sparse") is False, detail
+    assert not (engine._sparse_root() / "patch").exists()
+    assert (engine._sparse_root() / "maps").is_dir()  # the maps stay: the next release can go sparse

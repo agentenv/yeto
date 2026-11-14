@@ -238,3 +238,19 @@ def test_expert_file_update_options_are_checked(tmp_path):
         SGLangServerEngine(_config(tmp_path), SGLangOptions(expert_file_update="auto"))
     with pytest.raises(SamplerEngineError, match="expert_file_update"):
         SGLangServerEngine(_config(tmp_path, in_place_reload=True), SGLangOptions(expert_file_update="yes"))
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_during_the_expert_probe_is_not_swallowed(tmp_path, interrupt):
+    """``except BaseException`` around the probe write used to turn Ctrl-C / SystemExit
+    into a SamplerEngineError, which the probe then recorded as ``probe_failed``: the
+    start went on as if nothing happened."""
+    server = _Server(transforms=False)
+
+    def tensor(body):
+        raise interrupt()
+
+    server.tensor = tensor
+    engine = _engine(tmp_path, server)
+    with pytest.raises(interrupt):
+        engine.start(None, 0)
