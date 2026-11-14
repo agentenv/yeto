@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -184,3 +185,47 @@ def test_backfill_refuses_a_placed_release_whose_files_do_not_match(tmp_path, mo
     (island / cm.RELEASES / "r2-v2" / "w.bin").write_bytes(b"x" * 5000)
     assert sd.backfill_manifests(s3, island) == []
     assert not sd.peer_fanout.servable(island, "r2-v2")  # never advertised to peers
+
+
+def _count_verify(monkeypatch) -> list[str]:
+    calls: list[str] = []
+    real = sd.cm.verify
+
+    def counted(manifest, staged):
+        calls.append(manifest["release"])
+        return real(manifest, staged)
+
+    monkeypatch.setattr(sd.cm, "verify", counted)
+    return calls
+
+
+def test_pull_does_not_rehash_a_placed_release_that_keeps_failing_verification(tmp_path, monkeypatch):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    weights = island / cm.RELEASES / "r2-v2" / "w.bin"
+    good = weights.read_bytes()
+    weights.write_bytes(b"x" * len(good))  # same size: only the sha256 catches it
+    calls = _count_verify(monkeypatch)
+    for _ in range(3):
+        assert sd.pull(s3, island, "r2-v2") is None
+    assert calls == ["r2-v2"]  # hashed once, then remembered while nothing changed
+    assert not sd.peer_fanout.servable(island, "r2-v2")
+    weights.write_bytes(good)  # the placed files change: checked again, and now they match
+    os.utime(weights, ns=(weights.stat().st_atime_ns, weights.stat().st_mtime_ns + 1_000_000))
+    assert sd.pull(s3, island, "r2-v2") is None
+    assert calls == ["r2-v2", "r2-v2"]
+    assert sd.peer_fanout.servable(island, "r2-v2")
+
+
+def test_a_changed_s3_manifest_retries_a_remembered_backfill_failure(tmp_path, monkeypatch):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    weights = island / cm.RELEASES / "r2-v2" / "w.bin"
+    weights.write_bytes(b"y" * len(weights.read_bytes()))
+    calls = _count_verify(monkeypatch)
+    assert sd.backfill_manifests(s3, island) == [] and sd.backfill_manifests(s3, island) == []
+    assert calls == ["r2-v2"]
+    key = tmp_path / "bucket" / "manifests" / "r2-v2.json"
+    manifest = json.loads(key.read_text())
+    manifest["files"]["w.bin"]["sha256"] = sd.cm.file_sha256(weights)
+    key.write_text(json.dumps(manifest))
+    assert sd.backfill_manifests(s3, island) == ["r2-v2"]
+    assert calls == ["r2-v2", "r2-v2"]

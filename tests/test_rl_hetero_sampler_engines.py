@@ -744,3 +744,55 @@ def test_policy_loaded_says_why_the_fast_path_fell_back():
     assert loader.loaded_fields() == {"reload_mode": "in_place", "pause_s": 85.5, "scheme": "MXFP4_EXPERTS_RTN",
                                       "expert_update_fallback": "overlay_base_mismatch",
                                       "expert_update_fallback_detail": "/x is not laid over /base"}
+
+
+def test_a_failed_load_detail_keeps_the_error_notes_and_the_resume_failure(tmp_path):
+    """A reload whose /resume failed kills the engine and says so in a note on the
+    error (and in ``last_resume_failure``): both reach the load_check_failed event."""
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    class ResumeFailsEngine(FakeEngine):
+        last_resume_failure = None
+
+        def load(self, release_dir, version):
+            error = SamplerEngineError("rpc /collective_rpc: HTTP 500")
+            self.last_resume_failure = {"attempts": 3, "errors": ["ConnectError: refused"],
+                                        "after": "failed rpc"}
+            error.add_note("vllm-server: /resume failed 3 times after the reload; "
+                           "the paused server was killed so the next load restarts it")
+            raise error
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    engine = ResumeFailsEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4)
+    engine.last_resume_failure = {"attempts": 3, "errors": ["stale"], "after": "rpc"}
+    events = []
+    loader = _loader(engine, events)
+    loader.start(None, 0)
+    release = _w4a8_release(releases, 1)
+    with pytest.raises(ReleaseNotLoaded, match="load"):
+        loader(release, releases.resolve(release))
+    (failed,) = [f for n, f in events if n == LOAD_CHECK_FAILED_EVENT]
+    assert failed["step"] == "load"
+    assert "HTTP 500" in failed["detail"]
+    assert "the paused server was killed" in failed["detail"]
+    assert "ConnectError: refused" in failed["detail"]
+
+
+def test_a_failed_load_detail_leaves_out_a_resume_failure_of_an_earlier_load(tmp_path):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    class FailingEngine(FakeEngine):
+        def load(self, release_dir, version):
+            raise SamplerEngineError("rpc failed")
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    engine = FailingEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4)
+    engine.last_resume_failure = {"attempts": 3, "errors": ["stale"], "after": "rpc"}
+    events = []
+    loader = _loader(engine, events)
+    loader.start(None, 0)
+    release = _w4a8_release(releases, 1)
+    with pytest.raises(ReleaseNotLoaded):
+        loader(release, releases.resolve(release))
+    (failed,) = [f for n, f in events if n == LOAD_CHECK_FAILED_EVENT]
+    assert failed["detail"] == "SamplerEngineError: rpc failed"
