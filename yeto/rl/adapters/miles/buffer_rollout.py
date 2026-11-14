@@ -779,6 +779,22 @@ def _starved_selects_limit(environ: Mapping[str, str] | None = None) -> int:
         return DEFAULT_UNIDENTIFIED_STARVED_SELECTS
 
 
+# the reader's warning when one source's groups are all passed over as bad (damaged
+# payload, non-finite reward or log-prob, a size outside the group) many in a row while
+# other sources keep the run going (BatchReader._note_source)
+SOURCE_BAD_STREAK_EVENT = "rl_buffer_source_bad_streak"
+SOURCE_BAD_STREAK_ENV = "YETO_BUFFER_SOURCE_BAD_STREAK"  # 0: never warn
+DEFAULT_SOURCE_BAD_STREAK = 16
+
+
+def _source_bad_streak_limit(environ: Mapping[str, str] | None = None) -> int:
+    raw = (os.environ if environ is None else environ).get(SOURCE_BAD_STREAK_ENV, "").strip()
+    try:
+        return max(0, int(raw)) if raw else DEFAULT_SOURCE_BAD_STREAK
+    except ValueError:
+        return DEFAULT_SOURCE_BAD_STREAK
+
+
 def _echo_event(event: str, **fields: Any) -> None:
     """One ``YETO_RL_EVENT`` stdout record from the rollout executor's process (it has
     no event tape of its own; the island's log stream carries the record)."""
@@ -926,6 +942,10 @@ class BatchReader:
         self.starved_selects_limit = _starved_selects_limit()
         self._starved_selects = 0
         self.unidentified_total = 0  # groups passed over as unidentified by this reader
+        # per source: the bad groups in a row since its last good one, by reason
+        self.source_bad_streak_limit = _source_bad_streak_limit()
+        self._source_bad: dict[str, dict[str, int]] = {}
+        self._rollout_id = 0
         self.emit: Callable[..., None] = _echo_event
 
     def set_unidentified_gate(self, start_version: int, known_versions: Any) -> None:
@@ -976,6 +996,28 @@ class BatchReader:
                 "sample buffer: %d selections in a row kept no group (groups of versions no record "
                 "names are passed over): %s", self._starved_selects, fields)
             self.emit(UNIDENTIFIED_STARVED_EVENT, **fields)
+
+    def _note_source(self, source: str | None, reason: str | None) -> None:
+        """One decoded group of ``source``: good (``reason`` None) or passed over for a
+        fault of its data. The take's own bound (``max_damaged_run``) does not see one
+        bad source among good ones (their groups reset its run); here each source
+        counts its bad groups in a row, and at ``source_bad_streak_limit`` (and every
+        further multiple) the reader warns, naming it. The run goes on."""
+        if source is None:
+            return
+        if reason is None:
+            self._source_bad.pop(source, None)
+            return
+        reasons = self._source_bad.setdefault(source, {})
+        reasons[reason] = reasons.get(reason, 0) + 1
+        bad = sum(reasons.values())
+        limit = self.source_bad_streak_limit
+        if limit > 0 and bad % limit == 0:
+            fields = {"rollout_id": int(self._rollout_id), "source": source, "bad_groups": bad,
+                      "reasons": dict(sorted(reasons.items()))}
+            logging.getLogger(__name__).warning(
+                "sample buffer: source %s wrote %d bad groups in a row (none trained): %s", source, bad, fields)
+            self.emit(SOURCE_BAD_STREAK_EVENT, **fields)
 
     def _quarantined(self, source: str, rollout_id: int) -> bool:
         action = self.xhw_actions.get(source) or {}
@@ -1121,6 +1163,7 @@ class BatchReader:
     def _take(self, rollout_id: int, groups: int, current_version: int | None
               ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
         started = progress = self.clock()
+        self._rollout_id = rollout_id
         self._stop_prefetching()
         ahead = dict(self._reads)
         self._reads.clear()
@@ -1427,17 +1470,24 @@ class BatchReader:
                 continue
             self._entry_of[int(item.position)] = item.entry
             group = self._group_at(item.position, self._read(item.entry.payload_ref, inline=True))
-            if group is None or self._stale_payload(item.position, group):
+            if group is None:
+                self._note_source(source, "damaged_payload")
+                continue
+            if self._stale_payload(item.position, group):
                 continue
             if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
+                self._note_source(source, "group_size")
                 dropped += 1
                 continue
             if not finite_rewards(group):
+                self._note_source(source, "nonfinite_reward")
                 skipped["nonfinite"] = skipped.get("nonfinite", 0) + 1
                 continue
             if nonfinite_logprob(group) is not None:
+                self._note_source(source, "nonfinite_logprob")
                 skipped["nonfinite_logprob"] = skipped.get("nonfinite_logprob", 0) + 1
                 continue
+            self._note_source(source, None)
             position, version, tokens = int(item.position), item.entry.behavior_version, int(item.entry.tokens or 0)
             oldest = payload_oldest_version(group)
             if oldest is not None:  # what the next take's age gate compares if this group is carried over
@@ -1477,7 +1527,12 @@ class BatchReader:
             sized = group is not None and (
                 self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
             bad_lp = sized and nonfinite_logprob(group) is not None
-            if sized and not bad_lp and (self.group_size is None or finite_rewards(group)):
+            good = sized and not bad_lp and (self.group_size is None or finite_rewards(group))
+            if not aged:  # a group older than the floor says nothing about its source's data
+                self._note_source(position_sources.get(int(position)), None if good else (
+                    "damaged_payload" if group is None else "nonfinite_logprob" if bad_lp
+                    else "nonfinite_reward" if sized else "group_size"))
+            if good:
                 # in buffer order, after the payload checks: an earlier group of this
                 # selection that is trained holds the task; one just dropped does not
                 entry = self._entry_of.get(int(position))
