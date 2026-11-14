@@ -1105,7 +1105,7 @@ class SGLangServerEngine(ServerEngine):
             try:
                 record.update(self._send_tensors(plan, version=None))
                 after = self.score(prompt, " Paris.")
-            except BaseException as error:  # the weights may hold a half-written expert: reload them
+            except Exception as error:  # the weights may hold a half-written expert: reload them
                 self._repair_from_disk()
                 raise SamplerEngineError(f"probe write failed: {error}") from error
             delta = max((abs(a - b) for a, b in zip(after, before)), default=0.0)
@@ -1128,7 +1128,7 @@ class SGLangServerEngine(ServerEngine):
         assert self._served_dir is not None
         try:
             self._update_from_disk({"model_path": str(self._served_dir), "weight_version": str(self._started_version)})
-        except BaseException as error:  # the served weights are unknown: the start fails
+        except Exception as error:  # the served weights are unknown: the start fails (Ctrl-C passes)
             raise _ProbeReloadFailed(f"reload after the expert probe: {error}") from error
 
     def _expert_file_update(self, model_dir: Path, version: int) -> dict[str, Any]:
@@ -1245,7 +1245,7 @@ class SGLangServerEngine(ServerEngine):
                 try:
                     self._update_from_disk({"model_path": str(self._served_dir),
                                             "weight_version": str(self._started_version)})
-                except BaseException as error:  # not a sparse failure: the served weights are unknown
+                except Exception as error:  # not a sparse failure: the served weights are unknown
                     raise _ProbeReloadFailed(f"reload after the sparse probe: {error}") from error
             failed = [r for r in results if not r.get("ok")]
             if failed:
@@ -1270,6 +1270,9 @@ class SGLangServerEngine(ServerEngine):
             self._sparse_shapes = shapes
         except (SamplerEngineError, sparse_update.SparseUnavailable, OSError, ValueError, KeyError) as error:
             self._sparse_maps = None
+            import shutil
+
+            shutil.rmtree(root, ignore_errors=True)  # sparse stays off: free the maps (shared memory)
             if isinstance(error, _ProbeReloadFailed):
                 raise
             record["error"] = f"{type(error).__name__}: {str(error)[:300]}"
@@ -1320,7 +1323,13 @@ class SGLangServerEngine(ServerEngine):
         began = self._clock()
         try:  # may raise SparseUnavailable: nothing touched
             summary, detail = self._sparse_plan(model_dir, version)
-        except (OSError, ValueError, KeyError) as error:  # e.g. /dev/shm full: still nothing touched
+        except (sparse_update.SparseUnavailable, OSError, ValueError, KeyError) as error:
+            import shutil
+
+            # e.g. /dev/shm full: still nothing touched, but a half-written patch must not hold the RAM
+            shutil.rmtree(self._sparse_root() / "patch", ignore_errors=True)
+            if isinstance(error, sparse_update.SparseUnavailable):
+                raise
             raise sparse_update.SparseUnavailable("plan_error", f"{type(error).__name__}: {error}") from error
         planned = self._clock()
         root = self._sparse_root()
