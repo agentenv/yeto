@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+_TAIL_CHUNK = 64 * 1024  # bytes read per step while looking for the last complete line
+
 
 def ssh_tail_command(target: str, remote: str, offset: int) -> list[str]:
     return ["ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=10",
@@ -48,10 +50,19 @@ class SshTapeMirror:
         """Bytes mirrored so far, trimmed back to the last complete line."""
         if not self.local.exists():
             return 0
-        data = self.local.read_bytes()
-        end = data.rfind(b"\n") + 1
-        if end != len(data):  # torn tail from a killed stream: drop it, re-fetch
-            with open(self.local, "r+b") as fh:
+        # scan backwards in chunks: a multi-day mirror is far too large to read whole
+        with open(self.local, "r+b") as fh:
+            size = fh.seek(0, 2)
+            pos, end = size, 0
+            while pos > 0:
+                step = min(_TAIL_CHUNK, pos)
+                pos -= step
+                fh.seek(pos)
+                nl = fh.read(step).rfind(b"\n")
+                if nl >= 0:
+                    end = pos + nl + 1
+                    break
+            if end != size:  # torn tail from a killed stream: drop it, re-fetch
                 fh.truncate(end)
         return end
 
