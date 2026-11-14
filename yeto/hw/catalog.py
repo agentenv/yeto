@@ -26,6 +26,8 @@ import re
 import subprocess
 from typing import Mapping
 
+from .. import gpu_spec
+
 # Canonical card name (``yeto.gpu_spec`` / SkyPilot spelling) -> vendor.
 CARD_VENDOR: Mapping[str, str] = {
     "A100": "nvidia", "A100-80GB": "nvidia", "A10G": "nvidia", "L4": "nvidia",
@@ -58,15 +60,34 @@ CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
     "B300": (288,), "MI300X": (192,), "MI325X": (256,), "MI355X": (288,),
 }
 
-# torch device type -> device family in the backend identity. A PPU is absent
-# on purpose: its torch device type is "cuda", so only the card name tells it
-# apart from an NVIDIA GPU (see VENDOR_BY_DEVICE_FAMILY).
+# The tables below are derived from yeto.gpu_spec.HW_FAMILIES, the single
+# hardware-family table; the values are the ones this module already had.
+
+# torch device type -> device family in the backend identity. ROCm and PPU are
+# absent on purpose: their torch device type is "cuda", so only the card name
+# or the launcher's $YETO_DEVICE_FAMILY tells them apart from an NVIDIA GPU
+# (see VENDOR_BY_DEVICE_FAMILY and IDENTITY_FROM_ENV_FAMILY).
 DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend"}
 
 # Launcher device family (yeto.gpu_spec.DEVICE_FAMILIES) -> vendor.
-VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend",
-                                              "ppu": "thead", "rocm": "amd"}
+VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {
+    f.family: f.vendor for f in gpu_spec.HW_FAMILIES if f.family != "cpu"}
 DEVICE_FAMILY_BY_VENDOR: Mapping[str, str] = {v: k for k, v in VENDOR_BY_DEVICE_FAMILY.items()}
+
+# Opt-in (default off): read the identity device family from the launcher's
+# $YETO_DEVICE_FAMILY instead of the torch device type, so an AMD or PPU island
+# records vendor "amd"/"thead" instead of "nvidia" (gap T9). This value feeds
+# the backend identity, whose hash is part of the async GRPO delivery, so it
+# stays behind a switch: with the switch off every existing island -- NVIDIA
+# B300 trainer, MI355X sampler, CPU test runner -- reports exactly what it
+# reported before.
+IDENTITY_FROM_ENV_FAMILY = "YETO_IDENTITY_FAMILY_FROM_ENV"
+
+
+def identity_family_from_env_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether $YETO_IDENTITY_FAMILY_FROM_ENV turns the T9 fix on (default: no)."""
+    raw = (env if env is not None else os.environ).get(IDENTITY_FROM_ENV_FAMILY, "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
 def device_family(device_type: str | None = None) -> str:
@@ -74,8 +95,17 @@ def device_family(device_type: str | None = None) -> str:
 
     With no argument, the family of the accelerator visible on this node
     (``yeto.accel.available_type``); a CPU-only node reports ``"nvidia"`` so
-    that unit tests and dry runs keep the historical value.
+    that unit tests and dry runs keep the historical value. ROCm and PPU nodes
+    also read as ``"nvidia"`` unless :data:`IDENTITY_FROM_ENV_FAMILY` is on,
+    which is the historical (wrong, but hash-compatible) behaviour.
     """
+    if device_type is None and identity_family_from_env_enabled():
+        launcher = os.environ.get(gpu_spec.DEVICE_FAMILY_ENV, "").strip()
+        if launcher:
+            try:
+                return gpu_spec.hw_family(launcher).vendor
+            except gpu_spec.UnknownFamily:
+                pass
     if device_type is None:
         try:
             from yeto import accel  # noqa: PLC0415
@@ -95,7 +125,8 @@ def device_family(device_type: str | None = None) -> str:
 # reading verl's own platform layer at fork acad9875
 # (verl/plugin/platform/platform_npu.py ray_resource_name / ray_resource_options,
 # verl/single_controller/ray/base.py _check_resource_available).
-RAY_RESOURCE_BY_DEVICE_FAMILY: Mapping[str, str] = {"nvidia": "GPU", "ascend": "NPU", "thead": "GPU"}
+RAY_RESOURCE_BY_DEVICE_FAMILY: Mapping[str, str] = {
+    f.vendor: f.ray_resource for f in gpu_spec.HW_FAMILIES if f.family != "cpu"}
 
 
 def ray_accelerator_resource(device_family_name: str | None = None) -> str:

@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from yeto.gpu_spec import DEVICE_FAMILY_ENV
+from yeto.gpu_spec import DEVICE_FAMILY_ENV, hw_family_or
 from yeto.hw.card_telemetry import CardCollector, collector_for
 
 HEARTBEAT_EVENT = "rl_heartbeat"
@@ -147,7 +147,11 @@ class ResourceSampler(_Periodic):
         self._emit = emit
         # ``vram_guard.VramWatch``: high-VRAM alerts from the same card samples (sampler nodes)
         self._vram_watch = vram_watch
-        family = os.environ.get(DEVICE_FAMILY_ENV) or "cuda"
+        # A family spelling the collector does not know (an identity vendor
+        # such as "ascend"/"amd", or a typo) used to raise out of the sampler's
+        # constructor; it now resolves to its collector, or to the historical
+        # "cuda" default.
+        family = hw_family_or(os.environ.get(DEVICE_FAMILY_ENV), "cuda").telemetry
         self._collector = collector or collector_for(family, nvml_loader=nvml_loader)
         self._rss = rss
         self._clock = clock
