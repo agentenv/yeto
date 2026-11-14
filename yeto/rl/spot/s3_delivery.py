@@ -41,6 +41,7 @@ string to upload every release).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -273,6 +274,25 @@ def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth:
     return row
 
 
+# (store, release) -> ((S3 manifest sha256, placed-files fingerprint), error) of a
+# backfill whose placed files failed verification: the next pull does not hash the
+# whole release again until the S3 manifest or a placed file changes. In memory only.
+_BACKFILL_REFUSED: dict[tuple[str, str], tuple[tuple[str, tuple[Any, ...]], str]] = {}
+
+
+def _placed_fingerprint(directory: Path) -> tuple[Any, ...]:
+    """Cheap identity of the files under ``directory`` (path, size, mtime, ctime, inode):
+    changes whenever a file is added, removed, rewritten (also in place with its
+    mtime kept, e.g. ``rsync --inplace -t``: ctime still moves) or replaced."""
+    rows = []
+    for path in directory.rglob("*"):
+        if path.is_file():
+            st = path.stat()
+            rows.append((path.relative_to(directory).as_posix(), st.st_size, st.st_mtime_ns,
+                         st.st_ctime_ns, st.st_ino))
+    return tuple(sorted(rows))
+
+
 def backfill_manifest(s3: S3, store: Path, release: str) -> bool:
     """Write the local manifest of a release that is placed but has none (a crash
     between ``cm.place`` and ``save_manifest``), so this node serves it to peers
@@ -280,6 +300,7 @@ def backfill_manifest(s3: S3, store: Path, release: str) -> bool:
     first; True when one was written."""
     cm.check_release_name(release)
     if peer_fanout.manifest_path(store, release).is_file() or not (store / cm.RELEASES / release).is_dir():
+        _BACKFILL_REFUSED.pop((str(store), release), None)  # nothing left to backfill: forget it
         return False
     raw = s3.get_bytes(f"manifests/{release}.json")
     if raw is None:  # never uploaded (S3_ASSUME_PRESENT): nothing to serve it with
@@ -288,7 +309,19 @@ def backfill_manifest(s3: S3, store: Path, release: str) -> bool:
     cm.check(manifest, None)
     if manifest.get("release") != release:
         raise cm.ManifestError(f"manifests/{release}.json names {manifest.get('release')!r}")
-    cm.verify(manifest, store / cm.RELEASES / release)
+    placed = store / cm.RELEASES / release
+    seen = (str(store), release)
+    key = (hashlib.sha256(raw).hexdigest(), _placed_fingerprint(placed))
+    refused = _BACKFILL_REFUSED.get(seen)
+    if refused is not None and refused[0] == key:  # nothing changed: do not hash the release again
+        raise cm.ManifestError(f"placed files of {release} still do not match its S3 manifest "
+                               f"(unchanged since: {refused[1]})")
+    try:
+        cm.verify(manifest, placed)
+    except cm.ManifestError as error:
+        _BACKFILL_REFUSED[seen] = (key, str(error)[:200])
+        raise
+    _BACKFILL_REFUSED.pop(seen, None)
     peer_fanout.save_manifest(store, manifest)
     log(f"backfilled the local manifest of {release} (placed before an interrupted save)")
     return True

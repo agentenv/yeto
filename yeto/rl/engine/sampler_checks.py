@@ -293,6 +293,18 @@ class PostLoadChecks:
         return results
 
 
+def _load_error_detail(error: BaseException, engine: Any, resume_failure_before: Any) -> str:
+    """The detail of a failed load: the error, its ``__notes__`` (a vLLM server
+    adds one when its ``/resume`` failed and it was killed) and the engine's
+    ``last_resume_failure`` when this load set it (an older one is left out)."""
+    parts = [f"{type(error).__name__}: {error}"]
+    parts.extend(str(note) for note in getattr(error, "__notes__", ()) or ())
+    resume_failure = getattr(engine, "last_resume_failure", None)
+    if resume_failure is not None and resume_failure is not resume_failure_before:
+        parts.append(f"last_resume_failure: {json.dumps(resume_failure, sort_keys=True, default=str)}")
+    return "; ".join(parts)
+
+
 class PortReleaseLoader:
     """``PolicyFollower`` load hook over a :class:`SamplerEngine` (module doc).
 
@@ -440,15 +452,16 @@ class PortReleaseLoader:
         restart = first or self._restart  # after a failed load or check: restart, never patch in place
         self.ready = False  # the engine holds unchecked weights from here until the checks pass
         started = self.clock()
+        resume_failure = getattr(self.engine, "last_resume_failure", None)
         try:
             report = (self.engine.start(directory, version) if restart
                       else self.engine.load(directory, version))
         except SamplerEngineError as error:
-            self._fail(version, "load", f"{type(error).__name__}: {error}")
+            self._fail(version, "load", _load_error_detail(error, self.engine, resume_failure))
         try:
             results = self.checks.run(self.engine, expected_experts=expected)
         except SamplerEngineError as error:  # an engine call of a check failed: a failed check
-            self._fail(version, "checks", f"{type(error).__name__}: {error}")
+            self._fail(version, "checks", _load_error_detail(error, self.engine, resume_failure))
         served = self.engine.served_version()
         results.append({"name": "served_version", "passed": served == version,
                         "served": served, "expected": version})
