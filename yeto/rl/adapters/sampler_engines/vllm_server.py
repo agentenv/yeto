@@ -120,6 +120,8 @@ UPSTREAM_HANG_HINT = ("A Kimi-K3.1 load (about 1.56 TB of MXFP4 safetensors) can
                       "On MI355X a hang without an error is the MEC firmware scratch reclaim "
                       "(HSA_NO_SCRATCH_RECLAIM=1).")
 DEFAULT_MAX_LOGPROBS = 20  # vLLM ModelConfig.max_logprobs
+RESUME_ATTEMPTS = 3  # /resume tries after an in-place reload before the paused server is killed
+RESUME_RETRY_S = 2.0
 DEV_MODE_ENV = "VLLM_SERVER_DEV_MODE"  # mounts /collective_rpc and /pause + /resume
 # Every ROCm server (extra_env wins): AITER kernels, the V2 model runner (the K3.1 day-0
 # image predates V1's removal), no HSA scratch reclaim (MEC firmware hang without an
@@ -417,6 +419,7 @@ class VllmServerEngine(ServerEngine):
                     raise SamplerEngineError(f"vllm-server {name} needs upstream vLLM (platform cuda or rocm), "
                                              f"not platform {options.platform!r}")
         super().__init__(config, **kw)
+        self.last_resume_failure: dict[str, Any] | None = None
         self.options = options
         self.upstream = upstream
         self.HANG_HINT = UPSTREAM_HANG_HINT if upstream else LEGACY_HANG_HINT
@@ -642,12 +645,7 @@ class VllmServerEngine(ServerEngine):
             raise SamplerEngineError("vllm-server: in-place reload needs the upstream line (platform cuda / rocm)")
         if self.options.expert_reload:
             return self._reload_experts(model_dir)
-        self.call("POST", "/pause?mode=wait")
-        try:
-            result = self.call("POST", "/collective_rpc", {"method": "reload_weights",
-                                                           "kwargs": {"weights_path": str(model_dir)}})
-        finally:
-            self.call("POST", "/resume")
+        result = self._paused_rpc({"method": "reload_weights", "kwargs": {"weights_path": str(model_dir)}})
         return {"reload": "collective_rpc reload_weights", "rpc_results": len((result or {}).get("results") or [])}
 
     def _reload_experts(self, model_dir: Path) -> dict[str, Any]:
@@ -677,18 +675,51 @@ class VllmServerEngine(ServerEngine):
         if guard["mode"] == vram_guard.SAFE_CHUNKED:
             kwargs["max_experts"] = str(int(guard["max_experts"]))
         began = self._clock()
-        self.call("POST", "/pause?mode=wait")
-        try:
-            result = self.call("POST", "/collective_rpc", {"method": vllm_expert_reload.RELOAD_METHOD,
-                                                           "kwargs": kwargs})
-        finally:
-            self.call("POST", "/resume")
+        result = self._paused_rpc({"method": vllm_expert_reload.RELOAD_METHOD, "kwargs": kwargs})
         self._served_dir = Path(model_dir)
         ranks = (result or {}).get("results") or []
         return {"reload": "collective_rpc " + vllm_expert_reload.RELOAD_METHOD, "rpc_results": len(ranks),
                 "experts": plan.expert_count, "pause_s": round(self._clock() - began, 3),
                 "rank_seconds": max((r.get("seconds", 0.0) for r in ranks if isinstance(r, dict)), default=None),
                 "memory_guard": guard}
+
+    def _paused_rpc(self, body: dict[str, Any]) -> Any:
+        """``/pause?mode=wait`` -> ``/collective_rpc`` -> ``/resume``, resuming also
+        after a failed RPC. The RPC's own error is what propagates; a ``/resume``
+        that keeps failing is attached to it (or raised when the RPC succeeded)."""
+        self.call("POST", "/pause?mode=wait")
+        try:
+            result = self.call("POST", "/collective_rpc", body)
+        except BaseException as err:
+            self._resume(cause=err)
+            raise
+        self._resume(cause=None)
+        return result
+
+    def _resume(self, *, cause: BaseException | None) -> None:
+        """``/resume``, retried. A server that cannot be resumed would stay paused
+        (alive, healthy, never generating) without anybody noticing, so it is
+        killed instead: the failure is recorded in ``last_resume_failure``, the
+        next ``call`` fails loudly and the next load restarts it."""
+        errors: list[str] = []
+        for attempt in range(RESUME_ATTEMPTS):
+            try:
+                self.call("POST", "/resume")
+                return
+            except Exception as err:  # noqa: BLE001 - every failure is recorded below
+                errors.append(f"{type(err).__name__}: {err}"[:300])
+                if attempt + 1 < RESUME_ATTEMPTS:
+                    self._sleep(RESUME_RETRY_S)
+        self.last_resume_failure = {"attempts": len(errors), "errors": errors,
+                                    "after": "failed rpc" if cause is not None else "rpc"}
+        note = (f"vllm-server: /resume failed {len(errors)} times after the reload "
+                f"(last: {errors[-1]}); the paused server was killed so the next load restarts it")
+        print(f"[vllm-server] {note}", flush=True)
+        self._kill()
+        if cause is not None:
+            cause.add_note(note)
+            return
+        raise SamplerEngineError(note)
 
     def _free_bytes(self) -> int | None:
         """Free memory of the fullest GPU (None: no reading; the guard then lets the

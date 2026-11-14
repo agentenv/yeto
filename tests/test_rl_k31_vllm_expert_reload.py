@@ -137,6 +137,69 @@ def test_a_release_that_is_not_an_overlay_restarts_and_resumes_after_a_failed_rp
     assert [p for m, p, b in http.calls if m == "POST"][-1] == "/resume"
 
 
+class _RpcDown(Exception):
+    pass
+
+
+def _failing(exc):
+    def route(body):
+        raise exc
+    return route
+
+
+def _reload_engine(tmp_path, *, rpc, resume, expert_reload):
+    http = _Http({("GET", "/health"): {}, ("POST", "/pause?mode=wait"): {}, ("POST", "/collective_rpc"): rpc,
+                  ("POST", "/resume"): resume})
+    config = _config(tmp_path, card_model="MI355X", device_family="amd", in_place_reload=True)
+    engine = VllmServerEngine(config, VllmOptions(platform="rocm", tp=8, expert_reload=expert_reload),
+                              spawn=lambda a, e: _Process(), http=http, sleep=lambda s: None,
+                              run=lambda argv: ROCM_CARDS)
+    release = _base_and_release(tmp_path, engine.config.base_dir)
+    engine.start(None, 0)
+    target = overlay_release(engine.config.base_dir, release, tmp_path / "ov") if expert_reload else release
+    return engine, http, target
+
+
+@pytest.mark.parametrize("expert_reload", [False, True])
+def test_a_failed_resume_keeps_the_reload_error_and_kills_the_paused_server(tmp_path, expert_reload):
+    engine, http, target = _reload_engine(tmp_path, rpc=_failing(_RpcDown("rank 3 lost")),
+                                          resume=_failing(RuntimeError("resume broke")),
+                                          expert_reload=expert_reload)
+    with pytest.raises(_RpcDown, match="rank 3 lost") as caught:
+        engine.load(target, 1)
+    assert any("/resume failed 3 times" in n and "resume broke" in n for n in caught.value.__notes__)
+    assert [p for m, p, b in http.calls if m == "POST"].count("/resume") == 3
+    assert engine.last_resume_failure["after"] == "failed rpc"
+    # not left paused and healthy-looking: the server is gone and the next load restarts it
+    assert engine._process is None and engine._version is None
+    with pytest.raises(Exception, match="not running"):
+        engine.call("GET", "/health")
+
+
+@pytest.mark.parametrize("expert_reload", [False, True])
+def test_a_failed_resume_after_a_good_reload_is_raised_not_swallowed(tmp_path, expert_reload):
+    engine, _http, target = _reload_engine(tmp_path, rpc={"results": [{}] * 8},
+                                           resume=_failing(RuntimeError("resume broke")),
+                                          expert_reload=expert_reload)
+    with pytest.raises(Exception, match="/resume failed 3 times"):
+        engine.load(target, 1)
+    assert engine.last_resume_failure["after"] == "rpc" and engine._process is None
+
+
+def test_a_resume_that_recovers_on_retry_reloads_normally(tmp_path):
+    tries = []
+
+    def flaky(body):
+        tries.append(1)
+        if len(tries) == 1:
+            raise RuntimeError("blip")
+        return {}
+
+    engine, _http, target = _reload_engine(tmp_path, rpc={"results": [{}] * 8}, resume=flaky, expert_reload=False)
+    report = engine.load(target, 1)
+    assert report.reload_mode == "in_place" and engine.last_resume_failure is None and len(tries) == 2
+
+
 def test_reload_hands_freed_staging_blocks_back_to_the_device():
     calls = []
 
