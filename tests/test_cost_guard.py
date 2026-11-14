@@ -803,3 +803,22 @@ def test_pool_calls_of_an_earlier_app_count_from_their_own_apps_billing(tmp_path
     rows = [BillingRow("ap-old", "yeto-rollout-rp", T0, 68.0)]
     s = resource_costs(ResourceLedger(p).resources(), T0 + 5 * H, billing=ModalBilling(lambda s, e: rows))
     assert s.total_usd == pytest.approx(68.0 + 2 * 68.0 + 68.0)
+
+
+def test_an_nc_lease_granted_at_skewed_ahead_still_bills_from_its_ledger_create(tmp_path):
+    """A granted_at ahead of the ledger create (NC server clock skew) must not shrink the bill."""
+    p = tmp_path / "r.jsonl"
+    ledger_at(p, T0).created("nc_lease", "t-1", "nc", account=4, granted_at=T0 + 3 * H, usd_per_hour=10.0)
+    s = resource_costs(ResourceLedger(p).resources(), T0 + 2 * H, rates=Rates())
+    assert s.items[0].usd == pytest.approx(20.0)
+
+
+def test_a_corrupt_nc_lease_time_field_does_not_disable_the_budget(tmp_path):
+    """An unparsable granted_at / lease_until must not make every guard tick raise."""
+    clock = Clock(T0 + 3 * H)
+    g, led, calls = make_guard(tmp_path, clock, budget=50.0)
+    ledger_at(led.path, T0).created("nc_lease", "t-1", "nc", account=4, granted_at="garbage",
+                                    lease_until="not-a-time")
+    s = g.tick()
+    assert s.items[0].usd == pytest.approx(72.0)
+    assert "cost_budget_exceeded" in events(tmp_path) and calls["graceful"]

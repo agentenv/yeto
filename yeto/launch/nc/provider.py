@@ -140,9 +140,12 @@ def ledger_cost(r: Any, now: float, rates: Any) -> Any:
     ticket's rate; notes the minutes past ``lease_until``."""
     from yeto.cost import billing  # noqa: PLC0415
 
-    start = billing._ts(r.attrs.get("granted_at")) or r.created_at  # noqa: SLF001
+    # never later than the ledger create: a granted_at skewed ahead (NC clock) or
+    # unparsable must not shrink the bill (bill more rather than less)
+    granted = billing.ts_or_none(r.attrs.get("granted_at"))
+    start = min(granted, r.created_at) if granted else r.created_at
     note = ""
-    until = billing._ts(r.attrs.get("lease_until"))  # noqa: SLF001
+    until = billing.ts_or_none(r.attrs.get("lease_until"))
     end = r.released_at if r.released_at is not None else now
     if until is not None and end > until:
         note = f"{(end - until) / 60:.0f} min past lease_until"
