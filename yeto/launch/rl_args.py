@@ -854,6 +854,10 @@ def _prepare_rl_args(
             raise ValueError("--codex-reasoning-effort requires --training-mode rl")
         return
 
+    if getattr(args, "rl_model_auto", False):  # advisory print only; off by default
+        from yeto.rl.model_registry.cli import advise_launch
+
+        advise_launch(args)
     from yeto.rl.quant.tiers import validate_launch as _validate_quant_tier
 
     _validate_quant_tier(args)  # refused before any cloud spend

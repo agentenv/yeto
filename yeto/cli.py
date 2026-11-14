@@ -1078,6 +1078,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .rl.breaker import add_parser as _add_breaker_parser
 
     _add_breaker_parser(sub)
+    from .rl.model_registry.cli import add_parser as _add_adapt_parser
+
+    _add_adapt_parser(sub)
     reaper = sub.add_parser("_reaper")
     reaper.add_argument("run")
     reaper.add_argument("pid", type=int)
@@ -2590,6 +2593,10 @@ def main(argv=None) -> int:
         return 0
     if args.command == "_worker":
         return cmd_worker(args.run)
+    if args.command == "adapt":
+        from .rl.model_registry.cli import cmd_adapt
+
+        return cmd_adapt(args)
     if args.command == "breaker":
         from .rl.breaker import cmd_breaker
 
