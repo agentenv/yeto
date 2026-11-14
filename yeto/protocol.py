@@ -1636,6 +1636,25 @@ class SyncerClient:
     def _supervise(self) -> None:
         """Reconnect loop: on any socket failure of the live group, tear the
         whole group down, back off exponentially, redial, resume."""
+        try:
+            self._supervise_loop()
+        except BaseException as exc:  # noqa: BLE001 - a dead supervisor must not go unnoticed
+            self._thread_died("reconnect supervisor", exc)
+
+    def _thread_died(self, what: str, exc: BaseException) -> None:
+        """A background thread of the client ended on an unexpected error:
+        nothing would redial or watch the streams any more, so fail
+        ``check_health`` instead of letting the island step on silently."""
+        _connect_log(f"syncer client {what} died (learner {self.learner_id}): "
+                     f"{type(exc).__name__}: {exc}")
+        with self._lock:
+            if self._err is None:
+                self._err = RuntimeError(f"syncer client {what} died: {type(exc).__name__}: {exc}")
+                self._err.__cause__ = exc
+        with self._final_cond:
+            self._final_cond.notify_all()
+
+    def _supervise_loop(self) -> None:
         while True:
             self._failure.wait()
             if self._closed.is_set() or self.shutdown.is_set():
@@ -2627,6 +2646,12 @@ class SyncerClient:
         up (C32: 900 s with every socket still open). The failure goes
         through the normal reconnect path, so the syncer replays its PULLs
         and the island pushes the interrupted fragment again."""
+        try:
+            self._watch_stalls_loop()
+        except BaseException as exc:  # noqa: BLE001 - a dead watchdog must not go unnoticed
+            self._thread_died("stall watchdog", exc)
+
+    def _watch_stalls_loop(self) -> None:
         period = min(1.0, self.stream_stall_timeout / 4)
         while not self._closed.wait(period):
             if self.shutdown.is_set():

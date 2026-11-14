@@ -668,3 +668,68 @@ def test_enqueue_racing_a_teardown_leaves_no_phantom_backlog_for_the_stall_watch
     assert meter.idle
     assert meter.stalled_for(time.monotonic() + 3600) == 0.0
     assert client.send_progress().queued_chunks == 0
+
+
+@pytest.mark.timeout(30)
+def test_supervisor_crash_on_redial_surfaces_through_check_health(monkeypatch):
+    """An unexpected error inside the reconnect loop (here: no thread can be
+    started for the new group) used to kill the supervisor thread silently:
+    the island kept stepping with check_health() a no-op and never redialed."""
+    from yeto import protocol
+
+    monkeypatch.setattr(protocol, "RECONNECT_BACKOFF_START", 0.05)
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32,
+                          num_streams=1, connect_timeout=10, max_reconnects=None)
+    try:
+        client.start()
+        _, _, group = accept_group(listener, 1)
+
+        def broken_connect(patient):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(client, "_connect_group", broken_connect)
+        drop_group(group)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                client.check_health()
+            except RuntimeError as exc:
+                assert "can't start new thread" in str(exc)
+                break
+            assert time.monotonic() < deadline, "supervisor died without failing check_health"
+            time.sleep(0.05)
+    finally:
+        client.close()
+        listener.close()
+
+
+@pytest.mark.timeout(30)
+def test_stall_watchdog_crash_surfaces_through_check_health(monkeypatch):
+    """An error inside the stall watchdog used to end its thread silently:
+    stalled streams were then never dropped and nothing reported it."""
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32,
+                          num_streams=1, connect_timeout=10, stream_stall_timeout=0.4)
+
+    def broken_scan():
+        raise KeyError("watchdog bug")
+
+    monkeypatch.setattr(client, "_stalled_stream", broken_scan)
+    try:
+        client.start()
+        accept_group(listener, 1)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                client.check_health()
+            except RuntimeError as exc:
+                assert "watchdog" in str(exc)
+                break
+            assert time.monotonic() < deadline, "watchdog died without failing check_health"
+            time.sleep(0.05)
+    finally:
+        client.close()
+        listener.close()

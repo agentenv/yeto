@@ -131,3 +131,15 @@ def test_streaming_regroup_still_refuses_bad_lengths():
         list(_block_aligned_chunks([b"\0" * 6], 64, [2]))
     with pytest.raises(ValueError, match="longer than its tensor segments"):
         list(_block_aligned_chunks([b"\0" * 8, b"\0" * 8], 64, [3]))
+
+
+@pytest.mark.parametrize("block", [0, 1, 3, 63, 130 + 1, 258, -2])
+def test_fast_encoder_refuses_block_sizes_the_wire_format_refuses(block):
+    """The fast encoder must not emit bytes for a block size the reference
+    codec (and so the decoder) refuses: an odd block silently produced an
+    undecodable push, block 0 raised ZeroDivisionError."""
+    from yeto.push_codec import encode_i4_nearest
+
+    values = np.ones(300, dtype="<f4")
+    with pytest.raises(ValueError, match="int4 block size"):
+        encode_i4_nearest(values, block)

@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from .protocol import I4_BLOCK_MAX, I4_BLOCK_MIN
+
 # Rows per batch: 8192 rows of 128 values = 4 MiB of f32 per scratch buffer.
 BATCH_ROWS = 1 << 13
 # Encoder threads per call (YETO_PUSH_ENCODE_THREADS); 1 = the calling thread.
@@ -69,6 +71,10 @@ def encode_i4_nearest(values: np.ndarray, block: int, *, threads: int | None = N
     values = np.asarray(values)
     if values.dtype != np.dtype("<f4") or values.ndim != 1:
         raise ValueError("int4 encoder needs a 1-D little-endian f32 array")
+    if not (I4_BLOCK_MIN <= block <= I4_BLOCK_MAX and block % 2 == 0):
+        # The reference codec and the decoder refuse these: an odd block
+        # would encode bytes nobody can decode, block 0 divides by zero.
+        raise ValueError(f"int4 block size {block} must be even and within {I4_BLOCK_MIN}..{I4_BLOCK_MAX}")
     count = values.size
     full_rows, tail = divmod(count, block)
     row_bytes = i4_row_bytes(block)
