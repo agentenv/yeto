@@ -222,7 +222,10 @@ class PoolIslandClient:
         self.final_outer_version: int | None = None
         self.finished: PoolFinished | None = None
         self._permits: dict[int, PullRequest] = {}
-        self._answered: set[tuple[int, int]] = set()  # (global_step, round_attempt)
+        # (global_step, round_attempt) -> connection generation of the link
+        # the answer was queued on: a redial loses what that link had not
+        # sent yet, and the syncer replays the same PULL on the new link.
+        self._answered: dict[tuple[int, int], int] = {}
         self._stop = threading.Event()
         self._pause_until = 0.0
         self._rejoins_seen = 0
@@ -307,12 +310,16 @@ class PoolIslandClient:
             if permit.fragment_id != self.FRAGMENT:
                 raise RuntimeError(f"island pool received a PULL for fragment {permit.fragment_id}")
             # A restarted round (higher attempt) needs a fresh answer.
-            if (permit.global_step, permit.round_attempt) not in self._answered:
+            answered_on = self._answered.get((permit.global_step, permit.round_attempt))
+            if answered_on != self._link_generation():
                 previous = self._permits.get(permit.global_step)
                 if previous is None or permit.round_attempt > previous.round_attempt:
                     self._permits[permit.global_step] = permit
         if self.client.finalizing.is_set() and self.finished is None:
             self._take_final_cut()
+
+    def _link_generation(self) -> int:
+        return int(getattr(self.client, "connection_generation", 0))
 
     def _set_base(self, base: PoolBase, recv_seconds: float) -> None:
         self.latest_base = base
@@ -368,7 +375,7 @@ class PoolIslandClient:
         step = max(self._permits)
         permit = self._permits.pop(step)
         self._permits.clear()  # older rounds are closed or will close without this island
-        self._answered.add((step, permit.round_attempt))
+        self._answered[(step, permit.round_attempt)] = self._link_generation()
         self.client.push_fragment(
             self.FRAGMENT, step, permit.round_attempt, int(base_version), int(self.inner_step),
             max(int(c_steps), 1), int(c_tokens), pack_tensor(update.reshape(-1), DTYPE_F32))

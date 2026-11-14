@@ -1902,7 +1902,12 @@ class FullParameterRoleStream:
         ] = self._link_generation(candidate.permit.fragment_id) if link_generation is None else link_generation
         # A background push is recorded after the fact: a newer PULL may have
         # superseded the permit, or the closed round dropped it, meanwhile.
-        if self._pending.get(candidate.permit.fragment_id) == candidate.permit:
+        # A push queued on a link that has since been replaced does not answer
+        # the new link's replay of the same PULL: keep that permit.
+        fid = candidate.permit.fragment_id
+        replaced = (link_generation is not None and self._link_generations is not None
+                    and self._link_generations.get(fid) != link_generation)
+        if not replaced and self._pending.get(fid) == candidate.permit:
             self._pending.pop(candidate.permit.fragment_id)
         terminal = candidate.permit.global_step == self.config.total_fragment_steps
         self.terminal_submitted = self.terminal_submitted or terminal
@@ -1954,6 +1959,10 @@ class FullParameterRoleStream:
         # A redial drops the permits and answers of that link only: the
         # syncer resends PULLs of open rounds on the new group. With a
         # sharded head each shard is its own link.
+        # Drain before reading the generations: a PULL drained across a
+        # redial is then bound to the new link (at worst answered twice, a
+        # refused duplicate) instead of being dropped as the old link's.
+        pulls = self.client.drain_pulls()
         fragments = self.config.expected_fragments
         links = {fid: self._link_generation(fid) for fid in range(fragments)}
         if self._link_generations != links:
@@ -1966,7 +1975,7 @@ class FullParameterRoleStream:
                 if (key[0] - 1) % fragments not in stale
             }
             self._link_generations = links
-        for permit in self.client.drain_pulls():
+        for permit in pulls:
             self._validate_permit(permit)
             key = (permit.global_step, permit.round_attempt)
             if self._answered.get(key) == links[permit.fragment_id]:
