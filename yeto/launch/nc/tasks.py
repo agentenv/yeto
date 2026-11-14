@@ -82,7 +82,9 @@ def model_pull_task(pool: str, *, src: str, dest: str, max_mb_s: int = MAX_PULL_
     sync = ["aws", "s3", "sync", src, dest, "--only-show-errors"]
     if include:
         sync += ["--exclude", "*", "--include", include]
-    setup = "command -v aws >/dev/null || python3 -m pip install -q awscli"
+    # aws CLI v1 before 1.29 ignores AWS_ENDPOINT_URL (it would go to AWS): a fresh
+    # install is pinned past it and the sync names the endpoint, for a preinstalled old aws
+    setup = "command -v aws >/dev/null || python3 -m pip install -q 'awscli>=1.29'"
     run = "\n".join([
         "set -eu",
         'export AWS_CONFIG_FILE="$HOME/.yeto-nc-aws-config"',
@@ -90,7 +92,7 @@ def model_pull_task(pool: str, *, src: str, dest: str, max_mb_s: int = MAX_PULL_
         f"  max_bandwidth = {max_mb_s}MB/s\\n' \"${{AWS_REGION:-auto}}\" > \"$AWS_CONFIG_FILE\""),
         f"mkdir -p {shlex.quote(dest)}",
         'echo "YETO_NC_PULL start $(date -u +%FT%TZ) cap=' + f'{max_mb_s}MB/s"',
-        shlex.join(sync),
+        shlex.join(sync) + ' --endpoint-url "$AWS_ENDPOINT_URL"',
         f'echo "YETO_NC_PULL done $(date -u +%FT%TZ) $(du -sh {shlex.quote(dest)} | cut -f1)"',
     ])
     return {"name": "yeto-nc-model-pull", "resources": _resources(pool, gpus), "setup": setup,

@@ -238,6 +238,15 @@ def test_hello_and_pull_tasks():
         tasks.model_pull_task("nc-t1", src="s3://b/m", dest="/root/m")
 
 
+def test_pull_task_passes_endpoint_explicitly():
+    # aws CLI v1 before 1.29 ignores AWS_ENDPOINT_URL and would go to AWS, so the
+    # node's sync names the endpoint itself and a fresh install is pinned past 1.29
+    p = tasks.model_pull_task("nc-t1", src="s3://b/models/m", dest="/mnt/nvme/models/m")
+    (sync,) = [line for line in p["run"].splitlines() if line.startswith("aws s3 sync")]
+    assert sync.endswith('--endpoint-url "$AWS_ENDPOINT_URL"')
+    assert "'awscli>=1.29'" in p["setup"]
+
+
 def test_sampler_task_and_spec(tmp_path):
     spec = tasks.sampler_spec({"sampler_id": "old", "engine": {}}, sampler_id="nc-1", shards=["nc-0"])
     assert spec["sampler_id"] == "nc-1" and spec["buffer_shards"] == ["nc-0", "nc-1"]
