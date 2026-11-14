@@ -112,21 +112,47 @@ class LocalSyncer:
         return None
 
     def restart(self) -> None:
+        # The foreground (actor) syncer exiting ends the shell, but the
+        # backgrounded role syncers live on in its process group holding
+        # their ports; reap them first or the new ones fail to bind.
+        self._stop_tree()
         self.start()
 
     def stop(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self._signal_tree(signal.SIGTERM)
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._signal_tree(signal.SIGKILL)
+        self._stop_tree()
         if self.tape_forwarder is not None:
             self.tape_forwarder.stop()
             self.tape_forwarder = None
         if self.tape_run is not None:
             self.tape_run.finish()
             self.tape_run = None
+
+    def _stop_tree(self) -> None:
+        """Terminate the syncer's process group, even when its leader (the
+        shell) already exited: members it backgrounded may still run."""
+        if self.proc is None:
+            return
+        self._signal_tree(signal.SIGTERM)
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        deadline = time.monotonic() + 10
+        while self._group_alive() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if self._group_alive() or self.proc.poll() is None:
+            self._signal_tree(signal.SIGKILL)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _group_alive(self) -> bool:
+        try:
+            os.killpg(self.proc.pid, 0)
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+        return True
 
     def start_tape_forwarder(self, args) -> None:
         """Tail the syncer's event tape into a W&B run.
