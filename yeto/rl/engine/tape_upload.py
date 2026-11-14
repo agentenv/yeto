@@ -72,9 +72,14 @@ class TapeUploader:
                 return 0
             if size <= self.offset:
                 return 0
-            with open(self.tape, "rb") as fh:
-                fh.seek(self.offset)
-                data = fh.read(min(size - self.offset, MAX_CHUNK_BYTES))
+            try:  # the tape can vanish / rotate between stat and open
+                with open(self.tape, "rb") as fh:
+                    fh.seek(self.offset)
+                    data = fh.read(min(size - self.offset, MAX_CHUNK_BYTES))
+            except OSError as error:
+                self.failures += 1
+                self.log(f"[tape-upload] {self.tape.name}: read {type(error).__name__}: {error}"[:300])
+                return 0
             end = data.rfind(b"\n")
             if end < 0:
                 return 0  # a torn last line waits for its newline
