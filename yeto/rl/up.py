@@ -697,6 +697,20 @@ class Run:
         seconds = [s for s in (_utc_seconds(x) for x in stamps) if s is not None]
         return max(seconds) if seconds else None
 
+    def _legacy_period(self, now: float) -> dict[str, Any] | None:
+        """Before the first ``run up`` of an upgraded run (no ``ups`` yet): the period
+        :meth:`begin_up` will record for its pre-upgrade ups, ``t0`` to the last stamp
+        (``run status`` then bills no trainer over the stopped gap after it). None, and so
+        the whole time since ``trainer_t0`` as before, when that stamp may be short: no stamp,
+        or a trainer launcher or ``yeto launch`` worker that still runs."""
+        stamp = getattr(self, "_legacy_stamp", None)
+        if stamp is None or "t0" not in self.state or self._trainer_alive():
+            return None
+        if _worker_alive(self.trainer_launch_name()):
+            return None
+        start = float(self.state["t0"])
+        return {"pid": None, "start": start, "seen": min(now, max(start, stamp)), "end": None, "legacy": True}
+
     def _trainer_alive(self) -> bool:
         tr = (self.state.get("procs") or {}).get("trainer")
         return bool(tr) and _alive(tr.get("pid"))
@@ -1007,7 +1021,10 @@ class Run:
             now = min(now, max(finished, t0))
         ups = [p for p in self.state.get("ups") or () if p.get("start") is not None]
         if not ups:  # a run from before the periods were recorded
-            return max(0.0, now - t0) / 3600
+            legacy = self._legacy_period(now)
+            if legacy is None:
+                return max(0.0, now - t0) / 3600
+            ups = [legacy]  # the period the next ``run up`` records (begin_up), not the stopped gap
         trainer_ran = None
 
         def end(i: int, p: dict[str, Any]) -> float:
