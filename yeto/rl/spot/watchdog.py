@@ -62,6 +62,8 @@ SKY_CONFIG = os.path.expanduser(os.environ.get("YETO_SPOT_SKY_CONFIG") or "~/.sk
 
 DEFAULT_OWN_NAME = r"spot"  # only ever touch our own clusters (--own-name-re)
 
+SWEEP_BACKOFF_S, SWEEP_BACKOFF_MAX_S = 60.0, 1800.0  # orphan sweep retry after a failure
+
 # Watchdog.try_launch results
 UP, FAILED, RECLAIMED, STOPPED = "up", "failed", "reclaimed", "stopped"
 
@@ -131,8 +133,8 @@ class Ops:
             p = subprocess.run([sys.executable, "-m", "yeto.rl.harness.harbor.boat_labels", "sweep", "--run", run,
                                 "--island", island], capture_output=True, text=True, timeout=600, cwd=REPO,
                                env={**os.environ, "PYTHONPATH": str(REPO)})
-        except (subprocess.TimeoutExpired, OSError) as error:  # a hung sweep must not end the watchdog
-            return f"{type(error).__name__}: {error}"[:300]
+        except (subprocess.TimeoutExpired, OSError) as error:  # a failed sweep: retried with backoff
+            raise RuntimeError(f"{type(error).__name__}: {error}"[:300]) from error
         return (p.stdout + p.stderr).strip()[-300:]
 
     def ready(self, cluster: str, cmd: str) -> bool:
@@ -244,6 +246,10 @@ class Watchdog:
     billed_at: float = 0.0
     gone_since: float | None = None
     swept: bool = False
+    # a failed orphan sweep is retried no earlier than sweep_retry_at (exponential backoff),
+    # so a hung sweep cannot hold up every candidate's launch
+    sweep_failures: int = 0
+    sweep_retry_at: float = 0.0
     starting_since: float | None = None
     # clusters whose delete failed: retried every loop and billed until they are gone
     doomed: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -351,6 +357,7 @@ class Watchdog:
                        cold_start_s=round(self.clock() - t0, 1),
                        outage_s=round(t0 - self.gone_since, 1) if self.gone_since else None)
         self.gone_since, self.swept = None, False
+        self.sweep_failures, self.sweep_retry_at = 0, 0.0
         return UP
 
     def reclaimed_while_waiting(self) -> bool:
@@ -368,15 +375,19 @@ class Watchdog:
         return True
 
     def maybe_sweep(self) -> None:
-        if self.gone_since is None or self.swept:
+        if self.gone_since is None or self.swept or self.clock() < self.sweep_retry_at:
             return
         if self.clock() - self.gone_since >= self.cfg.orphan_sweep_min * 60:
             try:
                 out = self.ops.sweep(self.cfg.run_id, self.cfg.island)
-            except Exception as e:  # noqa: BLE001 - the VM loop must go on; the sweep is retried next pass
-                self.event("orphan_sweep_error", err=f"{type(e).__name__}: {e}"[:200])
+            except Exception as e:  # noqa: BLE001 - the VM loop must go on; the sweep is retried later
+                delay = min(SWEEP_BACKOFF_MAX_S, SWEEP_BACKOFF_S * 2 ** self.sweep_failures)
+                self.sweep_failures += 1
+                self.sweep_retry_at = self.clock() + delay
+                self.event("orphan_sweep_error", err=f"{type(e).__name__}: {e}"[:200],
+                           failures=self.sweep_failures, retry_in_s=delay)
                 return
-            self.swept = True
+            self.swept, self.sweep_failures, self.sweep_retry_at = True, 0, 0.0
             self.event("orphan_sweep", run=self.cfg.run_id, island=self.cfg.island,
                        gone_s=round(self.clock() - self.gone_since, 1), out=out)
 

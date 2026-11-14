@@ -332,8 +332,8 @@ def test_orphan_sweep_error_does_not_kill_the_watchdog(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(a[0], kw.get("timeout"))
 
     monkeypatch.setattr(wd.subprocess, "run", hung)
-    out = wd.Ops(yaml="x", envs=[], secrets=[]).sweep("runt", "spot-0")
-    assert "TimeoutExpired" in out
+    with pytest.raises(RuntimeError, match="TimeoutExpired"):  # a failure, retried with backoff
+        wd.Ops(yaml="x", envs=[], secrets=[]).sweep("runt", "spot-0")
 
     class Raising(FakeOps):
         def sweep(self, run, island):
@@ -349,3 +349,30 @@ def test_orphan_sweep_error_does_not_kill_the_watchdog(tmp_path, monkeypatch):
     events = _events(tmp_path)
     assert any(e["event"] == "orphan_sweep_error" for e in events)
     assert len([c for c in ops.calls if c[0] == "sweep"]) >= 2  # retried, not given up
+
+
+def test_a_hung_sweep_backs_off_and_does_not_slow_the_relaunch(tmp_path):
+    """Each failing sweep blocks 600 s (the subprocess timeout). Without a backoff it ran
+    before every candidate's launch, so a pass over the candidates took 600 s per candidate."""
+    class Hung(FakeOps):
+        def sweep(self, run, island):
+            self.calls.append(("sweep", run, island))
+            self.clock.t += 600.0
+            raise RuntimeError("TimeoutExpired: boat_labels sweep")
+
+    clk = Clock()
+    cands = wd.candidates()
+    ops = Hung(clk, launch={cands[0].key: [True]}, states=["STOPPED"])
+    w = wd.Watchdog(_cfg(tmp_path, orphan_sweep_min=0, max_rounds=3), cands, ops, clock=clk, sleep=clk.sleep)
+    w.acquire(); w.watch_once()  # preempted: the outage starts
+    assert w.run() == "max_rounds"
+    launches = [c for c in ops.calls if c[0] == "launch"][1:]
+    sweeps = [c for c in ops.calls if c[0] == "sweep"]
+    assert len(launches) == 3 * len(cands)
+    assert len(sweeps) <= 6, len(sweeps)  # 60 s, 120 s, 240 s ... not once per candidate
+    errors = [e for e in _events(tmp_path) if e["event"] == "orphan_sweep_error"]
+    assert [e["retry_in_s"] for e in errors][:3] == [60.0, 120.0, 240.0]
+    assert all(e["retry_in_s"] <= wd.SWEEP_BACKOFF_MAX_S for e in errors)
+    # the first pass over the candidates waits on one hung sweep, not one per candidate
+    first_pass = [e["t"] for e in _events(tmp_path) if e["event"] == "launch_start"][1:len(cands) + 1]
+    assert first_pass[-1] - first_pass[0] < 600.0 + 30.0 * len(cands) + 1
