@@ -356,6 +356,8 @@ class Run:
         self.state: dict[str, Any] = {}
         self._state_base: dict[str, Any] = {}
         self.reload_state(strict=True)
+        # read before this process marks anything (its preflight / sandbox stamps are now)
+        self._legacy_stamp = self._legacy_last_stamp()
         self.env = dict(os.environ)
         self.env.update({k: os.path.expanduser(str(v)) for k, v in (cfg.get("env") or {}).items()})
         self.env.setdefault("YETO_RESOURCE_LEDGER", str(Path(f"~/.yeto/runs/{self.run}/resources.jsonl").expanduser()))
@@ -658,8 +660,8 @@ class Run:
         ups = self.state.setdefault("ups", [])
         if not ups and "t0" in self.state:  # a run started before periods were recorded
             start = float(self.state["t0"])
-            ups.append({"pid": None, "start": start, "seen": self._legacy_last_seen(start), "end": None,
-                        "legacy": True})
+            seen = min(now, max(start, getattr(self, "_legacy_stamp", None) or start))
+            ups.append({"pid": None, "start": start, "seen": seen, "end": None, "legacy": True})
         # an earlier up that ended without a down: closed at its last poll, or now while
         # the trainer it started still runs (a --no-monitor up, a killed up: the trainer
         # is a detached process and billed the whole gap; `run down` closes it now too)
@@ -678,17 +680,22 @@ class Run:
         self._up_period = period
         self.save()
 
-    def _legacy_last_seen(self, start: float) -> float:
+    def _legacy_last_stamp(self) -> float | None:
         """The last time a run from before the periods were recorded is known to have run:
         the newest stamp its ``state.json`` holds (``steps`` - ``down`` among them -,
-        ``procs`` starts, ``trainer_exit_seen`` / ``trainer_finished``), at least ``start``.
-        Without it the legacy period would end at its start: the hours that run billed
-        before the upgrade (trainer, nodes without a pool state) would drop out of the spend."""
+        ``procs`` starts, ``trainer_exit_seen`` / ``trainer_finished``); None for a state
+        with ``ups`` or without stamps. Read when the state is first loaded: the stamps this
+        ``run up`` writes before :meth:`begin_up` (``preflight``, ``sandbox``) are not the
+        old run's and would stretch its period over the stopped gap. :meth:`begin_up` keeps
+        it within ``[t0, now]``. Without it the legacy period would end at its start: the
+        hours that run billed before the upgrade would drop out of the spend."""
+        if self.state.get("ups") or "t0" not in self.state:
+            return None
         stamps = [step.get("at") for step in (self.state.get("steps") or {}).values() if isinstance(step, dict)]
         stamps += [p.get("started") for p in (self.state.get("procs") or {}).values() if isinstance(p, dict)]
         stamps += [self.state.get("trainer_exit_seen"), self.state.get("trainer_finished")]
         seconds = [s for s in (_utc_seconds(x) for x in stamps) if s is not None]
-        return max([start, *seconds])
+        return max(seconds) if seconds else None
 
     def _trainer_alive(self) -> bool:
         tr = (self.state.get("procs") or {}).get("trainer")

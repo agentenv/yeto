@@ -59,3 +59,42 @@ def test_an_upgraded_run_without_stamps_still_starts(make_run, monkeypatch):
     run = _legacy_run(make_run, monkeypatch, {"t0": T0})
     run.begin_up()
     assert run.state["ups"][0]["seen"] == T0 and run.trainer_hours() == 0.0
+
+
+def test_the_upgraded_ups_own_marks_do_not_stretch_the_legacy_period(make_run, monkeypatch):
+    """`yeto run up` marks ``preflight`` / ``sandbox`` (stamped now) before ``begin_up``:
+    the legacy period still ends at the old ``run down``, not across the stopped day."""
+    now = _clock(monkeypatch, T0 + 600 + 5 * H + 24 * H)
+    run = _legacy_run(make_run, monkeypatch, STATE_34C08526)
+    run.mark("preflight", ok=True)
+    run.mark("sandbox", ok=True)
+    run.begin_up()
+    assert run.state["ups"][0]["end"] == T0 + 600 + 5 * H
+    assert abs(run.trainer_hours() - 5.0) < 1e-9
+    assert now[0] - run.state["ups"][1]["start"] == 0
+
+
+def test_a_legacy_stamp_past_now_is_not_billed(make_run, monkeypatch):
+    """A clock that jumped back since the old run: a stamp in the future ends nothing past now."""
+    _clock(monkeypatch, T0 + 2 * H)
+    state = {"t0": T0, "steps": {"down": {"at": "2023-11-20T00:00:00Z", "ok": True}}}
+    run = _legacy_run(make_run, monkeypatch, state)
+    run.begin_up()
+    assert run.state["ups"][0]["end"] <= T0 + 2 * H
+
+
+def test_a_trainer_finished_before_the_old_down_bills_to_its_finish(make_run, monkeypatch):
+    _clock(monkeypatch, T0 + 600 + 5 * H + 24 * H)
+    state = {**STATE_34C08526, "trainer_finished": "2023-11-15T01:23:20Z"}  # 3 h after its launch
+    run = _legacy_run(make_run, monkeypatch, state)
+    run.begin_up()
+    assert run.state["ups"][0]["end"] == T0 + 600 + 5 * H
+    assert abs(run.trainer_hours() - 3.0) < 1e-9
+
+
+def test_a_state_with_periods_is_left_as_it_is(make_run, monkeypatch):
+    _clock(monkeypatch, T0 + 10 * H)
+    ups = [{"pid": None, "start": T0, "seen": T0 + H, "end": T0 + H}]
+    run = _legacy_run(make_run, monkeypatch, {**STATE_34C08526, "ups": ups})
+    run.begin_up()
+    assert run.state["ups"][0] == ups[0] and len(run.state["ups"]) == 2
