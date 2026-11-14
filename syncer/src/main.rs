@@ -238,6 +238,15 @@ struct Args {
     /// Unset = off (also caps the grace window).
     #[arg(long)]
     soft_deadline_s: Option<u64>,
+    /// Soft lag window ceiling (fragment versions, > --max-base-lag): a push
+    /// lagging past --max-base-lag up to this is admitted with an extra
+    /// 0.5^((lag - max_base_lag) / --stale-lag-half-life) weight instead of
+    /// refused. Unset = refuse past --max-base-lag (the existing behavior).
+    #[arg(long, requires = "stale_lag_half_life")]
+    stale_lag_ceiling: Option<u64>,
+    /// Half-life (fragment versions) of the soft lag window's discount.
+    #[arg(long, requires = "stale_lag_ceiling")]
+    stale_lag_half_life: Option<f64>,
     /// Minimum arrived islands for a capacity-quorum or soft-deadline merge.
     #[arg(long, default_value_t = 1)]
     q_min: u32,
@@ -416,6 +425,14 @@ fn parse_membership(args: &Args) -> anyhow::Result<membership::MembershipConfig>
         capacities,
         max_learners: args.max_learners,
         final_grace: args.final_grace_s.map(std::time::Duration::from_secs),
+        stale_lag: match (args.stale_lag_ceiling, args.stale_lag_half_life) {
+            (Some(ceiling), Some(half_life)) => Some(membership::StaleLag {
+                from: args.max_base_lag.unwrap_or(0),
+                ceiling,
+                half_life,
+            }),
+            _ => None,
+        },
     })
 }
 
@@ -791,6 +808,24 @@ mod tests {
             let mut argv = vec!["yeto-syncer", "--learners", "2", "--total-steps", "8"];
             argv.extend(retired);
             assert!(Args::try_parse_from(argv).is_err(), "{retired:?} is no longer a flag");
+        }
+    }
+
+    #[test]
+    fn stale_lag_window_is_off_by_default_and_parses_as_a_pair() {
+        let base = ["yeto-syncer", "--learners", "2", "--total-steps", "8", "--max-base-lag", "2"];
+        let a = Args::try_parse_from(base).unwrap();
+        assert_eq!(parse_membership(&a).unwrap().stale_lag, None);
+        let mut argv = base.to_vec();
+        argv.extend(["--stale-lag-ceiling", "8", "--stale-lag-half-life", "2"]);
+        let m = parse_membership(&Args::try_parse_from(argv).unwrap()).unwrap();
+        assert_eq!(m.stale_lag, Some(membership::StaleLag { from: 2, ceiling: 8, half_life: 2.0 }));
+        assert!(!m.is_static());
+        assert_eq!(m.admit_lag(Some(2)), Some(8));
+        for half in [["--stale-lag-ceiling", "8"], ["--stale-lag-half-life", "2"]] {
+            let mut argv = base.to_vec();
+            argv.extend(half);
+            assert!(Args::try_parse_from(argv).is_err(), "{half:?} alone is refused");
         }
     }
 

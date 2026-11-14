@@ -182,3 +182,24 @@ def test_role_stream_lease_needs_asynchronous_rounds():
         replace(strict, island_lease_s=30.0)
     pooled = replace(strict, partial_quorum=True, island_lease_s=30.0, syncer_epoch=2)
     assert pooled.island_lease_s == 30.0
+
+
+@pytest.mark.parametrize("preset", [(), DECOUPLED], ids=["strict-avg", "decoupled"])
+def test_stale_lag_window_reaches_the_syncer_in_versions(preset):
+    lag = ("--rl-sync-max-base-lag", "1")
+    _, baseline = _plan(preset + QUORUM + lag + ("--rl-sync-carry-gamma", "0.5"))
+    args, plan = _plan(preset + QUORUM + lag + ("--rl-sync-carry-gamma", "0.5",
+                                                 "--rl-sync-stale-lag-ceiling", "4",
+                                                 "--rl-sync-stale-lag-half-life", "1.5"))
+    fragments = max(int(getattr(args, "fragments", 1)), 1)
+    window = f" --stale-lag-ceiling {4 * fragments} --stale-lag-half-life {1.5 * fragments!r}"
+    assert window in _syncer(plan)
+    assert _syncer(plan).replace(window, "", 1) == _syncer(baseline)
+    assert "--stale-lag" not in _syncer(baseline)
+    for bad, message in [(("--rl-sync-stale-lag-ceiling", "4"), "go together"),
+                         (("--rl-sync-stale-lag-ceiling", "1", "--rl-sync-stale-lag-half-life", "1"),
+                          "must exceed"),
+                         (("--rl-sync-stale-lag-ceiling", "4", "--rl-sync-stale-lag-half-life", "0"),
+                          "positive number of rounds")]:
+        with pytest.raises(ValueError, match=message):
+            _plan(preset + QUORUM + lag + bad)

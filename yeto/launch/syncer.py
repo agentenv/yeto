@@ -377,6 +377,7 @@ def rl_syncer_profile(args, num_learners: int):
 _ISLAND_POOL_PARAMS = rl_option_pairs(
     "rl_sync_quorum_theta", "rl_sync_carry_gamma", "rl_sync_soft_deadline_s", "rl_sync_q_min",
     "rl_sync_island_lease_s", "rl_sync_max_learners", "rl_sync_final_grace_s",
+    "rl_sync_stale_lag_ceiling", "rl_sync_stale_lag_half_life",
     layer=CLI,
 )
 
@@ -567,7 +568,26 @@ def _syncer_island_pool(args) -> str:
     grace = _final_grace_s(args)
     if grace is not None:
         flags += f" --final-grace-s {grace}"
-    return flags
+    return flags + _syncer_stale_lag(args)
+
+
+def _syncer_stale_lag(args) -> str:
+    """A29: the soft lag window (the two rl_sync_stale_lag options, in rounds) as syncer flags
+    (versions, like --max-base-lag); "" when off, so the command is unchanged."""
+    ceiling = getattr(args, "rl_sync_stale_lag_ceiling", None)
+    half_life = getattr(args, "rl_sync_stale_lag_half_life", None)
+    if ceiling is None and half_life is None:
+        return ""
+    if ceiling is None or half_life is None:
+        raise ValueError("--rl-sync-stale-lag-ceiling and --rl-sync-stale-lag-half-life go together")
+    lag = int(getattr(args, "rl_sync_max_base_lag", 0) or 0)
+    if lag <= 0 or int(ceiling) <= lag:
+        raise ValueError("--rl-sync-stale-lag-ceiling must exceed a positive --rl-sync-max-base-lag")
+    if not float(half_life) > 0.0 or float(half_life) == float("inf"):
+        raise ValueError("--rl-sync-stale-lag-half-life must be a positive number of rounds")
+    fragments = max(int(getattr(args, "fragments", 1)), 1)
+    return (f" --stale-lag-ceiling {int(ceiling) * fragments}"
+            f" --stale-lag-half-life {float(half_life) * fragments!r}")
 
 
 def peer_recovery_syncer_flags(args) -> str:
