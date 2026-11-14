@@ -345,14 +345,20 @@ def backfill_manifests(s3: S3, store: Path) -> list[str]:
     return done
 
 
-def check_server(server: peer_fanout.ReleaseFileServer, store: Path, reported: bool) -> bool:
-    """Restart a dead serve thread and put what happened on the metrics tape: every
-    restart (``peer_server_restarted``) and, once, giving up (``peer_server_unhealthy``,
-    peers fall back to the object store), so patrol and alerts see it, not just a log line.
-    Returns whether the give-up was recorded."""
-    if server.ensure_alive(log) or reported:
-        return reported
-    event = "peer_server_restarted" if server.healthy else "peer_server_unhealthy"
+def check_server(server: peer_fanout.ReleaseFileServer, store: Path, last: str | None) -> str | None:
+    """Restart a dead serve thread and put what happened on the metrics tape (``side:
+    "serve"`` rows), so patrol and alerts see it, not just a log line: every restart
+    (``peer_server_restarted``), giving up once (``peer_server_unhealthy``, peers fall back
+    to the object store), and serving again after either (``peer_server_healthy``, which
+    clears the alert). Returns the last event recorded (pass it back in)."""
+    if server.ensure_alive(log):
+        event = "peer_server_healthy" if last in ("peer_server_restarted", "peer_server_unhealthy") else None
+    elif server.healthy:
+        event = "peer_server_restarted"
+    else:
+        event = None if last == "peer_server_unhealthy" else "peer_server_unhealthy"
+    if event is None:
+        return last
     row = {"side": "serve", "event": event, "healthy": bool(server.healthy), "port": server.port,
            "restarts": server.restarts, "deaths_in_a_row": server.deaths_in_a_row,
            "error": str(server.error or "")[:300], "time_unix": round(time.time(), 1)}
@@ -360,7 +366,7 @@ def check_server(server: peer_fanout.ReleaseFileServer, store: Path, reported: b
         metrics(store, row)
     except OSError as error:  # a full disk must not stop the pull loop
         log(f"metrics write failed for {event}: {error}")
-    return not server.healthy
+    return event
 
 
 def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = (),
@@ -369,10 +375,10 @@ def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = ()
         backfill_manifests(s3, store)  # releases an earlier run placed but crashed before recording
     except Exception as error:  # noqa: BLE001 - the pull loop still has to start
         log(f"manifest backfill at start failed: {error}")
-    failures, reported = 0, False
+    failures, served = 0, None
     while True:
         if server is not None:
-            reported = check_server(server, store, reported)
+            served = check_server(server, store, served)
         try:
             pointer = s3.get_json(cm.LATEST)
             if pointer:

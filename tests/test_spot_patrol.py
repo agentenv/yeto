@@ -164,3 +164,6 @@ def test_a_peer_server_that_gave_up_is_an_alert(tmp_path):
     _write(tape, rows[:2])
     assert patrol.patrol(_args(delivery_tape=[str(tape)]), now=NOW)["alerts"] == []
     assert patrol.main(["--delivery-tape", _write(tape, rows)]) == 1
+    # serving again clears it
+    healthy = {"side": "serve", "event": "peer_server_healthy", "healthy": True, "time_unix": NOW - 60}
+    assert patrol.patrol(_args(delivery_tape=[_write(tape, rows + [healthy])]), now=NOW)["alerts"] == []

@@ -284,6 +284,9 @@ class _DyingServer:
             self.restarts += 1
             self.deaths_in_a_row += 1
             return False
+        if step == "back":
+            self.healthy = True
+            return True
         if step == "dead":
             self.deaths_in_a_row += 1
             self.healthy = False
@@ -325,3 +328,11 @@ def test_pull_loop_records_a_peer_server_that_gave_up(tmp_path, monkeypatch):
 def test_pull_loop_survives_a_metrics_tape_it_cannot_write(tmp_path, monkeypatch):
     monkeypatch.setattr(sd, "metrics", lambda store, row: (_ for _ in ()).throw(OSError(28, "No space left")))
     assert _run_loop(tmp_path, monkeypatch, _DyingServer(["dead"]), 3) == []
+
+
+def test_pull_loop_records_a_peer_server_serving_again(tmp_path, monkeypatch):
+    """After a restart (or a give-up) the server serves again: a healthy row clears the alert."""
+    rows = _run_loop(tmp_path, monkeypatch, _DyingServer(["restart", "ok", "ok", "dead", "back", "ok"]), 7)
+    assert [r["event"] for r in rows] == ["peer_server_restarted", "peer_server_healthy",
+                                          "peer_server_unhealthy", "peer_server_healthy"]
+    assert rows[-1]["healthy"] is True
