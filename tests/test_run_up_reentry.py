@@ -386,3 +386,22 @@ def test_a_timed_out_step_is_killed_with_the_processes_it_spawned(make_run, tmp_
         raise AssertionError(f"grandchild {pid} still runs after the step timed out")
     assert "TIMED OUT" in (run.dir / "down.log").read_text()
     assert up.Run._cmd(run, ["sh", "-c", "exit 3"], log="down.log", timeout=5) == 3
+
+
+def test_a_process_exiting_between_the_alive_check_and_the_kill_does_not_abort_the_stop(make_run, monkeypatch):
+    """The trainer / dashboard can exit after ``_alive`` said yes and before ``os.kill``:
+    the ProcessLookupError must not skip ``yeto down`` (the cloud trainer keeps billing)."""
+    def gone(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(up, "_alive", lambda pid: True)
+    monkeypatch.setattr(up.os, "kill", gone)
+    monkeypatch.setattr(up.time, "sleep", lambda s: None)
+    run = make_run()
+    run.state["procs"] = {"trainer": {"pid": 424242}, "dashboard": {"pid": 434343}}
+    run.trainer_down("budget $600")
+    assert ["down", "r1-trainer"] == run.calls[-1][-2:]
+    assert run.state["steps"]["trainer_down"]["why"] == "budget $600"
+    run.calls.clear()
+    run.down()
+    assert any(argv[-2:] == ["down", "r1-trainer"] for argv in run.calls)

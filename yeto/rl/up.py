@@ -1460,8 +1460,7 @@ class Run:
         """Stop the trainer only: the NC pool, its nodes and the sandboxes stay (a node setup
         and a model pull to rebuild); ``yeto down <run>`` keeps the run's NC leases."""
         tr = (self.state.get("procs") or {}).get("trainer")
-        if tr and _alive(tr["pid"]):
-            os.kill(int(tr["pid"]), signal.SIGINT)
+        if tr and _alive(tr["pid"]) and _signal(tr["pid"], signal.SIGINT):
             time.sleep(10)
         self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900)
         self.mark("trainer_down", why=why)
@@ -1975,10 +1974,9 @@ class Run:
                             str(self.dir / "dashboard.html")), log="down.log", timeout=600)  # read-only copy
         dash = (self.state.get("procs") or {}).get("dashboard")
         if dash and _alive(dash["pid"]):
-            os.kill(int(dash["pid"]), signal.SIGTERM)
+            _signal(dash["pid"], signal.SIGTERM)
         tr = (self.state.get("procs") or {}).get("trainer")
-        if tr and _alive(tr["pid"]):
-            os.kill(int(tr["pid"]), signal.SIGINT)
+        if tr and _alive(tr["pid"]) and _signal(tr["pid"], signal.SIGINT):
             time.sleep(10)
         if self._cmd(self.yeto("down", self.trainer_launch_name()), log="down.log", timeout=900) != 0:
             failed.append("trainer (yeto down: cloud/Modal teardown not confirmed)")
@@ -2214,6 +2212,16 @@ def _proc_start(pid: int) -> str | None:
         return stat.rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError, ValueError):
         return None
+
+
+def _signal(pid: Any, sig: int) -> bool:
+    """Send ``sig`` to ``pid``; False when it exited since the ``_alive`` check (the stop
+    goes on: a ProcessLookupError here must not skip ``yeto down``)."""
+    try:
+        os.kill(int(pid), sig)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def _alive(pid: Any) -> bool:
