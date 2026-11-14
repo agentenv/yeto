@@ -42,6 +42,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -317,10 +318,6 @@ def suggestions(req: MemoryRequest, limit_frac: float, *, response_len: int | No
         if peak <= limit_frac * req.gpu_mem_gib:
             out.append({"change": f"2x GPUs of the same type (TP {req.tp} -> {req.tp * 2})",
                         "peak_gib": peak})
-    if not any("GPUs" in s["change"] for s in out):
-        shape = smallest_parallel_shape(req, limit_frac)
-        if shape is not None:
-            out.append(shape)
     for gpu, cap in sorted((larger_gpus or {}).items(), key=lambda kv: kv[1]):
         if cap <= req.gpu_mem_gib:
             continue
@@ -342,7 +339,7 @@ def smallest_parallel_shape(req: MemoryRequest, limit_frac: float, *, max_tp: in
                      for pp in (2 ** i for i in range(8)) if pp <= max_pp),
                     key=lambda s: (s[0] * s[1], -s[0]))
     for tp, pp in shapes:
-        if (tp, pp) == (req.tp, req.pp) or tp * pp <= req.tp * req.pp:
+        if tp * pp <= req.tp * req.pp:
             continue
         peak = estimate(replace(req, tp=tp, pp=pp))["peak_gib"]
         if peak <= limit_frac * req.gpu_mem_gib:
@@ -420,4 +417,16 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
         resp = getattr(args, "rollout_max_response_len", None)
         rec["suggestions"] = suggestions(req, margin, response_len=int(resp) if resp else None,
                                          larger_gpus=_larger_gpus())
+        _print_parallel_shape_hint(req, margin, rec["suggestions"])
     return rec
+
+
+def _print_parallel_shape_hint(req: MemoryRequest, limit_frac: float, offered: list[dict]) -> None:
+    """Say on stderr the smallest TP x PP that fits, when "2x GPUs" is not already offered.
+    Text only: kept out of ``suggestions`` so the dry-run JSON and the manifest are unchanged."""
+    if any("GPUs" in s["change"] for s in offered):
+        return
+    shape = smallest_parallel_shape(req, limit_frac)
+    if shape is not None:
+        print(f"[preflight] hint: {shape['change']} (estimated peak {shape['peak_gib']:.1f} GiB; "
+              "heads/layers divisibility not checked)", file=sys.stderr, flush=True)

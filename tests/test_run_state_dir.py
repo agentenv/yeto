@@ -106,3 +106,28 @@ def test_state_root_default_is_under_home(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "YETO_STATE_DIR"}
     env["HOME"] = str(tmp_path)
     assert _state_root_in_child(env) == str(tmp_path / ".yeto" / "rl-up")
+
+
+def test_corrupt_state_json_propagates_as_on_main(tmp_path, monkeypatch):
+    """Not reworded as a run-config error: the traceback names state.json (rc 1, as on main)."""
+    import json
+    root = tmp_path / "rl-up"
+    (root / "typo").mkdir(parents=True)
+    (root / "typo" / "state.json").write_text("{trunc")
+    monkeypatch.setattr(up, "STATE_ROOT", root)
+    with pytest.raises(json.JSONDecodeError) as err:
+        up.open_run(_config(tmp_path), create=False)
+    assert not isinstance(err.value, up.RunConfigError)
+
+
+def test_pool_section_refused_by_resolve_names_the_config(tmp_path, monkeypatch):
+    from yeto.launch.rollout import pools
+    root = tmp_path / "rl-up"
+    monkeypatch.setattr(up, "STATE_ROOT", root)
+
+    def refuse(cfg, base):
+        raise ValueError("samplers[0]: bad section")
+    monkeypatch.setattr(pools, "resolve", refuse)
+    config = _config(tmp_path)
+    with pytest.raises(up.RunConfigError, match=r"run config .*: samplers\[0\]: bad section"):
+        up.open_run(config)

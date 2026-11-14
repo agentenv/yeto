@@ -49,7 +49,8 @@ def test_large_model_gets_a_parallel_shape_that_fits():
     after = estimate(MemoryRequest(arch=DENSE_100B, gpu="H100", gpu_mem_gib=78.4, tokens=4096,
                                    tp=shape["tensor_parallel"], pp=shape["pipeline_parallel"]))
     assert after["peak_gib"] <= 0.9 * 78.4
-    assert any("model parallel" in s["change"] for s in suggestions(req, 0.9))
+    # a stderr hint only: suggestions (dry-run JSON, manifest) stay as on main
+    assert not any("model parallel" in s["change"] for s in suggestions(req, 0.9))
 
 
 def test_model_revision_hint_names_the_local_path_and_the_fix():
