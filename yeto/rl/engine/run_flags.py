@@ -1451,6 +1451,15 @@ _SYNC = (
         "island. auto (default) = local with --rl-sync-full-parameter-rounds async",
     ),
     cli_flag(
+        "--rl-sync-local-init-fallback",
+        action="store_true",
+        help="full-parameter only, with local init: an island whose version-0 "
+        "digests differ from learner 0's INIT (another framework, card or dtype "
+        "path to the same base) gets the syncer's broadcast of that INIT and the "
+        "syncer records an init_digest_fallback_upload warning, instead of the "
+        "default: the syncer stops (init_digest_mismatch)",
+    ),
+    cli_flag(
         "--rl-sync-full-parameter-rounds",
         choices=FULL_PARAMETER_ROUNDS,
         default=sync_mode_default("sweep"),

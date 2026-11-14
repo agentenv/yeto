@@ -38,7 +38,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -86,6 +86,42 @@ def initial_cut_timeout(configured: float, model_bytes: int, islands: int, *, lo
     The configured timeout is the floor."""
     moved = model_bytes * (1 if local_init else 1 + islands)
     return max(configured, moved / INITIAL_CUT_MIN_BYTES_PER_SECOND)
+
+# Threads that hash local-init fragments (hashlib releases the GIL on large
+# buffers). SHA-256 itself is sequential, so the parallelism is across
+# fragments; 1 restores the serial hash.
+LOCAL_INIT_HASH_WORKERS_ENV = "YETO_LOCAL_INIT_HASH_WORKERS"
+
+
+def local_init_hash_workers(fragments: int) -> int:
+    configured = os.environ.get(LOCAL_INIT_HASH_WORKERS_ENV)
+    workers = int(configured) if configured else min(16, os.cpu_count() or 1)
+    if workers < 1:
+        raise ValueError(f"{LOCAL_INIT_HASH_WORKERS_ENV} must be >= 1, got {workers}")
+    return max(1, min(workers, fragments))
+
+
+def local_init_digests(fragments: int, parts_of: Callable[[int], Iterable[Any]],
+                       workers: int | None = None) -> list[bytes]:
+    """SHA-256 of each fragment's INIT_PARAMS bytes (the stream of
+    ``parts_of(fragment_id)``), fragments hashed concurrently. The digests
+    are the ones the serial loop computed, so the wire and checkpoints are
+    unchanged; each worker streams one fragment's parts, so memory is the
+    parts in flight, not the model."""
+    def one(fragment_id: int) -> bytes:
+        digest = hashlib.sha256()
+        for part in parts_of(fragment_id):
+            digest.update(part)
+        return digest.digest()
+
+    workers = local_init_hash_workers(fragments) if workers is None else workers
+    if workers <= 1 or fragments <= 1:
+        return [one(fragment_id) for fragment_id in range(fragments)]
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="local-init-hash") as pool:
+        return list(pool.map(one, range(fragments)))
+
 
 _LOWER_HEX = frozenset("0123456789abcdef")
 
@@ -981,15 +1017,15 @@ class FullParameterRoleStream:
     def _local_version_zero(self, adapter, initial, sink):
         """Local init: this island's own version-0 cut is its version-0
         anchors (shared, not copied), hashed exactly as the syncer hashes
-        INIT_PARAMS."""
-        stored, digests = [], []
-        for fragment_id in range(adapter.layout.fragments.num_fragments):
-            digest = hashlib.sha256()
-            for part in adapter.fragment_parts(initial, fragment_id, ray_module=self.ray_module)():
-                digest.update(part)
-            digests.append(digest.digest())
-            stored.append(sink.adopt(initial, fragment_id, 0, digest.hexdigest()))
-        return tuple(stored), digests
+        INIT_PARAMS. Fragments hash in parallel (``local_init_digests``)."""
+        digests = local_init_digests(
+            adapter.layout.fragments.num_fragments,
+            lambda fragment_id: adapter.fragment_parts(
+                initial, fragment_id, ray_module=self.ray_module)())
+        stored = tuple(
+            sink.adopt(initial, fragment_id, 0, digest.hex())
+            for fragment_id, digest in enumerate(digests))
+        return stored, digests
 
     def _wait_for_initial_fragments(
         self,
@@ -1063,6 +1099,16 @@ class FullParameterRoleStream:
                         "pool already merged past version 0; a restarted island rejoins only an "
                         "island pool with a lease (--rl-sync-island-lease-s) and asynchronous rounds"
                     )
+                if local is not None and not observed:
+                    # A local-init island that gets the broadcast after all (a
+                    # resumed syncer, or --rl-sync-local-init-fallback after a
+                    # digest mismatch) waits as long as a broadcast needs.
+                    deadline = max(deadline, started + initial_cut_timeout(
+                        self.config.wait_timeout, model_bytes,
+                        len(self.config.learner_generations), local_init=False))
+                    print(f"[{self.config.algorithm} {self.config.role}] local init: the syncer "
+                          "broadcasts version 0 instead of confirming this island's digests",
+                          file=sys.stderr, flush=True)
                 observed[stored.fragment_id] = stored
             if len(observed) < count:
                 now = time.monotonic()

@@ -4,13 +4,16 @@ Every island loaded the same base weights. Islands report per-fragment
 INIT digests; learner 0 still uploads INIT (the syncer keeps exact f32
 masters), but an island whose digests agree gets INIT_CONFIRM instead of the
 version-0 broadcast. Merged rounds must equal the old INIT path bit for bit,
-a disagreeing island must stop the run with a clear error, and a resumed
-syncer must broadcast its checkpointed cut instead of confirming.
+a disagreeing island must stop the run with a clear error (the default), or
+with --local-init-fallback get the broadcast of learner 0's INIT plus a
+warning, and a resumed syncer must broadcast its checkpointed cut instead of
+confirming.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 
 import numpy as np
@@ -41,8 +44,11 @@ def _digests(initial):
 class LocalRig(Rig):
     """``Rig`` whose islands may report local-init digests before start."""
 
-    def __init__(self, binary, tmp_path, islands, *options, **kwargs):
-        # The launcher-built command adds --resume when the checkpoint exists.
+    def __init__(self, binary, tmp_path, islands, *options, syncer_flags=(), **kwargs):
+        # The launcher-built command adds --resume when the checkpoint exists;
+        # ``syncer_flags`` go straight to the syncer binary.
+        self.tape = tmp_path / "tape.jsonl"
+        binary = " ".join([str(binary), *syncer_flags])
         super().__init__(binary, tmp_path, islands, "--rl-sync-outer-lr", str(LR),
                          "--rl-sync-outer-momentum", str(MU), *options, **kwargs)
 
@@ -157,6 +163,70 @@ def test_digest_mismatch_stops_the_run_with_a_clear_error(make_local_rig, bad):
     refused = next(c for c in rig.clients if isinstance(c._err, SessionRejectedError))
     with pytest.raises(StrictRlInvariantError, match="init digest mismatch"):
         refused.check_health()
+
+
+@pytest.mark.parametrize("bad", ["island", "init"])
+def test_local_init_fallback_broadcasts_to_a_disagreeing_island(make_local_rig, bad):
+    """--local-init-fallback: the run goes on; learner 0's INIT is version 0,
+    an island whose digests differ from it gets the broadcast, and merged
+    rounds equal the plain INIT-broadcast path bit for bit."""
+    steps = range(1, 7)
+    old = make_local_rig(2, total_steps=4)
+    initial = _initial(old.layout)
+    old.start(initial)
+    reference = _run_rounds(old, initial, steps)
+
+    rig = make_local_rig(2, total_steps=4, syncer_flags=["--local-init-fallback"])
+    digests = _digests(initial)
+    other = list(digests)
+    other[1] = hashlib.sha256(b"another conversion path").digest()
+    # "island": island 1 canonicalized the base to other bits; "init": both
+    # islands agree but learner 0's INIT differs (every island falls back).
+    by_island = {0: digests, 1: other} if bad == "island" else {0: other, 1: other}
+    rig.start_local(initial, by_island)
+    fallback = [1] if bad == "island" else [0, 1]
+    if bad == "island":
+        rig.wait_confirmed(0)
+        assert not rig.clients[0].drain_updates()
+    for island in fallback:
+        for fid in range(rig.layout.num_fragments):
+            assert rig.bcast(island, fid, 0).tobytes() == np.asarray(initial[fid]).tobytes()
+        assert not rig.clients[island].initial_cut_confirmed()
+    local = _run_rounds(rig, initial, steps)
+    for key, values in reference.items():
+        assert values.tobytes() == local[key].tobytes(), key
+    rig.close()
+    assert "init digest mismatch: fragment 1" in rig.output
+    assert f"learner(s) {fallback}" in rig.output
+    events = [json.loads(line).get("event") for line in rig.tape.read_text().splitlines()]
+    assert "init_digest_fallback_upload" in events and "rl_strict_failure" not in events
+
+
+def test_strict_local_init_flag_keeps_the_fatal_check(make_local_rig):
+    rig = make_local_rig(2, syncer_flags=["--strict-local-init"])
+    initial = _initial(rig.layout)
+    digests = _digests(initial)
+    other = list(digests)
+    other[0] = hashlib.sha256(b"another checkpoint").digest()
+    rig.start_local(initial, {0: digests, 1: other})
+    assert rig.wait_exit() not in (None, 0)
+    rig.close()
+    assert "init digest mismatch: fragment 0" in rig.output
+
+
+def test_local_init_digests_parallel_equals_serial():
+    from yeto.rl.engine.full_parameter_stream import local_init_digests
+
+    rng = np.random.default_rng(3)
+    fragments = [rng.standard_normal(n).astype(np.float32) for n in (1, 7, 4096, 33, 100_000)]
+
+    def parts_of(fid):  # uneven chunks, as an adapter streams them
+        raw = memoryview(fragments[fid].tobytes())
+        return [raw[start:start + 1000] for start in range(0, len(raw), 1000)]
+
+    want = [hashlib.sha256(f.tobytes()).digest() for f in fragments]
+    for workers in (1, 2, 8):
+        assert local_init_digests(len(fragments), parts_of, workers=workers) == want
 
 
 def test_resumed_syncer_broadcasts_its_checkpoint_instead_of_confirming(make_local_rig, tmp_path):

@@ -216,6 +216,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_final_cut", "auto", "--rl-sync-final-cut"),
     ("rl_sync_verify_ahead", "auto", "--rl-sync-verify-ahead"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
+    ("rl_sync_local_init_fallback", False, "--rl-sync-local-init-fallback"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
     ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
 )
