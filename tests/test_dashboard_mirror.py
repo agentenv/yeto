@@ -82,3 +82,43 @@ def test_lost_source_error_carries_no_credentials(tmp_path):
     m.run_forever(max_connections=1)
     (lost,) = [json.loads(x) for x in m.sidecar.read_text().splitlines()]
     assert secret not in lost["error"] and userinfo not in lost["error"] and "refused" in lost["error"]
+
+
+def test_offset_reads_only_the_tail_of_a_large_mirror(tmp_path, monkeypatch):
+    """A multi-day mirror is hundreds of MB: each reconnect must find the resume
+    offset (and trim a torn tail) without loading the whole file into memory."""
+    import tracemalloc
+    from pathlib import Path as _P
+
+    from yeto.dashboard.mirror import SshTapeMirror as _M
+
+    local = tmp_path / "tape.jsonl"
+    line = b'{"step": 1, "loss": 0.5, "pad": "' + b"x" * 200 + b'"}\n'
+    with open(local, "wb") as fh:
+        for _ in range(40):
+            fh.write(line * 2500)  # ~24 MB of complete lines
+        fh.write(b'{"torn": ')
+    size = local.stat().st_size
+    m = _M("t", "/r", local, command=lambda off: ["true"])
+    monkeypatch.setattr(_P, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("whole-file read")))
+    tracemalloc.start()
+    off = m.offset()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert off == size - len(b'{"torn": ') == local.stat().st_size
+    assert peak < 1 << 20
+    assert m.offset() == off  # idempotent on a clean tail
+
+
+def test_offset_edge_cases(tmp_path):
+    from yeto.dashboard.mirror import SshTapeMirror as _M
+
+    local = tmp_path / "tape.jsonl"
+    m = _M("t", "/r", local, command=lambda off: ["true"])
+    assert m.offset() == 0
+    local.write_bytes(b"")
+    assert m.offset() == 0
+    local.write_bytes(b"no newline at all " * 10000)  # one torn line longer than a chunk
+    assert m.offset() == 0 and local.stat().st_size == 0
+    local.write_bytes(b"a\n" + b"b" * 200000)
+    assert m.offset() == 2 and local.read_bytes() == b"a\n"
