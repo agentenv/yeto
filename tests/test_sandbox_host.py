@@ -649,3 +649,18 @@ def test_teardown_host_failing_after_removal_still_clears_its_ready_state(world)
     assert not any(c["Config"]["Labels"].get(LABEL_RUN) == "r1" for c in good.containers.values())
     doc = ready_mod.read_manifest(world["store"], "sandbox/ready.json")
     assert doc["tasks"]["cg_1"]["hosts"]["h1"]["prepared"] is False
+
+
+def test_claims_within_the_probe_ttl_do_not_exceed_the_host_room(tmp_path):
+    """The host probe is cached for ttl_s; the trial containers of a claim start
+    later. Claims made inside one cached probe must spend its room, or every
+    take() inside the ttl claims the full room again (max_sandboxes broken)."""
+    store = sd.DirObjects(tmp_path / "store")
+    _manifest(store, {f"t{i}": {"h1": True} for i in range(6)})
+    gate = _gate(store, max_sandboxes=2, running=0)
+    gate.ttl_s, gate.clock = 15.0, lambda: 100.0  # one probe answers every call below
+    p = _prompts(tmp_path, store, gate, n=6, groups=2)
+    first = p.take(2)
+    assert len(first) == 2
+    assert p.take(2) == []  # the containers of the first claim are not running yet
+    assert len(_claimed(store)) == 2

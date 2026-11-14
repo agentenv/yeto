@@ -1314,6 +1314,8 @@ class StoreDispensedPrompts:
             now = self._clock()
             if now >= self._next_scan:
                 got, ended = self._claim(want)
+                if got and self.gate is not None and hasattr(self.gate, "claimed"):
+                    self.gate.claimed(len(got))
                 if got:
                     self._idle = self.scan_s
                     self._next_scan = 0.0 if len(got) == asked else now + self.scan_s

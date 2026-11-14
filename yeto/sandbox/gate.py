@@ -159,6 +159,14 @@ class SandboxGate:
         rooms = [r for r in (self._process_free(), self._host_free()) if r is not None]
         return None if not rooms else min(rooms) // self.group_size
 
+    def claimed(self, groups: int) -> None:
+        """``groups`` were just claimed: spend their sandboxes from the cached host
+        probe. Their containers start later, so until the next probe the cached
+        room would otherwise be handed out again by every claim inside ``ttl_s``."""
+        if self._probe is not None and self._probe[1] is not None:
+            at, free = self._probe
+            self._probe = (at, max(0, free - max(0, int(groups)) * self.group_size))
+
     def sweep_shard(self, shard: str) -> int:
         """Remove the trial containers of ``shard`` of this run (a predecessor this
         sampler continues, after it left or was fenced); 0 without an owner."""
