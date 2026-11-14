@@ -128,6 +128,30 @@ def test_feed_returns_none_at_the_data_end_and_times_out_without_data(tmp_path):
         feed.keep()
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), None, "1.0"])
+def test_feed_drops_a_group_whose_reward_is_missing_or_not_finite(tmp_path, bad):
+    # one NaN reward makes verl's GRPO advantages of the whole group NaN (a NaN loss);
+    # a missing reward is a failed reward call, not a zero reward: the group is
+    # consumed and recorded, never handed to the trainer actor (as the Miles reader does)
+    writer = GroupWriter(_buffer(tmp_path), "s0")
+    writer.write([_sample(0, index=0), _sample(0, index=1, reward=bad)], group_key="bad")
+    writer.write([_sample(0, index=0), _sample(0, index=1, reward=0.0)], group_key="good")
+    vmap, added, records, events = VersionMap(), [], [], []
+    vmap.record(0, 0)
+    feed = bf.BufferFeed(_buffer(tmp_path), vmap=lambda: vmap, shape=SHAPE, add_group=added.append,
+                         record=records.append, sleep=lambda s: None,
+                         emit=lambda event, **f: events.append((event, f)))
+    meta = feed.pull()
+    assert meta["uid"] == "buf1" and meta["rewards"] == (1.0, 0.0)
+    feed.keep()
+    assert [r["non_tensor"]["uid"][0] for r in added] == ["buf1"]
+    assert records[0]["position"] == 0 and records[0]["kept"] is False
+    assert records[0]["dropped"] == bf.NONFINITE_REWARD_REASON
+    assert feed.dropped == {bf.NONFINITE_REWARD_REASON: 1}
+    assert events[0][1]["reason"] == bf.NONFINITE_REWARD_REASON
+    assert feed.pulled_positions == [0, 1]
+
+
 def test_buffer_call_routes_queue_calls_to_the_feed():
     seen = []
 

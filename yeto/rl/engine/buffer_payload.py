@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -428,6 +429,23 @@ def _sample_versions(sample: Mapping[str, Any]) -> list[int]:
 def behavior_versions(sample: Mapping[str, Any]) -> list[int]:
     """Engine weight versions of one sample's tokens (the buffer's behavior versions)."""
     return _sample_versions(sample)
+
+
+def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether every sample of a decoded group has a finite reward. A missing
+    (None) or NaN/inf scalar reward (a reward call that failed) makes the group's
+    centered advantages NaN in Miles and verl, hence a non-finite loss, or the driver's
+    ``nonfinite_reward`` stop; such a group is consumed, never trained. A reward
+    dict (a multi-key reward Miles reads by ``reward_key``) is not judged here."""
+    for sample in group:
+        if "reward" not in sample:
+            continue  # a payload without the field (not a Miles Sample.to_dict()): not judged
+        reward = sample["reward"]
+        if isinstance(reward, Mapping):
+            continue
+        if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+            return False
+    return True
 
 
 def payload_oldest_version(samples: Sequence[Mapping[str, Any]]) -> int | None:

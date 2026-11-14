@@ -57,6 +57,7 @@ from typing import Any
 # The payload format and the group writer are engine-neutral (the
 # engine sampler island writes the same payloads); re-exported here.
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
+    finite_rewards,
     PAYLOAD_SCHEMA,
     DamagedPayload,
     DamagedPayloadLimit,
@@ -782,23 +783,6 @@ def _echo_event(event: str, **fields: Any) -> None:
                          "event": str(event), **fields}), flush=True)
 
 
-def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether every sample of a decoded group has a finite reward. A missing
-    (None) or NaN/inf scalar reward (a reward call that failed) makes the group's
-    centered advantages NaN in Miles, hence a non-finite loss, or the driver's
-    ``nonfinite_reward`` stop; such a group is consumed, never trained. A reward
-    dict (a multi-key reward Miles reads by ``reward_key``) is not judged here."""
-    import math
-
-    for sample in group:
-        if "reward" not in sample:
-            continue  # a payload without the field (not a Miles Sample.to_dict()): not judged
-        reward = sample["reward"]
-        if isinstance(reward, Mapping):
-            continue
-        if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
-            return False
-    return True
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
 

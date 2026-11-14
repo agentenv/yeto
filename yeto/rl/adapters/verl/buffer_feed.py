@@ -91,12 +91,17 @@ from yeto.rl.engine.buffer_payload import (
     SampleBufferRolloutError,
     complete_prompt_tokens,
     decode_group,
+    finite_rewards,
     group_entry_fields,
 )
 
 from yeto.rl.engine.incarnation_lease import STALE_REASON
 
 from .fully_async_translate import VerlTranslationError, VersionMap
+
+# a group with a missing or non-finite reward (a failed reward call): one NaN makes
+# verl's GRPO advantages of the whole group NaN, so it is dropped, never trained
+NONFINITE_REWARD_REASON = "nonfinite_reward"
 
 TRAINER_CONSUMER = "trainer"  # the buffer's single consumer name (as the Miles reader)
 QUEUE_METHODS = ("yeto_pull_sample", "yeto_keep_last", "yeto_drop_last")
@@ -425,7 +430,10 @@ class BufferFeed:
             if not samples:
                 raise BufferFeedError(f"buffer position {item.position}: empty group")
             too_long = oversized(samples, self.shape, self.tokenize)
-            if too_long is None and self.group_size is not None and len(samples) != self.group_size:
+            if too_long is None and not finite_rewards(samples):
+                reason = NONFINITE_REWARD_REASON
+                too_long = "rewards " + repr([s.get("reward") for s in samples])
+            elif too_long is None and self.group_size is not None and len(samples) != self.group_size:
                 # An agentic group keeps >= min_samples trials, so it can be short;
                 # verl's update splits the round into mini-batches of groups x n samples and
                 # asserted (run s29r120-d: 15 % 16). A short group is dropped and recorded.
