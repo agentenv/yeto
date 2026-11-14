@@ -179,7 +179,7 @@ def load_config(path: str) -> dict[str, Any]:
     if "pool" not in cfg and "samplers" not in cfg:
         raise ValueError("run config: missing 'samplers' (the rollout pools) or 'pool' (one pool config)")
     known = {"run", "store", "env", "preflight", "sandbox", "pool", "samplers", "trainer", "first_group",
-             "dashboard", "budget", "comment", "syncer", "controller", "rollout"}
+             "dashboard", "budget", "comment", "syncer", "controller", "rollout", "starvation"}
     unknown = set(cfg) - known
     if unknown:
         raise ValueError(f"run config: unknown keys {sorted(unknown)} (known: {sorted(known)})")
@@ -221,7 +221,7 @@ def _number(section: dict[str, Any], field: str, key: str, *, positive: bool = F
 
 
 def check_sections(cfg: dict[str, Any]) -> None:
-    """The ``first_group``, ``budget``, ``dashboard`` sections and ``rollout.stall_alert_s``:
+    """The ``first_group``, ``budget``, ``dashboard``, ``starvation`` sections and ``rollout.stall_alert_s``:
     a misspelled key, a null, a string or a negative value is refused here, before anything is
     ordered (else it crashes the run once the pools bill, or is silently read as the default).
     ``budget.usd`` / ``budget.wall_h`` (null allowed) are checked by the preflight."""
@@ -241,6 +241,15 @@ def check_sections(cfg: dict[str, Any]) -> None:
                            or not 0 < dash["port"] < 65536):
         raise ValueError(f"run config: dashboard.port must be a port number 1-65535 (got {dash['port']!r})")
     _number(rollout_section(cfg), "rollout", "stall_alert_s")
+    if cfg.get("starvation") is not None:
+        from yeto.rl.starvation import StarvationConfig  # noqa: PLC0415
+
+        if not isinstance(cfg["starvation"], dict):
+            raise ValueError("run config: starvation must be an object")
+        try:
+            StarvationConfig.from_section(cfg["starvation"])
+        except ValueError as error:
+            raise ValueError(f"run config: {error}") from None
 
 
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}

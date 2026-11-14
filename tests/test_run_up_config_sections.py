@@ -59,3 +59,16 @@ def test_a_retired_budget_key_still_loads(tmp_path):
     assert cfg["budget"]["silence_min"] == 30
     with pytest.raises(ValueError, match="silence_grace_mni"):
         up.load_config(_write(tmp_path, budget={"silence_grace_mni": 50}))
+
+
+def test_the_starvation_section_loads_and_is_checked(tmp_path):
+    """``starvation`` (read by the monitor and the preflight) is a known run config key:
+    the guide's section loads, a bad value is refused at load like the other sections."""
+    cfg = up.load_config(_write(tmp_path, starvation={"alert_min": 30, "stop_min": 120, "unhealthy_min": 10,
+                                                      "check_s": 300, "stop_grace_min": 20,
+                                                      "trainer_wait_max_min": 120}))
+    assert cfg["starvation"]["stop_min"] == 120
+    for bad, field in (({"stop_min": -1}, "stop_min"), ({"alert_mins": 30}, "alert_mins"),
+                       ({"alert_min": 60, "stop_min": 30}, "stop_min"), ([30], "starvation")):
+        with pytest.raises(ValueError, match=field):
+            up.load_config(_write(tmp_path, starvation=bad))
