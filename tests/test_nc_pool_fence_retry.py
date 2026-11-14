@@ -431,3 +431,30 @@ def test_a_state_file_that_cannot_be_saved_is_reported_once_per_streak(tmp_path)
     broken["on"] = True
     pool._save_now()
     assert _names(pool).count("state_save_failing") == 2
+
+
+def test_an_unsaved_fence_success_does_not_order_a_successor_per_blocked_hold(tmp_path):
+    """A successor held back by an unsaved fence success is released after
+    fence_blocked_hold_s and its handoff goes back to pending: it is not ordered again
+    while the save still fails (each such node would be billed and released unstarted)."""
+    clock, cloud, pool, m = _setup()
+    pool.state_path = tmp_path / "pool.json"
+    cloud.fence_errors = 3
+    cloud.tickets[m.ticket].update(state="ended", reason="preempted")
+    pool.tick()
+    real_save, broken = pool.save, {"on": True}
+
+    def save(p):
+        if broken["on"]:
+            raise OSError("disk full")
+        real_save(p)
+
+    pool.save = save
+    _run(pool, clock, clock.t + 1800)
+    orders = len(cloud.kinds("order"))
+    _run(pool, clock, clock.t + 4 * 3600)
+    assert "fence_blocked_node_released" in _names(pool)
+    assert len(cloud.kinds("order")) == orders
+    broken["on"] = False
+    _run(pool, clock, clock.t + 1800)
+    assert any(s.state == READY and s.continues_from == m.ticket for s in pool.members)
