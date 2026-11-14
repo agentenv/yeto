@@ -21,6 +21,7 @@ def _make(tmp_path, command):
     syncer.tape_run = None
     syncer._log_offset = 0
     syncer._event_offset = 0
+    syncer._reaped = False
     return syncer
 
 
@@ -87,3 +88,36 @@ def test_restart_reaps_old_group_first(tmp_path):
     finally:
         syncer.stop()
         assert syncer.proc.poll() is not None
+
+
+def test_second_stop_never_signals_reused_pgid(tmp_path, monkeypatch):
+    syncer = _make(tmp_path, "sleep 300")
+    syncer.start()
+    syncer.stop()
+    assert syncer.proc.poll() is not None
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda *a: calls.append(a))
+    syncer.stop()
+    syncer.stop()
+    assert calls == []
+
+
+def test_signal_tree_tolerates_vanished_group(tmp_path):
+    syncer = _make(tmp_path, "true")
+    syncer.start()
+    syncer.proc.wait(timeout=10)
+    syncer._signal_tree(signal.SIGTERM)  # must not raise
+    assert not syncer._group_alive()
+
+
+def test_restart_rearms_reaping(tmp_path):
+    syncer = _make(tmp_path, "sleep 300")
+    syncer.start()
+    syncer.stop()
+    assert syncer._reaped
+    syncer.start()
+    try:
+        assert not syncer._reaped
+    finally:
+        syncer.stop()
+    assert syncer.proc.poll() is not None

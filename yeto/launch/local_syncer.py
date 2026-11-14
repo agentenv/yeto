@@ -38,6 +38,9 @@ class LocalSyncer:
         self.log_file = os.path.expanduser(log_file)
         self.event_tape = os.path.expanduser(syncer_event_tape(args))
         self.proc: subprocess.Popen | None = None
+        # True once this proc's whole process group is confirmed gone; its
+        # PGID may then be reused, so it must never be signalled again.
+        self._reaped = False
         self.tape_forwarder = None
         self.tape_run = None
         # The log file persists across controller jobs on a reused head;
@@ -57,6 +60,7 @@ class LocalSyncer:
             # pid alone can orphan the syncer, which then holds the port
             # across controller restarts; start_new_session gives the whole
             # tree its own process group for stop() to kill.
+            self._reaped = False
             self.proc = subprocess.Popen(
                 self.command,
                 shell=True,
@@ -130,7 +134,7 @@ class LocalSyncer:
     def _stop_tree(self) -> None:
         """Terminate the syncer's process group, even when its leader (the
         shell) already exited: members it backgrounded may still run."""
-        if self.proc is None:
+        if self.proc is None or self._reaped:
             return
         self._signal_tree(signal.SIGTERM)
         try:
@@ -146,6 +150,8 @@ class LocalSyncer:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if self.proc.poll() is not None and not self._group_alive():
+            self._reaped = True
 
     def _group_alive(self) -> bool:
         try:
