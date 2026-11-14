@@ -610,6 +610,9 @@ def encode_member_retire(learner_id: int, incarnation: int | None, reason: str =
                        int(incarnation is not None), int(incarnation or 0), len(text)) + text
 
 
+_MEMBER_RETIRED = struct.Struct("<BQQQ")
+
+
 def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
     if key is None:
         return body
@@ -617,7 +620,9 @@ def seal_member_retire(body: bytes, key: bytes | None) -> bytes:
 
 
 def decode_member_retired(payload: bytes) -> dict[str, Any]:
-    status, incarnation, reclaimed, held = struct.unpack("<BQQQ", payload)
+    if len(payload) != _MEMBER_RETIRED.size:
+        raise ConnectionError(f"MEMBER_RETIRED has {len(payload)} bytes, expected {_MEMBER_RETIRED.size}")
+    status, incarnation, reclaimed, held = _MEMBER_RETIRED.unpack(payload)
     return {"status": RETIRE_STATUS.get(status, str(status)), "incarnation": incarnation, "reclaimed": reclaimed,
             "held": held}
 

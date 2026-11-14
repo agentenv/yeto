@@ -128,6 +128,34 @@ class RelayStopped(RelayError):
 DEFAULT_GONE_S = 900.0  # a head unreachable this long has ended or failed
 
 
+def _unpack(layout: struct.Struct, data: bytes, offset: int, what: str) -> tuple:
+    """``layout.unpack_from`` that reports a short peer frame as ``RelayError``."""
+    if offset < 0 or len(data) < offset + layout.size:
+        raise RelayError(f"short relay {what}: {len(data)} bytes, need {offset + layout.size}")
+    return layout.unpack_from(data, offset)
+
+
+_COUNT = struct.Struct("<I")
+
+
+def _decode_items(body: bytes, limit: int | None = None) -> tuple["Depth", list["Item"]]:
+    """An ITEMS answer (count, depth, items); any short or overrunning part is ``RelayError``."""
+    (n,) = _unpack(_COUNT, body, 0, "ITEMS count")
+    depth = Depth.decode(body, _COUNT.size)
+    if limit is not None:
+        n = min(n, limit)
+    offset = _COUNT.size + _DEPTH.size
+    items = []
+    for _ in range(n):
+        item_id, producer, length = _unpack(_ITEM, body, offset, "ITEMS item header")
+        offset += _ITEM.size
+        if offset + length > len(body):
+            raise RelayError(f"relay item {item_id} declares {length} bytes, {len(body) - offset} left")
+        items.append(Item(item_id, producer, body[offset:offset + length]))
+        offset += length
+    return depth, items
+
+
 @dataclass(frozen=True)
 class Depth:
     items: int
@@ -137,7 +165,7 @@ class Depth:
 
     @classmethod
     def decode(cls, data: bytes, offset: int = 0) -> "Depth":
-        return cls(*_DEPTH.unpack_from(data, offset))
+        return cls(*_unpack(_DEPTH, data, offset, "depth"))
 
 
 @dataclass(frozen=True)
@@ -217,11 +245,15 @@ class RelayConnection:
         if msg_type != MSG_RELAY_WELCOME:
             self.close()
             raise RelayError(f"relay answered type {msg_type} to RELAY_HELLO")
-        version, epoch, max_item, max_items, max_bytes = _WELCOME.unpack_from(payload)
-        if version != RELAY_VERSION:
+        try:
+            version, epoch, max_item, max_items, max_bytes = _unpack(_WELCOME, payload, 0, "WELCOME")
+            if version != RELAY_VERSION:
+                raise RelayRefused(f"relay version {version}, this client speaks {RELAY_VERSION}")
+            depth = Depth.decode(payload, _WELCOME.size)
+        except BaseException:
             self.close()
-            raise RelayRefused(f"relay version {version}, this client speaks {RELAY_VERSION}")
-        self.welcome = Welcome(epoch, max_item, max_items, max_bytes, Depth.decode(payload, _WELCOME.size))
+            raise
+        self.welcome = Welcome(epoch, max_item, max_items, max_bytes, depth)
         return self.welcome
 
     def close(self) -> None:
@@ -261,8 +293,16 @@ class RelayConnection:
             raise RelayError(f"relay answered type {answer}, expected {expect}")
         return body
 
+    def decode(self, fn, body: bytes):
+        """``fn(body)``; a malformed answer drops the connection (the next request reconnects)."""
+        try:
+            return fn(body)
+        except RelayError:
+            self.close()
+            raise
+
     def status(self) -> Depth:
-        return Depth.decode(self.request(MSG_RELAY_STATUS, b"", expect=MSG_RELAY_STATUS))
+        return self.decode(Depth.decode, self.request(MSG_RELAY_STATUS, b"", expect=MSG_RELAY_STATUS))
 
 
 def _check_gone(last_ok: float, gone_s: float | None, clock, what: str) -> None:
@@ -337,10 +377,12 @@ class RelayProducer:
 
         def call() -> PutAck:
             body = self.conn.request(MSG_RELAY_PUT, payload, expect=MSG_RELAY_PUT_ACK)
-            got_seq, status, item_id = _PUT_ACK.unpack_from(body)
+            got_seq, status, item_id = self.conn.decode(
+                lambda b: _unpack(_PUT_ACK, b, 0, "PUT_ACK"), body)
             if got_seq != seq:
                 raise RelayError(f"relay acknowledged seq {got_seq}, sent {seq}")
-            return PutAck(got_seq, status, item_id, Depth.decode(body, _PUT_ACK.size))
+            return PutAck(got_seq, status, item_id,
+                          self.conn.decode(lambda b: Depth.decode(b, _PUT_ACK.size), body))
 
         ack = self._with_retry(call)
         if ack.status == PUT_FULL:
@@ -415,6 +457,7 @@ class RelayConsumer:
                 body = self.conn.request(MSG_RELAY_TAKE, payload, expect=MSG_RELAY_ITEMS,
                                          limit=self.max_bytes + (64 << 20) + 4096,
                                          timeout=self.conn.timeout + wait_s)
+                depth, items = self.conn.decode(_decode_items, body)
                 self.last_ok = self.clock()
                 break
             except RelayRefused:
@@ -424,15 +467,7 @@ class RelayConsumer:
             except RelayError:
                 _check_gone(self.last_ok, self.gone_s, self.clock, "take")
                 self.sleep(self.retry_s)
-        (n,) = struct.unpack_from("<I", body)
-        self.last_depth = Depth.decode(body, 4)
-        offset = 4 + _DEPTH.size
-        items = []
-        for _ in range(n):
-            item_id, producer, length = _ITEM.unpack_from(body, offset)
-            offset += _ITEM.size
-            items.append(Item(item_id, producer, body[offset:offset + length]))
-            offset += length
+        self.last_depth = depth
         if items:
             self.after = max(self.after, items[-1].item_id)
         return items
@@ -455,19 +490,15 @@ class RelayBoard:
         self.seq += 1
         payload = struct.pack("<Q", self.seq) + bytes(data)
         body = self.conn.request(MSG_RELAY_PUT, payload, expect=MSG_RELAY_PUT_ACK)
-        _seq, _status, item_id = _PUT_ACK.unpack_from(body)
+        _seq, _status, item_id = self.conn.decode(lambda b: _unpack(_PUT_ACK, b, 0, "PUT_ACK"), body)
         return int(item_id)
 
     def get(self, *, newer_than: int = 0, wait_s: float = 0.0) -> Item | None:
         payload = _TAKE.pack(int(newer_than), 0, 1, 1 << 40, int(max(0.0, wait_s) * 1000))
         body = self.conn.request(MSG_RELAY_TAKE, payload, expect=MSG_RELAY_ITEMS,
                                  limit=(64 << 20) + 4096, timeout=self.conn.timeout + wait_s)
-        (n,) = struct.unpack_from("<I", body)
-        if n == 0:
-            return None
-        item_id, producer, length = _ITEM.unpack_from(body, 4 + _DEPTH.size)
-        start = 4 + _DEPTH.size + _ITEM.size
-        return Item(item_id, producer, body[start:start + length])
+        _depth, items = self.conn.decode(lambda b: _decode_items(b, limit=1), body)
+        return items[0] if items else None
 
     def wait(self, *, timeout_s: float, poll_s: float = 5.0, sleep=time.sleep) -> Item:
         """The board's value, waiting up to ``timeout_s`` for the first PUT."""
