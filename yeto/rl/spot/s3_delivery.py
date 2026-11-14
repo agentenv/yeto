@@ -281,13 +281,15 @@ _BACKFILL_REFUSED: dict[tuple[str, str], tuple[tuple[str, tuple[Any, ...]], str]
 
 
 def _placed_fingerprint(directory: Path) -> tuple[Any, ...]:
-    """Cheap identity of the files under ``directory`` (path, size, mtime, inode):
-    changes whenever a file is added, removed, rewritten or replaced."""
+    """Cheap identity of the files under ``directory`` (path, size, mtime, ctime, inode):
+    changes whenever a file is added, removed, rewritten (also in place with its
+    mtime kept, e.g. ``rsync --inplace -t``: ctime still moves) or replaced."""
     rows = []
     for path in directory.rglob("*"):
         if path.is_file():
             st = path.stat()
-            rows.append((path.relative_to(directory).as_posix(), st.st_size, st.st_mtime_ns, st.st_ino))
+            rows.append((path.relative_to(directory).as_posix(), st.st_size, st.st_mtime_ns,
+                         st.st_ctime_ns, st.st_ino))
     return tuple(sorted(rows))
 
 
@@ -298,6 +300,7 @@ def backfill_manifest(s3: S3, store: Path, release: str) -> bool:
     first; True when one was written."""
     cm.check_release_name(release)
     if peer_fanout.manifest_path(store, release).is_file() or not (store / cm.RELEASES / release).is_dir():
+        _BACKFILL_REFUSED.pop((str(store), release), None)  # nothing left to backfill: forget it
         return False
     raw = s3.get_bytes(f"manifests/{release}.json")
     if raw is None:  # never uploaded (S3_ASSUME_PRESENT): nothing to serve it with

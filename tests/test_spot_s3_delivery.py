@@ -229,3 +229,39 @@ def test_a_changed_s3_manifest_retries_a_remembered_backfill_failure(tmp_path, m
     key.write_text(json.dumps(manifest))
     assert sd.backfill_manifests(s3, island) == ["r2-v2"]
     assert calls == ["r2-v2", "r2-v2"]
+
+
+def test_an_in_place_rewrite_that_keeps_the_mtime_is_verified_again(tmp_path, monkeypatch):
+    """``rsync --inplace -t`` rewrites the bytes in place and restores the mtime:
+    the inode and mtime stay, the ctime moves, so the release is hashed again."""
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    weights = island / cm.RELEASES / "r2-v2" / "w.bin"
+    good = weights.read_bytes()
+    weights.write_bytes(b"x" * len(good))
+    calls = _count_verify(monkeypatch)
+    assert sd.pull(s3, island, "r2-v2") is None and sd.pull(s3, island, "r2-v2") is None
+    assert calls == ["r2-v2"]
+    before = weights.stat()
+    with open(weights, "r+b") as handle:  # in place: same inode
+        handle.write(good)
+    os.utime(weights, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = weights.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)
+    assert sd.pull(s3, island, "r2-v2") is None
+    assert calls == ["r2-v2", "r2-v2"]
+    assert sd.peer_fanout.servable(island, "r2-v2")
+
+
+@pytest.mark.parametrize("gone", ["manifest_saved", "release_removed"])
+def test_a_remembered_backfill_failure_is_dropped_when_nothing_is_left_to_backfill(tmp_path, monkeypatch, gone):
+    s3, island = _crash_between_place_and_manifest(tmp_path, monkeypatch)
+    placed = island / cm.RELEASES / "r2-v2"
+    (placed / "w.bin").write_bytes(b"z" * len((placed / "w.bin").read_bytes()))
+    assert sd.backfill_manifests(s3, island) == []
+    assert (str(island), "r2-v2") in sd._BACKFILL_REFUSED
+    if gone == "manifest_saved":
+        sd.peer_fanout.save_manifest(island, json.loads((tmp_path / "bucket/manifests/r2-v2.json").read_text()))
+    else:
+        shutil.rmtree(placed)
+    assert sd.backfill_manifest(s3, island, "r2-v2") is False
+    assert (str(island), "r2-v2") not in sd._BACKFILL_REFUSED
