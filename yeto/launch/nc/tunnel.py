@@ -17,12 +17,14 @@ The cookie comes from ``port_open.mjs`` (the NC controller tool) and is cached
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,11 +87,26 @@ def fetch_endpoint(account: int, port: int = RELAY_PORT, *, run=subprocess.run) 
         raise TunnelError(f"port_open.mjs failed (exit {out.returncode}): {out.stderr.strip()[-300:]}")
     doc = json.loads(out.stdout.strip().splitlines()[-1])
     path = cookie_path(account, port)
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump({"base_url": doc["base_url"], "cookie": doc["cookie"]}, f)
-    os.replace(tmp, path)
+    # Every ssh ProxyCommand that finds the cookie stale refetches it, so several write
+    # at once: each writes a 0600 temporary of its own (a shared name was renamed away
+    # under the other writer), synced, renamed, and removed again when the write fails.
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"base_url": doc["base_url"], "cookie": doc["cookie"]}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     return Endpoint(doc["base_url"], doc["cookie"])
 
 
