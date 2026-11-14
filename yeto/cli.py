@@ -1889,7 +1889,15 @@ def cmd_worker(name: str) -> int:
     from .launcher import run as launcher_run
 
     def on_term(signum, _frame):
-        # `yeto down` / a supervisor: unwind through the launcher's teardown (finally)
+        # `yeto down` / a supervisor: unwind through the launcher's teardown (finally).
+        # Only once: a repeated signal (a retried `yeto down`) raising again would cut
+        # that teardown or the backstop cleanup short and leave clusters behind. A
+        # no-op handler, not SIG_IGN: children the teardown execs must not inherit it.
+        for again in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(again, lambda *_: None)
+            except (ValueError, OSError):
+                pass
         raise SystemExit(128 + signum)
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
