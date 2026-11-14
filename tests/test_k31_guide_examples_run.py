@@ -133,6 +133,8 @@ def _check_pool(cfg: dict[str, Any], tmp: Path) -> None:
     _check_provider(cfg)
 
 
+# A provider fragment may carry the pool keys that go with it (slot count, target, shard base).
+POOL_PROVIDER_KEYS = {"provider", "target", "slots", "shard_base"}
 RUN_KEYS = {"starvation", "controller", "rollout", "samplers", "budget", "first_group", "dashboard"}
 
 
@@ -148,7 +150,7 @@ def _cases():
         elif set(doc) <= RUN_KEYS:  # a run config fragment: in the full example
             merged = {k: v for k, v in run.items() if not ("samplers" in doc and k == "pool")}
             cases.append(pytest.param("run", {**merged, **doc}, id=f"guide:{ln}:run-fragment"))
-        elif set(doc) == {"provider"}:  # a pool provider section: in the full pool example
+        elif "provider" in doc and set(doc) <= POOL_PROVIDER_KEYS:  # a provider section: in the full pool example
             merged = {k: v for k, v in pool.items() if k != "accounts"}
             cases.append(pytest.param("pool", {**merged, "slots": [1, 2, 3], **doc},
                                       id=f"guide:{ln}:pool-provider"))
