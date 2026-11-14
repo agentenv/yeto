@@ -1255,6 +1255,9 @@ class PolicyFollower:
     release it reports on disk is the one the next refresh loads.
     Without it, a failed download raises the same :class:`ReleaseNotLoaded`
     on the refresh that tried it.
+    A download the store refuses (credentials, no such bucket:
+    ``object_store.is_fatal_store_error``) is raised as it is, in both modes: it
+    would fail the same way at every retry.
 
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
@@ -1466,6 +1469,8 @@ class PolicyFollower:
             except ReleaseDeltaError as error:
                 self._rebuild_failed(latest, error)
             except Exception as error:  # noqa: BLE001 - a failed transfer: keep the served weights
+                if is_fatal_store_error(error):  # refused credentials, no such bucket: no outage
+                    raise
                 raise _download_failed(latest, error, self.version) from error
         self.incomplete = None
         if not getattr(self._load, "verifies_files", False):
@@ -1528,6 +1533,11 @@ class PolicyFollower:
             self._fetch = None
             self.incomplete = str(error)
             return None
+        if is_fatal_store_error(error):  # refused credentials, no such bucket: fails the same way for ever
+            if not report:
+                return None
+            self._fetch = None
+            raise error
         if not fetch.reported:
             if not report:
                 return None

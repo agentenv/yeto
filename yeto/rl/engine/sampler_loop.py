@@ -52,6 +52,9 @@ there but is no release record, ``damaged``, ends the island after
 release, so one that stays damaged is not an outage), a round is not
 admitted while the backlog is unknown, and ``rl_sampler_store_read_failed`` /
 ``rl_sampler_store_read_ok`` mark the outage on the tape; the next poll reads
+again. A release download that keeps failing (``download_failed``, retried by
+the follower) ends the island once it has failed for ``max_read_outage_s``
+without a load in between: the sampler does not serve the old weights for ever.
 again. Only a failed group write ends a round.
 
 After the last round it calls ``generate.flush()`` when the round has one (a
@@ -168,6 +171,8 @@ class SamplerLoop:
         self._read_failing: dict[str, tuple[float, int]] = {}  # what -> (since, failures) of an outage
         self.max_read_outage_s: float | None = DEFAULT_MAX_READ_OUTAGE_S  # None: no bound
         self._latest_unread_since: float | None = None
+        self._download_failing_since: float | None = None  # first failed download since the last load
+        self._download_failures = 0
 
     def _outage_bound(self, what: str, since: float, failures: int, error: BaseException) -> None:
         """Raise when ``what`` has failed for longer than ``max_read_outage_s``."""
@@ -247,6 +252,12 @@ class SamplerLoop:
             self._damaged_latest = self._damaged_latest + 1 if unread and error.fields.get("damaged") else 0
             if self._damaged_latest >= self.max_damaged_latest_reads:
                 raise
+            if error.reason == "download_failed":  # retried, but not for ever on old weights
+                if getattr(self, "_download_failing_since", None) is None:
+                    self._download_failing_since = self.clock()
+                self._download_failures = getattr(self, "_download_failures", 0) + 1
+                self._outage_bound("release_download", self._download_failing_since,
+                                   self._download_failures, error)
             if unread:  # the served weights stay, but not for ever on a store that never answers
                 if getattr(self, "_latest_unread_since", None) is None:
                     self._latest_unread_since = self.clock()
@@ -265,6 +276,7 @@ class SamplerLoop:
         if self._not_loaded is not None and self._not_loaded[1] == LATEST_UNREAD:
             self._not_loaded = None  # read again: a later outage is reported anew
         if loaded is not None:
+            self._download_failing_since, self._download_failures = None, 0
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
                       weights=loaded.weights, sha256=loaded.sha256,
