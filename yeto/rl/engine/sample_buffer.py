@@ -243,7 +243,8 @@ def bad_shard_record(record: Mapping[str, Any]) -> str | None:
         return None
     try:
         _entry(dict(record))
-    except (KeyError, TypeError, ValueError) as error:
+    # OverflowError: JSON ``Infinity`` in an integer field (int(inf) raises it)
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
         return f"not an entry ({type(error).__name__}: {error})"
     return None
 
