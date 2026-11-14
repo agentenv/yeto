@@ -199,3 +199,58 @@ def test_relay_send_fails_softly_when_rank0_is_gone():
     from yeto import modal_runner
 
     assert modal_runner.send_reclaim_to_rank0("127.0.0.1", 1, 2, 1, timeout_s=0.2, attempts=1) is False
+
+
+def test_relay_is_stopped_and_its_port_freed_when_the_learner_fails_to_start(tmp_path):
+    """popen raising (missing binary, bad env) must not leave the relay thread
+    listening: a retry in the same process would fail to bind the port."""
+    import socket
+
+    import pytest
+
+    from yeto import modal_runner
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "m"), "SKYPILOT_NODE_RANK": "0",
+           "SKYPILOT_NODE_IPS": "127.0.0.1\n127.0.0.2", modal_runner.RECLAIM_RELAY_PORT_ENV: str(port)}
+    sig = SimpleNamespace(SIGINT=signal.SIGINT, SIGTERM=signal.SIGTERM, signal=lambda num, fn: None)
+
+    def popen(cmd, env):
+        raise FileNotFoundError("no such learner")
+
+    with pytest.raises(FileNotFoundError):
+        modal_runner._run_forwarding_to_learner(["missing"], env, popen=popen, sig=sig)
+    assert _wait(lambda: not any(t.name == "reclaim-relay" for t in threading.enumerate()))
+    again = modal_runner.ReclaimRelay(lambda num, rank: None, port=port, host="0.0.0.0").start()
+    again.stop()
+
+
+def test_relay_start_closes_its_socket_when_bind_fails():
+    import socket
+
+    import pytest
+
+    from yeto import modal_runner
+
+    holder = socket.socket()
+    holder.bind(("0.0.0.0", 0))
+    holder.listen(1)
+    created = []
+    real = socket.socket
+
+    def tracking(*a, **kw):
+        s = real(*a, **kw)
+        created.append(s)
+        return s
+
+    try:
+        modal_runner.socket.socket = tracking
+        with pytest.raises(OSError):
+            modal_runner.ReclaimRelay(lambda num, rank: None, port=holder.getsockname()[1]).start()
+    finally:
+        modal_runner.socket.socket = real
+        holder.close()
+    assert created and all(s.fileno() == -1 for s in created)

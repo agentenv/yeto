@@ -1350,16 +1350,16 @@ def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=t
         # it only through this relay (the peer runner sends its signal over the cluster net)
         relay = ReclaimRelay(lambda num, peer: _write_reclaim_marker(path, num, clock, from_rank=peer),
                              port=reclaim_relay_port(env)).start()
-    proc = popen(cmd, env=env)
+    try:  # the relay stops on every exit, also when the learner fails to start
+        proc = popen(cmd, env=env)
 
-    def forward(num, _frame):
-        _write_reclaim_marker(path, num, clock, from_rank=rank)
-        if rank > 0 and node_ips:
-            send_reclaim_to_rank0(node_ips[0], reclaim_relay_port(env), num, rank)
+        def forward(num, _frame):
+            _write_reclaim_marker(path, num, clock, from_rank=rank)
+            if rank > 0 and node_ips:
+                send_reclaim_to_rank0(node_ips[0], reclaim_relay_port(env), num, rank)
 
-    for name in ("SIGINT", "SIGTERM"):
-        sig.signal(getattr(sig, name), forward)
-    try:
+        for name in ("SIGINT", "SIGTERM"):
+            sig.signal(getattr(sig, name), forward)
         return proc.wait()
     finally:
         if relay is not None:
@@ -1429,10 +1429,14 @@ class ReclaimRelay:
 
     def start(self) -> "ReclaimRelay":
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.host, self.port))
-        sock.listen(8)
-        sock.settimeout(0.5)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((self.host, self.port))
+            sock.listen(8)
+            sock.settimeout(0.5)
+        except BaseException:
+            sock.close()  # a failed bind must not leak the descriptor
+            raise
         self._sock, self.port = sock, sock.getsockname()[1]
         self._thread = threading.Thread(target=self._serve, name="reclaim-relay", daemon=True)
         self._thread.start()
