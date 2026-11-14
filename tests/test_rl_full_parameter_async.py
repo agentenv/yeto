@@ -1174,3 +1174,54 @@ def test_mamba_ssm_state_dtype_reaches_every_island():
     _, plan = _plan(ASYNC + ("--mamba-training-ssm-states-dtype", "fp32"))
     for island in plan["island_requests"]:
         assert _flag(island["learner_command"], "--mamba-training-ssm-states-dtype") == "fp32"
+
+
+def _pushed_candidate(stream, permit):
+    from yeto.rl.engine.full_parameter_stream import RoleSubmissionCandidate
+
+    return RoleSubmissionCandidate(stream.config.role, permit, 0, 1, 1, 1, 4, object(), object())
+
+
+@pytest.mark.parametrize("partial_quorum", [True, False])
+def test_a_background_push_harvested_after_a_redial_keeps_the_replayed_pull(partial_quorum):
+    # The worker queued PULL (0,1,1) on link 0; the link dropped before the
+    # bytes left and the syncer replayed the same PULL on link 1, which the
+    # coordinator queued before harvesting the push.  The harvest must not
+    # consume the replayed permit: nothing would ever answer it.
+    stream = _stream(partial_quorum)
+    stream.client.pulls = [PullRequest(0, 1, 1)]
+    stream._queue_pulls()
+    candidate = _pushed_candidate(stream, stream._pending[0])
+    queued_on = stream._link_generation(0)
+    stream.client.connection_generation = 1
+    stream.client.pulls = [PullRequest(0, 1, 1)]
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 1)}
+
+    stream.note_pushed(candidate, queued_on)
+
+    assert stream._pending == {0: PullRequest(0, 1, 1)}
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 1)}
+
+
+@pytest.mark.parametrize("partial_quorum", [True, False])
+def test_a_pull_replayed_while_the_permits_drain_is_not_dropped(partial_quorum):
+    # A redial lands between reading the link generations and draining the
+    # PULLs: the drained PULL is the new link's replay and must survive the
+    # next drain, which sees the new generation.
+    stream = _stream(partial_quorum)
+    stream._queue_pulls()  # records link 0
+    client = stream.client
+    drain = client.drain_pulls
+
+    def redial_then_drain():
+        client.connection_generation = 1
+        client.pulls = [PullRequest(0, 1, 1)]
+        return drain()
+
+    client.drain_pulls = redial_then_drain
+    stream._queue_pulls()
+    client.drain_pulls = drain
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 1)}
