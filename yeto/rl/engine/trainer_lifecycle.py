@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from yeto.rl.pool_client import LeaveReason
+from yeto.rl.leave_code import LeaveReason
 
 from . import recovery
 from .leave_reason import leave_reason_for

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-from yeto.rl.pool_client import LeaveReason
+from yeto.rl.leave_code import LeaveReason
 
 _E = "yeto.rl.engine."
 
