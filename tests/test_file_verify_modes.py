@@ -14,6 +14,7 @@ from yeto.rl.spot_rollout import cut_manifest as cm
 def _cache(tmp_path, monkeypatch):
     monkeypatch.setenv(fv.ENV_CACHE, str(tmp_path / "verify-cache"))
     monkeypatch.delenv(fv.ENV_MODE, raising=False)
+    monkeypatch.delenv(fv.ENV_WORKERS, raising=False)
     return tmp_path / "verify-cache"
 
 
@@ -52,9 +53,26 @@ def test_default_is_full_and_writes_no_cache(tmp_path, monkeypatch, _cache):
     assert len(calls) == 2 and not _cache.exists()
 
 
-def test_bad_mode_is_refused():
-    with pytest.raises(ValueError):
-        fv.verify_mode({fv.ENV_MODE: "fastest"})
+@pytest.mark.parametrize("raw", ["fastest", "1", "true"])
+def test_unknown_mode_warns_and_falls_back_to_full(raw, caplog):
+    with caplog.at_level("WARNING", logger=fv.__name__):
+        assert fv.verify_mode({fv.ENV_MODE: raw}) == fv.FULL
+    assert fv.ENV_MODE in caplog.text
+
+
+def test_yeto_verify_1_does_not_break_the_default_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv(fv.ENV_MODE, "1")
+    p = tmp_path / "s.bin"
+    p.write_bytes(b"x" * 100)
+    sha = cut_mod.sha256_file(p)
+    assert cut_mod.file_problems(tmp_path, [cut_mod.CutFile(path="s.bin", sha256=sha, bytes=100)]) == []
+    cm.verify({"files": {"s.bin": {"size": 100, "sha256": sha}}}, tmp_path)
+
+
+def test_workers_are_opt_in():
+    assert fv.hash_workers({}) == 1
+    assert fv.hash_workers({fv.ENV_WORKERS: "4"}) == 4
+    assert fv.hash_workers({}, default=pr.DIGEST_WORKERS) == pr.DIGEST_WORKERS
 
 
 def test_fast_hashes_an_unchanged_file_once(tmp_path, monkeypatch):
@@ -172,3 +190,92 @@ def test_cut_file_problems_modes(tmp_path, monkeypatch):
         assert any("shard2.pt is 10 bytes" in p for p in problems)
     assert [p for p in cut_mod.file_problems(d, files, mode=fv.OFF)] == [
         "shard shard2.pt is 10 bytes, manifest says 2048 (truncated?)"]
+
+
+def _mixed(tmp_path):
+    """s1: wrong sha, zz: missing, s4: wrong size, ok: fine (main's own outputs below)."""
+    d = tmp_path / "mixed"
+    d.mkdir()
+    for name in ("s1.bin", "s4.bin", "ok.bin"):
+        (d / name).write_bytes(name.encode() * 64)
+    good = {n: fv.sha256_file(d / n, remember=False) for n in ("s1.bin", "s4.bin", "ok.bin")}
+    (d / "s1.bin").write_bytes(b"?" * len("s1.bin") * 64)
+    (d / "s4.bin").write_bytes(b"short")
+    return d, good
+
+
+@pytest.mark.parametrize("workers", [None, "4"])
+def test_file_problems_order_and_wording_match_main(tmp_path, monkeypatch, workers):
+    if workers:
+        monkeypatch.setenv(fv.ENV_WORKERS, workers)
+    d, good = _mixed(tmp_path)
+    files = [cut_mod.CutFile(path="s1.bin", sha256=good["s1.bin"], bytes=384),
+             cut_mod.CutFile(path="zz.bin", sha256="0" * 64, bytes=1),
+             cut_mod.CutFile(path="s4.bin", sha256=good["s4.bin"], bytes=384),
+             cut_mod.CutFile(path="ok.bin", sha256=good["ok.bin"], bytes=384)]
+    assert cut_mod.file_problems(d, files) == [
+        "shard s1.bin checksum mismatch",
+        "missing shard zz.bin",
+        "shard s4.bin is 5 bytes, manifest says 384 (truncated?)",
+    ]
+
+
+def test_verify_default_reports_the_first_bad_file_like_main(tmp_path):
+    d, good = _mixed(tmp_path)
+    sha_first = {"files": {"s1.bin": {"size": 384, "sha256": good["s1.bin"]},
+                           "s4.bin": {"size": 384, "sha256": good["s4.bin"]},
+                           "ok.bin": {"size": 384, "sha256": good["ok.bin"]}}}
+    with pytest.raises(cm.ManifestError) as err:
+        cm.verify(sha_first, d)
+    assert str(err.value) == "s1.bin: sha256 mismatch"
+    size_first = {"files": dict(reversed(list(sha_first["files"].items())))}
+    with pytest.raises(cm.ManifestError) as err:
+        cm.verify(size_first, d)
+    assert str(err.value) == "s4.bin: size 5 != 384"
+
+
+def test_verify_parallel_opt_in_checks_sizes_first_then_hashes(tmp_path, monkeypatch):
+    monkeypatch.setenv(fv.ENV_WORKERS, "4")
+    d, good = _mixed(tmp_path)
+    files = {"s1.bin": {"size": 384, "sha256": good["s1.bin"]},
+             "s4.bin": {"size": 384, "sha256": good["s4.bin"]},
+             "ok.bin": {"size": 384, "sha256": good["ok.bin"]}}
+    with pytest.raises(cm.ManifestError, match=r"^s4\.bin: size 5 != 384$"):
+        cm.verify({"files": files}, d)
+    (d / "s4.bin").unlink()
+    del files["s4.bin"]
+    with pytest.raises(cm.ManifestError, match=r"^s1\.bin: sha256 mismatch$"):
+        cm.verify({"files": files}, d)
+
+
+def test_parallel_digests_stop_early_on_error(tmp_path, monkeypatch):
+    paths = []
+    for i in range(6):
+        p = tmp_path / f"f{i}.bin"
+        p.write_bytes(bytes([i]) * (4 * fv.CHUNK))
+        paths.append(p)
+    read_blocks = []
+    real = fv.sha256_file
+
+    def slow(path, **kw):
+        if os.fspath(path).endswith("f0.bin"):
+            raise OSError("boom")
+        read_blocks.append(path)
+        return real(path, **kw)
+
+    monkeypatch.setattr(fv, "sha256_file", slow)
+    with pytest.raises(OSError, match="boom"):
+        fv.digests(paths, mode=fv.FULL, workers=2)
+    assert len(read_blocks) < len(paths) - 1  # queued files were cancelled
+
+
+def test_parallel_digests_stop_on_first_mismatch(tmp_path):
+    paths = []
+    for i in range(6):
+        p = tmp_path / f"f{i}.bin"
+        p.write_bytes(bytes([i]) * 1024)
+        paths.append(p)
+    expected = {os.fspath(p): fv.sha256_file(p, remember=False) for p in paths}
+    expected[os.fspath(paths[0])] = "0" * 64
+    got = fv.digests(paths, mode=fv.FULL, workers=2, expected=expected)
+    assert got[os.fspath(paths[0])] != "0" * 64

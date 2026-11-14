@@ -393,7 +393,8 @@ def check_release_files(release: PolicyRelease, directory: Path, *, mode: str | 
     if release.sha256 is not None:
         check_release_digest(release, directory_digest(directory))
     if release.file_sha256:
-        actual = file_digests(directory, release.file_sha256, workers=file_verify.hash_workers(), mode=mode)
+        actual = file_digests(directory, release.file_sha256, mode=mode,
+                              workers=file_verify.hash_workers(default=DIGEST_WORKERS))
         bad = sorted(name for name, digest in release.file_sha256.items() if actual[name] != digest)
         if bad:
             raise ReleaseDigestMismatch(f"release r{release.seq}-v{release.version}: {len(bad)} of "

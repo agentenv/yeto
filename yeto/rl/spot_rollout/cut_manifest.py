@@ -116,23 +116,36 @@ def verify(manifest: Mapping[str, Any], staged: Path, *, mode: str | None = None
     Sizes are always compared (truncation). sha256 per ``mode`` (``YETO_VERIFY``,
     :mod:`yeto.rl.engine.file_verify`): ``full`` (default) hashes every file,
     ``fast`` reuses the digest of a file unchanged since this disk last hashed
-    it, ``off`` compares sizes only. Files are hashed in parallel."""
+    it, ``off`` compares sizes only. Files are checked one at a time in manifest
+    order (size, then sha256; the first bad file raises). ``YETO_VERIFY_WORKERS``
+    opts in to parallel hashing: all sizes are checked first, then the files are
+    hashed in parallel and the first mismatch stops the rest."""
     staged = Path(staged)
     present = {p.relative_to(staged).as_posix() for p in staged.rglob("*") if p.is_file()}
     want = manifest["files"]
     if present != set(want):
         raise ManifestError(f"staged files differ: missing {sorted(set(want) - present)[:5]}, "
                             f"extra {sorted(present - set(want))[:5]}")
-    for name, meta in sorted(want.items()):
+    mode = file_verify.verify_mode() if mode is None else mode
+    if mode != file_verify.OFF and file_verify.hash_workers() > 1:
+        for name, meta in want.items():
+            path = staged / name
+            if path.stat().st_size != int(meta["size"]):
+                raise ManifestError(f"{name}: size {path.stat().st_size} != {meta['size']}")
+        expected = {os.fspath(staged / n): str(m["sha256"]) for n, m in want.items()}
+        actual = file_verify.digests([staged / n for n in want], mode=mode, expected=expected)
+        for name, meta in want.items():
+            got = actual.get(os.fspath(staged / name))
+            if got is not None and got != meta["sha256"]:
+                raise ManifestError(f"{name}: sha256 mismatch")
+        return
+    for name, meta in want.items():
         path = staged / name
         if path.stat().st_size != int(meta["size"]):
-            raise ManifestError(f"{name}: size {path.stat().st_size} != {meta['size']} under {staged}")
-    names = sorted(want)
-    actual = file_verify.digests([staged / n for n in names], mode=mode)
-    bad = [n for n in names if (got := actual[os.fspath(staged / n)]) is not None and got != want[n]["sha256"]]
-    if bad:
-        raise ManifestError(f"{bad[0]}: sha256 mismatch under {staged}"
-                            + (f" (and {len(bad) - 1} more files)" if len(bad) > 1 else ""))
+            raise ManifestError(f"{name}: size {path.stat().st_size} != {meta['size']}")
+        got = file_sha256(path) if mode == file_verify.FULL else file_verify.digest(path, mode=mode)
+        if got is not None and got != meta["sha256"]:
+            raise ManifestError(f"{name}: sha256 mismatch")
 
 
 def check_release_name(name: Any, what: str = "release") -> str:
