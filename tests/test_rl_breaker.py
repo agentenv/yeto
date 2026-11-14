@@ -69,7 +69,7 @@ def test_unknown_hardware_fails_closed_to_the_strictest_limits_and_says_so():
         out = breaker.evaluate([_trained(i, 0.09) for i in range(3)], sampler)
         c = _checks(out)["logprob_diff"]
         assert out["hardware"] == "nvidia" and out["hardware_seen"] == []
-        assert "unknown" in c["note"] and "--sampler-hardware" in c["note"]
+        assert "unknown" in c["note"] and "--sampler-hardware" in c["note"] and "act 0.052" in c["note"]
         assert c["level"] == "trip" and out["tripped"] == ["logprob_diff"]
     assert _checks(breaker.evaluate([_trained(i, 0.03) for i in range(3)], []))["logprob_diff"]["level"] == "ok"
     # the operator's explicit class still decides

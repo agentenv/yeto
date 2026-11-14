@@ -1849,6 +1849,10 @@ budget or wall-clock breach perform the full `yeto run down` immediately.
 The pool also has its own guards (`elastic.max_nodes`, `max_orders`,
 `max_run_spend_ucr`, order breaker); see [NC_POOL.md](NC_POOL.md). Log-prob
 and health breakers inside the run are described in [BREAKER.md](BREAKER.md).
+Run `yeto breaker` on a K3.1 run with `--sampler-tapes` (the MI355X sampler
+tapes) or `--sampler-hardware amd`: without either the sampler hardware is
+unknown and the breaker fails closed to the `nvidia` limits (act 0.052), so the
+healthy MI355X mismatch band (0.076-0.099) trips `logprob_diff`.
 The resource ledger, idle shutdown and cleanup are described in
 [COST_GUARD.md](COST_GUARD.md).
 

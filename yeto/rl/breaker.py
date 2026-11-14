@@ -180,7 +180,9 @@ def evaluate(trainer: Sequence[Mapping[str, Any]], sampler: Sequence[Mapping[str
     if hardware == "auto":
         if not known:
             hw = UNKNOWN_HARDWARE
-            note = f"sampler hardware unknown: strictest ({hw}) limits (pass --sampler-hardware)"
+            uw, ua = LOGPROB_LIMITS[hw]
+            note = (f"sampler hardware unknown: strictest ({hw}) limits warn {uw} / act {ua} "
+                    f"(pass --sampler-hardware)")
         elif "amd" in known:
             hw = "amd"
         else:
