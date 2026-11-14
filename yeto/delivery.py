@@ -16,8 +16,8 @@ learner teardown (so auto-teardown never destroys the only copy), then:
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
+from pathlib import Path
 
 
 def kind(output: str | None) -> str:
@@ -65,13 +65,16 @@ def deliver(output: str, src_dir: str) -> None:
 
 
 def _upload_s3(output: str, src_dir: str) -> None:
-    """Sync output artifacts to S3 without SkyPilot Storage lifecycle state."""
-    if shutil.which("aws") is None:
-        raise RuntimeError("aws CLI is required for s3:// output delivery")
-    subprocess.run(
-        ["aws", "s3", "sync", src_dir, output.rstrip("/"), "--only-show-errors"],
-        check=True,
-    )
+    """Upload output artifacts to S3 through the run store's client
+    (yeto.cloud.s3_store): its endpoint (YETO_RL_STORE_S3_ENDPOINT_URL, R2/MinIO),
+    store credentials or profile, timeouts and retries. The aws CLI read none of
+    these and wrote an R2 store's output to AWS."""
+    from yeto.cloud import s3_store
+
+    objects = s3_store.head_objects(output.rstrip("/"))
+    root = Path(src_dir)
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        objects.write_file(path.relative_to(root).as_posix(), path)
 
 
 def _upload_sky(output: str, src_dir: str) -> None:
