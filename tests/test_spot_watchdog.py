@@ -376,3 +376,77 @@ def test_a_hung_sweep_backs_off_and_does_not_slow_the_relaunch(tmp_path):
     # the first pass over the candidates waits on one hung sweep, not one per candidate
     first_pass = [e["t"] for e in _events(tmp_path) if e["event"] == "launch_start"][1:len(cands) + 1]
     assert first_pass[-1] - first_pass[0] < 600.0 + 30.0 * len(cands) + 1
+
+
+def test_ops_launch_survives_a_missing_sky(monkeypatch):
+    """No sky executable: launch fails like any other launch instead of raising."""
+    def missing(*a, **k):
+        raise FileNotFoundError(2, "No such file or directory", "sky")
+
+    monkeypatch.setattr(wd.subprocess, "run", missing)
+    ok, msg = wd.Ops(yaml="x.yaml", envs=[], secrets=[]).launch(
+        "spot-t-h100-1", wd.candidates()[0], 600.0)
+    assert ok is False and "sky" in msg
+
+
+def test_a_raising_launch_is_a_failed_launch_not_a_crash(tmp_path):
+    clk = Clock()
+
+    class Raising(FakeOps):
+        def launch(self, cluster, cand, timeout_s):
+            self.calls.append(("launch", cluster, cand.key))
+            raise PermissionError(13, "Permission denied", "sky")
+
+    ops = Raising(clk)
+    w = wd.Watchdog(_cfg(tmp_path, max_rounds=1), wd.candidates()[:2], ops, clock=clk, sleep=clk.sleep)
+    assert w.run() == "max_rounds"
+    assert [c[0] for c in ops.calls].count("launch") == 2  # every candidate was still tried
+    fails = [e for e in _events(tmp_path) if e["event"] == "launch_fail"]
+    assert len(fails) == 2 and "Permission denied" in fails[0]["msg"]
+
+
+def test_a_full_disk_under_the_event_log_does_not_kill_the_watchdog(tmp_path, monkeypatch):
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]}, states=["RUNNING", "STOPPED"])
+    w = wd.Watchdog(_cfg(tmp_path), wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    real_open = open
+
+    def full(path, mode="r", *a, **k):
+        if "w" in mode or "a" in mode:
+            raise OSError(28, "No space left on device")
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr("builtins.open", full)
+    monkeypatch.setattr(wd.Path, "write_text", lambda self, *a, **k: full(self, "w"))
+    w.acquire()
+    w.watch_once(); w.watch_once()  # RUNNING, then STOPPED -> preempted, deleted
+    assert w.cluster is None and ("down", "spot-t-h100-1") in ops.calls
+    assert w.log_write_errors > 0
+    assert [e["event"] for e in w.history][:2] == ["launch_start", "launch_ok"]  # still kept in memory
+    monkeypatch.undo()
+    w.event("disk_back")  # the log resumes once the disk has room
+    assert _events(tmp_path)[-1]["event"] == "disk_back"
+    assert _events(tmp_path)[-1]["log_write_errors"] == w.log_write_errors
+
+
+def test_a_full_disk_keeps_the_previous_state_file(tmp_path, monkeypatch):
+    """The state (spend, live cluster) is replaced whole or not at all, never truncated."""
+    clk = Clock()
+    ops = FakeOps(clk, launch={"H100:8@eu-north1/od": [True]})
+    cfg = _cfg(tmp_path)
+    w = wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep)
+    w.acquire()
+    before = json.loads(Path(cfg.state).read_text())
+    real_write = wd.Path.write_text
+
+    def half(self, data, *a, **k):
+        real_write(self, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(wd.Path, "write_text", half)
+    w.spent += 5.0
+    w.event("x")
+    monkeypatch.undo()
+    assert json.loads(Path(cfg.state).read_text()) == before
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+    assert wd.Watchdog(cfg, wd.candidates(), ops, clock=clk, sleep=clk.sleep).cluster == before["cluster"]

@@ -148,3 +148,19 @@ def test_act_with_a_nebius_source_requires_a_vm_filter(tmp_path):
     with pytest.raises(SystemExit) as exc:
         patrol.main(["--act", "--nebius-json", str(doc)])
     assert exc.value.code == 2
+
+
+def test_a_peer_server_that_gave_up_is_an_alert(tmp_path):
+    tape = tmp_path / "s3-delivery.jsonl"
+    rows = [{"side": "pull", "source": "s3", "release": "r2-v2", "placed_at": NOW - 900},
+            {"side": "serve", "event": "peer_server_restarted", "healthy": True, "time_unix": NOW - 800},
+            {"side": "serve", "event": "peer_server_unhealthy", "healthy": False, "port": 18555,
+             "restarts": 3, "error": "OSError('bad fd')", "time_unix": NOW - 600}]
+    report = patrol.patrol(_args(delivery_tape=[_write(tape, rows)]), now=NOW)
+    (alert,) = report["alerts"]
+    assert alert["key"] == "peer_server_unhealthy" and alert["severity"] == "warn"
+    assert alert["target"] == "s3-delivery.jsonl" and "bad fd" in alert["message"]
+    # only restarts: no alert, and a delivery tape is never mistaken for a silent island
+    _write(tape, rows[:2])
+    assert patrol.patrol(_args(delivery_tape=[str(tape)]), now=NOW)["alerts"] == []
+    assert patrol.main(["--delivery-tape", _write(tape, rows)]) == 1

@@ -290,6 +290,14 @@ def test_sparse_update_writes_only_the_changed_elements(started, tmp_path, monke
     new_tensors = {n: _bump(t, changed[n]) if n in changed else t for n, t in old.items()}
     new = _rebuild(tmp_path, base, new_tensors, "v1", monkeypatch)
     fake.calls.clear()
+    patches, real_call = {}, engine._sparse_call
+
+    def call(commands, **kw):  # the patch is removed once applied: read it while it is there
+        for c in commands:
+            patches[c["rank"]] = json.loads((Path(c["patch"]) / "patch.json").read_text())
+        return real_call(commands, **kw)
+
+    monkeypatch.setattr(engine, "_sparse_call", call)
 
     report = engine.load(new, 1)
 
@@ -303,8 +311,7 @@ def test_sparse_update_writes_only_the_changed_elements(started, tmp_path, monke
     # the patches name only the parameters the changed tensors live in
     patched = set()
     for rank in range(tp):
-        patch = json.loads((Path(engine._sparse_root()) / "patch" / f"rank{rank}" / "patch.json").read_text())
-        patched |= {p[0] for p in patch["params"]}
+        patched |= {p[0] for p in patches[rank]["params"]}
     assert patched == {L + "self_attn.qkv_proj.weight", L + "mlp.experts.w2_weight",
                        "model.embed_tokens.weight", L + "mlp.experts.w13_weight"}
     assert engine.served_version() == 1 and fake.version == "1"
@@ -676,3 +683,28 @@ def test_a_failed_sparse_plan_frees_the_half_written_patch(started, tmp_path, mo
     assert "sparse_fallback" in detail or detail.get("sparse") is False, detail
     assert not (engine._sparse_root() / "patch").exists()
     assert (engine._sparse_root() / "maps").is_dir()  # the maps stay: the next release can go sparse
+
+
+def test_an_applied_sparse_patch_is_freed(started, tmp_path, monkeypatch):
+    """After a successful sparse update the patch must not hold /dev/shm until the next one."""
+    tp, fake, engine, base, _ = started
+    old = _base_tensors()
+    name = L + "self_attn.o_proj.weight"
+    new = _rebuild(tmp_path, base, {**old, name: _bump(old[name], [1, 2])}, "v1", monkeypatch)
+    assert engine.load(new, 1).detail["sparse"] is True
+    assert not (engine._sparse_root() / "patch").exists()
+    assert (engine._sparse_root() / "maps").is_dir()  # the maps stay: the next release can go sparse
+    newer = _rebuild(tmp_path, new, {**old, name: _bump(old[name], [1, 2, 3])}, "v2", monkeypatch)
+    assert engine.load(newer, 2).detail["sparse"] is True and engine.served_version() == 2
+    assert not (engine._sparse_root() / "patch").exists()
+
+
+def test_a_patch_that_failed_to_apply_is_freed_after_the_repair(started, tmp_path, monkeypatch):
+    tp, fake, engine, base, _ = started
+    old = _base_tensors()
+    name = L + "self_attn.o_proj.weight"
+    new = _rebuild(tmp_path, base, {**old, name: _bump(old[name], [1, 2])}, "v1", monkeypatch)
+    monkeypatch.setattr(engine, "_sparse_call", lambda commands, **kw: [{"ok": False, "error": "boom"}])
+    detail = engine.load(new, 1).detail
+    assert detail["sparse"] is False and "boom" in detail["sparse_repair"]
+    assert not (engine._sparse_root() / "patch").exists()

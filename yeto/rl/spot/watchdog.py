@@ -88,6 +88,8 @@ class Ops:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=REPO)
         except subprocess.TimeoutExpired:
             return False, f"launch timeout after {timeout_s:.0f}s"
+        except OSError as error:  # no sky executable, not executable, fork failed
+            return False, f"launch could not run {SKY}: {error}"[:300]
         out = p.stdout + p.stderr
         if p.returncode == 0 and "Job submitted" in out:
             return True, ""
@@ -254,6 +256,8 @@ class Watchdog:
     # clusters whose delete failed: retried every loop and billed until they are gone
     doomed: dict[str, dict[str, Any]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
+    # event-log / state-file writes that failed (e.g. a full disk); the loop goes on
+    log_write_errors: int = 0
 
     def __post_init__(self) -> None:
         if not re.search(self.cfg.own_name, self.cfg.cluster_prefix):
@@ -272,16 +276,34 @@ class Watchdog:
     def event(self, kind: str, **kw: Any) -> None:
         rec = {"t": round(self.clock(), 3), "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock())),
                "event": kind, "cluster": self.cluster, "spent_usd": round(self.spent, 3), **kw}
+        if self.log_write_errors:
+            rec["log_write_errors"] = self.log_write_errors
         self.history.append(rec)
-        with open(self.cfg.log, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        try:
+            with open(self.cfg.log, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+        except OSError as error:  # a full disk must not take the VM loop (and its deletes) down
+            self._write_failed("event log", error)
         self._save()
 
     def _save(self) -> None:
-        Path(self.cfg.state).write_text(json.dumps({
-            "spent_usd": self.spent, "seq": self.seq, "cluster": self.cluster,
-            "cand": asdict(self.cand) if self.cand else None,
-            "doomed": {name: asdict(d["cand"]) for name, d in self.doomed.items()}}))
+        # written aside and renamed: a full disk leaves the previous state, never a truncated one
+        tmp = Path(f"{self.cfg.state}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps({
+                "spent_usd": self.spent, "seq": self.seq, "cluster": self.cluster,
+                "cand": asdict(self.cand) if self.cand else None,
+                "doomed": {name: asdict(d["cand"]) for name, d in self.doomed.items()}}))
+            os.replace(tmp, self.cfg.state)
+        except OSError as error:
+            self._write_failed("state", error)
+            tmp.unlink(missing_ok=True)
+
+    def _write_failed(self, what: str, error: OSError) -> None:
+        self.log_write_errors += 1
+        if self.log_write_errors == 1 or self.log_write_errors % 100 == 0:
+            print(f"[watchdog] {what} write failed ({self.log_write_errors} so far): {error}",
+                  file=sys.stderr, flush=True)
 
     def bill(self) -> None:
         now = self.clock()
@@ -333,7 +355,10 @@ class Watchdog:
         t0 = self.clock()
         self.billed_at = t0  # pessimistic: bill from the request
         self.event("launch_start", cand=cand.key, price_hr=cand.price_hr)
-        ok, msg = self.ops.launch(self.cluster, cand, self.cfg.launch_timeout_s)
+        try:
+            ok, msg = self.ops.launch(self.cluster, cand, self.cfg.launch_timeout_s)
+        except Exception as error:  # noqa: BLE001 - a launch that raised is a failed launch
+            ok, msg = False, f"launch raised {type(error).__name__}: {error}"[:300]
         t1 = self.clock()
         if not ok or t1 - t0 > self.cfg.launch_timeout_s:
             self.event("launch_fail", cand=cand.key, launch_s=round(t1 - t0, 1), msg=msg)
