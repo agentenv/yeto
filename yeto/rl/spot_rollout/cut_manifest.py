@@ -24,11 +24,14 @@ The npu1 uplink is ~0.2 MB/s to Nebius, so a 120B release (a 13 GB delta,
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import shutil
 import sys
+import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -147,6 +150,80 @@ def _newer_than_latest(record: Mapping[str, Any], latest: Path) -> bool:
     return mine > theirs
 
 
+_FSYNC_DIR_UNSUPPORTED = {errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL), errno.EOPNOTSUPP}
+
+_WINDOWS = os.name == "nt"
+
+
+def _unique() -> str:
+    """A temporary-name suffix no other writer (process or thread) shares."""
+    return f"{os.getpid()}.{uuid.uuid4().hex[:12]}"
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsync a directory entry list. Windows is not supported for durability: a
+    directory cannot be opened there, so this is a no-op; filesystems that refuse a
+    directory fsync (EINVAL/ENOTSUP, e.g. some network or FUSE mounts) are tolerated."""
+    if _WINDOWS:
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as error:
+        if error.errno not in _FSYNC_DIR_UNSUPPORTED:
+            raise
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(top: Path) -> None:
+    """fsync every file, then every directory bottom-up (so each entry is durable)."""
+    for dirpath, _dirs, files in os.walk(top, topdown=False):
+        for name in files:
+            fd = os.open(os.path.join(dirpath, name), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_dir(Path(dirpath))
+
+
+STALE_STAGING_SECONDS = 24 * 3600
+
+
+def _sweep_dead_staging(root: Path, release: str, *, now: float | None = None) -> None:
+    """Remove ``.<release>.placing.<pid>.<id>`` (and the pre-unique ``.<release>.placing``)
+    untouched for ``STALE_STAGING_SECONDS``. Age, not pid liveness: a pid means nothing
+    across containers or hosts sharing the store, so a live writer elsewhere is kept."""
+    now = time.time() if now is None else now
+    prefix = f".{release}.placing"
+    for entry in root.iterdir():
+        if entry.name != prefix and not entry.name.startswith(prefix + "."):
+            continue
+        try:
+            age = now - entry.lstat().st_mtime
+        except FileNotFoundError:
+            continue
+        if age > STALE_STAGING_SECONDS:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def _keep_or_replace(manifest: Mapping[str, Any], root: Path, target: Path, tmp: Path) -> None:
+    """``target`` appeared under us: keep it if it verifies, else move it aside and put
+    our verified, synced copy in its place."""
+    try:
+        verify(manifest, target)
+        return
+    except ManifestError:
+        pass
+    bad = root / f".{manifest['release']}.bad.{_unique()}"
+    os.replace(target, bad)
+    try:
+        os.replace(tmp, target)
+    finally:
+        shutil.rmtree(bad, ignore_errors=True)
+
+
 def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
           expected_digest: str | None) -> Path:
     """Verify, move ``staged`` to ``store/policy-releases/<release>`` and write
@@ -168,15 +245,32 @@ def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
         verify(manifest, target)
     else:
         verify(manifest, Path(staged))
-        tmp = root / f".{manifest['release']}.placing"
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        shutil.move(str(staged), tmp)
-        os.replace(tmp, target)
+        _sweep_dead_staging(root, manifest["release"])
+        tmp = root / f".{manifest['release']}.placing.{_unique()}"
+        try:
+            shutil.move(str(staged), tmp)
+            _fsync_tree(tmp)  # every byte durable before the name says the release is there
+            try:
+                os.replace(tmp, target)
+            except OSError:
+                if not target.is_dir():
+                    raise
+                _keep_or_replace(manifest, root, target, tmp)  # another writer placed it first
+        finally:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+        _fsync_dir(root)
     if _newer_than_latest(manifest["record"], root / LATEST):
-        latest = root / f".{LATEST}.tmp"
-        latest.write_text(json.dumps(manifest["record"], sort_keys=True))
-        os.replace(latest, root / LATEST)
+        latest = root / f".{LATEST}.{_unique()}.tmp"
+        try:
+            with open(latest, "w") as out:
+                out.write(json.dumps(manifest["record"], sort_keys=True))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(latest, root / LATEST)
+        finally:
+            latest.unlink(missing_ok=True)
+        _fsync_dir(root)
     return target
 
 

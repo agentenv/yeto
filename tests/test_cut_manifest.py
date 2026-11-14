@@ -1,5 +1,9 @@
 """A release handed to a spot island through a near store (cut_manifest)."""
+import errno
 import json
+import os
+import stat
+import time
 import shutil
 
 import pytest
@@ -110,3 +114,136 @@ def test_a_release_name_with_a_path_is_refused(tmp_path, name):
     with pytest.raises(cm.ManifestError, match="plain release directory name"):
         cm.place(manifest, tmp_path / "staged", _far(tmp_path), expected_digest=None)
     assert not (tmp_path / "far" / "policy-releases" / "LATEST.json").exists()
+
+
+def _placed_inputs(tmp_path):
+    store, _ = _store(tmp_path)
+    manifest = cm.make(store, "r2-v2")
+    staged = tmp_path / "staged"
+    shutil.copytree(store / "policy-releases" / "r2-v2", staged)
+    return manifest, staged, _far(tmp_path)
+
+
+def test_every_file_and_directory_is_fsynced_before_the_renames(tmp_path, monkeypatch):
+    """A power cut must never leave a renamed release (or LATEST) over unsynced bytes."""
+    manifest, staged, far = _placed_inputs(tmp_path)
+    log, real_fsync, real_replace = [], cm.os.fsync, cm.os.replace
+
+    def fsync(fd):
+        log.append(("fsync", fd, os.fstat(fd).st_ino))
+        real_fsync(fd)
+
+    def replace(src, dst):
+        log.append(("replace", str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "fsync", fsync)
+    monkeypatch.setattr(cm.os, "replace", replace)
+    target = cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    root = far / "policy-releases"
+    synced = lambda upto: {entry[2] for entry in log[:upto] if entry[0] == "fsync"}  # noqa: E731
+    first = next(i for i, e in enumerate(log) if e[0] == "replace" and e[1] == str(target))
+    need = {p.stat().st_ino for p in [target, *target.iterdir()]}
+    assert need <= synced(first), "release files/dir not fsynced before the rename"
+    latest = next(i for i, e in enumerate(log) if e[0] == "replace" and e[1] == str(root / "LATEST.json"))
+    assert (root / "LATEST.json").stat().st_ino in synced(latest)
+    assert root.stat().st_ino in synced(latest)  # the release rename is durable before LATEST names it
+    assert root.stat().st_ino in synced(len(log)) and log[-1][0] == "fsync"  # and LATEST's rename
+
+
+def test_temporary_names_are_unique_per_writer(tmp_path, monkeypatch):
+    """Two writers placing at once must not share (and so clobber) a temporary path."""
+    manifest, staged, far = _placed_inputs(tmp_path)
+    root = far / "policy-releases"
+    other = root / ".r2-v2.placing"  # what another live writer's staging used to be named
+    other.mkdir()
+    (other / "half").write_bytes(b"x")
+    names, real_replace = [], cm.os.replace
+    monkeypatch.setattr(cm.os, "replace", lambda s, d: (names.append(os.path.basename(s)), real_replace(s, d)))
+    cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert (other / "half").read_bytes() == b"x"  # never removed under the other writer
+    assert all(str(os.getpid()) in name for name in names) and ".LATEST.json.tmp" not in names
+    assert sorted(p.name for p in root.iterdir() if not p.name.startswith(".")) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+def test_losing_a_race_to_place_the_same_release_keeps_the_winner(tmp_path, monkeypatch):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    winner = tmp_path / "winner"
+    shutil.copytree(staged, winner)
+    target = far / "policy-releases" / "r2-v2"
+    real_replace = cm.os.replace
+
+    def replace(src, dst):
+        if str(dst) == str(target) and not target.exists():  # the other writer gets there first
+            shutil.copytree(winner, target)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "replace", replace)
+    assert cm.place(manifest, staged, far, expected_digest=cm.digest(manifest)) == target
+    assert sorted(p.name for p in target.parent.iterdir()) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+def test_stale_staging_is_swept_by_age_not_pid(tmp_path):
+    """A pid is meaningless across containers/hosts sharing the store: a recent staging
+    dir is kept even if its pid is not alive here; an old one (or a pre-unique
+    ``.<release>.placing``) is removed."""
+    manifest, staged, far = _placed_inputs(tmp_path)
+    root = far / "policy-releases"
+    recent = root / ".r2-v2.placing.999999999.deadbeef"
+    old_unique = root / ".r2-v2.placing.1.cafe"
+    legacy = root / ".r2-v2.placing"
+    other_release = root / ".r3-v3.placing.1.cafe"
+    for d in (recent, old_unique, legacy, other_release):
+        d.mkdir()
+    stale = time.time() - cm.STALE_STAGING_SECONDS - 60
+    for d in (old_unique, legacy, other_release):
+        os.utime(d, (stale, stale))
+    cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert recent.exists() and other_release.exists()
+    assert not old_unique.exists() and not legacy.exists()
+
+
+def test_a_corrupt_release_that_won_the_rename_race_is_replaced(tmp_path, monkeypatch):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    target = far / "policy-releases" / "r2-v2"
+    real_replace, raced = cm.os.replace, []
+
+    def replace(src, dst):
+        if str(dst) == str(target) and not raced:  # a writer that placed bad bytes first
+            raced.append(True)
+            target.mkdir()
+            (target / "model.safetensors.ydelta").write_bytes(b"x" * 5000)
+            (target / "config.json").write_text("{}")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "replace", replace)
+    assert cm.place(manifest, staged, far, expected_digest=cm.digest(manifest)) == target
+    assert (target / "model.safetensors.ydelta").read_bytes() == b"delta" * 1000
+    assert sorted(p.name for p in target.parent.iterdir()) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOTSUP])
+def test_a_filesystem_refusing_directory_fsync_is_tolerated(tmp_path, monkeypatch, code):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    real_fsync = cm.os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(code, os.strerror(code))
+        real_fsync(fd)
+
+    monkeypatch.setattr(cm.os, "fsync", fsync)
+    target = cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert (target / "config.json").read_text() == "{}"
+
+
+def test_other_directory_fsync_errors_still_raise(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm.os, "fsync", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "io")))
+    with pytest.raises(OSError):
+        cm._fsync_dir(tmp_path)
+
+
+def test_directory_fsync_is_skipped_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm, "_WINDOWS", True)
+    monkeypatch.setattr(cm.os, "fsync", lambda fd: pytest.fail("a directory cannot be opened on Windows"))
+    cm._fsync_dir(tmp_path)
