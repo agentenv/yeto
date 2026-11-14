@@ -33,12 +33,27 @@ ledger through ``$YETO_RESOURCE_LEDGER`` (see :func:`current`).
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
+
+
+def _stamp(value: Any) -> float | None:
+    """A record's ``ts`` as finite epoch seconds; None when missing or corrupt."""
+    if isinstance(value, bool):
+        return None
+    try:
+        t = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return t if math.isfinite(t) else None
 
 LEDGER_ENV = "YETO_RESOURCE_LEDGER"
 LEDGER_FILE = "resources.jsonl"
@@ -147,10 +162,34 @@ class ResourceLedger:
         """Folded state, in creation order. A create resolves the newest open
         intent of the same kind and name."""
         res: dict[str, Resource] = {}
-        for r in self.records():
-            kind, rid, name, ts = r["kind"], r.get("id"), r.get("name"), float(r.get("ts") or 0)
+        records = self.records()
+        # Time faults must neither raise (every guard tick failed: the budget breaker was off)
+        # nor shrink the bill. Append order is the true order, so ``floor`` (the newest stamp
+        # of any earlier record) bounds each record from below: a create / intent keeps its own
+        # stamp (earlier is the costlier side) unless it is corrupt, then takes ``floor``; a
+        # release is never earlier than ``floor`` (a wall clock stepped back between create and
+        # release billed the span as 0). It overbills by at most the step-back.
+        floor: float | None = None
+        for r in records:
+            if _stamp(r.get("ts")) is not None:
+                floor = _stamp(r.get("ts"))  # the first good stamp: a corrupt head record's floor
+                break
+        for r in records:
+            kind, rid, name = r["kind"], r.get("id"), r.get("name")
+            raw, op = _stamp(r.get("ts")), r.get("op")
+            if raw is None:
+                log.warning("ledger %s: %s %s %s has no valid ts (%r): taken as %s", self.path, op, kind,
+                            rid or name, r.get("ts"), floor)
+                ts = floor if floor is not None else 0.0
+            elif op in ("release", "release_failed") and floor is not None and raw < floor:
+                log.warning("ledger %s: release of %s %s stamped %.0f s before an earlier record "
+                            "(wall clock stepped back): billed to %s", self.path, kind, rid or name,
+                            floor - raw, floor)
+                ts = floor
+            else:
+                ts = raw
+            floor = ts if floor is None else max(floor, ts)
             attrs = dict(r.get("attrs") or {})
-            op = r.get("op")
             if op == "intent":
                 k = _key(kind, None, name)
                 res[k] = Resource(kind, None, name, ts, attrs, intent_only=True)

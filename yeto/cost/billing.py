@@ -16,6 +16,7 @@ summary says so; the guard warns about unpriced resources.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from collections.abc import Callable, Iterable, Mapping
@@ -24,6 +25,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .ledger import Resource
+
+log = logging.getLogger(__name__)
+_SKEW_WARNED: set[str] = set()  # one warning per resource, not one per guard tick
 
 HOUR = 3600.0
 NC_USD_PER_UCR_ENV = "YETO_NC_USD_PER_UCR"
@@ -298,6 +302,11 @@ def _nc_rate(r: Resource, rates: Rates) -> float | None:
 
 def _span_cost(r: Resource, start: float, now: float, rate: float | None, note: str = "") -> ItemCost:
     end = r.released_at if r.released_at is not None else now
+    if end < start and r.key not in _SKEW_WARNED:
+        _SKEW_WARNED.add(r.key)
+        # clamped to a 0 h span below (the ledger already floors a release at the newest
+        # earlier stamp, so this is a clock skew it could not see): said, never silent
+        log.warning("cost: %s ends %.0f s before its start (clock skew?): billed as 0 h", r.key, start - end)
     item = ItemCost(r.key, r.kind, r.name, start, max(start, end), r.open, note=note,
                     rate_usd_per_hour=rate)
     if rate is None:

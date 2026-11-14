@@ -75,6 +75,7 @@ import atexit
 import copy
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -128,6 +129,17 @@ def _utc_seconds(stamp: Any) -> float | None:
             tzinfo=_dt.timezone.utc).timestamp()
     except ValueError:
         return None
+
+
+def _epoch(value: Any) -> float | None:
+    """Finite epoch seconds of a pool-state stamp; None when missing or corrupt."""
+    if isinstance(value, bool):
+        return None
+    try:
+        t = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return t if math.isfinite(t) else None
 
 
 def _argv_value(argv: list[str], flag: str) -> str | None:
@@ -755,6 +767,22 @@ class Run:
                 period["end"] = now
         self.state["spend_usd_estimate"] = round(self.spend_usd(), 2)
 
+    def wall_elapsed_s(self, now: float | None = None) -> float:
+        """Seconds of this up (since ``t0``) for ``budget.wall_h``: the wall clock, but never
+        less than this process measured on the monotonic clock. A wall clock stepped back
+        (NTP) shrank the elapsed time and delayed the wall-clock breaker and the forced
+        pool-stop by the step."""
+        now = time.time() if now is None else now
+        t0 = float(self.state.get("t0", now))
+        wall = now - t0
+        mono = getattr(time, "monotonic", None)
+        if mono is None:
+            return wall
+        anchor = getattr(self, "_wall_anchor", None)
+        if anchor is None or anchor[0] != t0:  # first look at this up's t0: anchor it
+            anchor = self._wall_anchor = (t0, mono(), wall)
+        return max(wall, anchor[2] + (mono() - anchor[1]))
+
     def uptime(self, now: float | None = None) -> dict[str, Any]:
         """:func:`yeto.rl.up_segments.uptime_summary` with the live spend and the time left
         on this up's ``budget.wall_h``."""
@@ -765,7 +793,7 @@ class Run:
         out["wall_h"] = wall_h
         out["wall_h_left"] = None  # None: no wall-clock cap, or no open up
         if wall_h is not None and out["current_up_open"] and "t0" in self.state:
-            out["wall_h_left"] = round(wall_h - (now - float(self.state["t0"])) / 3600, 4)
+            out["wall_h_left"] = round(wall_h - self.wall_elapsed_s(now) / 3600, 4)
         return out
 
     @property
@@ -1103,8 +1131,13 @@ class Run:
         for m in members:
             if m.get("granted") is None:
                 continue
-            start = max(float(m["granted"]), t0)
-            end = float(m.get("charged_to") or now) if m.get("state") == "gone" else now
+            # a corrupt stamp must not raise out of the breaker (it ended the monitor and the
+            # budget guard) nor bill less: an unreadable grant bills from t0, an unreadable
+            # release to now
+            granted = _epoch(m["granted"])
+            start = t0 if granted is None else max(granted, t0)
+            charged = _epoch(m.get("charged_to")) if m.get("charged_to") else now
+            end = (now if charged is None else charged) if m.get("state") == "gone" else now
             hours += max(0.0, end - start) / 3600
         return hours
 
@@ -1253,7 +1286,7 @@ class Run:
         if controller is not None and controller.check():  # the in-process pools stopped being driven
             return controller.check()
         wall_h = up_consistency.budget_wall_h(b)
-        if wall_h is not None and "t0" in self.state and time.time() - self.state["t0"] > wall_h * 3600:
+        if wall_h is not None and "t0" in self.state and self.wall_elapsed_s() > wall_h * 3600:
             why = "wall clock"
         elif self.spend_usd() > up_consistency.budget_usd(b):
             why = f"budget ${self.spend_usd():.0f}"
@@ -1901,14 +1934,21 @@ class Run:
         wall_h = up_consistency.budget_wall_h(b)
         wall_cap = float("inf") if wall_h is None else wall_h * 3600 * FORCE_FACTOR
         forced: set[str] = set()
+        failed = 0
         while True:
             members = self.pool_members()
             billed = None if members is None else [m for m in members if m.get("state") != "gone"]
             if billed is not None and not billed:
                 _log(f"{self.pools_phrase()}: no machine bills any more; monitor done")
                 return
-            spend = self.spend_usd()
-            elapsed = time.time() - float(self.state.get("t0", time.time()))
+            try:
+                spend = self.spend_usd()
+            except Exception as error:  # noqa: BLE001 - raised, it ended the watch with nodes billing
+                _log(f"STILL BILLING after '{why}': spend unreadable ({type(error).__name__}: {error}); "
+                     "checking again next poll"[:400])
+                time.sleep(poll_s)
+                continue
+            elapsed = self.wall_elapsed_s()
             n = "?" if billed is None else len(billed)
             _log(f"STILL BILLING after '{why}': {n} machine(s) of {self.pools_phrase()}, spend ${spend:.0f}; "
                  f"release with: "
@@ -1927,7 +1967,12 @@ class Run:
                     return
                 # a pool-stop that failed or timed out (rc 124) has not released the machines:
                 # keep watching (the loop ends once none bills) and try the stop again next poll
+                failed += 1
                 _log(f"BREAKER: pool-stop rc={rc}: the machines may still bill; retrying next poll")
+                if failed >= 3:  # loud and recorded: `yeto run status` / the operator sees it
+                    _log(f"CRITICAL: forced pool-stop failed {failed} times in a row (rc={rc}); "
+                         f"{n} machine(s) still bill: release them by hand (yeto run down --config <run.json>)")
+                    self.mark("nc_forced_stop_failed", why=cap, rc=rc, attempts=failed)
             time.sleep(poll_s)
 
     # -- down
