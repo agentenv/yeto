@@ -4516,8 +4516,9 @@ async fn scheduler(
             if busy_fragments.contains(&p) {
                 break;
             }
-            let mut groups = current_groups(&registry);
-            groups.retain(|group| !catch_ups.holds(group.member) && !resends.holds(group.member));
+            let groups = ready_groups(current_groups(&registry), |group| group.member, |member| {
+                catch_ups.holds(member) || resends.holds(member)
+            });
             if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
@@ -4691,6 +4692,14 @@ async fn scheduler(
                             "quorum timeout below K; launching a new frozen-membership attempt"
                         );
                     }
+                    // Like a launch, a new attempt never pulls a learner whose
+                    // catch-up is still in flight: it would answer from the
+                    // anchor it held before the catch-up (a stale, future or
+                    // fenced base) and then not push for this attempt again.
+                    // Its catch-up tail joins it to the attempt instead.
+                    let groups = ready_groups(groups, |group| group.member, |member| {
+                        catch_ups.holds(member) || resends.holds(member)
+                    });
                     let required = cfg.membership.min_launch_members(cfg.quorum);
                     if groups.len() < required {
                         warn!(
@@ -4994,6 +5003,7 @@ async fn scheduler(
                             "push fenced: {reason:#}"
                         );
                         rejected("fenced");
+                        release_fenced_slot(&mut inflight, member, &push, fixed_roster);
                         continue;
                     }
                     // Pace from every unfenced push, refused ones included: a
@@ -6137,6 +6147,41 @@ fn join_gathering_rounds(
         });
     }
     joined
+}
+
+/// The learners a round launch or a new round attempt may pull: those not
+/// held by a rejoin catch-up or background resend. A held learner joins the
+/// gathering rounds when its catch-up tail runs (`join_gathering_rounds`).
+fn ready_groups<G>(groups: Vec<G>, member_of: impl Fn(&G) -> Member, held: impl Fn(Member) -> bool) -> Vec<G> {
+    groups.into_iter().filter(|group| !held(member_of(group))).collect()
+}
+
+/// A push fenced by the re-JOIN catch-up floor (`check_push_base`) is that
+/// island's answer to its round's pull: it will not push for that attempt
+/// again. Release its slot exactly as `route_push` does for a stale base, so
+/// the round closes with the remaining responders instead of waiting out the
+/// quorum timeout; the catch-up tail (or the next attempt) pulls the island
+/// again at a base it holds. A fixed roster and an exact fold keep the slot.
+fn release_fenced_slot(
+    rounds: &mut [Round],
+    member: Member,
+    push: &Push,
+    fixed_roster: bool,
+) -> bool {
+    if fixed_roster {
+        return false;
+    }
+    let Some(round) = rounds.iter_mut().find(|round| {
+        round.t == push.global_step
+            && round.p == push.fragment_id as usize
+            && round.attempt == push.round_attempt
+    }) else {
+        return false;
+    };
+    if matches!(round.fold, Some(RoundFold::Exact(_))) {
+        return false;
+    }
+    round.forget_unanswered(member)
 }
 
 fn route_push(
@@ -13966,6 +14011,93 @@ mod tests {
             PushDisposition::FutureBase
         );
         assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+    }
+
+    #[test]
+    fn fenced_slot_release_and_future_base_relaunch_compose() {
+        let ahead = member(0, 10);
+        let fenced = member(1, 20);
+        let fenced_push = test_push_for(1, 3);
+
+        // One island refused as FutureBase, the other fenced: the fenced one
+        // leaves the expected set, so every island still expected was
+        // refused ahead and the round relaunches at once.
+        let mut round = test_round(vec![ahead, fenced]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, ahead, test_push_for(0, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+        assert!(release_fenced_slot(&mut rounds, fenced, &fenced_push, false));
+        assert_eq!(rounds[0].expected_members, vec![ahead]);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Restart);
+
+        // Every island fenced: the expected set is empty, which is not "all
+        // refused ahead"; the round waits (a catch-up tail joins the islands
+        // back) instead of relaunching in a loop.
+        let mut round = test_round(vec![fenced]);
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert!(release_fenced_slot(&mut rounds, fenced, &fenced_push, false));
+        assert!(rounds[0].expected_members.is_empty());
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Wait);
+
+        // Refused ahead, then the other island accepted: no relaunch.
+        let mut round = test_round(vec![ahead, fenced]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        assert_eq!(
+            route_push(&mut rounds, ahead, test_push_for(0, 6), None, false),
+            PushDisposition::FutureBase
+        );
+        assert_eq!(
+            route_push(&mut rounds, fenced, test_push_for(1, 5), None, false),
+            PushDisposition::Accepted
+        );
+        assert_ne!(round_action(&rounds[0], Instant::now()), RoundAction::Restart);
+    }
+
+    #[test]
+    fn a_fenced_push_releases_the_slot_its_island_will_not_answer_again() {
+        // A re-joined island pulled before its catch-up landed answers from
+        // its pre-catch-up anchor; once the catch-up is recorded that push
+        // is fenced. The island will not push for this attempt again, so
+        // keeping its slot stalled the round until --quorum-timeout-s.
+        let fenced = member(0, 10);
+        let other = member(1, 20);
+        let mut round = test_round(vec![fenced, other]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        let mut push = test_push(3);
+        push.learner_id = 0;
+        assert!(release_fenced_slot(&mut rounds, fenced, &push, false));
+        assert_eq!(rounds[0].expected_members, vec![other]);
+        let mut accepted = test_push(5);
+        accepted.learner_id = 1;
+        assert_eq!(route_push(&mut rounds, other, accepted, None, false), PushDisposition::Accepted);
+        assert_eq!(round_action(&rounds[0], Instant::now()), RoundAction::Complete);
+
+        // Another attempt's push and a fixed roster leave the round alone.
+        let mut rounds = vec![test_round(vec![fenced, other])];
+        let mut old_attempt = test_push(3);
+        old_attempt.round_attempt = 2;
+        assert!(!release_fenced_slot(&mut rounds, fenced, &old_attempt, false));
+        assert!(!release_fenced_slot(&mut rounds, fenced, &push, true));
+        assert_eq!(rounds[0].expected_members, vec![fenced, other]);
+    }
+
+    #[test]
+    fn a_round_attempt_never_pulls_a_learner_still_catching_up() {
+        let ready = member(0, 10);
+        let catching_up = member(1, 20);
+        let resending = member(2, 30);
+        let groups = ready_groups(vec![ready, catching_up, resending], |m| *m, |m| m == catching_up || m == resending);
+        assert_eq!(groups, vec![ready]);
     }
 
     #[test]
