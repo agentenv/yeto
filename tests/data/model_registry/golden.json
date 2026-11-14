@@ -99,7 +99,7 @@
      "weight_gib": 1249.9,
      "weights": "bf16"
     },
-    "sampler_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+    "sampler_image_pin": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
     "status": "inferred",
     "trainer_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"
    },
@@ -185,7 +185,7 @@
    "rl_model_recipe": "generic",
    "sampler": "sglang",
    "sampler_hardware": null,
-   "sampler_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+   "sampler_image": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
    "status": "inferred",
    "trainer": "miles",
    "trainer_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"
@@ -465,7 +465,9 @@
    "tuning": "full",
    "world": 48
   },
-  "warnings": []
+  "warnings": [
+   "93 layers do not divide evenly by PP6: Megatron splits the pipeline unevenly (15-16 layers per stage); set the first/last stage layer counts explicitly if the stages must balance"
+  ]
  },
  "qwen3_0p6b/ascend": {
   "alternatives": [],
@@ -667,7 +669,7 @@
      "weight_gib": 1.1,
      "weights": "bf16"
     },
-    "sampler_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+    "sampler_image_pin": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
     "status": "verified",
     "trainer_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"
    },
@@ -748,7 +750,7 @@
    "rl_model_recipe": "generic",
    "sampler": "sglang",
    "sampler_hardware": null,
-   "sampler_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+   "sampler_image": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
    "status": "verified",
    "trainer": "miles",
    "trainer_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"
@@ -996,7 +998,7 @@
      "weight_gib": 56.9,
      "weights": "bf16"
     },
-    "sampler_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+    "sampler_image_pin": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
     "status": "inferred",
     "trainer_image_pin": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"
    },
@@ -1080,7 +1082,7 @@
    "rl_model_recipe": "generic",
    "sampler": "sglang",
    "sampler_hardware": null,
-   "sampler_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+   "sampler_image": "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
    "status": "inferred",
    "trainer": "miles",
    "trainer_image": "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE"

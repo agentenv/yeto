@@ -232,6 +232,11 @@ def recommend(facts: ModelFacts, hw: HardwareFacts, constraints: Constraints | N
     if not trainer["fits"]:
         warnings.append(f"trainer state does not fit {trainer['max_world']} x {hw.card} at "
                         f"{USABLE_FRACTION:.0%} HBM; use LoRA, more nodes (--max-nodes), or a larger card")
+    if trainer["fits"] and facts.layers % trainer["pipeline_parallel"]:
+        pp = trainer["pipeline_parallel"]
+        warnings.append(f"{facts.layers} layers do not divide evenly by PP{pp}: Megatron splits the "
+                        f"pipeline unevenly ({facts.layers // pp}-{-(-facts.layers // pp)} layers per stage); "
+                        f"set the first/last stage layer counts explicitly if the stages must balance")
     if not sampler["fits"]:
         warnings.append("sampler: " + sampler.get("note", "does not fit"))
     rec.supported = bool(trainer["fits"] and sampler["fits"])

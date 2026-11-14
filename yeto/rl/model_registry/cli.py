@@ -40,10 +40,14 @@ def cmd_adapt(args: argparse.Namespace) -> int:
         cfg, source = load_config(args.model)
         hw = hardware_facts(args.hardware, args.card, cards_per_node=args.cards_per_node,
                             max_nodes=args.max_nodes, interconnect=args.interconnect)
+        facts = facts_from_config(cfg)
     except (FileNotFoundError, ValueError) as exc:
         print(f"yeto adapt: {exc}", file=sys.stderr)
         return 2
-    facts = facts_from_config(cfg)
+    except (KeyError, TypeError, AttributeError) as exc:  # malformed config.json: not "unsupported" (1)
+        print(f"yeto adapt: cannot read {source}: malformed config ({type(exc).__name__}: {exc})",
+              file=sys.stderr)
+        return 2
     rec = recommend(facts, hw, Constraints(tuning=args.tuning, sampler_engine=args.sampler_engine,
                                            trainer_backend=args.trainer_backend, max_cards=args.max_cards),
                     card_explicit=args.card is not None)
@@ -56,8 +60,12 @@ def cmd_adapt(args: argparse.Namespace) -> int:
             print("\nrun-config draft (yeto run up):")
             print(json.dumps(draft, indent=2))
     if args.write_config and draft:
-        with open(args.write_config, "w", encoding="utf-8") as fh:
-            json.dump(draft, fh, indent=2)
+        try:
+            with open(args.write_config, "w", encoding="utf-8") as fh:
+                json.dump(draft, fh, indent=2)
+        except OSError as exc:
+            print(f"yeto adapt: cannot write --write-config {args.write_config}: {exc}", file=sys.stderr)
+            return 2
     return 0 if rec.supported else 1
 
 

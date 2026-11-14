@@ -200,3 +200,50 @@ def test_rl_model_auto_is_off_by_default_and_advisory():
     advise_launch(args, stream=buf)
     assert "qwen3-dense" in buf.getvalue() and "explicit flag is used" in buf.getvalue()
     assert args.rl_model_recipe == "kimi_k31"
+
+
+def test_adapt_malformed_config_exits_2_without_traceback(capsys, tmp_path):
+    from yeto.cli import main
+    bad = tmp_path / "config.json"
+    bad.write_text(json.dumps({"model_type": "x"}))
+    assert main(["adapt", str(bad), "--hardware", "nvidia"]) == 2
+    err = capsys.readouterr().err
+    assert "malformed config" in err and "Traceback" not in err
+
+
+def test_adapt_unwritable_write_config_exits_2(capsys, tmp_path):
+    from yeto.cli import main
+    target = tmp_path / "no-such-dir" / "draft.json"
+    assert main(["adapt", str(DATA / "qwen3_0p6b.json"), "--hardware", "nvidia",
+                 "--write-config", str(target)]) == 2
+    assert "cannot write --write-config" in capsys.readouterr().err
+
+
+def test_uneven_pipeline_split_is_flagged():
+    rec = _rec("kimi_k31", "nvidia")
+    assert rec.trainer_parallel["pipeline_parallel"] == 6
+    assert any("93 layers do not divide evenly by PP6" in w for w in rec.warnings)
+    even = _rec("qwen3_0p6b", "nvidia")
+    assert not any("divide evenly" in w for w in even.warnings)
+
+
+def test_generic_images_match_the_a22_default_image_rows():
+    """Mirror of A22 yeto.launch.engine_images.DEFAULT_IMAGES (pinned rows); after A22
+    merges, families reads engine_images.default_image_entry(...).ref instead."""
+    from yeto.rl.model_registry.families import GENERIC_IMAGES
+    assert GENERIC_IMAGES == {
+        ("cuda", "trainer", "miles"): "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
+        ("cuda", "trainer", "verl"): "yeto.rl.adapters.verl.pins:VERL_IMAGE",
+        ("cuda", "sampler", "sglang"): "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
+        ("cuda", "sampler", "vllm"): "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_CUDA",
+        ("rocm", "sampler", "vllm"): "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_ROCM",
+    }
+    for entry in ALL_ENTRIES:
+        for r in entry.recipes:
+            if r.status == "unsupported" or r.rl_model_recipe == "kimi_k31":
+                continue
+            fam = r.hardware[0]
+            if fam == "cuda":
+                assert r.sampler_image == GENERIC_IMAGES[("cuda", "sampler", r.sampler)], r.name
+                if r.trainer_image != "yeto.rl.adapters.verl.pins:VERL_MEGATRON_IMAGE":
+                    assert r.trainer_image == GENERIC_IMAGES[("cuda", "trainer", r.trainer)], r.name

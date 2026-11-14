@@ -20,6 +20,20 @@ VERL = f"{VERL_PINS}:VERL_IMAGE"
 VERL_MEGATRON = f"{VERL_PINS}:VERL_MEGATRON_IMAGE"
 VERL_NPU = f"{VERL_PINS}:VERL_NPU_BASE_IMAGE"
 VLLM_ROCM = f"{SAMPLER_PINS}:VLLM_SAMPLER_IMAGE_ROCM"
+SGLANG_CUDA = f"{SAMPLER_PINS}:SGLANG_SAMPLER_IMAGE_CUDA"
+VLLM_CUDA = f"{SAMPLER_PINS}:VLLM_SAMPLER_IMAGE_CUDA"
+
+# Generic (device family, role, engine) -> image ref. Kept identical to the pinned rows of
+# A22's yeto.launch.engine_images.DEFAULT_IMAGES (not merged yet, so not imported); once
+# A22 lands, read these from engine_images.default_image_entry(family, role, engine).ref.
+# Ascend has no pinned row there (ref None); the registry names the unverified CANN base.
+GENERIC_IMAGES = {
+    ("cuda", "trainer", "miles"): MILES_NEXT,
+    ("cuda", "trainer", "verl"): VERL,
+    ("cuda", "sampler", "sglang"): SGLANG_CUDA,
+    ("cuda", "sampler", "vllm"): VLLM_CUDA,
+    ("rocm", "sampler", "vllm"): VLLM_ROCM,
+}
 
 INF = float("inf")
 Q_CUDA = QuantPlan("bf16", "bf16 (FP8 optional on Hopper/Blackwell)", "bf16")
@@ -55,10 +69,10 @@ def _unsupported(name, hardware, band, reason, alternative):
 def _dense_recipes(fam: str, *, cuda_status: str, ascend_status: str, ascend_evidence: str) -> tuple:
     return (
         _r(f"{fam}/cuda/miles", ["cuda"], "miles", "sglang", "generic", ["lora", "full"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, cuda_status, "historical GPU runs (generic recipe)",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, cuda_status, "historical GPU runs (generic recipe)",
            pitfalls=(P_DROPOUT,)),
         _r(f"{fam}/cuda/verl", ["cuda"], "verl", "vllm", "generic", ["lora", "full"], (0, INF),
-           VERL, VERL, Q_CUDA, cuda_status, "verl FSDP2 + vLLM island (S16)",
+           VERL, VLLM_CUDA, Q_CUDA, cuda_status, "verl FSDP2 + vLLM island (S16)",
            pitfalls=(P_HOST_LOAD,)),
         _r(f"{fam}/ascend/verl", ["ascend"], "verl", "vllm-ascend", "generic", ["lora", "full"], (0, 300),
            VERL_NPU, VERL_NPU, Q_ASCEND, ascend_status, ascend_evidence,
@@ -81,11 +95,11 @@ QWEN3_MOE = FamilyEntry(
     "qwen3-moe", ("Qwen3MoeForCausalLM", "Qwen2MoeForCausalLM"), ("qwen3_moe", "qwen2_moe"),
     (
         _r("qwen3-moe/cuda/miles", ["cuda"], "miles", "sglang", "generic", ["lora", "full"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, "inferred", "A21 section 2 (Megatron-Bridge + SGLang list Qwen3-MoE)",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, "inferred", "A21 section 2 (Megatron-Bridge + SGLang list Qwen3-MoE)",
            pitfalls=(P_DROPOUT, "pick EP so that num_experts % EP == 0; routing replay (R2/R3) keeps "
                      "train/rollout expert choice aligned")),
         _r("qwen3-moe/cuda/verl", ["cuda"], "verl", "vllm", "generic", ["lora", "full"], (0, INF),
-           VERL_MEGATRON, VERL_MEGATRON, Q_CUDA, "inferred", "A21 section 2 (verl Megatron engine, EP)",
+           VERL_MEGATRON, VLLM_CUDA, Q_CUDA, "inferred", "A21 section 2 (verl Megatron engine, EP)",
            pitfalls=(P_HOST_LOAD,)),
         _r("qwen3-moe/ascend/verl", ["ascend"], "verl", "vllm-ascend", "generic", ["lora", "full"], (0, 100),
            VERL_NPU, VERL_NPU, Q_ASCEND, "inferred", "vllm-ascend support matrix: Qwen3-30B-A3B supported",
@@ -107,7 +121,7 @@ MISTRAL_GEMMA = FamilyEntry(
     ("mistral", "mixtral", "gemma2", "gemma3", "gemma3_text"),
     (
         _r("mistral-gemma/cuda/verl", ["cuda"], "verl", "vllm", "generic", ["lora", "full"], (0, INF),
-           VERL, VERL, Q_CUDA, "inferred", "A21 section 2 (verl FSDP2 partial; ms-swift has no support)",
+           VERL, VLLM_CUDA, Q_CUDA, "inferred", "A21 section 2 (verl FSDP2 partial; ms-swift has no support)",
            pitfalls=("Megatron-Bridge lacks Gemma 2 / Mistral: prefer verl FSDP2 over Miles",
                      "ms-swift Megatron does not support Mistral/Mixtral/Gemma")),
         _r("mistral-gemma/ascend/verl", ["ascend"], "verl", "vllm-ascend", "generic", ["lora", "full"], (0, 100),
@@ -120,7 +134,7 @@ DEEPSEEK_V3 = FamilyEntry(
     "deepseek-v3", ("DeepseekV3ForCausalLM", "KimiK2ForCausalLM"), ("deepseek_v3", "kimi_k2"),
     (
         _r("deepseek-v3/cuda/miles", ["cuda"], "miles", "sglang", "generic", ["lora", "full"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, "inferred", "A21 section 2 (Megatron-Bridge + SGLang support DeepSeek-V3)",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, "inferred", "A21 section 2 (Megatron-Bridge + SGLang support DeepSeek-V3)",
            pitfalls=(P_DROPOUT, "MLA: TP must divide num_attention_heads; KV heads are the latent (no GQA split)",
                      "the FP8 HF checkpoint (block-wise e4m3) needs a bf16 conversion before Megatron-Bridge loads it",
                      "MTP layers (num_nextn_predict_layers) are not trained by the generic recipe")),
@@ -135,7 +149,7 @@ DEEPSEEK_V4_FLASH = FamilyEntry(
     "deepseek-v4-flash", ("DeepseekV4ForCausalLM",), ("deepseek_v4",),
     (
         _r("deepseek-v4-flash/cuda/miles", ["cuda"], "miles", "sglang", "deepseek-v4-flash", ["lora"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, "verified", "tests/test_rl_deepseek_v4*",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, "verified", "tests/test_rl_deepseek_v4*",
            hard_constraints=("tp==8", "ep==8", "rollout_gpus_per_engine==8"),
            pitfalls=("expanded DeepSeek V4 requires TP8/EP8 and 8-GPU rollout replicas (run_config.py:937-956)",)),
         _unsupported("deepseek-v4-flash/ascend", ["ascend"], (0, INF),
@@ -148,7 +162,7 @@ GLM5_NEXT = FamilyEntry(
     "glm5_next", (), ("glm5_next", "glm5_next_text"),
     (
         _r("glm5_next/cuda/miles", ["cuda"], "miles", "sglang", "glm5_next", ["full"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, "smoke-only", "Modal run-7 (stage1.py:492)",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, "smoke-only", "Modal run-7 (stage1.py:492)",
            hard_constraints=("needs:megatron_ref_load",),
            pitfalls=("full-parameter only; convert to torch_dist first and pass --megatron-ref-load "
                      "(run_config.py:960-966)", P_AUTOBRIDGE)),
@@ -183,10 +197,10 @@ NEMOTRON_H = FamilyEntry(
     "nemotron-h", ("NemotronHForCausalLM",), ("nemotron_h",),
     (
         _r("nemotron-h/cuda/miles", ["cuda"], "miles", "sglang", "generic", ["lora", "full"], (0, INF),
-           MILES_NEXT, MILES_NEXT, Q_CUDA, "verified", "run_config.py:1002 (Megatron-Bridge Nemotron-H recipe)",
+           MILES_NEXT, SGLANG_CUDA, Q_CUDA, "verified", "run_config.py:1002 (Megatron-Bridge Nemotron-H recipe)",
            pitfalls=("the recipe is chosen from the provider (hybrid_layer_pattern), not --rl-model-recipe",)),
         _r("nemotron-h/cuda/verl", ["cuda"], "verl", "vllm", "generic", ["lora", "full"], (0, INF),
-           VERL_MEGATRON, VERL_MEGATRON, Q_CUDA, "verified", "verl/nemotron_h.py, patch_verl #7-#9",
+           VERL_MEGATRON, VLLM_CUDA, Q_CUDA, "verified", "verl/nemotron_h.py, patch_verl #7-#9",
            pitfalls=("verl picks AutoModel from auto_map (patch_verl #7)", P_HOST_LOAD,
                      "vLLM Mamba cache flags change between releases")),
         _unsupported("nemotron-h/ascend/rl", ["ascend"], (0, INF),
