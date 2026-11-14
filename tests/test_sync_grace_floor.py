@@ -166,6 +166,11 @@ class _StepReportingIsland(late.ReactiveIsland):
 
     STEPS_PER_PUSH = 4
 
+    def __init__(self, *args, warmup_pushes=0, warmup_extra_s=0.0):
+        super().__init__(*args)
+        self.warmup_pushes, self.warmup_extra_s = warmup_pushes, warmup_extra_s
+        self.pushes = 0
+
     def run(self):
         try:
             while not self.stop.is_set():
@@ -173,7 +178,9 @@ class _StepReportingIsland(late.ReactiveIsland):
                 if not pulls:
                     time.sleep(0.005)
                     continue
-                time.sleep(self.work_s)
+                extra = self.warmup_extra_s if self.pushes < self.warmup_pushes else 0.0
+                self.pushes += 1
+                time.sleep(self.work_s + extra)
                 self.client.heartbeat(self.rounds)
                 for update in self.client.drain_updates():
                     fid = update.fragment_id
@@ -190,19 +197,32 @@ class _StepReportingIsland(late.ReactiveIsland):
 
 
 @needs_cargo
-@pytest.mark.parametrize(("options", "least_direct", "most_direct"), [
-    ((), 0, 4),  # control: the adaptive window is ~0 s, island 1 is ~0.2 s late
-    (("--rl-sync-grace-min-ms", "600"), 15, 16),
-    (("--rl-sync-grace-arrival-quantile", "0.9"), 10, 16),  # warm-up: a few late gaps first
+@pytest.mark.parametrize(("options", "warmup", "counted", "least_direct", "most_direct"), [
+    ((), 0, range(1, 17), 0, 4),  # control: the adaptive window is ~0 s, island 1 is ~0.2 s late
+    (("--rl-sync-grace-min-ms", "600"), 0, range(1, 17), 15, 16),
+    # The quantile floor learns the gap from pushes: island 1 is 0.5 s later
+    # for its first 3 pushes (a few wide gaps), then ~0.2 s late. Once those
+    # gaps are kept, the 0.9 quantile (the largest or second largest gap
+    # while fewer than 20 are kept) sits ~0.5 s above the steady gap, so
+    # island 1 answers every steady round directly. Without the wide gaps
+    # the floor is the nearest-rank quantile of near-equal ~0.2 s gaps and
+    # each round is a toss on millisecond jitter (a gap above every earlier
+    # one misses): for exchangeable gaps 9 or fewer of 16 rounds are direct
+    # about 1% of the time, more often under CI load. Rounds before 9 are
+    # left out: whether round 1 waits the 5 s cap depends on whether a step
+    # time is known yet, and if not island 1 misses its warm-up rounds and
+    # catches up over the next few.
+    (("--rl-sync-grace-arrival-quantile", "0.9"), 3, range(9, 17), 8, 8),
 ])
 def test_the_floor_waits_for_a_peer_when_the_adaptive_window_collapses(
-        make_rig, monkeypatch, options, least_direct, most_direct):
+        make_rig, monkeypatch, options, warmup, counted, least_direct, most_direct):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "grace-floor-test-key")
     rounds = 16
     rig = make_rig(2, *late.ASYNC_K1, "--rl-sync-grace-ms", "5000", *options, total_steps=rounds + 2)
     rig.start(late._initial(rig.layout))
     stop = threading.Event()
-    islands = [_StepReportingIsland(rig, 0, 0.5, stop), _StepReportingIsland(rig, 1, 0.7, stop)]
+    islands = [_StepReportingIsland(rig, 0, 0.5, stop),
+               _StepReportingIsland(rig, 1, 0.7, stop, warmup_pushes=warmup, warmup_extra_s=0.5)]
     for island in islands:
         island.start()
     deadline = time.monotonic() + 120 + rounds * 4
@@ -221,9 +241,9 @@ def test_the_floor_waits_for_a_peer_when_the_adaptive_window_collapses(
         for island in islands:
             island.join(timeout=5)
     records = [late._merge_records(rig)[t] for t in range(1, rounds + 1)]
-    direct = sum(any(r["id"] == 1 for r in rec["responders"]) for rec in records)
+    direct = sum(any(r["id"] == 1 for r in rec["responders"]) for t, rec in enumerate(records, 1) if t in counted)
     grace = [rec["grace_ms"] for rec in records]
-    print(f"{options or 'no floor'}: island 1 direct in {direct}/{rounds} rounds; grace_ms {grace}")
+    print(f"{options or 'no floor'}: island 1 direct in {direct}/{len(counted)} counted rounds; grace_ms {grace}")
     assert least_direct <= direct <= most_direct, (direct, grace)
 
 
