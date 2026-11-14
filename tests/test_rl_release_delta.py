@@ -989,3 +989,66 @@ def test_an_exclusive_mirror_drops_a_stale_copy_before_rebuilding_from_the_store
     assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
     assert [count for count, _ in seen] == [1]
     assert sorted(p.name for p in root.iterdir() if p.is_dir()) == [releases[3].path]
+
+
+# ---------------------------------------------------------------- invariants (disk preflight, prune)
+def _tree_bytes(root: Path) -> int:
+    return sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
+
+
+def test_delta_entries_list_every_file_so_the_rebuild_preflight_counts_the_whole_copy(tmp_path, monkeypatch):
+    """``DeltaMirror.materialize`` checks free space against ``entries_of(delta)``: the
+    entries cover every file of the target (unchanged ones included, as deltas
+    with no change), so their sizes add up to what ``apply_directory`` writes."""
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    old = {"model-1.safetensors": _words(50_000, 1), "model-2.safetensors": _words(60_000, 2)}
+    new = {"model-1.safetensors": old["model-1.safetensors"],  # unchanged
+           "model-2.safetensors": _changed(old["model-2.safetensors"], 0.001)}
+    base, target = _release_dir(tmp_path / "v1", old), _release_dir(tmp_path / "v2", new)
+    delta = rd.encode_directory(base, target, tmp_path / "d")
+    assert set(delta.entries) == {"config.json", "model-1.safetensors", "model-2.safetensors"}
+    record = {"files": {n: e.to_dict() for n, e in delta.entries.items()}}
+    planned = sum(e.size for e in rd.entries_of(record).values())
+    assert planned == _tree_bytes(target) > 10 * _tree_bytes(tmp_path / "d")
+    rd.apply_directory(base, [(tmp_path / "d", rd.entries_of(record))], tmp_path / "out")
+    assert _tree_bytes(tmp_path / "out") == planned
+
+
+def test_mirror_preflight_refuses_a_disk_that_holds_the_delta_but_not_the_copy(tmp_path, monkeypatch):
+    from yeto.rl.engine import disk_space
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=4)
+    chain = DeltaChain(full_every=8)
+    words = [_words(100_000)]
+    words.append(_changed(words[0], 0.001, seed=2))
+    staging = tmp_path / "staging"
+    releases = [_release(trainer, chain, _stage(staging, v, w), v) for v, w in enumerate(words)]
+    assert releases[1].delta is not None
+    delta_bytes = sum(releases[1].files.values())
+    full_bytes = sum(e.size for e in rd.entries_of(releases[1].delta).values())
+    assert full_bytes > 10 * delta_bytes
+    monkeypatch.setattr(disk_space, "free_bytes", lambda path: 2 * delta_bytes)
+    mirror = rd.DeltaMirror(tmp_path / "mirror")
+    sampler = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), mirror=mirror)
+    with pytest.raises(disk_space.InsufficientDiskSpace):
+        sampler.resolve(sampler.latest())
+    assert not any((tmp_path / "mirror").iterdir())  # refused before the scratch directory
+
+
+def test_mount_path_releases_are_never_deltas_so_a_pinned_source_needs_no_base(tmp_path):
+    """The directory ``_prune`` (``release()``, mount path) keeps pinned releases but
+    not their delta bases: safe because ``release()`` never writes a delta (only
+    ``release_staged`` does, and its prune keeps bases, ``_kept_names``)."""
+    store = CheckpointStore(tmp_path / "store")
+    trainer = PolicyReleaseStore(store, keep=1)
+    first = trainer.release(1, "h1", lambda d: (d / "model.safetensors").write_text("v1"))
+    with trainer.pinned(first):
+        later = [trainer.release(v, f"h{v}", lambda d, v=v: (d / "model.safetensors").write_text(f"v{v}"))
+                 for v in (2, 3)]
+        names = sorted(p.name for p in trainer.root.iterdir() if p.is_dir())
+        assert names == sorted([first.path, later[-1].path])
+        assert all(r.delta is None for r in [first, *trainer.records()])
+        assert (trainer.resolve(first) / "model.safetensors").read_text() == "v1"
+    trainer.release(4, "h4", lambda d: (d / "model.safetensors").write_text("v4"))
+    assert first.path not in {p.name for p in trainer.root.iterdir()}
