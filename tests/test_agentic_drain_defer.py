@@ -269,6 +269,7 @@ def test_the_sampler_loop_emits_release_not_loaded_for_a_failed_prefetch(tmp_pat
     loop = SamplerLoop.__new__(SamplerLoop)
     loop.follower, loop._not_loaded = follower, None
     loop.read_failures, loop._damaged_latest, loop.max_damaged_latest_reads = 0, 0, 3
+    loop.clock = lambda: 0.0
     loop.emit = lambda name, **fields: events.append((name, fields))
     loop._load_newest()
     loop._load_newest()
