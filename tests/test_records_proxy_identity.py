@@ -16,7 +16,7 @@ BUILDERS = {"miles": rg.records_proxy_from_env, "verl": vre.records_proxy_from_e
 
 @pytest.fixture
 def build(monkeypatch):
-    for name in ("YETO_DEVICE_FAMILY", renv.CARD_ENV, renv.PRECISION_ENV):
+    for name in ("YETO_DEVICE_FAMILY", renv.CARD_ENV, renv.PRECISION_ENV, renv.QUANT_SCHEME_ENV):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(renv.TEMPLATE_ENV, "t")
     monkeypatch.setenv(renv.TOKENIZER_ENV, "/tok")
@@ -59,10 +59,19 @@ def test_nothing_known_reads_unknown_not_cuda(build, backend, monkeypatch):
 
 @pytest.mark.parametrize("backend", sorted(BUILDERS))
 def test_precision_is_declared_not_hard_coded(build, backend):
-    assert build(backend, YETO_RECORDS_PRECISION="fp8").precision == "fp8"
+    ident = build(backend, YETO_RECORDS_PRECISION="fp8")
+    assert (ident.precision, ident.quant_scheme) == ("fp8", "fp8")
+    assert build(backend, YETO_RECORDS_QUANT_SCHEME="w4a8").quant_scheme == "w4a8"
+
+
+@pytest.mark.parametrize("backend", sorted(BUILDERS))
+def test_cuda_family_on_a_rocm_card_reads_rocm(build, backend):
+    # yeto.accel has no rocm family: a ROCm box legitimately sets YETO_DEVICE_FAMILY=cuda
+    assert build(backend, YETO_DEVICE_FAMILY="CUDA", YETO_RECORDS_CARD="MI355X").device_family == "rocm"
+    assert build(backend, YETO_DEVICE_FAMILY="ROCm", YETO_RECORDS_CARD="MI355X").device_family == "rocm"
 
 
 @pytest.mark.parametrize("backend", sorted(BUILDERS))
 def test_family_contradicting_the_card_is_refused(build, backend):
     with pytest.raises(Exception, match="MI355X"):
-        build(backend, YETO_DEVICE_FAMILY="cuda", YETO_RECORDS_CARD="MI355X")
+        build(backend, YETO_DEVICE_FAMILY="npu", YETO_RECORDS_CARD="MI355X")

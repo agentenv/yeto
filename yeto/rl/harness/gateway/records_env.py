@@ -11,6 +11,7 @@ SAMPLING_ENV = "YETO_RECORDS_SAMPLING"          # JSON signed sampling
 MAX_MODEL_LEN_ENV = "YETO_RECORDS_MAX_MODEL_LEN"  # context length of the rollout engine
 CARD_ENV = "YETO_RECORDS_CARD"                  # GPU name (provenance)
 PRECISION_ENV = "YETO_RECORDS_PRECISION"        # weight precision the rollout serves (provenance; default bf16)
+QUANT_SCHEME_ENV = "YETO_RECORDS_QUANT_SCHEME"  # release scheme the rollout serves (provenance; default: the precision)
 TRUST_REMOTE_CODE_ENV = "YETO_RECORDS_TRUST_REMOTE_CODE"  # "1": run the checkpoint's tokenizer code (opt-in)
 
 # the proxy's own server names. They live here, not in ``recorder``,
@@ -41,13 +42,14 @@ def _torch_device_family() -> str | None:
 def records_device_family(environ=None) -> str:
     """Device family of the trainer's rollout (provenance): ``$YETO_DEVICE_FAMILY`` (set by
     the island launcher), else the card's catalog family, else the torch build, else
-    ``unknown`` -- never a guessed ``cuda``. A family that contradicts the card is refused."""
+    ``unknown`` -- never a guessed ``cuda``. ``cuda`` with a ROCm card reads ``rocm``; any
+    other family that contradicts the card is refused."""
     import os
 
     from yeto.gpu_spec import DEVICE_FAMILY_ENV, UnknownCard, device_family_of
 
     env = os.environ if environ is None else environ
-    family = (env.get(DEVICE_FAMILY_ENV) or "").strip() or None
+    family = (env.get(DEVICE_FAMILY_ENV) or "").strip().lower() or None
     card = (env.get(CARD_ENV) or "").strip()
     card_family = None
     if card:
@@ -55,6 +57,8 @@ def records_device_family(environ=None) -> str:
             card_family = device_family_of(card)
         except UnknownCard:
             card_family = None
+    if family == "cuda" and card_family == "rocm":
+        family = "rocm"  # a ROCm torch build runs as the cuda device type (yeto.accel has no rocm)
     if family and card_family and family != card_family:
         raise ValueError(f"{DEVICE_FAMILY_ENV}={family} but {CARD_ENV}={card} is a {card_family} card")
     return family or card_family or _torch_device_family() or "unknown"
@@ -67,3 +71,12 @@ def records_precision(environ=None) -> str:
 
     env = os.environ if environ is None else environ
     return (env.get(PRECISION_ENV) or "").strip() or "bf16"
+
+
+def records_quant_scheme(environ=None) -> str:
+    """Release scheme of the trainer's rollout (provenance): ``$YETO_RECORDS_QUANT_SCHEME``,
+    else the precision (:func:`records_precision`), so the two never disagree by default."""
+    import os
+
+    env = os.environ if environ is None else environ
+    return (env.get(QUANT_SCHEME_ENV) or "").strip() or records_precision(env)
