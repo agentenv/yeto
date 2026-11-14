@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import http.server
+import threading
+
 import pytest
 
 from yeto import delivery
@@ -26,7 +29,7 @@ def test_fetch_cmd_uses_sky_ssh_alias():
     ]
 
 
-def test_deliver_s3_goes_through_aws_cli(monkeypatch):
+def test_deliver_s3_goes_through_the_s3_upload(monkeypatch):
     calls = []
     monkeypatch.setattr(delivery, "_upload_s3", lambda output, src: calls.append((output, src)))
     monkeypatch.setattr(
@@ -50,30 +53,51 @@ def test_deliver_non_s3_object_store_goes_through_sky_storage(monkeypatch):
     assert calls == [("gs://b", "/tmp/model")]
 
 
-def test_upload_s3_uses_aws_sync(monkeypatch):
-    calls = []
-    monkeypatch.setattr(delivery.shutil, "which", lambda cmd: "/usr/bin/aws")
-    monkeypatch.setattr(
-        delivery.subprocess,
-        "run",
-        lambda cmd, check: calls.append((cmd, check)),
-    )
+class _PutRecorder(http.server.BaseHTTPRequestHandler):
+    puts: list = []
 
-    delivery._upload_s3("s3://bucket/models/run1/", "/tmp/model")
+    def do_PUT(self):  # noqa: N802 - http.server API
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        type(self).puts.append((self.path, body))
+        self.send_response(200)
+        self.send_header("ETag", '"e"')
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
-    assert calls == [
-        (
-            [
-                "aws",
-                "s3",
-                "sync",
-                "/tmp/model",
-                "s3://bucket/models/run1",
-                "--only-show-errors",
-            ],
-            True,
-        )
-    ]
+    def log_message(self, *args):
+        pass
+
+
+def test_upload_s3_goes_through_the_store_client_and_its_endpoint(tmp_path, monkeypatch):
+    """An s3:// output of a run whose store is R2/MinIO (YETO_RL_STORE_S3_ENDPOINT_URL)
+    goes to that endpoint with the store credentials, not to AWS via the aws CLI."""
+    import boto3
+
+    from yeto.cloud import s3_store
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "config.json").write_bytes(b"{}")
+    (tmp_path / "sub" / "w.bin").write_bytes(b"weights")
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: pytest.fail("bare boto3.client: default chain, AWS"))
+    monkeypatch.setattr(delivery.subprocess, "run", lambda *a, **k: pytest.fail(f"subprocess {a}"))
+    _PutRecorder.puts = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _PutRecorder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for name in ("AWS_PROFILE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", s3_store.PROFILE_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(s3_store.ENDPOINT_ENV, f"http://127.0.0.1:{server.server_address[1]}")
+        monkeypatch.setenv(s3_store.KEY_ID_ENV, "k")
+        monkeypatch.setenv(s3_store.SECRET_ENV, "s")
+        monkeypatch.setenv(s3_store.REGION_ENV, "auto")
+        delivery._upload_s3("s3://bucket/models/run1/", str(tmp_path))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+    got = {path.split("?")[0]: body for path, body in _PutRecorder.puts}
+    assert got == {"/bucket/models/run1/config.json": b"{}", "/bucket/models/run1/sub/w.bin": b"weights"}
 
 
 def test_upload_sky_resolves_store_type_from_uri(monkeypatch):
