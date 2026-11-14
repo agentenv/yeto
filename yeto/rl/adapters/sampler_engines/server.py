@@ -44,6 +44,8 @@ GIB = 1024 ** 3
 
 
 class Process(Protocol):
+    pid: int
+
     def poll(self) -> int | None: ...
 
     def send_signal(self, sig: int) -> None: ...
@@ -348,9 +350,22 @@ class ServerEngine:
                                          f"killed. {self.HANG_HINT}".strip())
             self._sleep(5.0)
 
+    def _end_group(self, process: Process) -> None:
+        """SIGKILL what is left of the server's process group (its pid is the group
+        id under :func:`popen_spawn`): workers / schedulers the leader forked
+        survive a SIGKILL of the leader alone and keep their GPU memory, and once
+        the leader is gone :func:`reap_stale_server` can no longer find them."""
+        if self._spawn is not popen_spawn:
+            return
+        try:
+            os.killpg(int(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     def _kill(self) -> None:
         if self._process is not None:
             self._stopping = True
+            self._end_group(self._process)
             self._process.kill()
             self._process.wait(timeout=30)
             self._process = None
@@ -369,8 +384,10 @@ class ServerEngine:
             try:
                 code = process.wait(timeout=self.config.stop_grace_s)
             except subprocess.TimeoutExpired:
+                self._end_group(process)
                 process.kill()
                 code = process.wait(timeout=30)
+        self._end_group(process)  # workers the leader's own shutdown left behind
         if self._spawn is popen_spawn:
             server_group_file(self.ENGINE, self.config.port).unlink(missing_ok=True)
         known = code in self.EXIT_CODES_AFTER_STOP
