@@ -21,6 +21,9 @@ from typing import Any, Callable
 from .channels import Command, LarkAppChannel, log
 
 _MENTION = re.compile(r"@_user_\d+\s*")
+_BACKOFF_START = 5.0
+_BACKOFF_CAP = 300.0
+_STABLE_S = 60.0  # a connection that lived this long resets the backoff
 
 
 def available() -> bool:
@@ -107,8 +110,13 @@ def build_handler(channel: LarkAppChannel) -> Any:
 
 
 def start(channel: LarkAppChannel, *, stop: threading.Event | None = None,
-          sleep: Callable[[float], None] = time.sleep) -> threading.Thread:
-    """Run the SDK's blocking ws client in a daemon thread, reconnecting with backoff."""
+          sleep: Callable[[float], None] = time.sleep,
+          clock: Callable[[], float] = time.monotonic) -> threading.Thread:
+    """Run the SDK's blocking ws client in a daemon thread, reconnecting with backoff.
+
+    The backoff doubles while attempts keep failing fast and goes back to the base
+    delay once a connection stayed up for ``_STABLE_S``, so a drop after a long
+    healthy stretch reconnects quickly instead of waiting out the cap."""
 
     def run() -> None:
         import asyncio
@@ -120,8 +128,9 @@ def start(channel: LarkAppChannel, *, stop: threading.Event | None = None,
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         ws_client.loop = loop
-        backoff = 5.0
+        backoff = _BACKOFF_START
         while stop is None or not stop.is_set():
+            began = clock()
             try:
                 cli = lark.ws.Client(channel.app_id, channel.app_secret, event_handler=build_handler(channel),
                                      domain=channel.domain, log_level=lark.LogLevel.WARNING)
@@ -129,8 +138,10 @@ def start(channel: LarkAppChannel, *, stop: threading.Event | None = None,
                 cli.start()
             except Exception as exc:
                 log(f"lark long connection failed: {exc}; retrying in {backoff:.0f}s")
+            if clock() - began >= _STABLE_S:
+                backoff = _BACKOFF_START
             sleep(backoff)
-            backoff = min(300.0, backoff * 2)
+            backoff = min(_BACKOFF_CAP, backoff * 2)
 
     t = threading.Thread(target=run, name="lark-ws", daemon=True)
     t.start()
