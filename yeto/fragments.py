@@ -28,6 +28,7 @@ ties break on tensor name and fragment index.
 
 from __future__ import annotations
 
+import heapq
 import re
 from dataclasses import dataclass, field
 
@@ -149,11 +150,14 @@ def build_layout(
         rest = loose  # norms, biases, etc. fall through to bin-packing below
     # Running bin totals: recomputing ``Fragment.numel`` per placement is
     # quadratic in the tensor count (minutes for an unfused 120B MoE).
-    totals = [b.numel for b in bins]
+    # Heap of (total, index): least-filled bin first, lowest index on ties,
+    # i.e. the choice of a stable linear ``min`` scan in O(log bins).
+    heap = [(b.numel, i) for i, b in enumerate(bins)]
+    heapq.heapify(heap)
     for name, numel in rest:
-        i = min(range(len(bins)), key=totals.__getitem__)  # min() is stable: first-smallest wins
+        total, i = heapq.heappop(heap)
         bins[i].tensors.append((name, numel))
-        totals[i] += numel
+        heapq.heappush(heap, (total + numel, i))
     fragments.extend(b for b in bins if b.tensors)  # strided can leave bins empty
     if matrix_mode == MERGE_ISO:
         for frag in fragments:
