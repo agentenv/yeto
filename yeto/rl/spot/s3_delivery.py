@@ -31,7 +31,8 @@ store only when none delivers; with ``--serve-port`` it serves its own placed re
 the other VMs of the cluster. The pointer's digest guards both paths the same way.
 
 Environment: S3_BUCKET, S3_PREFIX and S3_REGION (required), S3_PROXY (empty: direct),
-S3_TRANSFERS (4), RCLONE (rclone), AWS_PROFILE (unset: the default credential chain),
+S3_TRANSFERS (4), RCLONE (rclone), S3_RCLONE_CALL_TIMEOUT_S (600; one cat/copyto) and
+S3_RCLONE_COPY_TIMEOUT_S (21600; one release copy/sync) as wall-clock caps per rclone run, AWS_PROFILE (unset: the default credential chain),
 S3_METRICS (<store>/s3-delivery.jsonl),
 S3_ASSUME_PRESENT (comma list of full releases the island gets elsewhere, never uploaded;
 default ``r1-v0``, the trainer's first full release, i.e. the base model; set it to an empty
@@ -55,6 +56,8 @@ from yeto.rl.spot_rollout import cut_manifest as cm
 
 REMOTE = "s3w"
 DEFAULT_TRANSFERS = 4
+DEFAULT_CALL_TIMEOUT_S = 600.0  # cat / copyto of a small object
+DEFAULT_COPY_TIMEOUT_S = 6 * 3600.0  # copy / sync of one release
 
 
 def env(name: str, default: str) -> str:
@@ -81,6 +84,9 @@ class S3:
         region = required("S3_REGION")
         self.rclone = env("RCLONE", "rclone")
         self.transfers = int(env("S3_TRANSFERS", str(DEFAULT_TRANSFERS)))
+        # wall-clock caps on one rclone process (rclone's --timeout is an idle timeout only)
+        self.call_timeout_s = float(env("S3_RCLONE_CALL_TIMEOUT_S", str(DEFAULT_CALL_TIMEOUT_S)))
+        self.copy_timeout_s = float(env("S3_RCLONE_COPY_TIMEOUT_S", str(DEFAULT_COPY_TIMEOUT_S)))
         e = dict(os.environ)
         tag = f"RCLONE_CONFIG_{REMOTE.upper()}_"
         e.update({tag + "TYPE": "s3", tag + "PROVIDER": "AWS", tag + "ENV_AUTH": "true",
@@ -97,21 +103,29 @@ class S3:
     def url(self, key: str = "") -> str:
         return f"{REMOTE}:{self.bucket}/{self.prefix}/{key}".rstrip("/")
 
-    def run(self, *args: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+    def run(self, *args: str, check: bool = True, capture: bool = False,
+            timeout_s: float | None = None) -> subprocess.CompletedProcess:
         cmd = [self.rclone, *args, "--timeout", "2m", "--retries", "10", "--low-level-retries", "20", "--stats-log-level", "DEBUG"]
-        return subprocess.run(cmd, env=self.environ, check=check, text=True,
-                              stdout=subprocess.PIPE if capture else None,
-                              stderr=subprocess.PIPE if capture else None)
+        limit = self.call_timeout_s if timeout_s is None else timeout_s
+        try:
+            return subprocess.run(cmd, env=self.environ, check=check, text=True,
+                                  stdout=subprocess.PIPE if capture else None,
+                                  stderr=subprocess.PIPE if capture else None,
+                                  timeout=limit if limit > 0 else None)
+        except subprocess.TimeoutExpired:  # rclone was killed; the loops retry (copies resume)
+            raise RuntimeError(f"rclone {args[0]} did not finish within {limit:g} s") from None
 
     def copy_up(self, local: Path, key: str) -> None:
         # files <= 200 MB go up in one PUT each, many at a time; larger ones as 16 MB parts
         self.run("copy", str(local), self.url(key), "--transfers", str(self.transfers),
                  "--checkers", str(2 * self.transfers), "--s3-upload-cutoff", "200M",
-                 "--s3-chunk-size", "16M", "--s3-upload-concurrency", "4", "-q")
+                 "--s3-chunk-size", "16M", "--s3-upload-concurrency", "4", "-q",
+                 timeout_s=self.copy_timeout_s)
 
     def copy_down(self, key: str, local: Path) -> None:
         self.run("sync", self.url(key), str(local), "--transfers", str(self.transfers),
-                 "--checkers", str(2 * self.transfers), "--multi-thread-streams", "4", "-q")
+                 "--checkers", str(2 * self.transfers), "--multi-thread-streams", "4", "-q",
+                 timeout_s=self.copy_timeout_s)
 
     def put_bytes(self, key: str, data: bytes) -> None:
         with tempfile.NamedTemporaryFile(delete=False) as handle:
