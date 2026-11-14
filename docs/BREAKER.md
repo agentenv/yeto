@@ -55,8 +55,9 @@ The `amd` limits are the in-run guard's defaults. With `--sampler-hardware auto`
 (the default) the class comes from the sampler tapes (`rl_sampler_engine_round`
 `source`, `family/card/engine@version/...`) or the `rl_xhw_mismatch` rows. A run
 with any AMD sampler is judged by the `amd` limits, since the step value mixes
-the tokens of every source. When no tape tells, the `amd` limits apply and the
-line says `sampler hardware unknown`.
+the tokens of every source. When no tape tells, the breaker fails closed: the
+strictest limits (`nvidia`) apply and the line says `sampler hardware unknown`;
+pass `--sampler-hardware` to judge such a run.
 
 `--noise-floor X` (the mean abs diff of two repeat runs with the same weights)
 raises the trip limit to at least `1.5 * X` and the warn limit to at least `X`.
