@@ -227,6 +227,12 @@ same way before any order:
 | `s3://` / `r2://` URI | One listing with the control host's store credentials. |
 | Local directory | The directory, when it exists on the control host; otherwise a warning (it must exist on the trainer node). |
 
+An RL trainer launched with `yeto launch` (and so `yeto run up`) still needs a
+revision-pinned Hub model: a local directory or an `s3://` / `r2://` URI passes
+this check but is then refused (`RL v0 requires a revision-pinned Hugging Face
+model`). For private weights, push them to a private Hub repository and pass
+its 40-hex commit, optionally with `--modal-model-volume` for a volume copy.
+
 A problem ends the dry run with `dry run rejected: trainer model: ...`.
 `--preflight-model warn` prints the problems and continues; `off` (or
 `YETO_PREFLIGHT_MODEL=off`) skips the check. The dry-run plan records the

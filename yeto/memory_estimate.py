@@ -317,6 +317,10 @@ def suggestions(req: MemoryRequest, limit_frac: float, *, response_len: int | No
         if peak <= limit_frac * req.gpu_mem_gib:
             out.append({"change": f"2x GPUs of the same type (TP {req.tp} -> {req.tp * 2})",
                         "peak_gib": peak})
+    if not any("GPUs" in s["change"] for s in out):
+        shape = smallest_parallel_shape(req, limit_frac)
+        if shape is not None:
+            out.append(shape)
     for gpu, cap in sorted((larger_gpus or {}).items(), key=lambda kv: kv[1]):
         if cap <= req.gpu_mem_gib:
             continue
@@ -326,6 +330,27 @@ def suggestions(req: MemoryRequest, limit_frac: float, *, response_len: int | No
             out.append({"change": f"larger GPU {req.gpu} -> {gpu} ({cap:.0f} GiB)", "peak_gib": peak})
         break  # only the next larger GPU type
     return out
+
+
+def smallest_parallel_shape(req: MemoryRequest, limit_frac: float, *, max_tp: int = 8,
+                            max_pp: int = 128) -> dict | None:
+    """The fewest GPUs per model replica (TP <= ``max_tp`` inside a node, then PP) whose
+    estimate fits at the requested context: a large model on the default TP 1 / PP 1 is
+    otherwise told only "2x GPUs" or nothing. A suggestion only; expert parallelism is not
+    modelled (a MoE needs at least this many GPUs, usually fewer with EP)."""
+    shapes = sorted(((tp, pp) for tp in (1, 2, 4, 8) if tp <= max_tp
+                     for pp in (2 ** i for i in range(8)) if pp <= max_pp),
+                    key=lambda s: (s[0] * s[1], -s[0]))
+    for tp, pp in shapes:
+        if (tp, pp) == (req.tp, req.pp) or tp * pp <= req.tp * req.pp:
+            continue
+        peak = estimate(replace(req, tp=tp, pp=pp))["peak_gib"]
+        if peak <= limit_frac * req.gpu_mem_gib:
+            return {"change": f"model parallel TP {tp} x PP {pp} = {tp * pp} GPUs per replica "
+                              f"(--tensor-parallel {tp} --pipeline-parallel {pp}; "
+                              f"{-(-tp * pp // 8)} node(s) of 8)",
+                    "peak_gib": peak, "tensor_parallel": tp, "pipeline_parallel": pp}
+    return None
 
 
 def _larger_gpus() -> dict[str, float]:
@@ -372,7 +397,12 @@ def estimate_for_launch(args, spec, *, margin: float) -> dict[str, Any]:
         return {**base, "estimated": False, "reason": "only RL islands are estimated"}
     cap = gpu_capacity_gib(spec.gpu)
     if cap is None:
-        return {**base, "estimated": False, "reason": f"GPU {spec.gpu!r} memory unknown"}
+        reason = f"GPU {spec.gpu!r} memory unknown"
+        if str(spec.gpu).upper().startswith("910"):
+            reason += (" (Ascend 910x cards are not in the GPU memory table: size the island by "
+                       "hand from npu-smi info, e.g. weights 2 bytes/param / (TP x PP) plus "
+                       "the vllm-ascend sleep-level-1 engine share)")
+        return {**base, "estimated": False, "reason": reason}
     arch, repo, source = resolve_arch(model)
     if arch is None:
         return {**base, "estimated": False,

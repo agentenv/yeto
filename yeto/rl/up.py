@@ -2478,7 +2478,12 @@ def open_run(config: str, create: bool = True, missing: str | None = None) -> Ru
     except OSError as error:
         raise RunConfigError(f"run {cfg.get('run')}: cannot create the state directory {state_dir} "
                              f"({error.strerror or error}); HOME must be writable") from None
-    return Run(cfg)
+    try:
+        return Run(cfg)
+    except RunConfigError:
+        raise
+    except ValueError as error:  # a samplers / pool section the rollout layer refuses
+        raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
 
 
 def main(args: Any) -> int:
@@ -2516,7 +2521,9 @@ def main(args: Any) -> int:
         _log(refused)
         return 2
     if not args.skip_preflight and not run.preflight():
-        _log("preflight failed: nothing ordered (see preflight.log)")
+        log = run.dir / "preflight.log"
+        _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
+                                                     " (the reason is the preflight line above)"))
         return 2
     if args.dry_run:
         _log("dry run: preflight ok, nothing ordered" + (

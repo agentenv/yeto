@@ -209,7 +209,7 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         build_reward(checked)  # reward_kind and the reward function import
     except Exception as error:  # noqa: BLE001 - every refusal is a config error here
         raise ValueError(f"sampler spec {cfg.get('spec')!r} is refused by the sampler: "
-                         f"{type(error).__name__}: {error}"[:500]) from None
+                         f"{type(error).__name__}: {error}"[:1500]) from None
     return spec
 
 

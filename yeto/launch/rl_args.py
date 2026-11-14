@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import re
+import sys
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
@@ -841,6 +842,40 @@ def _check_rollout_ahead(args, *, max_policy_age: int, backend_max: int,
         raise ValueError(f"{FLAG} {ahead} requires " + "; ".join(problems))
 
 
+def _model_revision_hint(source: dict) -> str:
+    """The fix for a model the RL launch refuses as not revision-pinned (message only)."""
+    kind = source.get("source")
+    if kind in ("local", "remote-local"):
+        where = "a local path"
+    elif kind == "external-uri":
+        where = "an object-store URI"
+    else:
+        return "pass --model-revision <40-character commit>"
+    return (f"--model {source.get('requested_identifier')!r} is {where}, which yeto launch "
+            "does not accept for an RL trainer (no immutable revision to pin); push the "
+            "checkpoint to a (private) Hugging Face repository and pass --model <org>/<name> "
+            "--model-revision <40-character commit>, optionally with --modal-model-volume "
+            "for a Modal volume copy of that revision")
+
+
+def _warn_backend_device(args, specs) -> None:
+    """A warning (never a refusal) when the training backend has no path for the cards."""
+    from ..gpu_spec import device_family_of
+
+    backend = getattr(args, "rl_backend", None) or "miles"
+    families = set()
+    for spec in specs:
+        try:
+            families.add(device_family_of(spec.gpu))
+        except ValueError:
+            continue
+    if backend == "miles" and "npu" in families:
+        print("[launcher] WARNING: --rl-backend miles has no Ascend NPU support (Miles runs on "
+              "NVIDIA and ROCm only); an NPU island fails on the node after it starts. On 910x "
+              "use --rl-backend verl with the NPU image (docs/ASCEND.md, docs/NEW_MODEL_ONBOARDING.md)",
+              file=sys.stderr, flush=True)
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -1152,6 +1187,7 @@ def _prepare_rl_args(
 
     per_island = [rl_island_args(args, m) for m in range(rl_island_count(args))]
     specs = [rl_island_spec(iargs, spec) for iargs, spec in zip(per_island, parse_gpu_spec(args.gpu))]
+    _warn_backend_device(args, specs)
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
     if int(getattr(args, "context_parallel", 1) or 1) <= 0:
@@ -1447,7 +1483,7 @@ def _prepare_rl_args(
                     "pass --data-revision <40-character commit> for a Hub dataset, or "
                     "--rl-allow-local-data for a local prompt file"
                     if name == "dataset"
-                    else "pass --model-revision <40-character commit>"
+                    else _model_revision_hint(source)
                 )
                 raise ValueError(
                     f"RL v0 requires a revision-pinned Hugging Face {name}: {hint}"
@@ -1459,7 +1495,11 @@ def _prepare_rl_args(
             reward_path.relative_to(REPO_ROOT.resolve())
         except ValueError as exc:
             raise ValueError(
-                "RL reward source must be inside the synced Yeto workdir"
+                "RL reward source must be inside the synced Yeto workdir: "
+                f"--reward-function {args.reward_function} resolves to {reward_path}, "
+                f"outside {REPO_ROOT.resolve()} (only that tree is shipped to the "
+                "islands); put the module under it (e.g. examples/my_reward.py -> "
+                "--reward-function examples.my_reward:score)"
             ) from exc
         args.reward_sha256 = python_spec_sha256(
             args.reward_function, base_dir=REPO_ROOT
@@ -1468,4 +1508,8 @@ def _prepare_rl_args(
     # Megatron and SGLang loaders. Keep that trust decision explicit through
     # Yeto's existing flag.
     if not args.trust_remote_code:
-        raise ValueError("pinned Miles requires explicit --trust-remote-code")
+        raise ValueError(
+            "pinned Miles requires explicit --trust-remote-code: its Megatron and "
+            "SGLang loaders always allow remote model code, so the launch states it; "
+            "add --trust-remote-code (also for a model without remote code, e.g. Qwen3)"
+        )

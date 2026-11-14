@@ -1200,9 +1200,10 @@ def dry_run_plan(args) -> dict:
     external = max(0, getattr(args, "external_learners", 0) or 0)
     islands = []
     island_overrides = _island_overrides(args, specs) if rl else {}
-    from .launch_preflight import dry_run_memory
+    from .launch_preflight import dry_run_memory, print_dry_run_memory
 
     memory = dry_run_memory(args, specs)
+    print_dry_run_memory(memory)
     from .launch.model_check import preflight_trainer_model
 
     trainer_model = preflight_trainer_model(args)  # ModelCheckError (a ValueError): rejected
