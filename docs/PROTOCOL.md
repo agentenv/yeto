@@ -1019,7 +1019,10 @@ learner session and never touches merge state (not in the profile hash).
 
 `depth` = items:u32, bytes:u64, acked_through:u64, next_id:u64.
 
-- Channels: one per consuming training island; any number of producers; one
+- Channels: one per consuming training island (at most 256 channels and 64
+  boards at once; a PUT or consumer HELLO naming one more gets ERROR
+  `relay refused:`; STATUS of an unknown channel reads it as empty); any
+  number of producers; one
   consumer (a newer consumer connection supersedes the older one, whose next
   TAKE gets ERROR `relay superseded:`).
 - Producer: a sampler member (`client` = its id, `incarnation` = the

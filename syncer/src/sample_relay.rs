@@ -64,6 +64,11 @@ pub const ROLE_CONSUMER: u8 = 2;
 pub const ROLE_BOARD: u8 = 3;
 /// Largest board value.
 pub const MAX_BOARD_BYTES: u64 = 64 << 20;
+/// Channels the relay holds at once. Each may hold `--sample-relay-max-mib`,
+/// so the channel ids a peer names must not grow the head without bound.
+pub const MAX_CHANNELS: usize = 256;
+/// Boards the relay holds at once (each up to `MAX_BOARD_BYTES`).
+pub const MAX_BOARDS: usize = 64;
 
 pub const PUT_STORED: u8 = 0;
 pub const PUT_DUPLICATE: u8 = 1;
@@ -243,6 +248,10 @@ impl Relay {
             "board value has {} bytes, limit {MAX_BOARD_BYTES}",
             payload.len()
         );
+        ensure!(
+            self.boards.contains_key(&board) || self.boards.len() < MAX_BOARDS,
+            "relay already holds {MAX_BOARDS} boards; board {board} is one too many"
+        );
         let id = self.next_board_id;
         self.next_board_id += 1;
         self.boards.insert(board, Item { id, producer: client, payload: Arc::new(payload) });
@@ -258,20 +267,28 @@ impl Relay {
         self.cfg
     }
 
-    fn channel(&mut self, channel: u32) -> &mut Channel {
-        self.channels.entry(channel).or_insert_with(Channel::new)
+    /// Channel `channel`, created on first use while under `MAX_CHANNELS`.
+    fn channel(&mut self, channel: u32) -> Result<&mut Channel> {
+        let count = self.channels.len();
+        match self.channels.entry(channel) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                ensure!(count < MAX_CHANNELS, "relay already holds {MAX_CHANNELS} channels; channel {channel} is one too many");
+                Ok(entry.insert(Channel::new()))
+            }
+        }
     }
 
-    pub fn depth(&mut self, channel: u32) -> Depth {
-        self.channel(channel).depth()
+    /// Depth of `channel`; an unknown channel reads as empty and is not created.
+    pub fn depth(&self, channel: u32) -> Depth {
+        self.channels.get(&channel).map_or_else(|| Channel::new().depth(), Channel::depth)
     }
 
     /// Register a consumer connection; returns its connection token. A newer
     /// connection supersedes the older one, whose next TAKE is refused.
-    pub fn attach_consumer(&mut self, channel: u32, client: u32, incarnation: u64) -> u64 {
+    pub fn attach_consumer(&mut self, channel: u32, client: u32, incarnation: u64) -> Result<u64> {
         let token = self.next_connection;
-        self.next_connection += 1;
-        let ch = self.channel(channel);
+        let ch = self.channel(channel)?;
         if let Some((old_client, old_inc, _)) = ch.consumer {
             info!(
                 channel,
@@ -279,7 +296,8 @@ impl Relay {
             );
         }
         ch.consumer = Some((client, incarnation, token));
-        token
+        self.next_connection += 1;
+        Ok(token)
     }
 
     pub fn put(
@@ -300,7 +318,7 @@ impl Relay {
             "relay item has {} bytes, limit {max_item}",
             payload.len()
         );
-        let ch = self.channel(channel);
+        let ch = self.channel(channel)?;
         if let Some(&(last_seq, last_id)) = ch.producers.get(&(producer, incarnation, stream)) {
             if seq <= last_seq {
                 ch.counters.duplicate += 1;
@@ -335,7 +353,9 @@ impl Relay {
         max_items: u32,
         max_bytes: u64,
     ) -> Result<(Vec<Item>, Depth)> {
-        let ch = self.channel(channel);
+        let Some(ch) = self.channels.get_mut(&channel) else {
+            bail!("relay superseded: a newer consumer owns channel {channel}");
+        };
         match ch.consumer {
             Some((_, _, current)) if current == token => {}
             _ => bail!("relay superseded: a newer consumer owns channel {channel}"),
@@ -529,14 +549,22 @@ where
             bail!(message);
         }
     }
-    let (epoch, cfg, depth, token) = {
+    let attached = {
         let mut relay = hub.state.lock().unwrap();
         let token = if hello.role == ROLE_CONSUMER {
             relay.attach_consumer(hello.channel, hello.client, hello.incarnation)
         } else {
-            0
+            Ok(0)
         };
-        (relay.epoch, relay.config(), relay.depth(hello.channel), token)
+        token.map(|token| (relay.epoch, relay.config(), relay.depth(hello.channel), token))
+    };
+    let (epoch, cfg, depth, token) = match attached {
+        Ok(attached) => attached,
+        Err(error) => {
+            let message = format!("relay refused: {error:#}");
+            let _ = write_frame(wr, MSG_ERROR, &[message.as_bytes()]).await;
+            return Err(error);
+        }
     };
     info!(
         role = hello.role,
@@ -756,12 +784,12 @@ mod tests {
         for seq in 1..=4 {
             relay.put(0, 3, 1, 0, seq, vec![seq as u8; 10]).unwrap();
         }
-        let token = relay.attach_consumer(0, 0, 99);
+        let token = relay.attach_consumer(0, 0, 99).unwrap();
         let (items, depth) = relay.take(0, token, 0, 0, 2, 1000).unwrap();
         assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(depth.items, 4);
         // Re-delivery after a reconnect: same cursor gives the same items.
-        let token2 = relay.attach_consumer(0, 0, 99);
+        let token2 = relay.attach_consumer(0, 0, 99).unwrap();
         assert!(relay.take(0, token, 0, 0, 2, 1000).is_err(), "old connection is superseded");
         let (items, _) = relay.take(0, token2, 0, 0, 2, 1000).unwrap();
         assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec![1, 2]);
@@ -788,6 +816,32 @@ mod tests {
         assert!(relay.board(4, 0).is_none(), "boards are independent");
         // A board value may exceed the channel item limit (10 bytes here).
         assert!(relay.set_board(5, 1, vec![0; 1000]).is_ok());
+    }
+
+    #[test]
+    fn peer_chosen_channel_and_board_ids_are_bounded() {
+        // Each channel holds up to max_bytes, so an unbounded channel count
+        // multiplies the head's memory by whatever ids a peer picks.
+        let mut relay = Relay::new(cfg(4, 100, 10), 7);
+        for status_only in 0..10_000u32 {
+            relay.depth(1_000_000 + status_only);
+        }
+        assert_eq!(relay.channels.len(), 0, "a STATUS of an unknown channel creates nothing");
+        for channel in 0..MAX_CHANNELS as u32 {
+            assert_eq!(relay.put(channel, 1, 1, 0, 1, vec![0; 10]).unwrap().status, PUT_STORED);
+        }
+        assert!(relay.put(MAX_CHANNELS as u32, 1, 1, 0, 1, vec![0; 10]).is_err(), "one channel too many");
+        assert!(relay.attach_consumer(MAX_CHANNELS as u32, 0, 1).is_err());
+        assert_eq!(relay.channels.len(), MAX_CHANNELS);
+        // Existing channels keep working.
+        assert_eq!(relay.put(0, 1, 1, 0, 2, vec![0; 10]).unwrap().status, PUT_STORED);
+        assert!(relay.attach_consumer(0, 0, 1).is_ok());
+        for board in 0..MAX_BOARDS as u32 {
+            relay.set_board(board, 1, vec![1; 10]).unwrap();
+        }
+        assert!(relay.set_board(MAX_BOARDS as u32, 1, vec![1; 10]).is_err(), "one board too many");
+        assert!(relay.set_board(0, 1, vec![2; 10]).is_ok(), "replacing a board is not a new one");
+        assert_eq!(relay.boards.len(), MAX_BOARDS);
     }
 
     #[test]
