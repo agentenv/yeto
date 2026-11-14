@@ -175,3 +175,31 @@ def test_a_read_only_state_disk_keeps_billing_in_memory(make_run, monkeypatch): 
     run.state["procs"]["trainer"]["pid"] = os.getpid()  # the trainer this up started runs
     now[0] += 3 * H
     assert abs(run.trainer_hours() - 8.0) < 1e-9
+
+
+# -- no undercount: a legacy state without a successful down after the trainer's launch
+
+
+def _no_down(**extra):
+    steps = {k: v for k, v in STATE_34C08526["steps"].items() if k != "down"}
+    return {**STATE_34C08526, "steps": steps, **extra}
+
+
+def test_a_legacy_state_without_down_bills_to_now_though_its_pid_looks_dead(make_run, monkeypatch):
+    """Another control machine, a killed launcher whose app still runs: the pid looks dead here."""
+    now = _clock(monkeypatch, DOWN + 24 * H)
+    for state in (_no_down(), _no_down(trainer_exit_seen="2023-11-15T01:23:20Z"),
+                  {**STATE_34C08526, "steps": {**STATE_34C08526["steps"], "down": {"at": "2023-11-15T03:23:20Z",
+                                                                                    "ok": False}}},
+                  {**STATE_34C08526, "steps": {**STATE_34C08526["steps"], "down": {"at": "2023-11-14T22:00:00Z",
+                                                                                    "ok": True}}}):
+        run = _run(make_run, monkeypatch, state)
+        assert abs(run.trainer_hours() - (now[0] - (T0 + 600)) / H) < 1e-9
+
+
+def test_the_first_up_of_a_legacy_state_without_down_bills_the_gap(make_run, monkeypatch):
+    now = _clock(monkeypatch, DOWN + 24 * H)
+    run = _run(make_run, monkeypatch, _no_down())
+    run.begin_up()
+    assert run.state["ups"][0]["seen"] == now[0]
+    assert abs(run.trainer_hours() - (now[0] - (T0 + 600)) / H) < 1e-9

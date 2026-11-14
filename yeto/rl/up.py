@@ -660,7 +660,10 @@ class Run:
         ups = self.state.setdefault("ups", [])
         if not ups and "t0" in self.state:  # a run started before periods were recorded
             start = float(self.state["t0"])
-            seen = min(now, max(start, getattr(self, "_legacy_stamp", None) or start))
+            stamp = getattr(self, "_legacy_stamp", None)
+            if stamp is not None and not self._legacy_stopped():  # no down seen: it may have billed the gap
+                stamp = now
+            seen = min(now, max(start, stamp or start))
             ups.append({"pid": None, "start": start, "seen": seen, "end": None, "legacy": True})
         # an earlier up that ended without a down: closed at its last poll, or now while
         # the trainer it started still runs (a --no-monitor up, a killed up: the trainer
@@ -697,6 +700,25 @@ class Run:
         seconds = [s for s in (_utc_seconds(x) for x in stamps) if s is not None]
         return max(seconds) if seconds else None
 
+    def _legacy_stopped(self) -> bool:
+        """The run from before the periods were recorded is known to bill no trainer since
+        its last stamp: a successful ``run down`` (``steps.down.ok``) at or after the trainer's
+        last launch, or a ``trainer_finished``. Not a dead local pid: ``run status`` on another
+        control machine, a killed launcher whose Modal app still runs, an old up that crashed
+        all look dead here while the trainer bills; those keep billing to now (never less)."""
+        if _utc_seconds(self.state.get("trainer_finished")) is not None:
+            return True
+        steps = self.state.get("steps") or {}
+        down = steps.get("down") if isinstance(steps.get("down"), dict) else {}
+        down_at = _utc_seconds(down.get("at")) if down.get("ok") is True else None
+        if down_at is None:
+            return False
+        tr = steps.get("trainer") if isinstance(steps.get("trainer"), dict) else {}
+        procs = self.state.get("procs") or {}
+        trp = procs.get("trainer") if isinstance(procs.get("trainer"), dict) else {}
+        launches = [s for s in (_utc_seconds(tr.get("at")), _utc_seconds(trp.get("started"))) if s is not None]
+        return not launches or down_at >= max(launches)
+
     def _legacy_period(self, now: float) -> dict[str, Any] | None:
         """Before the first ``run up`` of an upgraded run (no ``ups`` yet): the period
         :meth:`begin_up` will record for its pre-upgrade ups, ``t0`` to the last stamp
@@ -704,7 +726,7 @@ class Run:
         the whole time since ``trainer_t0`` as before, when that stamp may be short: no stamp,
         or a trainer launcher or ``yeto launch`` worker that still runs."""
         stamp = getattr(self, "_legacy_stamp", None)
-        if stamp is None or "t0" not in self.state or self._trainer_alive():
+        if stamp is None or "t0" not in self.state or not self._legacy_stopped() or self._trainer_alive():
             return None
         if _worker_alive(self.trainer_launch_name()):
             return None
