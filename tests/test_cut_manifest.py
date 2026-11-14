@@ -1,6 +1,9 @@
 """A release handed to a spot island through a near store (cut_manifest)."""
+import errno
 import json
 import os
+import stat
+import time
 import shutil
 
 import pytest
@@ -180,10 +183,67 @@ def test_losing_a_race_to_place_the_same_release_keeps_the_winner(tmp_path, monk
     assert sorted(p.name for p in target.parent.iterdir()) == ["LATEST.json", "r1-v0", "r2-v2"]
 
 
-def test_a_dead_writers_staging_is_swept(tmp_path):
+def test_stale_staging_is_swept_by_age_not_pid(tmp_path):
+    """A pid is meaningless across containers/hosts sharing the store: a recent staging
+    dir is kept even if its pid is not alive here; an old one (or a pre-unique
+    ``.<release>.placing``) is removed."""
     manifest, staged, far = _placed_inputs(tmp_path)
     root = far / "policy-releases"
-    dead = root / ".r2-v2.placing.999999999.deadbeef"
-    dead.mkdir()
+    recent = root / ".r2-v2.placing.999999999.deadbeef"
+    old_unique = root / ".r2-v2.placing.1.cafe"
+    legacy = root / ".r2-v2.placing"
+    other_release = root / ".r3-v3.placing.1.cafe"
+    for d in (recent, old_unique, legacy, other_release):
+        d.mkdir()
+    stale = time.time() - cm.STALE_STAGING_SECONDS - 60
+    for d in (old_unique, legacy, other_release):
+        os.utime(d, (stale, stale))
     cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
-    assert not dead.exists()
+    assert recent.exists() and other_release.exists()
+    assert not old_unique.exists() and not legacy.exists()
+
+
+def test_a_corrupt_release_that_won_the_rename_race_is_replaced(tmp_path, monkeypatch):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    target = far / "policy-releases" / "r2-v2"
+    real_replace, raced = cm.os.replace, []
+
+    def replace(src, dst):
+        if str(dst) == str(target) and not raced:  # a writer that placed bad bytes first
+            raced.append(True)
+            target.mkdir()
+            (target / "model.safetensors.ydelta").write_bytes(b"x" * 5000)
+            (target / "config.json").write_text("{}")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(cm.os, "replace", replace)
+    assert cm.place(manifest, staged, far, expected_digest=cm.digest(manifest)) == target
+    assert (target / "model.safetensors.ydelta").read_bytes() == b"delta" * 1000
+    assert sorted(p.name for p in target.parent.iterdir()) == ["LATEST.json", "r1-v0", "r2-v2"]
+
+
+@pytest.mark.parametrize("code", [errno.EINVAL, errno.ENOTSUP])
+def test_a_filesystem_refusing_directory_fsync_is_tolerated(tmp_path, monkeypatch, code):
+    manifest, staged, far = _placed_inputs(tmp_path)
+    real_fsync = cm.os.fsync
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(code, os.strerror(code))
+        real_fsync(fd)
+
+    monkeypatch.setattr(cm.os, "fsync", fsync)
+    target = cm.place(manifest, staged, far, expected_digest=cm.digest(manifest))
+    assert (target / "config.json").read_text() == "{}"
+
+
+def test_other_directory_fsync_errors_still_raise(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm.os, "fsync", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "io")))
+    with pytest.raises(OSError):
+        cm._fsync_dir(tmp_path)
+
+
+def test_directory_fsync_is_skipped_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm, "_WINDOWS", True)
+    monkeypatch.setattr(cm.os, "fsync", lambda fd: pytest.fail("a directory cannot be opened on Windows"))
+    cm._fsync_dir(tmp_path)

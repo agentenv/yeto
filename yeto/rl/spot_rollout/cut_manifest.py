@@ -24,11 +24,13 @@ The npu1 uplink is ~0.2 MB/s to Nebius, so a 120B release (a 13 GB delta,
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import shutil
 import sys
+import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -148,15 +150,28 @@ def _newer_than_latest(record: Mapping[str, Any], latest: Path) -> bool:
     return mine > theirs
 
 
+_FSYNC_DIR_UNSUPPORTED = {errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL), errno.EOPNOTSUPP}
+
+_WINDOWS = os.name == "nt"
+
+
 def _unique() -> str:
     """A temporary-name suffix no other writer (process or thread) shares."""
     return f"{os.getpid()}.{uuid.uuid4().hex[:12]}"
 
 
 def _fsync_dir(path: Path) -> None:
+    """fsync a directory entry list. Windows is not supported for durability: a
+    directory cannot be opened there, so this is a no-op; filesystems that refuse a
+    directory fsync (EINVAL/ENOTSUP, e.g. some network or FUSE mounts) are tolerated."""
+    if _WINDOWS:
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)
+    except OSError as error:
+        if error.errno not in _FSYNC_DIR_UNSUPPORTED:
+            raise
     finally:
         os.close(fd)
 
@@ -173,26 +188,40 @@ def _fsync_tree(top: Path) -> None:
         _fsync_dir(Path(dirpath))
 
 
-def _sweep_dead_staging(root: Path, release: str) -> None:
-    """Remove ``.<release>.placing.<pid>.<id>`` left by a writer that is gone."""
-    prefix = f".{release}.placing."
+STALE_STAGING_SECONDS = 24 * 3600
+
+
+def _sweep_dead_staging(root: Path, release: str, *, now: float | None = None) -> None:
+    """Remove ``.<release>.placing.<pid>.<id>`` (and the pre-unique ``.<release>.placing``)
+    untouched for ``STALE_STAGING_SECONDS``. Age, not pid liveness: a pid means nothing
+    across containers or hosts sharing the store, so a live writer elsewhere is kept."""
+    now = time.time() if now is None else now
+    prefix = f".{release}.placing"
     for entry in root.iterdir():
-        if not entry.name.startswith(prefix):
+        if entry.name != prefix and not entry.name.startswith(prefix + "."):
             continue
-        pid = entry.name[len(prefix):].split(".", 1)[0]
-        if not pid.isdigit() or _alive(int(pid)):
+        try:
+            age = now - entry.lstat().st_mtime
+        except FileNotFoundError:
             continue
-        shutil.rmtree(entry, ignore_errors=True)
+        if age > STALE_STAGING_SECONDS:
+            shutil.rmtree(entry, ignore_errors=True)
 
 
-def _alive(pid: int) -> bool:
+def _keep_or_replace(manifest: Mapping[str, Any], root: Path, target: Path, tmp: Path) -> None:
+    """``target`` appeared under us: keep it if it verifies, else move it aside and put
+    our verified, synced copy in its place."""
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OverflowError):
-        return True
-    return True
+        verify(manifest, target)
+        return
+    except ManifestError:
+        pass
+    bad = root / f".{manifest['release']}.bad.{_unique()}"
+    os.replace(target, bad)
+    try:
+        os.replace(tmp, target)
+    finally:
+        shutil.rmtree(bad, ignore_errors=True)
 
 
 def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
@@ -226,7 +255,7 @@ def place(manifest: Mapping[str, Any], staged: Path, store: Path, *,
             except OSError:
                 if not target.is_dir():
                     raise
-                verify(manifest, target)  # another writer placed it first; keep theirs
+                _keep_or_replace(manifest, root, target, tmp)  # another writer placed it first
         finally:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
