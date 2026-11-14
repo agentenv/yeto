@@ -5,6 +5,7 @@ streaming / dense full-sweep contract adoption.
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 from pathlib import Path
 
@@ -663,8 +664,8 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
         raise ValueError("--rl-sync-max-base-lag must be >= 0")
     outer_lr = args.rl_sync_outer_lr
     if outer_lr is not None:
-        if not outer_lr > 0.0:
-            raise ValueError("--rl-sync-outer-lr must be positive")
+        if not (math.isfinite(outer_lr) and outer_lr > 0.0):
+            raise ValueError("--rl-sync-outer-lr must be positive and finite")
         args.outer_lr = outer_lr
     momentum = args.rl_sync_outer_momentum
     if momentum is not None:
@@ -952,8 +953,8 @@ def _prepare_rl_args(
         raise ValueError("RL v0 requires positive rollout batch and sample counts")
     if args.rollout_max_response_len <= 0:
         raise ValueError("RL v0 requires --rollout-max-response-len > 0")
-    if args.cybergym_timeout <= 0:
-        raise ValueError("RL v0 requires a positive CyberGym timeout")
+    if not (math.isfinite(args.cybergym_timeout) and args.cybergym_timeout > 0):
+        raise ValueError("RL v0 requires a positive, finite CyberGym timeout")
     if args.rl_distributed_timeout_minutes <= 0:
         raise ValueError(
             "RL v0 requires --rl-distributed-timeout-minutes > 0"
@@ -964,8 +965,8 @@ def _prepare_rl_args(
         raise ValueError(
             "RL --dynamic-sampling-max-replacements must be non-negative"
         )
-    if not args.inner_lr > 0:
-        raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
+    if not (math.isfinite(args.inner_lr) and args.inner_lr > 0):
+        raise ValueError(f"RL requires a finite --inner-lr > 0 (got {args.inner_lr})")
     refuse_unset_inner_lr(args)
     if args.rl_sync_preset == "strict-avg" or (
         args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET and not rl_full_parameter_async(args)
