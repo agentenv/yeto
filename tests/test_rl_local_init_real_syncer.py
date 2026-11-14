@@ -196,10 +196,15 @@ def test_local_init_fallback_broadcasts_to_a_disagreeing_island(make_local_rig, 
     for key, values in reference.items():
         assert values.tobytes() == local[key].tobytes(), key
     rig.close()
-    assert "init digest mismatch: fragment 1" in rig.output
-    assert f"learner(s) {fallback}" in rig.output
-    events = [json.loads(line).get("event") for line in rig.tape.read_text().splitlines()]
-    assert "init_digest_fallback_upload" in events and "rl_strict_failure" not in events
+    for island in fallback:  # one summary warning per disagreeing island
+        assert rig.output.count(f"learner {island} reported local-init digests") == 1, rig.output
+    assert "init digest mismatch: fragment 1" not in rig.output  # per-fragment detail is debug only
+    records = [json.loads(line) for line in rig.tape.read_text().splitlines()]
+    uploads = [r for r in records if r.get("event") == "init_digest_fallback_upload"]
+    assert sorted(r["learner_id"] for r in uploads) == fallback
+    assert all(r["mismatched_fragments"] == 1 for r in uploads)
+    assert not any(r.get("event") in ("rl_strict_failure", "init_digest_mismatch_detected")
+                   for r in records)
 
 
 def test_strict_local_init_flag_keeps_the_fatal_check(make_local_rig):
@@ -352,3 +357,22 @@ def test_local_init_is_the_default_for_async_rounds_only():
     assert not _local_init(SimpleNamespace(init_mode="auto"), False)
     assert _local_init(SimpleNamespace(init_mode="local"), False)
     assert not _local_init(SimpleNamespace(init_mode="upload"), True)
+
+
+def test_local_init_hash_is_serial_unless_opted_in(monkeypatch):
+    from yeto.rl.engine import full_parameter_stream as fps
+
+    monkeypatch.delenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, raising=False)
+    assert fps.local_init_hash_workers(64) == 1
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "4")
+    assert fps.local_init_hash_workers(64) == 4
+    assert fps.local_init_hash_workers(2) == 2
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "auto")
+    monkeypatch.setattr(fps.os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    assert fps.local_init_hash_workers(64) == 3
+    monkeypatch.delattr(fps.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(fps.os, "cpu_count", lambda: 40)
+    assert fps.local_init_hash_workers(64) == fps.LOCAL_INIT_HASH_AUTO_MAX
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "0")
+    with pytest.raises(ValueError):
+        fps.local_init_hash_workers(64)

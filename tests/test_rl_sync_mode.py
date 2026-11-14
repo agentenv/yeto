@@ -141,11 +141,11 @@ SYNCER_FLAGS = ("--quorum", "--grace-ms", "--grace-gamma", "--grace-tau", "--pip
                 "--outer-lr", "--outer-momentum", "--max-base-lag", "--learner-weight")
 
 
-def test_local_init_fallback_is_opt_in():
+def test_local_init_fallback_is_off_by_default_and_refused_until_islands_support_it():
     _, plan = _plan(FULL)
     assert "--local-init-fallback" not in plan["role_syncers"][0]["command"]
-    _, plan = _plan((*FULL, "--rl-sync-local-init-fallback"))
-    assert "--local-init-fallback" in plan["role_syncers"][0]["command"]
+    with pytest.raises(ValueError, match="local-init-fallback is not yet supported"):
+        _plan((*FULL, "--rl-sync-local-init-fallback"))
 
 
 def test_full_parameter_defaults_to_asynchronous_rounds():

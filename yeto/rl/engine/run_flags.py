@@ -1457,7 +1457,9 @@ _SYNC = (
         "digests differ from learner 0's INIT (another framework, card or dtype "
         "path to the same base) gets the syncer's broadcast of that INIT and the "
         "syncer records an init_digest_fallback_upload warning, instead of the "
-        "default: the syncer stops (init_digest_mismatch)",
+        "default: the syncer stops (init_digest_mismatch). NOT YET SUPPORTED: "
+        "the launcher refuses it until the islands can adopt a "
+        "broadcast version 0",
     ),
     cli_flag(
         "--rl-sync-full-parameter-rounds",

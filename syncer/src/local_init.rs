@@ -17,8 +17,8 @@
 //! With `--local-init-fallback` a disagreeing island instead gets the
 //! broadcast of the applied INIT: a different framework, card or dtype path
 //! may canonicalize the same base to different bits, and the broadcast puts
-//! it on the syncer's version 0 all the same. Each disagreement is a warning
-//! (`init_digest_fallback_upload` on the event tape). A different digest
+//! it on the syncer's version 0 all the same. Each disagreeing island gets
+//! one summary warning (`init_digest_fallback_upload` on the event tape). A different digest
 //! layout or fragment range stays fatal: a broadcast cannot fix a layout.
 
 use std::collections::BTreeMap;
@@ -195,6 +195,17 @@ impl LocalInit {
     /// fall back to the initial broadcast.
     pub fn fallbacks(&self) -> Vec<u32> {
         self.reported.keys().copied().filter(|learner| !self.holds(*learner)).collect()
+    }
+
+    /// How many fragments of this shard `learner_id` reported with a digest
+    /// other than the applied INIT (the per-island fallback summary).
+    pub fn mismatched_fragments(&self, learner_id: u32) -> usize {
+        self.reported.get(&learner_id).map_or(0, |reported| {
+            self.owned
+                .clone()
+                .filter(|fid| self.applied[*fid].as_ref() != reported.digests.get(fid - self.owned.start))
+                .count()
+        })
     }
 
     /// The INIT_CONFIRM payload (SHA-256 over the applied INIT digests), once

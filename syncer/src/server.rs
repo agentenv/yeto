@@ -3976,24 +3976,27 @@ async fn recv_init_event(
     event.context("event channel closed")
 }
 
-/// A lenient local-init disagreement: warn and record it; the island falls
-/// back to the initial broadcast (crate::local_init).
-fn warn_local_init(cfg: &Config, warning: Option<String>) {
+/// A lenient local-init disagreement (per fragment and report): logged at
+/// debug only; each disagreeing island gets one summary warning and one
+/// `init_digest_fallback_upload` tape event when the initial cut goes out.
+fn warn_local_init(warning: Option<String>) {
     if let Some(message) = warning {
-        warn!("local init: {message}");
-        append_tape_event(cfg.event_tape.as_deref(), "init_digest_mismatch_detected", &message);
+        tracing::debug!("local init: {message}");
     }
 }
 
-/// One `{"event": <event>, "message": ...}` line on the event tape.
-fn append_tape_event(path: Option<&std::path::Path>, event: &str, message: &str) {
+/// One `{"event": <event>, "value": 1, <fields>, "message": ...}` line on the event tape.
+fn append_tape_event(path: Option<&std::path::Path>, event: &str, fields: &str, message: &str) {
     use std::io::Write;
 
     let Some(path) = path else {
         return;
     };
-    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-    let line = format!("{{\"event\":\"{event}\",\"value\":1,\"message\":\"{escaped}\"}}\n");
+    let line = format!(
+        "{{\"event\":{},\"value\":1{fields},\"message\":{}}}\n",
+        crate::dispense::json_str(event),
+        crate::dispense::json_str(message)
+    );
     let result = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -4183,7 +4186,7 @@ async fn scheduler(
                     .context("INIT_DIGEST before HELLO")?
                     .on_digests(digests);
                 match checked {
-                    Ok(warning) => warn_local_init(&cfg, warning),
+                    Ok(warning) => warn_local_init(warning),
                     Err(error) => refuse_local_init(&cfg, &registry, error).await?,
                 }
             }
@@ -4209,7 +4212,7 @@ async fn scheduler(
                         sha256,
                     );
                     match checked {
-                        Ok(warning) => warn_local_init(&cfg, warning),
+                        Ok(warning) => warn_local_init(warning),
                         Err(error) => refuse_local_init(&cfg, &registry, error).await?,
                     }
                 }
@@ -4330,14 +4333,20 @@ async fn scheduler(
             confirm.is_some_and(|(init, _)| init.holds(group.member.learner_id))
         });
         if let Some((init, _)) = confirm {
-            let fallbacks = init.fallbacks();
-            if !fallbacks.is_empty() {
+            for learner in init.fallbacks() {
+                let mismatched = init.mismatched_fragments(learner);
                 let message = format!(
-                    "learner(s) {fallbacks:?} reported local-init digests that differ from \
-                     learner 0's INIT; they get the initial broadcast instead of INIT_CONFIRM"
+                    "learner {learner} reported local-init digests that differ from learner 0's \
+                     INIT on {mismatched} fragment(s); it gets the initial broadcast instead of \
+                     INIT_CONFIRM"
                 );
                 warn!("local init: {message}");
-                append_tape_event(cfg.event_tape.as_deref(), "init_digest_fallback_upload", &message);
+                append_tape_event(
+                    cfg.event_tape.as_deref(),
+                    "init_digest_fallback_upload",
+                    &format!(",\"learner_id\":{learner},\"mismatched_fragments\":{mismatched}"),
+                    &message,
+                );
             }
         }
         if let Some((_, digest)) = confirm {

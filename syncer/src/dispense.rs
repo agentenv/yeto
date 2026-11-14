@@ -344,7 +344,7 @@ fn count(ranges: &[(u64, u64)]) -> u64 {
 }
 
 /// A JSON string literal (names are UTF-8 without control characters).
-fn json_str(text: &str) -> String {
+pub(crate) fn json_str(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {

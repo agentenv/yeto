@@ -1350,6 +1350,16 @@ def _prepare_rl_args(
     if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
         _refuse_full_parameter_sync_options(args)
     _check_bcast_delta(args)
+    if getattr(args, "rl_sync_local_init_fallback", False):
+        # The syncer side works, but the island side does not yet: the verl
+        # and Miles adapters refuse a version 0 that differs from their own
+        # checkpoint (verify_initial_fragments), and a broadcast version 0 is
+        # never written into the model, so the island would train from its own
+        # bits against the broadcast anchors. Refuse rather than train wrong.
+        raise ValueError(
+            "--rl-sync-local-init-fallback is not yet supported: the verl and Miles "
+            "islands cannot adopt a broadcast version 0 that differs from their own "
+            "checkpoint; use the same base bits on every island or --rl-sync-init-mode upload")
     learners = _synced_learners(args, specs)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
