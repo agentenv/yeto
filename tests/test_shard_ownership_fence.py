@@ -1178,3 +1178,24 @@ def test_the_oss_relay_store_declares_its_create_not_atomic():
     from yeto.rl.engine.object_store import atomic_create
 
     assert RelayOssObjectStore.atomic_create is False and not atomic_create(RelayOssObjectStore)
+
+
+@pytest.mark.parametrize("field", ["behavior_version", "tokens"])
+def test_a_shard_record_with_an_infinite_integer_field_is_passed_over_not_raised(tmp_path, capsys, field):
+    """JSON ``Infinity`` parses to a float that ``int()`` refuses with OverflowError,
+    which the record check did not catch: every refresh and every reopen of the
+    trainer buffer (and the head's ``UnmergedShards``) raised, and no shard was merged."""
+    objects = _objects(tmp_path, trainer_lease=False)
+    writer = _writer(objects)
+    for n in range(2):
+        writer.append(SampleIndexEntry(f"{SHARD}-g{n}", 0, "", 1, 1.0))
+    raw = objects.read(ObjectIndex(objects, prefix=shard_prefix(SHARD)).key(1)).decode()
+    _damage(objects, 1, raw.replace(f'"{field}": {0 if field == "behavior_version" else 1}',
+                                    f'"{field}": Infinity').encode())
+    writer.append(SampleIndexEntry(f"{SHARD}-g2", 0, "", 1, 1.0))
+    assert "Infinity" in objects.read(ObjectIndex(objects, prefix=shard_prefix(SHARD)).key(1)).decode()
+    trainer = _trainer(objects)
+    assert _names(trainer) == ["g0", "g2"]
+    assert trainer.merge_counters()["bad_shard_records"] == 1
+    pending, _ = UnmergedShards(objects).pending({})
+    assert [e.sample_id for e in pending] == [f"{SHARD}-g0", f"{SHARD}-g2"]
