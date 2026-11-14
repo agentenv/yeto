@@ -252,6 +252,7 @@ def check_sections(cfg: dict[str, Any]) -> None:
     if "port" in dash and (isinstance(dash["port"], bool) or not isinstance(dash["port"], int)
                            or not 0 < dash["port"] < 65536):
         raise ValueError(f"run config: dashboard.port must be a port number 1-65535 (got {dash['port']!r})")
+    _check_run_sections(cfg)
     _number(rollout_section(cfg), "rollout", "stall_alert_s")
     if cfg.get("controller") is not None and cfg["controller"] not in CONTROLLERS:
         raise ValueError(f"run config: controller {cfg['controller']!r} is not 'subprocess' or 'in_process'")
@@ -264,6 +265,43 @@ def check_sections(cfg: dict[str, Any]) -> None:
             StarvationConfig.from_section(cfg["starvation"])
         except ValueError as error:
             raise ValueError(f"run config: {error}") from None
+
+
+def _string_list(section: dict[str, Any], field: str, key: str) -> None:
+    if key in section and not (isinstance(section[key], list) and all(isinstance(a, str) for a in section[key])):
+        raise ValueError(f"run config: {field}.{key} must be a list of strings (got {section[key]!r})")
+
+
+def _check_run_sections(cfg: dict[str, Any]) -> None:
+    """The ``trainer``, ``sandbox``, ``pool`` and ``preflight`` sections: a misspelled key
+    (``trainer.usd_per_hour``: the spend counts the trainer at $0/h and ``budget.usd`` never
+    trips; ``sandbox.max_run_container``: the container alert is off) or a wrongly typed
+    value is refused at load, not silently read as unset."""
+    tr = _section(cfg, "trainer", {"argv", "usd_per_h", "progress_paths"})
+    if "argv" not in tr:
+        raise ValueError("run config: trainer.argv (the yeto launch arguments) is required")
+    _string_list(tr, "trainer", "argv")
+    _string_list(tr, "trainer", "progress_paths")
+    if tr.get("usd_per_h") is not None:
+        _number(tr, "trainer", "usd_per_h")
+    sb = _section(cfg, "sandbox", {"envs", "docker_host", "max_run_containers", "max_containers_per_sampler"})
+    for key in ("max_run_containers", "max_containers_per_sampler"):
+        if sb.get(key) is not None:
+            _number(sb, "sandbox", key)
+    for key in ("envs", "docker_host"):
+        value = sb.get(key)
+        if value is not None and not isinstance(value, str) and not (
+                key == "docker_host" and isinstance(value, list) and all(isinstance(v, str) for v in value)):
+            raise ValueError(f"run config: sandbox.{key} must be a string{' or a list of strings' if key == 'docker_host' else ''} "
+                             f"(got {value!r})")
+    if "pool" in cfg:
+        pool = _section(cfg, "pool", {"config", "interval_s"})
+        _number(pool, "pool", "interval_s", positive=True)
+    pf = _section(cfg, "preflight", {"commands"})
+    commands = pf.get("commands")
+    if commands is not None and not (isinstance(commands, list) and all(
+            isinstance(c, list) and all(isinstance(a, str) for a in c) for c in commands)):
+        raise ValueError(f"run config: preflight.commands must be a list of argv lists (got {commands!r})")
 
 
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
