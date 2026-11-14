@@ -21,6 +21,9 @@ import os, signal, subprocess, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN if sys.argv[2] == "stubborn" else signal.SIG_DFL)
 child = subprocess.Popen([sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)"])
 open(sys.argv[1], "w").write(str(child.pid))
+if sys.argv[2] == "exits":
+    time.sleep(0.3)
+    sys.exit(3)  # the leader dies while starting (or serving) and leaves its worker
 time.sleep(600)
 """
 
@@ -102,6 +105,40 @@ def test_stop_past_grace_ends_the_workers_too(tmp_path):
     try:
         engine.stop()
         assert _gone(worker), "the leader's worker survived stop()"
+    finally:
+        if _alive(worker):
+            os.kill(worker, signal.SIGKILL)
+
+
+def test_leader_exit_during_start_ends_the_workers_too(tmp_path):
+    script = tmp_path / "leader.py"
+    script.write_text(LEADER)
+    pidfile = tmp_path / "worker.pid"
+    engine = _Engine(_config(tmp_path, 47313, start_timeout_s=30.0), script, pidfile, "exits")
+    worker = None
+    try:
+        with pytest.raises(Exception, match="exited with code 3 during start"):
+            engine.start(None, 1)
+        worker = _wait_pid(pidfile)
+        assert _gone(worker), "the worker of a leader that died while starting survived"
+        assert engine.last_exit == {"code": 3, "during": "start", "normal": False}
+    finally:
+        if worker is not None and _alive(worker):
+            os.kill(worker, signal.SIGKILL)
+
+
+def test_leader_exit_while_serving_ends_the_workers_too(tmp_path):
+    script = tmp_path / "leader.py"
+    script.write_text(LEADER)
+    pidfile = tmp_path / "worker.pid"
+    engine = _Engine(_config(tmp_path, 47314), script, pidfile, "exits")
+    engine._process = engine._spawn(engine.argv(tmp_path), {})
+    worker = _wait_pid(pidfile)
+    try:
+        engine._process.wait(timeout=30)
+        with pytest.raises(Exception, match="while serving"):
+            engine.call("GET", "/health")
+        assert _gone(worker), "the worker of a leader that died while serving survived"
     finally:
         if _alive(worker):
             os.kill(worker, signal.SIGKILL)

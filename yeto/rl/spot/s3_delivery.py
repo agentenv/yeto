@@ -234,6 +234,10 @@ def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth:
     cm.check_release_name(release)
     root = store / cm.RELEASES
     if (root / release).is_dir():
+        try:
+            backfill_manifest(s3, store, release)
+        except Exception as error:  # noqa: BLE001 - placed already; only peer serving lacks it
+            log(f"manifest backfill of {release} failed: {error}")
         return None
     raw = s3.get_bytes(f"manifests/{release}.json")
     if raw is None:
@@ -269,7 +273,50 @@ def pull(s3: S3, store: Path, release: str, *, digest: str | None = None, depth:
     return row
 
 
+def backfill_manifest(s3: S3, store: Path, release: str) -> bool:
+    """Write the local manifest of a release that is placed but has none (a crash
+    between ``cm.place`` and ``save_manifest``), so this node serves it to peers
+    again. The S3 manifest is checked against the placed files (sizes and sha256)
+    first; True when one was written."""
+    cm.check_release_name(release)
+    if peer_fanout.manifest_path(store, release).is_file() or not (store / cm.RELEASES / release).is_dir():
+        return False
+    raw = s3.get_bytes(f"manifests/{release}.json")
+    if raw is None:  # never uploaded (S3_ASSUME_PRESENT): nothing to serve it with
+        return False
+    manifest = json.loads(raw)
+    cm.check(manifest, None)
+    if manifest.get("release") != release:
+        raise cm.ManifestError(f"manifests/{release}.json names {manifest.get('release')!r}")
+    cm.verify(manifest, store / cm.RELEASES / release)
+    peer_fanout.save_manifest(store, manifest)
+    log(f"backfilled the local manifest of {release} (placed before an interrupted save)")
+    return True
+
+
+def backfill_manifests(s3: S3, store: Path) -> list[str]:
+    """:func:`backfill_manifest` for every placed release of ``store``; a release
+    that cannot be backfilled is logged and left unserved. Returns the backfilled."""
+    root = store / cm.RELEASES
+    done: list[str] = []
+    if not root.is_dir():
+        return done
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        try:
+            if backfill_manifest(s3, store, path.name):
+                done.append(path.name)
+        except Exception as error:  # noqa: BLE001 - one bad release must not stop the sweep
+            log(f"manifest backfill of {path.name} failed: {error}")
+    return done
+
+
 def pull_loop(s3: S3, store: Path, interval: float, *, peers: Sequence[str] = ()) -> None:
+    try:
+        backfill_manifests(s3, store)  # releases an earlier run placed but crashed before recording
+    except Exception as error:  # noqa: BLE001 - the pull loop still has to start
+        log(f"manifest backfill at start failed: {error}")
     failures = 0
     while True:
         try:
@@ -307,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "publish-loop":
         publish_loop(s3, a.store, a.interval)
     elif a.cmd == "pull":
+        backfill_manifests(s3, a.store)
         pointer = s3.get_json(cm.LATEST) or {}
         release = a.release or pointer["release"]
         pull(s3, a.store, release, digest=pointer.get("digest") if pointer.get("release") == release else None,
