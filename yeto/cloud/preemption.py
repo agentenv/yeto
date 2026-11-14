@@ -157,6 +157,7 @@ class ModalExitHandler:
         self.stop = threading.Event()
         self.event: dict[str, Any] | None = None
         self._lock = threading.Lock()
+        self._owner: int | None = None  # thread running the response, while it runs
 
     def install(self, signals: Iterable[str] = ("SIGINT", "SIGTERM")) -> list[str]:
         if threading.current_thread() is not threading.main_thread():
@@ -171,17 +172,29 @@ class ModalExitHandler:
 
     def handle(self, source: str = "modal_signal") -> dict[str, Any] | None:
         self.stop.set()
-        with self._lock:
-            if self.event is not None:
-                return self.event
-            last = self._last_save() if callable(self._last_save) else self._last_save
-            grace = capabilities.notice_seconds("modal")
-            notice = ReclaimNotice(self.island, "modal", self.region, "spot", self.role, source,
-                                   self.clock(), grace)
-            self.event = handle_notice(notice, save=self.save, leave=self.leave, emit=self.emit,
-                                       last_save_s=last, margin_s=self.margin_s, cap_s=self.cap_s,
-                                       clock=self.clock, write_marker=self.write_marker)
+        if self._owner == threading.get_ident():
+            # a second signal while this thread runs the response (the handler runs on
+            # the main thread, between bytecodes of the first call): waiting on the lock
+            # here would deadlock; the first call finishes the response
             return self.event
+        with self._lock:
+            self._owner = threading.get_ident()
+            try:
+                return self._respond(source)
+            finally:
+                self._owner = None
+
+    def _respond(self, source: str) -> dict[str, Any] | None:
+        if self.event is not None:
+            return self.event
+        last = self._last_save() if callable(self._last_save) else self._last_save
+        grace = capabilities.notice_seconds("modal")
+        notice = ReclaimNotice(self.island, "modal", self.region, "spot", self.role, source,
+                               self.clock(), grace)
+        self.event = handle_notice(notice, save=self.save, leave=self.leave, emit=self.emit,
+                                   last_save_s=last, margin_s=self.margin_s, cap_s=self.cap_s,
+                                   clock=self.clock, write_marker=self.write_marker)
+        return self.event
 
 
 # --- AWS: instance metadata poll -----------------------------------------------
