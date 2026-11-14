@@ -72,3 +72,12 @@ def test_the_starvation_section_loads_and_is_checked(tmp_path):
                        ({"alert_min": 60, "stop_min": 30}, "stop_min"), ([30], "starvation")):
         with pytest.raises(ValueError, match=field):
             up.load_config(_write(tmp_path, starvation=bad))
+
+
+def test_the_controller_value_is_checked_at_load(tmp_path):
+    """``controller`` is refused at load when misspelled, not only once ``run up`` reaches the
+    pool step (``run status`` / ``scale`` / ``down`` never got there)."""
+    for mode in ("subprocess", "in_process"):
+        assert up.load_config(_write(tmp_path, controller=mode))["controller"] == mode
+    with pytest.raises(ValueError, match="in-process"):
+        up.load_config(_write(tmp_path, controller="in-process"))

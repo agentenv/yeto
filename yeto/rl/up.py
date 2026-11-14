@@ -241,6 +241,8 @@ def check_sections(cfg: dict[str, Any]) -> None:
                            or not 0 < dash["port"] < 65536):
         raise ValueError(f"run config: dashboard.port must be a port number 1-65535 (got {dash['port']!r})")
     _number(rollout_section(cfg), "rollout", "stall_alert_s")
+    if cfg.get("controller") is not None and cfg["controller"] not in CONTROLLERS:
+        raise ValueError(f"run config: controller {cfg['controller']!r} is not 'subprocess' or 'in_process'")
     if cfg.get("starvation") is not None:
         from yeto.rl.starvation import StarvationConfig  # noqa: PLC0415
 
@@ -253,6 +255,7 @@ def check_sections(cfg: dict[str, Any]) -> None:
 
 
 ROLLOUT_KEYS = {"stall_alert_s", "drain_on_exit"}
+CONTROLLERS = ("subprocess", "in_process")
 
 
 def rollout_section(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -713,7 +716,7 @@ class Run:
         """``controller: "in_process"``: every pool in one RolloutController in this
         process (default ``"subprocess"``: one ``nc pool`` loop per pool)."""
         mode = str(self.cfg.get("controller") or "subprocess")
-        if mode not in ("subprocess", "in_process"):
+        if mode not in CONTROLLERS:
             raise ValueError(f"run config: controller {mode!r} is not 'subprocess' or 'in_process'")
         return mode == "in_process"
 
