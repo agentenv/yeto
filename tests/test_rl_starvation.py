@@ -135,7 +135,7 @@ FakeObjects.calls = []
 def run_up(tmp_path, monkeypatch):
     clock = Clock()
     monkeypatch.setattr(up, "STATE_ROOT", tmp_path / "rl-up")
-    monkeypatch.setattr(up, "time", types.SimpleNamespace(time=clock.time, sleep=clock.sleep,
+    monkeypatch.setattr(up, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=clock.sleep,
                                                          gmtime=lambda *a: __import__("time").gmtime(*a),
                                                          strftime=lambda *a: __import__("time").strftime(*a)))
     from yeto import runs

@@ -894,8 +894,8 @@ class Run:
     def wait_first_group(self) -> str | None:
         """None once the store holds a group; else why the wait ended (a breach, the timeout)."""
         fg = self.cfg.get("first_group") or {}
-        deadline = time.time() + float(fg.get("timeout_s", 5400))
-        while time.time() < deadline:
+        deadline = time.monotonic() + float(fg.get("timeout_s", 5400))  # a local interval: an NTP step must not end/stretch it
+        while time.monotonic() < deadline:
             n = self.buffer_objects()
             if n:
                 self.mark("first_group", objects=n)
@@ -1894,14 +1894,14 @@ class Run:
         self.state["starvation"] = {"at": _now(), "event": STOP_EVENT, "why": why}
         self.save()
         tr = (self.state.get("procs") or {}).get("trainer")
-        deadline = time.time() + self.starvation_config.stop_grace_s
+        deadline = time.monotonic() + self.starvation_config.stop_grace_s
         try:
             flag = runs.request_stop(self.trainer_launch_name())
             _log(f"{STOP_EVENT}: STOP flag written: {flag}")
         except OSError as error:  # no graceful drain to wait for: the yeto down below still stops it
             _log(f"{STOP_EVENT}: STOP flag not written ({type(error).__name__}: {error}); stopping the trainer now")
-            deadline = time.time()
-        while tr and _alive(tr["pid"]) and time.time() < deadline:
+            deadline = time.monotonic()
+        while tr and _alive(tr["pid"]) and time.monotonic() < deadline:
             time.sleep(poll_s)
         self.trainer_down(f"{STOP_EVENT}: {why}")
         _log(f"{STOP_EVENT}: once a sampler is healthy again, `yeto run up --config <run.json>` resumes "
