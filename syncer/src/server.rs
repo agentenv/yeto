@@ -4322,6 +4322,7 @@ async fn scheduler(
     let mut next_t = schedule.step_after(st.global_step);
     let mut next_commit_t = schedule.step_after(st.global_step);
     let mut inflight: Vec<Round> = Vec::new();
+    let mut retry_defers = RetryDeferLog::default();
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
@@ -4610,6 +4611,7 @@ async fn scheduler(
         // A ready gather is reduced deterministically and its complete ISO
         // matrices are submitted to the bounded worker pool.  The scheduler
         // immediately continues serving learner traffic while they run.
+        retry_defers.retain_inflight(&inflight);
         let now = Instant::now();
         let mut submitted_any = false;
         let mut i = 0;
@@ -4675,23 +4677,6 @@ async fn scheduler(
                         i += 1;
                         continue;
                     }
-                    if Instant::now() < r.quorum_deadline {
-                        warn!(
-                            step = r.t,
-                            attempt = r.attempt,
-                            refused = r.refused_ahead.len(),
-                            "every expected island pushed from a base ahead of the resumed state; \
-                             launching a new frozen-membership attempt"
-                        );
-                    } else {
-                        warn!(
-                            step = r.t,
-                            attempt = r.attempt,
-                            responses = r.pushes.len(),
-                            quorum = r.quorum_size,
-                            "quorum timeout below K; launching a new frozen-membership attempt"
-                        );
-                    }
                     // Like a launch, a new attempt never pulls a learner whose
                     // catch-up is still in flight: it would answer from the
                     // anchor it held before the catch-up (a stale, future or
@@ -4702,15 +4687,42 @@ async fn scheduler(
                     });
                     let required = cfg.membership.min_launch_members(cfg.quorum);
                     if groups.len() < required {
-                        warn!(
-                            step = r.t,
-                            connected = groups.len(),
-                            required,
-                            "fixed quorum unavailable; deferring retry"
-                        );
+                        // Retried every second while the islands catch up,
+                        // which can last minutes: warn once, then at most
+                        // every RETRY_DEFER_WARN_EVERY with a running count.
+                        if let Some(deferrals) = retry_defers.defer(r.t, r.p, Instant::now()) {
+                            warn!(
+                                step = r.t,
+                                attempt = r.attempt,
+                                connected = groups.len(),
+                                required,
+                                deferrals,
+                                "fixed quorum unavailable; deferring retry"
+                            );
+                        }
                         r.quorum_deadline = Instant::now() + Duration::from_secs(1);
                         i += 1;
                         continue;
+                    }
+                    let deferrals = retry_defers.launched(r.t, r.p);
+                    if Instant::now() < r.quorum_deadline {
+                        warn!(
+                            step = r.t,
+                            attempt = r.attempt,
+                            deferrals,
+                            refused = r.refused_ahead.len(),
+                            "every expected island pushed from a base ahead of the resumed state; \
+                             launching a new frozen-membership attempt"
+                        );
+                    } else {
+                        warn!(
+                            step = r.t,
+                            attempt = r.attempt,
+                            deferrals,
+                            responses = r.pushes.len(),
+                            quorum = r.quorum_size,
+                            "quorum timeout below K; launching a new frozen-membership attempt"
+                        );
                     }
                     r.expected_members = groups.iter().map(|group| group.member).collect();
                     r.expected_members.sort_unstable();
@@ -6147,6 +6159,55 @@ fn join_gathering_rounds(
         });
     }
     joined
+}
+
+/// How often a round whose new attempt keeps being deferred (too few ready
+/// learners, e.g. every leading island still catching up) re-logs it.
+const RETRY_DEFER_WARN_EVERY: Duration = Duration::from_secs(30);
+
+/// Rate limit for the "deferring retry" warning. A deferred attempt is
+/// retried every second, so without it a minutes-long catch-up logs one
+/// warning per second. Only logging changes; the retry cadence does not.
+#[derive(Default)]
+struct RetryDeferLog {
+    /// (step, fragment) -> (deferrals so far, last warning).
+    rounds: HashMap<(u64, usize), (u64, Instant)>,
+}
+
+impl RetryDeferLog {
+    /// Records one deferral; returns the running count when it should be logged
+    /// (the first deferral, then at most once per `RETRY_DEFER_WARN_EVERY`).
+    fn defer(&mut self, t: u64, p: usize, now: Instant) -> Option<u64> {
+        match self.rounds.get_mut(&(t, p)) {
+            None => {
+                self.rounds.insert((t, p), (1, now));
+                Some(1)
+            }
+            Some((count, last)) => {
+                *count += 1;
+                if now.saturating_duration_since(*last) >= RETRY_DEFER_WARN_EVERY {
+                    *last = now;
+                    Some(*count)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The round launched its new attempt: returns how often it was deferred
+    /// first and forgets it.
+    fn launched(&mut self, t: u64, p: usize) -> u64 {
+        self.rounds.remove(&(t, p)).map_or(0, |(count, _)| count)
+    }
+
+    /// Drops rounds no longer in flight (completed or abandoned while deferred).
+    fn retain_inflight(&mut self, inflight: &[Round]) {
+        if !self.rounds.is_empty() {
+            self.rounds
+                .retain(|(t, p), _| inflight.iter().any(|r| r.t == *t && r.p == *p));
+        }
+    }
 }
 
 /// The learners a round launch or a new round attempt may pull: those not
@@ -14089,6 +14150,56 @@ mod tests {
         assert!(!release_fenced_slot(&mut rounds, fenced, &old_attempt, false));
         assert!(!release_fenced_slot(&mut rounds, fenced, &push, true));
         assert_eq!(rounds[0].expected_members, vec![fenced, other]);
+    }
+
+    #[test]
+    fn a_retry_deferred_by_catching_up_learners_warns_once_then_relaunches() {
+        // Every expected island refused as FutureBase and all of them are
+        // still catching up: the round wants a new attempt on every wake,
+        // but no learner is ready, so the retry is deferred each second.
+        let a = member(0, 10);
+        let b = member(1, 20);
+        let mut round = test_round(vec![a, b]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        let mut rounds = vec![round];
+        for (m, id) in [(a, 0), (b, 1)] {
+            assert_eq!(
+                route_push(&mut rounds, m, test_push_for(id, 6), None, false),
+                PushDisposition::FutureBase
+            );
+        }
+        let (t, p) = (rounds[0].t, rounds[0].p);
+        let mut log = RetryDeferLog::default();
+        let start = Instant::now();
+        let mut warnings = Vec::new();
+        // Five minutes of 1 s retries.
+        for second in 0..300u64 {
+            let now = start + Duration::from_secs(second);
+            assert_eq!(round_action(&rounds[0], now), RoundAction::Restart);
+            let ready = ready_groups(vec![a, b], |m| *m, |_| true);
+            assert!(ready.is_empty());
+            log.retain_inflight(&rounds);
+            if let Some(count) = log.defer(t, p, now) {
+                warnings.push(count);
+            }
+        }
+        // One warning up front, then one per 30 s carrying the running count.
+        assert_eq!(warnings, vec![1, 31, 61, 91, 121, 151, 181, 211, 241, 271]);
+
+        // Catch-up done: the learners are ready, the round still relaunches
+        // and pulls both of them; the counter is reported and reset.
+        let now = start + Duration::from_secs(300);
+        assert_eq!(round_action(&rounds[0], now), RoundAction::Restart);
+        let ready = ready_groups(vec![a, b], |m| *m, |_| false);
+        assert_eq!(ready, vec![a, b]);
+        assert_eq!(log.launched(t, p), 300);
+        assert_eq!(log.launched(t, p), 0);
+        // A later deferral of the same round warns again at once.
+        assert_eq!(log.defer(t, p, now), Some(1));
+        // A round that leaves flight is forgotten.
+        log.retain_inflight(&[]);
+        assert_eq!(log.launched(t, p), 0);
     }
 
     #[test]
