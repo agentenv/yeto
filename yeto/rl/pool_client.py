@@ -139,11 +139,17 @@ class LeaseHeartbeat:
             self._thread.join(timeout=5.0)
 
     def _loop(self) -> None:
+        # Every hook runs under the guard: a raising on_tick (e.g. a tape write
+        # logging a re-JOIN) or paused/progress must not end the thread, or the
+        # lease silently expires while the island keeps training.
         while not self._stop.wait(self.period_s):
-            self._on_tick()
-            if self._paused():
-                continue
             try:
+                self._on_tick()
+            except Exception as error:  # noqa: BLE001 - logging must not drop the lease
+                self.errors.append(f"on_tick: {error}")
+            try:
+                if self._paused():
+                    continue
                 self.client.heartbeat(int(self._progress()))
             except Exception as error:  # noqa: BLE001 - the client's supervisor redials
                 self.errors.append(f"heartbeat: {error}")
