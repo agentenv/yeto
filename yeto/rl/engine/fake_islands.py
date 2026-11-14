@@ -124,6 +124,8 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
             base_sent.setdefault(i, time.time())
             inboxes[i].put(("base", ledger.outer_version, ledger.published[ledger.outer_version]))
 
+    founding = {s.island_id for s in islands if s.join_at_version <= 0}
+    joined: set[str] = set()
     t0 = time.time()
     with Journal(out / "journal") as journal:
         pool("pool_epoch", pool_epoch=pool_epoch,
@@ -148,6 +150,12 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
                                   membership_epoch=ledger.membership_epoch,
                                   catch_up=ev["catch_up"], base_version=ev["base_version"])
                 broadcast_base([island_id])
+                joined.add(island_id)
+                if ledger.outer_version == 0:
+                    # The founding round's T_soft window opens when its base is
+                    # sent (as for later rounds), not before the island processes
+                    # were spawned: interpreter start-up is not round time.
+                    round_start = time.time()
             elif kind == "heartbeat" and island_id in ledger.members:
                 ledger.heartbeat(island_id, now=now)
             elif kind == "delta" and island_id in ledger.members:
@@ -165,6 +173,8 @@ def run_fake_islands(islands: Sequence[FakeIsland], out_dir: str | Path, *, roun
             for gone in ledger.expire_leases(now=now):
                 pool("pool_leave", pool_epoch=pool_epoch, island_id=gone,
                                   membership_epoch=ledger.membership_epoch, reason="lease_expired")
+            if ledger.outer_version == 0 and not founding <= joined:
+                continue  # founding round: wait until every founding island has joined
             timed_out = now - round_start > quorum_timeout_s
             try:
                 step = ledger.try_advance(timed_out=timed_out)
