@@ -59,6 +59,15 @@ def _ts(value: Any) -> float | None:
     return (dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp()
 
 
+def ts_or_none(value: Any) -> float | None:
+    """``_ts`` for ledger / API fields that may be corrupt: an unparsable value is None
+    (callers fall back to the ledger's own times) instead of raising through every guard tick."""
+    try:
+        return _ts(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def floor_hour(t: float) -> float:
     return math.floor(t / HOUR) * HOUR
 

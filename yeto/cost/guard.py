@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .billing import CostSummary, ModalBilling, Rates, _ts, resource_costs
+from .billing import CostSummary, ModalBilling, Rates, _ts, resource_costs, ts_or_none
 from .idle import IdleConfig, IdleDetector
 from .ledger import Resource, ResourceLedger
 
@@ -242,7 +242,7 @@ class CostGuard:
         for r in resources:
             if r.kind != "nc_lease" or not r.open or r.key in self.overdue_released:
                 continue
-            until = _ts(r.attrs.get("lease_until"))
+            until = ts_or_none(r.attrs.get("lease_until"))
             if until is not None and now >= until + cfg.nc_overdue_grace_s:
                 self.overdue_released.add(r.key)
                 release = cfg.release_overdue_nc
