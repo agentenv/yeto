@@ -34,6 +34,7 @@ fed by both R2 buffer shards and the relay is not verified).
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,7 +92,7 @@ def resolve(cfg: dict[str, Any], state_dir: Path) -> list[PoolRef]:
         pool = cfg["pool"] or {}
         if "config" not in pool:
             raise ValueError("run config: pool.config (the pool config file) is required")
-        return [PoolRef("pool", os.path.expanduser(str(pool["config"])), float(pool.get("interval_s", 30)))]
+        return [PoolRef("pool", os.path.expanduser(str(pool["config"])), _number(pool, "pool", "interval_s", 30))]
     entries = cfg.get("samplers")
     if not isinstance(entries, list) or not entries:
         raise ValueError("run config: 'samplers' must be a non-empty list of pools (or use 'pool')")
@@ -153,8 +154,23 @@ def _entry(cfg: dict[str, Any], entry: dict[str, Any], i: int, state_dir: Path) 
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(doc, indent=1, sort_keys=True))
         target = str(out)
-    usd = entry.get("usd_per_h")
-    return PoolRef(name, target, float(entry.get("interval_s", 30)), None if usd is None else float(usd), data_path)
+    interval = _number(entry, f"samplers[{i}]", "interval_s", 30)
+    return PoolRef(name, target, interval, _number(entry, f"samplers[{i}]", "usd_per_h", None), data_path)
+
+
+def _number(entry: dict[str, Any], where: str, key: str, default: float | None) -> float | None:
+    """``interval_s`` (a number > 0) or ``usd_per_h`` (a number >= 0, null: the provider's
+    price) of a pool entry; a bool, a string, nan or inf is refused (a negative or nan node
+    price makes the run's spend estimate fall or never compare, so budget.usd never trips)."""
+    value = entry.get(key, default)
+    if value is None and key == "usd_per_h":
+        return None
+    ok = (not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+          and (value > 0 if key == "interval_s" else value >= 0))
+    if not ok:
+        raise ValueError(f"run config: {where}.{key} must be a finite number "
+                         f"{'> 0' if key == 'interval_s' else '>= 0'} (got {value!r})")
+    return float(value)
 
 
 def select(refs: list[PoolRef], *, pool: str | None = None, provider: str | None = None) -> list[PoolRef]:
