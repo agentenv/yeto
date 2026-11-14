@@ -899,6 +899,8 @@ class BatchReader:
         self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
         self._prefetcher: threading.Thread | None = None
         self._stop_lock = threading.Lock()  # executor_set_mode vs reset/take
+        # a convertible node's sampler stint (executor_set_mode): no read-ahead starts
+        self._sampler_stint = False
         self._stop_prefetch = threading.Event()
         # xhw_guard actions {source: {"action", ...}} set by the driver after each step
         self.xhw_actions: dict[str, dict[str, Any]] = {}
@@ -1671,10 +1673,22 @@ class BatchReader:
 
     # ------------------------------------------------------------ prefetch
     def _start_prefetching(self, groups: int, floor: int | None) -> None:
-        self._stop_prefetch.clear()
-        self._prefetcher = threading.Thread(target=self._prefetch_loop, args=(groups, floor),
-                                            name="buffer-prefetch", daemon=True)
-        self._prefetcher.start()
+        # under the stop lock: a take that ends after ``executor_set_mode(SAMPLER)``
+        # stopped the read-ahead must not start it again in the sampler stint
+        with self._stop_lock:
+            if self._sampler_stint:
+                return
+            self._stop_prefetch.clear()
+            self._prefetcher = threading.Thread(target=self._prefetch_loop, args=(groups, floor),
+                                                name="buffer-prefetch", daemon=True)
+            self._prefetcher.start()
+
+    def _set_sampler_stint(self, sampler: bool) -> None:
+        """Mark the convertible node's stint; entering a sampler stint stops the read-ahead."""
+        with self._stop_lock:
+            self._sampler_stint = bool(sampler)
+        if sampler:  # takes the stop lock itself (not reentrant)
+            self._stop_prefetching()
 
     def _stop_prefetching(self) -> None:
         """Stop the prefetch thread and wait for its reads (so a refresh may reload)."""
@@ -1793,11 +1807,12 @@ def executor_set_mode(_executor: Any, mode: str) -> str:
                                        f"{SAMPLER} or {TRAINER}")
     previous, _MODE[CONVERTIBLE] = _MODE[CONVERTIBLE], mode
     reader = _ACTIVE.get(TRAINER)
-    if mode == SAMPLER and reader is not None:
+    if reader is not None:
         # the trainer stint is over: its read-ahead would poll the index (a Volume
         # reload every poll) through the rollout and the next stint's start, whose
-        # store writes then fail on the remount (EPERM, seen on GPU)
-        reader._stop_prefetching()
+        # store writes then fail on the remount (EPERM, seen on GPU); a take still
+        # ending on another thread does not start it again
+        reader._set_sampler_stint(mode == SAMPLER)
     return previous
 
 
