@@ -108,7 +108,15 @@ def runtime_env(environ: dict[str, str] | None = None, *, fully_async: bool = Fa
     for key, value in environ.items():
         if key.startswith(FORWARD_ENV_PREFIXES) or key in FORWARD_ENV_NAMES:
             env["env_vars"][key] = value
-    env["worker_process_setup_hook"] = SETUP_HOOK
+    from yeto.rl import worker_setup
+    from yeto.swift_megatron import cross_node_gloo
+
+    # One Ray hook, several yeto hooks: an island on nodes without RoCE also
+    # installs the cross-node gloo shim in every worker.
+    if environ.get(cross_node_gloo.ENV_NAME) == "1":
+        worker_setup.add_hook(env["env_vars"], cross_node_gloo.SETUP_HOOK)
+    worker_setup.add_hook(env["env_vars"], SETUP_HOOK)
+    env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
     return env
 
 

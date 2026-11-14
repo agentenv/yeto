@@ -109,11 +109,19 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
     if fully_async:
         env["env_vars"][CUMEM_HOST_ENV] = os.environ.get(CUMEM_HOST_ENV, "0")
+    from yeto.rl import worker_setup
+    from yeto.swift_megatron import cross_node_gloo
+
+    if os.environ.get(cross_node_gloo.ENV_NAME) == "1":
+        # A trainer island whose nodes have no RoCE: every worker installs the
+        # shim before it builds a process group, so the groups that span nodes
+        # are created on gloo instead of dying on HCCL's first collective.
+        worker_setup.add_hook(env["env_vars"], cross_node_gloo.SETUP_HOOK)
     if ascend_stack:  # Install the Ascend plugin stack in every Ray worker
         from yeto.rl import ascend_plugin_stack
 
         os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
-        env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
+        worker_setup.add_hook(env["env_vars"], ascend_plugin_stack.SETUP_HOOK)
         # The stack pulls in paths that go through mcore's @jit_fuser, which IS
         # torch.compile (megatron/core/jit.py, unconditional on torch>=2.2), and inductor
         # has no NPU backend: a worker dies with
@@ -128,10 +136,9 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     if agentic:  # Register yeto_grpo in every Ray worker (agentic_main's hook)
         from .agentic_main import SETUP_HOOK
 
-        if env.get("worker_process_setup_hook"):
-            raise RuntimeError("an agentic verl island cannot also install the Ascend plugin hook "
-                               "(Ray takes one worker_process_setup_hook)")
-        env["worker_process_setup_hook"] = SETUP_HOOK
+        # Ray still takes one hook, but it is now the chain (worker_setup), so an
+        # agentic island on Ascend installs the plugin stack as well.
+        worker_setup.add_hook(env["env_vars"], SETUP_HOOK)
         for key, value in os.environ.items():
             if key.startswith(AGENTIC_ENV_PREFIXES) or key in AGENTIC_ENV_NAMES:
                 env["env_vars"][key] = value
@@ -147,6 +154,8 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     # travel in the runtime env as well (the caller's own value still wins).
     if os.environ.get(NPU_NOSET_ENV):
         env["env_vars"].setdefault(NPU_NOSET_ENV, os.environ[NPU_NOSET_ENV])
+    if env["env_vars"].get(worker_setup.HOOKS_ENV):
+        env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
     return env
 
 
