@@ -48,6 +48,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -67,7 +68,6 @@ SWEEP_BACKOFF_S, SWEEP_BACKOFF_MAX_S = 60.0, 1800.0  # orphan sweep retry after 
 
 # Watchdog.try_launch results
 UP, FAILED, RECLAIMED, STOPPED = "up", "failed", "reclaimed", "stopped"
-MAX_STATE_WRITE_FAILURES = 3  # in a row: exit (a restart would roll spend and seq back)
 
 
 class LaunchConfigError(RuntimeError):
@@ -248,6 +248,8 @@ class Config:
     round_sleep_s: float = 300.0
     orphan_sweep_min: float = 15.0
     max_rounds: int = 0  # 0 = forever
+    # state not writable for this long: exit (the VM stays) after dumping the state
+    state_unwritable_exit_s: float = 1800.0
     own_name: str = DEFAULT_OWN_NAME  # regex every cluster name we create or delete matches
 
 
@@ -276,6 +278,8 @@ class Watchdog:
     # event-log / state-file writes that failed (e.g. a full disk); the loop goes on
     log_write_errors: int = 0
     state_write_failures: int = 0  # in a row; while > 0 no new launch (spend/seq may not persist)
+    state_unwritable_since: float | None = None  # first failure of the current streak
+    rounds: int = 0  # candidate rounds that ended with no VM
 
     def __post_init__(self) -> None:
         if not re.search(self.cfg.own_name, self.cfg.cluster_prefix):
@@ -308,17 +312,40 @@ class Watchdog:
         # written aside and renamed: a full disk leaves the previous state, never a truncated one
         tmp = Path(f"{self.cfg.state}.{os.getpid()}.tmp")
         try:
-            tmp.write_text(json.dumps({
-                "spent_usd": self.spent, "seq": self.seq, "cluster": self.cluster,
-                "cand": asdict(self.cand) if self.cand else None,
-                "doomed": {name: asdict(d["cand"]) for name, d in self.doomed.items()}}))
+            tmp.write_text(self._state_json())
             os.replace(tmp, self.cfg.state)
         except OSError as error:
             self.state_write_failures += 1
+            if self.state_unwritable_since is None:
+                self.state_unwritable_since = self.clock()
             self._write_failed("state", error)
             tmp.unlink(missing_ok=True)
             return
-        self.state_write_failures = 0
+        self.state_write_failures, self.state_unwritable_since = 0, None
+
+    def _state_json(self) -> str:
+        return json.dumps({
+            "spent_usd": self.spent, "seq": self.seq, "cluster": self.cluster,
+            "cand": asdict(self.cand) if self.cand else None,
+            "doomed": {name: asdict(d["cand"]) for name, d in self.doomed.items()}})
+
+    def _dump_state(self) -> str | None:
+        """Print the in-memory state (same format as the state file) to stderr and try to
+        write it to a backup path for a manual restore; the backup written, if any."""
+        text = self._state_json()
+        print(f"[watchdog] state file {self.cfg.state} not writable; in-memory state: {text}",
+              file=sys.stderr, flush=True)
+        name = Path(self.cfg.state).name + ".bak"
+        for folder in (tempfile.gettempdir(), os.path.expanduser("~")):
+            backup = Path(folder) / name
+            try:
+                backup.write_text(text)
+            except OSError:
+                continue
+            print(f"[watchdog] state backup written to {backup}", file=sys.stderr, flush=True)
+            return str(backup)
+        print("[watchdog] no state backup could be written", file=sys.stderr, flush=True)
+        return None
 
     def _write_failed(self, what: str, error: OSError) -> None:
         self.log_write_errors += 1
@@ -500,50 +527,59 @@ class Watchdog:
             return "config_error"
 
     def _state_unwritable(self) -> bool:
-        return self.state_write_failures >= MAX_STATE_WRITE_FAILURES
+        since = self.state_unwritable_since
+        return since is not None and self.clock() - since > self.cfg.state_unwritable_exit_s
 
     def _loop(self) -> str:
-        rounds = 0
         while True:
-            if self.state_write_failures:  # retry every pass: recover, or count toward the exit
-                self.bill()
-                self._save()
-            if self._state_unwritable():
-                # a restart would read an old spend and seq (overspend, a reused cluster name,
-                # an orphan VM): delete what we run and stop
-                if self.cluster:
-                    self.delete("state not writable")
+            reason = self.step()
+            if reason:
+                return reason
+
+    def step(self) -> str | None:
+        """One pass of the main loop: an exit reason, or None to go on."""
+        if self.stopped_by_hand():
+            self.bill()
+            self.event("exit", reason="manual_stop", note="VM left as is", doomed=sorted(self.doomed))
+            return "manual_stop"
+        if self.state_write_failures:  # retry every pass: recover, or run out the window
+            self.bill()
+            self._save()
+        if self._state_unwritable():
+            # still unwritable after the window: a restart would read an old spend and seq,
+            # so stop here; the VM is left running (never delete a healthy sampler over a
+            # full disk on this machine) and the state goes to stderr and a backup file
+            self.bill()
+            backup = self._dump_state()
+            self.event("exit", reason="state_unwritable", note="VM left as is", backup=backup,
+                       unwritable_s=round(self.clock() - (self.state_unwritable_since or self.clock()), 1),
+                       doomed=sorted(self.doomed))
+            return "state_unwritable"
+        self.retry_deletes()
+        if self.cluster is None:
+            reason = self.acquire()
+            if reason:
+                if reason == "budget" and self.cluster:
+                    self.delete("budget")
                 self.retry_deletes()
-                self.event("exit", reason="state_unwritable", doomed=sorted(self.doomed))
-                return "state_unwritable"
-            if self.stopped_by_hand():
-                self.bill()
-                self.event("exit", reason="manual_stop", note="VM left as is", doomed=sorted(self.doomed))
-                return "manual_stop"
-            self.retry_deletes()
+                self.event("exit", reason=reason, doomed=sorted(self.doomed))
+                return reason
             if self.cluster is None:
-                reason = self.acquire()
-                if reason:
-                    if reason == "budget" and self.cluster:
-                        self.delete("budget")
-                    self.retry_deletes()
-                    self.event("exit", reason=reason, doomed=sorted(self.doomed))
-                    return reason
-                if self.cluster is None:
-                    rounds += 1
-                    if self.cfg.max_rounds and rounds >= self.cfg.max_rounds:
-                        self.event("exit", reason="max_rounds", doomed=sorted(self.doomed))
-                        return "max_rounds"
-                    self.sleep(self.cfg.round_sleep_s)
-                    self.maybe_sweep()
-                    continue
-            self.sleep(self.cfg.poll_s)
-            self.watch_once()
-            if self.cluster is not None and self.over_budget():
-                self.delete("budget")
-                self.retry_deletes()
-                self.event("exit", reason="budget", doomed=sorted(self.doomed))
-                return "budget"
+                self.rounds += 1
+                if self.cfg.max_rounds and self.rounds >= self.cfg.max_rounds:
+                    self.event("exit", reason="max_rounds", doomed=sorted(self.doomed))
+                    return "max_rounds"
+                self.sleep(self.cfg.round_sleep_s)
+                self.maybe_sweep()
+                return None
+        self.sleep(self.cfg.poll_s)
+        self.watch_once()
+        if self.cluster is not None and self.over_budget():
+            self.delete("budget")
+            self.retry_deletes()
+            self.event("exit", reason="budget", doomed=sorted(self.doomed))
+            return "budget"
+        return None
 
 
 def provider_ops(a: argparse.Namespace, cands: list[Candidate], envs: list[str], *, sky: Any = None) -> ProviderOps:
