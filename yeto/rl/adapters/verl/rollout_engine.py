@@ -24,6 +24,8 @@ Environment of :func:`records_proxy_from_env`:
   YETO_RECORDS_SAMPLING        JSON signed sampling (temperature, top_p, top_k, max_tokens)
   YETO_RECORDS_MAX_MODEL_LEN   context length of verl's rollout (``rollout.max_model_len``)
   YETO_RECORDS_CARD            GPU name (provenance; default ``unknown``)
+  YETO_RECORDS_PRECISION       weight precision the rollout serves (provenance; default ``bf16``)
+  YETO_DEVICE_FAMILY           device family (provenance; else the card's, else the torch build's)
 
 Policy version: verl's synchronous trainer updates the rollout weights only
 between steps, never while a batch is generated, so a turn cannot straddle a
@@ -83,6 +85,8 @@ from yeto.rl.harness.gateway.records_env import (
     TEMPLATE_ENV,
     TOKENIZER_ENV,
     TRUST_REMOTE_CODE_ENV,
+    records_device_family,
+    records_precision,
 )
 
 CALL_TIMEOUT_S = 1800.0
@@ -293,10 +297,11 @@ def records_proxy_from_env() -> Any:
         model = os.environ[MODEL_ENV]
         signed = json.loads(os.environ[SAMPLING_ENV])
         max_model_len = int(os.environ[MAX_MODEL_LEN_ENV])
+        device_family = records_device_family()
     except (KeyError, ValueError) as exc:
         raise HarnessConfigError(f"records proxy over verl rollout: bad or missing setting {exc}") from exc
-    identity = EngineIdentity(engine="verl-rollout", engine_version=_verl_version(), device_family="cuda",
-                              card_model=os.environ.get(CARD_ENV, UNKNOWN), precision="bf16",
+    identity = EngineIdentity(engine="verl-rollout", engine_version=_verl_version(), device_family=device_family,
+                              card_model=os.environ.get(CARD_ENV, UNKNOWN), precision=records_precision(),
                               quant_scheme="bf16", topology=UNKNOWN)
     engine = VerlRolloutEngine(max_model_len=max_model_len, identity=identity)
     template = ChatTemplate.load(template_name, tokenizer_path=tokenizer,

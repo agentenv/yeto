@@ -25,7 +25,8 @@ Rollout-process environment (besides the Harbor/boat variables of
   YETO_RECORDS_PROXY            ``yeto.rl.adapters.miles.records_generate:records_proxy_from_env``
   YETO_RECORDS_PROXY_HOST/PORT/PUBLIC_BASE/SECRET_FILE   (``gateway.recorder``)
   YETO_RECORDS_TEMPLATE, YETO_RECORDS_TOKENIZER, YETO_RECORDS_MODEL,
-  YETO_RECORDS_SAMPLING, YETO_RECORDS_MAX_MODEL_LEN, YETO_RECORDS_CARD
+  YETO_RECORDS_SAMPLING, YETO_RECORDS_MAX_MODEL_LEN, YETO_RECORDS_CARD,
+  YETO_RECORDS_PRECISION, YETO_DEVICE_FAMILY (provenance)
                                 (``gateway.records_env``)
   YETO_SGLANG_ROUTER_URL        ``http://<ip>:<port>`` of Miles' router (default: from
                                 ``--sglang-router-ip`` / ``--sglang-router-port``)
@@ -172,6 +173,8 @@ def records_proxy_from_env() -> Any:
         TEMPLATE_ENV,
         TOKENIZER_ENV,
         TRUST_REMOTE_CODE_ENV,
+        records_device_family,
+        records_precision,
     )
     from yeto.rl.harness.chat_templates import ChatTemplate
     from yeto.rl.harness.gateway.proxy import RecordsProxy
@@ -182,8 +185,8 @@ def records_proxy_from_env() -> Any:
                                      trust_remote_code=os.environ.get(TRUST_REMOTE_CODE_ENV) == "1")
         signed = json.loads(os.environ[SAMPLING_ENV])
         engine = SGLangRouterEngine(url, max_model_len=int(os.environ[MAX_MODEL_LEN_ENV]), identity=EngineIdentity(
-            engine="miles-sglang-router", engine_version=UNKNOWN, device_family="cuda",
-            card_model=os.environ.get(CARD_ENV, UNKNOWN), precision="bf16", quant_scheme="bf16",
+            engine="miles-sglang-router", engine_version=UNKNOWN, device_family=records_device_family(),
+            card_model=os.environ.get(CARD_ENV, UNKNOWN), precision=records_precision(), quant_scheme="bf16",
             topology=UNKNOWN))
         model = os.environ[MODEL_ENV]
     except (KeyError, ValueError) as exc:
