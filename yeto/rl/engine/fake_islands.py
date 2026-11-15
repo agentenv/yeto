@@ -46,6 +46,37 @@ class FakeIsland:
     crash_after_rounds: int | None = None  # silent exit (no LEAVE) after N submits
     join_at_version: int = 0  # started once the coordinator reaches this version
     behavior_logprob: bool = True
+    # Heterogeneous simulation (all off by default: a spec without them runs as before).
+    device_family: str = "cpu"  # label only: "nvidia", "amd", "ascend", ...
+    backend: str = "fake"  # label only: "megatron", "fsdp2", "mindspeed", ...
+    speed: float = 1.0  # relative speed; the round takes work_s / speed
+    noise_std: float = 0.0  # numeric noise (deterministic per island and round)
+
+    def __post_init__(self) -> None:
+        if not self.speed > 0:
+            raise ValueError(f"{self.island_id}: speed must be > 0")
+        if self.noise_std < 0:
+            raise ValueError(f"{self.island_id}: noise_std must be >= 0")
+
+    @property
+    def round_wall_s(self) -> float:
+        """One round's wall time: ``work_s / speed`` (``work_s`` when speed is 1)."""
+        return self.work_s if self.speed == 1.0 else self.work_s / self.speed
+
+    def noise(self, round_index: int, n: int) -> list[float]:
+        """``n`` Gaussian values of std ``noise_std``, seeded by island and round
+        (all zeros when the noise is off): reproducible across processes."""
+        if self.noise_std == 0.0 or n <= 0:
+            return [0.0] * max(n, 0)
+        import random
+
+        rng = random.Random(f"{self.island_id}|{round_index}")
+        return [rng.gauss(0.0, self.noise_std) for _ in range(n)]
+
+    def behavior_logprobs(self, round_index: int, n: int = 4) -> list[float]:
+        """The behavior log-probs this island reports for a round: -0.5 each, plus
+        its numeric noise (clamped at 0)."""
+        return [min(-0.5 + e, 0.0) for e in self.noise(round_index, n)]
 
 
 def _island_main(spec: FakeIsland, inbox: Any, outbox: Any, hb_s: float) -> None:
@@ -62,7 +93,7 @@ def _island_main(spec: FakeIsland, inbox: Any, outbox: Any, hb_s: float) -> None
             return
         _, version, policy_hash = msg
         t_start = time.time()
-        t_end = t_start + spec.work_s
+        t_end = t_start + spec.round_wall_s
         while time.time() < t_end:  # "train", heartbeating meanwhile
             time.sleep(min(hb_s, max(0.0, t_end - time.time())))
             send("heartbeat")
@@ -72,7 +103,7 @@ def _island_main(spec: FakeIsland, inbox: Any, outbox: Any, hb_s: float) -> None
              time.time() - t_start)  # the island's own round wall, free of coordinator lag
         send("samples", {"island_id": spec.island_id, "outer_version": version,
                          "inner_step": spec.steps_per_round, "policy_hash": policy_hash, "n": 8,
-                         "behavior_logprob": [-0.5] * 4 if spec.behavior_logprob else None})
+                         "behavior_logprob": spec.behavior_logprobs(done) if spec.behavior_logprob else None})
         done += 1
         if spec.crash_after_rounds is not None and done >= spec.crash_after_rounds:
             outbox.close()

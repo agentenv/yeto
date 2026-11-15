@@ -3,6 +3,11 @@
 Deterministic: the token ids and log-probs of a completion depend only on the
 prompt, the sample index and the served version. Faults are injected by
 attribute (``expert_matrices``, ``answers``, ``probe_shift``, ``fail_load``).
+
+Heterogeneous simulation (off by default): :func:`fake_identity` builds the
+identity of another device family / card / engine, :func:`fake_sampler_fleet`
+builds several such engines, and ``logprob_bias`` / ``logprob_noise`` shift the
+rollout log-probs of one engine (a source whose numerics drift).
 """
 
 from __future__ import annotations
@@ -28,6 +33,20 @@ FAKE_IDENTITY = EngineIdentity(engine="fake", engine_version="0", device_family=
                                topology="tp1")
 
 
+# device_family -> a representative card (labels only; nothing is checked against them)
+FAKE_CARDS = {"cpu": "none", "nvidia": "B300", "amd": "MI355X", "ascend": "910B", "ppu": "PPU"}
+
+
+def fake_identity(device_family: str = "cpu", card_model: str | None = None, *, engine: str = "fake",
+                  engine_version: str = "0", precision: str = "bf16", quant_scheme: str = "bf16",
+                  topology: str = "tp1") -> EngineIdentity:
+    """The identity of a fake engine on another device family / card. With no
+    arguments it is :data:`FAKE_IDENTITY`."""
+    card = card_model if card_model is not None else FAKE_CARDS.get(device_family, device_family)
+    return EngineIdentity(engine=engine, engine_version=engine_version, device_family=device_family,
+                          card_model=card, precision=precision, quant_scheme=quant_scheme, topology=topology)
+
+
 def _unit(*parts: object) -> float:
     digest = hashlib.sha256("|".join(map(str, parts)).encode()).digest()
     return int.from_bytes(digest[:8], "big") / 2**64
@@ -48,7 +67,8 @@ class FakeEngine:
                  routed_experts: tuple[int, int, int] | None = None,
                  routed_experts_pad_rows: int = 0,
                  top_logprobs_num: int = 0, fp32_lm_head: bool = False,
-                 expert_file_update: bool = False) -> None:
+                 expert_file_update: bool = False, logprob_bias: float = 0.0,
+                 logprob_noise: float = 0.0, sampler_id: str | None = None) -> None:
         """``routed_experts``: ``(num_experts, moe_layers, top_k)`` -> every completion
         carries R3 ids ``uint16[T, moe_layers, top_k]`` drawn below ``num_experts``
         (T = prompt + response - 1; the fake's text prompts count as one token);
@@ -59,7 +79,13 @@ class FakeEngine:
         release the K3.1 way (:mod:`.k31_release`): when the release carries a
         change manifest naming only routed-expert files, the fake takes the expert
         tensors file by file (recorded in ``expert_updates``) instead of a full
-        reload; anything else falls back to the full load with the plan's reason."""
+        reload; anything else falls back to the full load with the plan's reason.
+
+        ``logprob_bias``: added to every rollout log-prob (and ``score``) this
+        engine returns; ``logprob_noise``: plus a deterministic per-token noise
+        uniform in ``[-logprob_noise, logprob_noise]``; both clamped at 0. Zero
+        (the default) returns the exact log-probs of before. ``sampler_id``
+        names this engine as a buffer source (:meth:`provenance`)."""
         self._identity = identity
         self._max_model_len = int(max_model_len)
         self.in_place = bool(in_place)
@@ -84,6 +110,28 @@ class FakeEngine:
         self.fp32_lm_head = bool(fp32_lm_head)
         self.expert_file_update = bool(expert_file_update)
         self.expert_updates: list[dict] = []  # one record per file-level expert update taken
+        self.logprob_bias = float(logprob_bias)
+        self.logprob_noise = float(logprob_noise)
+        if self.logprob_noise < 0:
+            raise ValueError("logprob_noise must be >= 0")
+        self.sampler_id = sampler_id
+
+    def provenance(self) -> dict[str, str]:
+        """The buffer-entry provenance of this engine (``xhw_guard.source_key`` reads it)."""
+        ident = self._identity
+        return {"sampler_id": self.sampler_id or f"fake-{ident.device_family}-{ident.card_model}",
+                "engine": ident.engine, "engine_version": ident.engine_version,
+                "card_model": ident.card_model, "device_family": ident.device_family}
+
+    def _logprob(self, *key: object) -> float:
+        """The rollout log-prob of one token: ``-_unit(key)``, shifted when a bias or
+        noise is set (the unshifted value is exactly the default one)."""
+        value = -_unit(*key)
+        if self.logprob_bias == 0.0 and self.logprob_noise == 0.0:
+            return value
+        if self.logprob_noise:
+            value += (2.0 * _unit(*key, "noise") - 1.0) * self.logprob_noise
+        return min(value + self.logprob_bias, 0.0)
 
     def _arrays(self, key: object, ids: Sequence[int], prompt_tokens: int) -> dict:
         """The optional per-token arrays of one completion (constructor doc)."""
@@ -178,7 +226,7 @@ class FakeEngine:
                     ids = ids[: sampling.max_tokens]
                     text = "fake answer"
                 finish = FINISH_LENGTH if len(ids) >= sampling.max_tokens else FINISH_STOP
-                logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
+                logprobs = tuple(self._logprob(prompt, i, k, self._version) for k in range(len(ids)))
                 group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text=text,
                                         finish_reason=finish, **self._arrays((prompt, i), ids, 1)))
             out.append(group)
@@ -206,7 +254,7 @@ class FakeEngine:
                     if token in stops:
                         break
                 finish = FINISH_STOP if (ids and ids[-1] in stops) or len(ids) < sampling.max_tokens else FINISH_LENGTH
-                logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
+                logprobs = tuple(self._logprob(prompt, i, k, self._version) for k in range(len(ids)))
                 group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text="",
                                         finish_reason=finish, prompt_token_ids=prompt,
                                         **self._arrays((prompt, i), ids, len(prompt))))
@@ -216,7 +264,7 @@ class FakeEngine:
     def score(self, prompt: str, continuation: str) -> list[float]:
         if self._version is None:
             raise SamplerEngineError("fake engine is not serving")
-        return [-_unit(prompt, continuation, k) - self.probe_shift for k in range(len(continuation))]
+        return [self._logprob(prompt, continuation, k) - self.probe_shift for k in range(len(continuation))]
 
     def loaded_expert_matrices(self) -> int | None:
         return self.expert_matrices
@@ -226,3 +274,18 @@ class FakeEngine:
 
     def stop(self) -> None:
         self.stopped = True
+
+
+def fake_sampler_fleet(sources: Sequence[Mapping[str, object]], **common: object) -> dict[str, FakeEngine]:
+    """Several fake engines, one per source: each mapping holds ``sampler_id`` and
+    optionally ``device_family``, ``card_model``, ``engine``, ``engine_version``,
+    ``logprob_bias``, ``logprob_noise``; ``common`` goes to every :class:`FakeEngine`."""
+    fleet: dict[str, FakeEngine] = {}
+    for spec in sources:
+        spec = dict(spec)
+        sid = str(spec.pop("sampler_id"))
+        if sid in fleet:
+            raise ValueError(f"duplicate sampler_id {sid!r}")
+        ident = {k: spec.pop(k) for k in ("device_family", "card_model", "engine", "engine_version") if k in spec}
+        fleet[sid] = FakeEngine(identity=fake_identity(**ident), sampler_id=sid, **spec, **common)
+    return fleet
