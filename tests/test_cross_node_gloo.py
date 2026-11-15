@@ -23,9 +23,11 @@ def test_node_mapping():
     assert X.spans_nodes([1, 2], 2) is True
 
 
-def _worker(rank, port, q):
+def _worker(rank, port, q, chunk_mb=None):
     try:
         os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), YETO_CROSS_NODE_LOCAL_WORLD=str(LOCAL))
+        if chunk_mb is not None:
+            os.environ["YETO_CROSS_NODE_GLOO_CHUNK_MB"] = str(chunk_mb)
         dist.init_process_group("gloo", rank=rank, world_size=WORLD)
         X.install()
         intra = [dist.new_group([n * LOCAL + i for i in range(LOCAL)]) for n in range(WORLD // LOCAL)]
@@ -88,3 +90,71 @@ def test_cross_node_collectives_and_p2p():
     for p in procs:
         p.join(30)
     assert res == {r: "ok" for r in range(WORLD)}
+
+
+def _chunked_worker(rank, port, q):
+    """Same collectives as _worker, but every tensor spans many host chunks, and
+    one of them has no flat view (a transposed matrix): a chunked write back
+    through ``reshape`` would land in a copy and lose the result."""
+    try:
+        os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
+                          YETO_CROSS_NODE_LOCAL_WORLD=str(LOCAL),
+                          YETO_CROSS_NODE_GLOO_CHUNK_MB="0.00002",  # ~20 bytes: 5 floats
+                          YETO_CROSS_NODE_GLOO_LARGE="1")  # shard-at-a-time reduce_scatter
+        dist.init_process_group("gloo", rank=rank, world_size=WORLD)
+        X.install()
+        pps = [dist.new_group([i + n * LOCAL for n in range(WORLD // LOCAL)]) for i in range(LOCAL)]
+        pp = pps[rank % LOCAL]
+        peer = (rank + LOCAL) % WORLD
+
+        t = torch.arange(40, dtype=torch.float32) + rank
+        dist.all_reduce(t, group=pp)
+        assert torch.equal(t, torch.arange(40, dtype=torch.float32) * 2 + rank + peer)
+
+        tr = (torch.arange(24, dtype=torch.float32) + rank).reshape(4, 6).t()
+        assert not tr.is_contiguous()
+        dist.all_reduce(tr, group=pp)
+        want = ((torch.arange(24, dtype=torch.float32) + rank).reshape(4, 6).t()
+                + (torch.arange(24, dtype=torch.float32) + peer).reshape(4, 6).t())
+        assert torch.equal(tr, want)
+
+        out = torch.empty(40)
+        dist.all_gather_into_tensor(out, torch.arange(20, dtype=torch.float32) + rank, group=pp)
+        lo, hi = (rank, peer) if pp.rank() == 0 else (peer, rank)
+        assert torch.equal(out, torch.cat([torch.arange(20, dtype=torch.float32) + lo,
+                                           torch.arange(20, dtype=torch.float32) + hi]))
+
+        rs = torch.empty(20)
+        dist.reduce_scatter_tensor(rs, torch.arange(40, dtype=torch.float32) + rank, group=pp)
+        off = pp.rank() * 20
+        assert torch.equal(rs, torch.arange(off, off + 20, dtype=torch.float32) * 2 + rank + peer)
+        dist.barrier()
+        dist.destroy_process_group()
+        q.put((rank, "ok"))
+    except Exception as e:  # pragma: no cover - reported to the parent
+        q.put((rank, repr(e)))
+
+
+def test_chunked_staging_keeps_results():
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    port = free_port()
+    procs = [ctx.Process(target=_chunked_worker, args=(r, port, q)) for r in range(WORLD)]
+    for p in procs:
+        p.start()
+    res = dict(q.get(timeout=120) for _ in range(WORLD))
+    for p in procs:
+        p.join(30)
+    assert res == {r: "ok" for r in range(WORLD)}
+
+
+def test_timeout_is_torch_default_unless_switched_on(monkeypatch):
+    import datetime
+
+    monkeypatch.delenv("YETO_CROSS_NODE_GLOO_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("YETO_CROSS_NODE_GLOO_LARGE", raising=False)
+    assert X._timeout() is None  # as on main: torch's own default
+    monkeypatch.setenv("YETO_CROSS_NODE_GLOO_LARGE", "1")
+    assert X._timeout() == datetime.timedelta(hours=6)
+    monkeypatch.setenv("YETO_CROSS_NODE_GLOO_TIMEOUT_S", "60")
+    assert X._timeout() == datetime.timedelta(seconds=60)

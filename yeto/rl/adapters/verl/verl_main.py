@@ -109,11 +109,25 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
     if fully_async:
         env["env_vars"][CUMEM_HOST_ENV] = os.environ.get(CUMEM_HOST_ENV, "0")
+    from yeto.rl import worker_setup
+    from yeto.swift_megatron import cross_node_gloo
+
+    # The hook chain (worker_setup) is only used with the gloo shim switched on;
+    # otherwise a single worker_process_setup_hook is set exactly as before.
+    chain = os.environ.get(cross_node_gloo.ENV_NAME) == "1"
+    if chain:
+        # A trainer island whose nodes have no RoCE: every worker installs the
+        # shim before it builds a process group, so the groups that span nodes
+        # are created on gloo instead of dying on HCCL's first collective.
+        worker_setup.add_hook(env["env_vars"], cross_node_gloo.SETUP_HOOK)
     if ascend_stack:  # Install the Ascend plugin stack in every Ray worker
         from yeto.rl import ascend_plugin_stack
 
         os.environ[ascend_plugin_stack.ENV] = str(ascend_stack)  # forwarded by the YETO_ prefix below
-        env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
+        if chain:
+            worker_setup.add_hook(env["env_vars"], ascend_plugin_stack.SETUP_HOOK)
+        else:
+            env["worker_process_setup_hook"] = ascend_plugin_stack.SETUP_HOOK
         # The stack pulls in paths that go through mcore's @jit_fuser, which IS
         # torch.compile (megatron/core/jit.py, unconditional on torch>=2.2), and inductor
         # has no NPU backend: a worker dies with
@@ -128,10 +142,13 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     if agentic:  # Register yeto_grpo in every Ray worker (agentic_main's hook)
         from .agentic_main import SETUP_HOOK
 
-        if env.get("worker_process_setup_hook"):
-            raise RuntimeError("an agentic verl island cannot also install the Ascend plugin hook "
-                               "(Ray takes one worker_process_setup_hook)")
-        env["worker_process_setup_hook"] = SETUP_HOOK
+        if chain:  # the chain also installs the plugin stack on an agentic Ascend island
+            worker_setup.add_hook(env["env_vars"], SETUP_HOOK)
+        else:
+            if env.get("worker_process_setup_hook"):
+                raise RuntimeError("an agentic verl island cannot also install the Ascend plugin hook "
+                                   "(Ray takes one worker_process_setup_hook)")
+            env["worker_process_setup_hook"] = SETUP_HOOK
         for key, value in os.environ.items():
             if key.startswith(AGENTIC_ENV_PREFIXES) or key in AGENTIC_ENV_NAMES:
                 env["env_vars"][key] = value
@@ -140,6 +157,8 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
         # credential matches these prefixes.
         if key.startswith(FORWARD_ENV_PREFIXES) and key not in NEVER_FORWARD_ENV:
+            if chain and key == worker_setup.HOOKS_ENV:
+                continue  # the chain built above wins over a stray driver value
             env["env_vars"][key] = value
     # The Ascend NOSET switch is set on the driver by
     # _keep_npu_visible_in_cpu_actors, but a Ray worker of an already-running
@@ -147,6 +166,8 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
     # travel in the runtime env as well (the caller's own value still wins).
     if os.environ.get(NPU_NOSET_ENV):
         env["env_vars"].setdefault(NPU_NOSET_ENV, os.environ[NPU_NOSET_ENV])
+    if chain and env["env_vars"].get(worker_setup.HOOKS_ENV):
+        env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
     return env
 
 

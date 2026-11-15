@@ -35,11 +35,58 @@ import torch.distributed.distributed_c10d as c10d
 logger = logging.getLogger(__name__)
 
 _ENV = "YETO_CROSS_NODE_GLOO"
+# Host staging is bounded: a collective larger than this runs as a sequence of
+# flat chunks, so the host copy never scales with the model. A 100B+ island
+# reaches this: one optimizer-state or weight collective is hundreds of GB, and
+# an unchunked ``_host(t)`` would ask the host for the whole tensor at once (and
+# ``all_gather`` for ``world_size`` further copies). The default is a quarter of
+# a GiB, which on the measured 2.2 GB/s link is ~0.1 s of wire time per chunk --
+# small enough to stage, large enough that the per-collective overhead
+# (~1.4 ms at 1 MB) stays under a percent.
+_CHUNK_ENV = "YETO_CROSS_NODE_GLOO_CHUNK_MB"
+# Gloo groups are created with this timeout. torch's default is 30 min, which is
+# a *fixed* ceiling a large model can break: a 240 GB (120B bf16) collective at
+# the measured ~0.9 GB/s allreduce rate is already 4.4 min, and the f32 master
+# copy of a 200B MoE is over an hour. The staged path is also host-memory bound,
+# so a slow host makes it worse. With the large-island switch below the default
+# is 6 h; without it the timeout is torch's own, as before. Either way an
+# explicit value here wins.
+_TIMEOUT_ENV = "YETO_CROSS_NODE_GLOO_TIMEOUT_S"
+# Large-island switch (off by default): the 6 h group timeout and the
+# shard-at-a-time reduce_scatter (host memory one shard instead of the whole
+# input, at the cost of w gloo ``reduce`` calls instead of one ``all_reduce``).
+# Off, both behave exactly as before.
+_LARGE_ENV = "YETO_CROSS_NODE_GLOO_LARGE"
+ENV_NAME = _ENV  # public name for callers that decide whether to install the shim
+# For yeto.rl.worker_setup: a Ray worker of a verl island installs the shim
+# through this entry, before it builds any process group.
+SETUP_HOOK = "yeto.swift_megatron.cross_node_gloo:install"
 _installed = False
 _orig: dict = {}
 _cross: dict = {}  # id(group) -> group, gloo groups spanning nodes
 _world_gloo = None
 stats = {"p2p_bytes": 0, "coll_bytes": 0}
+
+
+def _chunk_bytes() -> int:
+    mb = float(os.environ.get(_CHUNK_ENV) or 256)
+    return max(1, int(mb * 1024 * 1024))
+
+
+def _large() -> bool:
+    return os.environ.get(_LARGE_ENV) == "1"
+
+
+def _timeout():
+    """The gloo group timeout, or None (torch's default) when nothing asks for one."""
+    import datetime
+
+    raw = os.environ.get(_TIMEOUT_ENV)
+    if raw:
+        return datetime.timedelta(seconds=float(raw))
+    if _large():
+        return datetime.timedelta(seconds=6 * 3600)
+    return None
 
 
 def _local_world() -> int:
@@ -61,7 +108,9 @@ def _job_spans_nodes() -> bool:
 def _get_world_gloo():
     global _world_gloo
     if _world_gloo is None:
-        _world_gloo = _orig["new_group"](backend="gloo")
+        t = _timeout()
+        _world_gloo = (_orig["new_group"](backend="gloo", timeout=t) if t is not None
+                       else _orig["new_group"](backend="gloo"))
         _cross[id(_world_gloo)] = _world_gloo
     return _world_gloo
 
@@ -80,7 +129,8 @@ def _new_group(ranks=None, timeout=None, backend=None, pg_options=None, **kwargs
         wants_device = backend is None or "gloo" not in str(backend).lower()
         if spans_nodes(list(rr)) and wants_device:
             kwargs.pop("device_id", None)
-            g = _orig["new_group"](ranks, timeout=timeout, backend="gloo", **kwargs)
+            g = _orig["new_group"](ranks, timeout=timeout if timeout is not None else _timeout(),
+                                   backend="gloo", **kwargs)
             if g is not None and g is not c10d.GroupMember.NON_GROUP_MEMBER:
                 _cross[id(g)] = g
             return g
@@ -177,6 +227,23 @@ def _avg_fix(a):
     return False
 
 
+def _chunks(numel: int, itemsize: int):
+    """Flat [start, end) slices whose host copy stays within the chunk budget."""
+    per = max(1, _chunk_bytes() // max(1, itemsize))
+    for start in range(0, numel, per):
+        yield start, min(start + per, numel)
+
+
+def _flat(t):
+    """A flat *view* of ``t``, or None when ``t`` has no flat view.
+
+    ``reshape`` on a non-contiguous tensor returns a copy, and writing the
+    result back into that copy would drop the collective's output on the floor,
+    so a caller that gets None stages the tensor whole instead of in chunks.
+    """
+    return t.view(-1) if t.is_contiguous() else None
+
+
 @torch.no_grad()
 def _run_on_host(name, a):
     o = _orig
@@ -185,23 +252,47 @@ def _run_on_host(name, a):
         o["barrier"](group=g)
     elif name in ("all_reduce", "reduce", "broadcast"):
         t = a["tensor"]
-        h = _host(t)
-        stats["coll_bytes"] += _bytes([h])
         avg = _avg_fix(a) if name != "broadcast" else False
-        a["tensor"] = h
-        o[name](**a)
-        if avg:
-            h.div_(g.size())
-        if h is not t:
+        flat = _flat(t)
+        stats["coll_bytes"] += _bytes([t])
+        if flat is None:  # no flat view: stage the tensor whole (small, by construction)
+            h = _host(t).contiguous()
+            a["tensor"] = h
+            o[name](**a)
+            if avg:
+                h.div_(g.size())
             t.copy_(h)
+            a["tensor"] = t
+            return
+        for lo, hi in _chunks(flat.numel(), t.element_size()):
+            part = flat[lo:hi]
+            h = _host(part).contiguous()
+            a["tensor"] = h
+            o[name](**a)
+            if avg:
+                h.div_(g.size())
+            part.copy_(h)
+        a["tensor"] = t
     elif name in ("all_gather_into_tensor", "_all_gather_base"):
         out, inp = a["output_tensor"], a["input_tensor"]
-        hin = _host(inp).contiguous()
-        parts = [torch.empty_like(hin) for _ in range(g.size())]
-        stats["coll_bytes"] += _bytes([hin]) * g.size()
-        o["all_gather"](parts, hin, group=g)
-        out.copy_(torch.cat([p.reshape(-1) for p in parts]).reshape(out.shape))
-    elif name in ("reduce_scatter_tensor", "_reduce_scatter_base"):
+        n, w = inp.numel(), g.size()
+        oflat, iflat = _flat(out), _flat(inp)
+        if oflat is None or iflat is None:
+            oflat, iflat = out.reshape(-1).clone(), inp.contiguous().reshape(-1)
+        stats["coll_bytes"] += _bytes([inp]) * w
+        # Stage into views of one host buffer: a list of ``w`` separate host
+        # tensors plus the torch.cat of the old code peaked at 3x the gathered
+        # size on the host, which a 100B+ gather cannot afford.
+        for lo, hi in _chunks(n, inp.element_size()):
+            hin = _host(iflat[lo:hi]).contiguous()
+            hout = torch.empty((hi - lo) * w, dtype=out.dtype)
+            parts = list(hout.split(hi - lo))
+            o["all_gather"](parts, hin, group=g)
+            for r in range(w):
+                oflat[r * n + lo:r * n + hi].copy_(parts[r])
+        if oflat.data_ptr() != out.data_ptr():  # staged through a copy
+            out.copy_(oflat.reshape(out.shape))
+    elif name in ("reduce_scatter_tensor", "_reduce_scatter_base") and not _large():
         out, inp = a["output"], a["input"]
         h = _host(inp).clone()
         avg = _avg_fix(a)
@@ -213,6 +304,31 @@ def _run_on_host(name, a):
         flat = h.reshape(-1)
         n = out.numel()
         out.copy_(flat[r * n:(r + 1) * n].reshape(out.shape))
+    elif name in ("reduce_scatter_tensor", "_reduce_scatter_base"):
+        out, inp = a["output"], a["input"]
+        avg = _avg_fix(a)
+        op = a.get("op", dist.ReduceOp.SUM)
+        r, w, n = g.rank(), g.size(), out.numel()
+        iflat = _flat(inp) if _flat(inp) is not None else inp.contiguous().reshape(-1)
+        oflat = _flat(out)
+        out_staged = oflat is None
+        if out_staged:
+            oflat = torch.empty(n, dtype=out.dtype, device=out.device)
+        stats["coll_bytes"] += _bytes([inp])
+        # gloo has no reduce_scatter, so each rank's shard is reduced with one
+        # ``reduce`` per destination rank: w reduces of n elements move the same
+        # bytes as the old full-tensor all_reduce but need only one shard of
+        # host memory, not the whole input.
+        for dst in range(w):
+            for lo, hi in _chunks(n, inp.element_size()):
+                h = _host(iflat[dst * n + lo:dst * n + hi]).contiguous().clone()
+                o["reduce"](h, dst=dist.get_global_rank(g, dst), op=op, group=g)
+                if dst == r:
+                    if avg:
+                        h.div_(w)
+                    oflat[lo:hi].copy_(h)
+        if out_staged:
+            out.copy_(oflat.reshape(out.shape))
     elif name == "all_gather":
         outs, t = a["tensor_list"], a["tensor"]
         ht = _host(t)
