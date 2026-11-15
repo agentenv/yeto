@@ -917,7 +917,12 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if "accounts" not in cfg and "slots" not in cfg:
         missing.insert(1, "accounts")
     if cfg.get("route", "ssh") == "ssh":
-        missing += [k for k in REQUIRED_SSH_KEYS if not cfg.get(k)]
+        required = REQUIRED_SSH_KEYS
+        if (cfg.get("provider") or {}).get("kind") == "ssh":  # own SSH nodes: r2_env_file only on the r2 path
+            from ..ssh_sampler_pool import required_pool_keys  # noqa: PLC0415
+
+            required = required_pool_keys(cfg)
+        missing += [k for k in required if not cfg.get(k)]
     if missing:
         raise ValueError(f"pool config: missing required keys {missing}")
     if "model" in cfg and "machine_type" in cfg:
@@ -981,7 +986,9 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
                       stop_below_ucr=int(cfg.get("stop_below_ucr", 20_000_000)),
                       min_balance_to_order_ucr=cfg.get("min_balance_to_order_ucr"),
                       data_slots=slots, elastic=island_status.ElasticConfig.from_dict(cfg.get("elastic")),
-                      hourly_cost=pool_hourly_ucr(cfg), slot_name=label)
+                      # None (no price stated): the MI355X rate; a stated price, 0 included, is the node hour
+                      hourly_cost=None if pool_price(cfg)[0] is None else pool_hourly_ucr(cfg),
+                      slot_name=label)
 
 
 def _seconds(cfg: dict[str, Any], key: str, default: float) -> float:
@@ -1010,6 +1017,8 @@ def pool_price(cfg: dict[str, Any]) -> tuple[float | None, str]:
             price = offers_from_config(section)[0].price_usd_h
         except ValueError:
             price = None
+    if price is None and kind == "ssh":
+        price = 0.0  # the operator's own nodes: no rental price unless the config states one
     if price is None:
         return None, currency
     if isinstance(price, bool):

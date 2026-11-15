@@ -462,3 +462,8 @@ register(ProviderKind(
     pool_ops="yeto.launch.nc.modal_provider:pool_ops",
     offline_problems="yeto.launch.nc.modal_provider:offline_problems",
     caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=900)))
+register(ProviderKind(
+    "ssh", "yeto.launch.ssh_sampler_pool:registry_factory",
+    pool_ops="yeto.launch.ssh_sampler_pool:pool_ops",
+    offline_problems="yeto.launch.ssh_sampler_pool:offline_problems",
+    caps=ProviderCaps(lease_bounded=False, notice_s=0.0, currency="usd", cold_start_s=300)))
