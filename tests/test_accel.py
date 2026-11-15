@@ -126,7 +126,17 @@ def test_device_count_is_zero_when_auto_detection_selects_cpu(no_cuda, monkeypat
 
 def test_cuda_wins_when_both_families_are_present(npu, monkeypatch):
     monkeypatch.setattr(torch, "cuda", FakeAccelerator(available=True))
+    monkeypatch.setattr(torch.version, "cuda", "12.4")  # a CUDA build: real CUDA cards
     assert accel.available_type() == "cuda"
+
+
+def test_cuda_alias_of_the_npu_does_not_win(npu, monkeypatch):
+    # torch_npu.contrib.transfer_to_npu: torch.cuda answers for the NPU on a torch
+    # build without CUDA or HIP (MindSpeed imports it in verl's Ascend workers)
+    monkeypatch.setattr(torch, "cuda", FakeAccelerator(available=True))
+    monkeypatch.setattr(torch.version, "cuda", None)
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    assert accel.available_type() == "npu"
 
 
 # --- collective backend --------------------------------------------------

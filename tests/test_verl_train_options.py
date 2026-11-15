@@ -116,3 +116,21 @@ def test_every_refused_option_has_a_reason_and_no_mapped_option_is_refused():
     assert refused == set(launch_flags.NOT_MAPPED_REASONS)
     mapped = {extra[0] for extra in (*MAPPED, *OBSERVED)}
     assert not refused & mapped
+
+
+def test_max_tokens_per_gpu_turns_dynamic_batching_back_on_after_the_ascend_override():
+    """An Ascend island forces one sample per micro-batch (no dynamic batching);
+    without dynamic batching the token bounds of --rl-max-tokens-per-gpu do nothing."""
+    base = ["actor_rollout_ref.actor.use_dynamic_bsz=True",
+            *island_entry.ascend_memory_overrides(gradient_checkpointing=True)]
+    out, asserted = to.apply_training_options(SimpleNamespace(rl_max_tokens_per_gpu=4096), base, (),
+                                              max_prompt_len=512, max_response_len=64)
+    assert "actor_rollout_ref.actor.use_dynamic_bsz=False" not in out
+    assert "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False" not in out
+    assert out.count("actor_rollout_ref.actor.use_dynamic_bsz=True") == 2  # both places replaced
+    assert "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True" in out
+    assert {to.ACTOR_DYNAMIC_KEY, to.LOG_PROB_DYNAMIC_KEY, to.ACTOR_TOKENS_KEY} <= set(asserted)
+    # without the option the Ascend override stays as it is
+    same, _ = to.apply_training_options(SimpleNamespace(rl_max_tokens_per_gpu=None), base, (),
+                                        max_prompt_len=512, max_response_len=64)
+    assert same == base

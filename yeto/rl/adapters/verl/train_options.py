@@ -18,7 +18,10 @@ Training options (:func:`apply_training_options`, verl hydra overrides):
   island already sets (16384 otherwise): ``actor.ppo_max_token_len_per_gpu``
   and ``rollout.log_prob_max_token_len_per_gpu``.  ``N`` must hold one whole
   sample (``max_prompt_len + max_response_len``), the rule of Miles'
-  ``--max-tokens-per-gpu >= --seq-len``;
+  ``--max-tokens-per-gpu >= --seq-len``.  It also turns dynamic batching
+  back on where the island had turned it off (Ascend: one sample per
+  micro-batch, ``island_entry.ascend_memory_overrides``), since the bounds
+  do nothing without it;
 * ``--rl-activation-recompute``: Miles' activation recompute is verl's
   gradient checkpointing, which the island always turns on
   (``config.build_overrides``); the option asserts it.
@@ -42,6 +45,8 @@ LR_SCHEDULER_KEY = "actor_rollout_ref.actor.optim.lr_scheduler_type"
 ACTOR_TOKENS_KEY = "actor_rollout_ref.actor.ppo_max_token_len_per_gpu"
 LOG_PROB_TOKENS_KEY = "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu"
 CHECKPOINTING_KEY = "actor_rollout_ref.model.enable_gradient_checkpointing"
+ACTOR_DYNAMIC_KEY = "actor_rollout_ref.actor.use_dynamic_bsz"
+LOG_PROB_DYNAMIC_KEY = "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz"
 VERL_LR_SCHEDULES = ("constant",)
 
 
@@ -102,6 +107,14 @@ def apply_training_options(args: Any, overrides: Sequence[str], asserted_keys: S
         for key in (ACTOR_TOKENS_KEY, LOG_PROB_TOKENS_KEY):
             out = _replace(out, key, int(tokens))
             asserted.append(key)
+        # The bounds only act with dynamic batching. An Ascend island turns it off
+        # (one sample per micro-batch, island_entry.ascend_memory_overrides), which
+        # left an explicit --rl-max-tokens-per-gpu without effect; the option turns it
+        # back on. Everywhere else the island already batches dynamically.
+        for key in (ACTOR_DYNAMIC_KEY, LOG_PROB_DYNAMIC_KEY):
+            if any(o.startswith(key + "=") for o in out):
+                out = _replace(out, key, True)
+                asserted.append(key)
     if getattr(args, "rl_activation_recompute", False):
         out = _replace(out, CHECKPOINTING_KEY, True)
         asserted.append(CHECKPOINTING_KEY)

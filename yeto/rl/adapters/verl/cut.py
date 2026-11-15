@@ -18,7 +18,7 @@ Rank file ``rank<NNNNN>.pt`` (``torch.save``):
   changes, so the freshly built trainer already has it;
 * ``optim`` -- the optimizer state dict keyed by parameter name, DTensor
   entries stored as local shards; ``dtensor`` lists which entries were DTensors;
-* ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA) RNG.
+* ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA or NPU) RNG.
 
 Restore needs the same world size (FSDP2 shards are per rank; a DP change is
 refused before any rank writes). Each rank checks its file checksum, loads it
@@ -38,6 +38,12 @@ a restore expects every Adam step to advance by ``optimizer_steps_per_round``.
 Driver-side functions are pure (lists of rank results in, manifest/problems
 out); :class:`VerlCutTrainer` binds them to a ``call_ranks`` callable (verl:
 ``VerlIsland.call_workers``).
+
+Compatibility (cut format): on Ascend a rank now saves its device RNG under the
+``npu`` key. Code from before this change only knows ``cpu`` / ``cuda``, so a cut
+newly written on Ascend cannot be restored by that older code (forward-only;
+cuts written by older code still restore here). CUDA ranks are not affected:
+they keep saving under ``cuda`` exactly as before.
 """
 
 from __future__ import annotations
@@ -192,26 +198,50 @@ def _digest(handles: TrainHandles) -> str:
 
 
 def _rng_state() -> dict[str, Any]:
+    """CPU RNG, plus the current device's under its torch device type: ``cuda``
+    on a CUDA rank (unchanged), ``npu`` on an Ascend rank. An Ascend rank used to
+    save its NPU state only when ``torch.cuda`` was the transfer_to_npu alias
+    (MindSpeed imported), as ``cuda``, and no device state at all otherwise.
+    An ``npu`` entry is a cut format change: older code cannot restore a cut
+    written on Ascend by this version. CUDA cuts are unchanged."""
     import torch
 
+    from yeto import accel
+
     rng = {"cpu": torch.get_rng_state()}
-    if torch.cuda.is_available():
-        rng["cuda"] = torch.cuda.get_rng_state()
+    device_type = accel.available_type()
+    if device_type in ("cuda", "npu"):
+        rng[device_type] = getattr(torch, device_type).get_rng_state()
     return rng
 
 
 def _set_rng_state(rng: Mapping[str, Any]) -> None:
+    """Restore what :func:`_rng_state` saved. A ``cuda`` entry written by an
+    Ascend rank under the transfer_to_npu alias restores through the same alias."""
     import torch
 
     torch.set_rng_state(rng["cpu"])
-    if "cuda" in rng:
-        if not torch.cuda.is_available():
-            raise CutError("cut rank file carries a CUDA RNG state but this rank has no CUDA device")
-        torch.cuda.set_rng_state(rng["cuda"])
+    for device_type, label in (("cuda", "CUDA"), ("npu", "NPU")):
+        if device_type not in rng:
+            continue
+        module = getattr(torch, device_type, None)
+        if module is None or not module.is_available():
+            raise CutError(f"cut rank file carries a {label} RNG state but this rank has no {label} device")
+        module.set_rng_state(rng[device_type])
+
+
+def _rng_state_as_saved(saved: Mapping[str, Any]) -> dict[str, Any]:
+    """:func:`_rng_state` under the saved cut's key names, so a restore re-exports
+    the digest it was written with: a cut from an Ascend rank under the
+    transfer_to_npu alias keeps its NPU state as ``cuda``."""
+    rng = _rng_state()
+    if "npu" in rng and "npu" not in saved and "cuda" in saved:
+        rng["cuda"] = rng.pop("npu")
+    return rng
 
 
 def rng_digest(rng: Mapping[str, Any]) -> str:
-    """sha256 of the RNG states (CPU, and CUDA when present): a restore must
+    """sha256 of the RNG states (CPU, and CUDA or NPU when present): a restore must
     re-export the saved one (as the Miles cut summary's ``rng_digest``)."""
     import torch
 
@@ -231,7 +261,8 @@ def _rank_and_world() -> tuple[int, int]:
     return 0, 1
 
 
-def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str) -> dict[str, Any]:
+def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str,
+                  saved_rng: Mapping[str, Any] | None = None) -> dict[str, Any]:
     resume = handles_rank_state(handles)
     return {
         "coord": {"rank": rank, "world": world},
@@ -239,7 +270,7 @@ def _rank_summary(handles: TrainHandles, *, rank: int, world: int, digest: str) 
         "has_optimizer_state": any(s.max > 0 for s in resume.adam_steps.values()) or bool(resume.moments),
         "has_rng": True,
         "state_digest": digest,
-        "rng_digest": rng_digest(_rng_state()),
+        "rng_digest": rng_digest(_rng_state() if saved_rng is None else _rng_state_as_saved(saved_rng)),
         "resume": resume.to_dict(),
     }
 
@@ -319,7 +350,8 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
                    options=_state_options(load=True))
     handles.scheduler.load_state_dict(saved["scheduler"])
     _set_rng_state(saved["rng"])
-    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles))}
+    return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles),
+                                                saved_rng=saved["rng"])}
 
 
 def resume_rank(handles: TrainHandles) -> dict[str, Any]:

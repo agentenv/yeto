@@ -67,11 +67,30 @@ def visible_devices_env(device_type: str) -> str | None:
     return _VISIBLE_DEVICE_ENVS.get(device_type)
 
 
+def cuda_is_npu_alias() -> bool:
+    """Whether ``torch.cuda`` answers for Ascend cards, not CUDA ones.
+
+    ``torch_npu.contrib.transfer_to_npu`` (imported by MindSpeed's
+    ``megatron_adaptor`` and so by verl's NPU stack) rebinds ``torch.cuda.*``
+    to ``torch.npu.*`` for the whole process: ``torch.cuda.is_available()``
+    then returns True on a 910B. A torch_npu build of torch has neither CUDA
+    nor HIP compiled in, which a real CUDA/ROCm/PPU torch always has."""
+    return (getattr(torch, "npu", None) is not None and torch.version.cuda is None
+            and getattr(torch.version, "hip", None) is None)
+
+
 def available_type() -> str:
-    """The accelerator family visible on this node, or ``"cpu"``."""
+    """The accelerator family visible on this node, or ``"cpu"``.
+
+    ``"npu"`` when ``torch.cuda`` is only the transfer_to_npu alias
+    (:func:`cuda_is_npu_alias`); before that check, an Ascend Ray worker that
+    had imported MindSpeed reported ``"cuda"`` (identity family ``nvidia``,
+    backend ``nccl``, Ray resource ``GPU``) while ``main`` reported ``npu``."""
     register_backends()
     for name in _ACCELERATORS:
         module = getattr(torch, name, None)
+        if name == "cuda" and module is not None and cuda_is_npu_alias():
+            continue
         if module is not None and module.is_available():
             return name
     return "cpu"
