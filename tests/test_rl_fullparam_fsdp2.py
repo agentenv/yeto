@@ -166,7 +166,10 @@ def test_verl_overrides_full_parameter():
 def test_backends_follow_the_device_family():
     from yeto.rl.fullparam.fsdp2 import BACKENDS
 
-    assert BACKENDS == {"cpu": "gloo", "cuda": "nccl", "ppu": "nccl", "npu": "hccl"}
+    # "rocm" joined the table with the single hardware-family model (gap T8):
+    # torch on ROCm reports device type "cuda" and its NCCL backend is RCCL.
+    assert BACKENDS == {"cpu": "gloo", "cuda": "nccl", "ppu": "nccl", "npu": "hccl",
+                        "rocm": "nccl"}
 
 
 def test_init_distributed_passes_the_family_backend_and_card(monkeypatch):

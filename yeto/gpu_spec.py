@@ -66,13 +66,110 @@ _CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu", "910B2": "npu",
 # collective-communication variables. It is not the torch device type: a PPU
 # card has family ``ppu`` and device type ``cuda``; so does an AMD card (torch
 # on ROCm reports ``cuda``), with family ``rocm``.
-DEVICE_FAMILIES = ("cuda", "npu", "ppu", "rocm")
+# (derived from HW_FAMILIES below; same tuple and order as before)
 # Environment variable the island launcher sets to the node's device family;
 # yeto.accel.device_family reads it (torch cannot tell a PPU from a GPU).
 DEVICE_FAMILY_ENV = "YETO_DEVICE_FAMILY"
 _CARD_DEVICE_FAMILY = {**{card: "npu" for card in _CARD_DEVICE_TYPE},
                        "810E": "ppu", "M890": "ppu",
                        "MI300X": "rocm", "MI325X": "rocm", "MI355X": "rocm"}
+
+
+# --- hardware family model (T8-T11, S7) -------------------------------------
+#
+# Three spellings of "which hardware is this" grew side by side: the launcher
+# family (cuda/npu/ppu/rocm, this module), the identity vendor
+# (nvidia/ascend/thead/amd, ``yeto.hw.catalog``) and the torch device type
+# (cuda/npu). Every per-family decision -- collective backend, Ray resource
+# name, card tool, visible-device variable, memory collector -- was a separate
+# dict somewhere, and each one had its own hole (``accel`` had no ``rocm`` at
+# all; ``catalog`` read ROCm and PPU as ``nvidia``).
+#
+# :class:`HwFamily` is the one table those dicts now derive from. The values
+# are exactly the ones already in use, so the NVIDIA and ROCm paths of the
+# async GRPO delivery read the same as before (identity hashes included: the
+# ``nvidia`` vendor of a CUDA/CPU node is unchanged, see
+# ``catalog.device_family``).
+
+
+class UnknownFamily(ValueError):
+    """The hardware family name is not in :data:`HW_FAMILIES`."""
+
+
+@dataclass(frozen=True)
+class HwFamily:
+    """One accelerator family: launcher name, identity vendor and its tooling."""
+
+    family: str          # launcher/inventory name, $YETO_DEVICE_FAMILY
+    vendor: str          # identity spelling (compat_group prefix)
+    device_type: str     # torch device type
+    dist_backend: str    # torch.distributed backend
+    ray_resource: str    # Ray accelerator resource name
+    smi: str             # primary card tool
+    visible_devices_env: str | None  # variable that limits visible cards
+    telemetry: str       # card-telemetry collector key (card_telemetry.collector_for)
+
+    @property
+    def is_npu(self) -> bool:
+        return self.device_type == "npu"
+
+
+HW_FAMILIES: tuple[HwFamily, ...] = (
+    HwFamily("cuda", "nvidia", "cuda", "nccl", "GPU", "nvidia-smi",
+             "CUDA_VISIBLE_DEVICES", "cuda"),
+    HwFamily("npu", "ascend", "npu", "hccl", "NPU", "npu-smi",
+             "ASCEND_RT_VISIBLE_DEVICES", "npu"),
+    # torch on a PPU reports device type "cuda" and the collective API is
+    # NCCL-compatible (served by ACCL-P); inferred from vendor docs, not
+    # verified on a PPU machine.
+    HwFamily("ppu", "thead", "cuda", "nccl", "GPU", "ppu-smi",
+             "CUDA_VISIBLE_DEVICES", "ppu"),
+    # torch on ROCm also reports "cuda" and its NCCL backend is RCCL.
+    HwFamily("rocm", "amd", "cuda", "nccl", "GPU", "amd-smi",
+             "HIP_VISIBLE_DEVICES", "rocm"),
+    # Historical values, not a claim about CPU hardware: before this table a
+    # CPU rank already reported vendor "nvidia" (identity default) and used the
+    # "cuda"/NVML collector, and "GPU" is the Ray default. Kept so no
+    # externally visible value changes; only device_type/dist_backend matter.
+    HwFamily("cpu", "nvidia", "cpu", "gloo", "GPU", "", None, "cuda"),
+)
+#: Launcher device families (no ``cpu``): the inventory/``--gpu`` dimension.
+DEVICE_FAMILIES = tuple(f.family for f in HW_FAMILIES if f.family != "cpu")
+# Both spellings resolve: launcher family and identity vendor.
+_HW_BY_NAME: dict[str, HwFamily] = {f.family: f for f in HW_FAMILIES}
+_HW_BY_NAME.update({f.vendor: f for f in HW_FAMILIES if f.family != "cpu"})
+
+
+def hw_family(name: str) -> HwFamily:
+    """The :class:`HwFamily` of a family or vendor name (``"npu"``/``"ascend"``).
+
+    Case-insensitive; an unknown name is an error (no silent NVIDIA default).
+    """
+    key = name.strip().lower() if isinstance(name, str) else ""
+    try:
+        return _HW_BY_NAME[key]
+    except KeyError:
+        raise UnknownFamily(f"unknown device family {name!r} "
+                            f"(known: {sorted(_HW_BY_NAME)})") from None
+
+
+def normalize_family(name: str) -> str:
+    """The canonical launcher family name of a family or vendor spelling."""
+    return hw_family(name).family
+
+
+def hw_family_or(name: str | None, default: str = "cuda") -> HwFamily:
+    """:func:`hw_family`, falling back to ``default`` for a missing/unknown name.
+
+    Used where an unreadable value must not break a running island (telemetry,
+    the sampler memory guard): the historical default is ``cuda``.
+    """
+    if name:
+        try:
+            return hw_family(name)
+        except UnknownFamily:
+            pass
+    return hw_family(default)
 
 
 class UnknownCard(ValueError):

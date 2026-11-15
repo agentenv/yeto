@@ -17,13 +17,16 @@ so the two events share one probe instead of defining a second peak source.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from typing import Any, Callable, Mapping
 
-from yeto.gpu_spec import DEVICE_FAMILY_ENV
+from yeto.gpu_spec import DEVICE_FAMILY_ENV, UnknownFamily, hw_family, hw_family_or
 from yeto.hw.card_telemetry import CardCollector, collector_for
+
+_log = logging.getLogger(__name__)
 
 HEARTBEAT_EVENT = "rl_heartbeat"
 RESOURCE_EVENT = "rl_resource_sample"
@@ -125,6 +128,14 @@ def _cpu_rss_bytes() -> int | None:
         return None
 
 
+def _known_family(name: str) -> bool:
+    try:
+        hw_family(name)
+    except UnknownFamily:
+        return False
+    return True
+
+
 class ResourceSampler(_Periodic):
     """2.2: ``rl_resource_sample`` every ``interval_s``, single fallback record.
 
@@ -147,7 +158,16 @@ class ResourceSampler(_Periodic):
         self._emit = emit
         # ``vram_guard.VramWatch``: high-VRAM alerts from the same card samples (sampler nodes)
         self._vram_watch = vram_watch
-        family = os.environ.get(DEVICE_FAMILY_ENV) or "cuda"
+        # A family spelling the collector does not know (an identity vendor
+        # such as "ascend"/"amd", or a typo) used to raise out of the sampler's
+        # constructor; it now resolves to its collector, or to the historical
+        # "cuda" default. An unknown name logs a WARNING so a typo does not
+        # silently turn off the VRAM watch on a non-NVIDIA sampler node.
+        raw_family = os.environ.get(DEVICE_FAMILY_ENV)
+        family = hw_family_or(raw_family, "cuda").telemetry
+        if raw_family and not _known_family(raw_family):
+            _log.warning("%s=%r is not a known device family; falling back to the %r card collector",
+                         DEVICE_FAMILY_ENV, raw_family, family)
         self._collector = collector or collector_for(family, nvml_loader=nvml_loader)
         self._rss = rss
         self._clock = clock

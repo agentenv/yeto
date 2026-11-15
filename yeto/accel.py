@@ -19,7 +19,14 @@ from types import ModuleType
 
 import torch
 
-from .gpu_spec import DEVICE_FAMILY_ENV
+from .gpu_spec import DEVICE_FAMILY_ENV, HW_FAMILIES
+
+# Everything below derives from gpu_spec.HW_FAMILIES, the single hardware
+# table (family / vendor / torch device type / collective / Ray resource /
+# card tool / memory collector). The CUDA and NPU values are the ones this
+# module already had; ``rocm`` used to be missing entirely, so a MI355X island
+# (the launcher exports YETO_DEVICE_FAMILY=rocm) raised ValueError in
+# ``device_family`` before it could start a learner (gap T8).
 
 # Visible-card environment variables, in accelerator auto-detection priority.
 _VISIBLE_DEVICE_ENVS = {
@@ -33,10 +40,11 @@ _DIST_BACKENDS = {"cuda": "nccl", "npu": "hccl", "cpu": "gloo"}
 
 # Inventory device family (gpu_spec.DEVICE_FAMILIES, plus "cpu") -> the torch
 # device type its learner runs on. A PPU keeps the CUDA device name and the
-# NCCL API (served by ACCL-P), so it shares the "cuda" runtime: an inference
-# from the vendor documentation, not verified on a PPU machine. NPU uses
-# torch_npu and HCCL. The collective backend follows from the device type.
-FAMILY_DEVICE_TYPES = {"cuda": "cuda", "ppu": "cuda", "npu": "npu", "cpu": "cpu"}
+# NCCL API (served by ACCL-P), and torch on ROCm also reports ``cuda`` (its
+# NCCL backend is RCCL), so both share the "cuda" runtime; the PPU entry is an
+# inference from the vendor documentation, not verified on a PPU machine. NPU
+# uses torch_npu and HCCL. The collective backend follows from the device type.
+FAMILY_DEVICE_TYPES = {f.family: f.device_type for f in HW_FAMILIES}
 
 
 
@@ -141,7 +149,13 @@ def family_device_type(family: str) -> str:
 
 
 def family_dist_backend(family: str) -> str:
-    """torch.distributed backend of a device family (nccl, hccl or gloo)."""
+    """torch.distributed backend of a device family (nccl, hccl or gloo).
+
+    Accepts the same spellings as :func:`device_family` and
+    :func:`family_device_type` (launcher family names plus ``cpu``, exact
+    case); an identity vendor spelling such as ``"ascend"`` is refused here
+    too. Normalize with ``gpu_spec.normalize_family`` first if needed.
+    """
     return _DIST_BACKENDS[family_device_type(family)]
 
 
