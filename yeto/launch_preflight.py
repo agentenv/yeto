@@ -446,6 +446,9 @@ def pre_cloud_checks(args, *, counter=None, sleep=None, clock=time.monotonic, ou
     from .launch.model_check import preflight_trainer_model
 
     preflight["model"] = preflight_trainer_model(args, out=out)  # before any order
+    xhw = xhw_family_advice(args, specs, out=out)
+    if xhw is not None:  # only a launch over several device families gets the record
+        preflight["xhw"] = xhw
     check_policy_age_spec(args)  # global flag (island copies: island_overrides.check_island_args)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))
@@ -471,6 +474,42 @@ def dry_run_memory(args, specs) -> list[dict] | None:
     if mode == "off":
         return None
     return island_memory_estimates(args, specs, margin=margin)
+
+
+def xhw_family_advice(args, specs, *, out=None, environ=None) -> dict | None:
+    """An RL launch whose islands sit on more than one device family (e.g. CUDA
+    samplers next to an Ascend or ROCm trainer): the rollout log-probs of one family
+    are the IS denominator of another's update, and ``YETO_RL_XHW_GUARD`` (off by
+    default) is the per-source check of that mismatch. Warn and advise turning it
+    on; never refuse, never turn it on. Returns the manifest record, or None for a
+    single-family (or non-RL) launch."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return None
+    from .gpu_spec import UnknownCard, device_family_of
+    from .rl.engine.xhw_guard import ENV, XhwGuard
+
+    families: dict[str, list[int]] = {}
+    for index, spec in enumerate(specs):
+        try:
+            family = device_family_of(spec.gpu)
+        except (UnknownCard, ValueError):
+            continue  # an unknown card fails elsewhere with its own message
+        families.setdefault(family, []).append(index)
+    if len(families) < 2:
+        return None
+    env = os.environ if environ is None else environ
+    try:
+        enabled = XhwGuard.from_env(env) is not None
+    except ValueError:
+        enabled = True  # a malformed value is refused by the island with its own message
+    listed = ", ".join(f"{f}: islands {v}" for f, v in sorted(families.items()))
+    if not enabled:
+        print(f"[preflight] WARNING: RL islands on several device families ({listed}); the "
+              "rollout log-probs of one family become the IS denominator of another's update "
+              f"and nothing checks their per-source mismatch. Consider {ENV}=1 (warn/quarantine "
+              "per sampler source; default off, not turned on for you)", file=out, flush=True)
+    return {"device_families": {f: v for f, v in sorted(families.items())},
+            "xhw_guard": enabled}
 
 
 def check_compat_groups(args, specs) -> None:

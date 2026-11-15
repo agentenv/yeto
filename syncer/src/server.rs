@@ -5115,6 +5115,9 @@ async fn scheduler(
                     };
                     let rejected = |reason: &str| {
                         pool("delta_rejected", format!("\"island_id\":{learner_id},\"reason\":\"{reason}\""));
+                        if dynamic {
+                            note_contribution_rejected(&cfg, learner_id, reason);
+                        }
                     };
                     if let Err(reason) = fenced {
                         warn!(
@@ -6782,6 +6785,7 @@ fn prepare_round_compute(
     }
     if !cfg.membership.is_static() {
         append_outer_step_record(cfg, round, &ordered_pushes, &weights);
+        note_contribution_round(cfg, round, &ordered_pushes, &weights);
     }
     let Some(mut fold) = round.fold.take() else {
         let tensor_scales = cfg.expert_token_weights.then_some(tensor_scales.as_slice());
@@ -9118,6 +9122,55 @@ async fn send_fragment(
         .await
 }
 
+/// The per-island contribution tracker of the pool whose event tape is
+/// `tape` (warn only, `crate::contribution`). Keyed by the tape so the shards
+/// of one process and parallel tests keep apart.
+fn with_contribution<R>(tape: &std::path::Path, f: impl FnOnce(&mut crate::contribution::ContributionTracker) -> R) -> R {
+    use std::sync::OnceLock;
+    static TRACKERS: OnceLock<Mutex<HashMap<std::path::PathBuf, crate::contribution::ContributionTracker>>> =
+        OnceLock::new();
+    let mut trackers = TRACKERS.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let tracker = trackers.entry(tape.to_path_buf()).or_insert_with(|| {
+        let (cfg, error) = crate::contribution::AlertConfig::from_env();
+        if let Some(error) = error {
+            warn!("{error}; using the defaults");
+        }
+        crate::contribution::ContributionTracker::new(cfg)
+    });
+    f(tracker)
+}
+
+/// A refused push of an island pool member, for its contribution figures.
+fn note_contribution_rejected(cfg: &Config, learner_id: u32, reason: &str) {
+    if let Some(tape) = cfg.event_tape.as_deref() {
+        with_contribution(tape, |t| t.note_rejected(learner_id, reason));
+    }
+}
+
+/// One merged pool round for the contribution figures; an island whose
+/// window shows no contribution (or mostly refused pushes) gets a warning and
+/// an `island_low_contribution` pool record. Never changes the merge.
+fn note_contribution_round(cfg: &Config, round: &Round, ordered_pushes: &[(&Member, &Push)], weights: &[f64]) {
+    let Some(tape) = cfg.event_tape.as_deref() else {
+        return;
+    };
+    let expected: Vec<u32> = round.expected_members.iter().map(|m| m.learner_id).collect();
+    let merged: Vec<(u32, f64)> =
+        ordered_pushes.iter().zip(weights).map(|((member, _), w)| (member.learner_id, *w)).collect();
+    let (alert_cfg, alerts) = with_contribution(tape, |t| (t.cfg, t.note_round(&expected, &merged)));
+    for figures in alerts {
+        warn!(
+            learner_id = figures.island_id,
+            window = figures.rounds,
+            contributed_rounds = figures.contributed_rounds,
+            rejected_pushes = figures.rejected_pushes,
+            reject_share = figures.reject_share,
+            "island contributes little or nothing to the merge (its pushes are refused or weightless) while it still holds its lease and capacity"
+        );
+        append_pool_record(Some(tape), "island_low_contribution", cfg.syncer_epoch, &figures.alert_fields(&alert_cfg));
+    }
+}
+
 /// One JSONL record per merge: the event tape.
 /// One island-pool record on the event tape: `{"kind":..,"syncer_epoch":..,
 /// <fields>,"time_unix":..}`. Written only with dynamic membership; the
@@ -9230,7 +9283,10 @@ fn write_pool_status(cfg: &Config, registry: &Registry, outer_version: u64, stat
         .iter()
         .map(|(id, capacity, lease)| {
             let lease = lease.map_or_else(|| "null".to_string(), |d| format!("{:?}", d.as_secs_f64()));
-            format!("\"{id}\":{{\"capacity\":{capacity:?},\"lease_remaining_s\":{lease}}}")
+            // per-island contribution over the alert window (crate::contribution)
+            let contribution = with_contribution(tape, |t| t.figures(*id))
+                .map_or_else(String::new, |f| format!(",{}", f.status_fields()));
+            format!("\"{id}\":{{\"capacity\":{capacity:?},\"lease_remaining_s\":{lease}{contribution}}}")
         })
         .collect();
     let body = format!(
@@ -13404,6 +13460,40 @@ mod tests {
         let mut push = test_push(base_version);
         push.learner_id = learner_id;
         push
+    }
+
+    #[test]
+    fn a_refused_slow_island_gets_a_low_contribution_record_and_status_fields() {
+        // A08 D1: island 1 pushes every round, is refused (carry_lag_exceeded) and
+        // never merged; island 0 alone carries every merge. Default window 8.
+        let dir = std::env::temp_dir().join(format!("yeto-contribution-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        let mut cfg = round_test_config(16);
+        cfg.event_tape = Some(tape.clone());
+        let (fast, slow) = (member(0, 1), member(1, 1));
+        let round = test_round(vec![fast, slow]);
+        let push = test_push_for(0, 5);
+        for _ in 0..8 {
+            note_contribution_rejected(&cfg, 1, "carry_lag_exceeded");
+            note_contribution_round(&cfg, &round, &[(&fast, &push)], &[1.0]);
+        }
+        let text = std::fs::read_to_string(&tape).unwrap();
+        let alerts: Vec<&str> = text.lines().filter(|l| l.contains("\"island_low_contribution\"")).collect();
+        assert_eq!(alerts.len(), 1, "{text}");
+        assert!(alerts[0].contains("\"island_id\":1") && alerts[0].contains("\"carry_lag_exceeded\":8"));
+        let registry: Registry =
+            Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg.membership.clone(), 2))));
+        for m in [fast, slow] {
+            let _ = registry.lock().unwrap().membership.admit(m, Instant::now());
+        }
+        write_pool_status(&cfg, &registry, 8, "running");
+        let status = std::fs::read_to_string(dir.join("status.json")).unwrap();
+        assert!(status.contains("\"1\":{\"capacity\":1.0,") , "{status}");
+        assert!(status.contains("\"contribution_share\":0.0,\"contribution_rounds\":8,\"reject_share\":1.0,\"rejected_pushes\":8"), "{status}");
+        assert!(status.contains("\"contribution_share\":1.0,\"contribution_rounds\":8,\"reject_share\":0.0"), "{status}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

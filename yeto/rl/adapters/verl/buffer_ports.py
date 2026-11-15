@@ -296,6 +296,8 @@ class BufferReleasePublisher:
         """The island's driver (synced trainers read its outer version; a resumed
         version account is wired into it here, module doc "relaunch")."""
         self.driver = driver
+        if self.feed.xhw and getattr(driver, "xhw_guard", None) is not None:
+            driver.xhw_actions_sink = self.feed.set_xhw_actions
         if self.resumed is not None:
             # The island's rounds and publications continue at vK,
             # and the versions published below it are restored with the hashes the
@@ -635,7 +637,11 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
                       add_group=lambda rows: actor_call("yeto_add_group", rows),
                       remove_group=lambda uid: actor_call("yeto_remove_group", uid), record=record,
                       tokenize=tokenize, wait_s=wait_s, poll_s=poll_s, cursor_log=cursor_log,
-                      merged=None if lane is None else MergedVersions(), **feed_kwargs)
+                      merged=None if lane is None else MergedVersions(),
+                      round_of=lambda: int(island.published[0]) if island.published else 0,
+                      **feed_kwargs)
+    # YETO_RL_XHW_GUARD (default off): the per-source guard on this trainer too
+    island.xhw_feed = feed if feed.xhw else None
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.recheck_kept = feed.recheck_kept  # the round judged again before assembly
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere

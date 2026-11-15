@@ -142,7 +142,7 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.rl.engine.release_delta import default_mirror
         from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
-        from .buffer_feed import RowShape
+        from .buffer_feed import RowShape, xhw_guard_enabled
         from .buffer_ports import install_buffer_ports, release_weights_for
         from .island_entry import TRAINER_FP8_KEY, start_trainer_releaser
         from .relay_trainer import RELAY_SECTION_KEY, install_relay_ports, relay_buffer
@@ -195,6 +195,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         releases = PolicyReleaseStore(store_for(release_root, environ=environ),
                                       mirror=default_mirror(environ, store=release_root))
 
+        xhw = xhw_guard_enabled(environ)
+
         def ports(island):
             return install_buffer_ports(island, buffer=buffer, releases=releases, shape=shape,
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
@@ -217,7 +219,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                         # This island counts its own
                                         # versions, so a new process of it continues the
                                         # account above the store's newest release
-                                        resume_versions=plan["sync"] == "none")
+                                        resume_versions=plan["sync"] == "none",
+                                        # YETO_RL_XHW_GUARD (default off): per-source guard
+                                        xhw=xhw)
 
         stop_releaser = threading.Event()
         fp8 = section.get(TRAINER_FP8_KEY)

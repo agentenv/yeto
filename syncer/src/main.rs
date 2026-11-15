@@ -1,3 +1,4 @@
+mod contribution;
 mod fold;
 mod hmac;
 mod shard;
