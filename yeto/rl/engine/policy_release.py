@@ -106,7 +106,6 @@ import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -114,8 +113,9 @@ from typing import Any
 
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
+from . import file_verify
 from .object_store import DOWNLOAD_SUFFIX, ObjectStore, download_file, is_fatal_store_error, object_size
-from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory, file_sha256
+from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory
 from .resume import CheckpointStore, _write_json_atomic, commit_paths
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -367,22 +367,34 @@ def check_complete(release: PolicyRelease, directory: Path) -> None:
 
 
 def file_digests(directory: Path, names: Iterable[str] | None = None, *,
-                 workers: int = DIGEST_WORKERS) -> dict[str, str]:
+                 workers: int = DIGEST_WORKERS, mode: str = file_verify.FULL) -> dict[str, str | None]:
     """{relative path: sha256} of ``names`` (default: every file but the record)
-    under ``directory``, ``workers`` files at a time."""
+    under ``directory``, ``workers`` files at a time. ``mode`` (:mod:`.file_verify`):
+    ``full`` (the default here, the writer's digest) hashes every file; under
+    ``YETO_VERIFY=fast`` it records each digest so a later check of the same
+    unchanged file on this disk reuses it."""
     root = Path(directory)
     names = sorted(file_sizes(root)) if names is None else sorted(names)
-    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
-        return dict(zip(names, pool.map(lambda name: file_sha256(root / name), names)))
+    got = file_verify.digests([root / name for name in names], mode=mode, workers=workers)
+    return {name: got[os.fspath(root / name)] for name in names}
 
 
-def check_release_files(release: PolicyRelease, directory: Path) -> None:
+def check_release_files(release: PolicyRelease, directory: Path, *, mode: str | None = None) -> None:
     """Raise when the weight files differ from the ones the trainer released:
-    the release digest (``sha256``) or each file's (``file_sha256``)."""
+    the release digest (``sha256``) or each file's (``file_sha256``).
+
+    ``mode`` (``YETO_VERIFY``, :mod:`.file_verify`): ``full`` (default) hashes
+    every file, ``fast`` reuses the digest of a file unchanged since this disk
+    hashed it (a spot placement, an earlier load of the same download), ``off``
+    checks the recorded sizes only."""
+    mode = file_verify.verify_mode() if mode is None else mode
+    if mode == file_verify.OFF:  # sizes were checked when the release was resolved (check_complete)
+        return
     if release.sha256 is not None:
         check_release_digest(release, directory_digest(directory))
     if release.file_sha256:
-        actual = file_digests(directory, release.file_sha256)
+        actual = file_digests(directory, release.file_sha256, mode=mode,
+                              workers=file_verify.hash_workers(default=DIGEST_WORKERS))
         bad = sorted(name for name, digest in release.file_sha256.items() if actual[name] != digest)
         if bad:
             raise ReleaseDigestMismatch(f"release r{release.seq}-v{release.version}: {len(bad)} of "

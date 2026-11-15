@@ -36,6 +36,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine import file_verify
+
 SCHEMA = "yeto.s29.cut-manifest/v1"
 RELEASES = "policy-releases"
 LATEST = "LATEST.json"
@@ -63,10 +65,19 @@ def digest(manifest: Mapping[str, Any]) -> str:
     return hashlib.sha256(encode(manifest)).hexdigest()
 
 
-def make(store: Path, release: str, *, record: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def make(store: Path, release: str, *, record: Mapping[str, Any] | None = None,
+         mode: str | None = None) -> dict[str, Any]:
     """The manifest of ``store/policy-releases/<release>``. The release record
     is ``record`` or else the store's LATEST.json, which must name this release
-    (the mirror runs after the trainer published it)."""
+    (the mirror runs after the trainer published it).
+
+    A file whose sha256 the trainer already recorded (``record["file_sha256"]``,
+    a full release) takes that digest instead of being hashed again here when
+    ``mode`` (``YETO_VERIFY``) is ``fast`` or ``off`` (the default ``full`` hashes
+    again). That is the producer's digest of the bytes it wrote, so the spot island's check in :func:`place` covers the whole
+    path trainer -> store -> mirror -> near store -> VM; a copy damaged before the
+    mirror read it is refused at placement instead of being re-blessed here. The
+    other files are hashed in parallel."""
     root = Path(store) / RELEASES
     directory = root / release
     if not directory.is_dir():
@@ -74,10 +85,16 @@ def make(store: Path, release: str, *, record: Mapping[str, Any] | None = None) 
     record = dict(record) if record is not None else json.loads((root / LATEST).read_text())
     if record.get("path") != release:
         raise ManifestError(f"{root / LATEST} names {record.get('path')!r}, not {release!r}")
-    files = {}
-    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
-        name = path.relative_to(directory).as_posix()
-        files[name] = {"size": path.stat().st_size, "sha256": file_sha256(path)}
+    mode = file_verify.verify_mode() if mode is None else mode
+    known = {} if mode == file_verify.FULL else dict(record.get("file_sha256") or {})
+    paths = {path.relative_to(directory).as_posix(): path
+             for path in sorted(p for p in directory.rglob("*") if p.is_file())}
+    # the manifest needs every digest: ``off`` still hashes here (like ``fast``)
+    hashed = file_verify.digests([p for n, p in paths.items() if n not in known],
+                                 mode=file_verify.FULL if mode == file_verify.FULL else file_verify.FAST)
+    files = {name: {"size": path.stat().st_size,
+                    "sha256": str(known[name]) if name in known else hashed[os.fspath(path)]}
+             for name, path in paths.items()}
     missing = sorted(set(record.get("files") or {}) - set(files))
     if missing:
         raise ManifestError(f"release {release} lacks recorded files {missing[:5]}")
@@ -93,19 +110,41 @@ def check(manifest: Mapping[str, Any], expected_digest: str | None) -> None:
         raise ManifestError("manifest digest does not match the control-plane digest")
 
 
-def verify(manifest: Mapping[str, Any], staged: Path) -> None:
-    """Every manifest file is in ``staged`` with its size and sha256; no extra files."""
+def verify(manifest: Mapping[str, Any], staged: Path, *, mode: str | None = None) -> None:
+    """Every manifest file is in ``staged`` with its size and sha256; no extra files.
+
+    Sizes are always compared (truncation). sha256 per ``mode`` (``YETO_VERIFY``,
+    :mod:`yeto.rl.engine.file_verify`): ``full`` (default) hashes every file,
+    ``fast`` reuses the digest of a file unchanged since this disk last hashed
+    it, ``off`` compares sizes only. Files are checked one at a time in manifest
+    order (size, then sha256; the first bad file raises). ``YETO_VERIFY_WORKERS``
+    opts in to parallel hashing: all sizes are checked first, then the files are
+    hashed in parallel and the first mismatch stops the rest."""
     staged = Path(staged)
     present = {p.relative_to(staged).as_posix() for p in staged.rglob("*") if p.is_file()}
     want = manifest["files"]
     if present != set(want):
         raise ManifestError(f"staged files differ: missing {sorted(set(want) - present)[:5]}, "
                             f"extra {sorted(present - set(want))[:5]}")
+    mode = file_verify.verify_mode() if mode is None else mode
+    if mode != file_verify.OFF and file_verify.hash_workers() > 1:
+        for name, meta in want.items():
+            path = staged / name
+            if path.stat().st_size != int(meta["size"]):
+                raise ManifestError(f"{name}: size {path.stat().st_size} != {meta['size']}")
+        expected = {os.fspath(staged / n): str(m["sha256"]) for n, m in want.items()}
+        actual = file_verify.digests([staged / n for n in want], mode=mode, expected=expected)
+        for name, meta in want.items():
+            got = actual.get(os.fspath(staged / name))
+            if got is not None and got != meta["sha256"]:
+                raise ManifestError(f"{name}: sha256 mismatch")
+        return
     for name, meta in want.items():
         path = staged / name
         if path.stat().st_size != int(meta["size"]):
             raise ManifestError(f"{name}: size {path.stat().st_size} != {meta['size']}")
-        if file_sha256(path) != meta["sha256"]:
+        got = file_sha256(path) if mode == file_verify.FULL else file_verify.digest(path, mode=mode)
+        if got is not None and got != meta["sha256"]:
             raise ManifestError(f"{name}: sha256 mismatch")
 
 

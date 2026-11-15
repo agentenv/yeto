@@ -42,11 +42,12 @@ class CutError(RuntimeError):
 
 
 def sha256_file(path: str | os.PathLike[str], *, chunk: int = 1 << 20) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        while block := fh.read(chunk):
-            digest.update(block)
-    return digest.hexdigest()
+    """The full sha256 of ``path`` (a shard its writer just wrote); under
+    ``YETO_VERIFY=fast`` it is recorded so a later check of the same unchanged file
+    on this disk need not read it again."""
+    from .file_verify import sha256_file as hash_and_remember
+
+    return hash_and_remember(path, chunk=chunk)
 
 
 def fsync_file(path: str | os.PathLike[str]) -> None:
@@ -467,7 +468,24 @@ def checksum_problems(remote_checksums: Mapping[str, tuple[str, str | None]] | N
 
 
 def file_problems(directory: Path, files: Iterable[CutFile], *,
-                  remote_sizes: Mapping[str, int | None] | None = None) -> list[str]:
+                  remote_sizes: Mapping[str, int | None] | None = None,
+                  mode: str | None = None) -> list[str]:
+    """Problems of the shards ``files`` under ``directory``, in their order. Sizes
+    are always compared; sha256 per ``mode`` (``YETO_VERIFY``, :mod:`.file_verify`):
+    ``full`` (default) hashes every shard, ``fast`` reuses the digest of a shard
+    unchanged since this disk hashed it, ``off`` compares sizes only. Shards are
+    hashed one at a time unless ``YETO_VERIFY_WORKERS`` opts in to parallel
+    hashing; the problems and their order are the same either way."""
+    from . import file_verify
+
+    mode = file_verify.verify_mode() if mode is None else mode
+    files = list(files)
+    parallel = mode != file_verify.OFF and file_verify.hash_workers() > 1
+    hashed: dict[str, str | None] = {}
+    if parallel:
+        hashed = file_verify.digests([directory / f.path for f in files
+                                      if (directory / f.path).is_file()
+                                      and (directory / f.path).stat().st_size == f.bytes], mode=mode)
     out = []
     for f in files:
         path = directory / f.path
@@ -485,7 +503,13 @@ def file_problems(directory: Path, files: Iterable[CutFile], *,
         if size != f.bytes:
             out.append(f"shard {f.path} is {size} bytes, manifest says {f.bytes} (truncated?)")
             continue
-        if sha256_file(path) != f.sha256:
+        if parallel:
+            got = hashed[os.fspath(path)]
+        elif mode == file_verify.FULL:
+            got = sha256_file(path)
+        else:
+            got = file_verify.digest(path, mode=mode)
+        if got is not None and got != f.sha256:
             out.append(f"shard {f.path} checksum mismatch")
     return out
 
