@@ -6789,6 +6789,18 @@ fn prepare_round_compute(
             tensor_scales.push(scales);
         }
     }
+    if !weights.is_empty() && weights.iter().all(|w| *w == 0.0) {
+        // Every merge weight is zero (e.g. a carry/staleness discount
+        // underflowed): the weighted merge degenerates to an all-zero delta.
+        // Say so instead of dropping the round's contribution silently.
+        tracing::error!(
+            step = round.t,
+            fragment = round.p,
+            pushes = weights.len(),
+            "every merge weight of this round is 0; the round merges as an all-zero delta \
+             (check --carry-gamma / --stale-lag-half-life and the pushes' token counts)"
+        );
+    }
     if !cfg.membership.is_static() {
         append_outer_step_record(cfg, round, &ordered_pushes, &weights);
         note_contribution_round(cfg, round, &ordered_pushes, &weights);

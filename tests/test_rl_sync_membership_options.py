@@ -200,6 +200,18 @@ def test_stale_lag_window_reaches_the_syncer_in_versions(preset):
                          (("--rl-sync-stale-lag-ceiling", "1", "--rl-sync-stale-lag-half-life", "1"),
                           "must exceed"),
                          (("--rl-sync-stale-lag-ceiling", "4", "--rl-sync-stale-lag-half-life", "0"),
-                          "positive number of rounds")]:
+                          "positive number of rounds"),
+                         (("--rl-sync-stale-lag-ceiling", "4", "--rl-sync-stale-lag-half-life", "0.001"),
+                          "too short")]:
         with pytest.raises(ValueError, match=message):
             _plan(preset + QUORUM + lag + bad)
+
+
+def test_stale_lag_options_fail_while_the_rl_args_are_prepared():
+    from yeto.launcher import _prepare_rl_args
+
+    lag = ("--rl-sync-max-base-lag", "1")
+    args = _launcher_args("ports", QUORUM + lag + ("--rl-sync-stale-lag-ceiling", "4"), gpu=THREE_ISLANDS)
+    args.controller = "local"
+    with pytest.raises(ValueError, match="go together"):
+        _prepare_rl_args(args)  # before any syncer command is rendered

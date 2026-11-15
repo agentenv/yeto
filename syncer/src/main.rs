@@ -497,6 +497,9 @@ fn main() -> anyhow::Result<()> {
     };
     let final_ack_timeout_s = args.resolved_final_ack_timeout_s();
     let membership = parse_membership(&args)?;
+    // Not part of the profile hash: a resume that drops or adds these
+    // flags changes the merge silently, so always say what is in effect.
+    tracing::info!(stale_lag = %membership.stale_lag_summary(), "soft lag window (--stale-lag-ceiling / --stale-lag-half-life)");
     let recovery = recovery::RecoveryConfig {
         bound_steps: args.recovery_bound_steps,
         max_donor_tries: args.recovery_max_donor_tries,

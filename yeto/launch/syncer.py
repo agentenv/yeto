@@ -571,13 +571,13 @@ def _syncer_island_pool(args) -> str:
     return flags + _syncer_stale_lag(args)
 
 
-def _syncer_stale_lag(args) -> str:
-    """A29: the soft lag window (the two rl_sync_stale_lag options, in rounds) as syncer flags
-    (versions, like --max-base-lag); "" when off, so the command is unchanged."""
+def check_stale_lag(args) -> None:
+    """Validate the soft lag window options (A29); called while the RL args are
+    prepared, so a bad pair fails before any launch work. No-op when unset."""
     ceiling = getattr(args, "rl_sync_stale_lag_ceiling", None)
     half_life = getattr(args, "rl_sync_stale_lag_half_life", None)
     if ceiling is None and half_life is None:
-        return ""
+        return
     if ceiling is None or half_life is None:
         raise ValueError("--rl-sync-stale-lag-ceiling and --rl-sync-stale-lag-half-life go together")
     lag = int(getattr(args, "rl_sync_max_base_lag", 0) or 0)
@@ -585,6 +585,20 @@ def _syncer_stale_lag(args) -> str:
         raise ValueError("--rl-sync-stale-lag-ceiling must exceed a positive --rl-sync-max-base-lag")
     if not float(half_life) > 0.0 or float(half_life) == float("inf"):
         raise ValueError("--rl-sync-stale-lag-half-life must be a positive number of rounds")
+    # Mirrors the syncer's MAX_STALE_LAG_HALVINGS: past it the weight underflows to 0.
+    if (int(ceiling) - lag) / float(half_life) > 1000.0:
+        raise ValueError("--rl-sync-stale-lag-half-life is too short for the ceiling: "
+                         "more than 1000 halvings would underflow the merge weight")
+
+
+def _syncer_stale_lag(args) -> str:
+    """A29: the soft lag window (the two rl_sync_stale_lag options, in rounds) as syncer flags
+    (versions, like --max-base-lag); "" when off, so the command is unchanged."""
+    ceiling = getattr(args, "rl_sync_stale_lag_ceiling", None)
+    half_life = getattr(args, "rl_sync_stale_lag_half_life", None)
+    if ceiling is None and half_life is None:
+        return ""
+    check_stale_lag(args)
     fragments = max(int(getattr(args, "fragments", 1)), 1)
     return (f" --stale-lag-ceiling {int(ceiling) * fragments}"
             f" --stale-lag-half-life {float(half_life) * fragments!r}")

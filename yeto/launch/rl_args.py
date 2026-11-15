@@ -37,7 +37,7 @@ from .topology import (
 from .syncer import (
     DEFAULT_ISLAND_LEASE_S, ROLE_SYNCERS, island_pool, rl_dense_sweep, rl_full_parameter_async,
     rl_full_parameter_final_cut,
-    rl_needs_critic, rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
+    check_stale_lag, rl_needs_critic, rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
 from .peer_recovery import check_peer_recovery
@@ -773,6 +773,7 @@ def _check_island_pool(args, *, num_islands: int) -> None:
         raise ValueError("membership options do not support a critic yet")
     if int(getattr(args, "syncer_shards", None) or 1) > 1:
         raise ValueError("membership options need one syncer (no --syncer-shards > 1)")
+    check_stale_lag(args)
     max_learners = getattr(args, "rl_sync_max_learners", None)
     if max_learners is not None:
         if preset == FULL_PARAMETER_SYNC_PRESET:
