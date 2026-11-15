@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import re
@@ -444,7 +445,8 @@ def _binpack_parameter_specs(
     num_fragments: int,
 ) -> list[list[ParameterSpec]]:
     bins: list[list[ParameterSpec]] = [[] for _ in range(num_fragments)]
-    sizes = [0] * num_fragments
+    # Least-filled fragment first, lowest index on ties (same as a linear min scan).
+    heap = [(0, index) for index in range(num_fragments)]
     for spec in sorted(
         specs,
         key=lambda value: (
@@ -454,9 +456,9 @@ def _binpack_parameter_specs(
             value.name,
         ),
     ):
-        fragment_id = min(range(num_fragments), key=lambda index: sizes[index])
+        size, fragment_id = heapq.heappop(heap)
         bins[fragment_id].append(spec)
-        sizes[fragment_id] += spec.numel
+        heapq.heappush(heap, (size + spec.numel, fragment_id))
     return bins
 
 
