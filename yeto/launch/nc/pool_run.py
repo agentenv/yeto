@@ -404,8 +404,10 @@ def dry_run(cfg: dict[str, Any], config_path: str) -> int:
             problems += [f"agentic.setup: {p}" for p in setup_problems]
         except ValueError as error:
             problems.append(str(error))
-        env_file = Path(str(cfg["r2_env_file"])).expanduser()
-        if not env_file.exists():
+        env_file = Path(str(cfg.get("r2_env_file") or "")).expanduser()
+        if not cfg.get("r2_env_file") and provider_kind(cfg) == "ssh":
+            pass  # own SSH nodes on a node-local store or the syncer path (ssh_sampler_pool.offline_problems)
+        elif not env_file.exists():
             problems.append(f"store env file {cfg['r2_env_file']!r} does not exist")
         else:
             if env_file.stat().st_mode & 0o077:

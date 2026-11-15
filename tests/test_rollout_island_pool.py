@@ -520,10 +520,10 @@ def test_fleet_controller_drains_rollout_when_the_fleet_ends():
 
 
 def test_registry_builtin_kinds_and_ledger_dispatch():
-    assert providers.kinds() == ["daytona", "modal", "nc", "sky"]
+    assert providers.kinds() == ["daytona", "modal", "nc", "sky", "ssh"]
     assert providers.is_national({"accounts": [1]}) and not providers.is_national({"provider": {"kind": "daytona"}})
     assert providers.pool_owned_ledger_kinds() == frozenset({"nc_lease", "daytona_sandbox"})
-    with pytest.raises(ValueError, match="'nc', 'daytona', 'sky' and 'modal' are built in"):
+    with pytest.raises(ValueError, match="'nc', 'daytona', 'sky', 'modal' and 'ssh' are built in"):
         providers.load({"provider": {"kind": "nope"}}, "r1")
 
 

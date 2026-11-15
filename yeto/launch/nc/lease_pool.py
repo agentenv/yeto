@@ -77,8 +77,11 @@ from .client import hourly_cost_ucr
 class PoolConfig(IslandPoolConfig):
     """:class:`~yeto.launch.pool.island_pool.PoolConfig` of a National Compute pool:
     one node hour is :func:`~.client.hourly_cost_ucr` (8 MI355X GPUs) unless
-    ``hourly_cost`` is set."""
+    ``hourly_cost`` is set. None: not set (the MI355X rate); an explicit 0 is a
+    node hour that costs nothing (the operator's own nodes), not "unset"."""
+
+    hourly_cost: float | None = None
 
     def hourly(self) -> float:
-        return self.hourly_cost or hourly_cost_ucr()
+        return hourly_cost_ucr() if self.hourly_cost is None else self.hourly_cost
 
