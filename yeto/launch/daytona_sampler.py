@@ -101,6 +101,8 @@ class SshExec:
     target: Sequence[str]
     options: Sequence[str] = ("-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30")
     run: Callable[..., Any] = subprocess.run
+    chunk_bytes: int | None = None  # None: one ssh session per upload (as before)
+    chunk_attempts: int = 3
 
     def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
         out = self.run(["ssh", "-n", *self.options, *self.target, "bash -c " + shlex.quote(command)],
@@ -108,13 +110,143 @@ class SshExec:
         return ExecResult(out.returncode, out.stdout or "", out.stderr or "")
 
     def upload(self, data: bytes, remote: str) -> None:
+        if self.chunk_bytes and len(data) > self.chunk_bytes:
+            self._upload_chunked(data, remote)
+            return
         q = shlex.quote(remote)
         out = self.run(["ssh", *self.options, *self.target,
                         f"mkdir -p \"$(dirname {q})\" && cat > {q}.part && mv -f {q}.part {q}"],
                        input=data, capture_output=True, timeout=1800, check=False)
         if out.returncode != 0:
-            err = out.stderr.decode(errors="replace") if isinstance(out.stderr, bytes) else str(out.stderr or "")
-            raise RuntimeError(f"upload to {self.name}:{remote} failed: {err.strip()[-300:]}")
+            raise RuntimeError(f"upload to {self.name}:{remote} failed: {_err(out)}")
+
+    def _upload_chunked(self, data: bytes, remote: str) -> None:
+        """``data`` in ``chunk_bytes`` pieces, one ssh session each (retried alone), then
+        joined and checked by size: a gateway that cuts long sessions (Daytona's ssh
+        gateway closed every 13 MB stream) costs one piece, not the whole file."""
+        q = shlex.quote(remote)
+        n = -(-len(data) // self.chunk_bytes)
+        for i in range(n):
+            piece = data[i * self.chunk_bytes:(i + 1) * self.chunk_bytes]
+            for attempt in range(self.chunk_attempts):
+                out = self.run(["ssh", *self.options, *self.target,
+                                f"mkdir -p \"$(dirname {q})\" && cat > {q}.chunk.{i}"],
+                               input=piece, capture_output=True, timeout=600, check=False)
+                if out.returncode == 0:
+                    break
+            else:
+                raise RuntimeError(f"upload to {self.name}:{remote} failed at chunk {i + 1} of {n}: {_err(out)}")
+        parts = " ".join(f"{q}.chunk.{i}" for i in range(n))
+        out = self.run(["ssh", "-n", *self.options, *self.target,
+                        f"cat {parts} > {q}.part && rm -f {parts} && test $(wc -c < {q}.part) -eq {len(data)} "
+                        f"&& mv -f {q}.part {q}"], capture_output=True, timeout=600, check=False)
+        if out.returncode != 0:
+            raise RuntimeError(f"upload to {self.name}:{remote} failed joining {n} chunks: {_err(out)}")
+
+
+@dataclass
+class SdkExec:
+    """:class:`SandboxExec` over the Daytona SDK (toolbox API over HTTPS), no ssh:
+    ``process.exec`` runs the command, ``fs.upload_file`` writes files (credentials
+    included: they never leave the API). ``sandbox()`` returns the SDK sandbox (looked
+    up on each call: a token or a sandbox object may go stale). Daytona's ssh gateway
+    closed sessions on fresh GPU sandboxes again and again; the toolbox API is the
+    provider's own control path."""
+
+    name: str
+    sandbox: Callable[[], Any]
+    attempts: int = 3
+
+    def _retry(self, fn: Callable[[], Any]) -> Any:
+        for attempt in range(self.attempts):
+            try:
+                return fn()
+            except Exception:  # noqa: BLE001 - a dropped API call: tried again, the last error raised
+                if attempt + 1 == self.attempts:
+                    raise
+
+    def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
+        try:
+            out = self._retry(lambda: self.sandbox().process.exec("bash -c " + shlex.quote(command),
+                                                                  timeout=max(1, int(timeout))))
+        except Exception as error:  # noqa: BLE001 - reads like an unreachable node
+            return ExecResult(255, "", f"daytona exec: {error!r}"[:500])
+        text = str(getattr(out, "result", "") or "")
+        code = int(getattr(out, "exit_code", 1))
+        return ExecResult(code, text, "" if code == 0 else text[-2000:])
+
+    def upload(self, data: bytes, remote: str) -> None:
+        q = shlex.quote(remote)
+        made = self.exec(f"mkdir -p \"$(dirname {q})\"", timeout=60)
+        if made.returncode != 0:
+            raise RuntimeError(f"upload to {self.name}:{remote} failed: {made.stderr[-300:]}")
+        try:
+            self._retry(lambda: self.sandbox().fs.upload_file(data, remote))
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"upload to {self.name}:{remote} failed: {error!r}"[:400]) from error
+
+
+@dataclass
+class StoreUploadExec:
+    """A :class:`SandboxExec` whose large uploads go through the object store: the launcher
+    puts the bytes at ``<prefix>/_upload/<sha256>`` and the sandbox fetches a presigned URL
+    with ``curl`` (checked by sha256). Daytona's ssh gateway closes long sessions (a 13 MB
+    ``cat`` over ssh was cut after about 45 s, every time); small files still go over ssh,
+    retried. ``env_file``: the pool's store env file (``AWS_*``, ``R2_BUCKET``)."""
+
+    inner: SandboxExec
+    env_file: str
+    prefix: str
+    threshold: int = 1 << 20
+    attempts: int = 3
+    client: Any = None
+
+    @property
+    def name(self) -> str:
+        return self.inner.name
+
+    def exec(self, command: str, *, timeout: float = 600) -> ExecResult:
+        return self.inner.exec(command, timeout=timeout)
+
+    def _store(self) -> tuple[Any, str]:
+        env = dict(line.split("=", 1) for line in Path(self.env_file).expanduser().read_text().splitlines()
+                   if "=" in line and not line.lstrip().startswith("#"))
+        env = {k.strip().removeprefix("export "): v.strip().strip("'\"") for k, v in env.items()}
+        if self.client is None:
+            import boto3  # noqa: PLC0415
+
+            self.client = boto3.client("s3", endpoint_url=env.get("AWS_ENDPOINT_URL"),
+                                       aws_access_key_id=env.get("AWS_ACCESS_KEY_ID"),
+                                       aws_secret_access_key=env.get("AWS_SECRET_ACCESS_KEY"),
+                                       region_name=env.get("AWS_REGION") or "auto")
+        return self.client, env["R2_BUCKET"]
+
+    def upload(self, data: bytes, remote: str) -> None:
+        if len(data) <= self.threshold:
+            for attempt in range(self.attempts):
+                try:
+                    return self.inner.upload(data, remote)
+                except RuntimeError:
+                    if attempt + 1 == self.attempts:
+                        raise
+        import hashlib  # noqa: PLC0415
+
+        digest = hashlib.sha256(data).hexdigest()
+        client, bucket = self._store()
+        key = f"{self.prefix.strip('/')}/_upload/{digest}"
+        client.put_object(Bucket=bucket, Key=key, Body=data)
+        url = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600)
+        q = shlex.quote(remote)
+        cmd = (f"mkdir -p \"$(dirname {q})\" && curl -fsS --retry 5 --retry-connrefused -o {q}.part {shlex.quote(url)} "
+               f"&& echo '{digest}  {remote}.part' | sha256sum -c --quiet - && mv -f {q}.part {q}")
+        out = self.inner.exec(cmd, timeout=1800)
+        if out.returncode != 0:
+            raise RuntimeError(f"upload to {self.name}:{remote} through the store failed: {out.stderr.strip()[-300:]}")
+
+
+def _err(out: Any) -> str:
+    err = out.stderr.decode(errors="replace") if isinstance(out.stderr, bytes) else str(out.stderr or "")
+    return err.strip()[-300:]
 
 
 def sh(box: SandboxExec, command: str, *, timeout: float = 600) -> ExecResult:
@@ -724,11 +856,23 @@ class DaytonaSamplerRoute:
 
     def __init__(self, *, gpus: int = 8, plan: DiskPlan | None = None, code_ref: str = "HEAD",
                  requirements: Mapping[str, Any] | None = None,
-                 exec_for: Callable[[str, Callable[..., Any]], SandboxExec] | None = None):
+                 exec_for: Callable[[str, Callable[..., Any]], SandboxExec] | None = None,
+                 upload_chunk_bytes: int | None = None, upload_via_store: bool = False,
+                 remote_scripts: bool = False):
         self.gpus, self.plan, self.code_ref = int(gpus), plan, code_ref
         self.requirements = dict(requirements or {})
-        self.exec_for = exec_for or (lambda alias, run: SshExec(alias, [alias], run=run))
+        self.exec_for = exec_for or (lambda alias, run: SshExec(alias, [alias], run=run,
+                                                                 chunk_bytes=upload_chunk_bytes))
+        self.upload_via_store = bool(upload_via_store)
+        # the pool's probe and stop scripts run through exec_for too (not a plain ssh)
+        self.remote_scripts = bool(remote_scripts)
         self._code: tuple[str, bytes] | None = None
+
+    def _box(self, alias: str, run: Callable[..., Any], r2_env_file: str, run_prefix: str) -> SandboxExec:
+        box = self.exec_for(alias, run)
+        if self.upload_via_store:
+            box = StoreUploadExec(box, r2_env_file, f"runs/{run_prefix.strip('/')}")
+        return box
 
     def code(self, run: Callable[..., Any] = subprocess.run) -> tuple[str, bytes]:
         if self._code is None:
@@ -741,10 +885,15 @@ class DaytonaSamplerRoute:
               run: Callable[..., Any] = subprocess.run) -> str:
         """Idempotent: a running sampler of the shard is stopped and started again."""
         req = requirements_of(spec, gpus=self.gpus, plan=self.plan, **self.requirements)
-        start_sampler(self.exec_for(alias, run), spec=spec, shard=shard, run_prefix=run_prefix,
+        start_sampler(self._box(alias, run, r2_env_file, run_prefix), spec=spec, shard=shard, run_prefix=run_prefix,
                       r2_env_file=r2_env_file, code=self.code(run), gpus=self.gpus, requirements=req,
                       protected=protected, agentic_env_file=agentic_env_file, spec_dir=spec_dir, emit=emit)
         return f"yeto-sampler-{shard}"
+
+    def run_script(self, alias: str, script: str, *, timeout: float, run: Callable[..., Any] = subprocess.run
+                   ) -> subprocess.CompletedProcess:
+        out = self.exec_for(alias, run).exec(script, timeout=timeout)
+        return subprocess.CompletedProcess(["sandbox", alias], out.returncode, out.stdout, out.stderr)
 
     def probe_script(self, shard: str, tape_glob: str, metrics_port: int | None = None) -> str:
         return probe_script(shard, tape_glob, metrics_port=metrics_port)
@@ -758,7 +907,7 @@ class DaytonaSamplerRoute:
 
     def pull(self, alias: str, *, r2_env_file: str, src_key: str, dest: str = MODEL_DIR, include: str | None = None,
              max_mb_s: int = 2500, run: Callable[..., Any] = subprocess.run) -> None:
-        box = self.exec_for(alias, run)
+        box = self._box(alias, run, r2_env_file, "pull")
         sh(box, f"mkdir -p {SAMPLER_DIR} && chmod 700 {SAMPLER_DIR}; " + ca_bundle_script(), timeout=120)
         put(box, Path(r2_env_file).expanduser().read_bytes(), STORE_ENV)
         out = sh(box, pull_command(src_key, dest, max_mb_s=max_mb_s, include=include), timeout=300)

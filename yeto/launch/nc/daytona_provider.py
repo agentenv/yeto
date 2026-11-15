@@ -123,7 +123,8 @@ CONFIG_KEYS = frozenset({"kind", "image", "snapshot", "gpus", "gpu_type", "spot"
                          "name_prefix", "env", "ttl_minutes", "queue_timeout_min", "create_timeout_s",
                          "delete_timeout_s", "ssh_token_minutes", "host_setup", "target", "api_url_env",
                          "api_key_env", "price_usd_h", "create_wait_s", "api_attempts",
-                         "sampler_requirements", "disk_plan"})
+                         "sampler_requirements", "disk_plan", "upload_chunk_mb",
+                         "upload_via_store", "transport"})
 RATE_LIMIT_MARKS = ("429", "rate limit", "ratelimit", "too many requests", "throttl")
 BACKOFF_CAP_S = 30.0
 LEDGER_KIND = "daytona_sandbox"
@@ -165,6 +166,8 @@ class DaytonaProvider:
                  api_url_env: str = "DAYTONA_API_URL", api_key_env: str = "DAYTONA_API_KEY",
                  price_usd_h: float | None = None, create_wait_s: float = 5.0, api_attempts: int = 6,
                  sampler_requirements: dict[str, Any] | None = None, disk_plan: dict[str, Any] | None = None,
+                 upload_chunk_mb: float | None = None, upload_via_store: bool = False,
+                 transport: str = "ssh",
                  sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time,
                  sleep=time.sleep):
         validate(image=image, snapshot=snapshot, gpus=gpus, gpu_type=gpu_type, spot=spot, name_prefix=name_prefix,
@@ -186,6 +189,16 @@ class DaytonaProvider:
         # preflight overrides for a sandbox smaller than the K3.1 node (None: the K3.1 defaults)
         self.sampler_requirements = _requirements(sampler_requirements)
         self.disk_plan = _disk_plan(disk_plan)
+        if upload_chunk_mb is not None and (isinstance(upload_chunk_mb, bool)
+                                            or not isinstance(upload_chunk_mb, (int, float)) or upload_chunk_mb <= 0):
+            raise ValueError("daytona provider: upload_chunk_mb must be a number > 0 (or unset: one stream)")
+        if not isinstance(upload_via_store, bool):
+            raise ValueError("daytona provider: upload_via_store must be true or false")
+        self.upload_via_store = upload_via_store
+        if transport not in ("ssh", "sdk"):
+            raise ValueError("daytona provider: transport must be ssh (default) or sdk")
+        self.transport = transport
+        self.upload_chunk_bytes = None if upload_chunk_mb is None else int(upload_chunk_mb * (1 << 20))
         self._lock = threading.RLock()  # the record and the ssh config (several pool threads)
         self._creating: dict[str, threading.Thread] = {}
         self._create_error: dict[str, BaseException] = {}
@@ -210,7 +223,26 @@ class DaytonaProvider:
         from ..daytona_sampler import DaytonaSamplerRoute, k31_disk_plan  # noqa: PLC0415
 
         plan = k31_disk_plan() if self.disk_plan is None else k31_disk_plan(**self.disk_plan)
-        return DaytonaSamplerRoute(gpus=self.gpus, plan=plan, requirements=self.sampler_requirements)
+        if self.transport == "sdk":  # the toolbox API, not the ssh gateway
+            from ..daytona_sampler import SdkExec  # noqa: PLC0415
+            from .node_pool import host_alias  # noqa: PLC0415
+
+            def exec_for(alias: str, run: Any) -> Any:  # noqa: ARG001
+                ticket = next((t for t in self._rows() if host_alias(t) == alias), alias)
+                return SdkExec(alias, lambda: self._sandbox_or_raise(ticket))
+
+            return DaytonaSamplerRoute(gpus=self.gpus, plan=plan, requirements=self.sampler_requirements,
+                                       exec_for=exec_for, upload_via_store=self.upload_via_store,
+                                       remote_scripts=True)
+        return DaytonaSamplerRoute(gpus=self.gpus, plan=plan, requirements=self.sampler_requirements,
+                                   upload_chunk_bytes=self.upload_chunk_bytes,
+                                   upload_via_store=self.upload_via_store)
+
+    def _sandbox_or_raise(self, ticket: str) -> Any:
+        sandbox = self._get(ticket)
+        if sandbox is None:
+            raise RuntimeError(f"sandbox {ticket} is gone")
+        return sandbox
 
     # -- sdk
     @property
@@ -493,6 +525,16 @@ class DaytonaProvider:
         """An ssh alias through the Daytona gateway (a fresh token), then ``host_setup``."""
         token, expires = self.ssh_access(lease.ticket)
         alias = self._write_alias(lease.ticket, token, expires)
+        if self.transport == "sdk" and self.host_setup:  # the toolbox API, not the ssh gateway
+            from ..daytona_sampler import SdkExec  # noqa: PLC0415
+
+            box = SdkExec(alias, lambda: self._sandbox_or_raise(lease.ticket))
+            for command in self.host_setup:
+                out = box.exec(command, timeout=1800)
+                if out.returncode != 0:
+                    raise RuntimeError(f"host setup {command[:40]!r} on {lease.ticket}: exit {out.returncode}: "
+                                       f"{out.stderr[-300:]}")
+            return alias
         for command in self.host_setup:
             out = ssh_run(alias, command)
             if out.returncode != 0:
