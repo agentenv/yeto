@@ -789,19 +789,21 @@ class VllmServerEngine(ServerEngine):
         try:
             result = self.call("POST", "/collective_rpc", {"method": "reload_weights",
                                                            "kwargs": {"weights_path": str(model_dir)}})
+        except BaseException as err:  # nothing verified was written yet: resume as main does
+            self._resume(cause=err)
+            raise
+        try:  # weights written: a failed sync or check must not be served
             if path == tvr.IN_PLACE_SYNC:
                 self.call("POST", "/collective_rpc", {"method": tvr.SYNC_METHOD, "kwargs": {}})
             states = (self.call("POST", "/collective_rpc", {"method": tvr.STATE_METHOD,
                                                             "kwargs": {"rows": json.dumps(rows)}}) or {}).get("results")
             check = tvr.verify(model_dir, release, states or [], rows)
-        except tvr.TiedReloadError as err:
-            print(f"[vllm-server] {err}; killing the server", flush=True)
-            self._kill()
-            raise SamplerEngineError(f"vllm-server: tied-embeddings check failed after the in-place reload: {err}") \
-                from err
         except BaseException as err:
-            self._resume(cause=err)
-            raise
+            print(f"[vllm-server] tied-embeddings sync/check after the in-place reload of {model_dir} failed "
+                  f"({type(err).__name__}: {err}); killing the server", flush=True)
+            self._kill()
+            raise SamplerEngineError(f"vllm-server: tied-embeddings sync/check failed after the in-place reload "
+                                     f"(server killed, the next load restarts it): {err}") from err
         self._resume(cause=None)
         self._served_dir = Path(model_dir)
         return {"reload": "collective_rpc reload_weights" + (" + " + tvr.SYNC_METHOD if path == tvr.IN_PLACE_SYNC

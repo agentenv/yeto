@@ -254,7 +254,7 @@ def test_engine_syncs_the_head_of_a_split_server_and_fails_loudly_when_stale(tmp
     posts = [p for m, p, b in http.calls if m == "POST"][-5:]
     assert posts == ["/pause?mode=wait", "/collective_rpc", "/collective_rpc", "/collective_rpc", "/resume"]
     server.sync_broken = True  # the safety net: a head that did not follow the embeddings
-    with pytest.raises(SamplerEngineError, match="tied-embeddings check failed"):
+    with pytest.raises(SamplerEngineError, match="tied-embeddings sync/check failed"):
         engine.load(_write(tmp_path / "r2", head="absent", seed=2), 2)
     assert engine._process is None  # killed, not resumed with a wrong head
 
@@ -276,3 +276,44 @@ def test_tied_model_without_in_place_reload_gets_no_extension(tmp_path):
                      quant_scheme="bf16", topology="tp1", max_model_len=2048)
     engine = VllmServerEngine(config, VllmOptions(platform="npu", tp=1))
     assert "--worker-extension-cls" not in engine.argv(cold)
+
+
+def test_a_failed_sync_or_check_after_the_reload_kills_instead_of_resuming(tmp_path):
+    """reload_weights wrote the weights: any failure of the sync / state RPC must
+    not resume a server that may serve a stale lm_head."""
+    for method in (tvr.SYNC_METHOD, tvr.STATE_METHOD):
+        cold = _write(tmp_path / f"cold-{method}", head="distinct", seed=0)
+        engine, server, http = _tied_engine(tmp_path, "npu", cold, shared=False)
+        engine.start(None, 0)
+        inner = http.routes[("POST", "/collective_rpc")]
+
+        def rpc(body, inner=inner, method=method):
+            if body["method"] == method:
+                raise ConnectionError(f"{method} lost")
+            return inner(body)
+
+        http.routes[("POST", "/collective_rpc")] = rpc
+        with pytest.raises(SamplerEngineError, match="sync/check failed"):
+            engine.load(_write(tmp_path / f"r-{method}", head="absent", seed=1), 1)
+        assert engine._process is None
+        posts = [p for m, p, b in http.calls if m == "POST"]
+        assert posts[-1] == "/collective_rpc" and "/resume" not in posts[posts.index("/pause?mode=wait"):]
+
+
+def test_a_failed_reload_weights_resumes_as_main_does(tmp_path):
+    """reload_weights itself failed: the server is resumed and the error raised."""
+    cold = _write(tmp_path / "cold", head="equal", seed=0)
+    engine, server, http = _tied_engine(tmp_path, "npu", cold, shared=True)
+    engine.start(None, 0)
+    inner = http.routes[("POST", "/collective_rpc")]
+
+    def rpc(body):
+        if body["method"] == "reload_weights":
+            raise ConnectionError("reload lost")
+        return inner(body)
+
+    http.routes[("POST", "/collective_rpc")] = rpc
+    with pytest.raises(ConnectionError, match="reload lost"):
+        engine.load(_write(tmp_path / "r1", head="equal", seed=1), 1)
+    assert engine._process is not None
+    assert [p for m, p, b in http.calls if m == "POST"][-2:] == ["/collective_rpc", "/resume"]
