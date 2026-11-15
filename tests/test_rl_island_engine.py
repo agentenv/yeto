@@ -253,3 +253,62 @@ def test_ascend_pool_defaults_to_vllm_ascend():
     assert nc_cli._sampler_engine({"platform": "cuda"}, "cuda") == "vllm"
     with pytest.raises(ValueError, match="set 'image'"):
         nc_cli.check_sampler_engine({"platform": "ascend"})
+
+
+# --- fix1115 F08 ----------------------------------------------------------------
+def test_platform_cuda_takes_the_recipe_default_image():
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_model_recipe="kimi_k31",
+                           tuning="full", rl_image=miles_pins.MILES_K31_FULL_IMAGE,
+                           rl_island_engine=["1:platform=cuda"])
+    assert island_engine.island_args(args, 1, 2).rl_image == miles_pins.MILES_K31_FULL_IMAGE
+    args.rl_model_recipe, args.tuning = None, None
+    assert island_engine.island_args(args, 1, 2).rl_image == miles_pins.default_rl_image()
+
+
+def test_platform_without_a_pinned_row_asks_for_an_image():
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_image=miles_pins.MILES_NEXT_IMAGE,
+                           rl_island_engine=["1:platform=rocm"])
+    with pytest.raises(engine_images.NoDefaultImage, match="image="):
+        island_engine.island_args(args, 1, 2)
+
+
+def test_platform_only_keeping_the_run_image_passes_release():
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_model_recipe="kimi_k31",
+                           tuning="full", rl_image=miles_pins.MILES_K31_FULL_IMAGE,
+                           rl_code_pack="release", rl_island_engine=["1:platform=cuda"])
+    island_engine.check(args, 2)
+    # a platform default that differs from the run-wide image is still refused
+    args.rl_image = OTHER
+    with pytest.raises(ValueError, match="code-pack"):
+        island_engine.check(args, 2)
+
+
+def test_infer_backend_from_the_image():
+    assert island_engine.infer_backend(miles_pins.MILES_K31_FULL_IMAGE) == "miles"
+    assert island_engine.infer_backend(miles_pins.MILES_NEXT_IMAGE) == "miles"
+    assert island_engine.infer_backend(verl_pins.VERL_IMAGE) == "verl"
+    assert island_engine.infer_backend(verl_pins.VERL_MEGATRON_IMAGE) == "verl"
+    assert island_engine.infer_backend(OTHER) is None
+
+
+def test_image_of_another_backend_without_backend_key_is_refused(monkeypatch):
+    args = SimpleNamespace(training_mode="rl", rl_backend="verl", rl_image=verl_pins.VERL_IMAGE,
+                           rl_sync_layout="shape-free",
+                           rl_island_engine=[f"1:image={miles_pins.MILES_NEXT_IMAGE}"])
+    with pytest.raises(ValueError, match="backend=miles"):
+        island_engine.check(args, 2)
+    args.rl_island_engine = [f"1:image={miles_pins.MILES_NEXT_IMAGE}", "1:backend=miles"]
+    island_engine.check(args, 2)
+    args.rl_island_engine = [f"1:image={miles_pins.MILES_NEXT_IMAGE}", "1:backend=verl"]
+    with pytest.raises(ValueError, match="is a 'miles' image"):
+        island_engine.check(args, 2)
+
+
+def test_unknown_image_without_backend_key_warns(capsys):
+    args = SimpleNamespace(training_mode="rl", rl_backend="miles", rl_image=miles_pins.MILES_NEXT_IMAGE,
+                           rl_island_engine=[f"1:image={OTHER}"])
+    island_engine.check(args, 2)
+    assert "WARNING" in capsys.readouterr().err
+    args.rl_island_engine = [f"1:image={miles_pins.MILES_K31_FULL_IMAGE}"]
+    island_engine.check(args, 2)
+    assert "WARNING" not in capsys.readouterr().err

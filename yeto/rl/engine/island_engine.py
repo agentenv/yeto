@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import copy
 import re
+import sys
 from collections.abc import Iterable
 from typing import Any
 
@@ -121,6 +122,60 @@ def default_backend_image(args: Any, backend: str) -> str:
                             tuning=getattr(args, "tuning", None))
 
 
+def platform_trainer_image(args: Any, platform: str, backend: str) -> str:
+    """The trainer image of an island that names ``platform`` but no ``image``.
+
+    A family without a pinned trainer image for ``backend`` raises
+    ``engine_images.NoDefaultImage`` (name the image). A pinned family
+    (cuda) takes the same recipe-aware default an omitted ``--rl-image`` gets
+    (:func:`default_backend_image`), so ``--rl-model-recipe kimi_k31 --tuning
+    full`` keeps the full-form image instead of the table's generic row."""
+
+    from yeto.launch.engine_images import NoDefaultImage, default_image_entry
+
+    row = default_image_entry(platform, "trainer", backend)
+    if row.ref is None:
+        raise NoDefaultImage(f"no pinned trainer image for {row.device_family}/{row.engine}: "
+                             f"{row.reason}; name it with {FLAG} ISLAND:image=...")
+    return default_backend_image(args, backend)
+
+
+def _backend_images(backend: str) -> set[str]:
+    """The pinned images a backend ships (its ``pins`` ``*_IMAGE`` constants
+    and its launch_flags ``DEFAULT_RL_IMAGE``)."""
+
+    from . import backends
+
+    images: set[str] = set()
+    try:
+        pins = backends.module("pins", backend)
+    except backends.UnknownBackend:
+        pins = None
+    if pins is not None:
+        images |= {v for k, v in vars(pins).items() if k.endswith("_IMAGE") and isinstance(v, str)}
+    default = getattr(backends.module("launch_flags", backend), "DEFAULT_RL_IMAGE", None)
+    if default:
+        images.add(default)
+    return images
+
+
+def infer_backend(image: str | None) -> str | None:
+    """The one backend ``image`` belongs to (a pinned image of that backend, or
+    its own image form such as ``verl-build:<commit>``); None when no backend
+    or more than one claims it."""
+
+    from . import backends
+
+    if not image:
+        return None
+    owners = set()
+    for name in backends.registered():
+        check = getattr(backends.module("launch_flags", name), "rl_image_ok", None)
+        if image in _backend_images(name) or (check is not None and check(image)):
+            owners.add(name)
+    return owners.pop() if len(owners) == 1 else None
+
+
 def island_args(args: Any, island: int, num_islands: int) -> Any:
     """A copy of ``args`` with island ``island``'s image / backend (``args``
     itself without the flag or without an override for this island)."""
@@ -137,10 +192,7 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     backend = own.get("rl_backend")
     platform = own.get(PLATFORM_DEST)
     if "rl_image" not in own and platform is not None:
-        from yeto.launch.engine_images import default_image
-
-        # NoDefaultImage (a ValueError) when the family has no pinned trainer image
-        out.rl_image = default_image(platform, "trainer", backend or run_backend)
+        out.rl_image = platform_trainer_image(args, platform, backend or run_backend)
     elif backend is not None and backend != run_backend and "rl_image" not in own:
         out.rl_image = default_backend_image(args, backend)
     return out
@@ -196,6 +248,21 @@ def check(args: Any, num_islands: int) -> None:
                              "docker:<repository>@sha256:<64 hex> reference (nor the "
                              f"{iargs.rl_backend or 'miles'} backend's own image form)")
         backend = own.get("rl_backend")
+        if "rl_image" in own:
+            # an image of another backend than the island trains with
+            island_backend = backend or run_backend
+            inferred = infer_backend(own["rl_image"])
+            if inferred is not None and inferred != island_backend:
+                raise ValueError(f"{FLAG}: island {m} image {own['rl_image']!r} is a {inferred!r} image "
+                                 f"but the island trains with backend {island_backend!r}; "
+                                 f"set {m}:backend={inferred} (with --rl-sync-layout shape-free) "
+                                 f"or name a {island_backend} image")
+            if inferred is None and backend is None:
+                print(f"[launcher] WARNING: {FLAG}: island {m} image {own['rl_image']!r} is not a "
+                      f"known pinned image of any backend; the island trains with the run-wide "
+                      f"backend {run_backend!r} and only the syncer identity check catches a "
+                      f"different backend. Name {m}:backend=... if it is not {run_backend!r}.",
+                      file=sys.stderr)
         if (backend is not None and backend != run_backend
                 and getattr(args, "rl_sync_layout", "shape-bound") != "shape-free"):
             raise ValueError(f"{FLAG}: island {m} trains with backend {backend!r} but the run "
