@@ -542,3 +542,71 @@ def test_the_reload_memory_guard_reads_the_card_tool_of_the_device_family(tmp_pa
     assert engine.card_family() == "rocm"
     engine, _ = _engine(tmp_path, "cuda")
     assert engine.card_family() == "cuda"
+
+# ------------------------------------------------------------------ npu in-place reload (opt-in)
+def _npu_config(tmp_path, **kw):
+    values = dict(card_model="910B4", device_family="npu", precision="bf16", quant_scheme="bf16",
+                  topology="tp4", max_model_len=4096)
+    return _config(tmp_path, **{**values, **kw})
+
+
+def _npu_reload_engine(tmp_path, *, config, **options):
+    """A vllm-ascend engine with the pause / rpc / resume routes mounted."""
+    def rpc(body):
+        assert body["method"] == "reload_weights"
+        return {"results": [None] * 4}
+
+    http = _Http({("GET", "/health"): {}, ("POST", "/pause?mode=wait"): {"status": "paused"},
+                  ("POST", "/collective_rpc"): rpc, ("POST", "/resume"): {"status": "resumed"}})
+    engine = VllmServerEngine(config, VllmOptions(platform="npu", tp=4, **options),
+                              spawn=lambda a, e: _Process(), http=http, sleep=lambda s: None)
+    return engine, http
+
+
+def _release(tmp_path, engine, name="r1"):
+    release = tmp_path / name
+    release.mkdir()
+    (release / "config.json").write_text((engine.config.base_dir / "config.json").read_text())
+    return release
+
+
+def test_npu_in_place_reload_is_off_by_default_and_restarts(tmp_path):
+    """Without the option the vllm-ascend line refuses in_place_reload and a plain
+    engine keeps the restart and no dev mode."""
+    with pytest.raises(SamplerEngineError, match="npu_in_place_reload"):
+        VllmServerEngine(_npu_config(tmp_path, in_place_reload=True), VllmOptions(platform="npu", tp=4))
+    engine, _ = _npu_reload_engine(tmp_path, config=_npu_config(tmp_path))
+    assert engine.npu_in_place is False and DEV_MODE_ENV not in engine.env()
+    engine.start(None, 0)
+    assert engine.load(_release(tmp_path, engine), 1).reload_mode == "restart"
+
+
+def test_npu_in_place_reload_pauses_reloads_and_resumes_when_asked(tmp_path):
+    engine, http = _npu_reload_engine(tmp_path, config=_npu_config(tmp_path, in_place_reload=True),
+                               npu_in_place_reload=True)
+    assert engine.npu_in_place is True and engine.env()[DEV_MODE_ENV] == "1"
+    engine.start(None, 0)
+    release = _release(tmp_path, engine)
+    report = engine.load(release, 1)
+    assert report.reload_mode == "in_place" and engine.served_version() == 1
+    assert report.detail["reload"] == "collective_rpc reload_weights" and report.detail["rpc_results"] == 4
+    posts = [(p, b) for m, p, b in http.calls if m == "POST"]
+    assert [p for p, _ in posts] == ["/pause?mode=wait", "/collective_rpc", "/resume"]
+    assert posts[1][1]["kwargs"] == {"weights_path": str(release)}
+    # the legacy argv is unchanged by the option
+    assert engine.argv(engine.config.base_dir)[2] == "vllm.entrypoints.openai.api_server"
+
+
+def test_npu_in_place_reload_refuses_the_untested_combinations(tmp_path):
+    """A quantized release, the K3.1 expert overlay and the other platforms."""
+    with pytest.raises(SamplerEngineError, match="quant_scheme"):
+        VllmServerEngine(_npu_config(tmp_path, in_place_reload=True, quant_scheme="W4A8_DYNAMIC",
+                                     precision="w4a8"),
+                         VllmOptions(platform="npu", tp=4, npu_in_place_reload=True))
+    with pytest.raises(SamplerEngineError, match="expert_reload"):
+        VllmServerEngine(_npu_config(tmp_path, in_place_reload=True),
+                         VllmOptions(platform="npu", tp=4, npu_in_place_reload=True, expert_reload=True))
+    for platform in (None, "cuda"):
+        with pytest.raises(SamplerEngineError, match="platform npu"):
+            VllmServerEngine(_npu_config(tmp_path, in_place_reload=True),
+                             VllmOptions(platform=platform, tp=4, npu_in_place_reload=True))

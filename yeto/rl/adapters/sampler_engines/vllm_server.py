@@ -13,8 +13,15 @@ port, on two lines of vLLM (``VllmOptions.platform``):
 Vendor facts of the legacy line (A-INF §3, report items 15-18; none verified on a
 910B by this code):
 
-* reload: restart only. In-place reload of W4A8_DYNAMIC on vllm-ascend is not
-  tested (GOAL §8); ``in_place_reload`` is refused on this line;
+* reload: restart by default. In-place reload of W4A8_DYNAMIC on vllm-ascend is
+  not tested (GOAL §8) and stays refused; a BF16 release on ``platform npu`` can
+  reload in place with ``VllmOptions.npu_in_place_reload`` (off by default). The
+  routers and the RPC are the ones of the upstream line below (vllm-ascend runs
+  vLLM's own API server and ``NPUWorker.reload_weights`` forwards to the GPU model
+  runner's), so the adapter only has to set ``VLLM_SERVER_DEV_MODE=1``. Measured on
+  a 910B4 (TP1, vllm-ascend 0.29.0rc2 / vLLM 0.29.0, Qwen3-0.6B, 1.40 GiB release):
+  about 0.3 s for pause + reload_weights + resume against about 75 s for a restart,
+  and a reload back to the served release reproduces that release's scores exactly;
 * item 17: 910B reads ``int-quantized`` only, not ``pack-quantized``; the
   default ``expected_format`` for a quantized scheme is ``int-quantized``.
   W4A8 stages int8 weights in host memory (``VLLM_ASCEND_W4A8_CPU_STAGE=1``),
@@ -61,7 +68,12 @@ behaviour NOT verified by this code):
   /collective_rpc {"method": "reload_weights", "kwargs": {"weights_path": DIR}}``
   (``model_loader.reload.inplace.reload_weights``: every rank reads the release
   from disk in checkpoint format and re-runs the post-load processing), ``POST
-  /resume`` (also after a failure). Both routers exist only with
+  /resume`` (also after a failure). A server whose release ties the word
+  embeddings loads the yeto worker extension of :mod:`vllm_tied_reload`, which
+  keeps the served ``lm_head`` equal to what a cold start serves (a copy of the
+  embeddings into a split head, a restart where the one shared storage cannot
+  hold the release's head) and verifies sampled rows after every reload (the
+  load fails instead of serving a wrong head). Both routers exist only with
   ``VLLM_SERVER_DEV_MODE=1``, which the adapter sets when in-place reload is on.
   verl #8574 rebuilds the frozen MXFP4 Kimi-K3.1 base this way on MI355X; this
   adapter's path is not measured;
@@ -104,7 +116,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 
-from . import k31_release, vllm_expert_reload
+from . import k31_release, vllm_expert_reload, vllm_tied_reload
 from .server import ServerConfig, ServerEngine
 from .sglang_server import dense_layer_count, moe_layer_count, rocm_card_count
 
@@ -319,6 +331,34 @@ class VllmOptions:
     # GiB left free on the fullest GPU while it stages; the reload goes in smaller
     # chunks, or by restart, when the staging would not fit
     reload_reserve_gib: float = 2.0
+    # opt in to ServerConfig.in_place_reload on vllm-ascend (platform npu; off by
+    # default, the restart stays the configured behaviour). Measured on a 910B4 with
+    # vllm-ascend 0.29.0rc2 / vLLM 0.29.0 and a BF16 Qwen3-0.6B release: /pause?mode=wait
+    # -> /collective_rpc reload_weights -> /resume takes about 0.3 s against about 75 s
+    # for a restart, and the scores after a reload back to the served release are equal
+    # to the ones that release served before. Only for a BF16 release: the quantized
+    # schemes of the legacy line (W4A8 ...) re-run no requantization here and are refused
+    npu_in_place_reload: bool = False
+
+
+def _check_npu_in_place(config: Any, options: VllmOptions) -> bool:
+    """Whether ``options.npu_in_place_reload`` holds for this configuration (False:
+    the option is off). The option is only for a BF16 release on vllm-ascend; the
+    other combinations are refused here instead of silently restarting."""
+    if not options.npu_in_place_reload:
+        return False
+    if options.platform != "npu":
+        raise SamplerEngineError("vllm-server: options.npu_in_place_reload is the vllm-ascend in-place reload "
+                                 f"(platform npu), not platform {options.platform!r}")
+    if config.quant_scheme != "bf16":
+        raise SamplerEngineError(f"vllm-server: options.npu_in_place_reload with quant_scheme "
+                                 f"{config.quant_scheme!r}: reload_weights reads the release as it lies on disk "
+                                 "and no quantized scheme of this line is covered by an on-card test; serve a "
+                                 "bf16 release or leave the restart on")
+    if options.expert_reload:
+        raise SamplerEngineError("vllm-server: options.expert_reload is the K3.1 overlay reload of the upstream "
+                                 "line (worker extension); it is not built for vllm-ascend")
+    return True
 
 
 def decode_top_logprobs(logprobs: dict[str, Any], *, k: int) -> tuple[Any, Any] | None:
@@ -410,12 +450,14 @@ class VllmServerEngine(ServerEngine):
         if options.platform is not None and options.platform not in PLATFORMS:
             raise SamplerEngineError(f"vllm platform must be one of {PLATFORMS} or None, got {options.platform!r}")
         upstream = options.platform in UPSTREAM_PLATFORMS
+        npu_in_place = _check_npu_in_place(config, options)
         if not upstream:
             if config.quant_scheme != "bf16" and config.expected_format is None:
                 config.expected_format = INT_QUANTIZED  # item 17
-            if config.in_place_reload:
+            if config.in_place_reload and not npu_in_place:
                 raise SamplerEngineError("vllm-server: in-place reload is not built for vllm-ascend / the legacy "
-                                         "line; restart is the only reload mode until an on-card test covers it")
+                                         "line; restart is the only reload mode, except on platform npu with a "
+                                         "BF16 release and options.npu_in_place_reload (measured on a 910B4)")
             for name in ("return_routed_experts", "fp32_lm_head"):
                 if getattr(options, name):
                     raise SamplerEngineError(f"vllm-server {name} needs upstream vLLM (platform cuda or rocm), "
@@ -424,6 +466,8 @@ class VllmServerEngine(ServerEngine):
         self.last_resume_failure: dict[str, Any] | None = None
         self.options = options
         self.upstream = upstream
+        # vllm-ascend reloads in place too, as an opt-in (VllmOptions.npu_in_place_reload)
+        self.npu_in_place = npu_in_place and bool(config.in_place_reload)
         self.HANG_HINT = UPSTREAM_HANG_HINT if upstream else LEGACY_HANG_HINT
         self.REFUSED_FORMATS = UPSTREAM_REFUSED_FORMATS if upstream else LEGACY_REFUSED_FORMATS
         if options.k31_preset is not None:
@@ -437,6 +481,8 @@ class VllmServerEngine(ServerEngine):
         self._run = run
         self._card_memory = card_memory
         self._served_dir: Path | None = None  # the directory the running server loaded
+        # SHARED / SPLIT word embeddings of a running server with the tied extension (None: without)
+        self._tied_layout: str | None = None
         self._moe_layers: int | None = options.moe_layers
         self._dense_layers = 0
         self.server_info: dict[str, Any] = {}
@@ -534,7 +580,22 @@ class VllmServerEngine(ServerEngine):
                 "--trust-remote-code"]
         if o.max_num_seqs is not None:
             argv += ["--max-num-seqs", str(int(o.max_num_seqs))]
+        argv += self._tied_extension_argv(model_dir)
         return argv + self.base_tokenizer_argv(model_dir) + list(c.extra_args)
+
+    def _reloads_in_place(self) -> bool:
+        return bool(self.config.in_place_reload) and (self.upstream or self.npu_in_place)
+
+    def _tied_extension_argv(self, model_dir: Path) -> list[str]:
+        """The tied-embeddings worker extension (:mod:`vllm_tied_reload`) for a
+        release whose config ties the word embeddings, when it reloads in place
+        (empty otherwise: the argv of an untied model is unchanged)."""
+        if not self._reloads_in_place() or not vllm_tied_reload.config_ties(model_dir):
+            return []
+        if self.options.expert_reload:
+            raise SamplerEngineError(f"{model_dir}: tie_word_embeddings with options.expert_reload: the K3.1 "
+                                     "overlay extension is for an untied model")
+        return ["--worker-extension-cls", vllm_tied_reload.EXTENSION]
 
     def base_tokenizer_argv(self, model_dir: Path) -> list[str]:
         """A release is served with the tokenizer of the base checkpoint: RL never
@@ -567,6 +628,7 @@ class VllmServerEngine(ServerEngine):
             argv += ["--enable-return-routed-experts"]
         if o.expert_reload and c.in_place_reload:
             argv += ["--worker-extension-cls", vllm_expert_reload.EXTENSION]
+        argv += self._tied_extension_argv(model_dir)
         overrides = self.hf_overrides()
         if overrides:
             argv += ["--hf-overrides", json.dumps(overrides, sort_keys=True, separators=(",", ":"))]
@@ -583,8 +645,8 @@ class VllmServerEngine(ServerEngine):
             env = {**ROCM_ENV_PRESET, **(self.preset.get("env") or {}), **env}
         elif platform == "cuda":
             env = {**CUDA_ENV_PRESET, **(self.preset.get("env") or {}), **env}
-        if self.upstream and self.config.in_place_reload:
-            env.setdefault(DEV_MODE_ENV, "1")
+        if self.config.in_place_reload and (self.upstream or self.npu_in_place):
+            env.setdefault(DEV_MODE_ENV, "1")  # /pause, /resume and /collective_rpc
         if not self.upstream and self.config.precision == "w4a8":
             env["VLLM_ASCEND_W4A8_CPU_STAGE"] = "1"  # int8 staging in host memory
         return env
@@ -667,20 +729,87 @@ class VllmServerEngine(ServerEngine):
         return detail
 
     def start(self, release_dir: Path | None, version: int):
+        self._tied_layout = None
         report = super().start(release_dir, version)
         self._served_dir = Path(release_dir) if release_dir is not None else Path(self.config.base_dir)
+        self._log_tie(self._served_dir)
         return report
+
+    def _log_tie(self, model_dir: Path) -> None:
+        """The start-up line: whether the model ties its word embeddings and which
+        path a reload takes; reads the served layout from the tied extension."""
+        in_place = self._reloads_in_place()
+        if in_place and vllm_tied_reload.config_ties(model_dir):
+            release = vllm_tied_reload.release_tie(model_dir)
+            ranks = (self.call("POST", "/collective_rpc", {"method": vllm_tied_reload.STATE_METHOD,
+                                                           "kwargs": {"rows": "[]"}}) or {}).get("results") or []
+            if not ranks:
+                raise SamplerEngineError(f"{model_dir}: the tied-embeddings extension reported no rank")
+            shared = all(bool(r.get("shared")) for r in ranks)
+            self._tied_layout = vllm_tied_reload.SHARED if shared else vllm_tied_reload.SPLIT
+        else:
+            release = vllm_tied_reload.ReleaseTie(vllm_tied_reload.config_ties(model_dir), None)
+        print(f"[vllm-server] {vllm_tied_reload.describe(release, self._tied_layout, in_place)}", flush=True)
 
     def reload_in_place(self, model_dir: Path, version: int) -> dict[str, Any]:
         """``in_place_reload`` on the upstream line (module doc): pause with drain,
         ``reload_weights`` from ``model_dir`` on every rank, resume (also after a
         failure, which is then raised)."""
-        if not self.upstream:
-            raise SamplerEngineError("vllm-server: in-place reload needs the upstream line (platform cuda / rocm)")
+        if not self.upstream and not self.npu_in_place:
+            raise SamplerEngineError("vllm-server: in-place reload needs the upstream line (platform cuda / rocm) "
+                                     "or platform npu with options.npu_in_place_reload")
+        if self._tied_layout is not None or vllm_tied_reload.config_ties(model_dir):
+            return self._reload_tied(model_dir, version)
         if self.options.expert_reload:
             return self._reload_experts(model_dir)
         result = self._paused_rpc({"method": "reload_weights", "kwargs": {"weights_path": str(model_dir)}})
         return {"reload": "collective_rpc reload_weights", "rpc_results": len((result or {}).get("results") or [])}
+
+    def _reload_tied(self, model_dir: Path, version: int) -> dict[str, Any]:
+        """In-place reload of a model that ties its word embeddings
+        (:mod:`vllm_tied_reload`): reload_weights, the head synced where the
+        release has none, sampled rows verified, all inside one pause. A failed
+        verification kills the server (it must not serve) and fails the load."""
+        tvr = vllm_tied_reload
+        release = tvr.release_tie(model_dir)
+        if self._tied_layout is None:
+            path, why = tvr.RESTART, "served_without_tied_extension"
+        else:
+            path, why = tvr.plan(self._tied_layout, release)
+        print(f"[vllm-server] tied reload of {model_dir}: release lm_head={release.lm_head}, served "
+              f"embeddings={self._tied_layout}: {path} ({why})", flush=True)
+        if path == tvr.RESTART:
+            report = self.start(model_dir, version)
+            return {"reload": "restart", "in_place_off": why, "restart_s": report.pause_s,
+                    "tied_layout": self._tied_layout}
+        files = tvr._tensor_files(model_dir)
+        vocab = tvr._Tensor.find(files, release.embed_name).shape[0]
+        rows = tvr.sample_rows(vocab, version)
+        self.call("POST", "/pause?mode=wait")
+        try:
+            result = self.call("POST", "/collective_rpc", {"method": "reload_weights",
+                                                           "kwargs": {"weights_path": str(model_dir)}})
+        except BaseException as err:  # nothing verified was written yet: resume as main does
+            self._resume(cause=err)
+            raise
+        try:  # weights written: a failed sync or check must not be served
+            if path == tvr.IN_PLACE_SYNC:
+                self.call("POST", "/collective_rpc", {"method": tvr.SYNC_METHOD, "kwargs": {}})
+            states = (self.call("POST", "/collective_rpc", {"method": tvr.STATE_METHOD,
+                                                            "kwargs": {"rows": json.dumps(rows)}}) or {}).get("results")
+            check = tvr.verify(model_dir, release, states or [], rows)
+        except BaseException as err:
+            print(f"[vllm-server] tied-embeddings sync/check after the in-place reload of {model_dir} failed "
+                  f"({type(err).__name__}: {err}); killing the server", flush=True)
+            self._kill()
+            raise SamplerEngineError(f"vllm-server: tied-embeddings sync/check failed after the in-place reload "
+                                     f"(server killed, the next load restarts it): {err}") from err
+        self._resume(cause=None)
+        self._served_dir = Path(model_dir)
+        return {"reload": "collective_rpc reload_weights" + (" + " + tvr.SYNC_METHOD if path == tvr.IN_PLACE_SYNC
+                                                             else ""),
+                "rpc_results": len((result or {}).get("results") or []), "tied_layout": self._tied_layout,
+                "tied_path": why, "tied_check": check}
 
     def _reload_experts(self, model_dir: Path) -> dict[str, Any]:
         """The overlay's released experts through the worker extension
