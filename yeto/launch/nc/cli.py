@@ -308,10 +308,13 @@ class NcSkyOps:
         if agentic_setup.parse(spec) is not None:  # agentic setup hook: ssh route only
             raise ValueError("agentic.setup runs through ssh_sampler.start_sampler (the ssh route); "
                              "the sky route cannot prepare an agentic node")
+        check_spec_engine(self.cfg, spec)
         tasks.write_spec(spec, spec_path)
+        image = pool_sampler_image(self.cfg)  # None: the sky route's old default image
         doc = tasks.with_secrets(tasks.sampler_task(
             pool, spec_path=str(spec_path), run_prefix=self.cfg["run_prefix"], workdir=self.cfg["workdir"],
-            protected=frozenset(self.cfg.get("protected_prefixes", ()))), self.cfg.get("r2_env_file"))
+            protected=frozenset(self.cfg.get("protected_prefixes", ())),
+            **({"image": image} if image else {})), self.cfg.get("r2_env_file"))
         sky = _sky()
         _record_cluster(cluster_name("sampler", m.ticket))
         sky.launch(sky.Task.from_yaml_config(doc), cluster_name=cluster_name("sampler", m.ticket))
@@ -591,7 +594,8 @@ class NcSshOps:
                                      spec_dir=Path(self.cfg["spec"]).expanduser().parent, run=self._run)
             return
         ssh_sampler.start_sampler(lease, spec=self._spec(m, shards), shard=m.shard, run_prefix=self.cfg["run_prefix"],
-                                  r2_env_file=self.cfg["r2_env_file"], image=self.cfg.get("image", ssh_sampler.IMAGE),
+                                  r2_env_file=self.cfg["r2_env_file"],
+                                  image=pool_sampler_image(self.cfg) or self.cfg.get("image", ssh_sampler.IMAGE),
                                   protected=frozenset(self.cfg.get("protected_prefixes", ())),
                                   state_dir=tunnel.state_dir(), agentic_env_file=self.cfg.get("agentic_env_file"),
                                   run=self._run)
@@ -651,6 +655,7 @@ def render_spec(cfg: dict[str, Any], m: Member, shards: list[str]) -> dict[str, 
     spec = tasks.apply_sampler_overrides(tasks.sampler_spec(json.loads(text), sampler_id=m.shard, shards=shards),
                                          data_slot=m.data_slot, continues_shard=m.replaces_shard,
                                          **_overrides(cfg.get("sampler") or {}))
+    check_spec_engine(cfg, spec)
     if m.replaces_shard and m.predecessor_lost:
         spec["handoff_wait_s"] = float(cfg.get("elastic", {}).get("lost_handoff_wait_s", 60.0))
     if m.replaces_shard and getattr(m, "predecessor_retired", False):
@@ -700,6 +705,7 @@ def run_id(cfg: dict[str, Any]) -> str:
 POOL_KEYS = frozenset({"shard_limit", "target", "accounts", "slots", "shard_base", "run", "route", "replace_lead_s", "end_margin_s",
                        "stop_below_ucr", "min_balance_to_order_ucr", "data_slots", "elastic", "event_command",
                        "machine_type", "model", "spec", "run_prefix", "r2_env_file", "bucket_env", "image",
+                       "engine", "platform",
                        "protected_prefixes", "agentic_env_file", "sampler", "backlog", "model_pull", "node_hooks",
                        "probe_timeout_s", "probe_connect_timeout_s", "provider", "model_src", "model_dest",
                        "workdir", "comment", "sampler_route", "data_path", "syncer", "protected_accounts"})
@@ -748,6 +754,71 @@ MODEL_PULL_KEYS = frozenset({"src_key", "dest", "include", "max_mb_s", "timeout_
 NODE_HOOK_KEYS = frozenset({"name", "command", "where", "timeout_s"})
 BACKLOG_KEYS = frozenset({"synced", "trainers", "fragments", "local_rounds", "pipeline", "explicit_rounds"})
 DEFAULT_MACHINE_TYPE = "mi355x"
+
+
+# hetero-1114 A22: a pool's sampler engine / platform (device family). Set either
+# and the pool's image defaults to that row of yeto.launch.engine_images.DEFAULT_IMAGES
+# (an explicit ``image`` still wins); a pool without them keeps its old image.
+SAMPLER_ENGINES = {"vllm": "vllm-server", "vllm-ascend": "vllm-server", "sglang": "sglang-server"}
+DEFAULT_SAMPLER_PLATFORM = "rocm"
+DEFAULT_SAMPLER_ENGINE = "vllm"
+
+
+def sampler_engine_requested(cfg: dict[str, Any]) -> bool:
+    return bool(cfg.get("engine") or cfg.get("platform"))
+
+
+def pool_sampler_image(cfg: dict[str, Any]) -> str | None:
+    """The image of a pool that sets ``engine`` / ``platform``: ``image`` when given,
+    else the default table's row (``docker:`` dropped); None for a pool without them
+    (callers keep their old default)."""
+    if not sampler_engine_requested(cfg):
+        return None
+    if cfg.get("image"):
+        return str(cfg["image"])
+    from yeto.launch import engine_images  # noqa: PLC0415
+
+    platform = str(cfg.get("platform") or DEFAULT_SAMPLER_PLATFORM)
+    engine = _sampler_engine(cfg, platform)
+    return engine_images.default_image(platform, "sampler", engine).removeprefix("docker:")
+
+
+def _sampler_engine(cfg: dict[str, Any], platform: str) -> str:
+    """A pool's ``engine``; unset, ``vllm-ascend`` on the ascend family, else vllm."""
+    if cfg.get("engine"):
+        return str(cfg["engine"])
+    from yeto.launch import engine_images  # noqa: PLC0415
+
+    ascend = engine_images.canonical_device_family(platform) == "ascend"
+    return "vllm-ascend" if ascend else DEFAULT_SAMPLER_ENGINE
+
+
+def check_sampler_engine(cfg: dict[str, Any]) -> None:
+    """``engine`` / ``platform`` of a pool config: known values with a default image
+    (or an explicit ``image``)."""
+    if not sampler_engine_requested(cfg):
+        return
+    from yeto.launch import engine_images  # noqa: PLC0415
+
+    platform = engine_images.canonical_device_family(str(cfg.get("platform") or DEFAULT_SAMPLER_PLATFORM))
+    engine = _sampler_engine(cfg, platform)
+    if engine not in SAMPLER_ENGINES:
+        raise ValueError(f"pool config: engine {engine!r} is not one of {sorted(SAMPLER_ENGINES)}")
+    if cfg.get("image"):
+        return  # an explicit image needs no default-table row
+    row = engine_images.default_image_entry(platform, "sampler", engine)
+    if row.ref is None:
+        raise ValueError(f"pool config: platform {platform} engine {engine} has no pinned default "
+                         f"image ({row.reason}); set 'image'")
+
+
+def check_spec_engine(cfg: dict[str, Any], spec: dict[str, Any]) -> None:
+    """A pool's ``engine`` must match its sampler spec's ``engine.adapter`` when both are set."""
+    engine = cfg.get("engine")
+    adapter = (spec.get("engine") or {}).get("adapter")
+    if engine and adapter and SAMPLER_ENGINES.get(str(engine)) != adapter:
+        raise ValueError(f"pool config: engine {engine!r} does not match the spec's engine.adapter "
+                         f"{adapter!r}")
 
 
 def machine_type(cfg: dict[str, Any]) -> str:
@@ -877,6 +948,7 @@ def pool_config(cfg: dict[str, Any], *, allowed: set[int] | None = None) -> Pool
     if slots is not None and slots < target:
         raise ValueError(f"pool config: data_slots {slots} < target {target} (each member holds one slot)")
     _overrides(cfg.get("sampler") or {})
+    check_sampler_engine(cfg)
     if cfg.get("model_pull"):
         _unknown("model_pull", cfg["model_pull"], MODEL_PULL_KEYS)
         if "src_key" not in cfg["model_pull"]:

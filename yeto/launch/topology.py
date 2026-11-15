@@ -149,10 +149,16 @@ def rl_island_args(args, learner_id: int):
     """``args`` as island ``learner_id`` sees it (rl-mixed-island-placement): a
     copy with its per-island placement values, or ``args`` itself without any.
     Every island-side rule below (trainer shape, layout, minimum nodes, learner
-    command) reads the placement from these args, never from the run-wide ones."""
-    from ..rl.engine import island_placement
+    command) reads the placement from these args, never from the run-wide ones.
+    ``--rl-island-engine`` (hetero-1114 A22) adds the island's own image and
+    backend on top; without it the result is unchanged."""
+    from ..rl.engine import island_engine, island_placement
 
-    return island_placement.island_args(args, learner_id, rl_island_count(args))
+    count = rl_island_count(args)
+    placed = island_placement.island_args(args, learner_id, count)
+    if not island_engine.requested(args):
+        return placed
+    return island_engine.island_args(placed, learner_id, count)
 
 
 def rl_island_placement_args(args) -> list:
@@ -164,7 +170,8 @@ def rl_island_placement_args(args) -> list:
         # run drops it (island_placement.island_args); the other fields follow.
         key = (getattr(iargs, "rl_placement", "colocated"),
                getattr(iargs, "rl_standby_gpus", 0), getattr(iargs, "rollout_num_gpus", None),
-               getattr(iargs, "rl_island_use_gpus_per_node", None))
+               getattr(iargs, "rl_island_use_gpus_per_node", None),
+               getattr(iargs, "rl_backend", None), getattr(iargs, "rl_image", None))
         if key not in seen:
             seen.add(key)
             out.append(iargs)

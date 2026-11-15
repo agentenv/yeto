@@ -519,6 +519,9 @@ def _check_ports_infra_switches(args) -> None:
 
     placements = island_placement.check(args, rl_island_count(args),
                                         island_scheduling="elastic" if island_pool(args) else "legacy")
+    from ..rl.engine import island_engine
+
+    island_engine.check(args, rl_island_count(args))
     # The checks below need a fixed partition; any colocated island fails them.
     placement = (island_placement.FIXED_PARTITION
                  if all(p.placement == island_placement.FIXED_PARTITION for p in placements)

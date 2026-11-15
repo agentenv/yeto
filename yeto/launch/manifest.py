@@ -75,6 +75,7 @@ def _write_run_manifest(args) -> dict | None:
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "island_placements": rl_island_placement_records(args),
+        **_island_engine_manifest(args),
         # Correction group per island
         **({"offpolicy_correction": args._offpolicy_correction_manifest}
            if getattr(args, "_offpolicy_correction_manifest", None) else {}),
@@ -145,3 +146,15 @@ def _record_trainer_start_from(args, tapes) -> dict | None:
     except (OSError, ValueError) as e:
         print(f"[launcher] could not record trainer start phases: {e}", file=sys.stderr)
     return None
+
+
+def _island_engine_manifest(args) -> dict:
+    """hetero-1114 A22: ``island_engines`` rows of ``--rl-island-engine`` ({} without it,
+    so a run without the flag keeps its manifest)."""
+    from ..rl.engine import island_engine
+    from .topology import rl_island_count
+
+    if not island_engine.requested(args):
+        return {}
+    return {"island_engines": island_engine.records(args, rl_island_count(args))}
+
