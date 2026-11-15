@@ -11,7 +11,8 @@ sampler hardware: the same weights sampled on another card and engine differ fro
 trainer's recompute by their numerics alone. Its limits come per hardware class
 (:data:`LOGPROB_LIMITS`): ``amd`` uses the in-run guard's defaults
 (:class:`~yeto.rl.engine.xhw_guard.XhwGuard`, set above the measured MI355X vLLM band),
-``nvidia`` the B300 SGLang baseline. The class is read from the sampler tapes
+``nvidia`` the B300 SGLang baseline, ``ascend`` the 910B vllm-ascend band (applied by
+``--sampler-hardware ascend``, or read from the tapes with ``YETO_BREAKER_ASCEND_AUTO=1``). The class is read from the sampler tapes
 (``rl_sampler_engine_round.source``, ``rl_xhw_mismatch`` rows), or given with
 ``--sampler-hardware``. A run with any AMD sampler is judged by the ``amd`` limits
 (the step value mixes every source's tokens). When no tape names a known class the
@@ -56,19 +57,29 @@ LOGPROB_LIMITS: dict[str, tuple[float, float]] = {
     "amd": (_GUARD.warn.abs_diff, _GUARD.act.abs_diff),
     "nvidia": (0.04, 0.052),
 }
-HARDWARE = ("auto", *LOGPROB_LIMITS)
 # no tape names the sampler hardware: judge by the strictest limits (fail closed), never
 # silently by the loosest; an unknown sampler next to a known AMD one keeps the amd limits
 UNKNOWN_HARDWARE = min(LOGPROB_LIMITS, key=lambda h: LOGPROB_LIMITS[h][1])
+# ascend: 910B vllm-ascend -> torch_npu bf16 trainer measured 0.0177-0.0187 on Qwen3-0.6B
+# (the trainer's own batch-shape noise is 0.015-0.018); warn ~2.7x, act 1.5x warn, as amd.
+# Added after UNKNOWN_HARDWARE so the fail-closed class and the amd / nvidia limits stay put.
+# Explicit ``--sampler-hardware ascend`` always applies it; ``auto`` reads an Ascend sampler
+# from the tapes only with ASCEND_AUTO_ENV=1 (off by default: such a run stays fail-closed).
+LOGPROB_LIMITS["ascend"] = (0.05, 0.075)
+ASCEND_FAMILIES = ("npu", "ascend", "cann")
+ASCEND_AUTO_ENV = "YETO_BREAKER_ASCEND_AUTO"
+HARDWARE = ("auto", *LOGPROB_LIMITS)
 NOISE_FLOOR_HEADROOM = 1.5  # --noise-floor: act at least this many times the measured floor
 
 
 def hardware_class(device_family: str | None = None, card_model: str | None = None) -> str | None:
-    """``amd`` / ``nvidia`` of a sampler, None when neither field tells."""
+    """``amd`` / ``nvidia`` / ``ascend`` of a sampler, None when neither field tells."""
     family = (device_family or "").strip().lower()
     card = (card_model or "").strip().upper()
     if family == "rocm" or card.startswith("MI"):
         return "amd"
+    if family in ASCEND_FAMILIES or card.startswith(("ASCEND", "910", "310")):
+        return "ascend"
     if family == "cuda" or card[:1] in {"A", "B", "H", "L"} and card[1:2].isdigit():
         return "nvidia"
     return None
@@ -175,6 +186,8 @@ def evaluate(trainer: Sequence[Mapping[str, Any]], sampler: Sequence[Mapping[str
     for d in xhw[-1:]:
         for row in (d.get("sources") or {}).values():
             seen.add(hardware_class(None, row.get("card_model")))
+    if os.environ.get(ASCEND_AUTO_ENV, "").strip().lower() not in ("1", "true", "yes", "on"):
+        seen.discard("ascend")  # default: an Ascend sampler is judged as before (unknown)
     known = sorted(h for h in seen if h)
     note = ""
     if hardware == "auto":
@@ -185,6 +198,8 @@ def evaluate(trainer: Sequence[Mapping[str, Any]], sampler: Sequence[Mapping[str
                     f"(pass --sampler-hardware)")
         elif "amd" in known:
             hw = "amd"
+        elif "ascend" in known:
+            hw = "ascend"
         else:
             hw = "nvidia"
     else:

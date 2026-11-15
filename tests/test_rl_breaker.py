@@ -167,3 +167,42 @@ def test_cli_reads_launcher_logs_and_tape_dirs_and_exits_by_trip(tmp_path, capsy
 def test_cli_missing_file_is_a_usage_error(tmp_path, capsys):
     assert cli.main(["breaker", "--trainer-log", str(tmp_path / "nope.log")]) == 2
     assert "[breaker]" in capsys.readouterr().err
+
+
+ASCEND_SOURCE = "npu/910B4/vllm-ascend@0.10.2rc1/bf16/tp1"
+
+
+def test_ascend_class_is_added_without_moving_amd_nvidia_or_the_fail_closed_class():
+    assert breaker.LOGPROB_LIMITS["amd"] == (0.10, 0.15)
+    assert breaker.LOGPROB_LIMITS["nvidia"] == (0.04, 0.052)
+    assert breaker.LOGPROB_LIMITS["ascend"] == (0.05, 0.075)
+    assert breaker.UNKNOWN_HARDWARE == "nvidia"
+    assert "ascend" in breaker.HARDWARE
+    for fam, card in (("npu", None), ("ascend", None), ("NPU", "910B4"), (None, "910B4-1"),
+                      (None, "Ascend910B"), (None, "910C")):
+        assert breaker.hardware_class(fam, card) == "ascend"
+    assert breaker.source_hardware(ASCEND_SOURCE) == "ascend"
+    assert breaker.hardware_class(None, "MI355X") == "amd" and breaker.hardware_class("cuda", "B300") == "nvidia"
+
+
+def test_ascend_auto_is_off_by_default_and_the_run_stays_fail_closed(monkeypatch):
+    monkeypatch.delenv(breaker.ASCEND_AUTO_ENV, raising=False)
+    out = breaker.evaluate([_trained(i, 0.06) for i in range(3)], [_round(ASCEND_SOURCE)])
+    assert out["hardware"] == "nvidia" and out["hardware_seen"] == [] and out["tripped"] == ["logprob_diff"]
+    # explicit class applies the ascend limits
+    out = breaker.evaluate([_trained(i, 0.06) for i in range(3)], [_round(ASCEND_SOURCE)], hardware="ascend")
+    c = _checks(out)["logprob_diff"]
+    assert (c["warn"], c["limit"], c["level"]) == (0.05, 0.075, "warn") and not out["tripped"]
+
+
+def test_ascend_auto_opt_in_reads_the_tapes_and_amd_still_wins_a_mixed_fleet(monkeypatch):
+    monkeypatch.setenv(breaker.ASCEND_AUTO_ENV, "1")
+    out = breaker.evaluate([_trained(i, 0.02) for i in range(3)], [_round(ASCEND_SOURCE)])
+    assert out["hardware"] == "ascend" and _checks(out)["logprob_diff"]["level"] == "ok"
+    assert breaker.evaluate([_trained(i, 0.08) for i in range(3)], [_round(ASCEND_SOURCE)])["tripped"] == ["logprob_diff"]
+    assert breaker.evaluate([_trained(i, 0.02) for i in range(3)],
+                            [_round(ASCEND_SOURCE), _round(NV_SOURCE)])["hardware"] == "ascend"
+    out = breaker.evaluate([_trained(i, 0.09) for i in range(3)], [_round(ASCEND_SOURCE), _round(AMD_SOURCE)])
+    assert out["hardware"] == "amd" and not out["tripped"]
+    # nvidia-only and amd-only fleets are judged exactly as without the switch
+    assert breaker.evaluate([_trained(i, 0.06) for i in range(3)], [_round(NV_SOURCE)])["hardware"] == "nvidia"

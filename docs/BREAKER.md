@@ -15,7 +15,7 @@ Two pieces watch an RL run's numerics:
 ```bash
 yeto breaker --trainer-log ~/.yeto/runs/<run>/launcher.log \
   --sampler-tapes <dir-of-pulled-sampler-tapes> [--window 3] \
-  [--sampler-hardware auto|amd|nvidia] [--noise-floor X] \
+  [--sampler-hardware auto|amd|nvidia|ascend] [--noise-floor X] \
   [--logprob-warn X] [--logprob-act Y] [--flips flips.json] [--json]
 ```
 
@@ -50,6 +50,7 @@ The limits therefore depend on where the rollouts were sampled.
 |---|---|---|---|
 | `amd` (ROCm, MI-series cards) | 0.10 | 0.15 | MI355X vLLM -> B300 Megatron 0.076-0.099 |
 | `nvidia` (CUDA cards) | 0.04 | 0.052 | B300 SGLang -> B300 Megatron 0.023-0.028 |
+| `ascend` (910B NPU) | 0.05 | 0.075 | Qwen3-0.6B only: 910B vllm-ascend -> torch_npu bf16 0.0177-0.0187 |
 
 The `amd` limits are the in-run guard's defaults. With `--sampler-hardware auto`
 (the default) the class comes from the sampler tapes (`rl_sampler_engine_round`
@@ -58,6 +59,13 @@ with any AMD sampler is judged by the `amd` limits, since the step value mixes
 the tokens of every source. When no tape tells, the breaker fails closed: the
 strictest limits (`nvidia`) apply and the line says `sampler hardware unknown`;
 pass `--sampler-hardware` to judge such a run.
+
+The `ascend` class is opt-in: `--sampler-hardware ascend` applies it, and `auto`
+reads an Ascend sampler (`npu`/`ascend` family, `910*` card) from the tapes only
+with `YETO_BREAKER_ASCEND_AUTO=1`; without it such a run is judged exactly as
+before (unknown, fail closed). Its limits come from a 0.6B model with an eager
+vllm-ascend engine; recalibrate on the real model with
+`scripts/xhw_logprob_compare.py` and `--noise-floor` before relying on them.
 
 `--noise-floor X` (the mean abs diff of two repeat runs with the same weights)
 raises the trip limit to at least `1.5 * X` and the warn limit to at least `X`.
