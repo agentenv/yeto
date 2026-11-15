@@ -475,6 +475,8 @@ def dry_run_memory(args, specs) -> list[dict] | None:
 
 def check_compat_groups(args, specs) -> None:
     """Islands that merge through the syncer must declare one compat group.
+    Under ``--rl-identity relaxed`` compat_group is provenance only: mixed
+    cards are admitted and the launcher only warns.
 
     The group is part of every island's session contract
     (``BackendIdentity.compat_group``), so a synced launch whose trainer islands
@@ -503,10 +505,16 @@ def check_compat_groups(args, specs) -> None:
             return  # an unknown card fails in the island task with its own message
     if len(groups) > 1:
         listed = ", ".join(f"{g}: islands {v}" for g, v in sorted(groups.items()))
+        if getattr(args, "rl_identity", "strict") == "relaxed":
+            print(f"[launcher] WARNING: synced islands on different cards ({listed}) merge in one "
+                  "session (--rl-identity relaxed); compat_group is provenance only, numeric "
+                  "tolerance not calibrated", flush=True)
+            return
         raise PreflightError(
             f"synced islands on different cards ({listed}) would be refused by the syncer "
             "(the compat group is part of the session contract); put them on one card type "
-            "or pass --rl-compat-group <vendor>-<card> to declare one group for all")
+            "or pass --rl-compat-group <vendor>-<card> to declare one group for all "
+            "(or --rl-identity relaxed)")
 
 
 def check_policy_age_spec(args) -> None:

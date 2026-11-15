@@ -67,7 +67,7 @@ def role_stream_session_contract_hash(
 
     from yeto.rl.adapters.miles.identity import backend_identity
 
-    return session_contract_hash(layout_hash, config, backend_identity_sha256=backend_identity().sha256())
+    return session_contract_hash(layout_hash, config, backend_identity_sha256=backend_identity().contract_sha256())
 
 
 class MilesFullParameterRoleStream(FullParameterRoleStream):

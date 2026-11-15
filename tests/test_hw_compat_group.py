@@ -66,26 +66,46 @@ def test_compat_group_is_in_the_identity_hash():
 
 
 def test_comparison_rules():
-    assert compat_refusal("nvidia-h200", "nvidia-h200") is None
-    reason = compat_refusal("nvidia-h100", "nvidia-h200")
+    """--rl-identity strict: phase-1 rule, any different group is refused."""
+    assert compat_refusal("nvidia-h200", "nvidia-h200", strict=True) is None
+    reason = compat_refusal("nvidia-h100", "nvidia-h200", strict=True)
     assert reason.startswith("compat_group differs: nvidia-h100 vs nvidia-h200, tolerance not calibrated")
-    assert "tolerance not calibrated" in compat_refusal("nvidia-h100", "ascend-910b")
-    assert "undeclared" in compat_refusal("nvidia-h100", None)
+    assert "tolerance not calibrated" in compat_refusal("nvidia-h100", "ascend-910b", strict=True)
+    assert "undeclared" in compat_refusal("nvidia-h100", None, strict=True)
     assert catalog.CARD_PAIR_TOLERANCE == {}  # phase 1: table key exists, empty
     with pytest.raises(CompatGroupMismatch):
-        check_compat_group("nvidia-h100", "nvidia-h200")
+        check_compat_group("nvidia-h100", "nvidia-h200", strict=True)
+
+
+def test_compat_group_is_provenance_when_relaxed(monkeypatch):
+    """hetero-1114: strict by default; $YETO_RL_IDENTITY=relaxed -> no refusal."""
+    monkeypatch.delenv("YETO_RL_IDENTITY", raising=False)
+    assert compat_refusal("nvidia-h100", "ascend-910b4-64g") is not None
+    monkeypatch.setenv("YETO_RL_IDENTITY", "relaxed")
+    assert compat_refusal("nvidia-h100", "ascend-910b4-64g") is None
+    check_compat_group("nvidia-h100", "nvidia-h200")
+
+
+def test_default_contract_hash_is_the_full_identity_hash(monkeypatch):
+    """Pin: with $YETO_RL_IDENTITY unset the session contract binds sha256()
+    exactly as before hetero-1114 (default path unchanged)."""
+    monkeypatch.delenv("YETO_RL_IDENTITY", raising=False)
+    for identity in (miles_identity.backend_identity(compat_group="nvidia-h100"),
+                     verl_identity.backend_identity(compat_group="ascend-910b4-64g")):
+        assert identity.contract_sha256() == identity.sha256()
+        assert identity.contract_sha256(None) == identity.sha256()
 
 
 def test_identity_check_names_both_card_types():
     h100 = miles_identity.backend_identity(compat_group="nvidia-h100")
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 vs nvidia-h200"):
-        check_identity_match(h100, miles_identity.backend_identity(compat_group="nvidia-h200"))
+        check_identity_match(h100, miles_identity.backend_identity(compat_group="nvidia-h200"), strict=True)
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 vs ascend-910b"):
-        check_identity_match(h100, verl_identity.backend_identity(compat_group="ascend-910b"))
+        check_identity_match(h100, verl_identity.backend_identity(compat_group="ascend-910b"), strict=True)
     check_identity_match(miles_identity.backend_identity(compat_group="nvidia-h200"),
-                         miles_identity.backend_identity(compat_group="nvidia-h200"))
+                         miles_identity.backend_identity(compat_group="nvidia-h200"), strict=True)
     with pytest.raises(BackendIdentityMismatch):  # same card, other backend: old rule
-        check_identity_match(h100, verl_identity.backend_identity(compat_group="nvidia-h100"))
+        check_identity_match(h100, verl_identity.backend_identity(compat_group="nvidia-h100"), strict=True)
 
 
 def test_hello_compat_trailer_layout():

@@ -150,11 +150,20 @@ def _identity(family: str, group: str):
     return verl_identity.backend_identity(device_family=family, compat_group=group)
 
 
+def test_npu_island_and_gpu_island_merge_when_relaxed():
+    """hetero-1114 --rl-identity relaxed: device family / compat_group are provenance."""
+    diff = check_identity_match(_identity("ascend", "ascend-910b4"), _identity("nvidia", "nvidia-h100"),
+                                strict=False)
+    assert set(diff) == {"device_family", "compat_group"}
+    assert (_identity("ascend", "ascend-910b4").contract_sha256(False)
+            == _identity("nvidia", "nvidia-h100").contract_sha256(False))
+
+
 def test_npu_island_and_gpu_island_are_refused():
     npu = _identity("ascend", "ascend-910b4")
     gpu = _identity("nvidia", "nvidia-h100")
     with pytest.raises(Exception) as err:  # CompatGroupMismatch (read first)
-        check_identity_match(npu, gpu)
+        check_identity_match(npu, gpu, strict=True)
     assert "ascend-910b4" in str(err.value) and "nvidia-h100" in str(err.value)
 
 
@@ -164,7 +173,7 @@ def test_same_card_but_different_device_family_is_still_refused():
     npu = _identity("ascend", "ascend-910b4")
     mislabelled = _identity("nvidia", "ascend-910b4")
     with pytest.raises(BackendIdentityMismatch):
-        check_identity_match(npu, mislabelled)
+        check_identity_match(npu, mislabelled, strict=True)
     assert npu.sha256() != mislabelled.sha256()
 
 

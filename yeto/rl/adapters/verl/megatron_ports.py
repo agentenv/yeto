@@ -678,12 +678,12 @@ def run_megatron_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> d
         specs: tuple = ()
         layout_hash = plan["full_parameter"]["parameter_layout_sha256"]
         _layout, identity_hash = full_parameter_identity(plan["model_config_sha256"])
-        identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
+        identity_sha = bind_policy_age(identity.contract_sha256(), int(plan.get("max_policy_age") or 0))
     else:
         specs = layout_of(call_workers(trainer, remote_megatron_layout))
         layout_hash = layout_hash_of(specs)
         identity_hash = config_hash(plan["model_path"], shape)
-        identity_sha = identity.sha256()
+        identity_sha = identity.contract_sha256()
     island = MegatronIsland(
         trainer, model_path=plan["model_path"], learner_id=learner_id, out_dir=plan["out_dir"],
         base_model_revision=plan["model_revision"], lora_config_hash=identity_hash,

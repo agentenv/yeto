@@ -296,7 +296,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     # Miles; limit 0 leaves the identity unchanged
     from yeto.rl.engine.policy_age import bind_policy_age
 
-    identity_sha = bind_policy_age(identity.sha256(), int(plan.get("max_policy_age") or 0))
+    identity_sha = bind_policy_age(identity.contract_sha256(), int(plan.get("max_policy_age") or 0))
     if full:
         sync, policy_state, publisher = _full_parameter_ports(island, plan, identity_sha)
         layout_hash = island.layout_hash
@@ -430,7 +430,7 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
                                 **({"train_backend": "megatron"} if plan.get("engine") == "megatron"
                                    else {}))
     tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
-    identity_sha = bind_policy_age(identity.sha256(), limit)
+    identity_sha = bind_policy_age(identity.contract_sha256(), limit)
     if full:  # Sets island.full_group (and the local layout hash without a syncer)
         sync, policy_state = full_parameter_ports(island, plan, backend_identity_sha256=identity_sha)
         layout_hash = island.layout_hash

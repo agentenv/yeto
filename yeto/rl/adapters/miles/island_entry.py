@@ -1673,7 +1673,9 @@ def _backend_identity_sha256(args) -> str:
     # agentic-rollout-utilization 2.1: a non-zero policy-age limit is bound into
     # the identity the syncer compares (limit 0: unchanged).
     identity = backend_identity(compat_group=getattr(args, "rl_compat_group", None))
-    return bind_policy_age(identity.sha256(),
+    # hetero-1114: full identity (default) or semantic hash (--rl-identity relaxed)
+    mode = getattr(args, "rl_identity", None)
+    return bind_policy_age(identity.contract_sha256(None if mode is None else mode != "relaxed"),
                            int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 

@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -45,15 +46,16 @@ VERL_ALGO_A = island_contract_sha256(VERL_ID, LR_CONSTANT, "a" * 64)
 VERL_ALGO_B = island_contract_sha256(VERL_ID, LR_CONSTANT, "b" * 64)
 
 
-def _start(binary, port, checkpoint, rounds, *, learners, event_tape):
-    """Strict syncer (``--max-base-lag 0``); fresh run, so no ``--resume``."""
+def _start(binary, port, checkpoint, rounds, *, learners, event_tape, strict_identity=True):
+    """Strict syncer (``--max-base-lag 0``); fresh run, so no ``--resume``.
+    ``strict_identity`` False: ``--relaxed-identity`` (compat_group is provenance)."""
     return group_popen(
         [str(binary), "--port", str(port), "--learners", str(learners), "--quorum", str(learners),
          "--grace-ms", "0", "--pipeline", "1", "--sync-interval-steps", "0",
          "--delta-correction", "none", "--total-steps", str(rounds), "--outer-lr", "1",
          "--outer-momentum", "0", "--quorum-timeout-s", "10", "--checkpoint-path", str(checkpoint),
          "--checkpoint-every", "1", "--max-base-lag", "0", "--learner-weight", "equal",
-         "--event-tape", str(event_tape)],
+         "--event-tape", str(event_tape)] + ([] if strict_identity else ["--relaxed-identity"]),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
 
@@ -92,8 +94,9 @@ MILES_ISLAND = textwrap.dedent("""
 """)
 
 
-# decoupling 7.7c: same backend, other card type (H200 or Ascend island in an
-# H100 session); the identity hash differs too because compat_group is in it.
+# decoupling 7.7c (default strict identity): same backend, other
+# card type (H200 or Ascend island in an H100 session); the identity hash
+# differs too because compat_group is in the strict identity.
 H200_ID = "c" * 64
 
 
@@ -179,3 +182,51 @@ def test_client_maps_session_refusal_to_strict_failure():
     with pytest.raises(RuntimeError, match="syncer connection failed") as info:
         other.check_health()
     assert not isinstance(info.value, StrictRlInvariantError)
+
+
+def test_islands_of_different_device_families_share_one_session(syncer_binary, tmp_path):
+    """hetero-1114 --rl-identity relaxed: an NVIDIA and an Ascend verl island declare
+    the same (semantic) contract; a --relaxed-identity syncer admits both into one
+    session and merges their deltas. The default (strict) syncer refuses the second."""
+    from yeto.rl.adapters.verl.identity import backend_identity
+
+    gpu = backend_identity(device_family="nvidia", compat_group="nvidia-h100").contract_sha256(False)
+    npu = backend_identity(device_family="ascend", compat_group="ascend-910b4-64g").contract_sha256(False)
+    assert gpu == npu
+    for strict in (False, True):
+        port = _port()
+        process = _start(syncer_binary, port, tmp_path / f"state{strict}.ckpt", rounds=1, learners=2,
+                         event_tape=tmp_path / f"syncer{strict}.jsonl", strict_identity=strict)
+        clients = []
+        try:
+            clients.append(_verl(port, 0, gpu, "nvidia-h100"))
+            clients[0].send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
+            if strict:
+                with pytest.raises(StrictRlInvariantError, match="syncer refused this island"):
+                    clients.append(_verl(port, 1, npu, "ascend-910b4-64g"))
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        clients[1].check_health()
+                        time.sleep(0.05)
+                assert process.poll() is None, "syncer must keep running"
+                continue
+            clients.append(_verl(port, 1, npu, "ascend-910b4-64g"))
+            for c in clients:
+                assert _wait_item(c.drain_updates).version == 0
+            _push(clients[0], 1, 0, [1, 1])
+            _push(clients[1], 1, 0, [3, 3])
+            finals = [c.wait_for_final_fragments(timeout=15) for c in clients]
+            for (manifest, _), c in zip(finals, clients):
+                assert manifest.global_step == 1
+                c.acknowledge_finalization(manifest)
+            assert process.wait(timeout=15) == 0
+        finally:
+            for c in clients:
+                c.close()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            out = process.stdout.read() if process.stdout else ""
+            (tmp_path / f"syncer{strict}.log").write_text(out)
+        if not strict:
+            assert "cross-hardware island admitted" in out and "ascend-910b4-64g" in out

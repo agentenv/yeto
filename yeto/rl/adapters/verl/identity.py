@@ -2,8 +2,11 @@
 
 Engine ``verl``, the pinned fork commit, the device family of the card this
 island runs on (``nvidia`` on CUDA, ``ascend`` on an NPU) and the hash of the
-parameter-name map (``param_names.PARAM_MAP``).  A verl island and a Miles island therefore never
-share a syncer session contract (the first version forbids mixing).
+parameter-name map (``param_names.PARAM_MAP``).  By default (strict) all
+of them are in the session contract, so mixed islands are refused.  Under
+``--rl-identity relaxed`` (hetero-1114) they are provenance: the contract binds
+only ``BackendIdentity.semantic_sha256()``, so verl FSDP2, verl Megatron and
+Miles islands on any device family can share a session.
 """
 
 from __future__ import annotations
@@ -21,8 +24,8 @@ DEVICE_FAMILY = "nvidia"
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 # The Megatron engine (verl ``model_engine=megatron``) names parameters
 # by Megatron-Core module path; Megatron-Bridge maps them to the HF names the
-# rollout loads. A Megatron island and an FSDP2 island therefore never share a
-# session contract.
+# rollout loads. In strict mode (default) a Megatron island and an FSDP2
+# island do not share a session contract; --rl-identity relaxed: provenance.
 MEGATRON_PARAM_MAP = {"names": "megatron-core module paths", "export": "megatron-bridge export_hf_weights"}
 PARAM_MAP_SHA256_BY_BACKEND = {"fsdp2": PARAM_MAP_SHA256, "megatron": param_map_sha256(MEGATRON_PARAM_MAP)}
 
@@ -33,8 +36,9 @@ def backend_identity(*, device_family: str | None = None,
 
     ``device_family`` None means "read it from this node's accelerator", so an
     Ascend island declares ``ascend`` without any call site change. The family
-    is part of the identity hash: a GPU island and an NPU island therefore get
-    different session contracts and cannot merge weights (task 3.10).
+    is part of the strict (default) contract: a GPU island and an NPU island
+    are refused (task 3.10). Under ``--rl-identity relaxed`` it is provenance
+    and they merge (with a warning).
     """
     if train_backend not in PARAM_MAP_SHA256_BY_BACKEND:
         raise ValueError(f"verl train backend {train_backend!r} has no parameter-name map yet")

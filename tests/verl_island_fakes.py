@@ -92,7 +92,8 @@ class Reached(Exception):
 
 
 def _identity():
-    return types.SimpleNamespace(compat_group="nvidia-h100", sha256=lambda: "c" * 64, to_dict=lambda: {})
+    return types.SimpleNamespace(compat_group="nvidia-h100", sha256=lambda: "c" * 64,
+                                 contract_sha256=lambda strict=None: "c" * 64, to_dict=lambda: {})
 
 
 def full_plan(tmp_path, **extra) -> dict:

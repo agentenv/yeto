@@ -174,6 +174,9 @@ pub struct Config {
     /// sha256(domain || layout_fingerprint || pinned) is refused, so the first
     /// island to connect no longer decides the contract. None keeps first-wins.
     pub expected_island_contract: Option<[u8; 32]>,
+    /// Compare compat_group at HELLO (refuse a different card group; default).
+    /// false (`--relaxed-identity`, hetero-1114): provenance only, admitted with a warning.
+    pub strict_identity: bool,
     /// Fencing token of this syncer incarnation: a HELLO that carries a
     /// lower epoch is refused; the epoch is persisted next to the checkpoint
     /// and never lowered on resume.
@@ -2272,6 +2275,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let hello_auth = Arc::new(HelloAuth {
         key: cfg.island_hmac_key.clone(),
         expected_contract: cfg.expected_island_contract,
+        strict_identity: cfg.strict_identity,
+        event_tape: cfg.event_tape.clone(),
     });
     if hello_auth.key.is_none() {
         warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
@@ -2369,6 +2374,9 @@ fn hex32(h: &[u8; 32]) -> String {
 pub struct HelloAuth {
     pub key: Option<Vec<u8>>,
     pub expected_contract: Option<[u8; 32]>,
+    pub strict_identity: bool,
+    /// Event tape for the `--relaxed-identity` cross-hardware admission record.
+    pub event_tape: Option<std::path::PathBuf>,
 }
 
 /// Domain of the HELLO MAC: HMAC-SHA256(key, domain || hello_body).
@@ -2421,21 +2429,44 @@ fn check_pinned_contract(pinned: Option<[u8; 32]>, offered: &SessionSpec) -> Opt
 /// Admit `offered` into the session: the first HELLO establishes the session
 /// contract; later HELLOs must match it exactly. Returns the refusal message
 /// (sent to that connection only) on mismatch. Never fatal for the session.
-fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
+///
+/// hetero-1114 `--relaxed-identity` (`strict_identity` false): compat_group is
+/// provenance only and not compared; `Ok(Some(note))` names the other
+/// island's hardware for the caller to log.
+fn admit_session(
+    session: &Session,
+    offered: SessionSpec,
+    strict_identity: bool,
+) -> Result<Option<String>, String> {
     let mut guard = session.lock().unwrap();
-    match guard.as_ref() {
-        None => {
-            *guard = Some(offered);
-            None
-        }
-        Some(expected) if expected == &offered => None,
-        Some(expected) if expected.compat_group != offered.compat_group => Some(format!(
+    let Some(expected) = guard.as_ref() else {
+        *guard = Some(offered);
+        return Ok(None);
+    };
+    let same_group = expected.compat_group == offered.compat_group;
+    let same_semantics = SessionSpec {
+        compat_group: expected.compat_group.clone(),
+        ..offered.clone()
+    } == *expected;
+    if same_semantics && same_group {
+        return Ok(None);
+    }
+    if same_semantics && !strict_identity {
+        return Ok(Some(format!(
+            "cross-hardware island admitted (--relaxed-identity: compat_group is \
+             provenance only): session {} vs this island {}, tolerance not calibrated",
+            group_label(&expected.compat_group),
+            group_label(&offered.compat_group),
+        )));
+    }
+    Err(match () {
+        _ if strict_identity && !same_group => format!(
             "session mismatch (HELLO refused, session keeps running): \
              compat_group differs: {} vs {}, tolerance not calibrated",
             group_label(&expected.compat_group),
             group_label(&offered.compat_group),
-        )),
-        Some(expected) => Some(format!(
+        ),
+        _ => format!(
             "session mismatch (HELLO refused, session keeps running): \
              expected session_contract_hash={} layout_fingerprint={} dtype={} fragments={}, \
              got session_contract_hash={} layout_fingerprint={} dtype={} fragments={}",
@@ -2447,8 +2478,8 @@ fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
             hex32(&offered.layout_fingerprint),
             offered.dtype,
             offered.layout.fragments.len(),
-        )),
-    }
+        ),
+    })
 }
 
 /// Length of the optional compat_group trailer at the end of `rest` (the
@@ -2767,10 +2798,17 @@ async fn handle_connection(
                 warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
                 return Ok(());
             }
-            if let Some(message) = admit_session(&session, offered) {
-                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
-                warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
-                return Ok(());
+            match admit_session(&session, offered, hello_auth.strict_identity) {
+                Ok(None) => {}
+                Ok(Some(note)) => {
+                    warn!(learner_id, generation, "{note}");
+                    append_identity_admission(hello_auth.event_tape.as_deref(), learner_id, generation, &note);
+                }
+                Err(message) => {
+                    send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                    warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
+                    return Ok(());
+                }
             }
             let member = Member {
                 learner_id,
@@ -9141,6 +9179,29 @@ fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: 
     }
 }
 
+/// `--relaxed-identity` only: record a cross-hardware HELLO admission on the
+/// event tape so the mixed-hardware session is auditable afterwards.
+fn append_identity_admission(path: Option<&std::path::Path>, learner_id: u32, generation: u64, note: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let line = format!(
+        "{{\"event\":\"rl_identity_cross_hardware_admitted\",\"learner_id\":{learner_id},\"generation\":{generation},\"note\":{},\"time_unix\":{:?}}}\n",
+        crate::dispense::json_str(note),
+        unix_now()
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
 /// Append an idempotent, fsynced accounting cut after a sweep checkpoint has
 /// become authoritative. A crash between the checkpoint rename and the
 /// ordinary per-merge tape append can lose that diagnostic merge record; the
@@ -9617,50 +9678,93 @@ mod tests {
         }
     }
 
-    /// yeto-framework-decoupling 7.7c: legacy HELLO with another compat_group
-    /// (H200 or Ascend island in an H100 session) is refused with both groups
-    /// named, the session is untouched; same group H200/H200 is admitted.
+    /// yeto-framework-decoupling 7.7c (default strict identity): a HELLO with
+    /// another compat_group (H200 or Ascend island in an H100 session) is
+    /// refused with both groups named, the session is untouched; same group
+    /// H200/H200 is admitted.
     #[test]
     fn hello_with_other_compat_group_is_refused_naming_both_card_types() {
         let layout = Layout { fragments: Vec::new() };
         let session: Session = Arc::new(Mutex::new(None));
         let h100 = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
-        assert_eq!(admit_session(&session, h100.clone()), None);
+        assert_eq!(admit_session(&session, h100.clone(), true), Ok(None));
         for group in ["nvidia-h200", "ascend-910b"] {
-            let mut other = spec(DTYPE_F32, &layout, 0xaf, 0x50);
-            other.compat_group = group.to_string();
-            let message = admit_session(&session, other).expect("must refuse");
-            assert!(message.starts_with("session mismatch"), "{message}");
-            assert!(message.contains(&format!("compat_group differs: nvidia-h100 vs {group}, tolerance not calibrated")), "{message}");
+            for contract in [0x4f, 0x50] {
+                let mut other = spec(DTYPE_F32, &layout, 0xaf, contract);
+                other.compat_group = group.to_string();
+                let message = admit_session(&session, other, true).expect_err("must refuse");
+                assert!(message.starts_with("session mismatch"), "{message}");
+                assert!(message.contains(&format!("compat_group differs: nvidia-h100 vs {group}, tolerance not calibrated")), "{message}");
+            }
         }
         assert_eq!(session.lock().unwrap().as_ref(), Some(&h100));
         let session: Session = Arc::new(Mutex::new(None));
         let mut h200 = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
         h200.compat_group = "nvidia-h200".to_string();
-        assert_eq!(admit_session(&session, h200.clone()), None);
-        assert_eq!(admit_session(&session, h200), None);
+        assert_eq!(admit_session(&session, h200.clone(), true), Ok(None));
+        assert_eq!(admit_session(&session, h200, true), Ok(None));
+    }
+
+    /// hetero-1114 `--relaxed-identity`: an island on another card family with
+    /// the same contract joins the session; the note names both groups and the
+    /// session keeps the first island's spec. A different contract is still
+    /// refused whatever the card.
+    #[test]
+    fn relaxed_hello_from_other_device_family_is_admitted_with_a_note() {
+        let layout = Layout { fragments: Vec::new() };
+        let session: Session = Arc::new(Mutex::new(None));
+        let h100 = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+        assert_eq!(admit_session(&session, h100.clone(), false), Ok(None));
+        let mut npu = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+        npu.compat_group = "ascend-910b4-64g".to_string();
+        let note = admit_session(&session, npu.clone(), false)
+            .expect("admitted")
+            .expect("cross-hardware note");
+        assert!(note.contains("nvidia-h100 vs this island ascend-910b4-64g"), "{note}");
+        assert_eq!(session.lock().unwrap().as_ref(), Some(&h100));
+        let mut other_contract = npu;
+        other_contract.session_contract_hash = [0x50; 32];
+        let message = admit_session(&session, other_contract, false).expect_err("must refuse");
+        assert!(message.contains("expected session_contract_hash="), "{message}");
+    }
+
+    #[test]
+    fn relaxed_cross_hardware_admission_is_recorded_on_the_tape() {
+        let dir = std::env::temp_dir().join(format!("yeto-identity-tape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        append_identity_admission(None, 1, 2, "ignored");
+        append_identity_admission(Some(&tape), 3, 7, "session \"a\" vs b\n");
+        let text = std::fs::read_to_string(&tape).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.starts_with(
+            "{\"event\":\"rl_identity_cross_hardware_admitted\",\"learner_id\":3,\"generation\":7,\"note\":\"session \\\"a\\\" vs b\\u000a\","
+        ), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn first_hello_establishes_session_and_mismatch_is_refused_without_reset() {
-        let layout = Layout { fragments: Vec::new() };
-        let session: Session = Arc::new(Mutex::new(None));
-        let verl = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
-        // No session yet: the first HELLO defines the contract.
-        assert_eq!(admit_session(&session, verl.clone()), None);
-        // Same contract: admitted.
-        assert_eq!(admit_session(&session, verl.clone()), None);
-        // Same layout, other backend identity (Miles island in a verl session):
-        // refused, with both hashes in the message.
-        let miles = spec(DTYPE_F32, &layout, 0xaf, 0x69);
-        let message = admit_session(&session, miles).expect("must refuse");
-        assert!(message.starts_with("session mismatch"), "{message}");
-        assert!(message.contains(&format!("expected session_contract_hash={}", "4f".repeat(32))));
-        assert!(message.contains(&format!("got session_contract_hash={}", "69".repeat(32))));
-        assert!(message.contains(&format!("layout_fingerprint={}", "af".repeat(32))));
-        // The refusal does not touch the established session.
-        assert_eq!(session.lock().unwrap().as_ref(), Some(&verl));
-        assert_eq!(admit_session(&session, verl), None);
+        for strict in [true, false] {
+            let layout = Layout { fragments: Vec::new() };
+            let session: Session = Arc::new(Mutex::new(None));
+            let verl = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+            // No session yet: the first HELLO defines the contract.
+            assert_eq!(admit_session(&session, verl.clone(), strict), Ok(None));
+            // Same contract: admitted.
+            assert_eq!(admit_session(&session, verl.clone(), strict), Ok(None));
+            // Same layout, other contract: refused, with both hashes in the message.
+            let miles = spec(DTYPE_F32, &layout, 0xaf, 0x69);
+            let message = admit_session(&session, miles, strict).expect_err("must refuse");
+            assert!(message.starts_with("session mismatch"), "{message}");
+            assert!(message.contains(&format!("expected session_contract_hash={}", "4f".repeat(32))));
+            assert!(message.contains(&format!("got session_contract_hash={}", "69".repeat(32))));
+            assert!(message.contains(&format!("layout_fingerprint={}", "af".repeat(32))));
+            // The refusal does not touch the established session.
+            assert_eq!(session.lock().unwrap().as_ref(), Some(&verl));
+            assert_eq!(admit_session(&session, verl, strict), Ok(None));
+        }
     }
 
     fn registry_with_current(current: Member) -> Registry {
@@ -9946,6 +10050,7 @@ mod tests {
             require_profile_binding: false,
             island_hmac_key: None,
             expected_island_contract: None,
+            strict_identity: true,
             syncer_epoch: 0,
             membership: Default::default(),
             recovery: Default::default(),

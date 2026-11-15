@@ -56,9 +56,10 @@ def test_golden_samples_keep_both_old_hashes_and_carry_the_identity():
 
 
 def test_miles_vs_verl_handshake_is_refused_and_names_both():
+    """Under --rl-strict-identity (the pre-hetero-1114 rule)."""
     miles = miles_identity.backend_identity()
     with pytest.raises(BackendIdentityMismatch) as err:
-        check_identity_match(miles, FAKE_VERL)
+        check_identity_match(miles, FAKE_VERL, strict=True)
     assert "'engine': 'miles'" in str(err.value) and "'engine': 'verl'" in str(err.value)
     check_identity_match(miles, miles_identity.backend_identity())  # two Miles islands: fine
 
@@ -101,7 +102,7 @@ def test_full_parameter_session_contracts_reference_the_identity():
     from yeto.rl.adapters.miles.full_parameter import role_stream
 
     # every full-parameter role stream (dense and SAO) binds the ports identity.
-    assert "backend_identity().sha256()" in Path(role_stream.__file__).read_text()
+    assert "backend_identity().contract_sha256()" in Path(role_stream.__file__).read_text()
 
 
 def test_lr_schedule_is_bound_into_the_island_contract():
@@ -184,3 +185,26 @@ def test_bridge_configs_bind_lr_schedule_into_hello(monkeypatch):
     layout = build_avg_layout((spec,))
     contract = island_contract_sha256(sha, lr, "e" * 64, "f" * 64)
     assert seen == [(bridge._session_contract(layout, contract), seen[0][1])]
+
+
+def test_light_identity_contract_ignores_hardware_and_stack(monkeypatch):
+    """hetero-1114 (gap T1-T3): the default contract is the old full identity
+    (unchanged); --rl-identity relaxed binds only the semantic identity, so device
+    family, engine, commit, param map and compat_group do not change it."""
+    from yeto.rl.adapters.verl import identity as verl_identity
+
+    monkeypatch.delenv("YETO_RL_IDENTITY", raising=False)
+    gpu = verl_identity.backend_identity(device_family="nvidia", compat_group="nvidia-h100")
+    npu = verl_identity.backend_identity(device_family="ascend", compat_group="ascend-910b4-64g")
+    meg = verl_identity.backend_identity(device_family="ascend", train_backend="megatron",
+                                         compat_group="ascend-910b4-64g")
+    miles = miles_identity.backend_identity(device_family="nvidia", compat_group="nvidia-b300")
+    assert len({i.contract_sha256(False) for i in (gpu, npu, meg, miles)}) == 1
+    assert len({i.contract_sha256(True) for i in (gpu, npu, meg, miles)}) == 4
+    for ident in (gpu, npu, meg, miles):  # strict == the pre-change contract (resume of old runs)
+        assert ident.contract_sha256(True) == ident.sha256() == ident.provenance_sha256()
+    assert gpu.contract_sha256() == gpu.sha256() != npu.contract_sha256()  # default strict
+    assert check_identity_match(gpu, gpu) == {}
+    monkeypatch.setenv("YETO_RL_IDENTITY", "relaxed")
+    assert gpu.contract_sha256() == npu.contract_sha256() == gpu.semantic_sha256()
+    assert set(check_identity_match(gpu, npu)) == {"device_family", "compat_group"}
