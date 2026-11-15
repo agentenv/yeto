@@ -166,6 +166,9 @@ def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None
 def check_trainer_batch_divisible(samples: int, world: int) -> None:
     """Refuse a round whose samples do not split over the trainer's ranks.
 
+    ``world`` is the trainer's data-parallel size (:func:`trainer_dp_size`): all
+    of its cards under FSDP, the cards over TP x PP x CP under Megatron.
+
     verl balances a step's sequences over the data-parallel ranks with
     ``equal_size=True`` (``seqlen_balancing.karmarkar_karp``), which asserts
     ``len(seqlen_list) % dp_size == 0`` deep inside the first step. Measured on a
@@ -178,9 +181,40 @@ def check_trainer_batch_divisible(samples: int, world: int) -> None:
     if samples % world:
         raise VerlTranslationError(
             f"one round holds {samples} sample(s) (groups_per_round x samples_per_group) but the trainer "
-            f"island has {world} card(s): verl balances a step over its ranks with equal sizes and asserts "
-            f"{samples} % {world} == 0 inside the first step. Change the island's card count or the round "
+            f"island has {world} data-parallel rank(s): verl balances a step over them with equal sizes and asserts "
+            f"{samples} % {world} == 0 inside the first step. Change the island's card count, its model-parallel split or the round "
             f"size so the samples divide.")
+
+
+# per-rank model-parallel splits: the data-parallel size is the trainer's cards over
+# their product (verl balances a step over the DP ranks, not over every card)
+_MODEL_PARALLEL_KEYS = (
+    "actor_rollout_ref.actor.megatron.tensor_model_parallel_size",
+    "actor_rollout_ref.actor.megatron.pipeline_model_parallel_size",
+    "actor_rollout_ref.actor.megatron.context_parallel_size",
+    "actor_rollout_ref.actor.ulysses_sequence_parallel_size",
+)
+
+
+def trainer_dp_size(overrides: Sequence[str], world: int) -> int:
+    """The trainer's data-parallel size: ``world`` over the TP x PP x CP (Megatron)
+    or Ulysses SP (FSDP) the overrides set; the last override of a key wins. With
+    none set, or a product that does not divide ``world``, it is ``world`` (the
+    strict check, as before)."""
+    last: dict[str, int] = {}
+    for item in overrides:
+        key, sep, raw = str(item).lstrip("+").partition("=")
+        if sep and key.strip() in _MODEL_PARALLEL_KEYS:
+            try:
+                last[key.strip()] = int(raw.strip().strip("'\""))
+            except ValueError:
+                continue
+    product = 1
+    for value in last.values():
+        product *= max(value, 1)
+    if world <= 0 or product <= 1 or world % product:
+        return world
+    return world // product
 
 
 def balance_batch_disabled(overrides: Sequence[str]) -> bool:

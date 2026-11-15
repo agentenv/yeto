@@ -1540,6 +1540,7 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
 
     from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, VerlTranslationError, balance_batch_disabled,
                                     buffer_trainer_shape, check_trainer_batch_divisible, execution_profile_for,
+                                    trainer_dp_size,
                                     fully_async_run_overrides)
     from .offpolicy_correction import apply_to_overrides, correction_mapping
     from .policy_age import SUPPORT
@@ -1568,7 +1569,7 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
         try:  # the samples of one round must split over the island's cards (verl asserts it mid-step)
             if not balance_batch_disabled(overrides):  # balance off: no equal-size assert
                 check_trainer_batch_divisible(int(args.groups_per_round) * int(args.samples_per_group),
-                                              nodes * per_node)
+                                              trainer_dp_size(overrides, nodes * per_node))
         except VerlTranslationError as exc:
             raise SystemExit(str(exc)) from exc
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
