@@ -290,6 +290,15 @@ _MODE = (
         "A backend without a registered adapter is refused before launch.",
     ),
     cli_flag(
+        "--rl-model-auto",
+        action="store_true",
+        help=(
+            "print the model registry's recommendation (backend, image pins, parallel "
+            "layout, pitfalls; yeto/rl/model_registry) before launch. Advisory: no "
+            "argument is changed. Default off; `yeto adapt` is the dry-run form"
+        ),
+    ),
+    cli_flag(
         "--rl-image-private",
         action="store_true",
         help=(

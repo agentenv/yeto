@@ -87,7 +87,78 @@ class ModelArch:
     head_dim: int
 
 
-def arch_from_hf_config(cfg: dict) -> ModelArch:
+def param_breakdown(cfg: dict) -> dict[str, float]:
+    """Parameter count of an HF ``config.json`` by part, counting what the default
+    :func:`arch_from_hf_config` estimate leaves out: MLA low-rank attention
+    (``kv_lora_rank``/``q_lora_rank``), shared experts, the dense first layers of a MoE
+    (``first_k_dense_replace`` / ``mlp_only_layers`` / ``decoder_sparse_step``) and a
+    latent MoE (``routed_expert_hidden_size``). ``active`` counts top-k routed experts.
+    MTP layers (``num_nextn_predict_layers``) are not counted."""
+    t = cfg.get("text_config") or cfg
+    L = int(t["num_hidden_layers"])
+    H = int(t["hidden_size"])
+    V = int(t["vocab_size"])
+    inter = int(t.get("intermediate_size") or 4 * H)
+    nh = int(t.get("num_attention_heads") or 1)
+    kv = int(t.get("num_key_value_heads") or nh)
+    hd = int(t.get("head_dim") or H // nh)
+    tied = bool(cfg.get("tie_word_embeddings", t.get("tie_word_embeddings", False)))
+    if t.get("kv_lora_rank"):
+        rope = int(t.get("qk_rope_head_dim") or 0)
+        nope = int(t.get("qk_nope_head_dim") or hd)
+        v_hd = int(t.get("v_head_dim") or nope)
+        qk = nope + rope
+        q_lora = int(t.get("q_lora_rank") or 0)
+        kv_lora = int(t["kv_lora_rank"])
+        q = H * q_lora + q_lora * nh * qk if q_lora else H * nh * qk
+        attn = q + H * (kv_lora + rope) + kv_lora * nh * (nope + v_hd) + nh * v_hd * H
+    else:
+        attn = H * nh * hd + 2 * H * kv * hd + nh * hd * H
+    experts = int(t.get("num_experts") or t.get("n_routed_experts") or 0)
+    topk = int(t.get("num_experts_per_tok") or t.get("num_experts_per_token") or 0)
+    if experts:
+        if t.get("first_k_dense_replace") is not None:
+            dense_layers = min(L, int(t["first_k_dense_replace"]))
+        elif t.get("mlp_only_layers"):
+            dense_layers = len(set(t["mlp_only_layers"]))
+        elif int(t.get("decoder_sparse_step") or 1) > 1:
+            step = int(t["decoder_sparse_step"])
+            dense_layers = L - sum(1 for i in range(L) if (i + 1) % step == 0)
+        else:
+            dense_layers = 0
+    else:
+        dense_layers = L
+    moe_layers = L - dense_layers
+    moe_inter = int(t.get("moe_intermediate_size") or inter)
+    latent = int(t.get("routed_expert_hidden_size") or H)
+    per_expert = 3 * latent * moe_inter
+    latent_proj = 2 * H * latent if latent != H else 0
+    n_shared = int(t.get("n_shared_experts") or t.get("num_shared_experts") or 0)
+    shared_inter = int(t.get("shared_expert_intermediate_size") or 0) or n_shared * moe_inter
+    shared = 3 * H * shared_inter if experts else 0
+    router = H * experts
+    out = {
+        "embed": float((1 if tied else 2) * V * H),
+        "attention": float(L * attn),
+        "norms": float(L * 2 * H),
+        "dense_mlp": float(dense_layers * 3 * H * inter),
+        "shared_experts": float(moe_layers * shared),
+        "routed_experts": float(moe_layers * per_expert * experts),
+        "moe_other": float(moe_layers * (router + latent_proj)),
+        "per_expert": float(per_expert),
+        "moe_layers": float(moe_layers),
+        "dense_layers": float(dense_layers),
+    }
+    base = out["embed"] + out["attention"] + out["norms"] + out["dense_mlp"] + out["shared_experts"] + out["moe_other"]
+    out["total"] = base + out["routed_experts"]
+    out["active"] = base + moe_layers * per_expert * min(topk or experts, experts)
+    return out
+
+
+def arch_from_hf_config(cfg: dict, *, precise: bool = False) -> ModelArch:
+    """``precise=False`` (default) keeps the historical upper-bound count every caller
+    and calibration uses; ``precise=True`` takes the parameter count of
+    :func:`param_breakdown` (MLA, shared experts, dense first layers)."""
     t = cfg.get("text_config") or cfg
     L = int(t["num_hidden_layers"])
     H = int(t["hidden_size"])
@@ -102,6 +173,8 @@ def arch_from_hf_config(cfg: dict) -> ModelArch:
     moe_inter = int(t.get("moe_intermediate_size") or inter)
     mlp = 3 * H * (moe_inter * moe_experts if moe_experts else inter)
     params = (1 if tied else 2) * V * H + L * (attn + mlp + 2 * H)
+    if precise:
+        params = int(param_breakdown(cfg)["total"])
     return ModelArch(params=float(params), layers=L, hidden=H, vocab=V, intermediate=inter,
                      heads=nh, kv_heads=kv, head_dim=hd)
 
