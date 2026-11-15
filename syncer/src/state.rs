@@ -1222,8 +1222,29 @@ impl CheckpointSnapshot {
             }
         };
         std::fs::rename(tmp, path)?;
-        sync_parent_directory(path)?;
+        sync_parent_directory(path).context(CheckpointRenamedUnsynced)?;
         Ok(persisted)
+    }
+}
+
+/// Error context marking a persist that failed only after the rename: the new
+/// checkpoint already replaced the previous one at `path`, but the directory
+/// fsync failed, so the rename may not survive a crash.
+#[derive(Clone, Copy, Debug)]
+pub struct CheckpointRenamedUnsynced;
+
+impl std::fmt::Display for CheckpointRenamedUnsynced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint renamed into place, but fsync of its directory failed")
+    }
+}
+
+/// What a failed checkpoint write left at its target path, for the log.
+pub fn failed_checkpoint_outcome(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<CheckpointRenamedUnsynced>().is_some() {
+        "background checkpoint failed after the rename; the new checkpoint replaced the previous one but its directory entry may not be durable"
+    } else {
+        "background checkpoint failed; the previous checkpoint stays in place"
     }
 }
 
@@ -1364,7 +1385,8 @@ impl GlobalState {
                         step,
                         path = %target.display(),
                         error = format!("{error:#}"),
-                        "background checkpoint failed; the previous checkpoint stays in place"
+                        outcome = failed_checkpoint_outcome(&error),
+                        "background checkpoint failed"
                     );
                     return Err(error);
                 }
@@ -2762,6 +2784,19 @@ mod tests {
         assert_eq!(restored.versions, vec![13, 12]);
         assert!(!path.with_extension("tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_is_not_reported_as_keeping_the_old_checkpoint() {
+        let before = anyhow::anyhow!("disk full").context("write ckpt.tmp");
+        assert!(failed_checkpoint_outcome(&before).contains("previous checkpoint stays in place"));
+        let after: anyhow::Error = Err::<(), _>(anyhow::anyhow!("sync checkpoint directory /x"))
+            .context(CheckpointRenamedUnsynced)
+            .unwrap_err();
+        let outcome = failed_checkpoint_outcome(&after);
+        assert!(outcome.contains("replaced the previous one"), "{outcome}");
+        assert!(!outcome.contains("stays in place"));
+        assert!(format!("{after:#}").contains("renamed into place"));
     }
 
     #[test]
