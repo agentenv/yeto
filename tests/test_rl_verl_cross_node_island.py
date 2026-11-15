@@ -20,6 +20,7 @@ from yeto.rl.adapters.verl.fully_async_round import (
     VerlTranslationError,
     balance_batch_disabled,
     check_trainer_batch_divisible,
+    trainer_dp_size,
 )
 from yeto.rl.adapters.verl.island_entry import (
     RAY_PROBE_TIMEOUT_ENV,
@@ -178,3 +179,21 @@ def test_release_logs_a_stop_only_when_it_failed(tmp_path, capsys, rc, printed):
                                 ops=_StopOps(rc, "Warning: Permanently added 'node-a' to known hosts."))
     assert islands._kill(1) is (rc == 0)
     assert ("stop of trainer incarnation 1" in capsys.readouterr().out) is printed
+
+
+def test_the_divisibility_check_counts_data_parallel_ranks_not_cards():
+    meg = "actor_rollout_ref.actor.megatron"
+    assert trainer_dp_size([], 8) == 8  # FSDP, nothing split: every card is a DP rank
+    # 8 cards with TP=4: 2 DP ranks, so 24 samples split (24 % 8 would refuse them)
+    dp = trainer_dp_size([f"{meg}.tensor_model_parallel_size=4"], 8)
+    assert dp == 2
+    check_trainer_batch_divisible(24, dp)
+    assert trainer_dp_size([f"{meg}.tensor_model_parallel_size=2", f"+{meg}.pipeline_model_parallel_size=2",
+                            f"{meg}.context_parallel_size=1"], 16) == 4
+    assert trainer_dp_size(["actor_rollout_ref.actor.ulysses_sequence_parallel_size=2"], 8) == 4
+    # the last override wins; a split that does not divide the cards keeps the strict check
+    assert trainer_dp_size([f"{meg}.tensor_model_parallel_size=4", f"{meg}.tensor_model_parallel_size=1"], 8) == 8
+    assert trainer_dp_size([f"{meg}.tensor_model_parallel_size=3"], 8) == 8
+    assert trainer_dp_size([f"{meg}.tensor_model_parallel_size=x"], 8) == 8
+    with pytest.raises(VerlTranslationError, match="data-parallel rank"):
+        check_trainer_batch_divisible(25, dp)
