@@ -38,6 +38,12 @@ a restore expects every Adam step to advance by ``optimizer_steps_per_round``.
 Driver-side functions are pure (lists of rank results in, manifest/problems
 out); :class:`VerlCutTrainer` binds them to a ``call_ranks`` callable (verl:
 ``VerlIsland.call_workers``).
+
+Compatibility (cut format): on Ascend a rank now saves its device RNG under the
+``npu`` key. Code from before this change only knows ``cpu`` / ``cuda``, so a cut
+newly written on Ascend cannot be restored by that older code (forward-only;
+cuts written by older code still restore here). CUDA ranks are not affected:
+they keep saving under ``cuda`` exactly as before.
 """
 
 from __future__ import annotations
@@ -195,7 +201,9 @@ def _rng_state() -> dict[str, Any]:
     """CPU RNG, plus the current device's under its torch device type: ``cuda``
     on a CUDA rank (unchanged), ``npu`` on an Ascend rank. An Ascend rank used to
     save its NPU state only when ``torch.cuda`` was the transfer_to_npu alias
-    (MindSpeed imported), as ``cuda``, and no device state at all otherwise."""
+    (MindSpeed imported), as ``cuda``, and no device state at all otherwise.
+    An ``npu`` entry is a cut format change: older code cannot restore a cut
+    written on Ascend by this version. CUDA cuts are unchanged."""
     import torch
 
     from yeto import accel
