@@ -512,6 +512,22 @@ def xhw_family_advice(args, specs, *, out=None, environ=None) -> dict | None:
             "xhw_guard": enabled}
 
 
+def print_dry_run_memory(memory: list[dict] | None, *, out=None) -> None:
+    """Say on stderr what the dry-run JSON records under ``memory_estimate`` when an island
+    is not estimated or over the limit, with the suggestions (text only; the dry run's
+    result and the real launch's ``--preflight-memory`` decision are unchanged)."""
+    out = sys.stderr if out is None else out
+    for rec in memory or ():
+        if not rec.get("estimated"):
+            print(f"[preflight] WARNING: GPU memory not estimated for island {rec.get('learner_id')}: "
+                  f"{rec.get('reason')}", file=out, flush=True)
+        elif not rec.get("fits"):
+            text = format_memory_refusal(rec)
+            label = ("WARNING (dry run; a real launch stops here with --preflight-memory error):"
+                     if rec.get("calibrated") else "WARNING (model not calibrated, advisory only):")
+            print(text.replace("STOP:", label, 1), file=out, flush=True)
+
+
 def check_compat_groups(args, specs) -> None:
     """Islands that merge through the syncer must declare one compat group.
     Under ``--rl-identity relaxed`` compat_group is provenance only: mixed
@@ -582,7 +598,10 @@ def check_policy_age_spec(args) -> None:
             f"execution.max_policy_staleness >= {age} (and a TIS correction); the run's spec "
             f"tolerates {tolerated} (--rl-algorithm-spec). Start from a shipped spec, e.g. "
             "examples/k31/algorithm-spec.async-age2-tis.json (max_policy_staleness 2, TIS), "
-            "or lower --rl-max-policy-age")
+            "or lower --rl-max-policy-age"
+            + ("; with --rl-backend verl set correction.lower to 0.0 in a copy of it (verl TIS "
+               "clamps the upper side only and refuses lower > 0)"
+               if (getattr(args, "rl_backend", None) or "miles") == "verl" else ""))
 
 
 # ---------------------------------------------------------------------------

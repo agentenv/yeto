@@ -122,6 +122,49 @@ def options_type(cls: type) -> type | None:
     return found[0] if found else None
 
 
+# What each required ``server`` field means, for the refusal of a section that leaves one out
+# (the text only; ServerConfig decides what is required).
+SERVER_FIELD_HINTS = {
+    "base_dir": "directory of the checkpoint the engine starts on, on the sampler node",
+    "card_model": "the card name, e.g. \"H100\", \"L4\", \"MI355X\", \"910B\"",
+    "device_family": "\"cuda\", \"rocm\", \"npu\" or \"ppu\" (the same as the spec's platform)",
+    "engine_version": "the engine build served, recorded in the sampler identity, e.g. \"vllm@0.29.0\"",
+    "precision": "the served weight precision, e.g. \"bf16\" for a dense checkpoint",
+    "quant_scheme": "the release scheme served; \"bf16\" for trained (unquantized) weights",
+    "topology": "the engine layout, e.g. \"tp1\", \"tp8\"",
+    "max_model_len": "the engine context length in tokens, e.g. 4096",
+}
+
+
+def _check_server_keys(server: Mapping[str, Any]) -> None:
+    """Refuse a ``server`` section with a missing or unknown field, naming each field and
+    what it holds (TypeError, as ``ServerConfig(**server)`` raises for the same section)."""
+    names = {f.name for f in dataclasses.fields(ServerConfig)}
+    required = [f.name for f in dataclasses.fields(ServerConfig)
+                if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
+    missing = [name for name in required if name not in server]
+    unknown = sorted(set(server) - names)
+    problems = []
+    if missing:
+        problems.append("engine.server is missing required field(s): " + "; ".join(
+            f"{name} ({SERVER_FIELD_HINTS[name]})" if name in SERVER_FIELD_HINTS else name
+            for name in missing))
+    if unknown:
+        problems.append(f"engine.server has unknown field(s) {unknown} (known: {sorted(names)})")
+    if problems:
+        raise TypeError("; ".join(problems))
+
+
+def _server_config(server: Mapping[str, Any]) -> Any:
+    """``ServerConfig(**server)``; when that raises, the refusal names each bad field."""
+    try:
+        return ServerConfig(**server)
+    except TypeError:
+        if dataclasses.is_dataclass(ServerConfig):
+            _check_server_keys(server)
+        raise
+
+
 def build(section: Mapping[str, Any]) -> Any:
     """The adapter of one ``engine`` section (module doc). Raises ValueError /
     KeyError / TypeError on a section the adapter does not accept."""
@@ -146,6 +189,8 @@ def build(section: Mapping[str, Any]) -> Any:
                 kwargs["routed_experts"] = tuple(kwargs["routed_experts"])
         return cls(**kwargs)
     server = dict(section["server"])
+    if "base_dir" not in server:
+        _check_server_keys(server)
     server["base_dir"] = Path(server["base_dir"])
     server["extra_args"] = tuple(server.get("extra_args") or ())
     options = dict(section.get("options") or {})
@@ -157,7 +202,7 @@ def build(section: Mapping[str, Any]) -> Any:
     if options_cls is None:
         if options:
             raise ValueError(f"adapter {section['adapter']!r} takes no options, the section gives {sorted(options)}")
-        return cls(ServerConfig(**server))
+        return cls(_server_config(server))
     # JSON has no tuples; the options dataclasses hold tuples
     options = {k: tuple(v) if isinstance(v, list) else v for k, v in options.items()}
-    return cls(ServerConfig(**server), options_cls(**options))
+    return cls(_server_config(server), options_cls(**options))

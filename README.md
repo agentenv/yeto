@@ -165,6 +165,7 @@ learners directly; see
 |---|---|
 | [CLI_REFERENCE.md](docs/CLI_REFERENCE.md) | every command and flag, with defaults and examples |
 | [MODELS.md](docs/MODELS.md) | model aliases and their memory footprint |
+| [NEW_MODEL_ONBOARDING.md](docs/NEW_MODEL_ONBOARDING.md) | checklist for bringing a new model to an async GRPO run |
 | [DESIGN.md](docs/DESIGN.md) | merge math, blending, adaptive grace, wire formats, resilience |
 | [PROTOCOL.md](docs/PROTOCOL.md) | learner/syncer wire protocol, RL sync modes, island pool |
 | [MILES_RL.md](docs/MILES_RL.md) | Miles RL: rollout/training boundaries, recovery, export, all RL flags |

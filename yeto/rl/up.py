@@ -171,6 +171,10 @@ class RunConfigError(ValueError):
     """The run config (or the run's state directory) cannot be used: one line for the user."""
 
 
+class PoolConfigError(RunConfigError):
+    """The rollout layer refused the samplers / pool section (``resolve``); ``open_run`` names the config."""
+
+
 def load_config(path: str) -> dict[str, Any]:
     file = Path(path).expanduser()
     try:
@@ -419,7 +423,12 @@ class Run:
         self.py = sys.executable
         from yeto.launch.rollout.pools import resolve  # noqa: PLC0415
 
-        self.pools = resolve(cfg, self.dir)  # the rollout pools (samplers list, or the one pool)
+        try:
+            self.pools = resolve(cfg, self.dir)  # the rollout pools (samplers list, or the one pool)
+        except RunConfigError:
+            raise
+        except ValueError as error:  # a samplers / pool section the rollout layer refuses
+            raise PoolConfigError(str(error)) from None
         self.controller: Any = None  # controller: in_process -> the RolloutController of every pool
 
     # -- state
@@ -2478,7 +2487,10 @@ def open_run(config: str, create: bool = True, missing: str | None = None) -> Ru
     except OSError as error:
         raise RunConfigError(f"run {cfg.get('run')}: cannot create the state directory {state_dir} "
                              f"({error.strerror or error}); HOME must be writable") from None
-    return Run(cfg)
+    try:
+        return Run(cfg)
+    except PoolConfigError as error:  # only resolve(); a corrupt state.json etc. propagates as on main
+        raise RunConfigError(f"run config {Path(config).expanduser()}: {error}") from None
 
 
 def main(args: Any) -> int:
@@ -2516,7 +2528,9 @@ def main(args: Any) -> int:
         _log(refused)
         return 2
     if not args.skip_preflight and not run.preflight():
-        _log("preflight failed: nothing ordered (see preflight.log)")
+        log = run.dir / "preflight.log"
+        _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
+                                                     " (the reason is the preflight line above)"))
         return 2
     if args.dry_run:
         _log("dry run: preflight ok, nothing ordered" + (
