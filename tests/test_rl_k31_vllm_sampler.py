@@ -610,21 +610,3 @@ def test_npu_in_place_reload_refuses_the_untested_combinations(tmp_path):
         with pytest.raises(SamplerEngineError, match="platform npu"):
             VllmServerEngine(_npu_config(tmp_path, in_place_reload=True),
                              VllmOptions(platform=platform, tp=4, npu_in_place_reload=True))
-
-
-def test_in_place_reload_restarts_a_release_with_tied_word_embeddings(tmp_path):
-    """vLLM's reload leaves a tied lm_head on the cold start's weights, so such a
-    release is loaded by restart on both lines (measured on a 910B4, Qwen3-0.6B)."""
-    for engine, _ in (_npu_reload_engine(tmp_path, config=_npu_config(tmp_path, in_place_reload=True),
-                                  npu_in_place_reload=True),
-                      _engine(tmp_path, config=_config(tmp_path, in_place_reload=True),
-                              routes={("POST", "/pause?mode=wait"): {"status": "paused"},
-                                      ("POST", "/collective_rpc"): {"results": [None]},
-                                      ("POST", "/resume"): {"status": "resumed"}})):
-        engine.start(None, 0)
-        release = _release(tmp_path, engine, name=f"tied-{engine.options.platform}")
-        config = json.loads((release / "config.json").read_text())
-        (release / "config.json").write_text(json.dumps({**config, "tie_word_embeddings": True}))
-        report = engine.load(release, 1)
-        assert report.detail["reload"] == "restart" and report.detail["in_place_off"] == "tie_word_embeddings"
-        assert engine.served_version() == 1

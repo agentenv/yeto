@@ -68,9 +68,12 @@ behaviour NOT verified by this code):
   /collective_rpc {"method": "reload_weights", "kwargs": {"weights_path": DIR}}``
   (``model_loader.reload.inplace.reload_weights``: every rank reads the release
   from disk in checkpoint format and re-runs the post-load processing), ``POST
-  /resume`` (also after a failure). A release whose config ties the word embeddings
-  is loaded by restart instead (:func:`tied_word_embeddings`: the reload leaves the
-  tied ``lm_head`` on the cold start's weights). Both routers exist only with
+  /resume`` (also after a failure). A server whose release ties the word
+  embeddings loads the yeto worker extension of :mod:`vllm_tied_reload`, which
+  keeps the served ``lm_head`` equal to what a cold start serves (a copy of the
+  embeddings into a split head, a restart where the one shared storage cannot
+  hold the release's head) and verifies sampled rows after every reload (the
+  load fails instead of serving a wrong head). Both routers exist only with
   ``VLLM_SERVER_DEV_MODE=1``, which the adapter sets when in-place reload is on.
   verl #8574 rebuilds the frozen MXFP4 Kimi-K3.1 base this way on MI355X; this
   adapter's path is not measured;
@@ -113,7 +116,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 
-from . import k31_release, vllm_expert_reload
+from . import k31_release, vllm_expert_reload, vllm_tied_reload
 from .server import ServerConfig, ServerEngine
 from .sglang_server import dense_layer_count, moe_layer_count, rocm_card_count
 
@@ -338,24 +341,6 @@ class VllmOptions:
     npu_in_place_reload: bool = False
 
 
-def tied_word_embeddings(model_dir: Path) -> bool:
-    """``tie_word_embeddings`` of ``model_dir/config.json`` (``text_config`` when
-    nested; False when the config does not say). vLLM's in-place reload leaves the
-    tied ``lm_head`` of such a model on the weights of the cold start
-    (``model_loader.weight_tying.maybe_retie_word_embeddings`` runs in the loader,
-    not in ``gpu_model_runner.reload_weights``), so the logits of a reloaded release
-    are not the ones a restart serves; measured on a 910B4 with Qwen3-0.6B, which
-    ties: a release that only changes ``model.embed_tokens.weight`` scores up to
-    0.083 nats away from the restart, while releases that change any other tensor
-    score exactly as the restart does."""
-    try:
-        config = json.loads((Path(model_dir) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    text = config.get("text_config") if isinstance(config.get("text_config"), dict) else config
-    return bool(text.get("tie_word_embeddings"))
-
-
 def _check_npu_in_place(config: Any, options: VllmOptions) -> bool:
     """Whether ``options.npu_in_place_reload`` holds for this configuration (False:
     the option is off). The option is only for a BF16 release on vllm-ascend; the
@@ -496,6 +481,8 @@ class VllmServerEngine(ServerEngine):
         self._run = run
         self._card_memory = card_memory
         self._served_dir: Path | None = None  # the directory the running server loaded
+        # SHARED / SPLIT word embeddings of a running server with the tied extension (None: without)
+        self._tied_layout: str | None = None
         self._moe_layers: int | None = options.moe_layers
         self._dense_layers = 0
         self.server_info: dict[str, Any] = {}
@@ -593,7 +580,22 @@ class VllmServerEngine(ServerEngine):
                 "--trust-remote-code"]
         if o.max_num_seqs is not None:
             argv += ["--max-num-seqs", str(int(o.max_num_seqs))]
+        argv += self._tied_extension_argv(model_dir)
         return argv + self.base_tokenizer_argv(model_dir) + list(c.extra_args)
+
+    def _reloads_in_place(self) -> bool:
+        return bool(self.config.in_place_reload) and (self.upstream or self.npu_in_place)
+
+    def _tied_extension_argv(self, model_dir: Path) -> list[str]:
+        """The tied-embeddings worker extension (:mod:`vllm_tied_reload`) for a
+        release whose config ties the word embeddings, when it reloads in place
+        (empty otherwise: the argv of an untied model is unchanged)."""
+        if not self._reloads_in_place() or not vllm_tied_reload.config_ties(model_dir):
+            return []
+        if self.options.expert_reload:
+            raise SamplerEngineError(f"{model_dir}: tie_word_embeddings with options.expert_reload: the K3.1 "
+                                     "overlay extension is for an untied model")
+        return ["--worker-extension-cls", vllm_tied_reload.EXTENSION]
 
     def base_tokenizer_argv(self, model_dir: Path) -> list[str]:
         """A release is served with the tokenizer of the base checkpoint: RL never
@@ -626,6 +628,7 @@ class VllmServerEngine(ServerEngine):
             argv += ["--enable-return-routed-experts"]
         if o.expert_reload and c.in_place_reload:
             argv += ["--worker-extension-cls", vllm_expert_reload.EXTENSION]
+        argv += self._tied_extension_argv(model_dir)
         overrides = self.hf_overrides()
         if overrides:
             argv += ["--hf-overrides", json.dumps(overrides, sort_keys=True, separators=(",", ":"))]
@@ -726,9 +729,27 @@ class VllmServerEngine(ServerEngine):
         return detail
 
     def start(self, release_dir: Path | None, version: int):
+        self._tied_layout = None
         report = super().start(release_dir, version)
         self._served_dir = Path(release_dir) if release_dir is not None else Path(self.config.base_dir)
+        self._log_tie(self._served_dir)
         return report
+
+    def _log_tie(self, model_dir: Path) -> None:
+        """The start-up line: whether the model ties its word embeddings and which
+        path a reload takes; reads the served layout from the tied extension."""
+        in_place = self._reloads_in_place()
+        if in_place and vllm_tied_reload.config_ties(model_dir):
+            release = vllm_tied_reload.release_tie(model_dir)
+            ranks = (self.call("POST", "/collective_rpc", {"method": vllm_tied_reload.STATE_METHOD,
+                                                           "kwargs": {"rows": "[]"}}) or {}).get("results") or []
+            if not ranks:
+                raise SamplerEngineError(f"{model_dir}: the tied-embeddings extension reported no rank")
+            shared = all(bool(r.get("shared")) for r in ranks)
+            self._tied_layout = vllm_tied_reload.SHARED if shared else vllm_tied_reload.SPLIT
+        else:
+            release = vllm_tied_reload.ReleaseTie(vllm_tied_reload.config_ties(model_dir), None)
+        print(f"[vllm-server] {vllm_tied_reload.describe(release, self._tied_layout, in_place)}", flush=True)
 
     def reload_in_place(self, model_dir: Path, version: int) -> dict[str, Any]:
         """``in_place_reload`` on the upstream line (module doc): pause with drain,
@@ -737,15 +758,56 @@ class VllmServerEngine(ServerEngine):
         if not self.upstream and not self.npu_in_place:
             raise SamplerEngineError("vllm-server: in-place reload needs the upstream line (platform cuda / rocm) "
                                      "or platform npu with options.npu_in_place_reload")
-        if tied_word_embeddings(model_dir):
-            # the tied lm_head would keep the cold start's weights (tied_word_embeddings)
-            report = self.start(model_dir, version)
-            self._served_dir = Path(model_dir)
-            return {"reload": "restart", "in_place_off": "tie_word_embeddings", "restart_s": report.pause_s}
+        if self._tied_layout is not None or vllm_tied_reload.config_ties(model_dir):
+            return self._reload_tied(model_dir, version)
         if self.options.expert_reload:
             return self._reload_experts(model_dir)
         result = self._paused_rpc({"method": "reload_weights", "kwargs": {"weights_path": str(model_dir)}})
         return {"reload": "collective_rpc reload_weights", "rpc_results": len((result or {}).get("results") or [])}
+
+    def _reload_tied(self, model_dir: Path, version: int) -> dict[str, Any]:
+        """In-place reload of a model that ties its word embeddings
+        (:mod:`vllm_tied_reload`): reload_weights, the head synced where the
+        release has none, sampled rows verified, all inside one pause. A failed
+        verification kills the server (it must not serve) and fails the load."""
+        tvr = vllm_tied_reload
+        release = tvr.release_tie(model_dir)
+        if self._tied_layout is None:
+            path, why = tvr.RESTART, "served_without_tied_extension"
+        else:
+            path, why = tvr.plan(self._tied_layout, release)
+        print(f"[vllm-server] tied reload of {model_dir}: release lm_head={release.lm_head}, served "
+              f"embeddings={self._tied_layout}: {path} ({why})", flush=True)
+        if path == tvr.RESTART:
+            report = self.start(model_dir, version)
+            return {"reload": "restart", "in_place_off": why, "restart_s": report.pause_s,
+                    "tied_layout": self._tied_layout}
+        files = tvr._tensor_files(model_dir)
+        vocab = tvr._Tensor.find(files, release.embed_name).shape[0]
+        rows = tvr.sample_rows(vocab, version)
+        self.call("POST", "/pause?mode=wait")
+        try:
+            result = self.call("POST", "/collective_rpc", {"method": "reload_weights",
+                                                           "kwargs": {"weights_path": str(model_dir)}})
+            if path == tvr.IN_PLACE_SYNC:
+                self.call("POST", "/collective_rpc", {"method": tvr.SYNC_METHOD, "kwargs": {}})
+            states = (self.call("POST", "/collective_rpc", {"method": tvr.STATE_METHOD,
+                                                            "kwargs": {"rows": json.dumps(rows)}}) or {}).get("results")
+            check = tvr.verify(model_dir, release, states or [], rows)
+        except tvr.TiedReloadError as err:
+            print(f"[vllm-server] {err}; killing the server", flush=True)
+            self._kill()
+            raise SamplerEngineError(f"vllm-server: tied-embeddings check failed after the in-place reload: {err}") \
+                from err
+        except BaseException as err:
+            self._resume(cause=err)
+            raise
+        self._resume(cause=None)
+        self._served_dir = Path(model_dir)
+        return {"reload": "collective_rpc reload_weights" + (" + " + tvr.SYNC_METHOD if path == tvr.IN_PLACE_SYNC
+                                                             else ""),
+                "rpc_results": len((result or {}).get("results") or []), "tied_layout": self._tied_layout,
+                "tied_path": why, "tied_check": check}
 
     def _reload_experts(self, model_dir: Path) -> dict[str, Any]:
         """The overlay's released experts through the worker extension
