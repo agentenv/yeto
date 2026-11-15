@@ -1193,3 +1193,7 @@ def main(argv: Sequence[str] | None = None, *, default_data_path: str | None = N
     if hold_after_reclaim(deadline=deadline):
         reclaim_exit("held")
     return 0
+
+
+if __name__ == "__main__":  # ``-m`` on this module, next to the documented ``-m ...engine_sampler``
+    raise SystemExit(main())

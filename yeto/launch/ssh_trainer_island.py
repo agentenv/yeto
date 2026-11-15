@@ -210,6 +210,16 @@ def container_name(run_id: str, island: str, incarnation: int, rank: int) -> str
     return re.sub(r"[^A-Za-z0-9_.-]", "-", raw)
 
 
+# The login HOME, pinned before the island's exports: ``paths`` hold ``$HOME``,
+# and a run whose environment sets ``HOME`` must not move the state dir away from
+# where the kill script (a fresh ssh shell, no exports) looks for the pid file.
+STATE_HOME_VAR = "__yeto_state_home"
+
+
+def _pin_state_home(paths: Mapping[str, str]) -> dict[str, str]:
+    return {k: str(v).replace("$HOME", "$" + STATE_HOME_VAR) for k, v in paths.items()}
+
+
 def _exports(env: Mapping[str, str]) -> str:
     return "".join(f"export {k}={shlex.quote(str(v))}\n" for k, v in sorted(env.items()))
 
@@ -263,6 +273,7 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     stream its log until it exits (node 0's stream carries the trainer events).
     ``container``: the docker container name (docker nodes)."""
     node = spec.nodes[rank]
+    paths = _pin_state_home(paths)
     comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
     # The learner reads the family to pick its card type and collective backend (accel).
     full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **spec.env, **env,
@@ -283,9 +294,18 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     body = f"{job} && rc=0 || rc=$?\necho $rc > \"{paths['rc']}\"\n"
     return (
         "set -eu\n"
-        f"mkdir -p \"{paths['dir']}\"\n"
-        + enter
+        # The state dir is pinned to the login HOME before the exports: ``paths``
+        # are written with ``$HOME``, and a run whose environment sets ``HOME`` (a
+        # shared island home on an on-prem node) would otherwise split the state
+        # dir, the log and the pid file across two homes (measured 2026-11-14 on a
+        # two-node Ascend island: every node died at once with "trainer-i1/pgid:
+        # No such file or directory"), and the kill script, which runs without the
+        # exports, would not find the pid file. The job still gets the run's HOME.
+        # Exported: the rc and requant-log paths expand inside the job's own bash.
+        + f"export {STATE_HOME_VAR}=\"$HOME\"\n"
         + _exports(full_env)
+        + f"mkdir -p \"{paths['dir']}\"\n"
+        + enter
         + f"rm -f \"{paths['rc']}\"\n"
         # Job control is off in a non-interactive shell, so the background setsid
         # is not a group leader: it does not fork, and $! is the new group's id.
@@ -300,11 +320,26 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
 def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, container: str | None = None) -> str:
     """TERM the island's process group, KILL it after ``grace_s``; exit 0 when it
     is gone. ``container``: remove that docker container first (a killed
-    ``docker run`` client does not stop its container)."""
+    ``docker run`` client does not stop its container).
+
+    The pid file is read from the login HOME, where :func:`start_script` pins the
+    state dir. No pid file: a warning, and exit 0 only when the state dir does not
+    exist either (this incarnation never started on the node); a state dir with no
+    pid file exits 3, so a release cannot report ok while the island may still run."""
     remove = f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true\n" if container else ""
+    paths = _pin_state_home(paths)
     return (
         remove
-        + f"pid=$(cat \"{paths['pid']}\" 2>/dev/null) || exit 0\n"
+        + f"{STATE_HOME_VAR}=\"$HOME\"\n"
+        + f"if ! pid=$(cat \"{paths['pid']}\" 2>/dev/null) || [ -z \"$pid\" ]; then\n"
+        + f"  if [ -d \"{paths['dir']}\" ]; then\n"
+        + f"    echo \"[yeto] kill: no pid in {paths['pid']} but the state dir exists; the island may "
+          "still run\" >&2; exit 3\n"
+        + "  fi\n"
+        # never started on this node (a first incarnation the run stopped early):
+        # nothing to stop, and not worth a line in the launcher log
+        + "  exit 0\n"
+        + "fi\n"
         + "kill -TERM -- -$pid 2>/dev/null || exit 0\n"
         + f"for _ in $(seq {int(grace_s)}); do kill -0 -- -$pid 2>/dev/null || exit 0; sleep 1; done\n"
         + "kill -KILL -- -$pid 2>/dev/null || true\n"
@@ -449,6 +484,10 @@ class SshTrainerIslands:
             try:
                 done = self.ops.run(node, script, timeout=self.kill_grace_s + 60.0)
                 ok &= done.returncode == 0
+                err = (getattr(done, "stderr", "") or "").strip()
+                if done.returncode != 0:  # rc 0 + stderr is ssh banner noise
+                    print(f"[launcher] stop of trainer incarnation {incarnation} on {node.name}: "
+                          f"rc={done.returncode} {err}", flush=True)
             except Exception as error:  # noqa: BLE001 - not confirmed: the caller reports it
                 print(f"[launcher] stop of trainer incarnation {incarnation} on {node.name} failed: {error}",
                       flush=True)

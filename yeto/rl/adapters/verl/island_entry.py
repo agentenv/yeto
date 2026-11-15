@@ -518,14 +518,111 @@ def island_data_slot(args: Any) -> Any:
 MIN_RAY_CPUS = 32  # logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
 
 
-def _ray_resources(address: str) -> dict:
+# The Ray probe below runs in a subprocess, so a cluster that is still electing
+# its GCS (a node pool that just came up) blocks it. A fixed deadline is the
+# wrong shape for a bigger cluster, so the wait is one tunable value, tried
+# twice: ``YETO_RAY_PROBE_TIMEOUT_S`` (seconds, default
+# :data:`RAY_PROBE_TIMEOUT_S`). Measured 2026-11-14 on a two-node Ascend island:
+# the probe hit the old hardcoded 180 s right after ``ray start`` and the island
+# died in ``TimeoutExpired`` with no statement of what had timed out.
+RAY_PROBE_TIMEOUT_S = 180
+RAY_PROBE_TIMEOUT_ENV = "YETO_RAY_PROBE_TIMEOUT_S"
+RAY_PROBE_ATTEMPTS = 2
+
+
+def ray_probe_timeout_s() -> float:
+    raw = os.environ.get(RAY_PROBE_TIMEOUT_ENV, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(RAY_PROBE_TIMEOUT_S)
+    return value if value > 0 else float(RAY_PROBE_TIMEOUT_S)
+
+
+def _ray_probe(address: str) -> tuple[dict, dict]:
+    """``(cluster resources, accelerator cards by node address)`` of the Ray
+    cluster at ``address``; one subprocess, so a broken Ray cannot poison this
+    process. A timeout is reported as what it is instead of a bare traceback."""
     code = ("import json, ray; ray.init(address=%r, logging_level='ERROR'); "
-            "print('YETO_RAY_RES ' + json.dumps(ray.cluster_resources())); ray.shutdown()" % address)
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=180).stdout
-    for line in out.splitlines():
-        if line.startswith("YETO_RAY_RES "):
-            return json.loads(line[len("YETO_RAY_RES "):])
-    return {}
+            "nodes={n['NodeManagerAddress']: {k: v for k, v in (n.get('Resources') or {}).items() "
+            "if k in ('GPU', 'NPU')} for n in ray.nodes() if n.get('Alive')}; "
+            "print('YETO_RAY_RES ' + json.dumps(ray.cluster_resources())); "
+            "print('YETO_RAY_NODES ' + json.dumps(nodes)); ray.shutdown()" % address)
+    timeout = ray_probe_timeout_s()
+    for attempt in range(1, RAY_PROBE_ATTEMPTS + 1):
+        try:
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 timeout=timeout).stdout
+        except subprocess.TimeoutExpired:
+            print(f"[yeto-verl] Ray probe of {address} timed out after {timeout:g}s "
+                  f"(attempt {attempt}/{RAY_PROBE_ATTEMPTS}); raise {RAY_PROBE_TIMEOUT_ENV} for a "
+                  f"cluster that needs longer to come up", file=sys.stderr, flush=True)
+            if attempt == RAY_PROBE_ATTEMPTS:
+                raise SystemExit(f"Ray at RAY_ADDRESS={address} did not answer within {timeout:g}s "
+                                 f"({RAY_PROBE_ATTEMPTS} attempts); set {RAY_PROBE_TIMEOUT_ENV} to wait "
+                                 f"longer, or check that the head node is up") from None
+            continue
+        resources: dict = {}
+        nodes: dict = {}
+        for line in out.splitlines():
+            if line.startswith("YETO_RAY_RES "):
+                resources = json.loads(line[len("YETO_RAY_RES "):])
+            elif line.startswith("YETO_RAY_NODES "):
+                nodes = json.loads(line[len("YETO_RAY_NODES "):])
+        return resources, nodes
+    return {}, {}
+
+
+_PROBED_CARD_NODES: dict[str, dict] = {}  # last probe per address, so one probe answers both reads
+
+
+def _ray_resources(address: str) -> dict:
+    resources, nodes = _ray_probe(address)
+    _PROBED_CARD_NODES[address] = nodes
+    return resources
+
+
+def _ray_card_nodes(address: str) -> dict:
+    """Accelerator cards by node of the cluster at ``address``, from the probe
+    :func:`_ray_resources` already made (it probes again only if there was none)."""
+    if address in _PROBED_CARD_NODES:
+        return _PROBED_CARD_NODES[address]
+    return _ray_probe(address)[1]
+
+
+def card_node_count(ray_info: Mapping[str, Any]) -> int:
+    """Nodes of the joined Ray cluster that report accelerator cards (0: unknown)."""
+    nodes = ray_info.get("card_nodes") or {}
+    return sum(1 for cards in nodes.values() if any(float(v or 0) > 0 for v in cards.values()))
+
+
+def check_island_node_span(ray_info: Mapping[str, Any], actor_num_nodes: int, *,
+                           buffer_trainer: bool = True) -> None:
+    """Refuse a buffer-trainer plan whose node count does not match the Ray cluster it joined.
+
+    Only a buffer trainer (role ``trainer``) is checked: its trainer takes every
+    card of the island, so its node count is the island's. A role-``both``
+    island with ``--rl-placement fixed-partition`` puts its rollout pool on the
+    other nodes and ``--actor-num-nodes`` counts the trainer rectangle only
+    (2 x 8 cards, ``--rollout-num-gpus 8``: one trainer node on a two-node
+    Ray), which runs on main and must not be refused here.
+
+    ``island_gpus`` reads ``ray.cluster_resources()``, which is cluster-wide: on
+    a Ray cluster that spans N card nodes the island would ask verl for every
+    card of the cluster on ``trainer.nnodes=1``, a pool no single node can hold,
+    and Ray leaves it pending with no error. Measured on a two-node Ascend
+    cluster (4 NPU, 2 per node) 2026-11-14: with ``--actor-num-nodes 2`` the
+    plan is ``nnodes=2, n_gpus_per_node=2`` and trains; the default 1 asks for
+    ``nnodes=1, n_gpus_per_node=4``.
+    """
+    if not buffer_trainer:
+        return
+    span = card_node_count(ray_info)
+    if span > 1 and int(actor_num_nodes or 1) != span:
+        raise SystemExit(
+            f"the Ray cluster at RAY_ADDRESS has cards on {span} node(s) but the island plans for "
+            f"{int(actor_num_nodes or 1)}; pass --actor-num-nodes {span} (a buffer-trainer island spans "
+            f"nodes) or point RAY_ADDRESS at a single-node Ray")
 
 
 def island_gpus(ray_info: Mapping[str, Any], *, device_family: str | None = None) -> int:
@@ -564,7 +661,7 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     if not address:
         return {"skipped": "no RAY_ADDRESS"}
     before = _ray_resources(address)
-    info = {"before": before}
+    info = {"before": before, "card_nodes": _ray_card_nodes(address)}
     if before.get("CPU", 0) >= min_cpus:
         return info
     if not os.environ.get("MODAL_TASK_ID"):
@@ -636,6 +733,13 @@ def main(argv=None) -> int:
     ray_info = ensure_ray_cpus()
     (OUTPUT / f"verl-ray-{lid}.json").write_text(json.dumps(ray_info, indent=1))
     print(f"[yeto-verl] island {lid} ray {json.dumps(ray_info)}", flush=True)
+    check_island_node_span(ray_info, getattr(args, "actor_num_nodes", 1),
+                           buffer_trainer=buffer_section is not None)
+    from .comm_env import island_plan as comm_env_plan
+
+    comm_env = comm_env_plan(card_node_count(ray_info))  # None unless YETO_ISLAND_COMM_INTERFACE
+    if comm_env is not None:
+        print(f"[yeto-verl] island {lid} comm env {json.dumps(comm_env, sort_keys=True)}", flush=True)
     if ray_info.get("after") is not None and ray_info["after"].get("CPU", 0) < MIN_RAY_CPUS:
         print("[yeto-verl] Ray restart did not give enough CPU slots", file=sys.stderr, flush=True)
         return 3
@@ -795,6 +899,7 @@ def main(argv=None) -> int:
     readback = work / "readback"
     onpolicy_old_logprob_static_check(args, overrides)  # before verl starts
     plan = {
+        **({"comm_env": comm_env} if comm_env is not None else {}),
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
         "groups_per_round": args.groups_per_round, "samples_per_group": args.samples_per_group,
         "model_path": model_path, "model_revision": args.model_revision, "lora_rank": run.lora_rank,
@@ -1433,8 +1538,9 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
-    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, VerlTranslationError, buffer_trainer_shape,
-                                    execution_profile_for, fully_async_run_overrides)
+    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, VerlTranslationError, balance_batch_disabled,
+                                    buffer_trainer_shape, check_trainer_batch_divisible, execution_profile_for,
+                                    fully_async_run_overrides)
     from .offpolicy_correction import apply_to_overrides, correction_mapping
     from .policy_age import SUPPORT
 
@@ -1459,6 +1565,12 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
             raise SystemExit(str(exc)) from exc
         # no rollouter on this role, so no weight-transport backend either
         sizes = {"trainer_gpus": per_node, "trainer_nodes": nodes, "rollouter": False}
+        try:  # the samples of one round must split over the island's cards (verl asserts it mid-step)
+            if not balance_batch_disabled(overrides):  # balance off: no equal-size assert
+                check_trainer_batch_divisible(int(args.groups_per_round) * int(args.samples_per_group),
+                                              nodes * per_node)
+        except VerlTranslationError as exc:
+            raise SystemExit(str(exc)) from exc
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds, **sizes)
     out = apply_to_overrides(out, correction_mapping(spec))

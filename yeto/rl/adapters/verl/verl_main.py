@@ -101,7 +101,7 @@ NEVER_FORWARD_ENV = ("ASCEND_RT_VISIBLE_DEVICES",)
 
 
 def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
-                 agentic: bool = False) -> dict:
+                 agentic: bool = False, comm_env: dict | None = None) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     env = get_ppo_ray_runtime_env(None)
@@ -168,6 +168,10 @@ def _runtime_env(fully_async: bool = False, ascend_stack: str | None = None,
         env["env_vars"].setdefault(NPU_NOSET_ENV, os.environ[NPU_NOSET_ENV])
     if chain and env["env_vars"].get(worker_setup.HOOKS_ENV):
         env["worker_process_setup_hook"] = worker_setup.SETUP_HOOK
+    if comm_env:  # opt-in (YETO_ISLAND_COMM_INTERFACE, plan["comm_env"]); None: unchanged
+        from .comm_env import apply
+
+        apply(env, comm_env)
     return env
 
 
@@ -208,7 +212,8 @@ def _plan_and_ray(fully_async: bool = False) -> dict:
         address = os.environ.get("RAY_ADDRESS") or None
         ray.init(address=address,
                  runtime_env=_runtime_env(disaggregated, ascend_stack=stack,
-                                          agentic=bool(plan.get("agentic"))),
+                                          agentic=bool(plan.get("agentic")),
+                                          comm_env=plan.get("comm_env")),
                  namespace="yeto-verl")
     return plan
 

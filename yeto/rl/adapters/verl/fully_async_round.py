@@ -163,6 +163,38 @@ def buffer_trainer_shape(cards: int, nodes: int = 1, per_node: int | None = None
     return nodes, each
 
 
+def check_trainer_batch_divisible(samples: int, world: int) -> None:
+    """Refuse a round whose samples do not split over the trainer's ranks.
+
+    verl balances a step's sequences over the data-parallel ranks with
+    ``equal_size=True`` (``seqlen_balancing.karmarkar_karp``), which asserts
+    ``len(seqlen_list) % dp_size == 0`` deep inside the first step. Measured on a
+    three-node Ascend island 2026-11-15: 8 groups x 8 samples over 6 cards died
+    after 95 s with ``AssertionError: 64 % 6 != 0``, recorded as INFRA_FAILED.
+    The shape is known before any card is touched, so it is refused here.
+    """
+    if samples <= 0 or world <= 0:
+        raise VerlTranslationError(f"a round needs samples (got {samples}) and trainer cards (got {world})")
+    if samples % world:
+        raise VerlTranslationError(
+            f"one round holds {samples} sample(s) (groups_per_round x samples_per_group) but the trainer "
+            f"island has {world} card(s): verl balances a step over its ranks with equal sizes and asserts "
+            f"{samples} % {world} == 0 inside the first step. Change the island's card count or the round "
+            f"size so the samples divide.")
+
+
+def balance_batch_disabled(overrides: Sequence[str]) -> bool:
+    """True when the last ``trainer.balance_batch=`` override turns it off: the
+    fully_async trainer then skips the equal-size balance
+    (``fully_async_runner``), so :func:`check_trainer_batch_divisible` does not apply."""
+    value = None
+    for item in overrides:
+        key, sep, raw = str(item).lstrip("+").partition("=")
+        if sep and key.strip() == "trainer.balance_batch":
+            value = raw.strip().strip("'\"").lower()
+    return value in ("false", "0", "no", "off")
+
+
 def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, groups_per_round: int,
                               rounds: int, rollout_gpus: int = 1, trainer_gpus: int = 1,
                               trainer_nodes: int = 1, rollouter: bool = True) -> list[str]:
