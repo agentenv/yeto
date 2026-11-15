@@ -455,10 +455,15 @@ class NcSshOps:
             script = elastic.probe_script(ssh_sampler.container_name(m.shard), self._tape_glob(m.shard),
                                           metrics_port=self.metrics_port)
         try:
-            out = self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o",
-                             f"ConnectTimeout={int(self.cfg.get('probe_connect_timeout_s', 20))}", alias, script],
-                            capture_output=True, text=True, timeout=float(self.cfg.get("probe_timeout_s", 90)),
-                            check=False)
+            if getattr(self.sampler_route, "remote_scripts", False):  # e.g. the Daytona toolbox API
+                out = self.sampler_route.run_script(alias, script, timeout=float(self.cfg.get("probe_timeout_s", 90)),
+                                                    run=self._run)
+            else:
+                out = self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o",
+                                 f"ConnectTimeout={int(self.cfg.get('probe_connect_timeout_s', 20))}", alias,
+                                 script],
+                                capture_output=True, text=True, timeout=float(self.cfg.get("probe_timeout_s", 90)),
+                                check=False)
         except subprocess.TimeoutExpired:
             return island_status.Probe(node=island_status.PROBE_UNREACHABLE)
         return island_status.Probe.parse(out.stdout or "", out.returncode)
@@ -532,9 +537,12 @@ class NcSshOps:
                     f"> {ssh_sampler.NVME}/logs/{name}.last.log 2>&1; sudo docker rm -f {name} "
                     ">/dev/null 2>&1; echo stopped")
             try:
-                self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-                           node_pool.host_alias(m.ticket), stop],
-                          capture_output=True, text=True, timeout=120, check=False)
+                if getattr(self.sampler_route, "remote_scripts", False):
+                    self.sampler_route.run_script(node_pool.host_alias(m.ticket), stop, timeout=120, run=self._run)
+                else:
+                    self._run(["ssh", "-n", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+                               node_pool.host_alias(m.ticket), stop],
+                              capture_output=True, text=True, timeout=120, check=False)
             except subprocess.TimeoutExpired:
                 _log(f"drain {m.ticket}: sampler stop timed out (node unreachable); deleting the ticket")
         node_pool.remove_ssh_alias(m.ticket)

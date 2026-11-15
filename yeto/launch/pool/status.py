@@ -125,6 +125,7 @@ def resolve_metrics_port(value: int | str | None, spec: Mapping[str, Any] | None
 
 SCALE_DOWN_MODES = ("drain", "fence")
 EXTERNAL_RELEASE_MODES = ("respect", "replace")
+CRASH_LOOP_BEFORE_READY_MODES = ("replace", "halt")
 
 
 @dataclass
@@ -203,6 +204,11 @@ class ElasticConfig:
     # "respect" takes it as a manual removal (target - 1, no replacement, manual_release_detected);
     # "replace" orders a replacement as for an eviction (the behaviour before manual priority)
     external_release: str = "respect"
+    # a crash loop of a sampler that never joined on its node (the image, the model or the spec
+    # is broken: a replacement node fails the same way): "replace" retires the node and orders
+    # a replacement (the behaviour before this setting); "halt" keeps the node and its logs and
+    # halts the pool like a configuration error, nothing is ordered until pool-retry or pool-stop
+    crash_loop_before_ready: str = "replace"
     # an automatic scale request (source "auto") is refused this long after a manual one
     manual_hold_s: float = 3600.0
 
@@ -231,6 +237,9 @@ class ElasticConfig:
             raise ValueError(f"elastic config: scale_down must be one of {list(SCALE_DOWN_MODES)}")
         if cfg.external_release not in EXTERNAL_RELEASE_MODES:
             raise ValueError(f"elastic config: external_release must be one of {list(EXTERNAL_RELEASE_MODES)}")
+        if cfg.crash_loop_before_ready not in CRASH_LOOP_BEFORE_READY_MODES:
+            raise ValueError("elastic config: crash_loop_before_ready must be one of "
+                             f"{list(CRASH_LOOP_BEFORE_READY_MODES)}")
         if float(cfg.manual_hold_s) < 0:
             raise ValueError("elastic config: manual_hold_s must be >= 0")
         if float(cfg.scale_drain_timeout_s) < 0:
@@ -272,7 +281,8 @@ _INT_FIELDS = ("max_stall_restart_failures", "max_sampler_restarts", "breaker_fa
 _INT_CAPS = ("max_run_spend_ucr", "max_nodes", "max_orders")  # None: no cap
 
 
-_NOT_NUMBERS = frozenset({"metrics_port", "stop_on_finish", "scale_down", "external_release"})
+_NOT_NUMBERS = frozenset({"metrics_port", "stop_on_finish", "scale_down", "external_release",
+                          "crash_loop_before_ready"})
 
 
 def _check_numbers(cfg: ElasticConfig) -> None:

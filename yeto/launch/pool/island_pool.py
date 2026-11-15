@@ -1741,6 +1741,10 @@ class IslandPool:
             m.created = now  # the start timeout counts from the restart
             return
         self._event("sampler_crash_loop", ticket=m.ticket, shard=m.shard, restarts=m.restarts, detail=detail)
+        if not m.ever_ready and self.ecfg.crash_loop_before_ready == "halt":
+            # never joined: a replacement would run the same image / model / spec and fail alike
+            self._config_error(m, f"crash loop before the first join: {detail}")
+            return
         self._fail(now, f"sampler on {m.ticket} crash loop")
         self._retire(m, "sampler crash loop", lost=False)
 

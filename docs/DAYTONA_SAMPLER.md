@@ -10,7 +10,7 @@ SSH (Daytona's gateway) or the SDK's `process.exec`. The National Compute sample
 |---|---|---|
 | Reach the node | Workspace relay (`tunnel.py`, `relay.mjs`, `port_open.mjs`) as the ssh `ProxyCommand` | Daytona SSH gateway (provider ssh alias) or SDK exec |
 | Host setup | Docker on NVMe, passwordless sudo, docker group | None: the snapshot is the image |
-| Image | `docker pull` of the pinned `vllm-openai-rocm:kimi-k31` digest | Snapshot built from `docker/daytona-sampler/Dockerfile` (same digest) |
+| Image | `docker pull` of the pinned `vllm-openai-rocm:kimi-k31` digest | Snapshot of the same official digest (section Snapshot), awscli added by `host_setup` |
 | Card check | `rocm-smi` on the host | `preflight`: `/dev/kfd`, `/dev/dri`, torch HIP, gfx950 |
 | Base model | aws-cli container, capped parallel pull to `/mnt/nvme/models` | Same pull shell, run by the sandbox's awscli into `/models` |
 | Code | `git archive` to `/mnt/nvme/yeto/<sha>`, mounted at `/yeto` | `git archive` to `/work/yeto/<sha>` |
@@ -91,6 +91,56 @@ same way on every new sandbox, so the pool keeps the sandbox and halts until `po
 
 The in-place expert reload (`vllm_expert_reload`) still checks the MXFP4 backend
 (`AITER_MXFP4_BF16`) inside the engine. The preflight can only make sure the cards are gfx950.
+
+## Snapshot
+
+Register the pinned official image as a GPU snapshot; do not build
+`docker/daytona-sampler/Dockerfile`. Daytona caps a snapshot at 20 GB. An image it
+pulls is counted at its registry (compressed) size: the official digest is 10.4 GB.
+A Dockerfile build is counted at its built, uncompressed size: the same image plus
+the Dockerfile's few additions measured 27.6 GB and was refused. The Dockerfile does
+not bloat the image; the two paths count differently.
+
+A sandbox created from a snapshot takes the snapshot's resources, so the GPU count is
+set on the snapshot. The CLI (`daytona snapshot create <name> --image <digest>`)
+has no GPU option; register a GPU snapshot with the SDK:
+
+```python
+from daytona import Daytona, CreateSnapshotParams, Resources, GpuType
+Daytona().snapshot.create(CreateSnapshotParams(
+    name="<name>",
+    image="docker.io/vllm/vllm-openai-rocm@sha256:5f47cc1004d9a7ac65f8a913725edb20c62c99a07e31cbf4ba21741bd0b4f9b1",
+    resources=Resources(cpu=16, memory=128, disk=200, gpu=1, gpu_type=[GpuType.MI355X])))
+```
+
+The official image has the sampler's Python modules. It lacks awscli (model pull,
+preflight `aws`). The provider's `host_setup` adds it at attach:
+
+```json
+"host_setup": ["/opt/runtime-venv/bin/python3 -m pip install -q 'awscli>=1.33' && ln -sf /opt/runtime-venv/bin/aws /usr/local/bin/aws && mkdir -p /work /models /tunnel && chmod 1777 /work /models"]
+```
+
+An agentic sampler also needs the docker CLI (client only) in `host_setup`.
+
+## Transport
+
+Daytona's ssh gateway closed sessions on fresh GPU sandboxes again and again. Uploads
+over about 8 MB never finished: the yeto code tar is 13 MB. Small commands failed now
+and then. Set these provider keys (both off by default):
+
+| Key | Effect |
+|---|---|
+| `"transport": "sdk"` | Commands, small files (the store env file with its credentials) and `host_setup` go through the Daytona toolbox API (`process.exec`, `fs.upload_file`). The pool's probe and stop scripts use it too. No ssh is used for the sampler. |
+| `"upload_via_store": true` | Files over 1 MB (the code tar) go to `<run>/_upload/<sha256>` in the run store. The sandbox fetches them with `curl` from a presigned URL and checks the sha256. Credentials never go to that URL. |
+
+For a sandbox smaller than the K3.1 node (for example 1 GPU, 128 GiB), size the
+preflight with `"sampler_requirements": {"memory_gib": ..., "shm_gib": ...}` and
+`"disk_plan": {"base_gib": ..., "release_gib": ...}`.
+
+Verified on 2026-11-15 with 1 x MI355X, Qwen3-0.6B and the official snapshot:
+order to ready took 250 s. The trainer consumed v0 groups and released v1 (full
+weights). The sampler restarted vLLM on v1: 36.7 s load, 13.7 s to resolve the
+release. The first v1 group reached the trainer 83 s after the release was written.
 
 ## Pool configuration
 

@@ -478,6 +478,37 @@ def test_a_restart_before_the_first_join_does_not_use_up_the_crash_budget():
     assert len(cloud.kinds("restart")) == 2 and "sampler_crash_loop" not in _names(pool) and m.state != GONE
 
 
+@pytest.mark.parametrize("mode", ["replace", "halt"])
+def test_a_crash_loop_before_the_first_join_replaces_or_halts(mode):
+    """A sampler that never joined and keeps crashing (a broken image or spec): by
+    default the node is replaced; with ``crash_loop_before_ready: halt`` the pool keeps
+    the node (and its logs), orders nothing and halts like a configuration error."""
+    clock = Clock()
+    cloud = Cloud(clock, ready_after=10**9)  # never joins
+    pool = _pool(clock, cloud, accounts=(1, 4), max_sampler_restarts=1, crash_loop_before_ready=mode)
+    while not any(k == "start" for k, *_ in cloud.log):
+        pool.tick()
+        clock.t += 60
+    m = pool.members[0]
+    for _ in range(2):
+        cloud.tickets[m.ticket].update(sampler="exited", exit=1)
+        pool.tick()
+        clock.t += 60
+    assert "sampler_crash_loop" in _names(pool)
+    pool.tick()
+    if mode == "replace":
+        assert m.state == GONE and len(pool.members) == 2 and pool.members[-1].state != GONE and pool.halted is None
+    else:
+        assert m.state != GONE and m.config_error and "before the first join" in pool.halted
+        assert len(pool.members) == 1 and not cloud.kinds("drain")
+
+
+def test_crash_loop_before_ready_is_validated():
+    with pytest.raises(ValueError, match="crash_loop_before_ready"):
+        el.ElasticConfig.from_dict({"crash_loop_before_ready": "stop"})
+    assert el.ElasticConfig.from_dict({}).crash_loop_before_ready == "replace"
+
+
 def test_the_restart_count_resets_after_a_healthy_stretch_but_not_in_a_loop():
     clock = Clock()
     cloud = Cloud(clock, ready_after=300)

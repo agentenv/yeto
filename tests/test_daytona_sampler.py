@@ -329,3 +329,115 @@ def test_process_env_keeps_the_release_cache_on_the_sized_disk():
     # preflight checks, not ~/.cache on the snapshot's root file system
     assert str(default_cache_dir(env)).startswith(f"{ds.WORK}/")
     assert all(env[k].startswith(f"{ds.WORK}/") for k in ("XDG_CACHE_HOME", "VLLM_CACHE_ROOT", "YETO_RL_STORE_S3_STAGE"))
+
+
+def test_store_upload_sends_large_files_through_a_presigned_url_and_retries_small_ones(tmp_path):
+    import hashlib
+
+    from yeto.launch.daytona_sampler import ExecResult, StoreUploadExec
+
+    env = tmp_path / "r2.env"
+    env.write_text("AWS_ENDPOINT_URL=https://e\nAWS_ACCESS_KEY_ID=a\nAWS_SECRET_ACCESS_KEY=b\nR2_BUCKET=bkt\n")
+
+    class Client:
+        def __init__(self):
+            self.put = []
+
+        def put_object(self, Bucket, Key, Body):
+            self.put.append((Bucket, Key, len(Body)))
+
+        def generate_presigned_url(self, op, Params, ExpiresIn):
+            return f"https://e/{Params['Bucket']}/{Params['Key']}?sig"
+
+    class Inner:
+        name = "box"
+
+        def __init__(self):
+            self.cmds, self.uploads, self.fail = [], [], 1
+
+        def exec(self, command, *, timeout=600):
+            self.cmds.append(command)
+            return ExecResult(0, "", "")
+
+        def upload(self, data, remote):
+            if self.fail:
+                self.fail -= 1
+                raise RuntimeError("Connection closed by remote host")
+            self.uploads.append(remote)
+
+    inner, client = Inner(), Client()
+    box = StoreUploadExec(inner, str(env), "runs/r1", threshold=10, client=client)
+    box.upload(b"small", "/work/a")  # first ssh try cut: retried
+    assert inner.uploads == ["/work/a"] and not client.put
+    data = b"y" * 100
+    box.upload(data, "/work/code.tar")
+    digest = hashlib.sha256(data).hexdigest()
+    assert client.put == [("bkt", f"runs/r1/_upload/{digest}", 100)]
+    assert "curl" in inner.cmds[-1] and digest in inner.cmds[-1] and "sha256sum -c" in inner.cmds[-1]
+
+
+def test_the_route_wraps_uploads_only_when_asked():
+    from yeto.launch.daytona_sampler import DaytonaSamplerRoute, SshExec, StoreUploadExec
+
+    assert isinstance(DaytonaSamplerRoute()._box("a", None, "env", "p"), SshExec)
+    assert isinstance(DaytonaSamplerRoute(upload_via_store=True)._box("a", None, "env", "p"), StoreUploadExec)
+
+
+def test_the_route_builds_its_code_tar_once_whatever_the_upload_mode():
+    from yeto.launch.daytona_sampler import DaytonaSamplerRoute
+
+    for route in (DaytonaSamplerRoute(), DaytonaSamplerRoute(upload_via_store=True)):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            from types import SimpleNamespace
+            return SimpleNamespace(stdout="abc\n" if "rev-parse" in argv else b"tar")
+        assert route.code(run) == ("abc", b"tar") and route.code(run) == ("abc", b"tar") and len(calls) == 2
+
+
+def test_sdk_exec_runs_commands_and_uploads_through_the_toolbox_api():
+    from types import SimpleNamespace
+
+    from yeto.launch.daytona_sampler import SdkExec
+
+    calls = {"exec": [], "up": [], "fail": 1}
+
+    def exec_(cmd, timeout=None):
+        if calls["fail"]:
+            calls["fail"] -= 1
+            raise ConnectionError("dropped")  # one dropped API call: retried
+        calls["exec"].append(cmd)
+        return SimpleNamespace(exit_code=0 if "false" not in cmd else 3, result="out")
+
+    sandbox = SimpleNamespace(process=SimpleNamespace(exec=exec_),
+                              fs=SimpleNamespace(upload_file=lambda data, remote: calls["up"].append((data, remote))))
+    box = SdkExec("b", lambda: sandbox)
+    assert box.exec("echo hi").stdout == "out" and calls["exec"][0].startswith("bash -c ")
+    assert box.exec("false").returncode == 3
+    box.upload(b"secret", "/work/sampler/store.env")
+    assert calls["up"] == [(b"secret", "/work/sampler/store.env")]
+
+
+def test_provider_transport_sdk_routes_scripts_and_host_setup_through_the_api(monkeypatch):
+    from types import SimpleNamespace
+
+    from yeto.launch.daytona_sampler import SdkExec
+    from yeto.launch.nc import daytona_provider as dp
+
+    assert dp.DaytonaProvider("r", slots=[1], snapshot="s", sdk=object(), client=object()).sampler_route.remote_scripts \
+        is False  # default: ssh, unchanged
+    with pytest.raises(ValueError, match="transport"):
+        dp.DaytonaProvider("r", slots=[1], snapshot="s", sdk=object(), client=object(), transport="http")
+    p = dp.DaytonaProvider("r", slots=[1], snapshot="s", sdk=object(), client=object(), transport="sdk",
+                           host_setup=["setup-cmd"])
+    route = p.sampler_route
+    assert route.remote_scripts and isinstance(route.exec_for("yeto-nc-x", None), SdkExec)
+    ran = []
+    monkeypatch.setattr(p, "ssh_access", lambda ticket: ("tok", None))
+    monkeypatch.setattr(p, "_write_alias", lambda ticket, token, expires: "alias")
+    monkeypatch.setattr(dp.DaytonaProvider, "_sandbox_or_raise", lambda self, t: SimpleNamespace(
+        process=SimpleNamespace(exec=lambda cmd, timeout=None: ran.append(cmd) or SimpleNamespace(exit_code=0, result=""))))
+    lease = SimpleNamespace(ticket="x")
+    assert p.attach(lease, ssh_run=lambda *a: (_ for _ in ()).throw(AssertionError("ssh used"))) == "alias"
+    assert ran and "setup-cmd" in ran[0]

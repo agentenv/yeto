@@ -317,6 +317,7 @@ def test_a_halted_node_still_goes_at_its_lease_end(tmp_path):
     (lambda d: d.update(reward="yeto.rl.no_such_reward:score"), "no_such_reward"),
     (lambda d: d.update(reward_kind="other"), "reward_kind"),
     (lambda d: d.pop("reward_kind"), "async Miles score"),
+    (lambda d: d.pop("event_tape"), "event_tape is required"),
 ])
 def test_the_full_local_build_refuses_what_the_node_would_refuse(tmp_path, capsys, break_it, match):
     doc = json.loads(EXAMPLE_SPEC.read_text())

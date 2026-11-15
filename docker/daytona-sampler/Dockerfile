@@ -1,5 +1,9 @@
 # Daytona snapshot of the K3.1 vLLM ROCm sampler (MI355X, gfx950).
 #
+# NOT for Daytona's default 20 GB snapshot cap: a Dockerfile build is counted uncompressed
+# (27.6 GB). Register the official digest itself as the snapshot instead
+# (docs/DAYTONA_SAMPLER.md, section Snapshot). Kept for registries / larger caps.
+#
 # The pinned sampler image (yeto/rl/sampler_pins.py VLLM_SAMPLER_IMAGE_ROCM) plus what the
 # no-docker sampler route (yeto/launch/daytona_sampler.py) needs inside the sandbox: the
 # sampler's pure-Python dependencies in the runtime venv, awscli (base model pull, store

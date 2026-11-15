@@ -405,6 +405,25 @@ def test_a_daytona_pool_runs_the_sampler_as_a_process():
     assert isinstance(provider.sampler_route, DaytonaSamplerRoute)
 
 
+def test_sampler_requirements_and_disk_plan_size_the_preflight_of_a_small_sandbox():
+    from yeto.launch.daytona_sampler import k31_disk_plan, requirements_of
+
+    default = DaytonaProvider("run-x", slots=[0], snapshot="s", sdk=object(), client=object()).sampler_route
+    assert default.plan == k31_disk_plan() and default.requirements == {}  # unchanged without the keys
+    cfg = dict(BASE, slots=[1], provider={"kind": "daytona", "snapshot": "s", "gpus": 1,
+                                          "sampler_requirements": {"memory_gib": 100, "shm_gib": 8},
+                                          "disk_plan": {"base_gib": 2, "release_gib": 2}})
+    cfg.pop("accounts", None)
+    route = from_config(cfg, "run-x", sdk=object(), client=object()).sampler_route
+    req = requirements_of({}, gpus=route.gpus, plan=route.plan, **route.requirements)
+    assert (req.gpus, req.memory_gib, req.shm_gib) == (1, 100, 8)
+    assert req.data_gib == k31_disk_plan(base_gib=2, release_gib=2).data_gib < k31_disk_plan().data_gib
+    for bad in ({"sampler_requirements": {"gpus": 2}}, {"sampler_requirements": {"memory_gib": 0}},
+                {"disk_plan": {"base_gib": -1}}, {"disk_plan": {"image_gib": 1}}):
+        with pytest.raises(ValueError):
+            DaytonaProvider("run-x", slots=[0], snapshot="s", sdk=object(), client=object(), **bad)
+
+
 def test_daytona_pool_warnings_name_sandboxes_not_national_compute_leases():
     cfg = dict(BASE, provider={"kind": "daytona", "image": "rocm/vllm:test"})
     warning = pool_run.lease_warning(cfg, "pool.json")
