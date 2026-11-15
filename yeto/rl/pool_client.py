@@ -25,36 +25,18 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import IntEnum
 from typing import Any
 
 import torch
 
 from ..protocol import DTYPE_F32, FragmentLayout, PullRequest, SyncerClient
 from ..tensor_io import pack_tensor, unpack_fragment
+from .leave_code import LeaveReason  # re-exported: the LEAVE code without the torch import
 
 
 # PoolClient.leave: why a LEAVE frame was not sent.
 LEAVE_NOT_SENT_SHUT_DOWN = "syncer_shut_down"
 LEAVE_NOT_SENT_NOT_WRITTEN = "not_written"
-
-class LeaveReason(IntEnum):
-    """Why an island left the pool (one byte of MSG_LEAVE; the syncer's
-    ``pool_leave`` record names it, see ``protocol.rs`` LEAVE_REASON_NAMES).
-    ``LEASE_EXPIRED`` is assigned by the syncer only."""
-
-    FINISHED = 0
-    LEASE_EXPIRED = 1
-    STOPPED = 2
-    PREEMPTED = 3
-    INFRA_FAILED = 4
-    TRAINING_FAILED = 5
-    CONFIG_MISMATCH = 6
-    # The member is not part of this run any more: a newer incarnation
-    # took its id ("superseded") or a fresh syncer replaced the run it joined
-    # ("other run"). An older syncer names the byte unknown_7.
-    FENCED = 7
-
 
 # Island lease on the syncer; the island heartbeats every lease/3. Same
 # default as the launcher's --rl-sync-island-lease-s.

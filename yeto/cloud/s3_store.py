@@ -845,11 +845,16 @@ class S3ObjectStore:
 
         An endpoint that answers a checksum with ``NotImplemented`` (Cloudflare R2
         on UploadPart) turns checksums off for this store, with one warning per
-        process, and the file is uploaded again without them."""
+        process, and the file is uploaded again without them. Files uploaded in
+        parallel (``file_concurrency``: a release push) each retry: whether this
+        call retries is decided by what *it* sent, not by the flag another thread
+        has turned off meanwhile (measured on R2: 7 of 8 parallel uploads failed
+        when it was read again here)."""
+        checks = self._checksums()  # what this try sent, not what another thread has since turned off
         try:
             return self._write_file(key, source)
         except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
-            if not self._checksums() or self._code(error) != "NotImplemented":
+            if not checks or self._code(error) != "NotImplemented":
                 raise
             self.part_checksums_refused = True
             _warn_part_checksums_off(self.uri, error)

@@ -279,6 +279,37 @@ def test_not_implemented_turns_checksums_off_once_with_one_warning(tmp_path, mon
     assert s3_store.PART_CHECKSUM_ENV in err
 
 
+def test_parallel_uploads_each_retry_when_the_endpoint_refuses_part_checksums(tmp_path, monkeypatch):
+    """A release push uploads ``file_concurrency`` files at once (measured on R2:
+    the first NotImplemented turned checksums off for the store and the other
+    uploads in flight were then raised instead of retried)."""
+    import threading
+
+    monkeypatch.setattr(s3_store, "_PART_CHECKSUM_WARNED", False)
+    fake = NoPartChecksums()
+    objects = _objects(fake)
+    dirs = [tmp_path / f"f{i}" for i in range(8)]
+    for one_dir in dirs:
+        one_dir.mkdir()
+    sources = [_source(path, parts=2) for path in dirs]
+    failed: list[BaseException] = []
+
+    def one(i: int) -> None:
+        try:
+            objects.write_file(f"round-cuts/r1/f{i}.pt", sources[i])
+        except BaseException as error:  # noqa: BLE001 - the point of the test
+            failed.append(error)
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(len(sources))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not failed, failed[:2]
+    for i, source in enumerate(sources):
+        assert fake.objects[_full(f"round-cuts/r1/f{i}.pt")] == source.read_bytes()
+
+
 def test_a_not_implemented_failure_without_checksums_is_raised(tmp_path):
     class Refusing(FakeS3):
         def upload_part(self, **kw):
