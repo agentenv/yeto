@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 
 import pytest
 
@@ -137,8 +138,12 @@ def test_kill_script_reads_the_pid_where_the_start_script_wrote_it(tmp_path):
         state = tmp_path / paths["pid"].replace("$HOME/", "")
         state.parent.mkdir(parents=True)
         state.write_text(str(proc.pid))
+        # reap the child as soon as it dies: an unreaped zombie still answers kill -0
+        reaper = threading.Thread(target=proc.wait, daemon=True)
+        reaper.start()
         assert _run_kill(tmp_path, paths).returncode == 0
-        assert proc.wait(timeout=10) is not None
+        reaper.join(timeout=10)
+        assert proc.poll() is not None
     finally:
         if proc.poll() is None:
             proc.kill()
