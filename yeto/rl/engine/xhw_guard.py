@@ -366,8 +366,9 @@ class XhwGuard:
         estimates = {name: self._attr[name].estimate() for name in METRICS}
         sources: dict[str, Any] = {}
         stop: list[str] = []
-        # sources that can still feed the trainer: this round's and the window's
-        live = set(shares) | {s for attr in self._attr.values() for sh, _ in attr.rows for s in sh}
+        # sources that can still feed the trainer: only those that fed this round (a
+        # source that dropped out but is still in the window rows is not live)
+        live = set(shares)
         for s in sorted(set(shares) | set(self._state)):
             st = self._state.setdefault(s, {"level": "ok", "action": None, "until_round": None, "trips": 0})
             if st["action"] == "quarantine" and st["until_round"] is not None and rollout_id >= st["until_round"]:

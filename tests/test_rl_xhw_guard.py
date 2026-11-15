@@ -90,11 +90,12 @@ def test_measured_mi355x_band_is_ok():
 
 def test_warn_then_quarantine_then_probe():
     g = xg.XhwGuard(min_rounds=2, quarantine_rounds=3)
-    g.observe(0, {KB: 100}, _metrics(0.02, 0.001))  # B is live in the window
+    g.observe(0, {KB: 100}, _metrics(0.02, 0.001))
     ev = g.observe(1, {KA: 100, KB: 0}, _metrics(0.2, 0.01))
     assert ev["sources"][KA]["level"] == "warn"  # over act but only one round seen
     assert ev["actions"] == {}
-    ev = g.observe(2, {KA: 100}, _metrics(0.2, 0.01))
+    # B feeds this round too (A's estimate stays exact from its single-source round)
+    ev = g.observe(2, {KA: 500, KB: 500}, _metrics(0.11, 0.0055))
     row = ev["sources"][KA]
     assert row["level"] == "act" and row["over"] == ["abs_diff"] and row["action"] == "quarantine"
     assert ev["actions"] == {KA: {"action": "quarantine", "until_round": 6}}
@@ -207,12 +208,30 @@ def test_quarantine_never_empties_the_batch():
     assert ev["actions"] == {} and row["level"] == "warn" and row["over"] == ["abs_diff"]
     assert row["held"] == [{"metric": None, "reason": "would_empty_batch"}]
     # two sources both over: the second is kept so the batch is not empty
+    # both live sources over at once (each exact from its own round): one is kept
     g = xg.XhwGuard(min_rounds=1)
-    g.observe(0, {KA: 100}, _metrics(0.02, 0.001))
-    g.observe(1, {KB: 100}, _metrics(0.02, 0.001))
-    g.observe(2, {KA: 100}, _metrics(0.3, 0.001))
-    ev = g.observe(3, {KB: 100}, _metrics(0.3, 0.001))
-    assert set(ev["actions"]) == {KA} and ev["sources"][KB]["held"][0]["reason"] == "would_empty_batch"
+    g.observe(0, {KA: 100}, _metrics(0.3, 0.001))
+    ev = g.observe(1, {KB: 100}, _metrics(0.3, 0.001))  # A not live this round: B kept
+    assert ev["actions"] == {}
+    ev = g.observe(2, {KA: 500, KB: 500}, _metrics(0.3, 0.001))
+    assert len(ev["actions"]) == 1
+    kept = ({KA, KB} - set(ev["actions"])).pop()
+    assert ev["sources"][kept]["held"][-1]["reason"] == "would_empty_batch"
+
+
+def test_a_dropped_source_in_the_window_is_not_live():
+    """F10 review repro: s0 and s1 feed six rounds, s0 drops out, s1 alone goes over.
+    s0 is still in the window rows but feeds nothing: quarantining s1 would empty the
+    batch (and a trainer that does not train never calls observe again)."""
+    g = xg.XhwGuard(min_rounds=1)
+    for r, share in enumerate((0.3, 0.7, 0.5, 0.4, 0.6, 0.35)):
+        ev = g.observe(r, {KA: share * 1000, KB: (1 - share) * 1000}, _metrics(0.02, 0.001, 0.001))
+        assert ev["actions"] == {}
+    for r in (6, 7, 8):
+        ev = g.observe(r, {KB: 1000}, _metrics(0.3, 0.001))
+        row = ev["sources"][KB]
+        assert ev["actions"] == {} and row["action"] is None and row["level"] == "warn"
+        assert {"metric": None, "reason": "would_empty_batch"} in row["held"]
 
 
 # single-source decisions as on origin/main e14b5f74 (recorded from that module):
