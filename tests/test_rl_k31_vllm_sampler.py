@@ -486,3 +486,59 @@ def test_a_release_is_served_with_the_tokenizer_of_the_base_checkpoint(tmp_path)
     engine, _ = _engine(tmp_path, config=pinned)
     argv = engine.argv(tmp_path / "r1-v1")
     assert argv.count("--tokenizer") == 1 and argv[argv.index("--tokenizer") + 1] == "/own/tokenizer"
+
+
+# ------------------------------------------------------------------ npu line: cards and the guard's card tool
+NPU_SMI_2 = """\
++-------------------------------------------------------------------------------+
+| NPU   Name          | Health   | Power(W)  Temp(C)  Hugepages-Usage(page)     |
+| Chip                | Bus-Id   | AICore(%) Memory-Usage(MB)  HBM-Usage(MB)    |
++===========================+===============+==================================+
+| 0     910B4               | OK            | 92.5      47       0 / 0         |
+| 0                         | 0000:C1:00.0  | 12        3161 / 65536           |
++===========================+===============+==================================+
+| 1     910B4               | OK            | 91.3      46       0 / 0         |
+| 0                         | 0000:C2:00.0  | 0         100 / 65536            |
++===========================+===============+==================================+
+"""
+
+
+def _npu_engine(tmp_path, *, run, tp=1, **options):
+    config = _config(tmp_path, card_model="910B4", device_family="npu", precision="bf16", quant_scheme="bf16",
+                     topology=f"tp{tp}", max_model_len=4096)
+    http = _Http({("GET", "/health"): {}})
+    return VllmServerEngine(config, VllmOptions(platform="npu", tp=tp, **options),
+                            spawn=lambda a, e: _Process(), http=http, sleep=lambda s: None, run=run)
+
+
+def test_npu_line_refuses_a_tp_larger_than_the_chips_npu_smi_lists(tmp_path):
+    engine = _npu_engine(tmp_path, run=lambda argv: NPU_SMI_2, tp=4)
+    with pytest.raises(SamplerEngineError, match="npu-smi lists 2 chip"):
+        engine.preflight(engine.config.base_dir)
+    assert engine.npu_chip_count() == 2
+    # a TP that fits starts (too few chips otherwise hangs HCCL until start_timeout_s)
+    ok = _npu_engine(tmp_path, run=lambda argv: NPU_SMI_2, tp=2)
+    ok.preflight(ok.config.base_dir)
+
+
+def test_npu_line_without_npu_smi_is_let_through(tmp_path, capsys):
+    def no_tool(argv):
+        raise FileNotFoundError("npu-smi")
+
+    engine = _npu_engine(tmp_path, run=no_tool, tp=8)
+    engine.preflight(engine.config.base_dir)
+    assert engine.npu_chip_count() is None
+    assert "npu-smi did not answer" in capsys.readouterr().out
+
+
+def test_the_reload_memory_guard_reads_the_card_tool_of_the_device_family(tmp_path):
+    # gap report S7: the guard used to ask NVML on every non-rocm platform, so on an
+    # Ascend / PPU node every reading failed and it staged into memory it never saw free
+    assert _npu_engine(tmp_path, run=lambda argv: NPU_SMI_2).card_family() == "npu"
+    engine, _ = _engine(tmp_path, "rocm", k31_preset="rl-precision")
+    assert engine.card_family() == "rocm"  # device_family nvidia, platform rocm
+    config = _config(tmp_path, card_model="MI355X", device_family="rocm", precision="bf16", quant_scheme="bf16")
+    engine, _ = _engine(tmp_path, "rocm", config=config, k31_preset="rl-precision")
+    assert engine.card_family() == "rocm"
+    engine, _ = _engine(tmp_path, "cuda")
+    assert engine.card_family() == "cuda"
