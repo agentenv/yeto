@@ -74,11 +74,13 @@ impl AlertConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct RoundEntry {
     contributed: bool,
     merged_pushes: u32,
     rejected_pushes: u32,
+    /// Refusal reasons of this round's `rejected_pushes` (sums to it).
+    reasons: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Default)]
@@ -86,7 +88,6 @@ struct Island {
     window: VecDeque<RoundEntry>,
     pending_rejected: u32,
     pending_reasons: BTreeMap<String, u32>,
-    reasons: BTreeMap<String, u32>,
     rounds_since_alert: usize,
     alerted: bool,
 }
@@ -165,10 +166,8 @@ impl ContributionTracker {
                 contributed: pushes.iter().any(|w| *w > 0.0),
                 merged_pushes: pushes.len() as u32,
                 rejected_pushes: std::mem::take(&mut island.pending_rejected),
+                reasons: std::mem::take(&mut island.pending_reasons),
             };
-            for (reason, n) in std::mem::take(&mut island.pending_reasons) {
-                *island.reasons.entry(reason).or_default() += n;
-            }
             island.window.push_back(entry);
             while island.window.len() > window {
                 island.window.pop_front();
@@ -198,6 +197,11 @@ fn figures(island_id: u32, island: &Island) -> IslandFigures {
     let merged_pushes: u32 = island.window.iter().map(|e| e.merged_pushes).sum();
     let rejected_pushes: u32 = island.window.iter().map(|e| e.rejected_pushes).sum();
     let pushes = merged_pushes + rejected_pushes;
+    // over the same window as `rejected_pushes`, so the two always agree
+    let mut reasons = BTreeMap::new();
+    for (reason, n) in island.window.iter().flat_map(|e| &e.reasons) {
+        *reasons.entry(reason.clone()).or_default() += *n;
+    }
     IslandFigures {
         island_id,
         rounds,
@@ -206,7 +210,7 @@ fn figures(island_id: u32, island: &Island) -> IslandFigures {
         merged_pushes,
         rejected_pushes,
         reject_share: if pushes == 0 { 0.0 } else { f64::from(rejected_pushes) / f64::from(pushes) },
-        reasons: island.reasons.clone(),
+        reasons,
     }
 }
 
@@ -246,6 +250,12 @@ mod tests {
         let ok = t.figures(0).unwrap();
         assert_eq!((ok.contribution_share, ok.reject_share), (1.0, 0.0));
         assert!(a.alert_fields(&t.cfg).contains("\"island_id\":1"));
+        // later alerts count reasons over the window, matching rejected_pushes
+        for later in [&alerts[7][0], &alerts[11][0]] {
+            assert_eq!(later.rejected_pushes, 4);
+            assert_eq!(later.reasons.values().sum::<u32>(), later.rejected_pushes);
+            assert_eq!(later.reasons.get("carry_lag_exceeded"), Some(&4));
+        }
     }
 
     #[test]

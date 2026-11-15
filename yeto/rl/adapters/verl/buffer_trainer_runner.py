@@ -232,4 +232,3 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
                                           buffer_ports=ports)
         finally:
             stop_releaser.set()
-

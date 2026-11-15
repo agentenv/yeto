@@ -9043,7 +9043,7 @@ fn note_contribution_round(cfg: &Config, round: &Round, ordered_pushes: &[(&Memb
             contributed_rounds = figures.contributed_rounds,
             rejected_pushes = figures.rejected_pushes,
             reject_share = figures.reject_share,
-            "island contributes little or nothing to the merge (its pushes are refused or weightless)              while it still holds its lease and capacity"
+            "island contributes little or nothing to the merge (its pushes are refused or weightless) while it still holds its lease and capacity"
         );
         append_pool_record(Some(tape), "island_low_contribution", cfg.syncer_epoch, &figures.alert_fields(&alert_cfg));
     }
