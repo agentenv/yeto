@@ -11,29 +11,33 @@ from .schema import BackendRecipe, FamilyEntry, QuantPlan
 
 MILES_PINS = "yeto.rl.adapters.miles.pins"
 VERL_PINS = "yeto.rl.adapters.verl.pins"
-SAMPLER_PINS = "yeto.rl.sampler_pins"
 
-MILES_NEXT = f"{MILES_PINS}:MILES_NEXT_IMAGE"
+from yeto.launch.engine_images import default_image_entry
+
+
+def _generic(family: str, role: str, engine: str) -> str:
+    """The generic image ref of (family, role, engine): the pinned row of
+    ``yeto.launch.engine_images.DEFAULT_IMAGES``, the one source of the
+    device-family defaults (the registry keeps no copy)."""
+    ref = default_image_entry(family, role, engine).ref
+    if ref is None:
+        raise ValueError(f"engine_images has no pinned {role} image for {family}/{engine}")
+    return ref
+
+
+# Generic images: read from engine_images, not repeated here.
+MILES_NEXT = _generic("cuda", "trainer", "miles")
+VERL = _generic("cuda", "trainer", "verl")
+SGLANG_CUDA = _generic("cuda", "sampler", "sglang")
+VLLM_CUDA = _generic("cuda", "sampler", "vllm")
+VLLM_ROCM = _generic("rocm", "sampler", "vllm")
+# Registry-only images (engine_images has no row for them): the K3.1 forms, the verl
+# Megatron engine variant, and the unverified CANN base (engine_images' ascend rows
+# carry no pinned ref; the registry names it with an "unverified" pitfall).
 MILES_K31_FULL = f"{MILES_PINS}:MILES_K31_FULL_IMAGE"
 MILES_K31 = f"{MILES_PINS}:MILES_K31_IMAGE"
-VERL = f"{VERL_PINS}:VERL_IMAGE"
 VERL_MEGATRON = f"{VERL_PINS}:VERL_MEGATRON_IMAGE"
 VERL_NPU = f"{VERL_PINS}:VERL_NPU_BASE_IMAGE"
-VLLM_ROCM = f"{SAMPLER_PINS}:VLLM_SAMPLER_IMAGE_ROCM"
-SGLANG_CUDA = f"{SAMPLER_PINS}:SGLANG_SAMPLER_IMAGE_CUDA"
-VLLM_CUDA = f"{SAMPLER_PINS}:VLLM_SAMPLER_IMAGE_CUDA"
-
-# Generic (device family, role, engine) -> image ref. Kept identical to the pinned rows of
-# A22's yeto.launch.engine_images.DEFAULT_IMAGES (not merged yet, so not imported); once
-# A22 lands, read these from engine_images.default_image_entry(family, role, engine).ref.
-# Ascend has no pinned row there (ref None); the registry names the unverified CANN base.
-GENERIC_IMAGES = {
-    ("cuda", "trainer", "miles"): MILES_NEXT,
-    ("cuda", "trainer", "verl"): VERL,
-    ("cuda", "sampler", "sglang"): SGLANG_CUDA,
-    ("cuda", "sampler", "vllm"): VLLM_CUDA,
-    ("rocm", "sampler", "vllm"): VLLM_ROCM,
-}
 
 INF = float("inf")
 Q_CUDA = QuantPlan("bf16", "bf16 (FP8 optional on Hopper/Blackwell)", "bf16")

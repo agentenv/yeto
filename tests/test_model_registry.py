@@ -227,23 +227,31 @@ def test_uneven_pipeline_split_is_flagged():
     assert not any("divide evenly" in w for w in even.warnings)
 
 
-def test_generic_images_match_the_a22_default_image_rows():
-    """Mirror of A22 yeto.launch.engine_images.DEFAULT_IMAGES (pinned rows); after A22
-    merges, families reads engine_images.default_image_entry(...).ref instead."""
-    from yeto.rl.model_registry.families import GENERIC_IMAGES
-    assert GENERIC_IMAGES == {
-        ("cuda", "trainer", "miles"): "yeto.rl.adapters.miles.pins:MILES_NEXT_IMAGE",
-        ("cuda", "trainer", "verl"): "yeto.rl.adapters.verl.pins:VERL_IMAGE",
-        ("cuda", "sampler", "sglang"): "yeto.rl.sampler_pins:SGLANG_SAMPLER_IMAGE_CUDA",
-        ("cuda", "sampler", "vllm"): "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_CUDA",
-        ("rocm", "sampler", "vllm"): "yeto.rl.sampler_pins:VLLM_SAMPLER_IMAGE_ROCM",
-    }
+def test_generic_images_are_read_from_engine_images():
+    """The registry keeps no copy of the device-family defaults: every generic
+    image it names is the ref of an engine_images.DEFAULT_IMAGES row, and the
+    only images outside that table are the registry-only ones."""
+    from yeto.launch import engine_images
+    from yeto.rl.model_registry import families
+
+    row = engine_images.default_image_entry
+    assert families.MILES_NEXT is row("cuda", "trainer", "miles").ref
+    assert families.VERL is row("cuda", "trainer", "verl").ref
+    assert families.SGLANG_CUDA is row("cuda", "sampler", "sglang").ref
+    assert families.VLLM_CUDA is row("cuda", "sampler", "vllm").ref
+    assert families.VLLM_ROCM is row("rocm", "sampler", "vllm").ref
+    assert not hasattr(families, "GENERIC_IMAGES")
+    table = {r.ref for r in engine_images.DEFAULT_IMAGES if r.ref}
+    registry_only = {families.MILES_K31_FULL, families.MILES_K31, families.VERL_MEGATRON,
+                     families.VERL_NPU}
+    assert not registry_only & table
     for entry in ALL_ENTRIES:
         for r in entry.recipes:
-            if r.status == "unsupported" or r.rl_model_recipe == "kimi_k31":
+            if r.status == "unsupported":
                 continue
-            fam = r.hardware[0]
-            if fam == "cuda":
-                assert r.sampler_image == GENERIC_IMAGES[("cuda", "sampler", r.sampler)], r.name
-                if r.trainer_image != "yeto.rl.adapters.verl.pins:VERL_MEGATRON_IMAGE":
-                    assert r.trainer_image == GENERIC_IMAGES[("cuda", "trainer", r.trainer)], r.name
+            for image in (r.trainer_image, r.sampler_image):
+                assert image in table | registry_only, (r.name, image)
+            if r.hardware[0] == "cuda" and r.rl_model_recipe != "kimi_k31":
+                assert r.sampler_image == row("cuda", "sampler", r.sampler).ref, r.name
+                if r.trainer_image != families.VERL_MEGATRON:
+                    assert r.trainer_image == row("cuda", "trainer", r.trainer).ref, r.name
