@@ -90,16 +90,17 @@ def test_measured_mi355x_band_is_ok():
 
 def test_warn_then_quarantine_then_probe():
     g = xg.XhwGuard(min_rounds=2, quarantine_rounds=3)
-    ev = g.observe(0, {KA: 100, KB: 0}, _metrics(0.2, 0.01))
+    g.observe(0, {KB: 100}, _metrics(0.02, 0.001))  # B is live in the window
+    ev = g.observe(1, {KA: 100, KB: 0}, _metrics(0.2, 0.01))
     assert ev["sources"][KA]["level"] == "warn"  # over act but only one round seen
     assert ev["actions"] == {}
-    ev = g.observe(1, {KA: 100}, _metrics(0.2, 0.01))
+    ev = g.observe(2, {KA: 100}, _metrics(0.2, 0.01))
     row = ev["sources"][KA]
     assert row["level"] == "act" and row["over"] == ["abs_diff"] and row["action"] == "quarantine"
-    assert ev["actions"] == {KA: {"action": "quarantine", "until_round": 5}}
-    ev = g.observe(2, {KB: 100}, _metrics(0.02, 0.001))  # A passed over; B healthy
+    assert ev["actions"] == {KA: {"action": "quarantine", "until_round": 6}}
+    ev = g.observe(3, {KB: 100}, _metrics(0.02, 0.001))  # A passed over; B healthy
     assert ev["sources"][KB]["level"] == "ok" and KA in ev["actions"]
-    ev = g.observe(5, {KB: 100}, _metrics(0.02, 0.001))
+    ev = g.observe(6, {KB: 100}, _metrics(0.02, 0.001))
     assert ev["actions"] == {}  # quarantine over: the next round probes A
 
 
@@ -121,13 +122,149 @@ def test_stop_raises():
 def test_mixed_round_blames_the_bad_source_only():
     g = xg.XhwGuard(min_rounds=2, window=4)
     truth = {KA: 0.30, KB: 0.025}
-    for r, share in enumerate((0.3, 0.7)):
+    for r, share in enumerate((0.3, 0.7, 0.5, 0.4)):
         shares = {KA: share * 1000, KB: (1 - share) * 1000}
         ev = g.observe(r, shares, _metrics(truth[KA] * share + truth[KB] * (1 - share), 0.001, 0.001))
     assert ev["sources"][KB]["level"] == "ok" and ev["sources"][KB]["abs_diff"] == pytest.approx(0.025)
-    assert ev["actions"] == {KA: {"action": "quarantine", "until_round": 10}}
-    ev = g.observe(2, {KB: 1000}, _metrics(0.025, 0.001, 0.001))  # the reader passes A over
+    assert ev["actions"] == {KA: {"action": "quarantine", "until_round": 12}}
+    ev = g.observe(4, {KB: 1000}, _metrics(0.025, 0.001, 0.001))  # the reader passes A over
     assert ev["sources"][KB]["level"] == "ok" and ev["sources"][KB]["abs_diff_exact"]
+
+
+# ---------------------------------------------------------------- identifiability (fix1115 F02)
+def test_two_sources_at_a_stable_50_50_mix_only_warn():
+    """Review repro: two sources, token shares a stable 50/50, healthy 0.02 and bad 0.3.
+    The share matrix is rank deficient however many rows: main quarantined both (the
+    trainer read nothing); now both warn with the reason and nothing is acted on."""
+    g = xg.XhwGuard()
+    for r in range(6):
+        ev = g.observe(r, {KA: 500, KB: 500}, _metrics(0.16, 0.001, 0.001))
+        assert ev["actions"] == {}
+        for s in (KA, KB):
+            row = ev["sources"][s]
+            assert row["level"] == "warn" and row["action"] is None
+            assert {h["reason"] for h in row["held"]} == {"rank_deficient"}
+            assert row["held"][0]["rank"] == 1 and row["held"][0]["sources"] == 2
+
+
+def test_two_sources_at_a_stable_70_30_mix_are_not_attributed():
+    g = xg.XhwGuard()
+    for r in range(6):
+        ev = g.observe(r, {KA: 700, KB: 300}, _metrics(0.30 * 0.3 + 0.02 * 0.7, 0.001, 0.001))
+        assert ev["actions"] == {}
+
+
+def test_nearly_collinear_shares_only_warn():
+    g = xg.XhwGuard()
+    for r, share in enumerate((0.50, 0.501, 0.499, 0.5005, 0.4995, 0.502)):
+        ev = g.observe(r, {KA: share * 1000, KB: (1 - share) * 1000}, _metrics(0.3 * share + 0.02 * (1 - share), 0.001, 0.001))
+        assert ev["actions"] == {}
+    held = ev["sources"][KA]["held"][0]
+    assert held["reason"] == "collinear" and held["cond"] > 20
+
+
+def test_mixed_estimate_needs_two_residual_degrees_of_freedom():
+    """rows == sources + 1 is an exact fit plus one residual: not enough to act on."""
+    g = xg.XhwGuard(min_rounds=1, window=3)
+    for r, share in enumerate((0.3, 0.7, 0.5)):
+        ev = g.observe(r, {KA: share * 1000, KB: (1 - share) * 1000}, _metrics(0.3 * share + 0.025 * (1 - share), 0.001, 0.001))
+    assert ev["actions"] == {}
+    assert ev["sources"][KA]["held"][0]["reason"] == "no_residual_dof"
+
+
+def test_noisy_mixed_estimate_is_low_confidence():
+    g = xg.XhwGuard(min_rounds=1)
+    values = (0.20, 0.05, 0.16, 0.09, 0.03)  # a source near the limit, noisy steps
+    for r, (share, v) in enumerate(zip((0.6, 0.3, 0.5, 0.4, 0.2), values)):
+        ev = g.observe(r, {KA: share * 1000, KB: (1 - share) * 1000}, _metrics(v, 0.001, 0.001))
+    row = ev["sources"][KA]
+    assert ev["actions"] == {} and row["abs_diff"] > 0.15
+    assert row["held"][0]["reason"] == "low_confidence"
+
+
+def test_positive_bias_clip_residual_does_not_quarantine_a_clean_source():
+    """A source whose log-probs read high saturates at 0: its clip fraction moves per
+    round, and a mixed solve hands part of it to a clean source. A mixed clip-only
+    estimate (abs_diff and KL clean) is held at warn."""
+    g = xg.XhwGuard(min_rounds=1)
+    bad_clip = (0.70, 0.78, 0.66, 0.75, 0.72)
+    for r, (share, c) in enumerate(zip((0.5, 0.3, 0.6, 0.4, 0.2), bad_clip)):
+        leak = 0.06 if r % 2 else 0.0  # the clean source's step looks clipped too
+        ev = g.observe(r, {KA: share * 1000, KB: (1 - share) * 1000},
+                       _metrics(0.21 * share + 0.01 * (1 - share), 0.001, c * share + leak * (1 - share)))
+    assert KB not in ev["actions"]
+    row = ev["sources"][KB]
+    assert row["clip"] > 0.03 and row["level"] == "warn" and row["action"] is None  # leaked clip, held
+    assert {h["reason"] for h in row["held"]} & {"clip_mixed_uncorroborated", "low_confidence"}
+
+
+def test_quarantine_never_empties_the_batch():
+    """The only live source over the act limit: quarantining it would leave the
+    trainer reading nothing (main timed out), so it warns with would_empty_batch."""
+    g = xg.XhwGuard(min_rounds=1)
+    ev = g.observe(0, {KA: 100}, _metrics(0.3, 0.001))
+    row = ev["sources"][KA]
+    assert ev["actions"] == {} and row["level"] == "warn" and row["over"] == ["abs_diff"]
+    assert row["held"] == [{"metric": None, "reason": "would_empty_batch"}]
+    # two sources both over: the second is kept so the batch is not empty
+    g = xg.XhwGuard(min_rounds=1)
+    g.observe(0, {KA: 100}, _metrics(0.02, 0.001))
+    g.observe(1, {KB: 100}, _metrics(0.02, 0.001))
+    g.observe(2, {KA: 100}, _metrics(0.3, 0.001))
+    ev = g.observe(3, {KB: 100}, _metrics(0.3, 0.001))
+    assert set(ev["actions"]) == {KA} and ev["sources"][KB]["held"][0]["reason"] == "would_empty_batch"
+
+
+# single-source decisions as on origin/main e14b5f74 (recorded from that module):
+# (level, over, action, abs_diff estimate) per round
+_SINGLE = dict(
+    ad=[0.077, 0.099, 0.21, 0.23, 0.08, 0.076, 0.31, 0.09, 0.12, 0.085, 0.2, 0.2, 0.2, 0.079],
+    kl=[0.015, 0.02, 0.02, 0.018, 0.07, 0.016, 0.02, 0.04, 0.016, 0.015, 0.016, 0.016, 0.016, 0.015],
+    clip=[0.004, 0.005, 0.004, 0.004, 0.004, 0.05, 0.004, 0.004, 0.004, 0.02, 0.004, 0.004, 0.004, 0.004])
+_A = ("act", ("abs_diff",))
+_MAIN_DOWNWEIGHT = [("ok", (), None, 0.077), ("ok", (), None, 0.088), ("warn", (), None, 0.128667),
+                    (*_A, "downweight", 0.179667), (*_A, "downweight", 0.173333), ("warn", (), "downweight", 0.128667),
+                    (*_A, "downweight", 0.155333), (*_A, "downweight", 0.158667), (*_A, "downweight", 0.173333),
+                    ("ok", (), None, 0.098333), ("warn", (), None, 0.135), (*_A, "downweight", 0.161667),
+                    (*_A, "downweight", 0.2), (*_A, "downweight", 0.159667)]
+
+
+def _single(action):
+    g, out = xg.XhwGuard(action=action), []
+    for r, (a, k, c) in enumerate(zip(_SINGLE["ad"], _SINGLE["kl"], _SINGLE["clip"])):
+        try:
+            ev = g.observe(r, {KA: 20000 + r}, _metrics(a, k, c))
+        except xg.XhwGuardStop:
+            out.append("STOP")
+            break
+        row = ev["sources"][KA]
+        out.append((row["level"], tuple(row["over"]), row["action"], round(row["abs_diff"], 6)))
+    return out
+
+
+def test_single_source_decisions_match_main():
+    assert _single("downweight") == _MAIN_DOWNWEIGHT
+    assert _single("warn") == [(lvl, over, None, v) for lvl, over, _, v in _MAIN_DOWNWEIGHT]
+    assert _single("stop") == _MAIN_DOWNWEIGHT[:3] + ["STOP"]
+    # quarantine: same estimates and limits crossed; the sole source is never
+    # quarantined (main left the trainer reading nothing), it warns instead
+    got = _single("quarantine")
+    assert [(o, v) for _, o, _, v in got[:4]] == [(o, v) for _, o, _, v in _MAIN_DOWNWEIGHT[:4]]
+    assert all(a is None for _, _, a, _ in got) and got[3][0] == "warn"
+
+
+def test_k31_delivery_form_is_unchanged():
+    """K3.1 as delivered: the guard is off (env unset), nothing is built or emitted.
+    With it on, healthy MI355X vLLM samplers in the measured band never act."""
+    assert xg.XhwGuard.from_env({}) is None
+    import random
+    for seed in range(40):
+        rnd, g = random.Random(seed), xg.XhwGuard()
+        for r in range(30):
+            toks = {f"nc-a{i}|vllm|vllm-kimi-k31@x|MI355X": rnd.randint(5000, 30000)
+                    for i in (1, 4, 5) if rnd.random() > 0.2} or {KA: 1000}
+            ev = g.observe(r, toks, _metrics(rnd.uniform(0.075, 0.099), rnd.uniform(0.015, 0.021), rnd.uniform(0.004, 0.0055)))
+            assert ev["actions"] == {}, (seed, r, ev["sources"])
 
 
 def test_missing_metrics_are_ignored():
@@ -245,14 +382,14 @@ def _driver(guard, sink=None):
 
 def test_driver_emits_and_hands_actions_to_the_reader():
     got = []
-    d, events = _driver(xg.XhwGuard(min_rounds=1), got.append)
+    d, events = _driver(xg.XhwGuard(min_rounds=1, action="downweight"), got.append)
     batch = SimpleNamespace(buffer_source_tokens={KA: 5}, buffer_source_stats={KA: {"tokens": 5.0}},
                             buffer_xhw_quarantined=0, buffer_xhw_downweighted=0)
     IslandDriver._guard_sources(d, 0, batch, _metrics(0.5, 0.01))
     name, fields = events[0]
     assert name == "rl_xhw_mismatch" and fields["sources"][KA]["level"] == "act"
     assert fields["rollout_stats"] == {KA: {"tokens": 5.0}}
-    assert got == [{KA: {"action": "quarantine", "until_round": 9}}]
+    assert got == [{KA: {"action": "downweight", "weight": 0.5}}]
 
 
 def test_driver_without_guard_or_sources_does_nothing():

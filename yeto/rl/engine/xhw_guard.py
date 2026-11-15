@@ -16,6 +16,12 @@ whose numerics drift biases the update. Miles reports the mismatch only per step
   passes its groups over for ``quarantine_rounds`` rounds, then lets one probe round
   through), ``downweight`` (its groups' advantages scaled by ``weight``; exact only
   without GRPO std normalization), or ``stop`` (the driver raises).
+* acts only on what it can attribute: a mixed (non-exact) estimate acts only when the
+  window's share matrix has full rank, a condition number <= ``max_cond``, two or more
+  residual degrees of freedom, and the estimate minus ``confidence_z`` standard errors
+  is still over the limit; a mixed clip-only trip needs abs_diff or KL over too; a
+  quarantine that would leave no live source is not applied. Each of these is
+  reported as a warn with ``held`` [{metric, reason, ...}].
 
 Rollout-side statistics that need no trainer pass (sampled-token log-prob, top-K head
 mass, non-finite values) are computed per source at read time (:func:`rollout_stats`):
@@ -27,13 +33,14 @@ loss reads ``rollout_log_probs`` and the rollout top-K directly (Miles
 
 ``YETO_RL_XHW_GUARD=warn_abs_diff=0.10,act_abs_diff=0.15,warn_kl=0.03,act_kl=0.06,
 warn_clip=0.01,act_clip=0.03,window=3,min_rounds=2,action=quarantine,quarantine_rounds=8,
-weight=0.5`` (every key optional; ``1``/``on`` = defaults). Unset: nothing changes.
+weight=0.5,max_cond=20,confidence_z=2`` (every key optional; ``1``/``on`` = defaults). Unset: nothing changes.
 Readers: the Miles buffer reader (every action) and the verl buffer trainer's feed
 (``adapters/verl/buffer_feed.py``: warn, quarantine, stop; downweight is refused there).
 A launch over several device families gets a preflight warning advising this switch
 (``launch_preflight.xhw_family_advice``); it is never turned on for you.
 
-Import-light: no torch, no Miles (numpy only inside :func:`rollout_stats`).
+Import-light: no torch, no Miles (numpy only inside :func:`rollout_stats` and a mixed
+window's identifiability check).
 """
 
 from __future__ import annotations
@@ -51,6 +58,11 @@ UNKNOWN = "unknown"
 METRICS = {"abs_diff": "train_rollout_logprob_abs_diff", "kl": "train_rollout_kl", "clip": "sc_is_clipped"}
 ACTIONS = ("warn", "quarantine", "downweight", "stop")
 SEP = "|"
+# residual degrees of freedom a mixed (non-exact) estimate needs before it may act
+MIN_DOF = 2
+# floor of a mixed solve's per-step residual noise, as a fraction of the warn limit
+# (measured healthy MI355X step-to-step spread of abs_diff: ~0.01 = 0.1 x warn)
+NOISE_FLOOR = 0.1
 
 
 class XhwGuardConfigError(ValueError):
@@ -126,7 +138,8 @@ def rollout_stats(samples: Iterable[Mapping[str, Any]], *, low_head_mass: float 
 # ------------------------------------------------------------------ attribution
 def _solve(rows: Sequence[tuple[Mapping[str, float], float]], sources: Sequence[str]) -> dict[str, float]:
     """Non-negative least squares of ``value = sum_s share_s * x_s`` (small: a few
-    sources). Sources the rows cannot separate get the value of the rows they appear in."""
+    sources). Sources the rows cannot separate get the value of the rows they appear in;
+    such values are never acted on (:func:`_identifiability`)."""
     n = len(sources)
     index = {s: i for i, s in enumerate(sources)}
     a = [[0.0] * n for _ in range(n)]
@@ -178,30 +191,95 @@ def _solve(rows: Sequence[tuple[Mapping[str, float], float]], sources: Sequence[
     return out
 
 
+def _identifiability(rows: Sequence[tuple[Mapping[str, float], float]], sources: Sequence[str],
+                     solved: Mapping[str, float], max_cond: float) -> tuple[str | None, dict[str, Any], dict[str, float]]:
+    """Whether a mixed window can name each source, and how sure the estimate is.
+
+    Returns ``(reason, diagnostics, se)``: ``reason`` is ``None`` when the design matrix
+    (rows x sources, token shares) has full column rank, a condition number (columns
+    scaled to unit norm) at most ``max_cond`` and at least ``MIN_DOF`` residual degrees
+    of freedom (one is too few: a residual that is small by chance passes noise); else ``rank_deficient`` / ``collinear`` / ``no_residual_dof``. ``se`` is the
+    least-squares standard error of each source's estimate (inf when unidentifiable)."""
+    import numpy as np
+
+    n = len(sources)
+    index = {s: i for i, s in enumerate(sources)}
+    x = np.zeros((len(rows), n))
+    y = np.zeros(len(rows))
+    for r, (shares, value) in enumerate(rows):
+        for s, w in shares.items():
+            x[r, index[s]] = w
+        y[r] = value
+    norms = np.linalg.norm(x, axis=0)
+    xs = x / np.where(norms > 0, norms, 1.0)
+    sv = np.linalg.svd(xs, compute_uv=False) if x.size else np.zeros(0)
+    rank = int((sv > 1e-9 * (sv[0] if sv.size else 1.0)).sum()) if sv.size else 0
+    cond = float(sv[0] / sv[-1]) if sv.size == n and sv.size and sv[-1] > 0 else math.inf
+    dof = len(rows) - n
+    diag = {"rank": rank, "sources": n, "rows": len(rows), "cond": cond}
+    inf = {s: math.inf for s in sources}
+    if rank < n:
+        return "rank_deficient", diag, inf
+    if not cond <= max_cond:
+        return "collinear", diag, inf
+    if dof < MIN_DOF:
+        return "no_residual_dof", diag, inf
+    beta = np.array([solved[s] for s in sources])
+    resid = y - x @ beta
+    diag["residual_rms"] = math.sqrt(float(resid @ resid) / dof)
+    unit = np.linalg.inv(x.T @ x)
+    # few residual degrees of freedom estimate the noise poorly: widen by Student's t.
+    # se = residual_rms * se_unit; the guard floors residual_rms (a residual small by
+    # chance must not make a noisy solve look sure)
+    t = _T975.get(dof, 1.96) / 1.96
+    return None, diag, {s: t * math.sqrt(max(float(unit[i, i]), 0.0)) for s, i in index.items()}
+
+
+# two-sided 95% Student-t quantiles by degrees of freedom (normal beyond 10)
+_T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}
+
+
 @dataclass
 class SourceAttribution:
-    """Trailing window of (token shares, step value) rows for one metric."""
+    """Trailing window of (token shares, step value) rows for one metric.
+
+    A window with several sources keeps at least ``sources + MIN_DOF`` rows, so a
+    mixed solve always has a residual to judge its own confidence by."""
 
     window: int = 3
+    max_cond: float = 20.0
     rows: deque = field(default_factory=deque)
 
     def add(self, shares: Mapping[str, float], value: float) -> None:
         self.rows.append((dict(shares), float(value)))
         while len(self.rows) > max(1, self.window):
+            n = len({s for sh, _ in self.rows for s in sh})
+            if n > 1 and len(self.rows) <= n + MIN_DOF:
+                break
             self.rows.popleft()
 
-    def estimate(self) -> dict[str, dict[str, float]]:
-        """{source: {"value", "exact" (1 when a single-source step of the window names it), "rounds"}}."""
+    def estimate(self) -> dict[str, dict[str, Any]]:
+        """{source: {"value", "exact" (1 when a single-source step of the window names
+        it), "rounds", "identifiable", "se", "se_unit", "reason", "design"}}. A mixed (non-exact) estimate is
+        ``identifiable`` only when the window separates every source (see
+        :func:`_identifiability`); ``se`` is its standard error (0 for exact)."""
         sources = sorted({s for shares, _ in self.rows for s in shares})
         if not sources:
             return {}
-        solved = _solve(list(self.rows), sources)
+        rows = list(self.rows)
+        solved = _solve(rows, sources)
+        mixed = any(len(shares) > 1 for shares, _ in rows)
+        reason, diag, se_unit = _identifiability(rows, sources, solved, self.max_cond) if mixed else (None, {}, {})
         out = {}
         for s in sources:
-            alone = [v for shares, v in self.rows if set(shares) == {s}]
-            seen = sum(1 for shares, _ in self.rows if shares.get(s, 0.0) > 0)
+            alone = [v for shares, v in rows if set(shares) == {s}]
+            seen = sum(1 for shares, _ in rows if shares.get(s, 0.0) > 0)
             value = sum(alone) / len(alone) if alone else solved[s]
-            out[s] = {"value": value, "exact": 1.0 if alone else 0.0, "rounds": float(seen)}
+            out[s] = {"value": value, "exact": 1.0 if alone else 0.0, "rounds": float(seen),
+                      "identifiable": bool(alone) or reason is None,
+                      "se_unit": 0.0 if alone else se_unit.get(s, 0.0),
+                      "se": 0.0 if alone else se_unit.get(s, 0.0) * diag.get("residual_rms", math.inf),
+                      "reason": None if alone else reason, "design": diag}
         return out
 
 
@@ -229,6 +307,11 @@ class XhwGuard:
     action: str = "quarantine"
     quarantine_rounds: int = 8
     weight: float = 0.5
+    # a mixed (non-exact) estimate acts only when the window separates the sources
+    # (condition number of the share matrix <= max_cond) and its lower bound
+    # value - confidence_z * se is over the act limit; else it only warns
+    max_cond: float = 20.0
+    confidence_z: float = 2.0
     _attr: dict[str, SourceAttribution] = field(default_factory=dict, init=False)
     _state: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
 
@@ -241,7 +324,9 @@ class XhwGuard:
             w, a = getattr(self.warn, name), getattr(self.act, name)
             if not (0 < w <= a):
                 raise XhwGuardConfigError(f"{ENV}: needs 0 < warn_{name} <= act_{name}")
-        self._attr = {m: SourceAttribution(self.window) for m in METRICS}
+        if not (self.max_cond >= 1 and self.confidence_z >= 0):
+            raise XhwGuardConfigError(f"{ENV}: needs max_cond >= 1 and confidence_z >= 0")
+        self._attr = {m: SourceAttribution(self.window, self.max_cond) for m in METRICS}
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] = os.environ) -> "XhwGuard | None":
@@ -250,7 +335,7 @@ class XhwGuard:
             return None
         if raw in ("1", "on", "true"):
             return cls()
-        floats = {f"{lvl}_{m}" for lvl in ("warn", "act") for m in METRICS} | {"weight"}
+        floats = {f"{lvl}_{m}" for lvl in ("warn", "act") for m in METRICS} | {"weight", "max_cond", "confidence_z"}
         ints = {"window", "min_rounds", "quarantine_rounds"}
         values: dict[str, Any] = {}
         for part in raw.split(","):
@@ -281,12 +366,14 @@ class XhwGuard:
         estimates = {name: self._attr[name].estimate() for name in METRICS}
         sources: dict[str, Any] = {}
         stop: list[str] = []
+        # sources that can still feed the trainer: this round's and the window's
+        live = set(shares) | {s for attr in self._attr.values() for sh, _ in attr.rows for s in sh}
         for s in sorted(set(shares) | set(self._state)):
             st = self._state.setdefault(s, {"level": "ok", "action": None, "until_round": None, "trips": 0})
             if st["action"] == "quarantine" and st["until_round"] is not None and rollout_id >= st["until_round"]:
                 st.update(action=None, until_round=None)  # probe: let the next round through
             row = {**source_fields(s), "share": shares.get(s, 0.0)}
-            level, over = "ok", []
+            level, over, held = "ok", [], []
             rounds = 0.0
             for name in METRICS:
                 e = estimates[name].get(s)
@@ -297,16 +384,41 @@ class XhwGuard:
                 v = e["value"]
                 if not math.isfinite(v):
                     continue
-                if v > getattr(self.act, name):
+                limit = getattr(self.act, name)
+                if v > limit and not e["identifiable"]:
+                    # the window cannot separate this source from the others: warn only
+                    held.append({"metric": name, "reason": e["reason"], **e["design"]})
+                    if level == "ok":
+                        level = "warn"
+                elif v > limit and v - self.confidence_z * self._se(name, e) <= limit:
+                    # e.g. a saturated (clipped at 0) log-prob leaves a residual the
+                    # solve hands to clean sources: too unsure to act on
+                    held.append({"metric": name, "reason": "low_confidence", "se": self._se(name, e), **e["design"]})
+                    if level == "ok":
+                        level = "warn"
+                elif v > limit:
                     over.append(name)
                     level = "act"
                 elif v > getattr(self.warn, name) and level == "ok":
                     level = "warn"
+            if over == ["clip"] and not row.get("clip_exact"):
+                # the clip fraction of a source whose log-probs saturate at 0 moves with
+                # the tokens it sampled; a mixed solve leaks that residual to clean
+                # sources. A mixed clip estimate acts only with abs_diff or KL over too.
+                held.append({"metric": "clip", "reason": "clip_mixed_uncorroborated"})
+                over, level = [], "warn"
             row["rounds"] = int(rounds)
             judged = rounds >= self.min_rounds
             if not judged and level == "act":
                 level = "warn"  # too few rounds to act on
+            if (level == "act" and st["action"] is None and s in shares and self.action == "quarantine"
+                    and not (live - {s} - self._quarantined())):
+                # quarantining the last live source would leave the trainer nothing to read
+                held.append({"metric": None, "reason": "would_empty_batch"})
+                level = "warn"
             row["level"], row["over"] = level, over
+            if held:
+                row["held"] = held
             if level == "act" and st["action"] is None and s in shares:
                 st["trips"] += 1
                 if self.action == "quarantine":
@@ -330,6 +442,17 @@ class XhwGuard:
             raise XhwGuardStop(f"rollout {rollout_id}: sources over the act limits: {stop} "
                                f"({ {s: sources[s]['over'] for s in stop} })")
         return event
+
+    def _se(self, name: str, e: Mapping[str, Any]) -> float:
+        """Standard error of a mixed estimate with the residual noise floored at
+        ``NOISE_FLOOR`` x the warn limit (0 for an exact estimate)."""
+        if e["exact"]:
+            return 0.0
+        rms = max(e["design"].get("residual_rms", math.inf), NOISE_FLOOR * getattr(self.warn, name))
+        return e["se_unit"] * rms
+
+    def _quarantined(self) -> set[str]:
+        return {s for s, st in self._state.items() if st["action"] == "quarantine"}
 
     def actions(self) -> dict[str, dict[str, Any]]:
         out = {}

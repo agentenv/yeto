@@ -311,7 +311,7 @@ def _train_step(groups, reference):
             "sc_is_clipped": float(np.mean(np.abs(ratio - 1) > 0.2))}
 
 
-def _run_three_sources(tmp_path, bias, *, min_rounds, rounds=8):
+def _run_three_sources(tmp_path, bias, *, min_rounds, rounds=8, window=None):
     fleet = fake_sampler_fleet([
         {"sampler_id": "b300", "device_family": "nvidia", "engine": "sglang"},
         {"sampler_id": "mi355x", "device_family": "amd", "engine": "vllm", "logprob_noise": 0.04},
@@ -323,7 +323,7 @@ def _run_three_sources(tmp_path, bias, *, min_rounds, rounds=8):
         engine.start(None, 0)
     buf = FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1)
     reader = br.BatchReader(buf, max_policy_age=4, prefetch=False, read_workers=1, wait_s=5)
-    guard = xg.XhwGuard(min_rounds=min_rounds, window=max(3, min_rounds), quarantine_rounds=8)
+    guard = xg.XhwGuard(min_rounds=min_rounds, window=window or max(3, min_rounds), quarantine_rounds=8)
     sampling = SamplingParams(n=4, max_tokens=12)
     events, seen = [], []
     for rollout_id in range(rounds):
@@ -361,7 +361,7 @@ def test_xhw_guard_attributes_and_quarantines_the_drifting_source(tmp_path, bias
     for sid in ("b300", "mi355x"):  # the healthy sources are not blamed
         other = ev["sources"][keys[sid]]
         assert other["level"] == "ok" and other["action"] is None, other
-    assert tripped <= 3
+    assert tripped <= 4  # a mixed window needs sources + 2 rows to act
     # after the trip the bad source is passed over and the batch is clean again
     after = seen[tripped + 1:]
     assert after and all(bad not in groups for groups, _ in after)
@@ -370,22 +370,32 @@ def test_xhw_guard_attributes_and_quarantines_the_drifting_source(tmp_path, bias
     assert all(math.isfinite(m["train/train_rollout_kl"]) for _, m in events)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "xhw_guard acts on an unidentifiable estimate: with fewer window rows than sources "
-    "_solve falls back to the per-source mean of its rows and every mixed source crosses "
-    "the act limit (min_rounds=2, three sources) -- healthy sources are quarantined too"))
 def test_xhw_guard_does_not_blame_healthy_sources_before_the_mix_is_separable(tmp_path):
-    keys, events, _ = _run_three_sources(tmp_path, -0.3, min_rounds=2, rounds=4)
-    actions = next(ev["actions"] for ev, _ in events if ev and ev["actions"])
-    assert set(actions) == {keys["910b"]}
+    """Fewer window rows than sources (min_rounds=2, three sources): the estimates
+    are not identifiable, so the guard only warns (with the reason) until the mix is
+    separable, then quarantines the 910B source alone; the trainer never reads empty."""
+    keys, events, _ = _run_three_sources(tmp_path, -0.3, min_rounds=2, rounds=8)
+    assert all(ev is not None for ev, _ in events)  # never an empty read
+    first = next(i for i, (ev, _) in enumerate(events) if ev["actions"])
+    assert set(events[first][0]["actions"]) == {keys["910b"]}
+    for ev, _ in events[:first]:  # before: warnings that say why they did not act
+        held = [h for row in ev["sources"].values() for h in row.get("held", [])]
+        assert all(row["action"] is None for row in ev["sources"].values())
+        assert held and {h["reason"] for h in held} <= {"rank_deficient", "collinear", "no_residual_dof"}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "xhw_guard least squares leaks blame through a non-stationary metric: a source whose "
-    "log-probs read too high saturates at 0, its per-round clip fraction moves with the "
-    "tokens it sampled, and with window == sources the exact solve hands the residual to "
-    "a healthy source (B300 quarantined on clip alone)"))
 def test_xhw_guard_positive_saturating_bias_blames_only_its_source(tmp_path):
-    keys, events, _ = _run_three_sources(tmp_path, 0.25, min_rounds=3)
-    actions = next(ev["actions"] for ev, _ in events if ev and ev["actions"])
+    """A +0.25 bias saturates at log-prob 0; its clip fraction moves with the tokens it
+    sampled and the mixed solve leaks a clip residual to B300. That clip-only mixed
+    estimate is held at warn. With the default window the 910B estimate itself is too
+    unsure to act on (warn, reason low_confidence); with a longer window only the 910B
+    source is quarantined. A healthy source is never quarantined."""
+    keys, events, _ = _run_three_sources(tmp_path / "w3", 0.25, min_rounds=3, rounds=10)
+    assert all(not ev["actions"] for ev, _ in events)
+    last = events[-1][0]["sources"][keys["910b"]]
+    assert last["level"] == "warn" and {h["reason"] for h in last["held"]} >= {"low_confidence"}
+    keys, events, _ = _run_three_sources(tmp_path / "w6", 0.25, min_rounds=3, rounds=10, window=6)
+    actions = next(ev["actions"] for ev, _ in events if ev["actions"])
     assert set(actions) == {keys["910b"]}
+    for ev, _ in events:
+        assert all(s == keys["910b"] for s in ev["actions"])
