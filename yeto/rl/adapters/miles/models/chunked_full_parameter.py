@@ -251,6 +251,13 @@ class AuthoritativeFragmentSink:
         self._stored[key] = stored
         return stored
 
+    def forget(self, stored: StoredAuthoritativeFragment) -> None:
+        """Stop keeping ``stored`` for its (id, version) without releasing it
+        (its holder releases it); a later payload for that key is stored anew."""
+        key = (stored.fragment_id, stored.version)
+        if self._stored.get(key) is stored:
+            self._stored.pop(key)
+
     def release_all(self) -> int:
         return sum(fragment.release() for fragment in self._stored.values())
 
@@ -1036,12 +1043,16 @@ class MilesChunkedFullParameterAdapter:
         fragments: Sequence[StoredAuthoritativeFragment],
         *,
         allow_newer: bool = False,
+        adopt_version_zero: bool = False,
     ) -> None:
         """Require the syncer's authoritative v0 bytes to equal the checkpoint.
 
         ``allow_newer``: an island joining a running pool receives some
         fragments at newer versions; those must match the layout, topology and
-        plan, but their content is the pool's, not the checkpoint's."""
+        plan, but their content is the pool's, not the checkpoint's.
+        ``adopt_version_zero``: the local-init fallback writes the syncer's
+        version 0 into the trainer, so a version-0 fragment needs the
+        checkpoint's geometry, not its content."""
 
         expected = {
             descriptor.fragment_id: (shard, descriptor)
@@ -1058,7 +1069,9 @@ class MilesChunkedFullParameterAdapter:
                 or stored.parameter_layout_hash != self.layout.layout_hash
                 or stored.topology != row[0].topology
                 or stored.plan_hash != row[0].plan_hash
-                or (stored.version == 0 and stored.descriptor != row[1])
+                or (stored.version == 0 and not adopt_version_zero and stored.descriptor != row[1])
+                or (stored.version == 0 and adopt_version_zero
+                    and not _same_fragment_geometry(row[1], stored.descriptor))
             ):
                 raise RuntimeError("dense syncer version-zero fragment changed")
             observed[stored.fragment_id] = stored

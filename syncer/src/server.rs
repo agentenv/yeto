@@ -154,6 +154,10 @@ pub struct Config {
     /// `--resume` refuses a checkpoint whose `.profile` record is missing or
     /// differs from this syncer's semantic profile. Not in the profile hash.
     pub require_profile_record: bool,
+    /// `--local-init-fallback`: a local-init island whose digests disagree
+    /// gets the initial broadcast instead of stopping the syncer (the
+    /// default, crate::local_init). Startup only: not in the profile hash.
+    pub local_init_fallback: bool,
     /// Benchmark-only exact local optimizer-step target for every learner.
     pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: merge records plus sweep ledger reconciliation cuts.
@@ -4010,6 +4014,64 @@ async fn recv_init_event(
     event.context("event channel closed")
 }
 
+/// A lenient local-init disagreement (per fragment and report): logged at
+/// debug only; each disagreeing island gets one summary warning and one
+/// `init_digest_fallback_upload` tape event when the initial cut goes out.
+fn warn_local_init(warning: Option<String>) {
+    if let Some(message) = warning {
+        tracing::debug!("local init: {message}");
+    }
+}
+
+/// One `{"event": <event>, "value": 1, <fields>, "message": ...}` line on the event tape.
+fn append_tape_event(path: Option<&std::path::Path>, event: &str, fields: &str, message: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let line = format!(
+        "{{\"event\":{},\"value\":1{fields},\"message\":{}}}\n",
+        crate::dispense::json_str(event),
+        crate::dispense::json_str(message)
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
+/// One warning and one `init_digest_fallback_upload` tape event per
+/// disagreeing island (`noted` keeps a redial's repeated report from
+/// writing a second one).
+fn note_local_init_fallback(
+    cfg: &Config,
+    init: &LocalInit,
+    learner: u32,
+    noted: &mut std::collections::BTreeSet<u32>,
+) {
+    if !noted.insert(learner) {
+        return;
+    }
+    let mismatched = init.mismatched_fragments(learner);
+    let message = format!(
+        "learner {learner} reported local-init digests that differ from learner 0's \
+         INIT on {mismatched} fragment(s); it gets the initial broadcast instead of \
+         INIT_CONFIRM"
+    );
+    warn!("local init: {message}");
+    append_tape_event(
+        cfg.event_tape.as_deref(),
+        "init_digest_fallback_upload",
+        &format!(",\"learner_id\":{learner},\"mismatched_fragments\":{mismatched}"),
+        &message,
+    );
+}
+
 /// The islands did not start from the same weights: record the strict
 /// failure, tell every connected island why, and stop the syncer.
 async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
@@ -4065,6 +4127,8 @@ async fn scheduler(
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
     // Local-init digests (`local_init`); created with the state.
     let mut local_init: Option<LocalInit> = None;
+    // Fallback islands already on the tape (--local-init-fallback).
+    let mut fallback_noted = std::collections::BTreeSet::new();
     let mut resumed = false;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
@@ -4175,6 +4239,7 @@ async fn scheduler(
                     local_init = Some(LocalInit::new(
                         st.owned_fragments(),
                         st.layout.fragments.len(),
+                        !cfg.local_init_fallback,
                     ));
                     state = Some(st);
                 }
@@ -4187,8 +4252,9 @@ async fn scheduler(
                     .as_mut()
                     .context("INIT_DIGEST before HELLO")?
                     .on_digests(digests);
-                if let Err(error) = checked {
-                    refuse_local_init(&cfg, &registry, error).await?;
+                match checked {
+                    Ok(warning) => warn_local_init(warning),
+                    Err(error) => refuse_local_init(&cfg, &registry, error).await?,
                 }
             }
             Event::Init {
@@ -4212,8 +4278,9 @@ async fn scheduler(
                         member.learner_id,
                         sha256,
                     );
-                    if let Err(error) = checked {
-                        refuse_local_init(&cfg, &registry, error).await?;
+                    match checked {
+                        Ok(warning) => warn_local_init(warning),
+                        Err(error) => refuse_local_init(&cfg, &registry, error).await?,
                     }
                 }
                 st.init_fragment(fragment_id as usize, values)?;
@@ -4332,6 +4399,11 @@ async fn scheduler(
         let (confirmed, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|group| {
             confirm.is_some_and(|(init, _)| init.holds(group.member.learner_id))
         });
+        if let Some((init, _)) = confirm {
+            for learner in init.fallbacks() {
+                note_local_init_fallback(&cfg, init, learner, &mut fallback_noted);
+            }
+        }
         if let Some((_, digest)) = confirm {
             for group in &confirmed {
                 let payload = bytes::Bytes::copy_from_slice(&digest);
@@ -5335,6 +5407,18 @@ async fn scheduler(
                     {
                         cutoff_established = true;
                         break 'outer;
+                    }
+                }
+                // --local-init-fallback: an island whose digests arrive after
+                // the initial cut took the late joiner's broadcast; if its
+                // digests differ from the applied INIT, record its fallback
+                // like the islands that reported in time.
+                Event::InitDigest { member, digests } if cfg.local_init_fallback && !resumed => {
+                    if let Some(init) = local_init.as_mut() {
+                        let learner = member.learner_id;
+                        if matches!(init.on_digests(digests), Ok(Some(_))) {
+                            note_local_init_fallback(&cfg, init, learner, &mut fallback_noted);
+                        }
                     }
                 }
                 Event::Init { .. } | Event::InitDigest { .. } => {} // already initialized; ignore
@@ -10043,6 +10127,7 @@ mod tests {
             resume: false,
             mark_final_checkpoint: false,
             require_profile_record: false,
+            local_init_fallback: false,
             learner_budget_steps: None,
             event_tape: None,
             max_base_lag: Some(0),

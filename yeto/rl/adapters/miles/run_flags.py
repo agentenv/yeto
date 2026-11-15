@@ -444,6 +444,13 @@ _ISLAND = (
         "= wait for the syncer's initial broadcast; auto = local for async rounds",
     ),
     island_flag(
+        "--local-init-fallback",
+        action="store_true",
+        help="full-parameter local init: if this island's version-0 digests differ "
+        "from learner 0's INIT, take the syncer's broadcast version 0 into the "
+        "trainer instead of failing (needs the syncer's --local-init-fallback)",
+    ),
+    island_flag(
         "--sweep-push-dtype",
         choices=("f32", "bf16", "int8", "int4", "int4-log"),
         default="f32",

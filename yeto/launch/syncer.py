@@ -629,6 +629,12 @@ def _syncer_profile_record(args) -> str:
     return " --require-profile-record" if async_mode else ""
 
 
+def _syncer_local_init_fallback(args) -> str:
+    """--rl-sync-local-init-fallback (off by default, keeping the command
+    unchanged): a local-init digest mismatch falls back to the broadcast."""
+    return " --local-init-fallback" if getattr(args, "rl_sync_local_init_fallback", False) else ""
+
+
 def _grace_floor(args) -> tuple[int, float]:
     """(--rl-sync-grace-min-ms, --rl-sync-grace-arrival-quantile); (0, 0.0) is off."""
     return (int(getattr(args, "grace_min_ms", 0) or 0),
@@ -710,6 +716,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f"{_syncer_eval_checkpoints(args)}"
         f"{_syncer_profile_record(args)}"
+        f"{_syncer_local_init_fallback(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
         f"{_syncer_weighted_fold(args)}"

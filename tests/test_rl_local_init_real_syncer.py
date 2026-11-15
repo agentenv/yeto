@@ -4,13 +4,16 @@ Every island loaded the same base weights. Islands report per-fragment
 INIT digests; learner 0 still uploads INIT (the syncer keeps exact f32
 masters), but an island whose digests agree gets INIT_CONFIRM instead of the
 version-0 broadcast. Merged rounds must equal the old INIT path bit for bit,
-a disagreeing island must stop the run with a clear error, and a resumed
-syncer must broadcast its checkpointed cut instead of confirming.
+a disagreeing island must stop the run with a clear error (the default), or
+with --local-init-fallback get the broadcast of learner 0's INIT plus a
+warning, and a resumed syncer must broadcast its checkpointed cut instead of
+confirming.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 
 import numpy as np
@@ -41,8 +44,11 @@ def _digests(initial):
 class LocalRig(Rig):
     """``Rig`` whose islands may report local-init digests before start."""
 
-    def __init__(self, binary, tmp_path, islands, *options, **kwargs):
-        # The launcher-built command adds --resume when the checkpoint exists.
+    def __init__(self, binary, tmp_path, islands, *options, syncer_flags=(), **kwargs):
+        # The launcher-built command adds --resume when the checkpoint exists;
+        # ``syncer_flags`` go straight to the syncer binary.
+        self.tape = tmp_path / "tape.jsonl"
+        binary = " ".join([str(binary), *syncer_flags])
         super().__init__(binary, tmp_path, islands, "--rl-sync-outer-lr", str(LR),
                          "--rl-sync-outer-momentum", str(MU), *options, **kwargs)
 
@@ -157,6 +163,75 @@ def test_digest_mismatch_stops_the_run_with_a_clear_error(make_local_rig, bad):
     refused = next(c for c in rig.clients if isinstance(c._err, SessionRejectedError))
     with pytest.raises(StrictRlInvariantError, match="init digest mismatch"):
         refused.check_health()
+
+
+@pytest.mark.parametrize("bad", ["island", "init"])
+def test_local_init_fallback_broadcasts_to_a_disagreeing_island(make_local_rig, bad):
+    """--local-init-fallback: the run goes on; learner 0's INIT is version 0,
+    an island whose digests differ from it gets the broadcast, and merged
+    rounds equal the plain INIT-broadcast path bit for bit."""
+    steps = range(1, 7)
+    old = make_local_rig(2, total_steps=4)
+    initial = _initial(old.layout)
+    old.start(initial)
+    reference = _run_rounds(old, initial, steps)
+
+    rig = make_local_rig(2, total_steps=4, syncer_flags=["--local-init-fallback"])
+    digests = _digests(initial)
+    other = list(digests)
+    other[1] = hashlib.sha256(b"another conversion path").digest()
+    # "island": island 1 canonicalized the base to other bits; "init": both
+    # islands agree but learner 0's INIT differs (every island falls back).
+    by_island = {0: digests, 1: other} if bad == "island" else {0: other, 1: other}
+    rig.start_local(initial, by_island)
+    fallback = [1] if bad == "island" else [0, 1]
+    if bad == "island":
+        rig.wait_confirmed(0)
+        assert not rig.clients[0].drain_updates()
+    for island in fallback:
+        for fid in range(rig.layout.num_fragments):
+            assert rig.bcast(island, fid, 0).tobytes() == np.asarray(initial[fid]).tobytes()
+        assert not rig.clients[island].initial_cut_confirmed()
+    local = _run_rounds(rig, initial, steps)
+    for key, values in reference.items():
+        assert values.tobytes() == local[key].tobytes(), key
+    rig.close()
+    for island in fallback:  # one summary warning per disagreeing island
+        assert rig.output.count(f"learner {island} reported local-init digests") == 1, rig.output
+    assert "init digest mismatch: fragment 1" not in rig.output  # per-fragment detail is debug only
+    records = [json.loads(line) for line in rig.tape.read_text().splitlines()]
+    uploads = [r for r in records if r.get("event") == "init_digest_fallback_upload"]
+    assert sorted(r["learner_id"] for r in uploads) == fallback
+    assert all(r["mismatched_fragments"] == 1 for r in uploads)
+    assert not any(r.get("event") in ("rl_strict_failure", "init_digest_mismatch_detected")
+                   for r in records)
+
+
+def test_strict_local_init_flag_keeps_the_fatal_check(make_local_rig):
+    rig = make_local_rig(2, syncer_flags=["--strict-local-init"])
+    initial = _initial(rig.layout)
+    digests = _digests(initial)
+    other = list(digests)
+    other[0] = hashlib.sha256(b"another checkpoint").digest()
+    rig.start_local(initial, {0: digests, 1: other})
+    assert rig.wait_exit() not in (None, 0)
+    rig.close()
+    assert "init digest mismatch: fragment 0" in rig.output
+
+
+def test_local_init_digests_parallel_equals_serial():
+    from yeto.rl.engine.full_parameter_stream import local_init_digests
+
+    rng = np.random.default_rng(3)
+    fragments = [rng.standard_normal(n).astype(np.float32) for n in (1, 7, 4096, 33, 100_000)]
+
+    def parts_of(fid):  # uneven chunks, as an adapter streams them
+        raw = memoryview(fragments[fid].tobytes())
+        return [raw[start:start + 1000] for start in range(0, len(raw), 1000)]
+
+    want = [hashlib.sha256(f.tobytes()).digest() for f in fragments]
+    for workers in (1, 2, 8):
+        assert local_init_digests(len(fragments), parts_of, workers=workers) == want
 
 
 def test_resumed_syncer_broadcasts_its_checkpoint_instead_of_confirming(make_local_rig, tmp_path):
@@ -282,3 +357,22 @@ def test_local_init_is_the_default_for_async_rounds_only():
     assert not _local_init(SimpleNamespace(init_mode="auto"), False)
     assert _local_init(SimpleNamespace(init_mode="local"), False)
     assert not _local_init(SimpleNamespace(init_mode="upload"), True)
+
+
+def test_local_init_hash_is_serial_unless_opted_in(monkeypatch):
+    from yeto.rl.engine import full_parameter_stream as fps
+
+    monkeypatch.delenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, raising=False)
+    assert fps.local_init_hash_workers(64) == 1
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "4")
+    assert fps.local_init_hash_workers(64) == 4
+    assert fps.local_init_hash_workers(2) == 2
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "auto")
+    monkeypatch.setattr(fps.os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    assert fps.local_init_hash_workers(64) == 3
+    monkeypatch.delattr(fps.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(fps.os, "cpu_count", lambda: 40)
+    assert fps.local_init_hash_workers(64) == fps.LOCAL_INIT_HASH_AUTO_MAX
+    monkeypatch.setenv(fps.LOCAL_INIT_HASH_WORKERS_ENV, "0")
+    with pytest.raises(ValueError):
+        fps.local_init_hash_workers(64)

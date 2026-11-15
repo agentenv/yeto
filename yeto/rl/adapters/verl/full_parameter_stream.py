@@ -837,9 +837,11 @@ class VerlChunkedFullParameterAdapter:
 
     def verify_initial_fragments(self, reference: VerlFullParameterCut,
                                  fragments: Sequence[VerlStoredFragment], *,
-                                 allow_newer: bool = False) -> None:
+                                 allow_newer: bool = False, adopt_version_zero: bool = False) -> None:
         """The syncer's version-0 bytes must equal this island's own cut
-        (``allow_newer``: a rejoin's newer fragments only need the right size)."""
+        (``allow_newer``: a rejoin's newer fragments only need the right size;
+        ``adopt_version_zero``: the local-init fallback writes the syncer's
+        version 0 into the trainer, so it too only needs the right size)."""
 
         observed = {}
         for stored in fragments:
@@ -847,7 +849,7 @@ class VerlChunkedFullParameterAdapter:
             if (not 0 <= fragment_id < self.layout.fragments.num_fragments or fragment_id in observed
                     or (stored.version != 0 and not allow_newer)
                     or stored.values().numel() != self.fragment_numel(fragment_id)
-                    or (stored.version == 0
+                    or (stored.version == 0 and not adopt_version_zero
                         and stored.wire_payload_hash != reference.fragment_hashes[fragment_id])):
                 raise RuntimeError(f"verl version-zero fragment {fragment_id} differs from the checkpoint")
             observed[fragment_id] = stored
@@ -1077,6 +1079,7 @@ def role_stream_config(section: Mapping[str, Any], *, syncer: str, learner_id: i
         final_cut=section["final_cut"],
         partial_quorum=async_rounds,
         local_init=bool(section["local_init"]),
+        local_init_fallback=bool(section.get("local_init_fallback", False)),
         matrix_merge=section["matrix_merge"],
         bcast_delta=bool(section.get("bcast_delta", False)),
         peer_recovery=PeerRecoveryOptions.from_plan(section.get("peer_recovery")),
@@ -1353,6 +1356,7 @@ def add_island_flags(parser) -> None:
     parser.add_argument("--syncer-profile-sha256", default=None)
     parser.add_argument("--full-parameter-rounds", choices=("sweep", "async"), default="sweep")
     parser.add_argument("--init-mode", choices=("auto", "local", "upload"), default="auto")
+    parser.add_argument("--local-init-fallback", action="store_true")
     parser.add_argument("--sweep-push-dtype", choices=("f32", "bf16", "int8", "int4", "int4-log"),
                         default="f32")
     parser.add_argument("--sweep-fragment-max-bytes", type=int, default=DEFAULT_MAX_FRAGMENT_BYTES)
@@ -1528,6 +1532,8 @@ def plan_section(args: Any, run: Mapping[str, Any], *, model_path: str, sync: st
     }
     if getattr(args, "bcast_delta", False):  # Absent when off (plans unchanged)
         out["full_parameter"]["bcast_delta"] = True
+    if getattr(args, "local_init_fallback", False):  # Absent when off (plans unchanged)
+        out["full_parameter"]["local_init_fallback"] = True
     if recovery is not None:  # Absent when off (plans unchanged)
         if not async_rounds or getattr(args, "bcast_delta", False):
             raise ValueError("--rl-peer-recovery-store needs --full-parameter-rounds async without "

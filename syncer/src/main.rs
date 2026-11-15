@@ -199,6 +199,14 @@ struct Args {
     /// syncer's; a checkpoint without the record is refused too.
     #[arg(long, default_value_t = false)]
     require_profile_record: bool,
+    /// Local init (`--rl-sync-init-mode local`): an island whose fragment
+    /// digests disagree with learner 0's INIT gets the initial broadcast of
+    /// that INIT and the syncer warns, instead of stopping (the default).
+    #[arg(long, default_value_t = false, conflicts_with = "strict_local_init")]
+    local_init_fallback: bool,
+    /// Explicitly keep the default fatal local-init digest check.
+    #[arg(long, default_value_t = false)]
+    strict_local_init: bool,
     /// Exact local optimizer-step budget per learner (benchmark-only).
     #[arg(long)]
     learner_budget_steps: Option<u64>,
@@ -554,6 +562,7 @@ fn main() -> anyhow::Result<()> {
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
         require_profile_record: args.require_profile_record,
+        local_init_fallback: args.local_init_fallback && !args.strict_local_init,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
         max_base_lag: args.max_base_lag,
