@@ -1193,8 +1193,21 @@ impl CheckpointSnapshot {
     /// Atomically persist the snapshot: stream it into the temporary `tmp`
     /// (same directory as `path`), fsync, rename over `path`, fsync the
     /// directory.  A failure at any point leaves the previous file at `path`
-    /// intact; `tmp` may remain.
+    /// intact and removes the partial `tmp` (best effort): on a full disk a
+    /// half-written cut (up to the whole checkpoint, TBs for a large model)
+    /// would otherwise keep squatting the space the event tape, the status
+    /// file and the next checkpoint need.
     pub fn persist(self, path: &std::path::Path, tmp: &std::path::Path) -> Result<PersistedSnapshot> {
+        let result = self.persist_through(path, tmp);
+        if result.is_err() && std::fs::symlink_metadata(tmp).is_ok_and(|m| m.is_file()) {
+            if let Err(error) = std::fs::remove_file(tmp) {
+                tracing::warn!(path = %tmp.display(), %error, "cannot remove a failed checkpoint temporary");
+            }
+        }
+        result
+    }
+
+    fn persist_through(self, path: &std::path::Path, tmp: &std::path::Path) -> Result<PersistedSnapshot> {
         let persisted = {
             let file = std::fs::File::create(tmp)
                 .with_context(|| format!("create checkpoint temporary {}", tmp.display()))?;
@@ -1209,8 +1222,29 @@ impl CheckpointSnapshot {
             }
         };
         std::fs::rename(tmp, path)?;
-        sync_parent_directory(path)?;
+        sync_parent_directory(path).context(CheckpointRenamedUnsynced)?;
         Ok(persisted)
+    }
+}
+
+/// Error context marking a persist that failed only after the rename: the new
+/// checkpoint already replaced the previous one at `path`, but the directory
+/// fsync failed, so the rename may not survive a crash.
+#[derive(Clone, Copy, Debug)]
+pub struct CheckpointRenamedUnsynced;
+
+impl std::fmt::Display for CheckpointRenamedUnsynced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint renamed into place, but fsync of its directory failed")
+    }
+}
+
+/// What a failed checkpoint write left at its target path, for the log.
+pub fn failed_checkpoint_outcome(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<CheckpointRenamedUnsynced>().is_some() {
+        "background checkpoint failed after the rename; the new checkpoint replaced the previous one but its directory entry may not be durable"
+    } else {
+        "background checkpoint failed; the previous checkpoint stays in place"
     }
 }
 
@@ -1344,7 +1378,18 @@ impl GlobalState {
             .name("yeto-checkpoint".into())
             .spawn(move || {
                 let started = std::time::Instant::now();
-                snapshot.save(&target)?;
+                if let Err(error) = snapshot.save(&target) {
+                    // Surfaces again (and fails the run) from the next wait,
+                    // which can be many rounds later; say it now.
+                    tracing::error!(
+                        step,
+                        path = %target.display(),
+                        error = format!("{error:#}"),
+                        outcome = failed_checkpoint_outcome(&error),
+                        "background checkpoint failed"
+                    );
+                    return Err(error);
+                }
                 tracing::info!(
                     step,
                     path = %target.display(),
@@ -2738,6 +2783,43 @@ mod tests {
         assert_eq!(restored.global_step, 13);
         assert_eq!(restored.versions, vec![13, 12]);
         assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_is_not_reported_as_keeping_the_old_checkpoint() {
+        let before = anyhow::anyhow!("disk full").context("write ckpt.tmp");
+        assert!(failed_checkpoint_outcome(&before).contains("previous checkpoint stays in place"));
+        let after: anyhow::Error = Err::<(), _>(anyhow::anyhow!("sync checkpoint directory /x"))
+            .context(CheckpointRenamedUnsynced)
+            .unwrap_err();
+        let outcome = failed_checkpoint_outcome(&after);
+        assert!(outcome.contains("replaced the previous one"), "{outcome}");
+        assert!(!outcome.contains("stays in place"));
+        assert!(format!("{after:#}").contains("renamed into place"));
+    }
+
+    #[test]
+    fn a_failed_persist_removes_its_partial_temporary_and_keeps_the_old_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("yeto-persist-fail-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        // The target is a non-empty directory: the temporary is written in
+        // full, then the rename over it fails (as a late ENOSPC/EIO would).
+        let path = dir.join("state.ckpt");
+        std::fs::create_dir_all(path.join("occupied")).unwrap();
+        let tmp = path.with_extension("tmp");
+
+        let mut st = state_with_fingerprint(layout2(), 0x22);
+        st.init_fragment(0, vec![3.0; 4]).unwrap();
+        st.init_fragment(1, vec![-4.0; 4]).unwrap();
+        assert!(st.save_checkpoint(&path).is_err());
+        assert!(!tmp.exists(), "the partial temporary must not keep the disk space");
+        assert!(path.join("occupied").is_dir());
+
+        // A failed background write surfaces from the next wait, also without a temporary.
+        st.save_checkpoint_in_background(&path).unwrap();
+        assert!(st.wait_for_background_checkpoint().is_err());
+        assert!(!tmp.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
