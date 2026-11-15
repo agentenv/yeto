@@ -236,3 +236,51 @@ def test_dry_run_reports_the_pinned_pack_drift(launch):
     # nothing was stored by the dry runs: still only the first start's pack
     assert [p.name for p in (launch.store / "code_packs").iterdir()] == [
         f"{manifest['code_pack']['digest']}.tar"]
+
+
+def test_light_hash_drift_upgrades_automatically(launch):
+    """Opt-in --rl-light-hash: a one-line test change moves the run to the local
+    tree as a recorded automatic upgrade; the default still refuses."""
+    from yeto.codepack import AUTO_UPGRADE_REASON
+
+    _, first = launch()
+    (launch.repo / "yeto" / "a.py").write_text("A = 5\n")
+    with pytest.raises(CodePackError, match="--rl-code-pack-keep"):
+        launch()
+    args, manifest = launch("--rl-light-hash")
+    (step,) = manifest["code_pack"]["upgrades"]
+    assert step["from"] == first["code_pack_digest"] != step["to"] == manifest["code_pack_digest"]
+    assert step["reason"] == AUTO_UPGRADE_REASON
+    assert (Path(args.code_pack_tree) / "yeto" / "a.py").read_text() == "A = 5\n"
+    assert code_pack.code_pack_island_flag(args).endswith(" --rl-light-hash")
+
+
+def test_light_hash_drift_still_refused_on_semantic_change(launch):
+    from yeto import runs
+
+    args, manifest = launch()
+    manifest["semantic_sha256"] = "0" * 64  # the run started with another algorithm
+    path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
+    path.write_text(json.dumps(manifest))
+    (launch.repo / "yeto" / "a.py").write_text("A = 6\n")
+    with pytest.raises(CodePackError, match="--rl-code-pack-keep"):
+        launch("--rl-light-hash")
+
+
+def test_light_hash_release_image_bump_and_dry_run(launch):
+    _, first = launch("--rl-code-pack", "release", "--rl-image", RELEASE_IMAGE)
+    other = RELEASE_IMAGE.replace("d" * 64, "e" * 64)
+    with pytest.raises(ValueError, match="--rl-code-pack-upgrade"):
+        launch("--rl-code-pack", "release", "--rl-image", other)
+    _, moved = launch("--rl-code-pack", "release", "--rl-image", other, "--rl-light-hash")
+    (step,) = moved["code_pack"]["upgrades"]
+    assert step["from"] == "d" * 64 and step["to"] == "e" * 64 == moved["code_pack_digest"]
+
+
+def test_light_hash_dry_run_passes_drift(launch):
+    args, _ = launch()
+    (launch.repo / "yeto" / "a.py").write_text("A = 7\n")
+    with pytest.raises(ValueError, match="pins code pack"):
+        launcher.dry_run_plan(args)
+    args.rl_light_hash = True
+    assert launcher.dry_run_plan(args)

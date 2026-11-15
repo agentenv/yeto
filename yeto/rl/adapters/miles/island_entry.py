@@ -1689,6 +1689,25 @@ def _island_code_pack_digest(args) -> str | None:
     return getattr(args, "code_pack_digest", None) or getattr(args, "source_sha256", None)
 
 
+def island_contract_slots(algorithm, code_pack_digest: str | None, *,
+                          strict: bool) -> tuple[str, str | None]:
+    """(algorithm slot, code pack slot) of the island contract v3.
+
+    ``strict`` (the default; no ``--rl-light-hash``): the full semantic hash and
+    the run code pack digest, unchanged. Light (``--rl-light-hash``): the merge-relevant semantic hash
+    (``AlgorithmSpec.merge_semantic_sha256``) and no code pack slot, so a test
+    commit or a customer reward post-processor does not refuse an island at the
+    handshake. Both left-out values are printed (and the code pack stays in the
+    run manifest / driver record), so a difference stays visible."""
+    if strict:
+        return algorithm.semantic_sha256(), code_pack_digest
+    print(f"[yeto-island] light hash: contract binds the merge semantic hash "
+          f"{algorithm.merge_semantic_sha256()[:16]}; recorded, not enforced: semantic "
+          f"{algorithm.semantic_sha256()[:16]}, code pack {(code_pack_digest or '-')[:16]} "
+          "(--rl-light-hash; drop it to enforce)", flush=True)
+    return algorithm.merge_semantic_sha256(), None
+
+
 def _island_compat_group(args) -> str:
     """Decoupling 7.7a: this island's compat_group, logged once with the driver
     and CUDA versions (recorded only; they never cause a refusal)."""
@@ -2107,8 +2126,9 @@ def run_miles(
     # run code pack instead; placement capabilities
     # stay out of both.
     algorithm_spec_sha256 = ports_algorithm.sha256()
-    algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
     code_pack_digest = _island_code_pack_digest(args)
+    algorithm_semantic_sha256, contract_code_pack_digest = island_contract_slots(
+        ports_algorithm, code_pack_digest, strict=not getattr(args, "rl_light_hash", False))
     # every island (also --rl-single-island-no-sync): the remote-code prewarm reads it
     miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
     # every island (also --rl-single-island-no-sync, which publishes releases too): the
@@ -2260,7 +2280,7 @@ def run_miles(
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
-                code_pack_digest=code_pack_digest,
+                code_pack_digest=contract_code_pack_digest,
                 compat_group=_island_compat_group(args),
                 matrix_merge=matrix_merge,
                 **_island_pool_membership(args),
@@ -2284,7 +2304,7 @@ def run_miles(
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
-                code_pack_digest=code_pack_digest,
+                code_pack_digest=contract_code_pack_digest,
                 compat_group=_island_compat_group(args),
                 bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )

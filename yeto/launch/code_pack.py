@@ -47,10 +47,14 @@ def code_workdir(args) -> str | None:
 
 
 def code_pack_island_flag(args) -> str:
+    """The island's code pack flags, plus ``--rl-light-hash`` when the launch has it
+    (it decides whether the pack digest is part of the island contract)."""
+    light = " --rl-light-hash" if getattr(args, "rl_light_hash", False) else ""
     pack = getattr(args, "code_pack", None)
     if pack is None:
-        return ""
-    return f" --code-pack-digest {pack.digest}" + (" --code-pack-mode release" if is_release(args) else "")
+        return light
+    return (f" --code-pack-digest {pack.digest}" + (" --code-pack-mode release" if is_release(args) else "")
+            + light)
 
 
 def code_pack_mode(args) -> str:
@@ -103,7 +107,9 @@ def run_code_pack_problem(args, *, repo: str | Path | None = None) -> str | None
             store_base=None if release else str(getattr(args, "rl_checkpoint_store", None) or "") or None,
             upgrade_reason=getattr(args, "rl_code_pack_upgrade", None),
             release_image=str(getattr(args, "rl_image", None) or "") if release else None,
-            keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)))
+            keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)),
+            strict=not getattr(args, "rl_light_hash", False),
+            semantic_sha256=_semantic_sha256(args))
     except codepack.CodePackError as e:
         problem = str(e)
     if problem is None:
@@ -138,7 +144,8 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
                 previous=_previous_manifest(args.cluster_prefix), repo=repo or REPO_ROOT,
                 store=None, cache_root=Path(cache_root or CODE_PACK_CACHE).expanduser(),
                 semantic_sha256=_semantic_sha256(args), upgrade_reason=upgrade,
-                release_image=str(getattr(args, "rl_image", None) or ""))
+                release_image=str(getattr(args, "rl_image", None) or ""),
+                strict=not getattr(args, "rl_light_hash", False))
         except codepack.CodePackError as e:
             raise ValueError(f"--rl-code-pack release: {e}") from None
         args.code_pack = resolved.pack
@@ -155,7 +162,8 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
         previous=_previous_manifest(args.cluster_prefix), repo=repo or REPO_ROOT,
         store=store, cache_root=Path(cache_root or CODE_PACK_CACHE).expanduser(),
         semantic_sha256=_semantic_sha256(args), upgrade_reason=upgrade,
-        keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)))
+        keep_pinned=bool(getattr(args, "rl_code_pack_keep", False)),
+        strict=not getattr(args, "rl_light_hash", False))
     from ..provenance import source_tree_sha256
 
     # sky syncs a workdir minus its .gitignore matches; the pack holds no ignored

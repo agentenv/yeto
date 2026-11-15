@@ -44,6 +44,17 @@ ALGORITHM_SPEC_SCHEMA = "yeto-rl-algorithm-spec-v1"
 ALGORITHM_SPEC_SCHEMA_V2 = "yeto-rl-algorithm-spec-v2"
 # Domain of AlgorithmSpec.semantic_sha256().
 ALGORITHM_SEMANTIC_SCHEMA = "yeto-rl-algorithm-semantic-v1"
+ALGORITHM_MERGE_SEMANTIC_SCHEMA = "yeto-rl-algorithm-merge-semantic-v1"
+# Spec paths that decide what an island trains on, not how its deltas combine
+# with another island's: which samples a filter keeps, and the customer's reward
+# post-processing (path and binary declaration). Islands that differ only here
+# produce deltas of the same policy / loss and can be averaged; the island
+# contract leaves them out under --rl-light-hash (AlgorithmSpec.merge_semantic_sha256).
+MERGE_IRRELEVANT_PATHS: tuple[str, ...] = (
+    "sampling",
+    "advantage.reward_postprocess",
+    "advantage.reward_binary",
+)
 ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
 # Neutral dynamic-sampling filter names (see yeto-framework-decoupling).
 # The backend adapter binds each name to its implementation (Miles:
@@ -1421,6 +1432,25 @@ class AlgorithmSpec:
     def semantic_sha256(self) -> str:
         payload = json.dumps(
             self.semantic_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def merge_semantic_dict(self) -> dict[str, Any]:
+        """:meth:`semantic_dict` without :data:`MERGE_IRRELEVANT_PATHS`: the part of
+        the spec two islands must share for their deltas to be merged."""
+
+        spec = _strip_plugin_hashes(self.structured_dict())
+        for path in MERGE_IRRELEVANT_PATHS:
+            head, _, tail = path.partition(".")
+            if not tail:
+                spec.pop(head, None)
+            elif isinstance(spec.get(head), dict):
+                spec[head] = {k: v for k, v in spec[head].items() if k != tail}
+        return {"schema": ALGORITHM_MERGE_SEMANTIC_SCHEMA, "spec": spec}
+
+    def merge_semantic_sha256(self) -> str:
+        payload = json.dumps(
+            self.merge_semantic_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

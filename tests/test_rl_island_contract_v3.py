@@ -134,3 +134,31 @@ def test_real_syncer_refuses_a_pool_island_with_another_contract(tmp_path, synce
         syncer.kill()
         syncer.wait()
         log.close()
+
+
+def test_light_contract_ignores_code_pack_and_merge_irrelevant_fields(capsys):
+    """Opt-in --rl-light-hash: a test commit (another code pack), another
+    sampling filter or a customer reward post-processor leaves the contract
+    unchanged; a loss / correction change still changes it. Strict (default) keeps v3."""
+    from yeto.rl.adapters.miles.island_entry import island_contract_slots
+    from yeto.rl.engine.algorithm import AdvantageSpec, SamplingSpec
+
+    def contract(spec, pack, strict=False):
+        algo, code = island_contract_slots(spec, pack, strict=strict)
+        return island_contract_sha256(IDENTITY, LR, algo, code)
+
+    base = contract(SPEC, PACK_A)
+    reward = SPEC.replace(advantage=AdvantageSpec(
+        reward_postprocess=PluginRef("yeto.rl.rewards.customer_post"), reward_binary=True))
+    sampling = SPEC.replace(sampling=SamplingSpec(filter="nonzero_reward_std", over_sampling_batch_size=8))
+    assert contract(SPEC, PACK_B) == contract(reward, PACK_A) == contract(sampling, None) == base
+    assert contract(SPEC.replace(correction=CorrectionSpec(method="tis", lower=0.0, upper=3.0)),
+                    PACK_A) != base
+    assert "recorded, not enforced" in capsys.readouterr().out
+    # strict: the full v3 binding (semantic hash + pack), byte-identical to before
+    assert contract(SPEC, PACK_A, strict=True) == island_contract_sha256(
+        IDENTITY, LR, SPEC.semantic_sha256(), PACK_A)
+    assert contract(SPEC, PACK_B, strict=True) != contract(SPEC, PACK_A, strict=True)
+    assert contract(reward, PACK_A, strict=True) != contract(SPEC, PACK_A, strict=True)
+    # the persisted semantic hash (manifests, cut identity, code pack upgrades) is unchanged
+    assert SPEC.merge_semantic_sha256() != SPEC.semantic_sha256()
