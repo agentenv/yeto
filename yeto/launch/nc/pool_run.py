@@ -205,6 +205,8 @@ def check_sampler_spec(cfg: dict[str, Any], pc=None) -> dict[str, Any]:
         # no round limit, a member store under work_dir)
         checked = apply_rollout_quant(normalize_spec(strip(spec)))
         island_config(checked)  # required keys, sampling parameters
+        if not checked.get("event_tape"):  # the sampler refuses it at start (engine_sampler_entry.run)
+            raise ValueError("spec.event_tape is required")
         build_engine(checked)  # engine section, server + options dataclasses, rollout_fields (no process)
         build_reward(checked)  # reward_kind and the reward function import
     except Exception as error:  # noqa: BLE001 - every refusal is a config error here

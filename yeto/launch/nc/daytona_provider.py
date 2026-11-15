@@ -122,7 +122,8 @@ FAILED = frozenset({"error", "build_failed"})
 CONFIG_KEYS = frozenset({"kind", "image", "snapshot", "gpus", "gpu_type", "spot", "cpu", "memory_gib", "disk_gib",
                          "name_prefix", "env", "ttl_minutes", "queue_timeout_min", "create_timeout_s",
                          "delete_timeout_s", "ssh_token_minutes", "host_setup", "target", "api_url_env",
-                         "api_key_env", "price_usd_h", "create_wait_s", "api_attempts"})
+                         "api_key_env", "price_usd_h", "create_wait_s", "api_attempts",
+                         "sampler_requirements", "disk_plan"})
 RATE_LIMIT_MARKS = ("429", "rate limit", "ratelimit", "too many requests", "throttl")
 BACKOFF_CAP_S = 30.0
 LEDGER_KIND = "daytona_sandbox"
@@ -163,6 +164,7 @@ class DaytonaProvider:
                  host_setup: list[str] | None = None, target: str | None = None,
                  api_url_env: str = "DAYTONA_API_URL", api_key_env: str = "DAYTONA_API_KEY",
                  price_usd_h: float | None = None, create_wait_s: float = 5.0, api_attempts: int = 6,
+                 sampler_requirements: dict[str, Any] | None = None, disk_plan: dict[str, Any] | None = None,
                  sdk: Any = None, client: Any = None, record: Path | None = None, clock=time.time,
                  sleep=time.sleep):
         validate(image=image, snapshot=snapshot, gpus=gpus, gpu_type=gpu_type, spot=spot, name_prefix=name_prefix,
@@ -181,6 +183,9 @@ class DaytonaProvider:
         self.record = record or state_dir() / f"daytona-sandboxes-{self.prefix}.json"
         self.create_wait_s, self.api_attempts = float(create_wait_s), max(1, int(api_attempts))
         self.sleep = sleep
+        # preflight overrides for a sandbox smaller than the K3.1 node (None: the K3.1 defaults)
+        self.sampler_requirements = _requirements(sampler_requirements)
+        self.disk_plan = _disk_plan(disk_plan)
         self._lock = threading.RLock()  # the record and the ssh config (several pool threads)
         self._creating: dict[str, threading.Thread] = {}
         self._create_error: dict[str, BaseException] = {}
@@ -204,7 +209,8 @@ class DaytonaProvider:
         (:class:`yeto.launch.daytona_sampler.DaytonaSamplerRoute`)."""
         from ..daytona_sampler import DaytonaSamplerRoute, k31_disk_plan  # noqa: PLC0415
 
-        return DaytonaSamplerRoute(gpus=self.gpus, plan=k31_disk_plan())
+        plan = k31_disk_plan() if self.disk_plan is None else k31_disk_plan(**self.disk_plan)
+        return DaytonaSamplerRoute(gpus=self.gpus, plan=plan, requirements=self.sampler_requirements)
 
     # -- sdk
     @property
@@ -492,6 +498,35 @@ class DaytonaProvider:
             if out.returncode != 0:
                 raise RuntimeError(f"host setup {command[:40]!r} on {lease.ticket}: exit {out.returncode}")
         return alias
+
+
+REQUIREMENT_KEYS = frozenset({"shm_gib", "memory_gib", "gpu_arch", "store"})
+DISK_PLAN_KEYS = frozenset({"base_gib", "release_gib"})
+
+
+def _requirements(value: Any) -> dict[str, Any] | None:
+    """``sampler_requirements``: preflight overrides (``daytona_sampler.Requirements``)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - REQUIREMENT_KEYS:
+        raise ValueError(f"daytona provider: sampler_requirements takes only {sorted(REQUIREMENT_KEYS)}")
+    for key in ("shm_gib", "memory_gib"):
+        if key in value and (isinstance(value[key], bool) or not isinstance(value[key], (int, float))
+                             or value[key] <= 0):
+            raise ValueError(f"daytona provider: sampler_requirements.{key} must be a number > 0")
+    return dict(value)
+
+
+def _disk_plan(value: Any) -> dict[str, float] | None:
+    """``disk_plan``: the base checkpoint and release sizes (GiB) the disk check sizes for."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - DISK_PLAN_KEYS:
+        raise ValueError(f"daytona provider: disk_plan takes only {sorted(DISK_PLAN_KEYS)}")
+    for key, v in value.items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"daytona provider: disk_plan.{key} must be a number >= 0")
+    return {k: float(v) for k, v in value.items()}
 
 
 def _drop_alias(ticket: str) -> None:
