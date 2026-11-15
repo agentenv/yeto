@@ -305,6 +305,15 @@ class RoleStreamConfig:
     # the broadcast of learner 0's INIT. Not part of the session contract: it
     # changes which bytes travel at startup, never the version-0 values.
     local_init: bool = False
+    # Local-init fallback (--rl-sync-local-init-fallback, with the syncer's
+    # --local-init-fallback): an island whose version-0 digests differ from
+    # learner 0's INIT gets the syncer's broadcast of that INIT instead of a
+    # fatal mismatch. The island writes the broadcast version 0 into its
+    # trainer (before any optimizer step, so there is no optimizer state to
+    # carry), re-reads and re-hashes it, and trains from it with it as the
+    # anchor. False (default) keeps the mismatch fatal. Not part of the
+    # session contract: version 0 is learner 0's INIT either way.
+    local_init_fallback: bool = False
     # What the island needs from the final cut. "download": every final f32
     # fragment, applied to the trainer, then the ACK (the island holds the
     # final parameters, e.g. to evaluate them). "ack": the final version
@@ -843,10 +852,17 @@ class FullParameterRoleStream:
             await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
             return
         local: tuple[Any, ...] | None = None
+        digests: list[bytes] = []
         try:
             if self.config.local_init:
                 local, digests = await asyncio.to_thread(
                     self._local_version_zero, adapter, initial, sink)
+                if self.config.local_init_fallback:
+                    # The syncer may broadcast learner 0's version 0 instead of
+                    # confirming: the sink must take it, not refuse it as a
+                    # replay of this island's own (different) version 0.
+                    for stored in local:
+                        sink.forget(stored)
                 client.set_init_digests(
                     hashlib.sha256(adapter.layout.layout_hash.encode()).digest(), digests)
             client.start()
@@ -870,7 +886,10 @@ class FullParameterRoleStream:
             authoritative = await asyncio.to_thread(
                 self._wait_for_initial_fragments, client, adapter, init_parts, local
             )
-            adapter.verify_initial_fragments(initial, authoritative, allow_newer=self.may_rejoin)
+            adopted = self._fallback_version_zero(local, digests, authoritative)
+            adapter.verify_initial_fragments(
+                initial, authoritative, allow_newer=self.may_rejoin,
+                **({"adopt_version_zero": True} if adopted else {}))
             if local is not None:  # a rejoin's newer fragments replace version 0
                 kept = {id(stored) for stored in authoritative}
                 for stored in local:
@@ -881,6 +900,9 @@ class FullParameterRoleStream:
                 heartbeat.stop()
             client.close()
             sink.release_all()
+            if local is not None and self.config.local_init_fallback:
+                for stored in local:  # not kept by the sink (forgotten above)
+                    stored.release()
             adapter.release(initial)
             raise
         count = adapter.layout.fragments.num_fragments
@@ -895,6 +917,8 @@ class FullParameterRoleStream:
         self._rounds_at_anchor = [0] * count
         self._tokens_at_anchor = [0] * count
         self._routed_at_anchor = [RoutedTokens()] * count
+        if adopted:
+            await self._adopt_version_zero(adopted)
         newer = {stored.fragment_id: stored for stored in authoritative if stored.version > 0}
         if newer:
             # A restarted island joined a running pool: the syncer resent
@@ -912,6 +936,54 @@ class FullParameterRoleStream:
                 flush=True,
             )
         self._first_push_phase = self._start_phases(count)
+
+    def _fallback_version_zero(self, local, digests: Sequence[bytes],
+                               authoritative: Sequence[Any]) -> dict[int, Any]:
+        """Local-init fallback: the broadcast version-0 fragments whose bytes
+        differ from this island's own (its digests disagreed with learner 0's
+        INIT). Empty unless the fallback is on and the syncer broadcast
+        instead of confirming."""
+        if not self.config.local_init_fallback or local is None:
+            return {}
+        return {
+            stored.fragment_id: stored for stored in authoritative
+            if stored.version == 0
+            and stored is not local[stored.fragment_id]
+            and stored.wire_payload_hash != digests[stored.fragment_id].hex()
+        }
+
+    async def _adopt_version_zero(self, adopted: Mapping[int, Any]) -> None:
+        """Write the syncer's version 0 into the trainer in place of this
+        island's own weights, read it back and re-hash it, so the island
+        trains from version 0 and its first push carries no initial difference.
+
+        No local step ran yet, so the trainer has no optimizer state (moments,
+        step count) for the old weights: nothing to reset or carry over. The
+        anchors become the broadcast fragments (``_apply_authoritative``)."""
+        started = time.monotonic()
+        count = self.adapter.layout.fragments.num_fragments
+        await self._apply_authoritative(adopted, optimizer_proof=False)
+        probe = await self.adapter.capture(
+            self.group, policy_version=self.transport_version, local_step_generation=0)
+        try:
+            digests = await asyncio.to_thread(
+                local_init_digests, count,
+                lambda fragment_id: self.adapter.fragment_parts(
+                    probe, fragment_id, ray_module=self.ray_module)())
+        finally:
+            self.adapter.release(probe)
+        wrong = [fragment_id for fragment_id, stored in adopted.items()
+                 if digests[fragment_id].hex() != stored.wire_payload_hash]
+        if wrong:
+            raise RuntimeError(
+                f"{self.config.algorithm} {self.config.role} local-init fallback: the trainer "
+                f"does not hold the syncer's version 0 after the apply (fragment(s) {wrong})")
+        print(
+            f"[yeto-initial-cut] learner {self.config.learner_id} local-init fallback: "
+            f"{len(adopted)}/{count} fragment(s) differed from learner 0's INIT; wrote the "
+            f"syncer's version 0 into the trainer and re-verified its digests in "
+            f"{time.monotonic() - started:.1f}s; training starts from version 0",
+            file=sys.stderr, flush=True)
 
     def _first_push_extra(self, fragment_id: int) -> int:
         """Local rounds a fragment waits beyond H (no phases: none)."""
@@ -1059,7 +1131,8 @@ class FullParameterRoleStream:
         model_bytes = sum(4 * fragment.numel for fragment in fragments)
         deadline = started + initial_cut_timeout(
             self.config.wait_timeout, model_bytes, len(self.config.learner_generations),
-            local_init=local is not None)
+            # A fallback island may get the whole broadcast instead of a confirm.
+            local_init=local is not None and not self.config.local_init_fallback)
         next_report = started + INITIAL_CUT_REPORT_SECONDS
         observed: dict[int, Any] = {}
         self._report_initial_cut(client, observed, count, started, "waiting")

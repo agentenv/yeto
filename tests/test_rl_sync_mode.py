@@ -141,11 +141,17 @@ SYNCER_FLAGS = ("--quorum", "--grace-ms", "--grace-gamma", "--grace-tau", "--pip
                 "--outer-lr", "--outer-momentum", "--max-base-lag", "--learner-weight")
 
 
-def test_local_init_fallback_is_off_by_default_and_refused_until_islands_support_it():
-    _, plan = _plan(FULL)
+def test_local_init_fallback_is_off_by_default_and_reaches_syncer_and_islands():
+    args, plan = _plan(FULL)
     assert "--local-init-fallback" not in plan["role_syncers"][0]["command"]
-    with pytest.raises(ValueError, match="local-init-fallback is not yet supported"):
-        _plan((*FULL, "--rl-sync-local-init-fallback"))
+    assert "--local-init-fallback" not in json.dumps(plan)
+    args, plan = _plan((*FULL, "--rl-sync-local-init-fallback"))
+    syncer = plan["role_syncers"][0]["command"]
+    assert syncer.count(" --local-init-fallback") == 1
+    # ... and every island command carries it (the island takes version 0 into its trainer).
+    assert json.dumps(plan).count("--local-init-fallback") > syncer.count("--local-init-fallback")
+    with pytest.raises(ValueError, match="needs local init"):
+        _plan((*FULL, "--rl-sync-local-init-fallback", "--rl-sync-init-mode", "upload"))
 
 
 def test_full_parameter_defaults_to_asynchronous_rounds():

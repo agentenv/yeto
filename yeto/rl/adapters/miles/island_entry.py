@@ -1114,6 +1114,7 @@ def _dense_full_sync_config(
         overlap=bool(getattr(args, "sweep_overlap", False)),
         partial_quorum=async_rounds,
         local_init=_local_init(args, async_rounds),
+        local_init_fallback=bool(getattr(args, "local_init_fallback", False)),
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
         shape_free=shape_free_granularity(args),
         peer_recovery=peer_recovery_options(args),

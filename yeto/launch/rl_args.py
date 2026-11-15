@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
+from ..rl.engine.full_parameter_identity import local_init as local_init_rule
 from ..rl.engine.run_flags import (
     FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE,
     FULL_PARAMETER_ASYNC_MAX_PIPELINE,
@@ -1350,16 +1351,12 @@ def _prepare_rl_args(
     if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
         _refuse_full_parameter_sync_options(args)
     _check_bcast_delta(args)
-    if getattr(args, "rl_sync_local_init_fallback", False):
-        # The syncer side works, but the island side does not yet: the verl
-        # and Miles adapters refuse a version 0 that differs from their own
-        # checkpoint (verify_initial_fragments), and a broadcast version 0 is
-        # never written into the model, so the island would train from its own
-        # bits against the broadcast anchors. Refuse rather than train wrong.
+    if getattr(args, "rl_sync_local_init_fallback", False) and not local_init_rule(
+            getattr(args, "rl_sync_init_mode", "auto"), rl_full_parameter_async(args)):
         raise ValueError(
-            "--rl-sync-local-init-fallback is not yet supported: the verl and Miles "
-            "islands cannot adopt a broadcast version 0 that differs from their own "
-            "checkpoint; use the same base bits on every island or --rl-sync-init-mode upload")
+            "--rl-sync-local-init-fallback needs local init (--rl-sync-init-mode local, or auto "
+            "with --rl-sync-full-parameter-rounds async); with upload every island already "
+            "takes the syncer's broadcast of learner 0's INIT")
     learners = _synced_learners(args, specs)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:

@@ -4007,6 +4007,33 @@ fn append_tape_event(path: Option<&std::path::Path>, event: &str, fields: &str, 
     }
 }
 
+/// One warning and one `init_digest_fallback_upload` tape event per
+/// disagreeing island (`noted` keeps a redial's repeated report from
+/// writing a second one).
+fn note_local_init_fallback(
+    cfg: &Config,
+    init: &LocalInit,
+    learner: u32,
+    noted: &mut std::collections::BTreeSet<u32>,
+) {
+    if !noted.insert(learner) {
+        return;
+    }
+    let mismatched = init.mismatched_fragments(learner);
+    let message = format!(
+        "learner {learner} reported local-init digests that differ from learner 0's \
+         INIT on {mismatched} fragment(s); it gets the initial broadcast instead of \
+         INIT_CONFIRM"
+    );
+    warn!("local init: {message}");
+    append_tape_event(
+        cfg.event_tape.as_deref(),
+        "init_digest_fallback_upload",
+        &format!(",\"learner_id\":{learner},\"mismatched_fragments\":{mismatched}"),
+        &message,
+    );
+}
+
 /// The islands did not start from the same weights: record the strict
 /// failure, tell every connected island why, and stop the syncer.
 async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
@@ -4062,6 +4089,8 @@ async fn scheduler(
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
     // Local-init digests (`local_init`); created with the state.
     let mut local_init: Option<LocalInit> = None;
+    // Fallback islands already on the tape (--local-init-fallback).
+    let mut fallback_noted = std::collections::BTreeSet::new();
     let mut resumed = false;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
@@ -4334,19 +4363,7 @@ async fn scheduler(
         });
         if let Some((init, _)) = confirm {
             for learner in init.fallbacks() {
-                let mismatched = init.mismatched_fragments(learner);
-                let message = format!(
-                    "learner {learner} reported local-init digests that differ from learner 0's \
-                     INIT on {mismatched} fragment(s); it gets the initial broadcast instead of \
-                     INIT_CONFIRM"
-                );
-                warn!("local init: {message}");
-                append_tape_event(
-                    cfg.event_tape.as_deref(),
-                    "init_digest_fallback_upload",
-                    &format!(",\"learner_id\":{learner},\"mismatched_fragments\":{mismatched}"),
-                    &message,
-                );
+                note_local_init_fallback(&cfg, init, learner, &mut fallback_noted);
             }
         }
         if let Some((_, digest)) = confirm {
@@ -5352,6 +5369,18 @@ async fn scheduler(
                     {
                         cutoff_established = true;
                         break 'outer;
+                    }
+                }
+                // --local-init-fallback: an island whose digests arrive after
+                // the initial cut took the late joiner's broadcast; if its
+                // digests differ from the applied INIT, record its fallback
+                // like the islands that reported in time.
+                Event::InitDigest { member, digests } if cfg.local_init_fallback && !resumed => {
+                    if let Some(init) = local_init.as_mut() {
+                        let learner = member.learner_id;
+                        if matches!(init.on_digests(digests), Ok(Some(_))) {
+                            note_local_init_fallback(&cfg, init, learner, &mut fallback_noted);
+                        }
                     }
                 }
                 Event::Init { .. } | Event::InitDigest { .. } => {} // already initialized; ignore
