@@ -321,6 +321,9 @@ def _env_flag(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+LOSS_TOKENS_ATTR = "_yeto_loss_tokens"
+
+
 def local_loss_tokens(metrics) -> int:
     """Sum the loss-token counts of this rank's micro-batches.
 
@@ -538,8 +541,13 @@ class YetoDiLoCoCallback(_CallbackBase):
 
         def train_step(*args, **kwargs):
             iteration_before = int(self.state.iteration)
+            # A trainer whose loss metrics carry no token count (ms-swift GRPO,
+            # rl_buffer.py) counts its loss tokens in LOSS_TOKENS_ATTR instead.
+            setattr(trainer, LOSS_TOKENS_ATTR, None)
             metrics, grad_norm, update_successful = original(*args, **kwargs)
-            self._pending = (iteration_before, local_loss_tokens(metrics), bool(update_successful))
+            counted = getattr(trainer, LOSS_TOKENS_ATTR, None)
+            tokens = local_loss_tokens(metrics) if counted is None else int(counted)
+            self._pending = (iteration_before, tokens, bool(update_successful))
             return metrics, grad_norm, update_successful
 
         train_step._yeto_diloco_wrapped = True  # type: ignore[attr-defined]
