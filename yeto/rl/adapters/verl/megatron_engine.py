@@ -460,6 +460,32 @@ def validate(shape: MegatronShape) -> None:
                                  "(each picks the optimizer: on-card FusedAdam or the host HybridDeviceOptimizer)")
 
 
+def expert_parallel_advice(shape: MegatronShape) -> str | None:
+    """Why this island's EP is probably not what the operator meant (None when it is).
+
+    The SFT learner fills an unset ``--expert-parallel`` with
+    ``gpus // (tp * pp)`` (``yeto/launch/learner_task.py:291``), and the flag's own
+    help text in ``yeto/cli.py`` documents that default. The RL island does not:
+    ``rl_island_task.py:407`` forwards the flag only when it is set, and
+    ``island_entry.py:1232`` reads ``args.expert_parallel or 1``, so an unset flag
+    means EP=1 here. On a MoE model that is a silent memory decision -- every expert
+    of every layer on every trainer card -- not a parallel shape, and at 100B+ it is
+    the difference between a run and an out-of-memory in the first model build.
+
+    This is advice, not a rule: EP=1 is a legal shape (a small MoE island may want
+    it), so the island prints this line and runs. Pure function, no side effects."""
+
+    if shape.num_experts is None or int(shape.ep) != 1:
+        return None
+    room = shape.trainer_gpus // (shape.tp * shape.pp * shape.cp)
+    if room <= 1:
+        return None
+    return (f"EP=1 with {shape.num_experts} experts: every expert of every layer is replicated on "
+            f"all {shape.trainer_gpus} trainer cards. --expert-parallel is unset and the RL island "
+            f"defaults it to 1 (the SFT learner instead fills it with gpus/(tp*pp)); this island "
+            f"has room for --expert-parallel up to {room}")
+
+
 def validate_run(cfg: vconf.VerlRunConfig) -> None:
     """The run-level rules of a Megatron island on top of ``config.validate``."""
     vconf.validate(cfg)

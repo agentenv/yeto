@@ -790,3 +790,22 @@ def test_island_plan_records_and_gates_the_measurement_switches(tmp_path, monkey
     monkeypatch.setenv(me.TCFG_EXTRA_ENV, "moe_aux_loss_coeff=0.1")
     with pytest.raises(SystemExit, match="must not override moe_aux_loss_coeff"):
         _plan(tmp_path, rl_measure_no_release=True)
+
+
+def test_expert_parallel_advice_names_the_rl_islands_own_default():
+    """EP=1 on a MoE island is a memory decision, so the island says so and runs.
+
+    A dense model and an explicit EP get no line."""
+    from yeto.rl.adapters.verl.megatron_engine import MegatronShape, expert_parallel_advice
+
+    moe = MegatronShape(trainer_nodes=1, trainer_gpus_per_node=8, ep=1, num_experts=128)
+    advice = expert_parallel_advice(moe)
+    assert advice is not None
+    assert "--expert-parallel" in advice and "up to 8" in advice
+    # dense: no experts to shard
+    assert expert_parallel_advice(MegatronShape(ep=1, num_experts=None)) is None
+    # an explicit EP is a decision, not a default
+    assert expert_parallel_advice(MegatronShape(ep=8, num_experts=128)) is None
+    # no room left for EP: TP x PP already takes the island
+    assert expert_parallel_advice(MegatronShape(trainer_gpus_per_node=2, tp=2, ep=1,
+                                                num_experts=128)) is None

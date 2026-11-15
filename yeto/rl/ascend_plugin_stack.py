@@ -110,6 +110,12 @@ SET_DEVICE_ENV = "YETO_ASCEND_STACK_SET_DEVICE"
 # own set_device call bypassed and the prewarm off, so where the import happens is
 # the next thing to vary.
 INSTALL_AT_ENV = "YETO_ASCEND_STACK_INSTALL_AT"
+# The positions :func:`setup_worker` knows, and the one an unset variable means. A
+# value outside this set keeps the default position (nothing changes for an island
+# that never sets the variable) and says so on stderr, so a hand-typed bisect
+# position with a typo cannot read as a measurement of that position.
+DEFAULT_INSTALL_AT = "worker_init"
+INSTALL_AT_POSITIONS = (DEFAULT_INSTALL_AT, "init_model", "after_init_model", "never")
 VERL_MODEL_WORKERS = (
     ("verl.workers.engine_workers", "ActorRolloutRefWorker", "init_model"),
     ("verl.workers.engine_workers", "TrainingWorker", "init_model"),
@@ -640,7 +646,7 @@ def setup_worker() -> None:
     root = os.environ.get(ENV, "")
     if not root:
         return
-    when = os.environ.get(INSTALL_AT_ENV, "worker_init").strip()
+    when = os.environ.get(INSTALL_AT_ENV, DEFAULT_INSTALL_AT).strip()
     if when == "never":
         # A diagnostic position: arm nothing and import nothing, while the island still
         # passes the flag and Ray still runs this hook. It separates "what the hook
@@ -652,6 +658,14 @@ def setup_worker() -> None:
         _install_at_model_build(root, lambda line: print(line, flush=True),
                                 after=when == "after_init_model")
         return
+    if when not in INSTALL_AT_POSITIONS:
+        # A bisect position is spelled by hand, so a typo has to be loud: silently
+        # running the default would read as "that position behaves like worker_init",
+        # which is the same mistake ``_narrow`` refuses to make for a plugin name.
+        # Behaviour is unchanged: the default position still runs.
+        print(f"[yeto-ascend-stack] {INSTALL_AT_ENV}={when!r} is not one of "
+              f"{sorted(INSTALL_AT_POSITIONS)}: falling back to {DEFAULT_INSTALL_AT!r}",
+              file=sys.stderr, flush=True)
     if rank_is_known():
         _install_once(root)
         return
