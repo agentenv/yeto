@@ -33,6 +33,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Result};
 
+/// Most halvings the soft lag window may apply at its ceiling.
+pub const MAX_STALE_LAG_HALVINGS: f64 = 1000.0;
+
 /// One connection generation of one logical island.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Member {
@@ -86,6 +89,23 @@ pub struct MembershipConfig {
     /// connected to acknowledge the final cut, then finish without the
     /// missing ones. None: every island at the final cut must acknowledge.
     pub final_grace: Option<Duration>,
+    /// Continuous lag discount past `--max-base-lag` (A29, off by default).
+    /// None: a push lagging more than `--max-base-lag` is refused
+    /// (`carry_lag_exceeded`), the existing behavior.
+    pub stale_lag: Option<StaleLag>,
+}
+
+/// Soft lag window: a push whose base lags by `from < lag <= ceiling`
+/// fragment versions is admitted instead of refused, with its merge weight
+/// further multiplied by `0.5^((lag - from) / half_life)`. `from` is the
+/// syncer's `--max-base-lag`; past `ceiling` the push is refused as before.
+/// A slow island in a pool then contributes a decaying share instead of
+/// nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaleLag {
+    pub from: u64,
+    pub ceiling: u64,
+    pub half_life: f64,
 }
 
 impl Default for MembershipConfig {
@@ -98,6 +118,7 @@ impl Default for MembershipConfig {
             capacities: BTreeMap::new(),
             max_learners: None,
             final_grace: None,
+            stale_lag: None,
         }
     }
 }
@@ -133,13 +154,35 @@ impl MembershipConfig {
         self.capacities.get(&learner_id).copied().unwrap_or(1.0)
     }
 
+    /// One-line description of the soft lag window for the startup log
+    /// ("off" when unset), so a resume that drops or adds the flags shows.
+    pub fn stale_lag_summary(&self) -> String {
+        match self.stale_lag {
+            Some(s) => format!("ceiling={} half_life={} from={}", s.ceiling, s.half_life, s.from),
+            None => "off".to_string(),
+        }
+    }
+
     /// Merge-weight multiplier for a push `lag` fragment versions behind.
     /// Exactly 1.0 when γ = 1, so the default merge is bit-identical.
     pub fn carry_discount(&self, lag: u64) -> f64 {
+        let soft = match self.stale_lag {
+            Some(stale) if lag > stale.from => 0.5f64.powf((lag - stale.from) as f64 / stale.half_life),
+            _ => 1.0,
+        };
         if self.carry_gamma == 1.0 || lag == 0 {
-            return 1.0;
+            return soft;
         }
-        self.carry_gamma.powi(lag.min(i32::MAX as u64) as i32)
+        self.carry_gamma.powi(lag.min(i32::MAX as u64) as i32) * soft
+    }
+
+    /// Largest admitted base lag: the soft window's ceiling when on,
+    /// otherwise `max_base_lag` unchanged.
+    pub fn admit_lag(&self, max_base_lag: Option<u64>) -> Option<u64> {
+        match self.stale_lag {
+            Some(stale) => Some(stale.ceiling),
+            None => max_base_lag,
+        }
     }
 
     pub fn validate(&self, learners: u32, quorum: u32) -> Result<()> {
@@ -165,6 +208,31 @@ impl MembershipConfig {
         }
         if let Some(max) = self.max_learners {
             ensure!(max >= learners, "--max-learners must be >= --learners");
+        }
+        if let Some(stale) = self.stale_lag {
+            ensure!(stale.from > 0, "--stale-lag-ceiling needs a positive --max-base-lag");
+            ensure!(
+                stale.ceiling > stale.from,
+                "--stale-lag-ceiling {} must exceed --max-base-lag {}",
+                stale.ceiling,
+                stale.from
+            );
+            ensure!(
+                stale.half_life.is_finite() && stale.half_life > 0.0,
+                "--stale-lag-half-life must be > 0, got {}",
+                stale.half_life
+            );
+            // 0.5^1000 is still a normal f64; past ~1074 halvings the weight
+            // underflows to 0 and a round of only such pushes merges nothing.
+            let halvings = (stale.ceiling - stale.from) as f64 / stale.half_life;
+            ensure!(
+                halvings <= MAX_STALE_LAG_HALVINGS,
+                "--stale-lag-half-life {} is too short for --stale-lag-ceiling {} over --max-base-lag {}: \
+                 {halvings} halvings would underflow the merge weight (at most {MAX_STALE_LAG_HALVINGS})",
+                stale.half_life,
+                stale.ceiling,
+                stale.from
+            );
         }
         Ok(())
     }
@@ -643,6 +711,33 @@ mod tests {
 
     #[test]
     fn carry_discount_is_opt_in() {
+        let soft = MembershipConfig {
+            stale_lag: Some(StaleLag { from: 2, ceiling: 8, half_life: 2.0 }),
+            ..Default::default()
+        };
+        assert_eq!(soft.carry_discount(2), 1.0, "inside --max-base-lag: no extra discount");
+        assert!((soft.carry_discount(4) - 0.5).abs() < 1e-12);
+        assert!((soft.carry_discount(8) - 0.125).abs() < 1e-12);
+        assert_eq!(soft.admit_lag(Some(2)), Some(8));
+        assert_eq!(MembershipConfig::default().admit_lag(Some(2)), Some(2));
+        let both = MembershipConfig { carry_gamma: 0.5, ..soft.clone() };
+        assert!((both.carry_discount(4) - 0.0625 * 0.5).abs() < 1e-12);
+        assert!(soft.validate(2, 1).is_ok());
+        let bad = |from, ceiling, half_life| MembershipConfig {
+            stale_lag: Some(StaleLag { from, ceiling, half_life }),
+            ..Default::default()
+        };
+        assert!(bad(0, 8, 2.0).validate(2, 1).is_err(), "needs a positive --max-base-lag");
+        assert!(bad(2, 2, 2.0).validate(2, 1).is_err(), "ceiling must exceed max_base_lag");
+        assert!(bad(2, 8, 0.0).validate(2, 1).is_err());
+        assert!(bad(2, 8, f64::NAN).validate(2, 1).is_err());
+        // P1: a half-life so short the weight underflows to 0 is refused.
+        assert!(bad(1, 2, 1e-300).validate(2, 1).is_err(), "would underflow");
+        assert!(bad(2, 1002, 1.0).validate(2, 1).is_ok(), "1000 halvings: still a positive weight");
+        assert!(bad(2, 1003, 1.0).validate(2, 1).is_err());
+        assert!(bad(2, 1002, 1.0).carry_discount(1002) > 0.0);
+        assert_eq!(MembershipConfig::default().stale_lag_summary(), "off");
+        assert_eq!(soft.stale_lag_summary(), "ceiling=8 half_life=2 from=2");
         let cfg = MembershipConfig { carry_gamma: 0.5, ..Default::default() };
         assert_eq!(cfg.carry_discount(0), 1.0);
         assert_eq!(cfg.carry_discount(2), 0.25);

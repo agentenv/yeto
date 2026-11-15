@@ -4436,7 +4436,7 @@ async fn scheduler(
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
-    let mut late_carry = LateCarry::new(cfg.max_base_lag, fixed_roster);
+    let mut late_carry = LateCarry::new(cfg.membership.admit_lag(cfg.max_base_lag), fixed_roster);
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
     // --checkpoint-at-steps: evaluation copies written off the scheduler.
@@ -5195,7 +5195,13 @@ async fn scheduler(
                         .find(|round| round.t == global_step && round.p == fragment_id as usize)
                         .map(|round| round.base_version);
                     let disposition =
-                        route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
+                        route_push(
+                            &mut inflight,
+                            member,
+                            push,
+                            cfg.membership.admit_lag(cfg.max_base_lag),
+                            fixed_roster,
+                        );
                     match disposition {
                         PushDisposition::Accepted => {
                             arrival_gaps.note_accepted(global_step, fragment_id as usize, Instant::now());
@@ -6782,6 +6788,18 @@ fn prepare_round_compute(
             })?;
             tensor_scales.push(scales);
         }
+    }
+    if !weights.is_empty() && weights.iter().all(|w| *w == 0.0) {
+        // Every merge weight is zero (e.g. a carry/staleness discount
+        // underflowed): the weighted merge degenerates to an all-zero delta.
+        // Say so instead of dropping the round's contribution silently.
+        tracing::error!(
+            step = round.t,
+            fragment = round.p,
+            pushes = weights.len(),
+            "every merge weight of this round is 0; the round merges as an all-zero delta \
+             (check --carry-gamma / --stale-lag-half-life and the pushes' token counts)"
+        );
     }
     if !cfg.membership.is_static() {
         append_outer_step_record(cfg, round, &ordered_pushes, &weights);
@@ -13367,6 +13385,50 @@ mod tests {
         let mut discounted = cfg.clone();
         discounted.membership.carry_gamma = 0.5;
         assert!((carried_merge(&discounted) + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stale_lag_window_admits_a_push_past_max_base_lag_with_a_decaying_weight() {
+        // Round base 4, late push from base 0: lag 4 > --max-base-lag 2.
+        let late_round = || {
+            let mut round = test_round(vec![member(0, 1), member(1, 1)]);
+            round.p = 0;
+            round.t = 6;
+            round.base_version = 4;
+            round
+        };
+        let stale = || {
+            let mut push = test_push_for(1, 0);
+            push.fragment_id = 0;
+            push.global_step = 6;
+            push
+        };
+        let mut cfg = round_test_config(1);
+        cfg.max_base_lag = Some(2);
+        // Default: refused, in-round and as a carry.
+        let limit = cfg.membership.admit_lag(cfg.max_base_lag);
+        let mut round = late_round();
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), member(1, 1), stale(), limit, false),
+            PushDisposition::StaleBase
+        );
+        assert_eq!(attach_carry(&mut late_round(), member(1, 1), stale(), limit.unwrap()), Err(PushDisposition::StaleBase));
+        // Soft window up to 8, half-life 2: admitted, weight x 0.5^((4-2)/2).
+        cfg.membership.stale_lag = Some(crate::membership::StaleLag { from: 2, ceiling: 8, half_life: 2.0 });
+        let limit = cfg.membership.admit_lag(cfg.max_base_lag);
+        let mut round = late_round();
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), member(1, 1), stale(), limit, false),
+            PushDisposition::Accepted
+        );
+        assert_eq!(attach_carry(&mut late_round(), member(1, 1), stale(), limit.unwrap()), Ok(4));
+        assert!((cfg.membership.carry_discount(4) - 0.5).abs() < 1e-12);
+        // Past the ceiling it is refused again.
+        let mut far = late_round();
+        far.base_version = 11;
+        let mut push = stale();
+        push.base_version = 2;
+        assert_eq!(attach_carry(&mut far, member(1, 1), push, limit.unwrap()), Err(PushDisposition::StaleBase));
     }
 
     #[test]

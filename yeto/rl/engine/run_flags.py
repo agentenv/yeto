@@ -925,6 +925,16 @@ _SCHEDULING = (
     cli_flag("--rl-sync-carry-gamma", type=float, default=None, metavar="F",
              help="membership: weight discount F^lag of a delta whose base lags the round "
              "(default 1: no discount); the largest lag is --rl-sync-max-base-lag"),
+    cli_flag("--rl-sync-stale-lag-ceiling", type=int, default=None, metavar="N",
+             help="membership: soft lag window (off by default). A delta whose base lags "
+             "the round by more than --rl-sync-max-base-lag but at most N rounds is merged "
+             "with its weight further multiplied by 0.5^((lag - max_base_lag) / "
+             "--rl-sync-stale-lag-half-life) instead of refused (carry_lag_exceeded), so a "
+             "slow island keeps a decaying share. Needs --rl-sync-stale-lag-half-life and "
+             "N > --rl-sync-max-base-lag > 0"),
+    cli_flag("--rl-sync-stale-lag-half-life", type=float, default=None, metavar="R",
+             help="membership: half-life in rounds of the soft lag window's weight "
+             "discount (with --rl-sync-stale-lag-ceiling)"),
     shared_flag("--rl-sync-island-lease-s", type=float, default=None, metavar="S",
                 help="membership: island lease on the syncer (--island-lease-s); an island "
                 "silent this long is removed and re-JOINs; islands heartbeat every S/3. "

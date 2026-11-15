@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import os
 import queue
 import secrets
 import socket
@@ -92,6 +93,25 @@ def encode_subscribe_incarnation(incarnation: int) -> bytes:
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
+CONNECT_TIMEOUT = 900.0
+# A29 (D4), opt-in: the lowest syncer link bandwidth to plan for, in bytes/s.
+# Set, a SyncerClient whose connect/finalization timeout was not passed
+# explicitly waits max(default, 2 x f32 layout bytes / bandwidth) instead of
+# the fixed default, so a 100B+ model's final cut (or a syncer resuming a TB
+# checkpoint) does not outlast a 900 s timer. Unset (the default) or a 0.6B
+# to K3.1 run below the floor: exactly the fixed defaults above.
+SYNC_TIMEOUT_BANDWIDTH_ENV = "YETO_SYNC_TIMEOUT_MIN_BYTES_PER_S"
+
+
+def scaled_sync_timeout(default: float, f32_bytes: int) -> float:
+    """``default`` unless SYNC_TIMEOUT_BANDWIDTH_ENV is set; never below it."""
+    raw = os.environ.get(SYNC_TIMEOUT_BANDWIDTH_ENV, "").strip()
+    if not raw:
+        return default
+    bandwidth = float(raw)
+    if not bandwidth > 0.0 or bandwidth == float("inf"):
+        raise ValueError(f"{SYNC_TIMEOUT_BANDWIDTH_ENV} must be a positive bytes/s, got {raw!r}")
+    return max(default, 2.0 * f32_bytes / bandwidth)
 
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
@@ -1277,9 +1297,9 @@ class SyncerClient:
         layout: FragmentLayout,
         dtype: int = DTYPE_BF16,
         num_streams: int = 4,
-        connect_timeout: float = 900.0,
+        connect_timeout: float | None = None,
         max_reconnects: int | None = None,
-        finalization_timeout: float = FINALIZATION_TIMEOUT,
+        finalization_timeout: float | None = None,
         session_contract_hash: bytes | None = None,
         syncer_profile_hash: bytes | None = None,
         hmac_key: bytes | None = None,
@@ -1413,6 +1433,13 @@ class SyncerClient:
         self._recovery_events: queue.Queue = queue.Queue()
         self._snapshot_requests: queue.Queue = queue.Queue()
         self.lease_expiries = 0
+        # None: the fixed defaults, scaled only when opted in (see
+        # scaled_sync_timeout); an explicit value is always kept.
+        layout_f32_bytes = 4 * sum(int(fragment.numel) for fragment in layout.fragments)
+        if connect_timeout is None:
+            connect_timeout = scaled_sync_timeout(CONNECT_TIMEOUT, layout_f32_bytes)
+        if finalization_timeout is None:
+            finalization_timeout = scaled_sync_timeout(FINALIZATION_TIMEOUT, layout_f32_bytes)
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
