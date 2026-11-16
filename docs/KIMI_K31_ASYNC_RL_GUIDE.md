@@ -882,9 +882,10 @@ Provider support:
 | Provider (`provider.kind`) | Island | Scale / status | Eviction refill | Data path | Verified on real machines |
 |---|---|---|---|---|---|
 | `nc` (default) | 8 x MI355X node, Docker over SSH | yes | yes (lease end and eviction) | `r2` | yes |
-| `daytona` | GPU sandbox, process over SSH | yes | yes (spot deletion) | `r2` | no (simulated end to end) |
+| `daytona` | GPU sandbox, SDK transport (opt-in) or process over SSH | yes | yes (spot deletion) | `r2` | yes (1 x MI355X, Qwen3-0.6B, 2026-11-15) |
 | `sky` | One-node SkyPilot cluster, Docker over SSH, offer rotation | yes | yes (preemption, stuck start) | `r2`; `syncer` with a syncer sampler spec | no (CPU tests with a fake sky) |
 | `modal` | Modal GPU function call, no SSH | yes | yes (call exited or failed) | `r2` | no (CPU tests with a fake client) |
+| `ssh` | The operator's own nodes from an SSH node inventory, container or venv | yes | restart on the same node (slot `i` is always `provider.nodes[i]`; no machine is ordered, so lost capacity is not replaced by another host) | `r2` | yes (Ascend 910B, podman) |
 
 ### 5.2 Automatic node replacement
 

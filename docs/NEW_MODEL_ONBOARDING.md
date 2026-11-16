@@ -23,11 +23,13 @@ nothing is ordered until step 6. The Kimi-K3.1 specifics are in
 | AMD MI3xx | `miles` | `vllm-server` (ROCm image), `"platform": "rocm"` |
 | Ascend 910x | `--rl-backend verl` only: Miles has no NPU path (the launch warns) | `vllm-server` with `"platform": "npu"` (vllm-ascend) |
 
-There is no sampler pool provider for your own SSH or Ascend nodes
-(`samplers[].provider` is `nc`, `modal`, `daytona`, `sky` or a provider section
-with a `factory`). Start Ascend samplers on the nodes with
-`python -m yeto.rl.engine.engine_sampler --spec <spec.json>`, or write a
-provider factory.
+For your own SSH or Ascend nodes, use `provider.kind: ssh`
+(`yeto/launch/ssh_sampler_pool.py`): the nodes of an SSH node inventory are the
+pool's slots, nothing is ordered or billed, and each start preflights the cards
+and the workdir before it runs. `samplers[].provider` is therefore `nc`,
+`modal`, `daytona`, `sky`, `ssh`, or a provider section with a `factory`.
+Starting the samplers by hand with
+`python -m yeto.rl.engine.engine_sampler --spec <spec.json>` still works.
 
 ## 3. Model weights
 
