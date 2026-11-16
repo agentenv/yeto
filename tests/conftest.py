@@ -296,9 +296,17 @@ def ppu_plan(tmp_path_factory):
 from syncer_reaper import (  # noqa: E402,F401
     pytest_fixture_setup,
     pytest_runtest_teardown,
-    pytest_sessionfinish,
     pytest_sessionstart,
 )
+from syncer_reaper import pytest_sessionfinish as _reaper_sessionfinish  # noqa: E402
+
+# The process leaves before libarrow's static destructors abort it (tests/hard_exit.py).
+from hard_exit import note_exitstatus, pytest_unconfigure  # noqa: E402,F401
+
+
+def pytest_sessionfinish(session, exitstatus):
+    note_exitstatus(exitstatus)
+    _reaper_sessionfinish(session, exitstatus)
 
 
 # Most launch tests build RL argv without --inner-lr; yeto refuses that
