@@ -29,7 +29,7 @@ from yeto.rl.adapters.sampler_engines.fake import FakeEngine
 from yeto.rl.compaction import RESUME_TEMPLATE, SUMMARY_PROMPT, CompactionConfig
 from yeto.rl.harness.chat_templates import TEMPLATES, ChatTemplate, check_alignment, parse_kimi_k3
 from yeto.rl.harness.gateway.proxy import RecordsProxy
-from yeto.rl.harness.gateway.records import RecordsMismatch
+from yeto.rl.harness.gateway.records import ContextFull, RecordsMismatch
 
 SIGNED = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 512}
 TOOLS = [{"type": "function", "function": {"name": "bash", "description": "Run a shell command",
@@ -148,8 +148,18 @@ def run_agent(template: ChatTemplate, cfg: CompactionConfig | None, *, return_st
     triggers = []
     for turn in range(STEPS + 1):
         before = proxy.backend.counters.get("t", {}).get("compactions", 0)
-        response = asyncio.run(proxy.handle("chat", {"model": "policy", "messages": copy.deepcopy(messages),
-                                                     "tools": TOOLS}, trajectory_id="t"))
+        try:
+            response = asyncio.run(proxy.handle("chat", {"model": "policy", "messages": copy.deepcopy(messages),
+                                                         "tools": TOOLS}, trajectory_id="t"))
+        except ContextFull:
+            # the compactions are used up and the last segment reached context_budget: the
+            # trajectory ends (truncated) at its last sampled turn; the unanswered tool outputs
+            # never entered the stream
+            assert cfg is not None and len(triggers) == cfg.max_compactions
+            assert proxy.backend.counters["t"]["context_budget_full"] == 1
+            while messages[-1]["role"] != "assistant":
+                messages.pop()
+            return Run(proxy, engine, messages, triggers, model)
         if proxy.backend.counters["t"].get("compactions", 0) > before:
             triggers.append(copy.deepcopy(messages))
         message = response["choices"][0]["message"]
