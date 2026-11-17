@@ -19,7 +19,7 @@ from yeto.dashboard.export import export_view, render_page
 from yeto.dashboard.reducer import Reducer
 from yeto.rl.engine import agentic_round
 from yeto.rl.engine.agentic_round import DRAIN_EVENT, LOST_DRAIN
-from yeto.rl.engine.engine_sampler import ROUND_EVENT
+from yeto.rl.engine.engine_sampler import ROUND_EVENT, PromptItem
 from yeto.rl.engine.timeline import (COMPACTION_COUNT_KEYS, CompactionTally, compaction_log_line,
                                      compaction_stats, drained_fields, live_segments, segment_bucket,
                                      trial_segments)
@@ -460,3 +460,59 @@ def test_driver_counts_segments_of_one_trial_once():
     # per trial: second moment ((0.25 + 0.25) * 2 + 1 * 2) / 4 = 0.75, variance 0.75 - 0.75 ** 2
     assert mean == 0.75 and std == pytest.approx(0.1875 ** 0.5, abs=1e-12)
     assert _main_pooled_reward(batch)[0] == pytest.approx(2 / 3)  # main weights segments
+
+
+# ---------------------------------------------------------------- the segment writer's FinishedSample (C1)
+ITEM = PromptItem("p0", "task", metadata={"agent_task": {"instance_id": "fix-git", "agent_name": "codex"}})
+
+
+def _compacted_finished(parts_spec, *, session="t-0", reward=1.0):
+    """A compacted trial as ``finish_sample`` returns it: one ``CompactionSegment`` per
+    (trained tokens, summary_ok, summary_tokens, retry_replays)."""
+    from yeto.rl.agentic import AgentTask, AgentTrajectory, Outcome, TrialVerdict
+    from yeto.rl.agentic.finish import CompactionSegment, FinishedSample
+    from yeto.rl.agentic.types import TokenSegments
+
+    task = AgentTask(task_id="fix-git", agent="codex", provider="docker", trajectory_id=session)
+    trajectory = AgentTrajectory(task=task, outcome=Outcome.OK, reward=reward, reason="verified",
+                                 verdict=TrialVerdict(rewards={"reward": reward}))
+    parts = tuple(CompactionSegment(turns=(), summary_ok=ok, context_budget=4096, summary_tokens=summary,
+                                    retry_replays=replays,
+                                    tokens=TokenSegments(prompt_ids=(1, 2), response_ids=tuple(range(n)),
+                                                         response_mask=(1,) * n, response_logprobs=(0.0,) * n))
+                  for n, ok, summary, replays in parts_spec)
+    return FinishedSample(trajectory=trajectory, segments=parts[-1].tokens, turns=(), parts=parts,
+                          compacting=True)
+
+
+def test_trial_segments_counts_the_parts_of_a_compacted_trial():
+    # R1 F4: a FinishedSample has no num_segments and its ``segments`` is the last part's
+    # TokenSegments, so the count must come from ``parts`` (it read 1 before)
+    from yeto.rl.agentic.finish import FinishedSample
+
+    finished = _compacted_finished([(4, True, 2, None), (4, True, 3, None), (3, None, 0, None)])
+    assert trial_segments(finished) == 3
+    whole = FinishedSample(trajectory=finished.trajectory, segments=finished.segments, turns=())
+    assert trial_segments(whole) == 1  # one stream: parts empty
+    tally = CompactionTally()
+    tally.drop([finished, whole], "below_min_samples")
+    tally.lose(finished, "served_by_other_version")
+    by = tally.summary()["by_segments"]
+    assert by["3"]["dropped"] == {"below_min_samples": 1} and by["3"]["lost"] == {"served_by_other_version": 1}
+    assert by["1"]["dropped"] == {"below_min_samples": 1}
+
+
+def test_the_segment_writers_samples_give_summary_tokens_and_retry_replays():
+    # R1 F3 closed by C1: agentic_samples writes summary_tokens / retry_replays per segment
+    finished = _compacted_finished([(4, True, 2, 1), (5, False, 3, 1), (3, None, 0, 1)])
+    samples = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0)
+    assert [s["metadata"]["compaction"]["summary_tokens"] for s in samples] == [2, 3, 0]
+    s = compaction_stats(samples)
+    assert (s["trials"], s["samples"], s["compacted_trials"], s["compactions"]) == (1, 3, 1, 2)
+    assert (s["trainable_tokens"], s["summary_tokens"]) == (12, 5)
+    assert s["summary_token_frac"] == pytest.approx(5 / 12, abs=1e-4)
+    assert (s["retry_replays"], s["retry_replay_trials"]) == (1, 1)  # one trial's count, not one per segment
+    assert (s["summaries"], s["summary_ok_frac"]) == (2, 0.5)
+    off = _compacted_finished([(4, True, 2, None), (3, None, 0, None)], session="t-1")  # replay off
+    s = compaction_stats(agentic_round.agentic_samples(ITEM, off, version=0, provenance={}, group_index=0, index=1))
+    assert s["retry_replays"] is None and s["summary_tokens"] == 2
