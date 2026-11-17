@@ -485,6 +485,25 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
             raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
 
 
+def stale_segment_buckets(report: Any, pruned: Sequence[Sequence[dict[str, Any]]] = (), *,
+                          compacted: bool = False) -> dict[str, int]:
+    """The round's stale trials by segment count (``rl_buffer_stale_skipped.stale_by_segments``):
+    the take's (``TakeReport.stale_by_segments``) plus the groups of pruned merged
+    releases (counted in the round's stale groups too). {} unless compaction shows in the
+    round (a trained or a stale group held segments): the default record is unchanged."""
+    from yeto.rl.engine.timeline import segment_bucket  # noqa: PLC0415
+
+    counts = dict(getattr(report, "stale_by_segments", None) or {})
+    for group in pruned:
+        compacted = compacted or has_siblings(group)
+        for trial in trial_rows(group):
+            bucket = segment_bucket(len(trial))
+            counts[bucket] = counts.get(bucket, 0) + 1
+    if not (compacted or getattr(report, "stale_compacted", False)):
+        return {}
+    return {bucket: int(n) for bucket, n in sorted(counts.items()) if n}
+
+
 def compaction_batch_line(rollout_id: int, groups: Sequence[Sequence[dict[str, Any]]]) -> str:
     """The trainer log line of a round with compacted trials: its trials (rollouts), its
     samples, and how many trials have 1, 2, ... samples (every sample of a trial is in
@@ -707,6 +726,12 @@ class TakeReport:
     # payload holds an older version, below the floor (the record and the payload
     # disagree; the tokens trained are the payload's, so the payload decides)
     stale_payload_groups: int = 0
+    # the trials of ``stale_groups`` by segment count (``timeline.segment_bucket``:
+    # "1", "2", "3", "4+"), and whether any of those groups held compaction segments.
+    # A group the age gate passed over unread (its index record was too old) is
+    # counted as ``group_size`` trials under "unknown" (its payload is never read)
+    stale_by_segments: dict[str, int] = field(default_factory=dict)
+    stale_compacted: bool = False
     # groups of a store-dispenser task that an earlier group of the buffer already
     # holds (the task was given out and written twice): consumed, never trained; one
     # record each in ``duplicate_tasks`` ({"slot", "position", "sample_id",
@@ -1445,7 +1470,25 @@ class BatchReader:
         if oldest is None or oldest >= self._floor:
             return False
         self._stale_payloads.append(_dispense_position(self._entry_of.get(int(position))))
+        self._note_stale(group)
         return True
+
+    def _note_stale(self, group: Sequence[Mapping[str, Any]] | None) -> None:
+        """Count a stale group's trials by segment count (``TakeReport.stale_by_segments``);
+        None: a group passed over unread (``group_size`` trials, "unknown")."""
+        from yeto.rl.engine.timeline import segment_bucket  # noqa: PLC0415
+
+        counts = getattr(self, "_stale_segments", None)
+        if counts is None:
+            counts = self._stale_segments = {}
+        if group is None:
+            counts["unknown"] = counts.get("unknown", 0) + int(self.group_size or 1)
+            return
+        if has_siblings(group):
+            self._stale_compacted = True
+        for trial in trial_rows(group):
+            bucket = segment_bucket(len(trial))
+            counts[bucket] = counts.get(bucket, 0) + 1
 
     def _read(self, ref: str, *, inline: bool = False) -> Future:
         if self.budget.limit is None:  # no budget: as before it
@@ -1582,6 +1625,7 @@ class BatchReader:
             raise ValueError("groups must be positive")
         carried_in, deferred_in = self._carry, list(self._deferred)
         self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
+        self._stale_segments, self._stale_compacted = {}, False
         self._damaged_run = self._decoded_payloads = 0
         self._duplicates = []
         try:
@@ -1633,6 +1677,7 @@ class BatchReader:
             start = min(start, position)
             if floor is not None and version < floor:  # aged out while it waited: stale
                 stale += 1
+                self._note_stale(group)
                 if dispensed is not None:
                     stale_positions.append(dispensed)
             else:
@@ -1686,6 +1731,7 @@ class BatchReader:
                     continue
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
+                    self._note_stale(None)
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
@@ -1842,6 +1888,8 @@ class BatchReader:
                                nonfinite_logprob_groups=nonfinite_lp,
                                damaged_payload_groups=len(damaged), damaged_payloads=damaged,
                                stale_payload_groups=len(self._stale_payloads),
+                               stale_by_segments=dict(sorted(getattr(self, "_stale_segments", {}).items())),
+                               stale_compacted=bool(getattr(self, "_stale_compacted", False)),
                                duplicate_task_groups=len(duplicates),
                                duplicate_task_unverified_groups=sum(
                                    1 for d in duplicates if not d["first_trained_here"]),
@@ -1890,6 +1938,7 @@ class BatchReader:
             end = self._cursor()
             if floor is not None and item.entry.behavior_version < floor:
                 skipped["stale"] += 1  # too old: consumed unread, as in the main selection
+                self._note_stale(None)
                 dispensed = _dispense_position(item.entry)
                 if dispensed is not None:
                     skipped["stale_positions"].append(dispensed)
