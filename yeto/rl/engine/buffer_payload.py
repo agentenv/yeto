@@ -13,7 +13,9 @@ C order) with their dtype and shape. An integer array is stored in the
 narrowest integer dtype that holds all its values, and ``cast`` names the
 dtype the reader returns (the array's original one), so a reader gets the same
 values in the same dtype. A payload written before ``cast`` existed decodes as
-before.
+before. That is format v1, the default; format v2 (opt-in,
+:data:`PAYLOAD_CODEC_ENV`) stores the arrays as binary blobs after the JSON
+record, raw or zstd-compressed (see the comment above :data:`PAYLOAD_SCHEMA_V2`).
 
 Rollout fields an engine sampler writes per sample (the trainer side reads
 them through :func:`rollout_routed_experts`, :func:`rollout_top_logprobs`):
@@ -222,21 +224,32 @@ def _with_field_meta(sample: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _encode_value(value: Any) -> Any:
+def _array_record(value: Any) -> tuple[dict[str, Any], Any] | None:
+    """``(record without its data, stored array)`` of an array field (the stored
+    array in the narrowest integer dtype, ``cast`` naming the original), None for a
+    value that is not an array."""
     extra: dict[str, Any] = {}
     if isinstance(value, _Field):
         value, extra = value.array, value.meta
     tolist = getattr(value, "tolist", None)
-    if callable(tolist) and hasattr(value, "dtype") and hasattr(value, "shape"):
-        import numpy
+    if not (callable(tolist) and hasattr(value, "dtype") and hasattr(value, "shape")):
+        return None
+    import numpy
 
-        array = numpy.ascontiguousarray(value)
-        record: dict[str, Any] = {"dtype": str(array.dtype), "shape": list(array.shape), **extra}
-        if array.dtype.kind in "iu":
-            stored = _narrowest_int(array)
-            if stored != array.dtype:
-                record = {"dtype": str(stored), _CAST: str(array.dtype), "shape": list(array.shape), **extra}
-                array = array.astype(stored)
+    array = numpy.ascontiguousarray(value)
+    record: dict[str, Any] = {"dtype": str(array.dtype), "shape": list(array.shape), **extra}
+    if array.dtype.kind in "iu":
+        stored = _narrowest_int(array)
+        if stored != array.dtype:
+            record = {"dtype": str(stored), _CAST: str(array.dtype), "shape": list(array.shape), **extra}
+            array = array.astype(stored)
+    return record, array
+
+
+def _encode_value(value: Any) -> Any:
+    found = _array_record(value)
+    if found is not None:
+        record, array = found
         return {_NDARRAY: base64.b64encode(array.tobytes()).decode("ascii"), **record}
     if hasattr(value, "value") and type(value).__module__ != "builtins":  # enum
         return value.value
@@ -418,25 +431,174 @@ def _engine_weight_version_call(sample: Mapping[str, Any]) -> dict[str, Any] | N
             "prefill_spans": [], "output_start": start, "prompt_tokens": start}
 
 
-def encode_group(samples: Sequence[Mapping[str, Any]]) -> bytes:
-    """One payload: the group's samples as ``Sample.to_dict()`` mappings."""
-    record = {"schema": PAYLOAD_SCHEMA, "samples": [_with_field_meta(s) for s in samples]}
-    return json.dumps(record, default=_encode_value, sort_keys=True, allow_nan=True).encode()
+# Payload format v2 (opt-in, :data:`PAYLOAD_CODEC_ENV`): the same JSON record, but
+# every array is a blob after it instead of base64 inside it. A segmented
+# (compacted) trial carries R3 and top-K per segment, so a group of long trials is
+# tens of GB in v1; v2 drops the base64 third and, with ``zstd``, compresses each
+# array by byte planes (K3.1 payloads measured: R3 1.52x, top-K ids 1.93x,
+# top-K log-probs 4.36x). Layout: :data:`_V2_MAGIC`, the header length (uint64
+# little-endian), the header JSON (``schema`` :data:`PAYLOAD_SCHEMA_V2`), the
+# blobs. An array record holds ``__blob__: [offset, nbytes]`` (into the blobs),
+# ``codec`` (``raw`` or ``zstd``) and, like v1, ``dtype`` / ``shape`` / ``cast``
+# and the field extras. A reader of this module reads v1 and v2; a reader before
+# v2 refuses a v2 payload as damaged (``payload does not decode``), so the
+# trainers must run this code before any sampler sets the codec.
+PAYLOAD_SCHEMA_V2 = "yeto.rl.sample-buffer-payload/v2"
+PAYLOAD_CODEC_ENV = "YETO_SAMPLE_BUFFER_PAYLOAD_CODEC"  # json (default, v1) | raw | zstd (v2)
+PAYLOAD_CODECS = ("json", "raw", "zstd")
+_V2_MAGIC = b"YETO-SBP2\n"
+_V2_HEADER_LEN = 8
+_BLOB = "__blob__"
+_ZSTD_LEVEL = 1  # K3.1 R3 per sample: the ratio of level 3 (1.52x), compressed faster
+
+
+def payload_codec(environ: Mapping[str, str] | None = None) -> str:
+    """The payload codec :data:`PAYLOAD_CODEC_ENV` names (unset: ``json``, format v1)."""
+    import os
+
+    raw = str((os.environ if environ is None else environ).get(PAYLOAD_CODEC_ENV) or "json").strip().lower()
+    if raw not in PAYLOAD_CODECS:
+        raise ValueError(f"{PAYLOAD_CODEC_ENV}={raw!r}: expected one of {', '.join(PAYLOAD_CODECS)}")
+    return raw
+
+
+def _zstd() -> tuple[Callable[[bytes, int], bytes], Callable[[bytes], bytes]]:
+    from .release_delta import ReleaseDeltaError, _zstd as zstd_pair  # noqa: PLC0415 - only v2 needs it
+
+    try:
+        return zstd_pair()
+    except ReleaseDeltaError as error:
+        raise SampleBufferRolloutError(f"payload codec zstd needs zstd: Python >= 3.14 or "
+                                       f"`pip install zstandard` ({PAYLOAD_CODEC_ENV})") from error
+
+
+def _byte_planes(array: Any) -> Any:
+    """The bytes of ``array`` grouped by byte position (all first bytes, then all
+    second bytes, ...; a uint16 expert id < 1024 has a high byte of 0..3), as a
+    contiguous ``uint8`` array. One plane at a time: about 3x faster than a
+    transposed copy."""
+    import numpy
+
+    flat = array.reshape(-1).view(numpy.uint8).reshape(-1, array.itemsize)
+    planes = numpy.empty((array.itemsize, flat.shape[0]), dtype=numpy.uint8)
+    for byte in range(array.itemsize):
+        planes[byte] = flat[:, byte]
+    return planes
+
+
+def _from_byte_planes(data: bytes, dtype: Any, count: int) -> Any:
+    """The flat ``dtype`` array whose :func:`_byte_planes` are ``data``."""
+    import numpy
+
+    dtype = numpy.dtype(dtype)
+    planes = numpy.frombuffer(data, dtype=numpy.uint8).reshape(dtype.itemsize, count)
+    out = numpy.empty(count, dtype=dtype)
+    flat = out.view(numpy.uint8).reshape(count, dtype.itemsize)
+    for byte in range(dtype.itemsize):
+        flat[:, byte] = planes[byte]
+    return out
+
+
+class _BlobEncoder:
+    """``json.dumps`` ``default`` for v2: an array becomes a record naming its blob."""
+
+    def __init__(self, codec: str) -> None:
+        self.codec = codec
+        self.blobs: list[bytes] = []
+        self.size = 0
+        self._compress = _zstd()[0] if codec == "zstd" else None
+
+    def __call__(self, value: Any) -> Any:
+        found = _array_record(value)
+        if found is None:
+            return _encode_value(value)
+        record, array = found
+        blob = array.tobytes() if self._compress is None else self._compress(_byte_planes(array), _ZSTD_LEVEL)
+        record.update({_BLOB: [self.size, len(blob)], "codec": self.codec})
+        self.blobs.append(blob)
+        self.size += len(blob)
+        return record
+
+
+def encode_group(samples: Sequence[Mapping[str, Any]], *, codec: str | None = None) -> bytes:
+    """One payload: the group's samples as ``Sample.to_dict()`` mappings.
+    ``codec``: ``json`` (format v1, the bytes every earlier writer wrote), ``raw``
+    or ``zstd`` (format v2, the comment above); None reads :data:`PAYLOAD_CODEC_ENV`."""
+    codec = payload_codec() if codec is None else payload_codec({PAYLOAD_CODEC_ENV: codec})
+    if codec == "json":
+        record = {"schema": PAYLOAD_SCHEMA, "samples": [_with_field_meta(s) for s in samples]}
+        return json.dumps(record, default=_encode_value, sort_keys=True, allow_nan=True).encode()
+    encoder = _BlobEncoder(codec)
+    record = {"schema": PAYLOAD_SCHEMA_V2, "samples": [_with_field_meta(s) for s in samples]}
+    header = json.dumps(record, default=encoder, sort_keys=True, allow_nan=True).encode()
+    return b"".join([_V2_MAGIC, len(header).to_bytes(_V2_HEADER_LEN, "little"), header, *encoder.blobs])
+
+
+def _v2_record(data: bytes) -> Any:
+    """The header record of a v2 payload, its arrays decoded from the blobs."""
+    import numpy
+
+    view = memoryview(data)
+    start = len(_V2_MAGIC) + _V2_HEADER_LEN
+    if len(view) < start:
+        raise ValueError("v2 payload is cut short before its header")
+    header_end = start + int.from_bytes(view[len(_V2_MAGIC):start], "little")
+    if header_end > len(view):
+        raise ValueError("v2 payload is cut short inside its header")
+    blobs = view[header_end:]
+    decompress: list[Callable[[bytes], bytes]] = []
+
+    def hook(obj: dict[str, Any]) -> Any:
+        if _BLOB not in obj:
+            return obj
+        offset, nbytes = (int(x) for x in obj[_BLOB])
+        if offset < 0 or nbytes < 0 or offset + nbytes > len(blobs):
+            raise ValueError(f"array blob [{offset}, {nbytes}] is outside the payload's {len(blobs)} blob bytes")
+        blob, dtype, shape = blobs[offset:offset + nbytes], numpy.dtype(obj["dtype"]), obj["shape"]
+        if any(int(n) < 0 for n in shape):
+            raise ValueError(f"array shape {shape} has a negative dimension")
+        count = math.prod(int(n) for n in shape)
+        codec = obj.get("codec")
+        if codec == "raw":
+            if nbytes != count * dtype.itemsize:
+                raise ValueError(f"raw blob holds {nbytes} B, the array {count * dtype.itemsize} B")
+            array = numpy.frombuffer(blob, dtype=dtype, count=count)
+        elif codec == "zstd":
+            if not decompress:
+                decompress.append(_zstd()[1])
+            try:
+                raw = decompress[0](blob)
+            except MemoryError:
+                raise
+            except Exception as error:  # noqa: BLE001 - the zstd module's own error class
+                raise ValueError(f"zstd blob does not decompress: {type(error).__name__}: {error}") from error
+            if len(raw) != count * dtype.itemsize:
+                raise ValueError(f"zstd blob holds {len(raw)} B, the array {count * dtype.itemsize} B")
+            array = _from_byte_planes(raw, dtype, count)
+        else:
+            raise ValueError(f"array codec {codec!r} is unknown")
+        array = array.reshape(shape)
+        cast = obj.get(_CAST)
+        return array.astype(cast) if cast else array.copy() if codec == "raw" else array
+
+    return json.loads(bytes(view[start:header_end]), object_hook=hook)
 
 
 def decode_group(data: bytes) -> list[dict[str, Any]]:
-    """The samples of one payload. Bytes that are not a payload (not JSON, cut
-    short, not an object, another schema, ``samples`` not a list of objects) raise
-    :class:`DamagedPayload`: the fault is in the stored bytes, so reading them
-    again gives the same answer."""
+    """The samples of one payload (format v1 or v2). Bytes that are not a payload
+    (not JSON, cut short, not an object, another schema, ``samples`` not a list of
+    objects) raise :class:`DamagedPayload`: the fault is in the stored bytes, so
+    reading them again gives the same answer."""
+    v2 = bytes(data[:len(_V2_MAGIC)]) == _V2_MAGIC
     try:
-        record = json.loads(data, object_hook=_decode_hook)
+        record = _v2_record(data) if v2 else json.loads(data, object_hook=_decode_hook)
     except (ValueError, KeyError, TypeError) as error:  # not JSON, not UTF-8, a broken array record
         raise DamagedPayload(f"payload does not decode: {type(error).__name__}: {str(error)[:200]}") from error
     if not isinstance(record, Mapping):
         raise DamagedPayload(f"payload is a {type(record).__name__}, not an object")
-    if record.get("schema") != PAYLOAD_SCHEMA:
-        raise DamagedPayload(f"payload schema {record.get('schema')!r} != {PAYLOAD_SCHEMA}")
+    schema = PAYLOAD_SCHEMA_V2 if v2 else PAYLOAD_SCHEMA
+    if record.get("schema") != schema:
+        raise DamagedPayload(f"payload schema {record.get('schema')!r} != {schema}")
     samples = record.get("samples")
     if not isinstance(samples, list) or not all(isinstance(sample, Mapping) for sample in samples):
         raise DamagedPayload("payload samples are not a list of objects")
@@ -575,8 +737,30 @@ def complete_prompt_tokens(sample: Mapping[str, Any],
             "metadata": {**metadata, PROMPT_TOKENIZED_BY: "trainer"}}
 
 
+# One payload is one object written by one PUT (``S3ObjectStore.write``): S3 and OSS
+# refuse a single PutObject over 5 GiB (R2: the same order). A compacted trial
+# carries R3 and top-K per segment, so its group grows with every compaction.
+SINGLE_PUT_LIMIT_BYTES = 5 * 2**30
+PAYLOAD_WARN_BYTES = 4 * 2**30  # GroupWriter warns from here (a group near the limit)
+# Payload bytes per stream token of a Kimi K3.1 trial (R3 uint16[92, 16] per token,
+# top-128 ids + log-probs per response token, the token lists), upper bounds: v1
+# base64, v2 raw, v2 zstd (ratios measured on K3.1 payloads; tool tokens compress
+# far better than this).
+K31_PAYLOAD_BYTES_PER_TOKEN = {"json": 5324, "raw": 4001, "zstd": 2353}
+
+
+def k31_group_payload_bytes(trials: int, context_budget: int, *, max_compactions: int = 0,
+                            codec: str = "json") -> int:
+    """Upper bound of one K3.1 group payload: ``trials`` trials whose
+    ``1 + max_compactions`` segments each fill ``context_budget`` tokens (a
+    preflight bound; compare with :data:`SINGLE_PUT_LIMIT_BYTES`)."""
+    per_token = K31_PAYLOAD_BYTES_PER_TOKEN[payload_codec({PAYLOAD_CODEC_ENV: codec})]
+    return int(trials) * (1 + int(max_compactions)) * int(context_budget) * per_token
+
+
 class GroupWriter:
-    """Writes finished groups to the buffer: payload first, then the index entry."""
+    """Writes finished groups to the buffer: payload first, then the index entry.
+    A payload of :data:`PAYLOAD_WARN_BYTES` or more is logged (one PUT carries it)."""
 
     def __init__(self, buffer: Any, sampler_id: str) -> None:
         if not sampler_id:
@@ -592,7 +776,13 @@ class GroupWriter:
         (``sampler_resume.SamplerRound.record()``)."""
         behavior_version, tokens = group_entry_fields(samples)
         sample_id = f"{self.sampler_id}-{group_key}"
-        ref = self.buffer.write_payload(sample_id, encode_group(samples))
+        data = encode_group(samples)
+        if len(data) >= PAYLOAD_WARN_BYTES:
+            print(f"[sample-buffer] payload {sample_id}: {len(data) / 2**30:.2f} GiB in one object "
+                  f"({len(samples)} samples, codec {payload_codec()}); an S3 / R2 / OSS store refuses a "
+                  f"single PUT over {SINGLE_PUT_LIMIT_BYTES / 2**30:.0f} GiB: set {PAYLOAD_CODEC_ENV}=zstd "
+                  "or lower agentic.compaction (context_budget, max_compactions)", flush=True)
+        ref = self.buffer.write_payload(sample_id, data)
         entry = SampleIndexEntry(sample_id=sample_id, behavior_version=behavior_version,
                                  payload_ref=ref, tokens=tokens,
                                  provenance=None if provenance is None else dict(provenance),
