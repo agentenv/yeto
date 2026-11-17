@@ -826,6 +826,29 @@ without compaction) and warns above 5 GiB. Set
 `YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd` on the samplers where the release
 supports it, or lower the rows / `context_budget` / `max_compactions`.
 
+A release with multipart object writes uploads a group larger than
+`YETO_RL_STORE_MULTIPART_MB` (default 1024 MiB) in parts (64 MiB parts, 16 at
+once; about 100 MB/s per object on R2, so an 11 GB group takes about 2 minutes),
+so the 5 GiB PUT limit no longer applies; the create-if-absent of the index
+records is unchanged. Smaller groups are still one PUT.
+
+**Trainer read budget** (with or without compaction). By default the trainer reads every payload of a round
+at once and keeps its raw bytes until the round is decoded: 32 groups of 11 GB
+are about 350 GB of bytes on top of the decoded arrays, and the next round's
+read-ahead adds as much again. For a 262k run set
+`YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES=64GiB` on the trainer. The trainer then
+holds at most that many raw payload bytes at once (reads in flight, read and
+not decoded, read ahead), drops each payload's bytes at its decode, reads a
+payload larger than one store part by parallel ranges, and decodes v2 payloads
+in its read threads. 64 GiB is sized for the 2400 GiB B300 trainer head next to
+the ~1.9 TB optimizer offload (section 10.4): it leaves room for the decoded
+round and still reads five full 262k groups at once. The read the take waits
+for next is never held back by the read-ahead, so the reader can go at most
+one payload over the limit. Unset or `0` keeps the default reader, with no HEAD
+and no ranged reads. The budget bounds raw bytes only. The decoded round itself
+(about 270 GB of arrays for 32 groups at 262k, twice that once Miles widens R3)
+is sized by `--rollout-batch-size`.
+
 **Evaluation.** Use a sampler spec without `agentic.compaction` for a baseline
 evaluation: with compaction on, scores are not comparable to an uncompacted run.
 
@@ -2446,6 +2469,10 @@ at about 1.8x the offloaded-optimizer estimate. For the 128-expert layout,
 size from the measured per-stage figures in
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#7-measured-data-6-x-8-b300),
 and confirm headroom on the first step as described there.
+
+At 262k the trainer's sample buffer reads come on top of this. Set
+`YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES=64GiB` (see "Trainer read budget" in
+section 3.6).
 
 ## 11. Daytona sampler sandboxes
 

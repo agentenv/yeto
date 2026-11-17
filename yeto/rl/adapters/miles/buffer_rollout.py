@@ -985,27 +985,27 @@ def _echo_event(event: str, **fields: Any) -> None:
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
 # Raw payload bytes the reader holds at once: reads in flight, read and not decoded
-# yet, read ahead (prefetch). A payload's bytes are dropped once it is decoded. 0: no
-# limit (every payload of a round read at once, as before this bound). The default is
-# for the K3.1 trainer head (2400 GiB host): the optimizer offload takes ~1.9 TB
-# (KIMI_K31_ASYNC_RL_GUIDE 10.4), which leaves ~550 GiB for the decoded round (262k
-# without compaction: ~270 GiB of arrays per 32 groups, twice that once Miles widens
-# R3 to int32) and one group's decode (a v1 payload peaks at ~4.6x its bytes,
-# ~50 GB at 11 GB). 64 GiB still reads five full 262k groups (11 GB each) at once,
-# more than one R2 stream per payload needs to keep the reader busy.
+# yet, read ahead (prefetch). A payload's bytes are dropped once it is decoded.
+# Unset or 0: no limit, the reader of before (every payload of a round read at once,
+# one GET each, no HEAD). RECOMMENDED_262K_INFLIGHT_BYTES is for a K3.1 262k run
+# (2400 GiB trainer head): the optimizer offload takes ~1.9 TB (KIMI_K31_ASYNC_RL_GUIDE
+# 10.4), which leaves ~550 GiB for the decoded round (262k without compaction: ~270
+# GiB of arrays per 32 groups, twice that once Miles widens R3 to int32) and one
+# group's decode (a v1 payload peaks at ~4.6x its bytes, ~50 GB at 11 GB). 64 GiB
+# still reads five full 262k groups (11 GB each) at once.
 MAX_INFLIGHT_BYTES_ENV = "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES"
-DEFAULT_MAX_INFLIGHT_BYTES = 64 << 30
+DEFAULT_MAX_INFLIGHT_BYTES = 0
+RECOMMENDED_262K_INFLIGHT_BYTES = 64 << 30
 _BYTE_UNITS = {"": 1, "b": 1, "k": 1 << 10, "kib": 1 << 10, "m": 1 << 20, "mib": 1 << 20,
                "g": 1 << 30, "gib": 1 << 30, "t": 1 << 40, "tib": 1 << 40}
 
 
 def inflight_bytes_limit(environ: Mapping[str, str] | None = None) -> int | None:
     """:data:`MAX_INFLIGHT_BYTES_ENV`: bytes, or with a unit (``64GiB``, ``512MiB``;
-    K / M / G / T are binary too); unset: :data:`DEFAULT_MAX_INFLIGHT_BYTES`; 0: no
-    limit (None)."""
+    K / M / G / T are binary too); unset or 0: no limit (None)."""
     raw = (os.environ if environ is None else environ).get(MAX_INFLIGHT_BYTES_ENV, "").strip()
     if not raw:
-        return DEFAULT_MAX_INFLIGHT_BYTES
+        return DEFAULT_MAX_INFLIGHT_BYTES or None
     number = raw.rstrip("bBiIkKmMgGtT ")
     unit = raw[len(number):].strip().lower()
     try:
@@ -1017,19 +1017,37 @@ def inflight_bytes_limit(environ: Mapping[str, str] | None = None) -> int | None
     return value or None
 
 
+class ReadTurn:
+    """What a take's read waits on besides room: ``urgent`` (the take waits for this
+    read now) and ``abandoned`` (its bytes are not wanted any more)."""
+
+    __slots__ = ("ticket", "urgent", "abandoned")
+
+    def __init__(self, ticket: int) -> None:
+        self.ticket = ticket
+        self.urgent = False
+        self.abandoned = False
+
+
 class ByteBudget:
     """The raw payload bytes a :class:`BatchReader` holds (``limit`` None: no limit).
 
     A take's read waits in a worker thread for its turn (tickets, handed out in the
-    order the take asks for its reads, which is the order it decodes them in) and for
-    room: ``used + size <= limit``, or nothing held at all (a payload larger than the
-    limit is read alone, never refused). The take decodes in the same order and
-    releases each payload's bytes after its decode, so the oldest waiting read always
-    gets room: no deadlock. A read ahead never waits: it is made only when it fits
-    now and no take read is waiting (:meth:`try_acquire`); otherwise the prefetch
-    stops and the take reads the rest. A read on the caller's thread (no read pool,
-    or one group topping up a round) is counted without waiting (:meth:`force`): only
-    that thread can release what is held."""
+    order the take asks for its reads) and for room: ``used + size <= limit``, or
+    nothing held at all (a payload larger than the limit is read alone, never
+    refused). A read ahead never waits: it is made only when it fits now and no take
+    read is waiting (:meth:`try_acquire`); otherwise the prefetch stops and the take
+    reads the rest. A read on the caller's thread (no read pool, or one group topping
+    up a round) is counted without waiting (:meth:`force`).
+
+    No deadlock: the take decodes its round in buffer order, and the reads ahead it
+    uses hold their room until it decodes them; a take read that comes before them
+    in that order (a read ahead that failed, a group the read ahead passed over, a
+    deferred group judged again) would wait for room only the take's later decodes
+    free. So the read the take waits for now is :meth:`urge` d: it goes at once,
+    whatever its turn and the room (at most one payload over the limit, and only
+    while the take waits for it). An :meth:`abandon` ed read that has not started
+    takes no room and its worker returns at once."""
 
     def __init__(self, limit: int | None) -> None:
         self.limit = None if not limit else int(limit)
@@ -1039,12 +1057,34 @@ class ByteBudget:
         self._cond = threading.Condition()
         self._issued = 0
         self._turn = 0
+        self._granted: set[int] = set()  # tickets let through before their turn
         self._warned = False
+        self.urged = 0  # reads let through by urge() without room or turn
 
-    def ticket(self) -> int:
+    def ticket(self) -> ReadTurn:
         with self._cond:
             self._issued += 1
-            return self._issued - 1
+            return ReadTurn(self._issued - 1)
+
+    def urge(self, turn: "ReadTurn | None") -> None:
+        if turn is None:
+            return
+        with self._cond:
+            turn.urgent = True
+            self._cond.notify_all()
+
+    def abandon(self, turn: "ReadTurn | None") -> None:
+        if turn is None:
+            return
+        with self._cond:
+            turn.abandoned = True
+            self._cond.notify_all()
+
+    def _grant(self, ticket: int) -> None:
+        self._granted.add(ticket)
+        while self._turn in self._granted:
+            self._granted.discard(self._turn)
+            self._turn += 1
 
     def _fits(self, size: int) -> bool:
         return self.limit is None or self.used == 0 or self.used + size <= self.limit
@@ -1057,16 +1097,23 @@ class ByteBudget:
             print(f"[sample-buffer] a payload of {size / (1 << 30):.1f} GiB is above the read budget "
                   f"({MAX_INFLIGHT_BYTES_ENV}={self.limit / (1 << 30):.1f} GiB): it is read alone", flush=True)
 
-    def acquire(self, ticket: int, size: int) -> None:
+    def acquire(self, turn: ReadTurn, size: int) -> bool:
+        """Wait for ``turn``'s turn and room for ``size`` bytes, then count them; False
+        (nothing counted) when the read was abandoned meanwhile."""
         with self._cond:
             waited = False
-            while ticket != self._turn or not self._fits(size):
-                waited = waited or ticket == self._turn
+            while not (turn.urgent or turn.abandoned) and (turn.ticket != self._turn or not self._fits(size)):
+                waited = waited or turn.ticket == self._turn
                 self._cond.wait()
             self.waits += int(waited)
-            self._turn += 1
-            self._take(size)
+            in_turn = turn.ticket == self._turn and self._fits(size)
+            self._grant(turn.ticket)
             self._cond.notify_all()
+            if turn.abandoned:
+                return False
+            self.urged += int(not in_turn)
+            self._take(size)
+            return True
 
     def try_acquire(self, size: int) -> bool:
         with self._cond:
@@ -1119,6 +1166,10 @@ def group_nbytes(group: Sequence[Mapping[str, Any]]) -> int:
             elif isinstance(value, (list, tuple)):
                 total += 32 * len(value)
     return total
+
+
+class _Abandoned(Exception):
+    """A take's read abandoned before it read (``BatchReader._abandon``)."""
 
 
 def _takes_size(read_payload: Any) -> bool:
@@ -1511,8 +1562,10 @@ class BatchReader:
             except BaseException as error:  # noqa: BLE001 - raised by result()
                 done.set_exception(error)
             return done
-        ticket = self.budget.ticket()
-        return self._opened(self._pool.submit(self._read_in_turn, ref, ticket, held), held)
+        turn = self.budget.ticket()
+        read = self._pool.submit(self._read_in_turn, ref, turn, held)
+        read.yeto_turn = turn  # type: ignore[attr-defined]
+        return self._opened(read, held)
 
     def _opened(self, read: Future, held: list[int]) -> Future:
         read.yeto_held = held  # type: ignore[attr-defined]
@@ -1532,14 +1585,21 @@ class BatchReader:
         size = size_of(ref)  # a store that does not answer: raised, like a read it does not answer
         return None if size is None else int(size)
 
-    def _read_in_turn(self, ref: str, ticket: int, held: list[int]) -> bytes:
-        """A take's read in a worker: its size, its turn and room in the budget, then the bytes."""
+    def _read_in_turn(self, ref: str, turn: ReadTurn, held: list[int]) -> Any:
+        """A take's read in a worker: its size, its turn and room in the budget, then the
+        bytes. Every ticket takes its turn (or the later ones never do), also one that
+        fails or is abandoned before it reads."""
+        if turn.abandoned:
+            self.budget.acquire(turn, 0)
+            raise _Abandoned(ref)
         try:
             size = self._payload_size(ref)
         except BaseException:
-            self.budget.acquire(ticket, 0)  # every ticket takes its turn, or the later ones never do
+            self.budget.abandon(turn)
+            self.budget.acquire(turn, 0)
             raise
-        self.budget.acquire(ticket, size or 0)
+        if not self.budget.acquire(turn, size or 0):
+            raise _Abandoned(ref)
         held[0] = size or 0
         return self._read_counted(ref, held, size)
 
@@ -1604,8 +1664,10 @@ class BatchReader:
         self.budget.release(size)
 
     def _abandon(self, reads: Any) -> None:
-        """Reads whose bytes are not wanted: released once they end."""
+        """Reads whose bytes are not wanted: one not started yet takes no room (its
+        worker returns at once), the others are released once they end."""
         for read in list(reads):
+            self.budget.abandon(getattr(read, "yeto_turn", None))
             read.add_done_callback(self._release)
 
     def _abandon_open(self) -> None:
@@ -2070,6 +2132,9 @@ class BatchReader:
             while fresh:
                 position, read = fresh.pop()
                 if not read.done():
+                    # the take waits for this read: it goes now, even past the reads ahead
+                    # holding the room until their later decodes (ByteBudget)
+                    self.budget.urge(getattr(read, "yeto_turn", None))
                     self._read_wait_s += self._settle([read])
                 group = self._group_at(position, read)
                 del read
