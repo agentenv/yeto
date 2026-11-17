@@ -28,8 +28,9 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   lists the run config's);
 * the release directory a sampler follows must be one the trainer side writes;
 * context compaction: a spec with ``agentic.compaction`` needs a Miles trainer with a
-  GRPO-family estimator (:func:`compaction_problem`; verl and PPO CompactionRL are
-  refused);
+  GRPO-family estimator, the rollout-side schedule (dynamic batch size, none of
+  :data:`SPLIT_BY_SAMPLE_FLAGS`) and rows of at least ``context_budget``
+  (:func:`compaction_problem`; verl and PPO CompactionRL are refused);
 * prices (:func:`price_problem`): with a spend cap (``budget.usd``) every pool of a
   USD-priced provider (Modal / Daytona / Sky) needs a real hourly price, or the run's
   spend estimate counts its islands at 0 and the cap never fires on them.
@@ -218,6 +219,47 @@ def release_dir_problem(spec: dict[str, Any]) -> str | None:
             f"({', '.join(known)}): the sampler would never see a release")
 
 
+# Miles flags under which its training side splits a round by sample count instead of
+# the rollout-side DP schedule (one rollout per trial, all of a trial's segments in one
+# step): a compacted round is then refused on the trainer at its first group
+# (buffer_rollout.segmented_round_problems). None of them is a yeto launch flag (yeto
+# refuses --indep-dp with the fault-tolerance flags); they are named here so a trainer
+# argv that carries one is refused before anything is ordered.
+SPLIT_BY_SAMPLE_FLAGS = {
+    "--indep-dp": "--indep-dp",
+    "--multi-lora": "multi-LoRA",
+    "--multimodal-keys": "--multimodal-keys",
+    "--use-dynamic-global-batch-size": "--use-dynamic-global-batch-size",
+}
+
+
+def segment_schedule_problems(args: Any | None, argv_flags: Any = ()) -> list[str]:
+    """Why the trainer of ``trainer.argv`` would not train compacted trials one rollout
+    each ([] when it does): a non-Miles backend (Miles trains on Megatron), no dynamic
+    batch size (``--rl-max-tokens-per-gpu``: a static micro batch asserts when the step's
+    sample count varies with the segments), or a flag of :data:`SPLIT_BY_SAMPLE_FLAGS`.
+    ``args``: the parsed argv (None: it does not parse); ``argv_flags``: its flag names."""
+    from yeto.rl.engine.backends import DEFAULT_BACKEND  # noqa: PLC0415
+
+    flags = {str(a).split("=", 1)[0] for a in argv_flags}
+    out = [why for flag, why in SPLIT_BY_SAMPLE_FLAGS.items() if flag in flags]
+    if args is None:
+        return out
+    backend = getattr(args, "rl_backend", None) or DEFAULT_BACKEND
+    if backend != DEFAULT_BACKEND:
+        out.append(f"--rl-backend {backend} (not the Megatron trainer of the Miles backend)")
+    if getattr(args, "rl_max_tokens_per_gpu", None) is None:
+        out.append("no --rl-max-tokens-per-gpu (Miles --use-dynamic-batch-size)")
+    return out
+
+
+def segment_schedule_text(problems: list[str]) -> str:
+    return ("the sampler spec's agentic.compaction writes several samples per trial, but this trainer would "
+            f"split a round by sample count ({'; '.join(problems)}): a trial's segments could land in different "
+            "steps and the trainer stops at the first compacted group; use the Miles backend with "
+            "--rl-max-tokens-per-gpu and none of the listed flags")
+
+
 def compaction_problem(args: Any, spec: dict[str, Any]) -> str | None:
     """A bad ``agentic.compaction`` section (:func:`yeto.rl.compaction.config_from_spec`),
     a trainer that cannot train its segment samples
@@ -234,6 +276,9 @@ def compaction_problem(args: Any, spec: dict[str, Any]) -> str | None:
         return str(exc)
     if cfg is None:
         return None
+    schedule = segment_schedule_problems(args, getattr(args, "_argv", ()))
+    if schedule:
+        return segment_schedule_text(schedule)
     seq = max(int(getattr(args, "seq_len", 0) or 0), int(getattr(args, "rollout_max_response_len", 0) or 0))
     if seq < cfg.context_budget:
         return (f"the trainer's --seq-len {seq} < the sampler spec's agentic.compaction.context_budget "
@@ -245,6 +290,7 @@ def compaction_problem(args: Any, spec: dict[str, Any]) -> str | None:
 
 # The smallest drain cut suggested with agentic.compaction: agentic_round's
 # COMPACTION_DRAIN_FLOOR_S (an estimate, C13); this value until it is there.
+# TODO(C13): dead once COMPACTION_DRAIN_FLOOR_S is merged; delete the fallback.
 COMPACTION_DRAIN_FLOOR_FALLBACK_S = 2400.0
 
 
@@ -411,8 +457,11 @@ def problems(run_store: str, trainer_argv: list[str], pool_cfg: dict[str, Any], 
              data_path: str = "r2") -> list[str]:
     """Every trainer / sampler mismatch of one pool (empty: consistent, or not checkable)."""
     args = trainer_args(trainer_argv)
-    if args is None:
-        return []
+    if args is None:  # yeto launch --dry-run reports the argv; a compacting pool also names the split flags
+        spec = effective_spec(pool_cfg)
+        compacting = isinstance((spec or {}).get("agentic"), dict) and spec["agentic"].get("compaction") is not None
+        split = segment_schedule_problems(None, trainer_argv) if compacting else []
+        return [segment_schedule_text(split)] if split else []
     args._argv = [str(a).split("=", 1)[0] for a in trainer_argv]
     out = store_problems(run_store, args, pool_cfg, data_path=data_path)
     spec = effective_spec(pool_cfg)
