@@ -83,6 +83,9 @@ LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # held for the next round, loss-free padding samples (BatchReader group_size)
 BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
                     "buffer_carried_over_groups", "buffer_padded_samples")
+# buffer_compacted_groups / _trials / _samples: groups with compacted trials trained this
+# round, those trials, and their segment samples (reported only when there are any)
+BUFFER_COMPACTED_KEYS = ("buffer_compacted_groups", "buffer_compacted_trials", "buffer_compacted_samples")
 # buffer_damaged_payload_groups: groups the reader passed over because their payload
 # is missing or is not a group; buffer_duplicate_task_groups: because an earlier group
 # of the buffer holds their store-dispenser task (both consumed, not trained);
@@ -93,7 +96,8 @@ BUFFER_FILL_KEYS = ("buffer_incomplete_groups", "buffer_dropped_small_groups",
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "buffer_unidentified_groups",
                                  "buffer_xhw_quarantined", "buffer_xhw_downweighted",
                                  "buffer_damaged_payload_groups", "buffer_duplicate_task_groups",
-                                 "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS})
+                                 "buffer_duplicate_task_unverified_groups", *BUFFER_FILL_KEYS,
+                                 *BUFFER_COMPACTED_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
 ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
@@ -240,6 +244,7 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     from yeto.rl.compaction import refresh_segment_counts
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
+    refresh_compaction_counts([s for group in data for s in _flat(group)])
     marks.append(("segment_counts", time.monotonic()))
     set_proc_state(args, _TRAINED_ATTR, {_group_key(group) for group in data})
     # The dispenser learns which of its rows entered this training batch
@@ -278,6 +283,33 @@ def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
           + (f" [{detail}]" if detail else ""), flush=True)
 
 
+def refresh_compaction_counts(samples: Sequence[Any]) -> int:
+    """``refresh_segment_counts`` for async GRPO's segment samples: the trial's
+    ``metadata.compaction`` (``segment_tokens``, ``tokens_after`` = N_{>s}) counts the
+    tokens the final loss masks train. Only that nested dict is replaced (a new one; the
+    decoded payload keeps its own); the top-level CompactionRL keys are never written
+    (Miles reads ``metadata.tokens_after`` as the PPO cross-segment layout). Returns the
+    segment samples whose counts changed (0 without any)."""
+    trials: dict[Any, list[Any]] = {}
+    for row, sample in enumerate(samples):
+        meta = compaction_meta(sample)
+        if meta is None or not isinstance(meta.get("segment_index"), int):
+            continue
+        key = (getattr(sample, "group_index", None), meta.get("trajectory_id"), trial_key(sample, row))
+        trials.setdefault(key, []).append(sample)
+    changed = 0
+    for segments in trials.values():
+        segments.sort(key=lambda s: s.metadata[COMPACTION_KEY]["segment_index"])
+        tokens = [sum(1 for m in (getattr(s, "loss_mask", None) or ()) if m) for s in segments]
+        for k, sample in enumerate(segments):
+            meta = sample.metadata[COMPACTION_KEY]
+            new = {"segment_tokens": tokens[k], "tokens_after": sum(tokens[k + 1:])}
+            if any(meta.get(name) != value for name, value in new.items()):
+                changed += 1
+                sample.metadata[COMPACTION_KEY] = {**meta, **new}
+    return changed
+
+
 def _reward(args: Any, sample: Any) -> float:
     getter = getattr(sample, "get_reward_value", None)
     value = getter(args) if callable(getter) else getattr(sample, "reward", None)
@@ -307,6 +339,7 @@ def _status(sample: Any) -> str:
 
 
 from yeto.rl.adapters.miles import carry_over as _carry  # noqa: E402
+from yeto.rl.engine.buffer_payload import COMPACTION_KEY, compaction_meta, trial_key, trial_rows  # noqa: E402
 from yeto.rl.engine.policy_age import token_version  # noqa: E402
 from yeto.rl.engine.policy_versions import (  # noqa: E402
     PublishedPolicies,
@@ -351,6 +384,9 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
             carry = _carry.group_versions_record(group) or {
                 "policy_versions": sorted({int(numbered[v]) for v in versions})}
     rewards = [_reward(args, s) for s in samples]
+    if any(compaction_meta(s) is not None for s in samples):
+        # compacted trials: one reward per trial (its segments share it), as Miles centers
+        rewards = [rewards[trial[0]] for trial in trial_rows(samples)]
     finite = [r for r in rewards if math.isfinite(r)]
     return {
         "group_id": f"g{group_index}",

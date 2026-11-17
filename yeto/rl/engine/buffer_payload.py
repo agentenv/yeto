@@ -485,6 +485,72 @@ def behavior_versions(sample: Mapping[str, Any]) -> list[int]:
     return _sample_versions(sample)
 
 
+# ---------------------------------------------------------------------- trials
+# A compacted trial (CompactionRL segments, async GRPO) is several samples of one group:
+# the same group_index and index, the trial's reward, and ``metadata.compaction``
+# ({"schema", "trajectory_id", "segment_index", "num_segments", ...}). A group with such
+# samples is counted and numbered by trial; every other group holds one sample per trial
+# (its count is ``len``) and is handled exactly as before.
+COMPACTION_KEY = "compaction"
+
+
+def _field(sample: Any, name: str) -> Any:
+    return sample.get(name) if isinstance(sample, Mapping) else getattr(sample, name, None)
+
+
+def compaction_meta(sample: Any) -> Mapping[str, Any] | None:
+    """``metadata.compaction`` of a segment sample (a dict or a Miles ``Sample``), else None."""
+    meta = _field(sample, "metadata")
+    value = meta.get(COMPACTION_KEY) if isinstance(meta, Mapping) else None
+    return value if isinstance(value, Mapping) else None
+
+
+def trial_key(sample: Any, row: int) -> Any:
+    """The trial a sample belongs to: Miles' rollout key (``reward_shaping.rollout_segments``:
+    ``rollout_id``, else ``index``, else the row)."""
+    rollout_id = _field(sample, "rollout_id")
+    if rollout_id is not None:
+        return rollout_id
+    index = _field(sample, "index")
+    return ("row", row) if index is None else index
+
+
+def has_siblings(samples: Sequence[Any]) -> bool:
+    """Whether a group holds compaction segments (``metadata.compaction`` on a sample)."""
+    return any(compaction_meta(s) is not None for s in samples)
+
+
+def trial_rows(samples: Sequence[Any]) -> list[list[int]]:
+    """The rows of each trial of a group, in first-seen order (by :func:`trial_key`);
+    one row per trial in a group without compaction segments (whatever its indices)."""
+    if not has_siblings(samples):
+        return [[row] for row in range(len(samples))]
+    by_trial: dict[Any, list[int]] = {}
+    for row, sample in enumerate(samples):
+        by_trial.setdefault(trial_key(sample, row), []).append(row)
+    return list(by_trial.values())
+
+
+def trial_count(samples: Sequence[Any]) -> int:
+    """The trials of a group (``len(samples)`` without compaction segments)."""
+    return len(trial_rows(samples))
+
+
+def check_trials(samples: Sequence[Mapping[str, Any]]) -> list[list[int]]:
+    """The rows of each trial of a group with compaction segments (in segment order),
+    checked by the contract (``yeto.rl.contracts.validate_compaction_group``: one shared
+    index, reward and ``trajectory_id`` per trial, segments ``0..n-1``, only the last one
+    truncated, no ``trajectory_id`` or ``rollout_id`` shared by two trials). Raises
+    :class:`SampleBufferRolloutError`."""
+    from yeto.rl.contracts import validate_compaction_group  # noqa: PLC0415
+
+    try:
+        trials = validate_compaction_group(samples)
+    except ValueError as error:
+        raise SampleBufferRolloutError(f"compaction group: {error}") from error
+    return [list(trial.positions) for trial in trials]
+
+
 def finite_rewards(group: Sequence[Mapping[str, Any]]) -> bool:
     """Whether every sample of a decoded group has a finite reward. A missing
     (None) or NaN/inf scalar reward (a reward call that failed) makes the group's
