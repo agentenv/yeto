@@ -727,7 +727,13 @@ preflight refuse:
   compaction rewrites that history and breaks the token chain. yeto runs pi with
   its own compaction off. A task row that names another agent stops the sampler
   when its trial is built;
-- a trainer that is not Miles with a GRPO-family estimator (see Limits).
+- a trainer that is not Miles with a GRPO-family estimator (see Limits);
+- a trainer that would split a round by sample count instead of training each
+  trial as one rollout: without `--rl-max-tokens-per-gpu` (Miles dynamic batch
+  size; the K3.1 example trainer does not set it, add it with a value of at
+  least `--seq-len`), or with any of the Miles flags `--indep-dp`,
+  `--multi-lora`, `--multimodal-keys`, `--use-dynamic-global-batch-size`. Such a
+  trainer would stop at the first compacted group.
 
 Leave headroom between `context_budget` and `max_model_len` (the example uses
 262144 - 16384 for an engine at 262144): the step before a compaction can add a

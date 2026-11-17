@@ -416,6 +416,7 @@ def _check_summary_room(cfg: CompactionConfig, turn_max_tokens: int) -> None:
         if check is not None:
             check(turn_max_tokens)
             return
+        # TODO(C7): dead once CompactionConfig.check_summary_room is merged; delete this fallback.
         need = turn_max_tokens + len(SUMMARY_PROMPT.encode("utf-8")) + 64
         if need > cfg.t_comp:
             raise ValueError(f"t_comp {cfg.t_comp} cannot hold the summary turn: max_tokens {turn_max_tokens} "

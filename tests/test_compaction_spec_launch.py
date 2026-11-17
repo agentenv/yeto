@@ -112,7 +112,8 @@ def test_t_comp_must_hold_the_summary_turn():
         C.config_from_spec(_spec({"context_budget": 65536, "t_comp": 2048}))
 
 
-@pytest.mark.skipif(hasattr(C.CompactionConfig, "check_summary_room"), reason="CompactionConfig owns the rule")
+@pytest.mark.skipif(hasattr(C.CompactionConfig, "check_summary_room"),
+                    reason="CompactionConfig owns the rule")  # TODO(C7): delete with the fallback
 def test_the_summary_room_before_compaction_config_owns_it():
     """Before CompactionConfig has the rule, the summary turn is a plain turn
     (turn_max_tokens) with SUMMARY_PROMPT."""
@@ -408,6 +409,7 @@ def _compacting(setup, budget=32768):  # noqa: F811
                              "compaction": {"context_budget": budget}}
     _set(setup.argv, "--seq-len", str(budget))
     _set(setup.argv, "--rollout-max-response-len", str(budget))
+    setup.argv += ["--rl-max-tokens-per-gpu", str(budget)]
 
 
 def test_run_up_preflight_shows_the_compaction_and_passes_a_grpo_trainer(setup, capsys):  # noqa: F811
@@ -540,3 +542,47 @@ def test_run_up_preflight_warns_on_a_group_over_one_put(setup, sized, capsys):  
     assert run.preflight() is True
     out = capsys.readouterr().out
     assert "preflight: WARNING: one buffer group can reach" in out and "multipart write" in out
+
+
+def test_run_up_preflight_refuses_a_trainer_that_splits_by_sample_count(setup):  # noqa: F811
+    """Miles trains a compacted round one rollout per trial only on its rollout-side
+    schedule; without dynamic batch size the trainer would stop at the first group."""
+    _compacting(setup)
+    i = setup.argv.index("--rl-max-tokens-per-gpu")
+    del setup.argv[i:i + 2]
+    run = setup.make()
+    problem = run.consistency_problem()
+    assert "split a round by sample count (no --rl-max-tokens-per-gpu" in problem
+    assert run.preflight() is False and run.calls == []
+    # without compaction the same trainer passes
+    setup.spec["agentic"] = {}
+    _set(setup.argv, "--seq-len", "16384")
+    _set(setup.argv, "--rollout-max-response-len", "12288")
+    assert setup.make().consistency_problem() is None
+
+
+@pytest.mark.parametrize(("flag", "named"), [
+    ("--indep-dp", "--indep-dp"), ("--multi-lora", "multi-LoRA"), ("--multimodal-keys=image", "--multimodal-keys"),
+    ("--use-dynamic-global-batch-size", "--use-dynamic-global-batch-size")])
+def test_run_up_preflight_names_the_split_by_sample_flags(setup, flag, named):  # noqa: F811
+    """These are Miles flags, not yeto launch flags: an argv that carries one does not
+    parse (yeto launch --dry-run reports that); a compacting pool also names the flag."""
+    _compacting(setup)
+    setup.argv += [flag]
+    run = setup.make()
+    assert f"split a round by sample count ({named})" in run.consistency_problem()
+    assert run.preflight() is False and run.calls == []
+    setup.spec["agentic"] = {}
+    assert setup.make().consistency_problem() is None  # no compaction: only yeto launch --dry-run refuses it
+
+
+def test_the_split_by_sample_checks_on_parsed_args():
+    from yeto.rl.up_consistency import segment_schedule_problems
+
+    ok = SimpleNamespace(rl_backend="miles", rl_max_tokens_per_gpu=32768)
+    assert segment_schedule_problems(ok) == []
+    assert segment_schedule_problems(SimpleNamespace(rl_backend="verl", rl_max_tokens_per_gpu=1)) == [
+        "--rl-backend verl (not the Megatron trainer of the Miles backend)"]
+    assert segment_schedule_problems(SimpleNamespace(rl_backend="miles", rl_max_tokens_per_gpu=None)) == [
+        "no --rl-max-tokens-per-gpu (Miles --use-dynamic-batch-size)"]
+    assert segment_schedule_problems(None, ["--indep-dp", "--multi-lora=2"]) == ["--indep-dp", "multi-LoRA"]
