@@ -1142,6 +1142,48 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
             f"drain_timeout_s <= reload_max_defer_s to make that explicit")
 
 
+def spec_compaction(spec: Mapping[str, Any], engine: Any = None) -> Any:
+    """The records proxy's :class:`~yeto.rl.compaction.CompactionConfig` from the spec's
+    ``agentic.compaction`` (:func:`yeto.rl.compaction.config_from_spec`), or None
+    without one. ``context_budget`` is checked against the engine's own
+    ``max_model_len`` when the engine gives one, else the spec's. Raises
+    :class:`~yeto.rl.agentic.HarnessConfigError`."""
+    from yeto.rl.agentic import HarnessConfigError
+    from yeto.rl.compaction import config_from_spec
+
+    try:
+        limit = getattr(engine, "max_model_len", None) if engine is not None else None
+        limit = int(limit) if isinstance(limit, int) and not isinstance(limit, bool) else None
+    except Exception:  # noqa: BLE001 - an engine that cannot tell yet: the spec's value
+        limit = None
+    try:
+        return config_from_spec(spec, max_model_len=limit)
+    except (TypeError, ValueError) as exc:
+        raise HarnessConfigError(f"spec {exc}") from exc
+
+
+def proxy_compaction_trials(build: Callable[..., Any]) -> Callable[..., Any]:
+    """``build`` (a Harbor trial-config builder) that refuses a task whose agent compacts
+    its own history (:data:`~yeto.rl.harness.harbor.pi_config.PROXY_COMPACTION_AGENTS`):
+    with the records proxy compacting, the agent's own compaction must stay off. The
+    refusal is a :class:`~yeto.rl.agentic.HarnessConfigError` (it stops the sampler,
+    as every trial-config error does). pi gets the longer call timeout of a
+    compacting round (:func:`~yeto.rl.harness.harbor.pi_config.use_proxy_compaction_timeouts`)."""
+    from yeto.rl.agentic import HarnessConfigError
+    from yeto.rl.harness.harbor.pi_config import PROXY_COMPACTION_AGENTS, use_proxy_compaction_timeouts
+
+    def checked(task: Any, endpoint: str) -> Any:
+        if str(task.agent) not in PROXY_COMPACTION_AGENTS:
+            raise HarnessConfigError(
+                f"task {task.task_id}: agent {task.agent!r} may compact its own history, which the records "
+                f"proxy's agentic.compaction cannot follow; use {', '.join(sorted(PROXY_COMPACTION_AGENTS))}")
+        config = build(task, endpoint)
+        use_proxy_compaction_timeouts(config.agent)  # a compacting call is longer (pi_config)
+        return config
+
+    return checked
+
+
 def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, str]) -> Callable[..., AgenticRound]:
     """``make_round`` of :func:`~.engine_sampler.build_engine_sampler` from the
     spec's ``agentic`` section (``engine_sampler_entry``):
@@ -1180,7 +1222,9 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     * ``infra_retries``: runs again of a trial that failed on infrastructure before
       the policy ran, per slot (default 2; 0 = off);
     * ``task_defaults``: :meth:`AgentTask.from_mapping` defaults; ``provider``
-      falls back to ``HARBOR_ENV_TYPE``.
+      falls back to ``HARBOR_ENV_TYPE``;
+    * ``compaction`` (optional, default off): the records proxy's context
+      compaction (:func:`spec_compaction`; one training sample per segment).
 
     Harbor's settings (task directories, trials, provider kwargs) are the
     environment variables both backends read (``HarborSettings.from_env``)."""
@@ -1219,14 +1263,23 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     public_base = str(environ.get(records_env.PROXY_PUBLIC_BASE_ENV, "") or "").strip() or None
     if public_base and not secret_file:
         raise HarnessConfigError("a public records-proxy base needs a path secret (the tunnel is public)")
+    compaction = spec_compaction(spec, engine)
+    if compaction is not None:
+        from yeto.rl.compaction import describe
+
+        logger.info("agentic.compaction: %s", describe(compaction))
     proxy = RecordsProxy(engine, template, model=model, signed_sampling=signed,
                          sampler_id=str(spec.get("sampler_id", "records-proxy")),
+                         compaction=compaction,  # None (no agentic.compaction): as before
                          r3_response_len=max_response_len)  # R3 rows cut to the training window
     recorder = ProxyTokenRecorder(proxy, host=str(proxy_cfg.get("host", "127.0.0.1")),
                                   port=int(proxy_cfg.get("port", 0)), public_base=public_base,
                                   path_secret=Path(secret_file).read_text().strip() if secret_file else None)
     settings = dataclasses.replace(HarborSettings.from_env(), turn_max_tokens=signed["max_tokens"])
-    harness = HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
+    build = partial(build_trial_config, settings=settings)
+    if compaction is not None:
+        build = proxy_compaction_trials(build)
+    harness = HarborHarness(build, setup_retries=settings.setup_retries)
     defaults = {"model_name": model, **dict(section.get("task_defaults") or {})}
     provider = str(environ.get("HARBOR_ENV_TYPE", "") or "").strip().lower()
     if provider and "provider" not in defaults:

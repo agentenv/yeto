@@ -32,7 +32,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Protocol
 
 T_COMP = 10_240
@@ -372,3 +372,146 @@ def refresh_segment_counts(samples: Any) -> int:
                 changed += 1
             sample.metadata.update(new)
     return changed
+
+
+# --- the sampler spec's ``agentic.compaction`` section -------------------------
+# Every CompactionConfig field is a spec key except ``max_turns``: the episode
+# driver's evaluation cap, which the records proxy does not read (an accepted key
+# must reach its consumer). The summary-turn fields (``summary_max_tokens``,
+# ``summary_prompt``, ``resume_template``) are accepted once CompactionConfig has
+# them; CompactionConfig checks their values.
+SPEC_KEYS: tuple[str, ...] = tuple(f.name for f in fields(CompactionConfig) if f.name != "max_turns")
+# Integer keys and their least value (``summary_max_tokens``: CompactionConfig checks it).
+_INT_MINIMUM = {"context_budget": 1, "t_comp": 1, "keep_recent_steps": 0, "max_compactions": 0}
+
+
+def _spec_int(name: str, value: Any, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"agentic.compaction.{name} must be an integer, got {value!r}")
+    if value < minimum:
+        raise ValueError(f"agentic.compaction.{name} must be >= {minimum}, got {value}")
+    return value
+
+
+def spec_max_model_len(spec: Mapping[str, Any]) -> int | None:
+    """The engine context length a sampler spec declares (``engine.server.max_model_len``,
+    or ``engine.kwargs.max_model_len`` of an adapter without a server); None if unset."""
+    engine = spec.get("engine") if isinstance(spec.get("engine"), Mapping) else {}
+    for part in ("server", "kwargs"):
+        section = engine.get(part)
+        if isinstance(section, Mapping) and section.get("max_model_len") is not None:
+            return int(section["max_model_len"])
+    return None
+
+
+def _check_summary_room(cfg: CompactionConfig, turn_max_tokens: int) -> None:
+    """``t_comp`` must hold the summary turn: its ``max_tokens`` plus the summary request.
+    CompactionConfig owns the rule (``check_summary_room``, with the configurable
+    summary prompt and ``summary_max_tokens``). Until that method is merged the
+    summary turn is a plain turn (``turn_max_tokens``) with :data:`SUMMARY_PROMPT`,
+    and the same bound is applied here: one token per UTF-8 byte of the prompt plus
+    64 for the template's wrapper."""
+    check = getattr(cfg, "check_summary_room", None)
+    try:
+        if check is not None:
+            check(turn_max_tokens)
+            return
+        need = turn_max_tokens + len(SUMMARY_PROMPT.encode("utf-8")) + 64
+        if need > cfg.t_comp:
+            raise ValueError(f"t_comp {cfg.t_comp} cannot hold the summary turn: max_tokens {turn_max_tokens} "
+                             f"(agentic.turn_max_tokens) + up to {need - turn_max_tokens} tokens of summary "
+                             f"request = {need}; raise t_comp or lower agentic.turn_max_tokens")
+    except ValueError as exc:
+        raise ValueError(f"agentic.compaction: {exc}") from None
+
+
+def _check_agent(section: Mapping[str, Any]) -> None:
+    """The proxy compacts on the history it records; an agent that compacts its own
+    history rewrites it and breaks the token chain. Only agents whose own compaction
+    yeto switches off may run (:data:`yeto.rl.harness.harbor.pi_config.PROXY_COMPACTION_AGENTS`);
+    the default agent of the spec is checked here, each task's agent when its trial
+    is built."""
+    from yeto.rl.harness.harbor.pi_config import PROXY_COMPACTION_AGENTS  # noqa: PLC0415 - harbor package
+
+    defaults = section.get("task_defaults") if isinstance(section.get("task_defaults"), Mapping) else {}
+    agent = defaults.get("agent", defaults.get("agent_name"))
+    if agent is not None and str(agent) not in PROXY_COMPACTION_AGENTS:
+        raise ValueError(f"agentic.compaction: agentic.task_defaults.agent {agent!r} may compact its own history; "
+                         f"the records proxy's compaction needs an agent whose own compaction is off "
+                         f"({', '.join(sorted(PROXY_COMPACTION_AGENTS))})")
+
+
+def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = None) -> CompactionConfig | None:
+    """``agentic.compaction`` of a sampler spec as a :class:`CompactionConfig`, or None
+    (no section, or ``null``: no compaction).
+
+    Only ``context_budget`` is required; the other keys default to the paper's
+    values (:data:`T_COMP`, :data:`KEEP_RECENT_STEPS`, :data:`MAX_COMPACTIONS`).
+    Refused (ValueError), so that ``pool --dry-run`` and the sampler's start stop it:
+
+    * unknown keys (:data:`SPEC_KEYS`), non-integers, ``t_comp < 1``,
+      ``keep_recent_steps`` / ``max_compactions`` below 0, ``context_budget <= t_comp``;
+    * ``context_budget`` above the engine context length (``max_model_len``, else the
+      spec's :func:`spec_max_model_len`): the engine refuses a prompt the proxy still
+      lets grow;
+    * a ``t_comp`` that cannot hold the summary turn (:func:`_check_summary_room`,
+      with ``agentic.turn_max_tokens``), and, where CompactionConfig has
+      ``check_summary_headroom``, a budget whose summary turn can overrun the
+      engine context;
+    * ``agentic.max_response_len`` below ``context_budget``: a segment's response is
+      cut at that width, and the summary at the end of a segment is what is cut;
+    * a default agent that compacts its own history (:func:`_check_agent`)."""
+    agentic = spec.get("agentic")
+    raw = agentic.get("compaction") if isinstance(agentic, Mapping) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"agentic.compaction must be an object or null, got {type(raw).__name__}")
+    unknown = sorted(set(raw) - set(SPEC_KEYS))
+    if unknown:
+        raise ValueError(f"agentic.compaction: unknown key(s) {unknown} (known: {list(SPEC_KEYS)})")
+    if "context_budget" not in raw:
+        raise ValueError("agentic.compaction.context_budget is required (the context size C that triggers "
+                         "a compaction)")
+    values = {key: _spec_int(key, raw[key], minimum=least) for key, least in _INT_MINIMUM.items() if key in raw}
+    values.update({key: value for key, value in raw.items() if key not in _INT_MINIMUM})
+    budget, t_comp = values["context_budget"], values.get("t_comp", T_COMP)
+    if budget <= t_comp:
+        raise ValueError(f"agentic.compaction.context_budget {budget} must exceed t_comp {t_comp}")
+    limit = spec_max_model_len(spec) if max_model_len is None else int(max_model_len)
+    if limit is not None and budget > limit:
+        raise ValueError(f"agentic.compaction.context_budget {budget} exceeds the engine context length "
+                         f"max_model_len {limit}: the engine refuses a prompt before the proxy compacts it")
+    try:
+        cfg = CompactionConfig(**values)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"agentic.compaction: {exc}") from None
+    for key in ("turn_max_tokens", "max_response_len"):
+        if agentic.get(key) is None:
+            raise ValueError(f"agentic.compaction needs agentic.{key}")
+    _check_summary_room(cfg, int(agentic["turn_max_tokens"]))
+    headroom = getattr(cfg, "check_summary_headroom", None)  # the summary turn within the engine context
+    if headroom is not None and limit is not None:
+        try:
+            headroom(limit, int(agentic["turn_max_tokens"]))
+        except ValueError as exc:
+            raise ValueError(f"agentic.compaction: {exc}") from None
+    if int(agentic["max_response_len"]) < budget:
+        raise ValueError(f"agentic.max_response_len {int(agentic['max_response_len'])} < agentic.compaction."
+                         f"context_budget {budget}: a segment's response is cut at max_response_len, and the "
+                         f"summary that ends the segment is the part cut; set max_response_len >= context_budget")
+    _check_agent(agentic)
+    return cfg
+
+
+def describe(cfg: CompactionConfig) -> str:
+    """One line of the dry runs: the effective values of the section."""
+    line = (f"on: context_budget {cfg.context_budget}, t_comp {cfg.t_comp} (compacts once fewer than "
+            f"{cfg.t_comp} tokens remain), keep_recent_steps {cfg.keep_recent_steps}, max_compactions "
+            f"{cfg.max_compactions} (at most {cfg.max_compactions + 1} segments per trial)")
+    summary_max_tokens = getattr(cfg, "summary_max_tokens", None)
+    if summary_max_tokens is not None:
+        line += f", summary_max_tokens {summary_max_tokens}"
+    if cfg.max_compactions == 0:
+        line += "; max_compactions 0: the proxy never compacts"
+    return line
