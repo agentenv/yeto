@@ -399,7 +399,7 @@ def test_a_trajectory_forgotten_during_its_summary_turn_samples_nothing_more(glm
     engine.token_reply = reply
     from yeto.rl.harness.gateway.records import RecordsMismatch
 
-    with pytest.raises(RecordsMismatch, match="forgotten during its summary turn"):
+    with pytest.raises(RecordsMismatch, match="forgotten while a request was in flight"):
         run(proxy, "t", RESULTS)
     assert len(engine.token_requests) == 3 and script.replies == [SCRIPT[2]]
     assert proxy.backend.sessions == {} and proxy.backend.counters == {}
@@ -479,3 +479,65 @@ def test_a_summary_drafted_in_the_reasoning_is_not_the_summary(glm):
     first, second = proxy.records("t")["sessions"][0]["samples"]
     assert first["summary_ok"] is False and first["turns"][-1]["finish_reason"] == "length"
     assert "never written" not in glm.decode(second["token_ids"])
+
+
+# ------------------------------------------------------------------ R1: forget races, drift counts
+def test_a_trajectory_forgotten_during_an_action_turn_leaves_no_counters(glm):
+    """forget() while the engine samples a turn that appends a stop token the
+    engine did not return (the stop_added counter): RecordsMismatch, no KeyError,
+    and no counter entry is made again for the forgotten trajectory."""
+    from yeto.rl.harness.gateway.records import RecordsMismatch
+
+    script = ScriptedModel(glm, [SCRIPT[0], SCRIPT[1], SCRIPT[2]], return_stop=False)
+    engine = engine_for(script)
+    proxy = RecordsProxy(engine, glm, model="policy", signed_sampling=SIGNED)
+
+    def reply(prompt, index):
+        if len(script.replies) == 2:  # the second turn: its prompt starts with the stop the engine did not return
+            proxy.backend.forget("t")
+        return script(prompt, index)
+
+    engine.token_reply = reply
+    with pytest.raises(RecordsMismatch, match="forgotten while a request was in flight"):
+        run(proxy, "t", RESULTS)
+    assert proxy.backend.sessions == {} and proxy.backend.counters == {} and len(engine.token_requests) == 2
+
+
+def test_a_request_for_a_forgotten_session_is_a_records_mismatch(glm):
+    from yeto.rl.harness.gateway.records import RecordingBackend, RecordsMismatch
+
+    backend = RecordingBackend(engine_for(ScriptedModel(glm, [SCRIPT[0]])), glm)
+
+    async def go():
+        session = await backend.create_session("t")
+        backend.forget("t")
+        await backend.chat(session, [{"role": "user", "content": "x"}], dict(SIGNED))
+
+    with pytest.raises(RecordsMismatch, match="forgotten"):
+        asyncio.run(go())
+    assert backend.counters == {}
+
+
+def test_drift_is_counted_once_per_sampled_turn_on_a_compaction_turn(glm):
+    """The second reply is sampled in a non-canonical tokenization, so every later
+    prompt of that segment drifts. The compacting request builds two prompts
+    (the agent's turn, then the summary request) and samples one: the counter
+    equals the sampled turns that carry a render_diff."""
+
+    class Spelled(ScriptedModel):
+        def __call__(self, prompt, index):
+            ids = super().__call__(prompt, index)
+            if len(self.replies) == 2:  # the second reply
+                text = self.template.decode(ids[:3])
+                ids = [i for ch in text for i in self.template.encode(ch)] + ids[3:]
+            return ids
+
+    cfg = third_trigger(glm, 2000, keep_recent_steps=1)
+    engine = engine_for(Spelled(glm, [SCRIPT[0], SCRIPT[1], SUMMARY, SCRIPT[2]]))
+    proxy = RecordsProxy(engine, glm, model="policy", signed_sampling=SIGNED, compaction=cfg)
+    run(proxy, "t", RESULTS)
+    records = proxy.records("t")
+    assert records["counters"]["compactions"] == 1
+    turns = [t for s in records["sessions"][0]["samples"] for t in s["turns"]]
+    assert turns[2]["kind"] == "summary" and turns[2]["render_diff"] is not None  # the summary request drifted
+    assert records["counters"]["render_drift_turns"] == sum(t["render_diff"] is not None for t in turns) == 1

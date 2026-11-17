@@ -166,11 +166,15 @@ class Segment:
 class _Prompt:
     """Ids to append before the next sample. ``stop``: a stop token the engine
     ended on but did not return (mask 0); ``tail``: the new messages (mask 0);
-    ``render_diff``: drift position (None: aligned or not checked)."""
+    ``render_diff``: drift position (None: aligned or not checked);
+    ``prefill_dropped``: the history form omits the last generation prompt's
+    prefill. Both are counted when the prompt is sampled (:meth:`RecordingBackend._sample`),
+    not when it is built: a compaction turn builds prompts it never samples."""
 
     stop: tuple[int, ...]
     tail: tuple[int, ...]
     render_diff: int | None = None
+    prefill_dropped: bool = False
 
     def __len__(self) -> int:
         return len(self.stop) + len(self.tail)
@@ -234,6 +238,7 @@ class _Session:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turns: int = 0
     render_memo: _RenderMemo | None = None  # the last _prompt rendering (RecordingBackend._prompt)
+    forgotten: bool = False  # RecordingBackend.forget dropped it; a request still in flight stops
 
 
 def _common_prefix(a: str, b: str) -> str:
@@ -284,16 +289,18 @@ class RecordingBackend:
         return session_id
 
     async def chat(self, session_id: str, messages: list[Message], sampling: dict[str, Any]) -> dict[str, Any]:
-        session = self.sessions[session_id]
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise RecordsMismatch(f"no records session {session_id!r} (the trajectory was forgotten)")
         params = sampling_params(sampling)
         async with session.lock:
+            self._check_alive(session)  # forgotten while this request waited for the lock
             segment = session.segments[-1]
             context = segment.head + list(messages[segment.base:])
             pending = self._prompt(session, segment, context)
             if self._should_compact(session, segment, pending):
                 await self._compact(session, segment, context, params)
-                if self.sessions.get(session_id) is not session:  # forgotten during the summary turn
-                    raise RecordsMismatch("the trajectory was forgotten during its summary turn")
+                self._check_alive(session)  # forgotten during the summary turn
                 segment = session.segments[-1]
                 context = segment.head + list(messages[segment.base:])
                 pending = self._prompt(session, segment, context)
@@ -304,7 +311,7 @@ class RecordingBackend:
             message = self._parse(completion)
         except TemplateError as exc:  # malformed model output: the policy's failure
             segment.turns[-1].parse_error = str(exc)[:500]
-            self.counters[session.trajectory_id]["policy_output_errors"] += 1
+            self._counters(session)["policy_output_errors"] += 1
             raise
         return self._chat_response(session_id, message, completion, prompt_tokens=prompt_tokens)
 
@@ -319,11 +326,21 @@ class RecordingBackend:
     def forget(self, trajectory_id: str) -> None:
         """Drop everything recorded for the trajectory (after its records were read)."""
         for session_id in [sid for sid, s in self.sessions.items() if s.trajectory_id == trajectory_id]:
-            del self.sessions[session_id]
+            self.sessions.pop(session_id).forgotten = True
         self.tools.pop(trajectory_id, None)
         self.counters.pop(trajectory_id, None)
 
     # -------------------------------------------------------------- internals
+    @staticmethod
+    def _check_alive(session: _Session) -> None:
+        if session.forgotten:
+            raise RecordsMismatch(f"trajectory {session.trajectory_id!r} was forgotten while a request was in flight")
+
+    def _counters(self, session: _Session) -> Counter[str]:
+        """The trajectory's counters; a forgotten one gets none (RecordsMismatch, no new entry)."""
+        self._check_alive(session)
+        return self.counters[session.trajectory_id]
+
     def _prompt(self, session: _Session, segment: Segment, context: list[Message]) -> _Prompt:
         """What to append before the next sample (the whole prompt on a segment's first turn)."""
         tools = self.tools.get(session.trajectory_id)
@@ -350,6 +367,7 @@ class RecordingBackend:
             start = memo.text  # the last turn's rendering of these same messages (module doc)
         else:
             start = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=True)
+        prefill_dropped = False
         if not full.startswith(start):
             # The generation prompt may end in a template prefill that the history form of the
             # turn omits (Qwen3 enable_thinking=False: ``<think>\n\n</think>\n\n``). The
@@ -359,7 +377,7 @@ class RecordingBackend:
             if not (start.startswith(head) and full.startswith(head)):
                 raise RecordsMismatch("the rendering of the earlier turns changed (template rewrites history)")
             start = head + _common_prefix(start[len(head):], full[len(head):])
-            self.counters[session.trajectory_id]["prefill_dropped_turns"] += 1
+            prefill_dropped = True
         stop_ids: tuple[int, ...] = ()
         if segment.last_stop is None:  # the engine ended on a stop token but did not return it
             found = sorted((full.find(s, len(start)), s) for s in self.template.spec.stop_tokens)
@@ -377,9 +395,7 @@ class RecordingBackend:
         diff = None
         if self.check_render:
             diff = _first_difference([*segment.token_ids, *stop_ids, *tail], self.template.encode(full))
-            if diff is not None:
-                self.counters[session.trajectory_id]["render_drift_turns"] += 1
-        return _Prompt(stop=stop_ids, tail=tail, render_diff=diff)
+        return _Prompt(stop=stop_ids, tail=tail, render_diff=diff, prefill_dropped=prefill_dropped)
 
     def _should_compact(self, session: _Session, segment: Segment, pending: _Prompt) -> bool:
         """Compact before this turn (``C - |h| < T_comp``, a step in the segment to summarize).
@@ -403,7 +419,7 @@ class RecordingBackend:
             return True
         if used >= cfg.context_budget:
             left = "no compaction is left" if not opened_over else "the segment started over the compaction trigger"
-            self.counters[session.trajectory_id]["context_budget_full"] += 1
+            self._counters(session)["context_budget_full"] += 1
             self._context_full(session, segment, f"prompt has {used} tokens; context_budget is "
                                                  f"{cfg.context_budget} and {left}")
         return False
@@ -414,7 +430,7 @@ class RecordingBackend:
         does at ``max_model_len`` (the trajectory ran out of context; not a parse failure)."""
         if segment.turns:
             segment.turns[-1].parse_error = f"context_full: {message}"
-        self.counters[session.trajectory_id]["context_full"] += 1
+        self._counters(session)["context_full"] += 1
         raise ContextFull(message)
 
     async def _compact(self, session: _Session, segment: Segment, context: list[Message],
@@ -440,7 +456,7 @@ class RecordingBackend:
         False and a counter."""
         cfg = self.compaction
         assert cfg is not None
-        counters = self.counters[session.trajectory_id]
+        counters = self._counters(session)
         params = params.replace(max_tokens=cfg.summary_tokens(params.max_tokens))
         request = {"role": "user", "content": cfg.summary_prompt}
         pending = self._prompt(session, segment, context + [request])
@@ -455,8 +471,7 @@ class RecordingBackend:
             self._context_full(session, segment, f"{COMPACTION_NO_ROOM}: the summary request has {prompt_len} "
                                                  f"tokens; max_model_len is {self.engine.max_model_len}")
         completion = await self._sample(session, segment, pending, params, kind=KIND_SUMMARY)
-        if self.counters.get(session.trajectory_id) is not counters:  # forgotten while the engine wrote it
-            raise RecordsMismatch("the trajectory was forgotten during its summary turn")
+        self._check_alive(session)  # forgotten while the engine wrote it
         if completion.finish_reason == FINISH_LENGTH:
             counters["summary_truncated"] += 1
         try:
@@ -514,7 +529,7 @@ class RecordingBackend:
             # sampled turn so the outer layer trains it as a 0 instead of an infrastructure abort.
             if segment.turns:
                 segment.turns[-1].parse_error = f"context_full: {message}"
-            self.counters[session.trajectory_id]["context_full"] += 1
+            self._counters(session)["context_full"] += 1
             raise ContextFull(message)
         params = params.replace(max_tokens=min(params.max_tokens, room))
         version = self.engine.served_version()
@@ -526,11 +541,17 @@ class RecordingBackend:
         elif self.engine.served_version() != version:  # a reload during the call: version unknown
             raise RecordsMismatch(f"served version changed from {version} during the turn; "
                                   "the turn's behavior version is unknown")
+        self._check_alive(session)  # forgotten while the engine sampled: nothing more is recorded
         if completion.prompt_token_ids and tuple(completion.prompt_token_ids) != tuple(prompt):
             raise RecordsMismatch("the engine reports other prompt ids than the proxy sent")
+        counters = self._counters(session)
+        if pending.render_diff is not None:  # drift and prefill of the stream that is sampled (and trained)
+            counters["render_drift_turns"] += 1
+        if pending.prefill_dropped:
+            counters["prefill_dropped_turns"] += 1
         if pending.stop:
             segment.turns[-1].stop_added = pending.stop
-            self.counters[session.trajectory_id]["stop_added"] += 1
+            counters["stop_added"] += 1
         segment.extend(pending.stop, mask=0)
         segment.extend(pending.tail, mask=0)
         segment.extend(completion.token_ids, mask=1, logprobs=completion.logprobs)

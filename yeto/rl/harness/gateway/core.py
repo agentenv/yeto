@@ -168,6 +168,8 @@ class Gateway:
                 continue
             if trajectory_id in self.invalidated:
                 raise TrajectoryInvalid(self.invalidated[trajectory_id])
+            if self.registries.get(trajectory_id) is not registry:  # forgotten while the first request ran
+                raise TrajectoryInvalid(f"trajectory {trajectory_id!r} was forgotten while a request was in flight")
             self.replays[trajectory_id] += 1
             return self._reply(entry, copy.deepcopy(completion))
         if located.kind is LocateKind.continue_:

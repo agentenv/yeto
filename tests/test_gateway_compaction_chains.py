@@ -774,3 +774,28 @@ def test_a_client_that_leaves_during_keep_alive_gets_the_reply_on_its_resend(glm
     assert len(engine.token_requests) == 1
     snap = proxy.gateway.snapshot(tid)
     assert snap["retry_replays"] == 1 and snap["chains_total"] == 1
+
+
+def test_a_resend_waiting_on_a_trajectory_forgotten_meanwhile_is_refused_and_counts_nothing(glm):
+    """The first call returns, then the trajectory is forgotten before the waiting
+    resend resumes: the resend is refused (TrajectoryInvalid) and no replay
+    counter is made again for the forgotten trajectory."""
+    proxy, engine, policy = make_proxy(glm)
+    history = [{"role": "system", "content": "sys"}, {"role": "user", "content": "read"}]
+
+    async def go() -> Any:
+        policy.gate = threading.Event()
+        first = asyncio.ensure_future(proxy.handle("chat", body(history), trajectory_id="t"))
+        await asyncio.to_thread(policy.entered.wait, 10)
+        second = asyncio.ensure_future(proxy.handle("chat", body(history), trajectory_id="t"))
+        await asyncio.sleep(0.05)
+        (_, generation), = proxy.gateway._generations.values()
+        generation.add_done_callback(lambda _: proxy.forget("t"))  # runs before the resend resumes
+        policy.gate.set()
+        return await asyncio.gather(first, second, return_exceptions=True)
+
+    a, b = asyncio.run(go())
+    assert a["choices"][0]["message"]["tool_calls"]
+    assert isinstance(b, TrajectoryInvalid) and "forgotten" in str(b)
+    assert "t" not in proxy.gateway.replays and "t" not in proxy.gateway.registries
+    assert len(engine.token_requests) == 1
