@@ -19,7 +19,8 @@ The paper does not give the q_sum section names, the ``<analysis>`` wording or
 the u_resume text: :data:`SUMMARY_SECTIONS`, :data:`SUMMARY_PROMPT` and
 :data:`RESUME_TEMPLATE` are yeto drafts (a 9-section template; the paper's sec. 4.1 lists what must be kept: original goal, completed
 actions, important observations, unresolved errors, current state, plausible
-next steps) and need user confirmation.
+next steps) and need user confirmation; a run may replace them
+(:attr:`CompactionConfig.summary_prompt` / :attr:`CompactionConfig.resume_template`).
 
 Integration: the driver takes a ``policy(messages) -> str`` and
 an ``env`` with ``step(action) -> (observation, done)`` / ``reward()``; wiring it
@@ -84,19 +85,109 @@ def default_count_tokens(text: str) -> int:
     return len(text.split())
 
 
+# Cap of the summary turn's max_tokens when no summary_max_tokens is set: the summary
+# turn and the next segment's first action are sampled within one agent request, and
+# two full 8192-token turns at long-context ITL outlast the agent's HTTP idle timeout.
+DEFAULT_SUMMARY_MAX_TOKENS = 4096
+
+# Tokens of the summary request beyond its text: the template's user-message
+# wrapper, the assistant generation prompt and a stop token the engine did not
+# return (a bound for the shipped templates: GLM, Qwen3, Kimi K3 XTML).
+SUMMARY_REQUEST_OVERHEAD = 64
+
+
+def summary_request_tokens(summary_prompt: str) -> int:
+    """Upper bound on the tokens the summary request adds to the context: one
+    token per UTF-8 byte of ``summary_prompt`` (a byte-level BPE token is at
+    least one byte) plus :data:`SUMMARY_REQUEST_OVERHEAD`. Needs no tokenizer,
+    so a spec is checked before any model is loaded."""
+    return len(summary_prompt.encode("utf-8")) + SUMMARY_REQUEST_OVERHEAD
+
+
 @dataclass(frozen=True)
 class CompactionConfig:
+    """``summary_max_tokens``: the summary turn's ``max_tokens`` (None: the
+    agent's signed per-turn ``max_tokens`` capped at
+    :data:`DEFAULT_SUMMARY_MAX_TOKENS`); when set, ``t_comp`` must hold it plus
+    the summary request (:func:`summary_request_tokens`).
+    ``summary_prompt`` / ``resume_template``: q_sum and u_resume (default: the
+    yeto drafts :data:`SUMMARY_PROMPT` / :data:`RESUME_TEMPLATE`);
+    ``resume_template`` has one ``{summary}`` field."""
+
     context_budget: int  # C (paper: 64k GLM-4.7-Flash, 80k GLM-4.5-Air-SFT)
     t_comp: int = T_COMP
     keep_recent_steps: int = KEEP_RECENT_STEPS
     max_compactions: int = MAX_COMPACTIONS
     max_turns: int = 250  # evaluation turn cap (sec. 5.1); training value not given
+    summary_max_tokens: int | None = None
+    summary_prompt: str = SUMMARY_PROMPT
+    resume_template: str = RESUME_TEMPLATE
 
     def __post_init__(self) -> None:
         if self.context_budget <= self.t_comp:
             raise ValueError("context_budget must exceed t_comp")
         if self.keep_recent_steps < 0 or self.max_compactions < 0 or self.max_turns < 1:
             raise ValueError("keep_recent_steps/max_compactions must be >= 0, max_turns >= 1")
+        if not isinstance(self.summary_prompt, str) or not self.summary_prompt.strip():
+            raise ValueError("summary_prompt must be a non-empty string")
+        if not isinstance(self.resume_template, str) or "{summary}" not in self.resume_template:
+            raise ValueError("resume_template must be a string with a {summary} field")
+        try:
+            self.resume_template.format(summary="")
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(f"resume_template may have only the {{summary}} field "
+                             f"(write other braces as {{{{ }}}}): {exc!r}") from exc
+        if self.summary_max_tokens is not None:
+            if isinstance(self.summary_max_tokens, bool) or not isinstance(self.summary_max_tokens, int):
+                raise ValueError(f"summary_max_tokens must be an integer, got {self.summary_max_tokens!r}")
+            self.check_summary_room(self.summary_max_tokens)
+
+    def summary_tokens(self, turn_max_tokens: int) -> int:
+        """The summary turn's ``max_tokens`` given the signed per-turn one."""
+        if self.summary_max_tokens is None:
+            return min(int(turn_max_tokens), DEFAULT_SUMMARY_MAX_TOKENS)
+        return int(self.summary_max_tokens)
+
+    def check_summary_room(self, turn_max_tokens: int) -> int:
+        """Refuse (ValueError) a ``t_comp`` that cannot hold the summary turn:
+        compaction starts once fewer than ``t_comp`` tokens remain, and that
+        room must take the summary request and a summary of
+        :meth:`summary_tokens`. Returns those tokens. A spec reader calls it
+        with the signed per-turn ``max_tokens`` (``agentic.turn_max_tokens``)."""
+        tokens = self.summary_tokens(turn_max_tokens)
+        if tokens < 1:
+            raise ValueError(f"the summary turn's max_tokens must be >= 1, got {tokens}")
+        need = tokens + summary_request_tokens(self.summary_prompt)
+        if need > self.t_comp:
+            raise ValueError(
+                f"t_comp {self.t_comp} cannot hold the summary turn: max_tokens {tokens} + up to "
+                f"{need - tokens} tokens of summary request = {need}; raise t_comp or set "
+                f"summary_max_tokens <= {self.t_comp - (need - tokens)}")
+        return tokens
+
+    def check_summary_headroom(self, max_model_len: int, turn_max_tokens: int) -> int:
+        """Refuse (ValueError) a budget whose summary turn can overrun the engine context.
+
+        The step before a compaction starts below the trigger (at most
+        ``C - t_comp`` tokens), adds one reply (``turn_max_tokens``) and then
+        tool output of any length. The records proxy leaves that newest output
+        out of the summary request when it does not fit, so the summary turn
+        always fits within ``max_model_len`` when
+        ``C - t_comp + turn_max_tokens + summary request + summary <= max_model_len``.
+        Returns the slack (tokens to spare). A spec reader calls it with the
+        engine's ``max_model_len`` and ``agentic.turn_max_tokens``."""
+        summary = self.summary_tokens(turn_max_tokens)
+        need = (self.context_budget - self.t_comp + int(turn_max_tokens)
+                + summary_request_tokens(self.summary_prompt) + summary)
+        if need > int(max_model_len):
+            over = need - int(max_model_len)
+            raise ValueError(
+                f"the summary turn can overrun max_model_len {max_model_len} by {over} tokens: "
+                f"context_budget {self.context_budget} - t_comp {self.t_comp} + turn_max_tokens "
+                f"{turn_max_tokens} + summary request {summary_request_tokens(self.summary_prompt)} + "
+                f"summary {summary} = {need}; lower context_budget to <= {self.context_budget - over}, "
+                f"raise t_comp, or lower summary_max_tokens")
+        return int(max_model_len) - need
 
 
 def context_tokens(messages: Sequence[Message], count: Callable[[str], int]) -> int:
@@ -112,14 +203,22 @@ def should_compact(used_tokens: int, cfg: CompactionConfig) -> bool:
 def extract_summary(text: str) -> tuple[str, bool]:
     """``(summary, ok)``: the ``<summary>`` body, ``<analysis>`` dropped.
 
-    Without a closed ``<summary>`` tag the text minus any analysis block is
-    used and ``ok`` is False (recorded in the segment metadata).
+    Without a closed ``<summary>`` tag ``ok`` is False (recorded in the
+    segment metadata) and the text kept is: after an unclosed ``<summary>``
+    (a reply cut at its length), the part written; otherwise the text minus
+    the closed analysis blocks, or an unclosed analysis's own text when
+    nothing else is left.
     """
 
     m = re.search(r"<summary>(.*?)</summary>", text, flags=re.S)
     if m:
         return m.group(1).strip(), True
-    stripped = re.sub(r"<analysis>.*?(</analysis>|$)", "", text, flags=re.S)
+    stripped = re.sub(r"<analysis>.*?</analysis>", "", text, flags=re.S)
+    if "<summary>" in stripped:  # cut inside the summary (length): the part written
+        return stripped.rsplit("<summary>", 1)[1].strip(), False
+    if "<analysis>" in stripped:  # cut inside the analysis: its text, else nothing would be kept
+        head, scratch = stripped.split("<analysis>", 1)
+        stripped = head if head.strip() else scratch
     return stripped.strip(), False
 
 
@@ -137,7 +236,7 @@ def rebuild_context(prefix: Sequence[Message], summary: str, steps: Sequence[tup
     necessary").
     """
 
-    resume = {"role": "user", "content": RESUME_TEMPLATE.format(summary=summary)}
+    resume = {"role": "user", "content": cfg.resume_template.format(summary=summary)}
     for k in range(min(cfg.keep_recent_steps, len(steps)), -1, -1):
         recent = [m for st in steps[len(steps) - k:] for m in step_messages(st)] if k else []
         ctx = [*prefix, resume, *recent]
@@ -247,10 +346,10 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
                 truncated = True
                 break
             continue
-        request = {"role": "user", "content": SUMMARY_PROMPT}
+        request = {"role": "user", "content": cfg.summary_prompt}
         text = policy([*ctx, request])
-        seg.turns.append({"role": "user", "content": SUMMARY_PROMPT, "kind": "summary_request",
-                          "tokens": count(SUMMARY_PROMPT)})
+        seg.turns.append({"role": "user", "content": cfg.summary_prompt, "kind": "summary_request",
+                          "tokens": count(cfg.summary_prompt)})
         seg.turns.append({"role": "assistant", "content": text, "kind": "summary",
                           "tokens": count(text)})
         summary, ok = extract_summary(text)
