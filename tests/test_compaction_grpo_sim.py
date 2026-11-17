@@ -6,12 +6,6 @@ records proxy behind ``ProxyTokenRecorder(allow_compaction=True)`` -> ``AgenticR
 ``BatchReader`` and ``_BufferRound`` (trial numbering, padding by trial, the
 ``compaction_batch`` line) -> Miles' GRPO normalization, with a fake engine, a pi-like
 agent and a simulated environment.
-
-The trainer-side checks of compacted groups are strict xfails while the segment
-metadata C1 writes (``kept_steps`` None on the first segment, ``summary_ok`` None on
-the last) is refused by ``yeto.rl.contracts.validate_compaction_group`` (C3's
-``check_trials``): every compacted group is left out of the round (issue N1 of the
-compaction-1118 C4 report).
 """
 
 from __future__ import annotations
@@ -30,9 +24,6 @@ sys.path.insert(0, str(REPO / "scripts"))
 import sim_compaction_grpo as sim  # noqa: E402
 
 pytest.importorskip("aiohttp")
-
-N1 = pytest.mark.xfail(strict=True, reason="N1: contracts.validate_compaction_group refuses the kept_steps=None / "
-                                           "summary_ok=None that agentic_samples writes; compacted groups never train")
 
 # the buffer sample of a trial without compaction on main (agentic_round.agentic_sample)
 MAIN_KEYS = {"group_index", "index", "label", "loss_mask", "metadata", "prompt", "response", "response_length",
@@ -248,26 +239,10 @@ def test_tcomp_overflow_runs_without_the_spec_checks_and_loses_no_trial(runs):
 
 
 # ---------------------------------------------------------------------- trainer side
-@N1
 @pytest.mark.parametrize("name", ["compact_once", "compact3_truncated", "mixed_reload", "partial_abort",
                                   "tcomp_overflow", "r3_segment_window", "batch_count"])
 def test_trainer_trains_each_trial_as_one_rollout(runs, name):
     check_trainer(runs(name))
-
-
-def test_n1_every_compacted_group_is_left_out_of_the_trainer_round(runs):
-    """N1 as it is: the reader takes the groups, ``miles_groups`` leaves each compacted one
-    out (the contract validator refuses ``kept_steps`` None), and the round fails."""
-    from yeto.rl.adapters.miles.buffer_rollout import miles_groups
-    from yeto.rl.contracts import validate_compaction_group
-
-    r = runs("compact_once")
-    group = [x for t in r.trials if t.group == 0 for x in t.samples]
-    with pytest.raises(ValueError, match="kept_steps must be a non-negative integer"):
-        validate_compaction_group(group)
-    converted, problems = miles_groups([(0, group)], samples_per_group=r.scenario.n)
-    assert converted == [] and "kept_steps" in problems[0]
-    assert "error" in r.metrics()["trainer_steps"][0]
 
 
 def test_cli_prints_both_tables_and_writes_json(tmp_path, capsys):
