@@ -1,65 +1,54 @@
 """CPU end-to-end simulation of async GRPO with context compaction (CompactionRL segments).
 
-Real pieces: the records proxy (``RecordsProxy`` -> ``RecordingBackend`` with a
-``CompactionConfig``), the gateway's Chat route, the outer agent layer
-(``run_agent_task``), ``AgenticRound`` writing groups through ``GroupWriter``
-into a local-disk sample buffer (``open_buffer`` over ``YETO_SAMPLE_BUFFER_ROOT``),
-the trainer's ``BatchReader`` / ``miles_groups`` (``miles_sample_dict``), Miles'
-``Sample`` (when Miles is importable) and Miles' GRPO reward normalization
-(``reward_group_segments`` / ``rollout_segments`` from Miles when importable;
-``_normalize_rewards_by_rollout`` itself needs Miles' train-data imports, so a
-line-for-line port runs here, see :func:`normalize_rewards_by_rollout`).
+Real pieces, end to end:
 
-Fake pieces:
+* the spec's ``agentic.compaction`` -> ``agentic_round.spec_compaction`` (``config_from_spec``
+  and its launch checks) -> :class:`~yeto.rl.compaction.CompactionConfig`;
+* the records proxy as ``round_factory`` builds it (``RecordsProxy(compaction=...,
+  r3_response_len=max_response_len)``) behind ``ProxyTokenRecorder(allow_compaction=True)``
+  on 127.0.0.1 HTTP, the gateway's Chat route and ``RecordingBackend``'s compaction;
+* ``AgenticRound`` (``run_agent_task``, ``finish_sample(segmented=True)``,
+  ``agentic_samples``: one buffer sample per compaction segment) writing through
+  ``GroupWriter`` into a local-disk sample buffer (``open_buffer`` over
+  ``YETO_SAMPLE_BUFFER_ROOT``);
+* the trainer's round: ``BatchReader(group_size=n)`` and ``_BufferRound.__call__`` of
+  ``buffer_rollout_miles`` (``miles_groups`` / ``renumber_group`` by trial,
+  ``check_segmented_round``, padding by trial, the ``compaction_batch`` log line);
+  only the Miles rollout base classes that module imports are stand-ins (as in
+  ``tests/test_rl_buffer_rollout.py``), and Miles' own ``Sample`` is used when Miles
+  is importable;
+* Miles' GRPO normalization (``reward_group_segments`` / ``rollout_segments`` from
+  Miles when importable; ``_normalize_rewards_by_rollout`` needs Miles' train-data
+  imports, so a line-for-line port runs, see :func:`normalize_rewards_by_rollout`).
 
-* tokenizer / chat template: a word-level hashing tokenizer with a ChatML-like
-  template (no HF download); tool calls are Qwen3 ``<tool_call>{json}</tool_call>``
-  (parsed by ``parse_qwen3``);
-* engine: :class:`SimEngine`, a :class:`FakeEngine` whose replies come from a
-  scripted policy (tool calls until the environment says ``remaining=0``,
-  then a final answer; a summary when the proxy asks for one), with
-  log-probs, top-K rows (sampled token first) and small R3 rows, and an
-  in-place weight reload after configured call counts (live update);
-* agent: :class:`SimAgent`, a pi-like loop that sends the whole history to the
-  records proxy's Chat Completions route every turn, runs each tool call in
-  :class:`SimEnvironment` and returns the 0/1 verifier reward;
-* environment: tool output lengths and tool run times from configured
-  distributions; a trial may fail (ABORTED) after some calls.
+Fake pieces: a word-level hashing tokenizer with a ChatML-like template (Qwen3 tool
+calls, ``parse_qwen3``); :class:`SimEngine` (a :class:`FakeEngine` with a scripted
+policy, log-probs, top-K rows, small R3 rows and in-place reloads); :class:`SimAgent`
+(pi-like: the whole history to the Chat route every turn, every tool call run in
+:class:`SimEnvironment`, the 0/1 verifier reward); the environment's tool output
+lengths and tool times come from configured distributions, and a trial may fail
+(ABORTED) after some calls.
 
-Time is simulated (nothing sleeps): an LLM call costs
-``call_overhead_s + prefill_s_per_token * uncached prompt tokens +
-decode_s_per_token * completion tokens``; a tool call costs a draw from
-``tool_time_s``. Two totals per trial: ``env_s`` (tool time only) and
-``env_s + 0.1 * llm_s``. The real CPU wall clock of each phase is reported too
-(yeto's own overhead; the fake engine's own time is subtracted per call).
+Time is simulated (nothing sleeps): an LLM call costs ``call_overhead_s +
+prefill_s_per_token * uncached prompt tokens + decode_s_per_token * completion
+tokens`` (the proxy's summary turns included); a tool call costs a draw from
+``tool_time_s``. Two totals per trial: ``env_s`` (tool time only) and ``env_s + 0.1
+* llm_s``. The real CPU per LLM call (the process minus the fake engine's thread
+time) is yeto's own overhead.
 
-Paths:
-
-* ``agentic``: ``AgenticRound`` + ``ProxyTokenRecorder`` (HTTP on 127.0.0.1) ->
-  buffer -> trainer read -> normalization. Without compaction this runs on
-  main. With compaction it needs the sampler-side segment samples (C1); on main
-  ``ProxyTokenRecorder`` refuses a compacting proxy.
-* ``records``: the agent drives the records proxy in process (no AgenticRound);
-  each recorded segment is joined on its own and turned into a buffer sample
-  with the real ``agentic_sample`` plus ``metadata.compaction`` as the
-  compaction-1118 contract fixes it (a stand-in until C1 lands); the groups go
-  through the buffer and the trainer read (segment groups need C3: on main the
-  reader refuses a group with more samples than ``n``) and through the
-  normalization directly.
-
-Run: ``python scripts/sim_compaction_grpo.py --scenario all`` (``--json out.json``,
-``--path records|agentic|auto``). Add the Miles checkout to ``PYTHONPATH``
-(or ``--miles-root``) to use Miles' own ``Sample`` and segment helpers.
+Run: ``python scripts/sim_compaction_grpo.py --scenario all`` (``--json out.json``).
+Add the Miles checkout to ``PYTHONPATH`` (or ``--miles-root``) to use Miles' own
+``Sample`` and segment helpers.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import dataclasses
 import hashlib
-import inspect
+import importlib.util
+import io
 import json
 import math
 import random
@@ -69,6 +58,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -94,7 +84,8 @@ SYSTEM = ("You are a coding agent working in a sandbox. Call the shell tool to i
 WORDS = ("file", "line", "test", "error", "patch", "build", "check", "value", "module", "config", "path", "read",
          "write", "parse", "fix", "run", "output", "diff", "commit", "import", "class", "method", "list", "index",
          "cache", "token", "shape", "batch", "trace", "stack", "branch", "merge", "status", "result", "number")
-COMPACTION_SCHEMA = 1
+AGENT = "pi"  # the agent whose own compaction yeto turns off (pi_config.PROXY_COMPACTION_AGENTS)
+BATCH_LINE = re.compile(r"compaction_batch: rollout=(\d+) trials=(\d+) segments=(\d+) per_trial=\{([^}]*)\}")
 
 
 # ============================================================================ tokenizer and template
@@ -187,8 +178,9 @@ class Scenario:
     tasks: int = 4
     n: int = 8
     compaction: Mapping[str, int] | None = None  # spec agentic.compaction (None: off)
+    spec_checked: bool = True  # False: build CompactionConfig directly (a config the spec refuses)
     max_model_len: int = 4096
-    turn_max_tokens: int = 256
+    turn_max_tokens: int = 192
     max_response_len: int = 4096
     steps: Dist = Dist("int", 2, 4)  # tool calls a trial needs before it can answer
     action_tokens: Dist = Dist("int", 30, 90)  # text before the tool call
@@ -212,8 +204,33 @@ class Scenario:
     seed: int = 1118
     max_agent_turns: int = 200
 
-    def compaction_config(self) -> CompactionConfig | None:
-        return None if self.compaction is None else CompactionConfig(**dict(self.compaction))
+    def spec(self) -> dict[str, Any]:
+        """The sampler spec's ``agentic`` section the round would be built from."""
+        return {"sampler_id": "sim-0", "sampling": {"temperature": 1.0, "top_p": 1.0},
+                "agentic": {"compaction": None if self.compaction is None else dict(self.compaction),
+                            "turn_max_tokens": self.turn_max_tokens, "max_response_len": self.max_response_len,
+                            "task_defaults": {"agent": AGENT}}}
+
+    def spec_error(self) -> str | None:
+        """Why the spec's checks refuse this scenario's compaction (None: accepted)."""
+        from yeto.rl.compaction import config_from_spec
+
+        try:
+            config_from_spec(self.spec(), max_model_len=self.max_model_len)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    def compaction_config(self, engine: Any = None) -> CompactionConfig | None:
+        """The proxy's config as ``round_factory`` gets it (``agentic_round.spec_compaction``);
+        ``spec_checked=False``: the dataclass itself (the launch checks skipped)."""
+        if self.compaction is None:
+            return None
+        if not self.spec_checked:
+            return CompactionConfig(**dict(self.compaction))
+        from yeto.rl.engine.agentic_round import spec_compaction
+
+        return spec_compaction(self.spec(), engine)
 
     def success(self, task: int) -> float:
         if isinstance(self.success_p, Mapping):
@@ -221,28 +238,41 @@ class Scenario:
         return float(self.success_p)
 
 
-SMALL = {"context_budget": 4096, "t_comp": 512, "keep_recent_steps": 2, "max_compactions": 3}
-# t_comp 512 leaves room for one step (action <= ~90 tokens, tool output <= ~125) plus the
-# summary request (~140) and the summary (<= ~135); ``tcomp_overflow`` breaks that on purpose.
+# 4096 / 1024: t_comp holds the summary turn (summary_max_tokens 128 + the summary request's
+# byte bound, 632) and the budget leaves the engine room for it after a full step
+# (config_from_spec: check_summary_room / check_summary_headroom with turn_max_tokens 192).
+# A t_comp of 512 is refused by the spec (``tcomp_overflow`` runs it with the checks off).
+SMALL = {"context_budget": 4096, "t_comp": 1024, "keep_recent_steps": 2, "max_compactions": 3,
+         "summary_max_tokens": 128}
 SHORT_STEP = {"action_tokens": Dist("int", 20, 60), "tool_tokens": Dist("int", 60, 110),
-              "summary_tokens": Dist("int", 40, 90)}
-MIXED = {0: 0.5, 1: 0.25, 2: 0.75, 3: 0.5}
+              "summary_tokens": Dist("int", 30, 70)}
+MIXED = {0: 0.5, 1: 0.25, 2: 0.75, 3: 0.5, 4: 0.5, 5: 0.25}
 SCENARIOS: dict[str, Scenario] = {s.name: s for s in (
     Scenario("no_compaction", "compaction off, short trials (main format)", compaction=None, max_model_len=16384,
              max_response_len=16384, steps=Dist("int", 2, 5), success_p=MIXED),
-    Scenario("no_trigger", "compaction on (4096 / 512), trials too short to trigger it", compaction=SMALL,
+    Scenario("no_trigger", "compaction on (4096 / 1024), trials too short to trigger it", compaction=SMALL,
              steps=Dist("int", 3, 8), success_p=MIXED, **SHORT_STEP),
-    Scenario("compact_once", "compaction on (4096 / 512), about one compaction per trial", compaction=SMALL,
-             steps=Dist("int", 20, 28), success_p=MIXED, **SHORT_STEP),
+    Scenario("compact_once", "compaction on, about one compaction per trial", compaction=SMALL,
+             steps=Dist("int", 18, 24), success_p=MIXED, **SHORT_STEP),
     Scenario("compact3_truncated", "trials that never finish: 3 compactions, then the context fills (truncated)",
              compaction=SMALL, steps=Dist("int", 500, 500), success_p=1.0, **SHORT_STEP),
     Scenario("mixed_reload", "short to long trials, two in-place weight reloads during the round (live)",
-             compaction=SMALL, steps=Dist("int", 3, 40), reload_after_calls=(300, 600), success_p=MIXED,
+             compaction=SMALL, steps=Dist("int", 3, 34), reload_after_calls=(250, 500), success_p=MIXED,
              **SHORT_STEP),
     Scenario("partial_abort", "a quarter of the trials fail after 1-3 calls (ABORTED, left out of the group)",
-             compaction=SMALL, steps=Dist("int", 10, 30), abort_p=0.25, success_p=MIXED, **SHORT_STEP),
-    Scenario("tcomp_overflow", "steps longer than t_comp allows: the summary request itself overflows the context",
-             compaction=SMALL, steps=Dist("int", 9, 12), tool_tokens=Dist("int", 300, 450), success_p=MIXED),
+             compaction=SMALL, steps=Dist("int", 8, 24), abort_p=0.25, success_p=MIXED, **SHORT_STEP),
+    Scenario("tcomp_overflow", "t_comp 512 (the spec refuses it; run with the checks off): steps of up to ~700 "
+             "tokens, the summary request does not always fit", spec_checked=False,
+             compaction={"context_budget": 4096, "t_comp": 512, "keep_recent_steps": 2, "max_compactions": 3},
+             turn_max_tokens=256, steps=Dist("int", 9, 12), tool_tokens=Dist("int", 300, 450), success_p=MIXED),
+    Scenario("r3_segment_window", "R3 rows cut to each segment's own training window: max_response_len 3250 "
+             "< budget (the spec refuses it; checks off), one compaction, the last segment cut",
+             spec_checked=False, compaction={**SMALL, "max_compactions": 1}, max_response_len=3250,
+             steps=Dist("int", 500, 500), success_p=1.0, **SHORT_STEP),
+    Scenario("batch_count", "6 tasks, 3 groups per trainer step, aborted trials: the global batch counts trials "
+             "(rollout_batch_size x n distinct rollouts per step, padding by trial)", tasks=6,
+             rollout_batch_size=3, compaction=SMALL, steps=Dist("int", 8, 24), abort_p=0.2, success_p=MIXED,
+             **SHORT_STEP),
 )}
 
 
@@ -406,49 +436,19 @@ class SimEnvironment:
         return 1.0 if answered and self.done >= self.steps and self.success else 0.0
 
 
-class InProcess:
-    """The records proxy's Chat route without HTTP (``RecordsProxy.handle`` with the
-    route's error mapping)."""
-
-    def __init__(self, proxy: Any) -> None:
-        self.proxy = proxy
-
-    async def chat(self, trajectory_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        from yeto.rl.harness.chat_templates import TemplateError
-        from yeto.rl.harness.gateway.core import GatewayError
-
-        try:
-            return 200, await self.proxy.handle("chat", body, trajectory_id=trajectory_id)
-        except TemplateError as exc:
-            return 400, {"error": {"type": type(exc).__name__, "message": str(exc)}}
-        except GatewayError as exc:
-            return 409, {"error": {"type": type(exc).__name__, "message": str(exc)}}
-
-
 class SimAgent:
     """pi-like agent (``AgentHarness``): every turn it sends the whole history and
     the tool schemas to ``<endpoint>/chat/completions``; it runs every tool call and
-    answers when the model replies without one. ``inproc://<trajectory>``
-    endpoints go to :class:`InProcess` instead of HTTP. A refused call (the
-    context is full) ends the agent with a non-zero exit, as pi does."""
+    answers when the model replies without one. A refused call (the context is
+    full) ends the agent with a non-zero exit, as pi does."""
 
-    def __init__(self, scenario: Scenario, *, inproc: InProcess | None = None) -> None:
+    def __init__(self, scenario: Scenario) -> None:
         self.scenario = scenario
-        self.inproc = inproc
         self.trials: dict[str, dict[str, Any]] = {}
-        self._http: Any = None
-
-    async def _post(self, endpoint: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        if endpoint.startswith("inproc://"):
-            assert self.inproc is not None
-            return await self.inproc.chat(endpoint[len("inproc://"):], body)
-        import aiohttp
-
-        async with aiohttp.ClientSession() as http:
-            async with http.post(f"{endpoint}/chat/completions", json=body) as reply:
-                return reply.status, await reply.json()
 
     async def run(self, task: Any, endpoint: str) -> Any:
+        import aiohttp
+
         from yeto.rl.agentic import TrialVerdict
 
         tid = str(task.trajectory_id)
@@ -461,74 +461,33 @@ class SimAgent:
         info = {"task": task.task_id, "env": env, "calls": 0, "answered": False, "exit": None,
                 "call_wall_s": [], "statuses": Counter()}
         self.trials[tid] = info
-        while info["calls"] < self.scenario.max_agent_turns:
-            began = time.perf_counter()
-            status, reply = await self._post(endpoint, {"model": SIGNED_MODEL, "messages": messages, "tools": TOOLS})
-            info["call_wall_s"].append(time.perf_counter() - began)
-            info["statuses"][status] += 1
-            if status != 200:
-                info["exit"] = f"{status}: {str((reply.get('error') or {}).get('message'))[:120]}"
-                return TrialVerdict(rewards={"reward": 0.0}, exception_type="NonZeroAgentExitCodeError",
-                                    exception_message=info["exit"], timings_s={"env_s": sum(env.tool_s)})
-            info["calls"] += 1
-            message = dict(reply["choices"][0]["message"])
-            messages.append({k: message[k] for k in ("role", "content", "tool_calls") if k in message})
-            if env.abort_after is not None and info["calls"] >= env.abort_after:
-                info["exit"] = "sandbox lost"
-                return TrialVerdict(rewards=None, exception_type="SandboxLostError",
-                                    exception_message="simulated sandbox loss")
-            calls = message.get("tool_calls") or []
-            if not calls:
-                info["answered"] = reply["choices"][0].get("finish_reason") != "length"
-                break
-            for call in calls:
-                messages.append({"role": "tool", "tool_call_id": call["id"], "content": env.execute(call)})
-        reward = env.reward(info["answered"])
-        return TrialVerdict(rewards={"reward": reward}, timings_s={"env_s": sum(env.tool_s)},
+        async with aiohttp.ClientSession() as http:
+            while info["calls"] < self.scenario.max_agent_turns:
+                began = time.perf_counter()
+                body = {"model": SIGNED_MODEL, "messages": messages, "tools": TOOLS}
+                async with http.post(f"{endpoint}/chat/completions", json=body) as response:
+                    status, reply = response.status, await response.json()
+                info["call_wall_s"].append(time.perf_counter() - began)
+                info["statuses"][status] += 1
+                if status != 200:
+                    info["exit"] = f"{status}: {str((reply.get('error') or {}).get('message'))[:160]}"
+                    return TrialVerdict(rewards={"reward": 0.0}, exception_type="NonZeroAgentExitCodeError",
+                                        exception_message=info["exit"], timings_s={"env_s": sum(env.tool_s)})
+                info["calls"] += 1
+                message = dict(reply["choices"][0]["message"])
+                messages.append({k: message[k] for k in ("role", "content", "tool_calls") if k in message})
+                if env.abort_after is not None and info["calls"] >= env.abort_after:
+                    info["exit"] = "sandbox lost"
+                    return TrialVerdict(rewards=None, exception_type="SandboxLostError",
+                                        exception_message="simulated sandbox loss")
+                calls = message.get("tool_calls") or []
+                if not calls:
+                    info["answered"] = reply["choices"][0].get("finish_reason") != "length"
+                    break
+                for call in calls:
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": env.execute(call)})
+        return TrialVerdict(rewards={"reward": env.reward(info["answered"])}, timings_s={"env_s": sum(env.tool_s)},
                             agent_metrics={"tool_calls": env.done, "steps_needed": env.steps})
-
-
-# ============================================================================ capabilities (integration probes)
-def capabilities() -> dict[str, bool]:
-    """Which compaction-1118 parts are in this tree (the simulation adapts; tests skip):
-
-    * ``sampler_segments`` (C1): ``ProxyTokenRecorder`` accepts a compacting proxy;
-    * ``spec_compaction`` (C2): the spec's ``agentic.compaction`` reaches the proxy
-      (``round_factory`` reads it);
-    * ``trainer_segments`` (C3): the trainer keeps a group of segment samples
-      (more samples than ``n``, siblings sharing ``index``) with its trial identity."""
-    from yeto.rl.agentic import HarnessConfigError
-    from yeto.rl.engine import agentic_round
-    from yeto.rl.harness.gateway.proxy import RecordsProxy
-    from yeto.rl.harness.gateway.recorder import ProxyTokenRecorder
-
-    out = {}
-    template = sim_template()
-    engine = FakeEngine(max_model_len=4096)
-    try:
-        ProxyTokenRecorder(RecordsProxy(engine, template, model=SIGNED_MODEL, signed_sampling={"max_tokens": 8},
-                                        compaction=CompactionConfig(context_budget=4096, t_comp=512)))
-        out["sampler_segments"] = True
-    except HarnessConfigError:
-        out["sampler_segments"] = False
-    out["spec_compaction"] = "compaction" in inspect.getsource(agentic_round.round_factory)
-    out["trainer_segments"] = _trainer_keeps_segments()
-    return out
-
-
-def _trainer_keeps_segments() -> bool:
-    from yeto.rl.adapters.miles.buffer_rollout import renumber_group
-    from yeto.rl.engine.buffer_payload import SampleBufferRolloutError
-
-    meta = lambda i, k: {"trajectory_id": f"t{i}", "compaction": {"schema": 1, "trajectory_id": f"t{i}",  # noqa: E731
-                                                                  "segment_index": k, "num_segments": 2}}
-    group = [{"group_index": 0, "index": i, "metadata": meta(i, k)} for i in range(2) for k in range(2)]
-    try:
-        out = renumber_group(group, position=5, samples_per_group=2)
-    except SampleBufferRolloutError:
-        return False
-    keys = [(d.get("rollout_id"), d["index"]) for d in out]
-    return keys[0] == keys[1] and keys[2] == keys[3] and keys[0] != keys[2]
 
 
 # ============================================================================ Miles normalization
@@ -657,59 +616,6 @@ def trainer_advantages(miles: SimpleNamespace, scenario: Scenario, samples: Sequ
     return normalize_rewards_by_rollout(miles, miles_args(scenario), samples, rewards, unshaped_rewards=rewards)
 
 
-# ============================================================================ records -> segment samples
-def trial_key(sample: Mapping[str, Any]) -> str:
-    """The trial a buffer sample belongs to: ``metadata.compaction.trajectory_id``, else
-    ``metadata.trajectory_id``."""
-    meta = sample.get("metadata") or {}
-    comp = meta.get("compaction")
-    return str(comp["trajectory_id"]) if isinstance(comp, Mapping) else str(meta.get("trajectory_id"))
-
-
-def records_segment_samples(item: Any, trajectory: Any, records: Mapping[str, Any], *, group_index: int,
-                            index: int, cfg: CompactionConfig | None, max_response_len: int,
-                            provenance: Mapping[str, str], live: bool) -> list[dict[str, Any]]:
-    """One buffer sample per recorded segment, in the compaction-1118 contract form
-    (stand-in for C1): each segment joined on its own (``turns_from_records`` +
-    ``join_turns``), written by the real ``agentic_sample``; a trial of several
-    segments gets ``metadata.compaction`` on each, only its last segment may be
-    ``truncated``; a single-segment trial is the main sample."""
-    from yeto.rl.agentic.finish import FinishedSample
-    from yeto.rl.agentic.tokens import join_turns
-    from yeto.rl.engine.agentic_round import agentic_sample
-    from yeto.rl.harness.gateway.recorder import turns_from_records
-
-    segments = [seg for session in records["sessions"] for seg in session["samples"]]
-    joined = []
-    for seg in segments:
-        turns = turns_from_records({"sessions": [{"samples": [seg]}]})
-        joined.append((seg, turns, join_turns(turns, max_response_len=max_response_len, rebase=True)))
-    trained = [sum(j.response_mask) for _, _, j in joined]
-    out = []
-    for k, (seg, turns, tokens) in enumerate(joined):
-        versions = [int(t.policy_version) for t in turns if t.policy_version is not None]
-        finished = FinishedSample(trajectory, tokens, turns)
-        sample = agentic_sample(item, finished, version=min(versions), provenance=provenance,
-                                group_index=group_index, index=index,
-                                versions=(min(versions), max(versions)) if live else None)
-        if len(joined) > 1:
-            last = k == len(joined) - 1
-            context_full = any(str(t.policy_error or "").startswith("context_full") for t in turns)
-            if not last:
-                sample["status"] = "completed"
-                sample["metadata"]["finish_reason"] = FINISH_STOP
-            elif context_full:
-                sample["status"] = "truncated"
-            sample["metadata"]["compaction"] = {
-                "schema": COMPACTION_SCHEMA, "trajectory_id": sample["metadata"]["trajectory_id"],
-                "segment_index": k, "num_segments": len(joined),
-                "context_budget": None if cfg is None else cfg.context_budget,
-                "summary_ok": seg.get("summary_ok"), "kept_steps": seg.get("kept_steps"),
-                "segment_tokens": trained[k], "tokens_after": sum(trained[k + 1:])}
-        out.append(sample)
-    return out
-
-
 def check_sample_alignment(sample: Mapping[str, Any], scenario: Scenario) -> list[str]:
     """Token / loss mask / log-prob / top-K / R3 alignment of one buffer sample
     (empty: aligned)."""
@@ -754,6 +660,92 @@ def check_sample_alignment(sample: Mapping[str, Any], scenario: Scenario) -> lis
     return problems
 
 
+# ============================================================================ trainer round
+def trial_key(sample: Any) -> str:
+    """The trial a buffer sample (a dict or a Miles ``Sample``) belongs to:
+    ``metadata.compaction.trajectory_id``, else ``metadata.trajectory_id``."""
+    meta = (sample.get("metadata") if isinstance(sample, Mapping) else getattr(sample, "metadata", None)) or {}
+    comp = meta.get("compaction")
+    return str(comp["trajectory_id"]) if isinstance(comp, Mapping) else str(meta.get("trajectory_id"))
+
+
+def _field(sample: Any, name: str) -> Any:
+    return sample.get(name) if isinstance(sample, Mapping) else getattr(sample, name, None)
+
+
+def buffer_round_module() -> types.ModuleType:
+    """``yeto.rl.adapters.miles.buffer_rollout_miles`` loaded with stand-ins for the Miles
+    rollout base classes it imports (as ``tests/test_rl_buffer_rollout.py`` does), under a
+    private module name: the sys.modules entries of those Miles modules are restored, so a
+    real Miles on the path is not shadowed afterwards."""
+    from yeto.rl.adapters.miles import buffer_rollout
+
+    class _Base:
+        def __init__(self, input: Any) -> None:
+            self.constructor_input = input
+
+    stubs = {
+        "miles.rollout.base_types": dict(BaseRolloutFn=_Base, RolloutFnConstructorInput=object,
+                                         RolloutFnInput=object, RolloutFnTrainOutput=lambda **kw: kw),
+        "miles.rollout.inference_rollout.inference_rollout_common": dict(InferenceRolloutFn=_Base),
+        "miles.utils.function_registry": dict(load_function=lambda path: None),
+        "miles.utils.types": dict(Sample=object),
+    }
+    parents = {"miles", "miles.rollout", "miles.rollout.inference_rollout", "miles.utils"}
+    names = set(stubs) | parents
+    saved = {name: sys.modules.get(name) for name in names}
+    name = "yeto.rl.adapters.miles._sim_buffer_rollout_miles"
+    try:
+        for parent in parents:
+            if parent not in sys.modules:
+                sys.modules[parent] = types.ModuleType(parent)
+        for module, attrs in stubs.items():
+            sys.modules[module] = SimpleNamespace(**attrs)  # type: ignore[assignment]
+        spec = importlib.util.spec_from_file_location(
+            name, Path(buffer_rollout.__file__).with_name("buffer_rollout_miles.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = value
+    return module
+
+
+def trainer_round(plugin: types.ModuleType, reader: Any, scenario: Scenario, rollout_id: int, *, version: int,
+                  sample_cls: Any) -> tuple[Any, list[dict[str, Any]], str]:
+    """One trainer round: the real ``_BufferRound.__call__`` over ``reader`` (a real
+    ``BatchReader``). Returns its output, the ``record_round_metadata`` counts, and what
+    it printed (the ``compaction_batch`` line)."""
+    counts: list[dict[str, Any]] = []
+    plugin.record_round_metadata = lambda args, rid, **c: counts.append(dict(c))
+    plugin.Sample = sample_cls if sample_cls is not None else SimpleNamespace(from_dict=lambda d: d)
+    budget = (scenario.compaction or {}).get("context_budget", scenario.max_model_len)
+    round_ = plugin._BufferRound.__new__(plugin._BufferRound)
+    round_.args = SimpleNamespace(rollout_sample_filter_path=None, rollout_all_samples_process_path=None,
+                                  use_dynamic_batch_size=True, seq_length=int(budget), grpo_std_normalization=True,
+                                  hf_checkpoint=None, rollout_batch_size=scenario.rollout_batch_size,
+                                  n_samples_per_prompt=scenario.n)
+    round_.groups, round_.samples_per_group, round_.reader = scenario.rollout_batch_size, scenario.n, reader
+    round_._r3_layers_cached = (None, scenario.r3[0])
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        out = round_(SimpleNamespace(evaluation=False, rollout_id=int(rollout_id), weight_version=int(version)))
+    return out, counts, printed.getvalue()
+
+
+def parse_batch_line(text: str) -> dict[str, Any] | None:
+    """The ``compaction_batch`` line of a trainer round (None: not printed)."""
+    m = BATCH_LINE.search(text)
+    if m is None:
+        return None
+    per = {int(k): int(v) for k, v in (kv.split(":") for kv in m.group(4).split(",") if kv)}
+    return {"rollout": int(m.group(1)), "trials": int(m.group(2)), "segments": int(m.group(3)), "per_trial": per}
+
+
 # ============================================================================ runs
 @dataclasses.dataclass
 class TrialResult:
@@ -763,66 +755,66 @@ class TrialResult:
     outcome: str
     reward: float
     samples: list[dict[str, Any]]
-    records: Mapping[str, Any] | None
     env_s: float
     llm_s: float
     calls: int
     summary_calls: int
     exit: str | None = None  # why the agent stopped early (None: it answered or ran out of turns)
+    counters: Mapping[str, int] = dataclasses.field(default_factory=dict)  # the proxy's, at close
 
 
 class SimRun:
-    """One scenario through one path (module doc); :meth:`metrics` summarizes it."""
+    """One scenario: sampler island (AgenticRound) -> buffer -> trainer rounds;
+    :meth:`metrics` summarizes it."""
 
-    def __init__(self, scenario: Scenario, *, path: str = "auto", workdir: Path | None = None,
-                 miles_root: str | None = None) -> None:
+    def __init__(self, scenario: Scenario, *, workdir: Path | None = None, miles_root: str | None = None) -> None:
         self.scenario = scenario
-        self.caps = capabilities()
-        if path == "auto":
-            path = "agentic" if scenario.compaction is None or self.caps["sampler_segments"] else "records"
-        if path not in ("agentic", "records"):
-            raise ValueError(f"path must be agentic, records or auto, got {path!r}")
-        self.path = path
         self.workdir = Path(workdir or tempfile.mkdtemp(prefix="sim-compaction-"))
         self.miles = miles_imports(miles_root)
         self.template = sim_template()
         self.engine = SimEngine(scenario, self.template)
         self.engine.start(None, 0)
+        self.cfg = scenario.compaction_config(self.engine)
         self.trials: list[TrialResult] = []
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.steps: list[dict[str, Any]] = []
         self.wall: dict[str, float] = {}
-        self.direct_advantages: dict[str, float] = {}
         self.compaction_attempts: Counter[str] = Counter()
-        self.backend: Any = None
+        self.closed_counters: dict[str, dict[str, int]] = {}
+        self.r3_cut_turns: dict[str, int] = {}  # turns whose R3 rows the proxy cut to the training window
         self.agent: SimAgent | None = None
         self.groups_written = 0
 
-    # ------------------------------------------------------------------ shared
     def _proxy(self) -> Any:
+        """The records proxy as ``round_factory`` builds it, plus two instruments: the
+        summary attempts (``_compact`` calls; one that finds no room is not a
+        compaction) and each trajectory's counters when its records are read."""
         from yeto.rl.harness.gateway.proxy import RecordsProxy
 
         signed = {"max_tokens": self.scenario.turn_max_tokens, "temperature": 1.0, "top_p": 1.0}
         proxy = RecordsProxy(self.engine, self.template, model=SIGNED_MODEL, signed_sampling=signed,
-                             sampler_id="sim-0", compaction=self.scenario.compaction_config(),
-                             r3_response_len=self.scenario.max_response_len)
-        backend, compact = proxy.backend, proxy.backend._compact
+                             sampler_id="sim-0", compaction=self.cfg, r3_response_len=self.scenario.max_response_len)
+        backend, compact, records = proxy.backend, proxy.backend._compact, proxy.records
 
         async def counted(session: Any, *args: Any, **kwargs: Any) -> Any:
-            # instrumentation only: a summary request that overflows the context is an
-            # attempt the backend's ``compactions`` counter does not see
             self.compaction_attempts[session.trajectory_id] += 1
             return await compact(session, *args, **kwargs)
 
-        backend._compact = counted
-        self.backend = backend
+        def recorded(trajectory_id: str) -> dict[str, Any]:
+            out = records(trajectory_id)
+            self.closed_counters[trajectory_id] = dict(out.get("counters") or {})
+            self.r3_cut_turns[trajectory_id] = sum(bool(turn.get("routed_experts_cut")) for session in out["sessions"]
+                                                   for seg in session["samples"] for turn in seg["turns"])
+            return out
+
+        backend._compact, proxy.records = counted, recorded
         return proxy
 
     def _items(self) -> list[Any]:
         from yeto.rl.engine.engine_sampler import PromptItem
 
         return [PromptItem(f"task-{g}", f"simulated task {g}",
-                           metadata={"agent_task": {"instance_id": f"task-{g}", "agent_name": "pi-sim"}})
+                           metadata={"agent_task": {"instance_id": f"task-{g}", "agent_name": AGENT}})
                 for g in range(self.scenario.tasks)]
 
     def _buffer_env(self) -> dict[str, str]:
@@ -830,44 +822,39 @@ class SimRun:
 
         return {BUFFER_ROOT_ENV: str(self.workdir / "store")}
 
-    def _provenance(self) -> Provenance:
-        sampling = SamplingParams(max_tokens=self.scenario.turn_max_tokens, n=self.scenario.n)
-        return Provenance.of(self.engine.identity, sampler_id="sim-0", sampling=sampling, routed_experts=True)
-
     def _timing(self, trajectory_id: str) -> tuple[float, int, int]:
         calls = [c for c in self.engine.ledger if c.trajectory == trajectory_id]
         return (sum(c.llm_s(self.scenario) for c in calls), len(calls), sum(c.kind == "summary" for c in calls))
 
-    # ------------------------------------------------------------------ paths
     def run(self) -> "SimRun":
         began, cpu = time.perf_counter(), time.process_time()
-        if self.path == "agentic":
-            self._run_agentic()
-        else:
-            self._run_records()
+        self._sample()
         self.wall["sampler_s"], self.wall["sampler_cpu_s"] = time.perf_counter() - began, time.process_time() - cpu
         began, cpu = time.perf_counter(), time.process_time()
-        self._train_read()
+        self._train()
         self.wall["trainer_s"], self.wall["trainer_cpu_s"] = time.perf_counter() - began, time.process_time() - cpu
         return self
 
-    def _run_agentic(self) -> None:
+    def _sample(self) -> None:
+        """The sampler island's round: ``AgenticRound`` over ``ProxyTokenRecorder``."""
         from yeto.rl.adapters.miles.buffer_rollout import open_buffer
         from yeto.rl.engine.agentic_round import AgenticRound
-        from yeto.rl.engine.buffer_payload import GroupWriter
+        from yeto.rl.engine.buffer_payload import GroupWriter, decode_group
         from yeto.rl.harness.gateway.recorder import ProxyTokenRecorder
 
         s = self.scenario
-        recorder = ProxyTokenRecorder(self._proxy())
+        recorder = ProxyTokenRecorder(self._proxy(), allow_compaction=True)  # as round_factory
         agent = self.agent = SimAgent(s)
-        buffer = open_buffer(self._buffer_env(), sampler=True)
         items = self._items()
         sampling = SamplingParams(max_tokens=s.turn_max_tokens, n=s.n)
-        rnd = AgenticRound(self.engine, GroupWriter(buffer, "sim-0"), recorder=recorder, harness=agent,
-                           max_in_flight=s.tasks * s.n, max_response_len=s.max_response_len, min_samples=2,
+        provenance = Provenance.of(self.engine.identity, sampler_id="sim-0", sampling=sampling, routed_experts=True)
+        buffer = open_buffer(self._buffer_env(), sampler=True)
+        rnd = AgenticRound(self.engine, GroupWriter(buffer, "sim-0"),
+                           recorder=recorder, harness=agent, max_in_flight=s.tasks * s.n,
+                           max_response_len=s.max_response_len, min_samples=2,
                            task_defaults={"provider": "docker", "model_name": SIGNED_MODEL},
                            prompts=lambda rollout_id: items if rollout_id == 0 else [], sampling=sampling,
-                           provenance=self._provenance(), emit=lambda name, **f: self.events.append((name, f)),
+                           provenance=provenance, emit=lambda name, **f: self.events.append((name, f)),
                            weight_switch="live" if self.engine.live else "drain", release_poll_s=0.0,
                            wait_s=0.005, infra_retries=0)
         try:
@@ -877,10 +864,9 @@ class SimRun:
             with contextlib.suppress(Exception):
                 rnd.loop.run(recorder.aclose())
             rnd.close()
+        buffer.mark_data_end()  # as the sampler loop after its last round: the trainer takes what is left
         reader = open_buffer(self._buffer_env(), reader=True)
         reader.refresh()
-        from yeto.rl.engine.buffer_payload import decode_group
-
         written: dict[str, list[dict[str, Any]]] = {}
         for selected in reader.select("sim-audit", 10_000):
             self.groups_written += 1
@@ -889,105 +875,50 @@ class SimRun:
         for tid, info in agent.trials.items():
             samples = written.get(tid, [])
             llm_s, calls, summaries = self._timing(tid)
-            outcome = "written" if samples else f"not written ({info['exit'] or 'lost'})"
+            outcome = "written" if samples else f"not written ({(info['exit'] or 'lost').split(':', 1)[0]})"
             self.trials.append(TrialResult(int(str(info["task"]).rsplit("-", 1)[-1]), int(tid.rsplit("-", 1)[-1]),
                                            tid, outcome, float(samples[0]["reward"]) if samples else 0.0, samples,
-                                           None, sum(info["env"].tool_s), llm_s, calls, summaries, info["exit"]))
+                                           sum(info["env"].tool_s), llm_s, calls, summaries, info["exit"],
+                                           self.closed_counters.get(tid, {})))
 
-    def _run_records(self) -> None:
-        from yeto.rl.adapters.miles.buffer_rollout import open_buffer
-        from yeto.rl.agentic import AdmissionGate, AgentTask, Outcome, run_agent_task
-        from yeto.rl.agentic.outcome import policy_output_failure
-        from yeto.rl.engine.buffer_payload import GroupWriter
-
-        s = self.scenario
-        proxy = self._proxy()
-        agent = self.agent = SimAgent(s, inproc=InProcess(proxy))
-        items = self._items()
-        provenance = self._provenance().to_record()
-
-        async def trial(g: int, j: int, gate: Any) -> tuple[int, int, Any, Mapping[str, Any]]:
-            tid = f"sim-r0-task-{g}-{j}"
-            proxy.open(tid)
-            task = AgentTask.from_mapping({**items[g].metadata["agent_task"], "trajectory_id": tid},
-                                          defaults={"provider": "docker", "model_name": SIGNED_MODEL})
-            trajectory = await run_agent_task(task, agent, f"inproc://{tid}", gate)
-            records = proxy.records(tid)
-            proxy.close(tid)
-            proxy.forget(tid)
-            errors = [t.get("parse_error") for sess in records["sessions"] for seg in sess["samples"]
-                      for t in seg["turns"] if t.get("parse_error")]
-            return g, j, policy_output_failure(trajectory, errors), records
-
-        async def everything() -> list[Any]:
-            gate = AdmissionGate(s.tasks * s.n, policy_version=self.engine.served_version)
-            return await asyncio.gather(*(trial(g, j, gate) for g in range(s.tasks) for j in range(s.n)))
-
-        results = asyncio.run(everything())
-        writer = GroupWriter(open_buffer(self._buffer_env(), sampler=True), "sim-0")
-        cfg = s.compaction_config()
-        for g in range(s.tasks):
-            kept: list[dict[str, Any]] = []
-            for gg, j, trajectory, records in results:
-                if gg != g:
-                    continue
-                tid = trajectory.task.trajectory_id
-                llm_s, calls, summaries = self._timing(tid)
-                env_s = sum(agent.trials[tid]["env"].tool_s)
-                samples: list[dict[str, Any]] = []
-                if trajectory.outcome is not Outcome.ABORTED and records["sessions"]:
-                    samples = records_segment_samples(items[g], trajectory, records, group_index=g,
-                                                      index=g * s.n + j, cfg=cfg,
-                                                      max_response_len=s.max_response_len,
-                                                      provenance=provenance, live=self.engine.live)
-                kept += samples
-                self.trials.append(TrialResult(g, j, tid, trajectory.outcome.value, float(trajectory.reward),
-                                               samples, records, env_s, llm_s, calls, summaries,
-                                               agent.trials[tid]["exit"]))
-            if len({trial_key(x) for x in kept}) >= 2:  # min_samples 2 (trials)
-                writer.write(kept, group_key=f"r0-task-{g}", provenance=provenance)
-                self.groups_written += 1
-        # Miles' normalization straight on the contract samples (no buffer renumbering)
-        flat = [x for t in self.trials for x in t.samples]
-        if flat:
-            advantages = trainer_advantages(self.miles, s, to_miles_samples(self.miles, flat))
-            for sample, adv in zip(flat, advantages):
-                key = f"{trial_key(sample)}#{(sample['metadata'].get('compaction') or {}).get('segment_index', 0)}"
-                self.direct_advantages[key] = adv
-
-    def _train_read(self) -> None:
-        """The trainer island's reader: ``BatchReader.take`` -> ``miles_groups`` -> Miles
-        ``Sample`` -> GRPO normalization, ``rollout_batch_size`` groups per step."""
-        from yeto.rl.adapters.miles.buffer_rollout import BatchReader, miles_groups, open_buffer
+    def _train(self) -> None:
+        """The trainer island's rounds: ``_BufferRound`` (real) over a ``BatchReader``
+        (real) with ``rollout_batch_size`` groups of ``n`` trials, then Miles' GRPO
+        normalization of the round's samples."""
+        from yeto.rl.adapters.miles.buffer_rollout import BatchReader, is_padding, open_buffer
         from yeto.rl.engine.buffer_payload import SampleBufferRolloutError
 
         s = self.scenario
+        plugin = buffer_round_module()
         buffer = open_buffer(self._buffer_env(), batch_size=s.rollout_batch_size, reader=True)
         reader = BatchReader(buffer, max_policy_age=s.max_policy_age, wait_s=0.0, poll_s=0.0,
                              sleep=lambda _s: None, read_workers=1, prefetch=False, incarnation_gate=None,
                              group_size=s.n)
         for step in range(-(-self.groups_written // s.rollout_batch_size)):
             try:
-                groups, report = reader.take(step, s.rollout_batch_size,
-                                             current_version=self.engine.served_version())
+                out, counts, printed = trainer_round(plugin, reader, s, step, version=int(self.engine.served_version()),
+                                                     sample_cls=self.miles.Sample)
             except SampleBufferRolloutError as exc:
-                self.steps.append({"step": step, "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
+                self.steps.append({"step": step, "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
                 break
-            converted, problems = miles_groups(groups, samples_per_group=s.n, r3_num_experts=s.r3[0])
-            dicts = [d for _, group in converted for d in group]
-            samples = to_miles_samples(self.miles, dicts)
-            advantages = trainer_advantages(self.miles, s, samples) if samples else []
+            flat = [x for group in out["samples"] for x in group]
+            real = [x for x in flat if not is_padding(x)]
+            samples = flat if self.miles.Sample is not None else to_miles_samples(self.miles, flat)
+            advantages = trainer_advantages(self.miles, s, samples)
+            rollouts = {(_field(x, "rollout_id") if _field(x, "rollout_id") is not None else ("index", _field(x, "index")))
+                        for x in flat}
+            meta = counts[0] if counts else {}
             self.steps.append({
-                "step": step, "groups": len(groups), "converted_groups": len(converted),
-                "unconvertible": problems, "samples": len(dicts),
-                "trials": len({trial_key(d) for d in dicts}),
-                "stale_groups": report.stale_groups, "incomplete_groups": report.incomplete_groups,
-                "dropped_small_groups": report.dropped_small_groups,
-                "carried_over_groups": report.carried_over_groups, "padded_samples": report.padded_samples,
-                "rows": [{"trial": trial_key(d), "group_index": d.get("group_index"), "index": d.get("index"),
-                          "rollout_id": getattr(x, "rollout_id", None), "reward": float(d["reward"]),
-                          "segment": (d["metadata"].get("compaction") or {}).get("segment_index", 0),
-                          "advantage": a} for d, x, a in zip(dicts, samples, advantages)]})
+                "step": step, "samples": len(real), "trials": len({trial_key(x) for x in real}),
+                "padded_samples": len(flat) - len(real), "distinct_rollouts": len(rollouts),
+                "expected_rollouts": s.rollout_batch_size * s.n,
+                "compaction_batch": parse_batch_line(printed),
+                "round_metadata": {k: v for k, v in meta.items() if k.startswith("buffer_")},
+                "rows": [{"trial": trial_key(x), "group_index": _field(x, "group_index"), "index": _field(x, "index"),
+                          "rollout_id": _field(x, "rollout_id"), "reward": float(_field(x, "reward")),
+                          "segment": ((_field(x, "metadata") or {}).get("compaction") or {}).get("segment_index", 0),
+                          "advantage": a}
+                         for x, a in zip(flat, advantages) if not is_padding(x)]})
 
     # ------------------------------------------------------------------ metrics
     def metrics(self) -> dict[str, Any]:
@@ -1010,23 +941,33 @@ class SimRun:
         for x in samples:
             by_segment.setdefault(int((x["metadata"].get("compaction") or {}).get("segment_index", 0)), []).append(
                 len(x["tokens"]))
+        counters: Counter[str] = Counter()
+        for t in self.trials:
+            counters.update(t.counters)
         calls = list(self.engine.ledger)
         engine_cpu = sum(c.engine_cpu_s for c in calls)
         sampler_cpu = self.wall.get("sampler_cpu_s", 0.0)
+        rounds = [f for n, f in self.events if n == "rl_sampler_engine_round"]
+        lost: Counter[str] = Counter()
+        for f in rounds:
+            lost.update((f.get("agentic") or {}).get("lost") or {})
         return {
-            "scenario": s.name, "description": s.description, "path": self.path, "capabilities": self.caps,
-            "normalization": self.miles.source,
+            "scenario": s.name, "description": s.description, "normalization": self.miles.source,
             "compaction": None if s.compaction is None else dict(s.compaction),
+            "spec_checked": s.spec_checked, "spec_error": None if s.compaction is None else s.spec_error(),
             "tasks": s.tasks, "n": s.n,
             "trials_per_task": {g: len(ts) for g, ts in sorted(by_group.items())},
             "kept_trials_per_task": {g: sum(1 for t in ts if t.samples) for g, ts in sorted(by_group.items())},
-            "outcomes": dict(Counter(t.outcome for t in self.trials)),
+            "outcomes": dict(Counter(t.outcome for t in self.trials)), "lost": dict(lost),
+            "compaction_no_room": sum(int((f.get("agentic") or {}).get("compaction_no_room", 0)) for f in rounds),
             "reward_mean": round(statistics.fmean(t.reward for t in kept), 3) if kept else None,
             "segments_per_trial": dict(sorted(Counter(len(t.samples) for t in kept).items())),
             "compactions_per_trial": dict(sorted(compactions.items())),
             "compaction_attempts": sum(self.compaction_attempts.values()),
-            "compactions": sum(k * v for k, v in compactions.items()),
-            "context_full_exits": sum(1 for t in self.trials if "max_model_len" in str(t.exit or "")),
+            "compactions": int(counters.get("compactions", 0)),
+            "proxy_counters": dict(sorted(counters.items())),
+            "context_full_exits": sum(1 for t in self.trials if "max_model_len" in str(t.exit or "")
+                                      or "context_budget" in str(t.exit or "") or "no_room" in str(t.exit or "")),
             "summary_ok_rate": round(sum(summary) / len(summary), 3) if summary else None,
             "kept_steps": dict(sorted(Counter(c["kept_steps"] for c in comp if c["kept_steps"] is not None).items())),
             "samples": len(samples), "trainable_tokens": trained,
@@ -1034,6 +975,8 @@ class SimRun:
             "trainable_of_tokens": round(trained / total, 3) if total else None,
             "segment_tokens": _stats([len(x["tokens"]) for x in samples]),
             "segment_tokens_by_index": {k: _stats(v) for k, v in sorted(by_segment.items())},
+            "r3_cut_turns": sum(self.r3_cut_turns.values()),
+            "response_at_max_response_len": sum(int(x["response_length"]) == s.max_response_len for x in samples),
             "status": dict(Counter(x["status"] for x in samples)),
             "samples_with_compaction_meta": len(comp),
             "versions": sorted({x["metadata"]["weight_version"] for x in samples}),
@@ -1055,34 +998,19 @@ class SimRun:
             "wall_trainer_s": round(self.wall.get("trainer_s", 0.0), 3),
             "groups_written": self.groups_written,
             "trainer_steps": [{k: v for k, v in step.items() if k != "rows"} for step in self.steps],
-            "advantage_check": self.advantage_check(),
+            "advantage_check": [_advantage_verdict(step.get("rows") or []) for step in self.steps],
         }
-
-    def advantage_check(self) -> dict[str, Any]:
-        """Per trainer step: every trial's segments share one advantage, and it equals the
-        GRPO normalization of the trial-level rewards of its group (computed here
-        independently with ``statistics``)."""
-        out = {"steps": [], "direct": None}
-        for step in self.steps:
-            rows = step.get("rows") or []
-            out["steps"].append(_advantage_verdict(rows))
-        if self.direct_advantages:
-            rows = []
-            for t in self.trials:
-                for x in t.samples:
-                    seg = (x["metadata"].get("compaction") or {}).get("segment_index", 0)
-                    rows.append({"trial": t.trajectory_id, "group_index": x["group_index"], "reward": float(x["reward"]),
-                                 "segment": seg, "advantage": self.direct_advantages[f"{t.trajectory_id}#{seg}"]})
-            out["direct"] = _advantage_verdict(rows)
-        return out
 
 
 def _advantage_verdict(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Every trial's segments share one advantage and reward, and the advantage equals the
+    GRPO normalization of the trial-level rewards of its group (:func:`grpo_reference`)."""
     by_trial: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
         by_trial.setdefault(str(row["trial"]), []).append(row)
     same = all(len({r["advantage"] for r in rs}) == 1 and len({r["reward"] for r in rs}) == 1
                for rs in by_trial.values())
+    one_rollout = all(len({(r["rollout_id"], r["index"]) for r in rs}) == 1 for rs in by_trial.values())
     expected = {}
     for g in {r["group_index"] for r in rows}:
         trials = sorted({str(r["trial"]) for r in rows if r["group_index"] == g})
@@ -1091,7 +1019,8 @@ def _advantage_verdict(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             expected[t] = a
     worst = max((abs(r["advantage"] - expected[str(r["trial"])]) for r in rows), default=0.0)
     return {"samples": len(rows), "trials": len(by_trial), "segments_share_advantage": same,
-            "max_error_vs_trial_grpo": worst, "matches_trial_grpo": worst < 1e-5}
+            "one_rollout_per_trial": one_rollout, "max_error_vs_trial_grpo": worst,
+            "matches_trial_grpo": worst < 1e-5}
 
 
 def grpo_reference(rewards: Sequence[float]) -> list[float]:
@@ -1115,61 +1044,65 @@ def _stats(values: Sequence[float]) -> dict[str, float] | None:
 
 
 # ============================================================================ report
-def _check(checks: Sequence[Mapping[str, Any] | None]) -> str:
-    checks = [c for c in checks if c and c["samples"]]
+def _check(checks: Sequence[Mapping[str, Any]]) -> str:
+    checks = [c for c in checks if c["samples"]]
     if not checks:
         return "-"
-    share = all(c["segments_share_advantage"] for c in checks)
+    share = all(c["segments_share_advantage"] and c["one_rollout_per_trial"] for c in checks)
     match = all(c["matches_trial_grpo"] for c in checks)
     return f"{'yes' if share else 'NO'}/{'yes' if match else 'NO'}"
 
 
+def _table(rows: list[list[str]]) -> str:
+    return "\n".join("| " + " | ".join(r) + " |" for r in [rows[0], ["---"] * len(rows[0]), *rows[1:]])
+
+
 def markdown(all_metrics: Sequence[Mapping[str, Any]]) -> str:
     """Two tables: the sampler side and the trainer side of every scenario."""
-    head = ["scenario", "path", "trials/task (kept)", "outcomes", "segments/trial", "compactions/trial",
-            "summary_ok", "trainable/resp", "segment tokens p50 (max)", "env s p50/max",
-            "env+0.1*llm s p50/max", "cpu ms/call"]
-    rows = [head, ["---"] * len(head)]
+    rows = [["scenario", "trials/task (kept)", "outcomes", "segments/trial", "compactions/trial", "summary_ok",
+             "trainable/resp", "segment tokens p50 (max)", "env s p50/max", "env+0.1*llm s p50/max",
+             "round env / env+0.1*llm s", "yeto cpu ms/call"]]
     for m in all_metrics:
         seg = m["segment_tokens"] or {}
         kept = sorted(set(m["kept_trials_per_task"].values()))
-        rows.append([m["scenario"], m["path"], f"{sorted(set(m['trials_per_task'].values()))} ({kept})",
+        rows.append([m["scenario"], f"{sorted(set(m['trials_per_task'].values()))} ({kept})",
                      json.dumps(m["outcomes"]), json.dumps(m["segments_per_trial"]),
                      json.dumps(m["compactions_per_trial"]), str(m["summary_ok_rate"]),
                      str(m["trainable_of_response"]), f"{seg.get('p50')} ({seg.get('max')})",
                      f"{m['time_env_s']['p50']}/{m['time_env_s']['max']}",
                      f"{m['time_env_plus_llm_s']['p50']}/{m['time_env_plus_llm_s']['max']}",
-                     str(m["cpu_yeto_per_call_ms"])])
-    head2 = ["scenario", "groups written", "trainer steps: samples/trials", "trainer: same adv/trial GRPO",
-             "direct Miles norm: same adv/trial GRPO", "alignment problems", "status", "versions"]
-    rows2 = [head2, ["---"] * len(head2)]
+                     f"{m['round_time_env_s']} / {m['round_time_env_plus_llm_s']}", str(m["cpu_yeto_per_call_ms"])])
+    rows2 = [["scenario", "groups", "per step: samples/trials/rollouts(expected)/padded", "compaction_batch lines",
+              "same adv per trial / == trial GRPO", "alignment problems", "status", "versions"]]
     for m in all_metrics:
-        steps = ", ".join("error" if "error" in x else f"{x['samples']}/{x['trials']}" for x in m["trainer_steps"])
-        rows2.append([m["scenario"], str(m["groups_written"]), steps or "-", _check(m["advantage_check"]["steps"]),
-                      _check([m["advantage_check"]["direct"]]), str(m["alignment_problem_count"]),
-                      json.dumps(m["status"]), json.dumps(m["versions"])])
-    return "\n".join("| " + " | ".join(r) + " |" for r in rows) + "\n\n" + \
-        "\n".join("| " + " | ".join(r) + " |" for r in rows2)
+        steps = ", ".join("error" if "error" in x else
+                          f"{x['samples']}/{x['trials']}/{x['distinct_rollouts']}({x['expected_rollouts']})"
+                          f"/{x['padded_samples']}" for x in m["trainer_steps"])
+        lines = ", ".join("-" if not x.get("compaction_batch") else
+                          f"trials={x['compaction_batch']['trials']} segments={x['compaction_batch']['segments']}"
+                          for x in m["trainer_steps"] if "error" not in x)
+        rows2.append([m["scenario"], str(m["groups_written"]), steps or "-", lines or "-", _check(m["advantage_check"]),
+                      str(m["alignment_problem_count"]), json.dumps(m["status"]), json.dumps(m["versions"])])
+    return _table(rows) + "\n\n" + _table(rows2)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--scenario", default="all", help=f"one of {sorted(SCENARIOS)} or all")
-    parser.add_argument("--path", default="auto", choices=("auto", "agentic", "records"))
     parser.add_argument("--json", help="write every scenario's metrics here")
     parser.add_argument("--miles-root", help="a Miles checkout (adds it to sys.path)")
     parser.add_argument("--workdir", help="buffer directory (default: a fresh temporary one per scenario)")
     args = parser.parse_args(argv)
-    names = sorted(SCENARIOS) if args.scenario == "all" else [args.scenario]
+    names = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
     out = []
     for name in names:
         workdir = Path(args.workdir) / name if args.workdir else None
         began = time.perf_counter()
-        metrics = SimRun(SCENARIOS[name], path=args.path, workdir=workdir, miles_root=args.miles_root).run().metrics()
+        metrics = SimRun(SCENARIOS[name], workdir=workdir, miles_root=args.miles_root).run().metrics()
         metrics["wall_total_s"] = round(time.perf_counter() - began, 3)
         out.append(metrics)
-        print(f"[sim] {name}: path={metrics['path']} samples={metrics['samples']} "
-              f"wall={metrics['wall_total_s']}s", file=sys.stderr, flush=True)
+        print(f"[sim] {name}: samples={metrics['samples']} wall={metrics['wall_total_s']}s", file=sys.stderr,
+              flush=True)
     print(markdown(out))
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2, default=str))
