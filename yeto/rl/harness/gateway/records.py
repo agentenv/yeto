@@ -15,6 +15,14 @@ signed sampling. This backend replaces the session server behind it:
   the full rendering and records the first differing position. The stream is
   what trains; a drift means the template does not reproduce the generated
   text (counted, not fatal);
+* one rendering per turn: a turn needs the rendering of the history the last
+  turn was sampled on, which is the last turn's own rendering. The session
+  keeps it (:class:`_RenderMemo`) with a private copy of the messages, and a
+  turn reuses it only when the history is the same, type for type
+  (:func:`_same`); otherwise it renders again. Rendering is a pure function of
+  the messages and tool schemas, so the ids, masks and counters are the ones
+  a second rendering gives (a 262k-token Kimi-K3.1 history costs ~250 ms per
+  rendering on one core, and the proxy runs it on its event loop);
 * optional context compaction (CompactionRL, :mod:`yeto.rl.compaction`): when
   ``C - |h| < T_comp`` the policy writes a summary in the current segment
   (trainable), and the next segment starts from ``system + u_resume(S) + last
@@ -34,6 +42,7 @@ Miles session server can also sit behind this backend.
 from __future__ import annotations
 
 import asyncio
+import copy
 import itertools
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -162,12 +171,64 @@ class _Prompt:
         return len(self.stop) + len(self.tail)
 
 
+@dataclass(frozen=True)
+class _RenderMemo:
+    """The last generation-prompt rendering of a session: ``text`` =
+    ``render(context, tools=tools, add_generation_prompt=True)``; ``context``
+    and ``tools`` are private copies (the caller's messages may change later)."""
+
+    context: list[Message]
+    tools: list[Message] | None
+    text: str
+
+    def leads(self, context: Sequence[Message], tools: Sequence[Message] | None) -> bool:
+        """The memo's messages are the first messages of ``context`` and its tools
+        are ``tools``, type for type (:func:`_same`)."""
+        return (len(self.context) <= len(context) and _same(tools, self.tools)
+                and all(_same(a, b) for a, b in zip(self.context, context)))
+
+    @classmethod
+    def after(cls, lead: _RenderMemo | None, context: Sequence[Message], tools: Sequence[Message] | None,
+              text: str) -> _RenderMemo:
+        """The memo of ``context``'s rendering; ``lead`` (one that :meth:`leads` it)
+        gives the copies of its messages, so only the new messages are copied."""
+        if lead is None:
+            return cls(copy.deepcopy(list(context)), copy.deepcopy(None if tools is None else list(tools)), text)
+        return cls(lead.context + copy.deepcopy(list(context[len(lead.context):])), lead.tools, text)
+
+
+_SCALARS = (str, int, bool, type(None), bytes)
+
+
+def _same(a: Any, b: Any) -> bool:
+    """Structural equality that also compares types and dict key order (``True``
+    is not ``1``, ``(1,)`` is not ``[1]``, ``-0.0`` is not ``0.0``): equal values
+    render to the same text. Other types are never the same (render again)."""
+    kind = type(a)
+    if kind is not type(b):
+        return False
+    if kind is dict:
+        return len(a) == len(b) and all(_same(ka, kb) and _same(va, vb)
+                                        for (ka, va), (kb, vb) in zip(a.items(), b.items()))
+    if kind is list or kind is tuple:
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if kind is float:
+        return repr(a) == repr(b)
+    return kind in _SCALARS and a == b
+
+
+def _first_difference(a: list[int], b: Sequence[int]) -> int | None:
+    """:func:`first_difference`, the aligned case (every turn without drift) at C speed."""
+    return None if a == b else first_difference(a, b)
+
+
 @dataclass
 class _Session:
     trajectory_id: str
     segments: list[Segment]
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     turns: int = 0
+    render_memo: _RenderMemo | None = None  # the last _prompt rendering (RecordingBackend._prompt)
 
 
 def _common_prefix(a: str, b: str) -> str:
@@ -259,14 +320,24 @@ class RecordingBackend:
     def _prompt(self, session: _Session, segment: Segment, context: list[Message]) -> _Prompt:
         """What to append before the next sample (the whole prompt on a segment's first turn)."""
         tools = self.tools.get(session.trajectory_id)
+        memo = session.render_memo
+        if memo is not None and not memo.leads(context, tools):
+            memo = None  # another history (a new segment, a summary request, an edited history)
         full = self.template.render(context, tools=tools, add_generation_prompt=True)
+        try:
+            session.render_memo = _RenderMemo.after(memo, context, tools, full)
+        except (TypeError, copy.Error, RecursionError):  # not copyable: no memo, the next turn renders again
+            session.render_memo = None
         if not segment.turns:
             return _Prompt(stop=(), tail=tuple(self.template.encode(full)))
         if segment.last_finish == FINISH_LENGTH:
             raise RecordsMismatch("cannot continue a stream after a length-truncated turn")
         if len(context) < segment.n_context:
             raise RecordsMismatch("history is shorter than the recorded stream")
-        start = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=True)
+        if memo is not None and len(memo.context) == segment.n_context - 1:
+            start = memo.text  # the last turn's rendering of these same messages (module doc)
+        else:
+            start = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=True)
         if not full.startswith(start):
             # The generation prompt may end in a template prefill that the history form of the
             # turn omits (Qwen3 enable_thinking=False: ``<think>\n\n</think>\n\n``). The
@@ -293,7 +364,7 @@ class RecordingBackend:
         tail = tuple(self.template.encode(full[pos + len(stop):]))
         diff = None
         if self.check_render:
-            diff = first_difference([*segment.token_ids, *stop_ids, *tail], self.template.encode(full))
+            diff = _first_difference([*segment.token_ids, *stop_ids, *tail], self.template.encode(full))
             if diff is not None:
                 self.counters[session.trajectory_id]["render_drift_turns"] += 1
         return _Prompt(stop=stop_ids, tail=tail, render_diff=diff)
