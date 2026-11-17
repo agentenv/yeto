@@ -372,6 +372,13 @@ class JsonlIndex:
     def has_payload(self, ref: str) -> bool:
         return (self.root / ref).is_file()
 
+    def payload_size(self, ref: str) -> int | None:
+        """The payload's size in bytes (no read), None when it is missing."""
+        try:
+            return (self.root / ref).stat().st_size
+        except FileNotFoundError:
+            return None
+
     def read_new(self) -> list[dict[str, Any]]:
         if self._reload:
             self.store.reload()
@@ -483,14 +490,24 @@ class ObjectIndex:
         self.objects.write(f"{BUFFER_DIR}/{ref}", data)
         return ref
 
-    def read_payload(self, ref: str) -> bytes:
-        data = self.objects.read(f"{BUFFER_DIR}/{ref}")
+    def read_payload(self, ref: str, size: int | None = None) -> bytes:
+        """``size`` (known to the caller): a large payload (a group of long trials,
+        GBs) is read by parallel ranges when the store has them, else one GET."""
+        ranged = getattr(self.objects, "read_ranged", None)
+        key = f"{BUFFER_DIR}/{ref}"
+        data = ranged(key, int(size)) if size is not None and callable(ranged) else self.objects.read(key)
         if data is None:
             raise SampleBufferError(f"payload {ref} is missing")
         return data
 
     def has_payload(self, ref: str) -> bool:
         return self.objects.exists(f"{BUFFER_DIR}/{ref}")
+
+    def payload_size(self, ref: str) -> int | None:
+        """The payload's size in bytes by one HEAD, None when it is missing or the
+        store cannot tell without reading the object."""
+        size = getattr(self.objects, "size", None)
+        return size(f"{BUFFER_DIR}/{ref}") if callable(size) else None
 
     def read_new(self) -> list[dict[str, Any]]:
         """The records after the last one read, in order. Stops before a missing
@@ -925,8 +942,19 @@ class FileSampleBuffer:
                                     "a payload is never overwritten")
         return self.index.write_payload(name, data)
 
-    def read_payload(self, payload_ref: str) -> bytes:
-        return self.index.read_payload(payload_ref)
+    def read_payload(self, payload_ref: str, size: int | None = None) -> bytes:
+        """``size``: the payload's size when the caller knows it (``payload_size``): a
+        large payload on an object store is then read by parallel ranges."""
+        if size is None:
+            return self.index.read_payload(payload_ref)
+        return self.index.read_payload(payload_ref, size=size) if isinstance(self.index, ObjectIndex) \
+            else self.index.read_payload(payload_ref)
+
+    def payload_size(self, payload_ref: str) -> int | None:
+        """The payload's size in bytes without reading it (the trainer's read budget,
+        ``BatchReader``); None when unknown."""
+        size = getattr(self.index, "payload_size", None)
+        return size(payload_ref) if callable(size) else None
 
     def append(self, entry: SampleIndexEntry) -> None:
         if entry.payload_ref and not self.index.has_payload(entry.payload_ref):

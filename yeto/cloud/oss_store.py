@@ -44,8 +44,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from yeto.cloud.s3_store import (FILE_CONCURRENCY_ENV, INDEPENDENT_DIRS, PART_CONCURRENCY_ENV, PART_MB_ENV,
-                                 POINTER_FILES, RECORD_FILES, STAGED_SUBTREES, S3ObjectStore,
+from yeto.cloud.s3_store import (FILE_CONCURRENCY_ENV, INDEPENDENT_DIRS, MULTIPART_MB_ENV, PART_CONCURRENCY_ENV,
+                                 PART_MB_ENV, POINTER_FILES, RECORD_FILES, STAGED_SUBTREES, S3ObjectStore,
                                  TransferSettings, parse_s3_uri)
 from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror
 from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore
@@ -64,7 +64,7 @@ DEFAULT_STAGE = "~/.cache/yeto/oss-store-stage"
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, CREDENTIALS_FILE_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV,
-                FILE_CONCURRENCY_ENV)
+                FILE_CONCURRENCY_ENV, MULTIPART_MB_ENV)
 FORBID_OVERWRITE_HEADER = "x-oss-forbid-overwrite"
 
 
@@ -88,8 +88,8 @@ class OssObjectStore(S3ObjectStore):
     part_checksums = False  # OSS's S3 API takes no x-amz-checksum-sha256 (its CRC64 is not composite)
 
     def create(self, key: str, data: bytes) -> bool:
-        if not self.conditional_writes:
-            return super().create(key, data)
+        if not self.conditional_writes or len(data) > self.transfer.multipart_bytes:
+            return super().create(key, data)  # a large one: multipart, the condition on its complete
         condition = {"ForbidOverwrite": True} if _accepts_forbid(self.client) else {"IfNoneMatch": "*"}
         try:
             self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data, **condition)
@@ -101,6 +101,12 @@ class OssObjectStore(S3ObjectStore):
                 raise
             self.conditional_writes = False
         return super().create(key, data)
+
+    def _absent_condition(self) -> dict[str, Any]:
+        """OSS documents ``x-oss-forbid-overwrite`` on CompleteMultipartUpload
+        (``FileAlreadyExists``, 409, when the key exists; ignored in a bucket with
+        versioning, as on PutObject)."""
+        return {"ForbidOverwrite": True} if _accepts_forbid(self.client) else {"IfNoneMatch": "*"}
 
 
 def _accepts_forbid(client: Any) -> bool:
@@ -123,8 +129,9 @@ def _add_forbid_overwrite(client: Any) -> Any:
         if request.context.get("yeto_forbid_overwrite"):
             request.headers[FORBID_OVERWRITE_HEADER] = "true"
 
-    events.register("before-parameter-build.s3.PutObject", lift)
-    events.register("before-sign.s3.PutObject", header)
+    for operation in ("PutObject", "CompleteMultipartUpload"):  # a large create completes in parts
+        events.register(f"before-parameter-build.s3.{operation}", lift)
+        events.register(f"before-sign.s3.{operation}", header)
     client.accepts_forbid_overwrite = True
     return client
 

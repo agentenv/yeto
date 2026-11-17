@@ -174,9 +174,24 @@ def test_a_missing_answer_is_not_believed_while_the_store_cannot_confirm_it():
     trouble, so the take raises and the group is trained once the store is back."""
     s3 = FaultS3()
     ids = _fill(s3, "s0", 2)
-    batch_reader = reader(trainer(s3, ("s0",)))
+    # no read budget: the read is the payload's first request (the scripted answers' order)
+    batch_reader = reader(trainer(s3, ("s0",)), max_inflight_bytes=None)
     s3.fail("get", PAYLOADS, FaultS3.exceptions.NoSuchKey)
     s3.fail("head", PAYLOADS, client_error("InternalError", "HeadObject"))
+    with pytest.raises(ClientError):
+        batch_reader.take(0, 1, current_version=1)
+    trained, reports = drain(batch_reader)
+    assert _ids(trained) == ids and sum(r.damaged_payload_groups for r in reports) == 0
+
+
+def test_a_missing_answer_is_not_believed_under_the_read_budget_either():
+    """With the read budget the payload's size is asked first (one HEAD): the same
+    store in trouble behind it raises the take too."""
+    s3 = FaultS3()
+    ids = _fill(s3, "s0", 2)
+    batch_reader = reader(trainer(s3, ("s0",)), max_inflight_bytes=1 << 30)
+    s3.fail("get", PAYLOADS, FaultS3.exceptions.NoSuchKey)
+    s3.fail("head", PAYLOADS, client_error("InternalError", "HeadObject"), skip=1)  # after the size HEAD
     with pytest.raises(ClientError):
         batch_reader.take(0, 1, current_version=1)
     trained, reports = drain(batch_reader)

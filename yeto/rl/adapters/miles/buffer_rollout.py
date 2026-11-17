@@ -78,6 +78,7 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     trial_count,
     trial_rows,
 )
+from yeto.rl.engine import buffer_payload as _payload_format
 from yeto.rl.engine.merged_release import (
     LANE_ENV,
     BufferLane,
@@ -958,6 +959,159 @@ def _echo_event(event: str, **fields: Any) -> None:
 
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
+# Raw payload bytes the reader holds at once: reads in flight, read and not decoded
+# yet, read ahead (prefetch). A payload's bytes are dropped once it is decoded. 0: no
+# limit (every payload of a round read at once, as before this bound). The default is
+# for the K3.1 trainer head (2400 GiB host): the optimizer offload takes ~1.9 TB
+# (KIMI_K31_ASYNC_RL_GUIDE 10.4), which leaves ~550 GiB for the decoded round (262k
+# without compaction: ~270 GiB of arrays per 32 groups, twice that once Miles widens
+# R3 to int32) and one group's decode (a v1 payload peaks at ~4.6x its bytes,
+# ~50 GB at 11 GB). 64 GiB still reads five full 262k groups (11 GB each) at once,
+# more than one R2 stream per payload needs to keep the reader busy.
+MAX_INFLIGHT_BYTES_ENV = "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES"
+DEFAULT_MAX_INFLIGHT_BYTES = 64 << 30
+_BYTE_UNITS = {"": 1, "b": 1, "k": 1 << 10, "kib": 1 << 10, "m": 1 << 20, "mib": 1 << 20,
+               "g": 1 << 30, "gib": 1 << 30, "t": 1 << 40, "tib": 1 << 40}
+
+
+def inflight_bytes_limit(environ: Mapping[str, str] | None = None) -> int | None:
+    """:data:`MAX_INFLIGHT_BYTES_ENV`: bytes, or with a unit (``64GiB``, ``512MiB``;
+    K / M / G / T are binary too); unset: :data:`DEFAULT_MAX_INFLIGHT_BYTES`; 0: no
+    limit (None)."""
+    raw = (os.environ if environ is None else environ).get(MAX_INFLIGHT_BYTES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_INFLIGHT_BYTES
+    number = raw.rstrip("bBiIkKmMgGtT ")
+    unit = raw[len(number):].strip().lower()
+    try:
+        value = int(float(number) * _BYTE_UNITS[unit])
+    except (KeyError, ValueError):
+        raise ValueError(f"{MAX_INFLIGHT_BYTES_ENV}={raw!r}: expected bytes, e.g. 68719476736 or 64GiB") from None
+    if value < 0:
+        raise ValueError(f"{MAX_INFLIGHT_BYTES_ENV}={raw!r}: expected >= 0")
+    return value or None
+
+
+class ByteBudget:
+    """The raw payload bytes a :class:`BatchReader` holds (``limit`` None: no limit).
+
+    A take's read waits in a worker thread for its turn (tickets, handed out in the
+    order the take asks for its reads, which is the order it decodes them in) and for
+    room: ``used + size <= limit``, or nothing held at all (a payload larger than the
+    limit is read alone, never refused). The take decodes in the same order and
+    releases each payload's bytes after its decode, so the oldest waiting read always
+    gets room: no deadlock. A read ahead never waits: it is made only when it fits
+    now and no take read is waiting (:meth:`try_acquire`); otherwise the prefetch
+    stops and the take reads the rest. A read on the caller's thread (no read pool,
+    or one group topping up a round) is counted without waiting (:meth:`force`): only
+    that thread can release what is held."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = None if not limit else int(limit)
+        self.used = 0
+        self.peak = 0  # the most bytes held at once
+        self.waits = 0  # reads that waited for room
+        self._cond = threading.Condition()
+        self._issued = 0
+        self._turn = 0
+        self._warned = False
+
+    def ticket(self) -> int:
+        with self._cond:
+            self._issued += 1
+            return self._issued - 1
+
+    def _fits(self, size: int) -> bool:
+        return self.limit is None or self.used == 0 or self.used + size <= self.limit
+
+    def _take(self, size: int) -> None:
+        self.used += int(size)
+        self.peak = max(self.peak, self.used)
+        if self.limit is not None and size > self.limit and not self._warned:
+            self._warned = True
+            print(f"[sample-buffer] a payload of {size / (1 << 30):.1f} GiB is above the read budget "
+                  f"({MAX_INFLIGHT_BYTES_ENV}={self.limit / (1 << 30):.1f} GiB): it is read alone", flush=True)
+
+    def acquire(self, ticket: int, size: int) -> None:
+        with self._cond:
+            waited = False
+            while ticket != self._turn or not self._fits(size):
+                waited = waited or ticket == self._turn
+                self._cond.wait()
+            self.waits += int(waited)
+            self._turn += 1
+            self._take(size)
+            self._cond.notify_all()
+
+    def try_acquire(self, size: int) -> bool:
+        with self._cond:
+            if self._turn != self._issued or not self._fits(size):
+                return False
+            self._take(size)
+            return True
+
+    def force(self, size: int) -> None:
+        with self._cond:
+            self._take(size)
+            self._cond.notify_all()
+
+    def release(self, size: int) -> None:
+        if not size:
+            return
+        with self._cond:
+            self.used -= int(size)
+            self._cond.notify_all()
+
+
+class _Decoded:
+    """A payload a read thread decoded already (:func:`decodes_in_worker`)."""
+
+    __slots__ = ("group",)
+
+    def __init__(self, group: list[dict[str, Any]]) -> None:
+        self.group = group
+
+
+def decodes_in_worker(data: Any) -> bool:
+    """Whether a budgeted read decodes this payload in its read thread: format v2
+    (``buffer_payload``'s array blobs). Its zstd and numpy copies run outside the GIL,
+    so the read threads decode a round's v2 groups in parallel, and their peak is
+    ~1.4-2x the payload (C12). A v1 payload (JSON + base64, GIL-bound, ~4.6x peak) is
+    decoded on the caller's thread, one at a time, as before."""
+    magic = getattr(_payload_format, "_V2_MAGIC", None)
+    return bool(magic) and bytes(data[:len(magic)]) == magic
+
+
+def group_nbytes(group: Sequence[Mapping[str, Any]]) -> int:
+    """About the memory of a decoded group: its arrays' bytes, 32 B per list item
+    (what a decoded group counts in the read budget)."""
+    total = 0
+    for sample in group:
+        for value in sample.values():
+            nbytes = getattr(value, "nbytes", None)
+            if nbytes is not None:
+                total += int(nbytes)
+            elif isinstance(value, (list, tuple)):
+                total += 32 * len(value)
+    return total
+
+
+def _takes_size(read_payload: Any) -> bool:
+    """Whether a buffer's ``read_payload`` takes ``size=`` (``FileSampleBuffer``)."""
+    import inspect
+
+    try:
+        return "size" in inspect.signature(read_payload).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _placeholder() -> Future:
+    """A done read without bytes: what ``chosen`` keeps once a payload is decoded."""
+    done: Future = Future()
+    done.set_result(None)
+    return done
+
 
 class BatchReader:
     """Selects the trainer's rounds from the buffer (single consumer).
@@ -1007,7 +1161,8 @@ class BatchReader:
                  cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
                  incarnation_gate: Any = "auto", group_size: int | None = None,
-                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True) -> None:
+                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True,
+                 max_inflight_bytes: Any = "auto") -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -1030,7 +1185,9 @@ class BatchReader:
         ``padded_samples`` (:func:`padding_samples` builds them). None: no check.
         ``max_damaged_run``: the damaged payloads at which a take raises (the class
         doc); 0: no limit. ``one_group_per_task``: a second group of a store-dispenser
-        task is passed over (:class:`TaskSlots`, ``TakeReport.duplicate_task_groups``)."""
+        task is passed over (:class:`TaskSlots`, ``TakeReport.duplicate_task_groups``).
+        ``max_inflight_bytes``: the raw payload bytes held at once (:class:`ByteBudget`;
+        ``"auto"``: :func:`inflight_bytes_limit` from the environment; None or 0: no limit)."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -1048,6 +1205,11 @@ class BatchReader:
                       if int(read_workers) > 1 else None)
         self.prefetch = bool(prefetch) and callable(getattr(buffer, "peek", None))
         self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
+        self.budget = ByteBudget(inflight_bytes_limit() if max_inflight_bytes == "auto" else max_inflight_bytes)
+        self._open: set[Future] = set()  # budgeted reads whose bytes are still counted
+        self._open_lock = threading.Lock()
+        self._read_wait_s = 0.0  # seconds a take waited for single reads while decoding
+        self._sized_reads = _takes_size(getattr(buffer, "read_payload", None))
         self._prefetcher: threading.Thread | None = None
         self._stop_lock = threading.Lock()  # executor_set_mode vs reset/take
         # a convertible node's sampler stint (executor_set_mode): no read-ahead starts
@@ -1227,7 +1389,9 @@ class BatchReader:
         entry = self._entry_of.get(int(position))
         ref = getattr(entry, "payload_ref", None)
         try:
-            group = decode_group(read.result())
+            result = read.result()
+            group = result.group if isinstance(result, _Decoded) else decode_group(result)
+            del result
             self._damaged_run = 0
             self._decoded_payloads += 1
             return group
@@ -1237,6 +1401,8 @@ class BatchReader:
             if ref is None or not payload_is_missing(self.buffer, ref, error):
                 raise
             reason = "payload is missing"
+        finally:
+            self._release(read)  # decoded (or not a group): its bytes no longer count
         dispensed = _dispense_position(entry)
         self._damaged.append({"position": int(position), "sample_id": getattr(entry, "sample_id", None),
                               "payload_ref": ref, "reason": reason,
@@ -1282,14 +1448,127 @@ class BatchReader:
         return True
 
     def _read(self, ref: str, *, inline: bool = False) -> Future:
-        if self._pool is None or inline:
-            done: Future = Future()
+        if self.budget.limit is None:  # no budget: as before it
+            if self._pool is None or inline:
+                done: Future = Future()
+                try:
+                    done.set_result(self.buffer.read_payload(ref))
+                except BaseException as error:  # noqa: BLE001 - raised by result()
+                    done.set_exception(error)
+                return done
+            return self._pool.submit(self.buffer.read_payload, ref)
+        held = [0]  # the bytes this read counts in the budget
+        if self._pool is None or inline:  # the caller's thread: counted, never waits (ByteBudget)
+            done = self._opened(Future(), held)
             try:
-                done.set_result(self.buffer.read_payload(ref))
+                data = self.buffer.read_payload(ref)
+                self.budget.force(len(data))
+                held[0] = len(data)
+                done.set_result(data)
             except BaseException as error:  # noqa: BLE001 - raised by result()
                 done.set_exception(error)
             return done
-        return self._pool.submit(self.buffer.read_payload, ref)
+        ticket = self.budget.ticket()
+        return self._opened(self._pool.submit(self._read_in_turn, ref, ticket, held), held)
+
+    def _opened(self, read: Future, held: list[int]) -> Future:
+        read.yeto_held = held  # type: ignore[attr-defined]
+        with self._open_lock:
+            self._open.add(read)
+        # a failed read holds no bytes: out of the open set at once
+        read.add_done_callback(lambda done: None if done.cancelled() or done.exception() is None
+                               else self._release(done))
+        return read
+
+    def _payload_size(self, ref: str) -> int | None:
+        """The payload's size without reading it (one HEAD on an object store), None
+        when the buffer cannot tell: the read is then counted once it arrived."""
+        size_of = getattr(self.buffer, "payload_size", None)
+        if not callable(size_of):
+            return None
+        size = size_of(ref)  # a store that does not answer: raised, like a read it does not answer
+        return None if size is None else int(size)
+
+    def _read_in_turn(self, ref: str, ticket: int, held: list[int]) -> bytes:
+        """A take's read in a worker: its size, its turn and room in the budget, then the bytes."""
+        try:
+            size = self._payload_size(ref)
+        except BaseException:
+            self.budget.acquire(ticket, 0)  # every ticket takes its turn, or the later ones never do
+            raise
+        self.budget.acquire(ticket, size or 0)
+        held[0] = size or 0
+        return self._read_counted(ref, held, size)
+
+    def _read_counted(self, ref: str, held: list[int], size: int | None = None) -> Any:
+        """Read ``ref`` with ``held[0]`` bytes counted for it; the count is set to the
+        bytes read (a size that was unknown, or changed), and to 0 when the read fails.
+        A known ``size`` goes to a buffer that takes it (a large payload is then read
+        by parallel ranges, ``FileSampleBuffer.read_payload``)."""
+        try:
+            data = self.buffer.read_payload(ref, size=size) if size is not None and self._sized_reads \
+                else self.buffer.read_payload(ref)
+        except BaseException:
+            self.budget.release(held[0])
+            held[0] = 0
+            raise
+        self._recount(held, len(data))
+        if not decodes_in_worker(data):
+            return data
+        try:  # a v2 payload: decoded here; its bytes go, its arrays count instead
+            group = decode_group(data)
+        except BaseException:  # DamagedPayload included: _group_at records it like a caller decode
+            self._recount(held, 0)
+            raise
+        del data
+        self._recount(held, group_nbytes(group))
+        return _Decoded(group)
+
+    def _recount(self, held: list[int], size: int) -> None:
+        """Count ``size`` bytes for a read that counted ``held[0]``."""
+        if size > held[0]:
+            self.budget.force(size - held[0])
+        else:
+            self.budget.release(held[0] - size)
+        held[0] = int(size)
+
+    def _read_ahead(self, ref: str) -> Future | None:
+        """A read ahead of the next take; None when it does not fit the budget now
+        (the prefetch stops there, the take reads the rest)."""
+        if self.budget.limit is None:
+            return self._read(ref)
+        size = self._payload_size(ref)
+        if not self.budget.try_acquire(size or 0):
+            return None
+        held = [size or 0]
+        if self._pool is None:
+            done = self._opened(Future(), held)
+            try:
+                done.set_result(self._read_counted(ref, held, size))
+            except BaseException as error:  # noqa: BLE001 - raised by result()
+                done.set_exception(error)
+            return done
+        return self._opened(self._pool.submit(self._read_counted, ref, held, size), held)
+
+    def _release(self, read: Future) -> None:
+        """The read's bytes no longer count (decoded, passed over or abandoned)."""
+        held = getattr(read, "yeto_held", None)
+        with self._open_lock:
+            self._open.discard(read)
+            size = held[0] if held else 0
+            if held:
+                held[0] = 0
+        self.budget.release(size)
+
+    def _abandon(self, reads: Any) -> None:
+        """Reads whose bytes are not wanted: released once they end."""
+        for read in list(reads):
+            read.add_done_callback(self._release)
+
+    def _abandon_open(self) -> None:
+        with self._open_lock:
+            reads = list(self._open)
+        self._abandon(reads)
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -1308,6 +1587,7 @@ class BatchReader:
         try:
             return self._take(int(rollout_id), int(groups), current_version)
         except BaseException:
+            self._abandon_open()  # its reads: selected again by the next take, read again then
             self._retry = self._taken + self._retry
             self._carry = carried_in
             # the groups deferred by an earlier take wait again (those this take
@@ -1444,15 +1724,24 @@ class BatchReader:
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
             selected = selection[0]
+            if ahead and self.budget.limit is not None:
+                # read ahead for the groups this pass did not take (aged out, fenced, the
+                # carried group's place): their bytes would hold the budget the take's own
+                # reads wait for; a later pass that selects one reads it again
+                self._abandon(ahead.values())
+                ahead.clear()
             self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
                                  self.unidentified_total - unidentified_before)
             if selected or len(chosen) > kept_before:  # decode now (a deferred group judged again
                 # included): a group that is dropped is replaced by the next selection
-                read_s += self._settle([read for _, read, _ in chosen])
-                begun = self.clock()
+                if self.budget.limit is None:  # with a budget each read is waited for at its decode
+                    read_s += self._settle([read for _, read, _ in chosen])
+                begun, waited = self.clock(), self._read_wait_s
                 dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
                                                        source_tokens, position_sources)
-                decode_s += self.clock() - begun
+                waited = self._read_wait_s - waited
+                read_s += waited
+                decode_s += self.clock() - begun - waited
             if selected:
                 progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
@@ -1673,11 +1962,14 @@ class BatchReader:
         fresh = [(position, read) for position, read, _ in chosen if position not in decoded]
         if not fresh:
             return 0
-        self._settle([read for _, read in fresh])
+        if self.budget.limit is None:
+            self._settle([read for _, read in fresh])
+        else:  # ``chosen`` keeps a placeholder: a payload's bytes go once it is decoded
+            ready = {position for position, _ in fresh}
+            chosen[:] = [(p, _placeholder() if p in ready else r, early) for p, r, early in chosen]
         drop: set[int] = set()
         nonfinite = nonfinite_lp = damaged = duplicate = 0
-        for position, read in fresh:
-            group = self._group_at(position, read)
+        for position, group in self._decoded_in_order(fresh):
             if group is not None and self._stale_payload(position, group):
                 group, aged = None, True
             else:
@@ -1717,6 +2009,24 @@ class BatchReader:
         self._nonfinite += nonfinite
         self._nonfinite_lp += nonfinite_lp
         return len(drop) - nonfinite - nonfinite_lp - damaged - duplicate
+
+    def _decoded_in_order(self, fresh: list[tuple[int, Future]]) -> Any:
+        """``(position, decoded group or None)`` of ``fresh`` reads, in their order,
+        each read waited for at its turn (with a budget the reads wait for room in
+        this order, ByteBudget) and dropped from ``fresh`` before its group is
+        yielded, so its bytes go with its decode. Reads left when the caller stops
+        (a decode that raised) are abandoned: their bytes are released."""
+        fresh.reverse()
+        try:
+            while fresh:
+                position, read = fresh.pop()
+                if not read.done():
+                    self._read_wait_s += self._settle([read])
+                group = self._group_at(position, read)
+                del read
+                yield position, group
+        finally:
+            self._abandon(read for _, read in fresh)
 
     def _recheck(self, chosen: list, accounts: tuple, lease_reads: dict[str, float]) -> tuple[int, int]:
         """Judge the ``chosen`` groups again, each shard's lease read again (at most
@@ -1868,7 +2178,10 @@ class BatchReader:
                 for item in wanted:
                     ref = item.entry.payload_ref
                     if ref not in self._reads:
-                        self._reads[ref] = self._read(ref)
+                        read = self._read_ahead(ref)
+                        if read is None:  # the budget is full: the next take reads the rest
+                            return
+                        self._reads[ref] = read
                 if len(wanted) >= groups or self.buffer.data_ended:
                     return
                 self._stop_prefetch.wait(self.poll_s)
@@ -1899,6 +2212,7 @@ class BatchReader:
         # the read-ahead of the last take: its reads end before the restore's refresh
         # (a Volume reload), and it reads ahead of a position that is abandoned now
         self._stop_prefetching()
+        self._abandon(self._reads.values())
         self._reads.clear()
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
