@@ -5,6 +5,7 @@ key, for an ``s3://`` store whose bucket mount cannot append or rewrite."""
 from __future__ import annotations
 
 import json
+import sys
 import threading
 
 import pytest
@@ -170,7 +171,11 @@ class FakeS3:
 
         class Paginator:
             def paginate(self, Bucket, Prefix, StartAfter=""):
-                keys = sorted(k for b, k in fake.objects if b == Bucket and k.startswith(Prefix) and k > StartAfter)
+                # under the lock the puts take: a put from another thread during this scan
+                # would change the dict's size mid-iteration (RuntimeError in the lister)
+                with fake.lock:
+                    keys = sorted(k for b, k in fake.objects
+                                  if b == Bucket and k.startswith(Prefix) and k > StartAfter)
                 for i in range(0, max(len(keys), 1), 2):  # two keys a page
                     yield {"Contents": [{"Key": k} for k in keys[i:i + 2]]} if keys else {}
 
@@ -353,6 +358,28 @@ def test_buffer_by_object_key(tmp_path, which):
         writer.append(SampleIndexEntry("x", 0, "payloads/missing.bin"))
 
 
+def _add_all(jobs):
+    """Run ``_add(buf, sample_id, 0)`` for every ``(buf, sample_id)`` of ``jobs`` on
+    its own thread, started together; returns the errors the threads raised (an
+    error in a thread is otherwise only a warning, and the test sees a lost sample)."""
+    start = threading.Barrier(len(jobs))
+    errors: list[BaseException] = []
+
+    def run(buf, sample_id):
+        try:
+            start.wait()
+            _add(buf, sample_id, 0)
+        except BaseException as error:  # noqa: BLE001 - reported to the test
+            errors.append(error)
+
+    threads = [threading.Thread(target=run, args=job) for job in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+
 def test_two_writers_never_share_a_position(tmp_path):
     """Writers on two hosts: each append takes the next free position with a
     create-if-absent write; the loser re-reads and takes the next one."""
@@ -361,14 +388,33 @@ def test_two_writers_never_share_a_position(tmp_path):
     _add(a, "a0", 0)
     _add(b, "b0", 0)  # b had read nothing: loses position 0, takes 1
     _add(a, "a1", 0)
-    threads = [threading.Thread(target=_add, args=(buf, f"{name}{i}", 0))
-               for i in range(2, 12) for name, buf in (("a", a), ("b", b))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    errors = _add_all([(buf, f"{name}{i}") for i in range(2, 12) for name, buf in (("a", a), ("b", b))])
+    assert errors == []
     ids = [s.entry.sample_id for s in FileSampleBuffer(objects, batch_size=1).select("t", 99)]
     assert ids[:3] == ["a0", "b0", "a1"] and len(ids) == len(set(ids)) == 23
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["directory", "s3"])
+def test_concurrent_appends_lose_nothing_under_tight_thread_switching(tmp_path, which):
+    """Threads of one buffer and of a second buffer on the same store append at
+    once, with the interpreter switching threads every microsecond: every append
+    lands at its own position (one buffer's appends are serialized by its lock,
+    two buffers' by create-if-absent) and the listing that each append reads
+    never fails because another thread writes meanwhile."""
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for attempt in range(5):
+            objects = _stores(tmp_path / str(attempt))[which]
+            a, b = FileSampleBuffer(objects, batch_size=1), FileSampleBuffer(objects, batch_size=1)
+            errors = _add_all([(buf, f"{name}{i}") for i in range(12) for name, buf in (("a", a), ("b", b))])
+            assert errors == []
+            records = [json.loads(objects.read(key)) for key in objects.list("sample-buffer/index/")]
+            assert [r["pos"] for r in records] == list(range(24))
+            ids = [s.entry.sample_id for s in FileSampleBuffer(objects, batch_size=1).select("t", 99)]
+            assert sorted(ids) == sorted(f"{n}{i}" for i in range(12) for n in "ab")
+    finally:
+        sys.setswitchinterval(previous)
 
 
 def test_reader_stops_before_a_missing_position(tmp_path):
