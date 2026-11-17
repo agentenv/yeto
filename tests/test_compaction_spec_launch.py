@@ -127,11 +127,28 @@ def test_compaction_needs_the_turn_and_row_caps(missing):
         C.config_from_spec(spec)
 
 
-def test_the_sampler_row_must_hold_a_whole_segment():
+def test_the_sampler_row_must_hold_the_engine_context():
+    """A segment can grow past context_budget to the engine context (R1-F2,
+    tests/test_compaction_segment_width.py): the row must hold max_model_len."""
+    with pytest.raises(ValueError, match=r"agentic.max_response_len 245760 < the engine context length "
+                                         r"max_model_len 262144: .* drops the trial"):
+        C.config_from_spec(_spec({"context_budget": 245760}, max_model_len=262144, max_response_len=245760))
+    cfg = C.config_from_spec(_spec({"context_budget": 245760}, max_model_len=262144, max_response_len=262144))
+    assert C.segment_width(_spec({"context_budget": 245760}, max_model_len=262144), cfg) == (262144, None)
+    # the running engine's context wins over the spec's
+    with pytest.raises(HarnessConfigError, match="max_model_len 300000"):
+        ar.spec_compaction(_spec({"context_budget": 245760}, max_model_len=262144, max_response_len=262144),
+                           SimpleNamespace(max_model_len=300000))
+
+
+def test_without_an_engine_context_the_row_is_checked_against_context_budget_with_a_warning():
     with pytest.raises(ValueError, match=r"agentic.max_response_len 16384 < agentic.compaction.context_budget "
-                                         r"65536: .* the summary .* is the part cut"):
+                                         r"65536"):
         C.config_from_spec(_spec({"context_budget": 65536}, max_response_len=16384))
-    assert C.config_from_spec(_spec({"context_budget": 65536}, max_response_len=65536)) is not None
+    cfg = C.config_from_spec(_spec({"context_budget": 65536}, max_response_len=65536))
+    width, warning = C.segment_width(_spec({"context_budget": 65536}), cfg)
+    assert width == 65536 and "gives no engine max_model_len" in warning
+    assert "set engine.server.max_model_len" in warning
 
 
 def test_a_default_agent_that_compacts_itself_is_refused():
@@ -180,7 +197,7 @@ def _round(monkeypatch, agentic, *, build=None):
 
 def test_round_factory_passes_the_compaction_to_the_records_proxy(monkeypatch):
     kwargs, _build = _round(monkeypatch, {"compaction": {"context_budget": 32768, "t_comp": 4096},
-                                          "max_response_len": 32768})
+                                          "max_response_len": 65536})  # the engine's max_model_len
     assert kwargs["compaction"] == C.CompactionConfig(context_budget=32768, t_comp=4096)
 
 
@@ -217,7 +234,7 @@ def test_a_compacting_round_refuses_a_task_whose_agent_compacts_itself():
 
 def test_round_factory_wraps_the_trial_builder_when_compacting(monkeypatch):
     _kwargs, build = _round(monkeypatch, {"compaction": {"context_budget": 32768, "t_comp": 4096},
-                                          "max_response_len": 32768})
+                                          "max_response_len": 65536})
     with pytest.raises(HarnessConfigError, match="may compact its own history"):
         build(SimpleNamespace(agent="codex", task_id="t"), "http://e")
 
@@ -299,6 +316,7 @@ def test_the_pool_dry_run_shows_the_compaction(tmp_path, capsys):
     assert rc == 0, out
     assert ("agentic.compaction: on: context_budget 32768, t_comp 10240 (compacts once fewer than 10240 tokens "
             "remain), keep_recent_steps 1, max_compactions 3 (at most 4 segments per trial)") in out
+    assert "note: agentic.compaction: the spec gives no engine max_model_len" in out  # the fake engine has none
 
 
 @pytest.mark.parametrize(("section", "agentic", "match"), [
@@ -430,7 +448,7 @@ def test_run_up_preflight_refuses_the_k31_example_rows_with_compaction(setup):  
     _set(setup.argv, "--rollout-max-response-len", "12288")
     run = setup.make()
     problem = run.consistency_problem()
-    assert "--seq-len 16384 < the sampler spec's agentic.compaction.context_budget 32768" in problem
+    assert "--seq-len 16384 < the sampler spec's engine context length max_model_len 32768" in problem
     assert run.preflight() is False and run.calls == []
 
 
@@ -573,3 +591,51 @@ def test_the_split_by_sample_checks_on_parsed_args():
     assert segment_schedule_problems(SimpleNamespace(rl_backend="miles", rl_max_tokens_per_gpu=None)) == [
         "no --rl-max-tokens-per-gpu (Miles --use-dynamic-batch-size)"]
     assert segment_schedule_problems(None, ["--indep-dp", "--multi-lora=2"]) == ["--indep-dp", "multi-LoRA"]
+
+
+def test_run_up_preflight_asks_the_trainer_row_for_the_engine_context(setup):  # noqa: F811
+    """--seq-len == context_budget < max_model_len is refused (a segment can be as wide as
+    the engine context); 262144 / 262144 passes, also with max_prompt_len set (a row is
+    at most max_model_len)."""
+    _compacting(setup, budget=245760)
+    setup.spec["engine"]["server"]["max_model_len"] = 262144
+    setup.spec["agentic"]["max_response_len"] = 262144
+    _set(setup.argv, "--rollout-max-response-len", "262144")
+    problem = setup.make().consistency_problem()
+    assert "--seq-len 262144" not in (problem or "")
+    _set(setup.argv, "--seq-len", "245760")
+    _set(setup.argv, "--rollout-max-response-len", "245760")
+    problem = setup.make().consistency_problem()
+    assert "max_response_len 262144 > the trainer's --rollout-max-response-len 245760" in problem
+    _set(setup.argv, "--seq-len", "262144")
+    _set(setup.argv, "--rollout-max-response-len", "262144")
+    setup.spec["agentic"]["max_prompt_len"] = 16384
+    assert setup.make().consistency_problem() is None
+    setup.spec["agentic"].pop("compaction")  # without compaction: the sum is the row, as before
+    assert "16384 + agentic.max_response_len 262144 = 278528 > the trainer's --seq-len 262144" in \
+        setup.make().consistency_problem()
+
+
+def test_run_up_preflight_refuses_a_seq_len_of_context_budget(setup):  # noqa: F811
+    _compacting(setup, budget=24576)
+    setup.spec["agentic"]["max_response_len"] = 32768  # max_model_len 32768
+    _set(setup.argv, "--rollout-max-response-len", "32768")
+    _set(setup.argv, "--seq-len", "24576")
+    _set(setup.argv, "--rl-max-tokens-per-gpu", "32768")
+    run = setup.make()
+    assert run.consistency_problem() is None  # yeto launch raises --seq-len to the response width
+    from yeto.rl.up_consistency import compaction_problem
+
+    args = SimpleNamespace(rl_backend="miles", rl_max_tokens_per_gpu=32768, seq_len=24576,
+                           rollout_max_response_len=24576, rl_algorithm_spec_json=None)
+    assert "--seq-len 24576 < the sampler spec's engine context length max_model_len 32768" in \
+        compaction_problem(args, setup.spec)
+
+
+def test_run_up_preflight_warns_without_an_engine_context(setup, capsys):  # noqa: F811
+    _compacting(setup)
+    setup.spec["engine"]["server"].pop("max_model_len")
+    run = setup.make()
+    assert run.consistency_problem() is None
+    run.log_compaction(0)
+    assert "preflight: WARNING: agentic.compaction: the spec gives no engine max_model_len" in capsys.readouterr().out

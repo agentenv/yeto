@@ -530,6 +530,28 @@ def _check_agent(section: Mapping[str, Any]) -> None:
                          f"({', '.join(sorted(PROXY_COMPACTION_AGENTS))})")
 
 
+def segment_width(spec: Mapping[str, Any], cfg: CompactionConfig, *,
+                  max_model_len: int | None = None) -> tuple[int, str | None]:
+    """``(tokens, warning)``: how wide a compaction segment's sample can be, which the
+    sampler's ``agentic.max_response_len`` and the trainer's ``--seq-len`` must hold.
+
+    The trigger is checked before a model call: a step that did not trigger adds its
+    reply and then tool output of any length, and the summary turn follows, so a
+    segment's stream can grow to the engine context (``max_model_len``), past
+    ``context_budget``. A non-last segment cut at ``max_response_len`` loses its
+    summary and the whole trial is dropped. Without a known engine context the width
+    is ``context_budget`` and ``warning`` says it is not enough."""
+    limit = spec_max_model_len(spec) if max_model_len is None else int(max_model_len)
+    if limit is not None:
+        return limit, None
+    return cfg.context_budget, (
+        f"agentic.compaction: the spec gives no engine max_model_len, so the row widths are checked against "
+        f"context_budget {cfg.context_budget}; a segment can grow past it to the engine context (a large tool "
+        f"output after the last step below the trigger, then the summary), and a non-last segment cut at "
+        f"agentic.max_response_len drops the whole trial: set engine.server.max_model_len and keep "
+        f"agentic.max_response_len and the trainer's --seq-len at least that")
+
+
 def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = None) -> CompactionConfig | None:
     """``agentic.compaction`` of a sampler spec as a :class:`CompactionConfig`, or None
     (no section, or ``null``: no compaction).
@@ -546,8 +568,9 @@ def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = Non
     * a ``t_comp`` that cannot hold the summary turn, and a budget whose summary
       turn can overrun the engine context (:func:`_check_summary_room`, with
       ``agentic.turn_max_tokens``);
-    * ``agentic.max_response_len`` below ``context_budget``: a segment's response is
-      cut at that width, and the summary at the end of a segment is what is cut;
+    * ``agentic.max_response_len`` below the engine context length (:func:`segment_width`;
+      ``context_budget`` when the spec gives none): a segment's response is cut at
+      that width, and the summary at the end of a segment is what is cut;
     * a default agent that compacts its own history (:func:`_check_agent`)."""
     agentic = spec.get("agentic")
     raw = agentic.get("compaction") if isinstance(agentic, Mapping) else None
@@ -578,10 +601,15 @@ def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = Non
         if agentic.get(key) is None:
             raise ValueError(f"agentic.compaction needs agentic.{key}")
     _check_summary_room(cfg, int(agentic["turn_max_tokens"]), limit)
-    if int(agentic["max_response_len"]) < budget:
-        raise ValueError(f"agentic.max_response_len {int(agentic['max_response_len'])} < agentic.compaction."
-                         f"context_budget {budget}: a segment's response is cut at max_response_len, and the "
-                         f"summary that ends the segment is the part cut; set max_response_len >= context_budget")
+    width, _warning = segment_width(spec, cfg, max_model_len=limit)
+    if int(agentic["max_response_len"]) < width:
+        what = f"the engine context length max_model_len {width}" if limit is not None else \
+            f"agentic.compaction.context_budget {width}"
+        raise ValueError(f"agentic.max_response_len {int(agentic['max_response_len'])} < {what}: a compaction "
+                         f"segment can grow to the engine context (the trigger is checked before a model call, "
+                         f"so a large tool output can follow the last step below it, then the summary), and a "
+                         f"segment cut at max_response_len loses the summary that ends it and drops the trial; "
+                         f"set max_response_len >= {width}")
     _check_agent(agentic)
     return cfg
 
