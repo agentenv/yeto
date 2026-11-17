@@ -49,7 +49,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from yeto.rl.compaction import RESUME_TEMPLATE, SUMMARY_PROMPT, CompactionConfig, extract_summary, should_compact
+from yeto.rl.compaction import CompactionConfig, extract_summary, should_compact
 from yeto.rl.engine.sampler_engine import (
     FINISH_LENGTH,
     Completion,
@@ -67,6 +67,8 @@ Message = dict[str, Any]
 
 KIND_ACTION = "action"
 KIND_SUMMARY = "summary"
+# Stands in for the newest messages in a summary request they leave no room in (RecordingBackend._compact).
+OMITTED_FROM_SUMMARY = "[output left out: too long for the summary request]"
 
 
 class RecordsMismatch(GatewayError):
@@ -287,6 +289,8 @@ class RecordingBackend:
             pending = self._prompt(session, segment, context)
             if self._should_compact(session, segment, pending):
                 await self._compact(session, segment, context, params)
+                if self.sessions.get(session_id) is not session:  # forgotten during the summary turn
+                    raise RecordsMismatch("the trajectory was forgotten during its summary turn")
                 segment = session.segments[-1]
                 context = segment.head + list(messages[segment.base:])
                 pending = self._prompt(session, segment, context)
@@ -331,6 +335,11 @@ class RecordingBackend:
         if not segment.turns:
             return _Prompt(stop=(), tail=tuple(self.template.encode(full)))
         if segment.last_finish == FINISH_LENGTH:
+            if self.compaction is not None and len(segment.token_ids) >= int(self.engine.max_model_len):
+                # cut because the stream reached the engine context, not by the turn's max_tokens:
+                # the trajectory ran out of context (as a compacted one that no compaction can help)
+                self._context_full(session, segment, f"the stream has {len(segment.token_ids)} tokens after a "
+                                                     f"turn cut at max_model_len {self.engine.max_model_len}")
             raise RecordsMismatch("cannot continue a stream after a length-truncated turn")
         if len(context) < segment.n_context:
             raise RecordsMismatch("history is shorter than the recorded stream")
@@ -370,12 +379,40 @@ class RecordingBackend:
         return _Prompt(stop=stop_ids, tail=tail, render_diff=diff)
 
     def _should_compact(self, session: _Session, segment: Segment, pending: _Prompt) -> bool:
+        """Compact before this turn (``C - |h| < T_comp``, a step in the segment to summarize).
+
+        A segment is not compacted again when no compaction is left
+        (``max_compactions``) or when it already started over the trigger (its
+        rebuilt context, even with no kept step, crossed ``C - T_comp``: another
+        summary would only repeat every turn). Such a segment runs until the
+        context reaches ``C``, then :class:`ContextFull` ends the trajectory (the
+        policy's budget, as :meth:`_sample`'s ``max_model_len``)."""
         cfg = self.compaction
-        if cfg is None or len(session.segments) > cfg.max_compactions:
+        if cfg is None:
             return False
         if not any(t.kind == KIND_ACTION for t in segment.turns):
             return False  # no step to summarize yet
-        return should_compact(len(segment.token_ids) + len(pending), cfg)
+        used = len(segment.token_ids) + len(pending)
+        if not should_compact(used, cfg):
+            return False
+        opened_over = segment.index > 0 and should_compact(len(segment.turns[0].prompt_added), cfg)
+        if len(session.segments) <= cfg.max_compactions and not opened_over:
+            return True
+        if used >= cfg.context_budget:
+            left = "no compaction is left" if not opened_over else "the segment started over the compaction trigger"
+            self.counters[session.trajectory_id]["context_budget_full"] += 1
+            self._context_full(session, segment, f"prompt has {used} tokens; context_budget is "
+                                                 f"{cfg.context_budget} and {left}")
+        return False
+
+    def _context_full(self, session: _Session, segment: Segment, message: str) -> None:
+        """End the trajectory at a full context (raises :class:`ContextFull`): marked
+        ``context_full: ...`` on the segment's last sampled turn, as :meth:`_sample`
+        does at ``max_model_len`` (the trajectory ran out of context; not a parse failure)."""
+        if segment.turns:
+            segment.turns[-1].parse_error = f"context_full: {message}"
+        self.counters[session.trajectory_id]["context_full"] += 1
+        raise ContextFull(message)
 
     async def _compact(self, session: _Session, segment: Segment, context: list[Message],
                        params: SamplingParams) -> None:
@@ -384,26 +421,84 @@ class RecordingBackend:
         ``history`` is the agent's own messages in this segment's context
         (``messages[segment.base:]``); the next segment keeps the last ``k``
         whole steps (assistant + its tool outputs), ``k`` reduced while the
-        rebuilt context would trigger again (as :func:`yeto.rl.compaction.rebuild_context`)."""
+        rebuilt context would trigger again (as :func:`yeto.rl.compaction.rebuild_context`).
+
+        The summary turn samples ``cfg.summary_max_tokens`` (else the turn's
+        ``max_tokens`` capped at :data:`~yeto.rl.compaction.DEFAULT_SUMMARY_MAX_TOKENS`).
+        When the newest messages leave the engine less room than that (a large
+        tool output), they are replaced by a note in the summary request only
+        (this segment is not continued); the next segment still
+        keeps them verbatim when they fit. The summary is read from the parsed
+        reply's content (the response channel; a ``<summary>`` drafted in the
+        reasoning does not count); with no content (cut inside the reasoning)
+        the reasoning text is kept, ``summary_ok`` False. A reply cut
+        at its length, without a closed ``<summary>``, with tool calls (not run)
+        or that does not parse still opens the next segment, with ``summary_ok``
+        False and a counter."""
         cfg = self.compaction
         assert cfg is not None
-        summary_context = context + [{"role": "user", "content": SUMMARY_PROMPT}]
-        completion = await self._sample(session, segment, self._prompt(session, segment, summary_context),
-                                        params, kind=KIND_SUMMARY)
-        summary, segment.summary_ok = extract_summary(self.template.decode(self._strip_stop(completion.token_ids)))
-        self.counters[session.trajectory_id]["compactions"] += 1
+        counters = self.counters[session.trajectory_id]
+        params = params.replace(max_tokens=cfg.summary_tokens(params.max_tokens))
+        request = {"role": "user", "content": cfg.summary_prompt}
+        pending = self._prompt(session, segment, context + [request])
+        room = int(self.engine.max_model_len) - len(segment.token_ids) - len(pending)
+        if room < params.max_tokens and len(context) > segment.n_context:
+            newest = [{**m, "content": OMITTED_FROM_SUMMARY} for m in context[segment.n_context:]]
+            pending = self._prompt(session, segment, context[: segment.n_context] + newest + [request])
+            counters["summary_newest_omitted"] += 1
+        prompt_len = len(segment.token_ids) + len(pending)
+        if prompt_len >= int(self.engine.max_model_len):  # nothing left to write the summary in
+            counters["compaction_no_room"] += 1
+            self._context_full(session, segment, f"compaction_no_room: the summary request has {prompt_len} "
+                                                 f"tokens; max_model_len is {self.engine.max_model_len}")
+        completion = await self._sample(session, segment, pending, params, kind=KIND_SUMMARY)
+        if self.counters.get(session.trajectory_id) is not counters:  # forgotten while the engine wrote it
+            raise RecordsMismatch("the trajectory was forgotten during its summary turn")
+        if completion.finish_reason == FINISH_LENGTH:
+            counters["summary_truncated"] += 1
+        try:
+            reply: Message | None = self._parse(completion)
+        except TemplateError:
+            reply = None
+            counters["summary_parse_errors"] += 1
+        from_reasoning = False
+        if reply is None:
+            text = self.template.decode(self._strip_stop(completion.token_ids))
+        else:
+            text = str(reply.get("content") or "")
+            if not text.strip():  # cut inside the reasoning: what was written (never a good summary)
+                text, from_reasoning = str(reply.get("reasoning_content") or ""), True
+            if reply.get("tool_calls"):  # against the request; never run, the agent does not see this turn
+                counters["summary_tool_calls"] += 1
+        summary, ok = extract_summary(text)
+        segment.summary_ok = (ok and bool(summary) and reply is not None and not from_reasoning
+                              and not reply.get("tool_calls"))
+        counters["compactions"] += 1
+        if not segment.summary_ok:
+            counters["summary_not_ok"] += 1
 
         systems = list(itertools.takewhile(lambda m: m.get("role") == "system", context))
-        head = systems + [{"role": "user", "content": RESUME_TEMPLATE.format(summary=summary)}]
+        head = systems + [{"role": "user", "content": cfg.resume_template.format(summary=summary)}]
         history = context[len(segment.head):]
         steps = _atomic_step_starts(history)
         tools = self.tools.get(session.trajectory_id)
+
+        def tokens(rebuilt: list[Message]) -> int:
+            return len(self.template.encode(self.template.render(rebuilt, tools=tools, add_generation_prompt=True)))
+
         kept, first = 0, len(history)
         for k in range(min(cfg.keep_recent_steps, len(steps)), 0, -1):
-            rebuilt = head + history[steps[-k]:]
-            if not should_compact(len(self.template.encode(self.template.render(rebuilt, tools=tools, add_generation_prompt=True))), cfg):
+            if not should_compact(tokens(head + history[steps[-k]:]), cfg):
                 kept, first = k, steps[-k]
                 break
+        else:
+            used = tokens(head)
+            if used >= int(self.engine.max_model_len):  # the next segment could not sample a token
+                counters["compaction_no_room"] += 1
+                self._context_full(session, segment, f"compaction_no_room: the rebuilt context has {used} "
+                                                     f"tokens; max_model_len is {self.engine.max_model_len}")
+            if should_compact(used, cfg):  # even k = 0 is over the trigger: _should_compact will not compact it again
+                counters["compaction_rebuild_over_budget"] += 1
         session.segments.append(Segment(len(session.segments), head=head, base=segment.base + first, kept_steps=kept))
 
     async def _sample(self, session: _Session, segment: Segment, pending: _Prompt, params: SamplingParams,
