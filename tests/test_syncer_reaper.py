@@ -17,12 +17,44 @@ import syncer_reaper
 TESTS = Path(__file__).resolve().parent
 
 
+# A multicall coreutils (uutils, the default since Ubuntu 25.10) picks the tool by
+# argv[0], so a ``sleep`` linked as yeto-syncer exits at once there; a compiled one
+# does not.
+SLEEP_C = """
+#include <stdlib.h>
+#include <unistd.h>
+int main(int argc, char **argv) { sleep(argc > 1 ? atoi(argv[1]) : 1); return 0; }
+"""
+
+
+def _sleeps(binary: Path) -> bool:
+    process = subprocess.Popen([binary, "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        process.wait(timeout=0.3)
+        return False
+    except subprocess.TimeoutExpired:
+        return True
+    finally:
+        process.kill()
+        process.wait()
+
+
 def _fake_syncer(tmp_path: Path) -> Path:
-    """``sleep`` under the name yeto-syncer (``ps`` shows the link's path)."""
+    """A ``sleep SECONDS`` named yeto-syncer (``ps`` shows its path)."""
     binary = tmp_path / "bin" / "yeto-syncer"
     binary.parent.mkdir()
     binary.symlink_to(shutil.which("sleep"))
-    return binary
+    if _sleeps(binary):
+        return binary
+    binary.unlink()
+    compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if compiler:
+        source = tmp_path / "sleep.c"
+        source.write_text(SLEEP_C)
+        built = subprocess.run([compiler, "-o", str(binary), str(source)], capture_output=True)
+        if built.returncode == 0 and _sleeps(binary):
+            return binary
+    pytest.skip("no sleep that keeps working under another name, and no C compiler")
 
 
 def _alive(pid: int) -> bool:
