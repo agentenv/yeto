@@ -214,7 +214,9 @@ class TrajectoryEnvelope:
 COMPACTION_METADATA_KEY = "compaction"
 COMPACTION_METADATA_SCHEMA = 1
 _COMPACTION_INT_FIELDS = ("segment_index", "num_segments", "context_budget",
-                          "kept_steps", "segment_tokens", "tokens_after")
+                          "segment_tokens", "tokens_after")
+# optional (absent on older samples); None allowed where the contract writes null
+_COMPACTION_OPTIONAL_INT_FIELDS = ("summary_tokens", "retry_replays")
 _TRAINABLE_STATUSES = frozenset({"completed", "truncated"})
 
 
@@ -269,8 +271,10 @@ def validate_compaction_group(samples: Sequence[Any]) -> tuple[CompactionTrial, 
     compacted trial's samples all carry ``metadata.compaction`` with schema 1,
     one non-empty ``trajectory_id`` (no sample of another index names it),
     ``segment_index`` 0..n-1 (each once), ``num_segments`` n, one positive
-    ``context_budget``, a boolean ``summary_ok`` and non-negative
-    ``kept_steps`` / ``segment_tokens`` / ``tokens_after``; they share one
+    ``context_budget``, non-negative ``segment_tokens`` / ``tokens_after``, a
+    boolean ``summary_ok`` (null allowed on the last segment), non-negative
+    ``kept_steps`` (null allowed on segment 0), optional non-negative
+    ``summary_tokens`` and ``retry_replays`` (one value, or null, per trial); they share one
     finite ``reward``, and only the last segment may be ``truncated`` (the
     earlier ones are ``completed``). A ``rollout_id`` (Miles' rollout key),
     when a trial's samples carry one, is the same on all of them and differs
@@ -341,8 +345,12 @@ def _check_trial_segments(
             value = meta.get(name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{where}: compaction {name} must be a non-negative integer")
-        if type(meta.get("summary_ok")) is not bool:
-            raise ValueError(f"{where}: compaction summary_ok must be a boolean")
+        for name in ("kept_steps", *_COMPACTION_OPTIONAL_INT_FIELDS):
+            value = meta.get(name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{where}: compaction {name} must be a non-negative integer or null")
+        if meta.get("summary_ok") is not None and type(meta.get("summary_ok")) is not bool:
+            raise ValueError(f"{where}: compaction summary_ok must be a boolean or null")
     order = sorted(range(len(positions)), key=lambda k: metas[k]["segment_index"])  # type: ignore[index]
     segments = [samples[positions[k]] for k in order]
     metas = [metas[k] for k in order]
@@ -363,6 +371,14 @@ def _check_trial_segments(
                              f"{len(segments)} segments in the group")
         if meta["context_budget"] < 1 or meta["context_budget"] != first.get("context_budget"):
             raise ValueError(f"{where}: compaction context budget is invalid or changed")
+        # contract 2 / decision 8: kept_steps is null only on segment 0 (not rebuilt), summary_ok
+        # null only on the last (no summary at its end); retry_replays is the trial's, on each
+        if ordinal > 0 and meta.get("kept_steps") is None:
+            raise ValueError(f"{where}: segment {ordinal} has no kept_steps")
+        if ordinal < len(segments) - 1 and meta.get("summary_ok") is None:
+            raise ValueError(f"{where}: segment {ordinal} ends without a summary_ok")
+        if meta.get("retry_replays") != first.get("retry_replays"):
+            raise ValueError(f"{where}: segments do not share one retry_replays")
         status = _status_name(sample)
         allowed = _TRAINABLE_STATUSES if ordinal == len(segments) - 1 else {"completed"}
         if status not in allowed:
