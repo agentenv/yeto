@@ -10,6 +10,7 @@ import threading
 import pytest
 from botocore.exceptions import ClientError
 
+from tests.sleep_fakes import fake_module_sleep
 from yeto.cloud import s3_store
 from yeto.launch.credentials import SECRET_ENV_NAMES, split_secret_envs
 from yeto.launch.storage import store_object_envs
@@ -1195,7 +1196,7 @@ def test_a_whole_object_read_that_stays_cut_short_raises_the_error_after_a_bound
     from botocore.exceptions import ResponseStreamingError
 
     pauses = []
-    monkeypatch.setattr(s3_store.time, "sleep", pauses.append)
+    fake_module_sleep(monkeypatch, s3_store, pauses.append)
     s3 = CutBodies(cut=[_reset() for _ in range(50)])
     objects = s3_store.S3ObjectStore(URI, client=s3)
     objects.write("LATEST.json", b"{}")
@@ -1207,7 +1208,7 @@ def test_a_whole_object_read_that_stays_cut_short_raises_the_error_after_a_bound
 
 def test_a_whole_object_read_the_store_refuses_is_not_sent_again(monkeypatch):
     """403 / a 503 left after the SDK's retries: an answer, not a broken body."""
-    monkeypatch.setattr(s3_store.time, "sleep", lambda s: pytest.fail("no retry of an error answer"))
+    fake_module_sleep(monkeypatch, s3_store, lambda s: pytest.fail("no retry of an error answer"))
     for code in ("AccessDenied", "ExpiredToken", "ServiceUnavailable"):
         gets = []
 

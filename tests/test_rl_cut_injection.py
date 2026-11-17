@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from tests.rl_cut_fakes import make_rank, params, train_step
+from tests.sleep_fakes import fake_caller_sleep
 from yeto.rl.adapters.miles import cut_injection as ci
 from yeto.rl.adapters.miles import cut_plugin
 from yeto.rl.adapters.miles.trainer_rebuild import inject_rebuild_failures
@@ -74,7 +75,7 @@ def test_restore_sleep_targets_one_rank(tmp_path, monkeypatch):
     rank = make_rank(0)
     s = cut_plugin.save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
     slept = []
-    monkeypatch.setattr("time.sleep", slept.append)
+    fake_caller_sleep(monkeypatch, slept.append, callers=(cut_plugin.__name__,))  # it imports time in the function
     monkeypatch.setenv(ci.RESTORE_SLEEP_ENV, "0:7.5")
     cut_plugin.restore_cut_shard(make_rank(1), directory=str(tmp_path), files=[s], cut_id="c1")
     assert slept == [7.5]

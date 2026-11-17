@@ -3,31 +3,21 @@ process runs at once and is tried again (``yeto.cloud.s3_store.RangeGate``)."""
 
 from __future__ import annotations
 
-import sys
 import threading
-import time
 
 import pytest
 from botocore.exceptions import ClientError
 
+from tests.sleep_fakes import fake_caller_sleep
 from tests.test_rl_object_store import URI, FakeS3
 from yeto.cloud import s3_store
 
 
 def record_sleeps(monkeypatch, record, callers=("yeto.cloud.s3_store",)):
-    """Replace ``time.sleep`` (one object for the whole process) so only the waits
-    of ``callers`` are handed to ``record``; any other thread (a daemon left by an
-    earlier test in this worker, e.g. a syncer client redialing) still really
-    sleeps and is not counted."""
-    real = time.sleep
-
-    def sleep(seconds):
-        caller = sys._getframe(1).f_globals.get("__name__", "")
-        if any(caller == c or caller.startswith(c + ".") for c in callers):
-            return record(seconds)
-        return real(seconds)
-
-    monkeypatch.setattr(time, "sleep", sleep)
+    """Hand only the waits of ``callers`` to ``record``; any other thread (a daemon
+    left by an earlier test in this worker, e.g. a syncer client redialing) still
+    really sleeps and is not counted."""
+    fake_caller_sleep(monkeypatch, record, callers)
 
 
 def _refusal(code="ServiceUnavailable", status=503):
