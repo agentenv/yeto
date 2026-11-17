@@ -13,17 +13,37 @@ re-targets or waits for undrain; the trajectory is *not* invalidated),
 ``enter_session``/``exit_session`` bracket each backend session, and the session
 counters are mirrored with ``record_session_mismatch`` /
 ``record_chain_break(reason)`` so the load sample sees them.
+
+Retry replay (``GatewayConfig.replay_retries``, off by default; the records
+proxy turns it on with context compaction): a harness that lost a reply (an
+HTTP timeout, a dropped connection) sends the same request again.  Without
+replay that request diverges at the generated message it never received, a
+``retry_fork``: a new session that starts from the whole history, which after a
+compaction no longer fits the engine's context.  With replay, a request equal to
+the history a chain's newest generation answered gets that generation's reply
+again (``retry_replays``), without an engine call; one that arrives while the
+generation is still running waits for it.  Any other divergence is located as
+before.
+
+Fork after compaction (``GatewayConfig.session_compacted``, set by the records
+proxy with compaction): any other fork or break from a chain whose backend
+session has compacted would open a session from message 0 (past the engine's
+window, and a stream the segment join refuses), so it fails closed instead:
+the trajectory is invalid (``compaction_fork_lost: <reason>``, counted).
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import secrets
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from yeto.rl.engine.tool_wait import _call as _board_call
 from yeto.rl.engine.tool_wait import _resolve as _board_resolve
 
-from .chains import ChainRegistry, LocateKind, SessionMismatch
+from .chains import Chain, ChainRegistry, Locate, LocateKind, SessionMismatch
 from .context import ContextProvider, IdentityContextProvider
 from .translate import (
     UnsupportedShape,
@@ -71,6 +91,8 @@ class GatewayConfig:
     context_provider: ContextProvider = field(default_factory=IdentityContextProvider)
     harness_board: Any = None  # tool_wait.HarnessBoard (local or actor handle), IR-2/IR-4
     member: str | None = None  # admission key of the rollout member this gateway targets
+    replay_retries: bool = False  # a resent request gets the reply it lost (module doc)
+    session_compacted: Callable[[str], bool] | None = None  # backend session id -> has compacted (module doc)
 
     @classmethod
     def from_codex_profile(cls, profile_name: str, signed_sampling: dict[str, Any], **overrides: Any) -> "GatewayConfig":
@@ -96,6 +118,11 @@ class Gateway:
         self.backend = backend
         self.registries: dict[str, ChainRegistry] = {}
         self.invalidated: dict[str, str] = {}
+        # replay_retries: per (trajectory, chain) the newest generation, as
+        # (messages it answered, future of its completion); counted replays per trajectory
+        self._generations: dict[tuple[str, int], tuple[int, asyncio.Future[dict[str, Any]]]] = {}
+        self.replays: Counter[str] = Counter()
+        self.forks_lost: Counter[str] = Counter()
 
     def _board(self, method: str, *args: Any) -> Any:
         board = self.config.harness_board
@@ -125,12 +152,24 @@ class Gateway:
         sampling = self._check_sampling(body)
         messages = {"responses": responses_to_messages, "chat": chat_to_messages, "messages": messages_to_messages}[entry](body)
         registry = self.registry(trajectory_id)
-        try:
-            located = registry.locate(messages, compaction_window=compaction_window)
-        except SessionMismatch as exc:
-            self.invalidated[trajectory_id] = f"tito_session_mismatch: {exc}"
-            self._board("record_session_mismatch")
-            raise TrajectoryInvalid(self.invalidated[trajectory_id]) from exc
+        while True:
+            try:
+                located = registry.locate(messages, compaction_window=compaction_window)
+            except SessionMismatch as exc:
+                self.invalidated[trajectory_id] = f"tito_session_mismatch: {exc}"
+                self._board("record_session_mismatch")
+                raise TrajectoryInvalid(self.invalidated[trajectory_id]) from exc
+            generation = self._replayable(trajectory_id, messages, located)
+            if generation is None:
+                break
+            try:
+                completion = await asyncio.shield(generation)
+            except Exception:  # noqa: BLE001 - the first request failed and answered its own error: locate again
+                continue
+            if trajectory_id in self.invalidated:
+                raise TrajectoryInvalid(self.invalidated[trajectory_id])
+            self.replays[trajectory_id] += 1
+            return self._reply(entry, copy.deepcopy(completion))
         if located.kind is LocateKind.continue_:
             chain = located.chain
             assert chain is not None
@@ -142,6 +181,15 @@ class Gateway:
                 registry.chain_breaks[reason] += 1
                 self._board("record_chain_break", reason)
                 raise TrajectoryInvalid(self.invalidated[trajectory_id])
+            compacted = self.config.session_compacted
+            if located.chain is not None and compacted is not None and compacted(located.chain.session_id):
+                reason = located.reason.value if located.reason else located.kind.value
+                self.invalidated[trajectory_id] = (f"compaction_fork_lost: {reason} at message {located.prefix_len} "
+                                                   f"of chain {located.chain.chain_id}, whose session has compacted")
+                registry.chain_breaks[reason] += 1
+                self.forks_lost[trajectory_id] += 1
+                self._board("record_chain_break", reason)
+                raise TrajectoryInvalid(self.invalidated[trajectory_id])
             if self.config.harness_board is not None and not self._board("allow_new_session", self.config.member):
                 raise AdmissionClosed(f"member {self.config.member!r} is draining; session for {trajectory_id!r} refused")
             session_id = await self.backend.create_session(trajectory_id)
@@ -150,8 +198,43 @@ class Gateway:
             if located.reason is not None:
                 self._board("record_chain_break", located.reason.value)
         provided = self.config.context_provider.provide(trajectory_id, chain.chain_id, list(chain.messages))
-        completion = await self.backend.chat(chain.session_id, provided, sampling)
-        registry.record_generation(chain, dict(completion["choices"][0]["message"]))
+        if not self.config.replay_retries:
+            completion = await self.backend.chat(chain.session_id, provided, sampling)
+            registry.record_generation(chain, dict(completion["choices"][0]["message"]))
+            return self._reply(entry, completion)
+        key = (trajectory_id, chain.chain_id)
+        generation: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        generation.add_done_callback(lambda f: f.cancelled() or f.exception())  # retrieved, never logged
+        self._generations[key] = (len(chain.messages), generation)
+        try:
+            completion = await self.backend.chat(chain.session_id, provided, sampling)
+            registry.record_generation(chain, dict(completion["choices"][0]["message"]))
+        except BaseException as exc:
+            if self._generations.get(key, (0, None))[1] is generation:
+                del self._generations[key]
+            generation.set_exception(exc if isinstance(exc, Exception) else GatewayError("generation cancelled"))
+            raise
+        generation.set_result(copy.deepcopy(completion))
+        return self._reply(entry, completion)
+
+    def _replayable(self, trajectory_id: str, messages: list[dict[str, Any]],
+                    located: Locate) -> "asyncio.Future[dict[str, Any]] | None":
+        """The newest generation of the located chain when ``messages`` is the
+        history it answered (module doc: retry replay), else None."""
+        chain: Chain | None = located.chain
+        if not self.config.replay_retries or chain is None:
+            return None
+        entry = self._generations.get((trajectory_id, chain.chain_id))
+        if entry is None or entry[0] != len(messages) or located.prefix_len != len(messages):
+            return None
+        answered, generation = entry
+        if generation.done():  # recorded (a failed one is dropped): the request stops before the generated message
+            done = located.kind is LocateKind.fork and len(chain.messages) == answered + 1 and chain.generated[-1]
+            return generation if done else None
+        # running: the chain already holds the request (appended by the first one)
+        return generation if located.kind is LocateKind.continue_ and len(chain.messages) == answered else None
+
+    def _reply(self, entry: str, completion: dict[str, Any]) -> dict[str, Any]:
         response_id = secrets.token_hex(8)
         if entry == "responses":
             return completion_to_responses(completion, response_id=response_id)
@@ -171,8 +254,16 @@ class Gateway:
         """Drop the trajectory's chain state (after :meth:`close`; a long-lived gateway would grow)."""
         self.registries.pop(trajectory_id, None)
         self.invalidated.pop(trajectory_id, None)
+        self.replays.pop(trajectory_id, None)
+        self.forks_lost.pop(trajectory_id, None)
+        for key in [k for k in self._generations if k[0] == trajectory_id]:
+            del self._generations[key]
 
     def snapshot(self, trajectory_id: str) -> dict[str, Any]:
         snap = self.registry(trajectory_id).snapshot()
         snap["invalidated"] = self.invalidated.get(trajectory_id)
+        if self.config.replay_retries:
+            snap["retry_replays"] = self.replays[trajectory_id]
+        if self.config.session_compacted is not None:
+            snap["compaction_fork_lost"] = self.forks_lost[trajectory_id]
         return snap
