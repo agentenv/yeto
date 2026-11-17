@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.sleep_fakes import fake_module_sleep
 from yeto.rl.harness.harbor.boat_client import BoatQuota, CommandStatus
 from yeto.rl.harness.harbor.boat_pool import BoatSandboxPool
 from yeto.rl.harness.harbor.boat_sandbox import BoatSandbox, ContainerSpec, _parse_phase_mark
@@ -437,7 +438,7 @@ def test_quota_hourly_window(monkeypatch):
         slept.append(seconds)
         now[0] += seconds
 
-    monkeypatch.setattr(boat_client.asyncio, "sleep", fake_sleep)
+    fake_module_sleep(monkeypatch, boat_client, fake_sleep, name="asyncio")
     quota = BoatQuota(100, 12, starts_per_hour=3, clock=lambda: now[0])
 
     async def go():

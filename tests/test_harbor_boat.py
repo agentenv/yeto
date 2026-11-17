@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.sleep_fakes import fake_module_sleep
 from yeto.rl.harness.harbor import boat_client
 from yeto.rl.harness.harbor.boat_client import BoatError, BoatQuota, CommandStatus, check_in_flight_cap
 from yeto.rl.harness.harbor.boat_sandbox import (
@@ -368,7 +369,7 @@ def test_quota_limits_starts_per_minute(monkeypatch):
         slept.append(seconds)
         now[0] += seconds
 
-    monkeypatch.setattr(boat_client.asyncio, "sleep", fake_sleep)
+    fake_module_sleep(monkeypatch, boat_client, fake_sleep, name="asyncio")
     quota = BoatQuota(10, 2, clock=lambda: now[0])
 
     async def go():
