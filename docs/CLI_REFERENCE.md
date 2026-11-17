@@ -285,7 +285,8 @@ environment). See [docs/CYBERGYM_RL.md](CYBERGYM_RL.md).
 Module entry points: `python -m yeto.learner` and `python -m
 yeto.mlx.learner` (manual learners, see below),
 `python -m yeto.rl.engine.engine_sampler --spec SPEC.json` (one rollout island
-from a sampler spec), and `python -m yeto.rl.spot.{watchdog,patrol,s3_delivery,spot_plan}`
+from a sampler spec; its optional `agentic.compaction` section turns on context
+compaction, see [KIMI_K31_ASYNC_RL_GUIDE.md section 3.6](KIMI_K31_ASYNC_RL_GUIDE.md#36-context-compaction)), and `python -m yeto.rl.spot.{watchdog,patrol,s3_delivery,spot_plan}`
 (spot rollout island operations, see
 [docs/MILES_RL.md](MILES_RL.md#buffer-trainer-releases-and-spot-rollout-islands)).
 
@@ -506,7 +507,7 @@ injection and are omitted here.
 | Flag | Default | Description |
 |---|---|---|
 | `--training-mode` | `sft` | `sft` or `rl` |
-| `--rl-backend` | `miles` | `miles` or `verl` |
+| `--rl-backend` | `miles` | `miles` or `verl`. A sampler spec with `agentic.compaction` (context compaction, [KIMI_K31_ASYNC_RL_GUIDE.md section 3.6](KIMI_K31_ASYNC_RL_GUIDE.md#36-context-compaction)) needs `miles` with a GRPO-family estimator; `yeto run up` preflight refuses it with `verl` |
 | `--rl-image` | — | digest-pinned RL image `docker:REPO@sha256:DIGEST` (a default is built in) |
 | `--rl-model-recipe` | `generic` | model-specific memory/kernel contract: `generic`, `deepseek-v4-flash`, `glm5_next` |
 | `--rollout-model` | — | separate inference checkpoint (e.g. FP8) for SGLang; defaults to `--model` |

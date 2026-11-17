@@ -21,6 +21,15 @@ Schema history:
   and records the trainer's merged version at the round, against which every
   trajectory's merged version is bounded by the policy-age limit.
 
+Schemas 3 to 5 may also bind trials that context compaction split into segment
+samples (``metadata.compaction``, ``contracts.validate_compaction_group``): one
+envelope per segment, in segment order, with the trial's ``compaction_trajectory_id``,
+``compaction_segment_index``, ``compaction_context_budget`` and
+``compaction_num_segments`` (no segment type), each naming the policy of its own
+tokens (a reload between segments changes it). ``compaction_num_segments`` is
+written only on such envelopes, so a batch without them is byte-for-byte the
+file it was before.
+
 New evidence is schema 4 when the caller names each trajectory's policy (the
 ports rollout hook), schema 5 when it names each trajectory's external merged
 cut (a relay trainer), and schema 3 otherwise.  Schema 1 and 2 files remain
@@ -50,7 +59,12 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
-from .contracts import EXTERNAL_MERGED_CUT, TrajectoryEnvelope
+from .contracts import (
+    EXTERNAL_MERGED_CUT,
+    TrajectoryEnvelope,
+    compaction_metadata,
+    validate_compaction_group,
+)
 
 _LEGACY_SCHEMA = 1
 _SIGNED_LAYERED_SCHEMA = 2
@@ -88,13 +102,19 @@ _LEGACY_ENVELOPE_FIELDS = (
 _EXTERNAL_CUT_FIELDS = frozenset(
     {"behavior_policy_kind", "behavior_merged_version", "behavior_cut_digest"}
 )
+# written only on the segment envelopes of a compacted trial (any layered schema)
+_SEGMENTED_TRIAL_FIELDS = frozenset({"compaction_num_segments"})
 _LAYERED_ENVELOPE_FIELDS = (
-    frozenset(field.name for field in fields(TrajectoryEnvelope)) - _EXTERNAL_CUT_FIELDS
+    frozenset(field.name for field in fields(TrajectoryEnvelope))
+    - _EXTERNAL_CUT_FIELDS
+    - _SEGMENTED_TRIAL_FIELDS
 )
 
 BehaviorPolicyOf = Callable[[Sequence[Any]], tuple[int, str]]
 """The (version, weight hash) of the policy that generated one logical
-trajectory, given its segments (one sample, or the samples of a compaction)."""
+trajectory, given its segments (one sample, or the samples of a legacy
+compaction). A segment of a compacted trial (``metadata.compaction``) is asked
+alone: each segment names its own policy."""
 
 BehaviorCutOf = Callable[[Sequence[Any]], tuple[int, str]]
 """The (merged version, cut digest) of the external merged cut that generated
@@ -191,32 +211,35 @@ def build_trajectory_batch_evidence(
     seen_groups: set[int] = set()
     batch_compaction_context_budget: int | None = None
 
+    def trajectory_policy(segments: Sequence[Any]) -> tuple[dict[str, Any], list[bytes]]:
+        """The envelope fields and trajectory-id parts of the policy of ``segments``."""
+        if schema_version == _EXTERNAL_CUT_SCHEMA:
+            assert behavior_cut_of is not None and merged_version is not None
+            return _external_cut_policy(
+                behavior_cut_of, segments, merged_version, max_policy_age
+            )
+        behavior_version, behavior_hash = _behavior_policy(
+            behavior_policy_of, segments, rollout_id, behavior_policy_hash, max_policy_age
+        )
+        return {
+            "behavior_policy_version": behavior_version,
+            "behavior_policy_hash": behavior_hash,
+        }, (
+            [str(behavior_version).encode("ascii"), bytes.fromhex(behavior_hash)]
+            if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
+            else []
+        )
+
     for group in groups:
         current_group_index: int | None = None
-        for logical_sample in group:
-            compacted = isinstance(logical_sample, list)
-            segments = logical_sample if compacted else [logical_sample]
+        for logical_sample, segmented in _logical_trajectories(group):
+            compacted = isinstance(logical_sample, list) and not segmented
+            segments = logical_sample if isinstance(logical_sample, list) else [logical_sample]
             if not segments:
                 raise ValueError("trajectory evidence has an empty compacted rollout")
 
-            if schema_version == _EXTERNAL_CUT_SCHEMA:
-                assert behavior_cut_of is not None and merged_version is not None
-                policy_fields, policy_identity = _external_cut_policy(
-                    behavior_cut_of, segments, merged_version, max_policy_age
-                )
-            else:
-                behavior_version, behavior_hash = _behavior_policy(
-                    behavior_policy_of, segments, rollout_id, behavior_policy_hash, max_policy_age
-                )
-                policy_fields = {
-                    "behavior_policy_version": behavior_version,
-                    "behavior_policy_hash": behavior_hash,
-                }
-                policy_identity = (
-                    [str(behavior_version).encode("ascii"), bytes.fromhex(behavior_hash)]
-                    if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
-                    else []
-                )
+            if not segmented:
+                policy_fields, policy_identity = trajectory_policy(segments)
             first = segments[0]
             group_index = getattr(first, "group_index", None)
             sample_index = getattr(first, "index", None)
@@ -255,7 +278,18 @@ def build_trajectory_batch_evidence(
 
                 segment_index: int | None = None
                 segment_type: str | None = None
-                if compacted:
+                num_segments: int | None = None
+                if segmented:
+                    # checked by validate_compaction_group (_logical_trajectories)
+                    meta = compaction_metadata(sample)
+                    assert meta is not None
+                    compaction_id = str(meta["trajectory_id"])
+                    segment_index = segment_ordinal
+                    num_segments = len(segments)
+                    compaction_context_budget = int(meta["context_budget"])
+                    # each segment names the policy of its own tokens
+                    policy_fields, policy_identity = trajectory_policy([sample])
+                elif compacted:
                     (
                         compaction_id,
                         segment_index,
@@ -273,7 +307,11 @@ def build_trajectory_batch_evidence(
                         raise ValueError(
                             "compaction context budget changed within the batch"
                         )
-                elif any(
+                if not segmented and metadata.get("compaction") is not None:
+                    raise ValueError(
+                        "compaction segment was not checked as a trial of its group"
+                    )
+                if not compacted and any(
                     metadata.get(name) is not None
                     for name in (
                         "compaction_schema_version",
@@ -342,7 +380,18 @@ def build_trajectory_batch_evidence(
                     (verified.sample_id or "").encode("utf-8"),
                     bytes.fromhex(token_hash),
                 ]
-                if compacted:
+                if segmented:
+                    assert compaction_id is not None
+                    identity_parts.extend(
+                        [
+                            b"segment",
+                            compaction_id.encode("utf-8"),
+                            str(segment_index).encode("ascii"),
+                            str(num_segments).encode("ascii"),
+                            str(compaction_context_budget).encode("ascii"),
+                        ]
+                    )
+                elif compacted:
                     assert compaction_id is not None
                     assert segment_index is not None
                     assert segment_type is not None
@@ -383,6 +432,7 @@ def build_trajectory_batch_evidence(
                         compaction_segment_index=segment_index,
                         compaction_segment_type=segment_type,
                         compaction_context_budget=compaction_context_budget,
+                        compaction_num_segments=num_segments,
                         **policy_fields,
                     )
                 )
@@ -549,6 +599,30 @@ def read_trajectory_batch_evidence(path: str | Path) -> TrajectoryBatchEvidence:
     )
     _validate_batch_evidence(evidence)
     return evidence
+
+
+def _logical_trajectories(group: Sequence[Any]) -> list[tuple[Any, bool]]:
+    """``(logical sample, segmented)`` per trial of ``group``.
+
+    A group without ``metadata.compaction`` is returned item by item (a sample,
+    or a list: the segments of a legacy compaction). A group with it holds the
+    segment samples of compacted trials beside uncompacted ones, flat:
+    ``validate_compaction_group`` partitions it into trials and each compacted
+    trial becomes one list of its segments (``segmented`` True)."""
+    if not any(
+        not isinstance(item, list) and compaction_metadata(item) is not None
+        for item in group
+    ):
+        return [(item, False) for item in group]
+    if any(isinstance(item, list) for item in group):
+        raise ValueError("trajectory group mixes legacy and segmented compaction")
+    out: list[tuple[Any, bool]] = []
+    for trial in validate_compaction_group(group):
+        if trial.trajectory_id is None:
+            out.append((group[trial.positions[0]], False))
+        else:
+            out.append(([group[position] for position in trial.positions], True))
+    return out
 
 
 def _trajectory_outcome(
@@ -808,6 +882,9 @@ def _envelope_mapping(
     value = asdict(envelope)
     if schema_version == _LEGACY_SCHEMA:
         return {name: value[name] for name in _LEGACY_ENVELOPE_FIELDS}
+    if envelope.compaction_num_segments is None:
+        for name in _SEGMENTED_TRIAL_FIELDS:
+            del value[name]
     if schema_version == _EXTERNAL_CUT_SCHEMA:
         return value
     return {name: item for name, item in value.items() if name not in _EXTERNAL_CUT_FIELDS}
@@ -820,6 +897,13 @@ def _envelope_from_mapping(value: Any, schema_version: int) -> TrajectoryEnvelop
         expected = _LAYERED_ENVELOPE_FIELDS | _EXTERNAL_CUT_FIELDS
     else:
         expected = _LAYERED_ENVELOPE_FIELDS
+    if (
+        schema_version != _LEGACY_SCHEMA
+        and isinstance(value, dict)
+        and value.get("compaction_num_segments") is not None
+    ):
+        # a segment of a compacted trial (a null count is never written)
+        expected = expected | _SEGMENTED_TRIAL_FIELDS
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("trajectory evidence item fields are malformed")
     return TrajectoryEnvelope(
@@ -869,15 +953,20 @@ def _validate_envelope_order(
         count != 1 and logical[index] is None for index, count in counts.items()
     ):
         raise ValueError("trajectory evidence repeats a flat sample index")
+    # legacy compaction only: a segmented trial's budget is checked per trial
     compaction_context_budgets = {
         item.compaction_context_budget
         for item in envelopes
         if item.compaction_trajectory_id is not None
+        and item.compaction_num_segments is None
     }
     if len(compaction_context_budgets) > 1:
         raise ValueError("compaction context budget changed within the batch")
 
     for segments in compacted.values():
+        if any(item.compaction_num_segments is not None for item in segments):
+            _validate_segmented_trial(segments)
+            continue
         indices = [item.compaction_segment_index for item in segments]
         if indices != list(range(len(segments))):
             raise ValueError(
@@ -906,6 +995,31 @@ def _validate_envelope_order(
         }
         if len(shared) != 1:
             raise ValueError("compaction segment evidence changed logical outcome")
+
+
+def _validate_segmented_trial(segments: list[TrajectoryEnvelope]) -> None:
+    """The segment envelopes of one compacted trial: all of its segments, in
+    order, sharing its outcome; each names the policy of its own tokens."""
+    indices = [item.compaction_segment_index for item in segments]
+    if indices != list(range(len(segments))) or any(
+        item.compaction_num_segments != len(segments) for item in segments
+    ):
+        raise ValueError("trajectory evidence does not hold every segment of a trial in order")
+    shared = {
+        (
+            item.task_id,
+            item.prompt_group_id,
+            item.sample_index,
+            item.reward,
+            item.reward_contract_hash,
+            item.cleanup_evidence_hash,
+            item.evidence_kind,
+            item.compaction_context_budget,
+        )
+        for item in segments
+    }
+    if len(shared) != 1:
+        raise ValueError("compaction segment evidence changed logical outcome")
 
 
 def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:

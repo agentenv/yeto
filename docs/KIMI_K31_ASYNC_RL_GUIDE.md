@@ -554,13 +554,14 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
 | `max_backlog_groups` | Groups a sampler may hold ahead of the trainer before it pauses. |
 | `reload_max_defer_s` | Longest time, in seconds, a downloaded policy release may wait for running agentic trials before the sampler loads it anyway (default 600; `null` waits indefinitely). A forced load is reported as `rl_sampler_policy_loaded` with `forced: true` and `deferred_s`; trials that span the switch are excluded from training (lost as `served_by_other_version`, or aborted when the switch falls inside a model call) and counted in `rl_agentic_group`. |
-| `agentic.weight_switch` | How an agentic sampler switches weights: `drain` (default on engines without live updates) stops starting new trials, waits for the running ones, then loads the release; `live` loads into the running engine. |
+| `agentic.weight_switch` | How an agentic sampler switches weights: `drain` (default on engines without live updates) stops starting new trials, waits for the running ones, then loads the release; `live` loads into the running engine. With `agentic.compaction` prefer `live`: a drain cuts the long compacted trials (section 3.6). |
 | `agentic.drain_timeout_s` | Longest a `drain` switch waits on running trials before it cancels them (lost as `drain_timeout`). The effective limit is min(`agentic.drain_timeout_s`, `reload_max_defer_s`): with `reload_max_defer_s` 600 and `drain_timeout_s` 3600, a drain ends after 600 s. A larger `drain_timeout_s` (or none) is reported as a warning by `pool --dry-run` and at sampler start (not for a spec that resolves to `live`). **Behaviour change:** a drain-mode spec without `drain_timeout_s` used to wait for its trials to end by themselves; it is now cut at `reload_max_defer_s` (default 600 s) and the trials still running are cancelled and lost. Set `reload_max_defer_s: null` (and no `drain_timeout_s`) to keep the old wait. Must be a number >= 0 or `null`. Keep it at or below `reload_max_defer_s`: while a drain waits the engine starts no new trial, and one trial running into an hour-long agent timeout otherwise idles the node for that hour. |
 | `agentic.abandon_grace_s` | After a drain's timeout cancels its trials, the longest wait (default 120 s) for a trial that does not honour the cancel, for example one blocked in a long sandbox tool call. It is then counted lost (`drain_timeout`), detached, the drain ends and the release loads; its late result is dropped and its recorder session is closed (no further model output); its sandbox is left to the trial's own teardown. A detached trial keeps its sandbox and its concurrency slot until it ends by itself (at most its agent timeout): until then that many fewer new trials start; `agentic.detached_in_flight` in `rl_sampler_engine_round` and `detached_in_flight` in `rl_agentic_drain` count them. A number >= 0 (`null` is refused). |
 | Release pickup in drain mode | The sampler downloads a new release in the background as soon as `LATEST` changes and keeps starting trials meanwhile; the drain starts once the release is on disk. The drain is for the release that is on disk, and it always ends in a load of that release: a newer release published during the drain is downloaded, drained for and loaded afterwards (releases published faster than a drain do not starve the sampler; it stays behind by at most the releases of one drain). The cut and the detach are timers, so writing groups does not delay them: the last trial ends at most min(`agentic.drain_timeout_s`, `reload_max_defer_s`) + `abandon_grace_s` (only if a trial ignores the cancel) after the drain began (`trials_ended_s` of `rl_agentic_drain`). The groups that ended are written before the drain ends and the release loads, so a sampler that dies in the load loses nothing it finished; `waited_s` is `trials_ended_s` plus the time to write what was still unwritten. From `LATEST` to loaded takes about download + `waited_s` + load. A call that waits (every slot busy or held by detached trials) writes `rl_agentic_waiting` every 60 s. A failed download is reported as `rl_sampler_release_not_loaded` (`download_failed`) and retried; a release of another weight scheme is not downloaded. |
 | `prompts.groups_per_round` | Groups a sampler produces per round. |
 | `reward`, `reward_kind` | Reward function import path and kind. |
 | `agentic.*` | Agentic trial settings: `max_in_flight`, `turn_max_tokens`, `max_response_len`, `infra_retries`, `task_defaults`, `setup` (sandbox, tunnel, tasks), `envs` ([SANDBOX_HOSTS.md](SANDBOX_HOSTS.md)). |
+| `agentic.compaction` | Optional, off by default: context compaction of long trials (section 3.6). |
 
 **GPU memory utilization.** To change it, add the flag to
 `engine.server.extra_args`, for example
@@ -674,6 +675,211 @@ GPUs or 64 GPUs with activation offload (measured on 4- and 16-layer cut
 models, extrapolated to 93 layers; full 1M training *not verified*). The
 launcher allows expandable segments on a full-parameter trainer island
 (#353). See also section 10.4.
+
+### 3.6 Context compaction
+
+An agent trial can grow past the engine context. With `agentic.compaction` in
+the sampler spec, the records proxy compacts the trial's context instead of
+letting it hit `max_model_len`. Without the section (or with `null`) nothing
+changes: the samplers, the buffer samples, the dry runs and the launch are as
+before.
+
+```json
+"agentic": {
+  "turn_max_tokens": 8192,
+  "max_response_len": 262144,
+  "compaction": {
+    "context_budget": 245760,
+    "t_comp": 10240,
+    "keep_recent_steps": 2,
+    "max_compactions": 3
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `context_budget` | required | The context size C in tokens. Must be greater than `t_comp` and at most the engine context length (`engine.server.max_model_len`). |
+| `t_comp` | 10240 | A compaction starts when fewer than `t_comp` tokens of `context_budget` remain before the next model call. Integer >= 1. It must hold the summary turn: its `max_tokens` (`summary_max_tokens`, by default the smaller of `agentic.turn_max_tokens` and 4096) plus the summary request (bounded by one token per byte of the summary prompt plus 64). |
+| `keep_recent_steps` | 2 | How many recent steps (one assistant turn plus its tool results) the next segment keeps word for word. Lowered automatically when the rebuilt context would compact again at once. `0` keeps only the summary. Integer >= 0. |
+| `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` turns compaction off in effect (the dry run says so). Integer >= 0. |
+
+Optional keys: `summary_max_tokens`, `summary_prompt` and `resume_template`
+(the summary turn's length cap, the summary request and the resume message;
+`resume_template` must contain `{summary}`). `pool --dry-run` lists the keys it
+accepts when it refuses an unknown one.
+
+**Checks before anything is ordered.** `pool --dry-run` and `yeto run up`
+preflight refuse:
+
+- an unknown key, a value that is not an integer, or a value out of range;
+- `context_budget > max_model_len` (the sampler checks again at start, against
+  the running engine's own context length);
+- a `t_comp` that cannot hold the summary turn (see the table);
+- `agentic.max_response_len < max_model_len`, and a trainer whose `--seq-len`
+  (or `--rollout-max-response-len`) is below `max_model_len`: a segment is up to
+  `max_model_len` tokens, not `context_budget`, and ends with its summary, so a
+  narrower row cuts exactly the summary and the whole trial is dropped. A
+  segment outgrows `context_budget` because the trigger is checked before a
+  model call: a step that stays below the trigger still adds its reply and then
+  a tool output of any length, and the summary turn follows. The example above
+  is for an engine at `max_model_len` 262144 (rows of 262144). The K3.1 example
+  trainer (`SEQ_LEN=16384`) is refused with compaction on; raise `--seq-len`,
+  `--rollout-max-response-len` and `agentic.max_response_len` to at least
+  `max_model_len`. With compaction on, the trainer's `--seq-len` is compared
+  with `max_model_len` rather than `max_prompt_len + max_response_len` (a row
+  never exceeds the engine context). A spec that gives no
+  `engine.server.max_model_len` is checked against `context_budget` instead,
+  with a warning that this is not enough;
+- an agent that compacts its own history (`agentic.task_defaults.agent` other
+  than `pi`). The proxy compacts on the history it records; an agent-side
+  compaction rewrites that history and breaks the token chain. yeto runs pi with
+  its own compaction off. A task row that names another agent stops the sampler
+  when its trial is built;
+- a trainer that is not Miles with a GRPO-family estimator (see Limits);
+- a trainer that would split a round by sample count instead of training each
+  trial as one rollout: without `--rl-max-tokens-per-gpu` (Miles dynamic batch
+  size; the K3.1 example trainer does not set it, add it with a value of at
+  least `--seq-len`), or with any of the Miles flags `--indep-dp`,
+  `--multi-lora`, `--multimodal-keys`, `--use-dynamic-global-batch-size`. Such a
+  trainer would stop at the first compacted group.
+
+Leave headroom between `context_budget` and `max_model_len` (the example uses
+262144 - 16384 for an engine at 262144): the step before a compaction can add a
+reply and a large tool output past the trigger point, and the summary turn then
+has to fit in what is left of the engine context. `context_budget - t_comp +
+turn_max_tokens + summary request + summary max_tokens > max_model_len` is
+refused, with the largest `context_budget` that fits.
+
+`agentic.max_prompt_len` bounds the first segment's prompt only. A later
+segment starts from the system prompt, the summary and the kept steps; its
+prompt is bounded by `context_budget` (the next compaction), not by
+`max_prompt_len`.
+
+**Behaviour.**
+
+- The compaction happens in the records proxy on the sampler, not in the agent.
+  The agent sees a shorter conversation and keeps working; it needs no change.
+- The policy writes the summary itself. When a compaction is due, the proxy asks
+  the same policy to summarise the trial so far (an `<analysis>` part and a
+  `<summary>` part). The summary tokens are trained like any other policy output,
+  also when the summary is malformed (`summary_ok: false`) or cut.
+- The next segment starts from the system prompt, a resume message carrying the
+  summary, and the last `keep_recent_steps` steps.
+- Each segment becomes one training sample. All segments of a trial go into the
+  same buffer group, with the same `group_index` and `index` and the trial's
+  reward. A group can therefore hold more samples than `sampling.n`. A training
+  step takes whole trials: the segments of one trial are never split across
+  steps.
+- GRPO normalizes per trial, not per sample: the trainer computes the group
+  baseline over the trials of a prompt, and every segment of a trial gets that
+  trial's advantage. Each segment keeps its own tokens, log-probs, top-k
+  log-probs, routing replay rows and policy version. The loss stays a token-level
+  mean, so a long (compacted) trial weighs more, as it does without compaction.
+
+**Weight switches and trial time.** A compacted trial runs several segments
+and can take several release intervals; each compaction adds a summary turn and
+an uncached prefill of the next segment (estimated 125-380 s each at 262k on
+MI355X, up to about 1000 s under long-context load; not measured). A drain-mode
+weight switch does not spare it: at min(`agentic.drain_timeout_s`,
+`reload_max_defer_s`) it is cancelled with all its segments (lost as
+`drain_timeout`), and a group whose oldest segment is older than
+`--rl-max-policy-age` is skipped as stale. Both drop exactly the long trials
+compaction is for, and the group baselines then come from the short trials.
+
+- **Prefer a live-update engine** (`agentic.weight_switch: live`, section 3.4):
+  no trial is cut, and each segment records its own policy version.
+- On drain, raise `agentic.drain_timeout_s` **and** `reload_max_defer_s`
+  together (the cut is the smaller one) to at least 2400 s (an estimate for a
+  262k budget and 3 compactions: the uncompacted p90 of about 980 s plus 3 x
+  380 s). Replace it with the p90 wall time of your compacted trials once you
+  have measured it.
+- Release less often: `--rl-release-every N` with N about the compacted trials'
+  p90 wall time / the step time (2400 s / 200 s: N = 12), or
+  `--rl-release-skip-busy`.
+- Raise `--rl-max-policy-age` to match: about N + 6 (the K3.1 upload alone lags
+  4-6 versions). The default 2 makes almost every compacted group stale.
+- Raise the trial wall clock: `agentic.task_defaults.wall_clock_s` (default
+  7200 s, the outer cap of a trial; past it the trial is aborted as
+  `wall_clock_cap` and not retried), and `agent_timeout_s` with it, to the p99
+  wall time of the compacted trials. This applies on live engines too.
+- With compaction on, pi waits 3600 s on one model call (`httpIdleTimeoutMs`
+  and the provider timeout; 1800 s without compaction): the call that triggers a
+  compaction carries the summary turn and the next segment's first turn and is
+  answered at its end.
+
+`yeto run up` preflight warns, with compaction on a drain-mode sampler, when the
+effective drain cut is below 2400 s, when `--rl-max-policy-age` is 2 or less,
+and when the trainer releases every version (no `--rl-release-every N` > 1, no
+`--rl-release-skip-busy`); and, on any sampler, when `wall_clock_s` is left at
+the default. `pool --dry-run` and the sampler's start also warn on compaction
+with a drain switch.
+
+**Buffer group size.** A group holds every segment of every trial of a prompt,
+each with its routing replay rows and top-128 log-probs. At 262k a K3.1 group
+of 8 trials is about 11 GB in the default payload encoding without compaction,
+and up to `1 + max_compactions` times that with it: over the 5 GiB that one
+object PUT to S3 / R2 / OSS can carry. `yeto run up` preflight estimates
+`sampling.n x (1 + max_compactions) x max_model_len` tokens (or the sample rows
+without compaction) and warns above 5 GiB. Set
+`YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd` on the samplers, or lower the rows /
+`context_budget` / `max_compactions`.
+
+The sample buffer uploads a group larger than `YETO_RL_STORE_MULTIPART_MB`
+(default 1024 MiB) in parts (64 MiB parts, 16 at
+once; about 100 MB/s per object on R2, so an 11 GB group takes about 2 minutes),
+so the 5 GiB PUT limit no longer applies; the create-if-absent of the index
+records is unchanged. Smaller groups are still one PUT.
+
+**Trainer read budget** (with or without compaction). By default the trainer reads every payload of a round
+at once and keeps its raw bytes until the round is decoded: 32 groups of 11 GB
+are about 350 GB of bytes on top of the decoded arrays, and the next round's
+read-ahead adds as much again. For a 262k run set
+`YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES=64GiB` on the trainer. The trainer then
+holds at most that many raw payload bytes at once (reads in flight, read and
+not decoded, read ahead), drops each payload's bytes at its decode, reads a
+payload larger than one store part by parallel ranges, and decodes v2 payloads
+in its read threads. 64 GiB is sized for the 2400 GiB B300 trainer head next to
+the ~1.9 TB optimizer offload (section 10.4): it leaves room for the decoded
+round and still reads five full 262k groups at once. The read the take waits
+for next is never held back by the read-ahead, so the reader can go at most
+one payload over the limit. Unset or `0` keeps the default reader, with no HEAD
+and no ranged reads. The budget bounds raw bytes only. The decoded round itself
+(about 270 GB of arrays for 32 groups at 262k, twice that once Miles widens R3)
+is sized by `--rollout-batch-size`.
+
+**Evaluation.** Use a sampler spec without `agentic.compaction` for a baseline
+evaluation: with compaction on, scores are not comparable to an uncompacted run.
+
+**Limits.**
+
+- Miles only. The trainer must use a GRPO-family estimator (`grpo` or `gspo`;
+  `--rl-loss score_centering` runs on `grpo`). `yeto run up` preflight refuses a
+  compacting sampler pool together with a `--rl-backend verl` trainer (a verl
+  sample is one token stream), a critic estimator, or another backend.
+- PPO CompactionRL (`gae_variant` `cross_segment_per_sample` or
+  `cross_segment_whole_rollout`, with a critic and cross-segment GAE; see
+  [RL_ALGORITHMS.md](RL_ALGORITHMS.md)) is unchanged. It is still refused on the
+  Harbor path, and it cannot be combined with `agentic.compaction`.
+
+**What to look at.**
+
+- `pool --dry-run` prints the effective values, for example
+  `agentic.compaction: on: context_budget 245760, t_comp 10240 (...), keep_recent_steps 2, max_compactions 3 (at most 4 segments per trial)`.
+  `yeto run up` preflight prints the same line as `preflight: agentic.compaction on: ...`,
+  and the sampler logs it at start.
+- The records proxy counts `compactions` (summaries written) and `context_full`
+  (model calls refused because the context was full) per trial, in the trial's
+  records (`counters`).
+- Every segment sample carries `metadata.compaction`: `trajectory_id`,
+  `segment_index`, `num_segments`, `context_budget`, `summary_ok` (false when the
+  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens` and
+  `tokens_after`. Without `agentic.compaction` no sample has this key.
+- A high share of `summary_ok: false`, or of trials whose last segment is
+  truncated after `max_compactions`, means the summaries are not doing their job:
+  raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high
+  `drain_timeout` loss or stale-group count on trials with several segments
+  means the weight-switch settings above are too tight.
 
 ## 4. Launch
 
@@ -2262,6 +2468,10 @@ at about 1.8x the offloaded-optimizer estimate. For the 128-expert layout,
 size from the measured per-stage figures in
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#7-measured-data-6-x-8-b300),
 and confirm headroom on the first step as described there.
+
+At 262k the trainer's sample buffer reads come on top of this. Set
+`YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES=64GiB` (see "Trainer read budget" in
+section 3.6).
 
 ## 11. Daytona sampler sandboxes
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}\Z")
@@ -63,6 +65,11 @@ class TrajectoryEnvelope:
     compaction_segment_index: int | None = None
     compaction_segment_type: str | None = None
     compaction_context_budget: int | None = None
+    # A segment of a trial split by context compaction (``metadata.compaction``,
+    # :func:`validate_compaction_group`): the trial's segment count. Set only on
+    # such segments, which then carry no ``compaction_segment_type`` (a segment
+    # holds both execution turns and its closing summary turn).
+    compaction_num_segments: int | None = None
     # (trajectory evidence schema 5) the behavior policy is an external
     # merged cut, named by its merged version and cut digest; the local
     # publication fields above are then None.
@@ -152,6 +159,9 @@ class TrajectoryEnvelope:
                 "trajectory active log probabilities lack active-token evidence"
             )
 
+        if self.compaction_num_segments is not None:
+            self._check_segmented_trial()
+            return
         compaction_fields = (
             self.compaction_trajectory_id,
             self.compaction_segment_index,
@@ -176,6 +186,219 @@ class TrajectoryEnvelope:
                 or self.compaction_context_budget < 1
             ):
                 raise ValueError("trajectory compaction context budget is invalid")
+
+    def _check_segmented_trial(self) -> None:
+        if self.compaction_segment_type is not None:
+            raise ValueError("a compaction segment of a trial has no segment type")
+        if (
+            type(self.compaction_num_segments) is not int
+            or self.compaction_num_segments < 1
+        ):
+            raise ValueError("trajectory compaction segment count is invalid")
+        if not isinstance(self.compaction_trajectory_id, str):
+            raise ValueError("trajectory compaction identity is incomplete")
+        _require_identifier("compaction_trajectory_id", self.compaction_trajectory_id)
+        _require_nonnegative_int(
+            "compaction_segment_index", self.compaction_segment_index  # type: ignore[arg-type]
+        )
+        if self.compaction_segment_index >= self.compaction_num_segments:  # type: ignore[operator]
+            raise ValueError("trajectory compaction segment index exceeds its count")
+        if (
+            type(self.compaction_context_budget) is not int
+            or self.compaction_context_budget < 1
+        ):
+            raise ValueError("trajectory compaction context budget is invalid")
+
+
+# ``metadata.compaction`` of one segment sample, written by the sampler (``agentic_round.agentic_samples``)
+COMPACTION_METADATA_KEY = "compaction"
+COMPACTION_METADATA_SCHEMA = 1
+_COMPACTION_INT_FIELDS = ("segment_index", "num_segments", "context_budget",
+                          "segment_tokens", "tokens_after")
+# optional (absent on older samples); None allowed where the contract writes null
+_COMPACTION_OPTIONAL_INT_FIELDS = ("summary_tokens", "retry_replays")
+_TRAINABLE_STATUSES = frozenset({"completed", "truncated"})
+
+
+@dataclass(frozen=True)
+class CompactionTrial:
+    """One trial of a buffer group: its sample ``index``, the positions of its
+    samples in the group (in segment order), and, when context compaction split
+    it, its ``trajectory_id`` (None: one uncompacted sample)."""
+
+    index: int
+    positions: tuple[int, ...]
+    trajectory_id: str | None = None
+
+    @property
+    def num_segments(self) -> int:
+        return len(self.positions)
+
+
+def _field(sample: Any, name: str) -> Any:
+    if isinstance(sample, Mapping):
+        return sample.get(name)
+    return getattr(sample, name, None)
+
+
+def _status_name(sample: Any) -> Any:
+    status = _field(sample, "status")
+    return getattr(status, "value", status)
+
+
+def compaction_metadata(sample: Any) -> Mapping[str, Any] | None:
+    """``metadata.compaction`` of a segment sample (a mapping or a Miles Sample);
+    None for a sample of an uncompacted trial."""
+    metadata = _field(sample, "metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    value = metadata.get(COMPACTION_METADATA_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("metadata.compaction is not an object")
+    return value
+
+
+def validate_compaction_group(samples: Sequence[Any]) -> tuple[CompactionTrial, ...]:
+    """Check one buffer group whose trials context compaction may have split
+    into segments, and return its trials in first-seen order.
+
+    Samples are buffer mappings or Miles Samples. All share one integer
+    ``group_index``; a trial is the samples with one integer ``index`` (they
+    need not be adjacent; ``CompactionTrial.positions`` lists them in segment
+    order). A trial without ``metadata.compaction`` is exactly one sample. A
+    compacted trial's samples all carry ``metadata.compaction`` with schema 1,
+    one non-empty ``trajectory_id`` (no sample of another index names it),
+    ``segment_index`` 0..n-1 (each once), ``num_segments`` n, one positive
+    ``context_budget``, non-negative ``segment_tokens`` / ``tokens_after``, a
+    boolean ``summary_ok`` (null allowed on the last segment), non-negative
+    ``kept_steps`` (null allowed on segment 0), optional non-negative
+    ``summary_tokens`` and ``retry_replays`` (one value, or null, per trial); they share one
+    finite ``reward``, and only the last segment may be ``truncated`` (the
+    earlier ones are ``completed``). A ``rollout_id`` (Miles' rollout key),
+    when a trial's samples carry one, is the same on all of them and differs
+    between trials. Raises ``ValueError`` otherwise.
+
+    Callers count trials (``len(result)``), not samples, against
+    ``n_samples_per_prompt``. This is not the legacy PPO check
+    (``yeto.rl.compaction.validate_compaction_segments``: flat
+    ``compaction_*`` keys, alternating execution/summary segments).
+    """
+    if not samples:
+        raise ValueError("compaction group is empty")
+    group_indexes = {_field(sample, "group_index") for sample in samples}
+    if len(group_indexes) != 1:
+        raise ValueError("compaction group mixes group identities")
+    _require_nonnegative_int("sample.group_index", next(iter(group_indexes)))
+    by_index: dict[int, list[int]] = {}
+    for position, sample in enumerate(samples):
+        index = _field(sample, "index")
+        _require_nonnegative_int("sample.index", index)
+        by_index.setdefault(index, []).append(position)
+    spans: dict[Any, set[int]] = {}
+    for sample in samples:
+        meta = compaction_metadata(sample)
+        if meta is not None and isinstance(meta.get("trajectory_id"), str):
+            spans.setdefault(meta["trajectory_id"], set()).add(_field(sample, "index"))
+    for trajectory_id, indexes in spans.items():
+        if len(indexes) > 1:
+            raise ValueError(
+                f"compaction trajectory {trajectory_id!r} spans sample indexes {sorted(indexes)} "
+                "(the segments of one trial share its index)")
+    trials: list[CompactionTrial] = []
+    seen_rollouts: dict[Any, int] = {}
+    for index, positions in by_index.items():
+        trajectory_id, ordered = _check_trial_segments(index, samples, positions)
+        # Miles keys a rollout by ``rollout_id`` (else ``index``): when set, one per trial
+        rollout_ids = {_field(samples[position], "rollout_id") for position in positions}
+        if rollout_ids != {None}:
+            if len(rollout_ids) != 1:
+                raise ValueError(f"trial {index}: its samples carry rollout ids {sorted(map(str, rollout_ids))}")
+            rollout_id = next(iter(rollout_ids))
+            if rollout_id in seen_rollouts:
+                raise ValueError(f"trial {index}: rollout id {rollout_id!r} is also trial "
+                                 f"{seen_rollouts[rollout_id]}")
+            seen_rollouts[rollout_id] = index
+        trials.append(CompactionTrial(index, ordered, trajectory_id))
+    return tuple(trials)
+
+
+def _check_trial_segments(
+    index: int, samples: Sequence[Any], positions: Sequence[int]
+) -> tuple[str | None, tuple[int, ...]]:
+    """(trajectory id or None, the trial's positions in segment order)."""
+    metas = [compaction_metadata(samples[position]) for position in positions]
+    if all(meta is None for meta in metas):
+        if len(positions) != 1:
+            raise ValueError(f"trial {index}: {len(positions)} samples share its index "
+                             "without compaction metadata")
+        return None, tuple(positions)
+    if any(meta is None for meta in metas):
+        raise ValueError(f"trial {index}: some segments lack compaction metadata")
+    where = f"trial {index}"
+    for meta in metas:
+        assert meta is not None
+        if meta.get("schema") != COMPACTION_METADATA_SCHEMA:
+            raise ValueError(f"{where}: compaction metadata has an unsupported schema")
+        for name in _COMPACTION_INT_FIELDS:
+            value = meta.get(name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{where}: compaction {name} must be a non-negative integer")
+        for name in ("kept_steps", *_COMPACTION_OPTIONAL_INT_FIELDS):
+            value = meta.get(name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{where}: compaction {name} must be a non-negative integer or null")
+        if meta.get("summary_ok") is not None and type(meta.get("summary_ok")) is not bool:
+            raise ValueError(f"{where}: compaction summary_ok must be a boolean or null")
+    order = sorted(range(len(positions)), key=lambda k: metas[k]["segment_index"])  # type: ignore[index]
+    segments = [samples[positions[k]] for k in order]
+    metas = [metas[k] for k in order]
+    first = metas[0]
+    assert first is not None
+    trajectory_id = first.get("trajectory_id")
+    if not isinstance(trajectory_id, str) or not trajectory_id:
+        raise ValueError(f"{where}: compaction metadata has no trajectory id")
+    rewards = []
+    for ordinal, (sample, meta) in enumerate(zip(segments, metas)):
+        assert meta is not None
+        if meta.get("trajectory_id") != trajectory_id:
+            raise ValueError(f"{where}: segments mix compaction trajectory ids")
+        if meta["segment_index"] != ordinal:
+            raise ValueError(f"{where}: compaction segment indexes are not 0..n-1")
+        last = ordinal == len(segments) - 1
+        summary_ok = meta.get("summary_ok")
+        if not (type(summary_ok) is bool or (last and summary_ok is None)):
+            raise ValueError(f"{where}: compaction summary_ok must be a boolean (None only on the last segment)")
+        kept = meta.get("kept_steps")
+        if not ((type(kept) is int and kept >= 0) or (ordinal == 0 and kept is None)):
+            raise ValueError(f"{where}: compaction kept_steps must be a non-negative integer "
+                             "(None only on segment 0)")
+        if meta["num_segments"] != len(segments):
+            raise ValueError(f"{where}: num_segments {meta['num_segments']} != "
+                             f"{len(segments)} segments in the group")
+        if meta["context_budget"] < 1 or meta["context_budget"] != first.get("context_budget"):
+            raise ValueError(f"{where}: compaction context budget is invalid or changed")
+        # kept_steps is null only on segment 0 (not rebuilt), summary_ok
+        # null only on the last (no summary at its end); retry_replays is the trial's, on each
+        if ordinal > 0 and meta.get("kept_steps") is None:
+            raise ValueError(f"{where}: segment {ordinal} has no kept_steps")
+        if ordinal < len(segments) - 1 and meta.get("summary_ok") is None:
+            raise ValueError(f"{where}: segment {ordinal} ends without a summary_ok")
+        if meta.get("retry_replays") != first.get("retry_replays"):
+            raise ValueError(f"{where}: segments do not share one retry_replays")
+        status = _status_name(sample)
+        allowed = _TRAINABLE_STATUSES if ordinal == len(segments) - 1 else {"completed"}
+        if status not in allowed:
+            raise ValueError(f"{where}: segment {ordinal} has status {status!r}")
+        reward = _field(sample, "reward")
+        if (isinstance(reward, bool) or not isinstance(reward, (int, float))
+                or not math.isfinite(float(reward))):
+            raise ValueError(f"{where}: segment {ordinal} has no finite reward")
+        rewards.append(float(reward))
+    if len(set(rewards)) != 1:
+        raise ValueError(f"{where}: segments do not share one reward")
+    return trajectory_id, tuple(positions[k] for k in order)
 
 
 @dataclass(frozen=True)

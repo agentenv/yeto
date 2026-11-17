@@ -54,6 +54,27 @@ PI_PROCESS_ENV: Mapping[str, str] = {"PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK":
 
 MAX_TOKENS_KWARG = "max_tokens"
 
+# Agents whose own context compaction yeto switches off, so the records proxy's
+# compaction (the sampler spec's ``agentic.compaction``) is the only one: pi
+# (``settings_json``: ``compaction.enabled`` false). Codex and Terminus manage
+# their own context, which rewrites the history the proxy records.
+PROXY_COMPACTION_AGENTS = frozenset({"pi"})
+# pi's HTTP idle timeout (and provider timeout) with the records proxy compacting: the
+# call that triggers a compaction carries the summary turn and the next segment's
+# first turn, answered at its end; at long-context ITL two full turns can exceed the
+# default 1800 s, and pi would retry the call (a fork of the token chain). An
+# estimate (2 x the worst such call), not measured.
+COMPACTION_HTTP_IDLE_TIMEOUT_S = 3600
+HTTP_IDLE_TIMEOUT_KWARG = "http_idle_timeout_s"
+
+
+def use_proxy_compaction_timeouts(agent_config: Any) -> None:
+    """A pi ``AgentConfig`` of a compacting round waits :data:`COMPACTION_HTTP_IDLE_TIMEOUT_S`
+    on a call (``settings.json`` ``httpIdleTimeoutMs`` and the provider timeout); a
+    timeout the task already gives wins. Other agents are not changed."""
+    if getattr(agent_config, "import_path", None) == PI_AGENT_IMPORT_PATH:
+        agent_config.kwargs.setdefault(HTTP_IDLE_TIMEOUT_KWARG, COMPACTION_HTTP_IDLE_TIMEOUT_S)
+
 
 def models_json(model: str, max_tokens: int, *, context_window: int = UNBOUNDED_CONTEXT_WINDOW) -> dict[str, Any]:
     """``models.json`` with the ``yeto`` provider; ``baseUrl`` is a shell expansion (module doc)."""

@@ -58,6 +58,7 @@ from typing import Any
 # engine sampler island writes the same payloads); re-exported here.
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     finite_rewards,
+    COMPACTION_KEY,
     PAYLOAD_SCHEMA,
     DamagedPayload,
     DamagedPayloadLimit,
@@ -71,7 +72,13 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     passed_over_text,
     payload_is_missing,
     payload_oldest_version,
+    check_trials,
+    compaction_meta,
+    has_siblings,
+    trial_count,
+    trial_rows,
 )
+from yeto.rl.engine import buffer_payload as _payload_format
 from yeto.rl.engine.merged_release import (
     LANE_ENV,
     BufferLane,
@@ -281,19 +288,41 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
     and trajectory ids need them unique. The buffer position is unique for the
     buffer's life and the same after a restore re-reads it, so ``group_index`` is
     the position and ``index`` is ``position * samples_per_group + j``. The
-    sampler's numbers stay in ``metadata["yeto_sampler_identity"]``."""
-    if len(samples) > int(samples_per_group):
-        raise SampleBufferRolloutError(
-            f"group at buffer position {position} has {len(samples)} samples > "
-            f"samples per group {samples_per_group}")
+    sampler's numbers stay in ``metadata["yeto_sampler_identity"]``.
+
+    A group with compaction segments (``buffer_payload.has_siblings``: a sample with
+    ``metadata.compaction``) is numbered by trial instead: ``j`` is the
+    trial's number in the group (:func:`~yeto.rl.engine.buffer_payload.check_trials`),
+    and every sample of the trial gets that ``index`` and the same ``rollout_id``. Miles
+    then keys one rollout per trial (``rollout_segments``: one advantage per trial; the
+    rollout-side DP schedule keeps a trial's samples in one step, and with a
+    ``rollout_id`` on the round its samples are not trimmed by count; the trajectory
+    evidence binds the segments of one ``index`` as one trial). Any other group (a Miles
+    sampler's ``rollout_id`` siblings included) is numbered exactly as before."""
+    if not has_siblings(samples):
+        trials = None
+        if len(samples) > int(samples_per_group):
+            raise SampleBufferRolloutError(
+                f"group at buffer position {position} has {len(samples)} samples > "
+                f"samples per group {samples_per_group}")
+    else:
+        rows = check_trials(samples)
+        if len(rows) > int(samples_per_group):
+            raise SampleBufferRolloutError(
+                f"group at buffer position {position} has {len(rows)} trials > "
+                f"samples per group {samples_per_group}")
+        trials = {row: t for t, trial in enumerate(rows) for row in trial}
     out = []
     for j, sample in enumerate(samples):
         sample = dict(sample)
         metadata = dict(sample.get("metadata") or {})
-        metadata["yeto_sampler_identity"] = {"group_index": sample.get("group_index"),
-                                             "index": sample.get("index")}
-        sample.update(metadata=metadata, group_index=int(position),
-                      index=int(position) * int(samples_per_group) + j)
+        identity = {"group_index": sample.get("group_index"), "index": sample.get("index")}
+        index = int(position) * int(samples_per_group) + (j if trials is None else trials[j])
+        if trials is not None:
+            identity["rollout_id"] = sample.get("rollout_id")
+            sample["rollout_id"] = index
+        metadata["yeto_sampler_identity"] = identity
+        sample.update(metadata=metadata, group_index=int(position), index=index)
         out.append(sample)
     return out
 
@@ -322,13 +351,44 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     return kept, problems
 
 
+def with_reader_edits(converted: Sequence[tuple[int, list[dict[str, Any]]]],
+                      groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]
+                      ) -> list[tuple[int, list[dict[str, Any]]]]:
+    """The converted groups (:func:`miles_groups`) of the positions still in ``groups``,
+    with the reader's later edits of those decoded groups carried over: the ``reward``
+    (the xhw guard's downweight) and the ``metadata`` (the downweight record, the merged
+    release cut stamp). The conversion keeps a sample's other fields and adds only
+    ``metadata["yeto_sampler_identity"]`` (kept), so the result is what converting the
+    edited groups would give, without copying their rollout arrays (R3) again."""
+    edited = {int(position): group for position, group in groups}
+    out = []
+    for position, group in converted:
+        source = edited.get(int(position))
+        if source is None:
+            continue  # pruned after the conversion: not trained
+        if len(source) != len(group):
+            raise SampleBufferRolloutError(f"buffer position {position}: {len(source)} decoded samples, "
+                                           f"{len(group)} converted")
+        samples = []
+        for d, e in zip(group, source):
+            d = dict(d)
+            if "reward" in e:
+                d["reward"] = e["reward"]
+            identity = (d.get("metadata") or {}).get("yeto_sampler_identity")
+            d["metadata"] = {**dict(e.get("metadata") or {}), "yeto_sampler_identity": identity}
+            samples.append(d)
+        out.append((position, samples))
+    return out
+
+
 PADDING_GROUP_BASE = 1 << 40  # group_index of padding samples: past any buffer position
 PADDING_KEY = "yeto_padding"
 
 
 def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
                     samples_per_group: int) -> list[dict[str, Any]]:
-    """``count`` samples that fill a round to Miles' global batch without training.
+    """``count`` samples that fill a round to Miles' global batch without training
+    (one per missing trial: each is a rollout of its own).
 
     Each is a copy of the round's shortest real sample with a response (the cheapest
     forward pass)
@@ -351,11 +411,110 @@ def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
         pad["loss_mask"] = [0] * int(pad.get("response_length") or 0)
         pad["remove_sample"] = True
         pad["rollout_id"] = None
-        pad["metadata"] = {**dict(pad.get("metadata") or {}), PADDING_KEY: True}
+        metadata = {**dict(pad.get("metadata") or {}), PADDING_KEY: True}
+        metadata.pop(COMPACTION_KEY, None)  # a padding sample is no segment of a trial
+        pad["metadata"] = metadata
         pad["group_index"] = PADDING_GROUP_BASE + k
         pad["index"] = (PADDING_GROUP_BASE + k) * int(samples_per_group)
         out.append(pad)
     return out
+
+
+def segmented_round_problems(args: Any) -> list[str]:
+    """Why Miles would not train a round that holds multi-sample trials (compaction
+    segments) one rollout per trial; [] when it does.
+
+    With a ``rollout_id`` on the round (:func:`renumber_group`) Miles keeps every sample
+    (no trim by count, ``rollout_data_conversion.postprocess_rollout_data``) and its
+    rollout-side DP schedule (``train_data_conversion.can_precompute_dp_schedule``,
+    ``dp_schedule.build_dp_schedule``) counts ``--global-batch-size`` in rollouts and puts
+    all samples of a rollout in one step. That schedule needs a Megatron trainer without
+    independent DP, multi-LoRA or multimodal inputs; otherwise the training side splits by
+    sample count and a trial's segments can land in different steps or be dropped.
+    ``--use-dynamic-global-batch-size`` is only computed for a round without rollout ids
+    (Miles asserts on one with them). Without ``--use-dynamic-batch-size`` the schedule
+    cuts a step into fixed micro batches and asserts unless the step's sample count (data
+    dependent here) is a multiple of DP x micro batch size."""
+    problems = []
+    if not getattr(args, "use_dynamic_batch_size", False):
+        problems.append("no --use-dynamic-batch-size (--rl-max-tokens-per-gpu)")
+    if getattr(args, "use_dynamic_global_batch_size", False):
+        problems.append("--use-dynamic-global-batch-size")
+    if getattr(args, "indep_dp", False):
+        problems.append("--indep-dp")
+    if getattr(args, "multi_lora", False):
+        problems.append("multi-LoRA")
+    if getattr(args, "multimodal_keys", None):
+        problems.append("--multimodal-keys")
+    backend = getattr(args, "train_backend", None)
+    if backend not in (None, "megatron"):
+        problems.append(f"--train-backend {backend}")
+    return problems
+
+
+def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]) -> None:
+    """Refuse a round (its converted ``groups``) with multi-sample trials that Miles would
+    not train one rollout per trial (:func:`segmented_round_problems`), or whose
+    compaction ``context_budget`` is more than this trainer's ``--seq-length`` (a segment
+    would not fit: its summary, at the end, would be cut). Then the sibling check of the
+    loss side (``yeto.rl.algos.segment_weights.sibling_problems``) over all
+    the round's samples. A round without such trials: nothing is checked."""
+    every = groups
+    groups = [(position, group) for position, group in every if has_siblings(group)]
+    if not groups:
+        return
+    positions = [position for position, _ in groups]
+    problems = segmented_round_problems(args)
+    if problems:
+        raise SampleBufferRolloutError(
+            f"groups at buffer positions {positions[:8]} hold compacted trials (several samples "
+            f"per trial); Miles trains them one rollout per trial only on its rollout-side DP schedule, "
+            f"which this trainer does not use ({', '.join(problems)})")
+    budgets = [int(meta["context_budget"]) for _, group in groups for d in group
+               if (meta := compaction_meta(d)) is not None and isinstance(meta.get("context_budget"), int)]
+    seq_length = getattr(args, "seq_length", None)
+    if budgets and (not isinstance(seq_length, int) or seq_length < max(budgets)):
+        raise SampleBufferRolloutError(
+            f"groups at buffer positions {positions[:8]} hold compaction segments of context budget "
+            f"{max(budgets)}; this trainer's --seq-length {seq_length} does not hold one (a segment "
+            "ends with its summary, which would be cut): raise --seq-len to the budget")
+    from yeto.rl.algos.segment_weights import sibling_problems  # noqa: PLC0415
+
+    problems = sibling_problems([d for _, group in every for d in group])
+    if problems:
+        raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
+
+
+def stale_segment_buckets(report: Any, pruned: Sequence[Sequence[dict[str, Any]]] = (), *,
+                          compacted: bool = False) -> dict[str, int]:
+    """The round's stale trials by segment count (``rl_buffer_stale_skipped.stale_by_segments``):
+    the take's (``TakeReport.stale_by_segments``) plus the groups of pruned merged
+    releases (counted in the round's stale groups too). {} unless compaction shows in the
+    round (a trained or a stale group held segments): the default record is unchanged."""
+    from yeto.rl.engine.timeline import segment_bucket  # noqa: PLC0415
+
+    counts = dict(getattr(report, "stale_by_segments", None) or {})
+    for group in pruned:
+        compacted = compacted or has_siblings(group)
+        for trial in trial_rows(group):
+            bucket = segment_bucket(len(trial))
+            counts[bucket] = counts.get(bucket, 0) + 1
+    if not (compacted or getattr(report, "stale_compacted", False)):
+        return {}
+    return {bucket: int(n) for bucket, n in sorted(counts.items()) if n}
+
+
+def compaction_batch_line(rollout_id: int, groups: Sequence[Sequence[dict[str, Any]]]) -> str:
+    """The trainer log line of a round with compacted trials: its trials (rollouts), its
+    samples, and how many trials have 1, 2, ... samples (every sample of a trial is in
+    this round, so Miles trains them in one step)."""
+    sizes = [len(trial) for group in groups for trial in trial_rows(group)]
+    per_trial: dict[int, int] = {}
+    for size in sorted(sizes):
+        per_trial[size] = per_trial.get(size, 0) + 1
+    histogram = ",".join(f"{k}:{v}" for k, v in per_trial.items())
+    return (f"[sample-buffer] compaction_batch: rollout={int(rollout_id)} trials={len(sizes)} "
+            f"segments={sum(sizes)} per_trial={{{histogram}}}")
 
 
 def is_padding(sample: Any) -> bool:
@@ -557,6 +716,12 @@ class TakeReport:
     # payload holds an older version, below the floor (the record and the payload
     # disagree; the tokens trained are the payload's, so the payload decides)
     stale_payload_groups: int = 0
+    # the trials of ``stale_groups`` by segment count (``timeline.segment_bucket``:
+    # "1", "2", "3", "4+"), and whether any of those groups held compaction segments.
+    # A group the age gate passed over unread (its index record was too old) is
+    # counted as ``group_size`` trials under "unknown" (its payload is never read)
+    stale_by_segments: dict[str, int] = field(default_factory=dict)
+    stale_compacted: bool = False
     # groups of a store-dispenser task that an earlier group of the buffer already
     # holds (the task was given out and written twice): consumed, never trained; one
     # record each in ``duplicate_tasks`` ({"slot", "position", "sample_id",
@@ -809,6 +974,210 @@ def _echo_event(event: str, **fields: Any) -> None:
 
 DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
+# Raw payload bytes the reader holds at once: reads in flight, read and not decoded
+# yet, read ahead (prefetch). A payload's bytes are dropped once it is decoded.
+# Unset or 0: no limit, the reader of before (every payload of a round read at once,
+# one GET each, no HEAD). RECOMMENDED_262K_INFLIGHT_BYTES is for a K3.1 262k run
+# (2400 GiB trainer head): the optimizer offload takes ~1.9 TB (KIMI_K31_ASYNC_RL_GUIDE
+# 10.4), which leaves ~550 GiB for the decoded round (262k without compaction: ~270
+# GiB of arrays per 32 groups, twice that once Miles widens R3 to int32) and one
+# group's decode (a v1 payload peaks at ~4.6x its bytes, ~50 GB at 11 GB). 64 GiB
+# still reads five full 262k groups (11 GB each) at once.
+MAX_INFLIGHT_BYTES_ENV = "YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES"
+DEFAULT_MAX_INFLIGHT_BYTES = 0
+RECOMMENDED_262K_INFLIGHT_BYTES = 64 << 30
+_BYTE_UNITS = {"": 1, "b": 1, "k": 1 << 10, "kib": 1 << 10, "m": 1 << 20, "mib": 1 << 20,
+               "g": 1 << 30, "gib": 1 << 30, "t": 1 << 40, "tib": 1 << 40}
+
+
+def inflight_bytes_limit(environ: Mapping[str, str] | None = None) -> int | None:
+    """:data:`MAX_INFLIGHT_BYTES_ENV`: bytes, or with a unit (``64GiB``, ``512MiB``;
+    K / M / G / T are binary too); unset or 0: no limit (None)."""
+    raw = (os.environ if environ is None else environ).get(MAX_INFLIGHT_BYTES_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_INFLIGHT_BYTES or None
+    number = raw.rstrip("bBiIkKmMgGtT ")
+    unit = raw[len(number):].strip().lower()
+    try:
+        value = int(float(number) * _BYTE_UNITS[unit])
+    except (KeyError, ValueError):
+        raise ValueError(f"{MAX_INFLIGHT_BYTES_ENV}={raw!r}: expected bytes, e.g. 68719476736 or 64GiB") from None
+    if value < 0:
+        raise ValueError(f"{MAX_INFLIGHT_BYTES_ENV}={raw!r}: expected >= 0")
+    return value or None
+
+
+class ReadTurn:
+    """What a take's read waits on besides room: ``urgent`` (the take waits for this
+    read now) and ``abandoned`` (its bytes are not wanted any more)."""
+
+    __slots__ = ("ticket", "urgent", "abandoned")
+
+    def __init__(self, ticket: int) -> None:
+        self.ticket = ticket
+        self.urgent = False
+        self.abandoned = False
+
+
+class ByteBudget:
+    """The raw payload bytes a :class:`BatchReader` holds (``limit`` None: no limit).
+
+    A take's read waits in a worker thread for its turn (tickets, handed out in the
+    order the take asks for its reads) and for room: ``used + size <= limit``, or
+    nothing held at all (a payload larger than the limit is read alone, never
+    refused). A read ahead never waits: it is made only when it fits now and no take
+    read is waiting (:meth:`try_acquire`); otherwise the prefetch stops and the take
+    reads the rest. A read on the caller's thread (no read pool, or one group topping
+    up a round) is counted without waiting (:meth:`force`).
+
+    No deadlock: the take decodes its round in buffer order, and the reads ahead it
+    uses hold their room until it decodes them; a take read that comes before them
+    in that order (a read ahead that failed, a group the read ahead passed over, a
+    deferred group judged again) would wait for room only the take's later decodes
+    free. So the read the take waits for now is :meth:`urge` d: it goes at once,
+    whatever its turn and the room (at most one payload over the limit, and only
+    while the take waits for it). An :meth:`abandon` ed read that has not started
+    takes no room and its worker returns at once."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = None if not limit else int(limit)
+        self.used = 0
+        self.peak = 0  # the most bytes held at once
+        self.waits = 0  # reads that waited for room
+        self._cond = threading.Condition()
+        self._issued = 0
+        self._turn = 0
+        self._granted: set[int] = set()  # tickets let through before their turn
+        self._warned = False
+        self.urged = 0  # reads let through by urge() without room or turn
+
+    def ticket(self) -> ReadTurn:
+        with self._cond:
+            self._issued += 1
+            return ReadTurn(self._issued - 1)
+
+    def urge(self, turn: "ReadTurn | None") -> None:
+        if turn is None:
+            return
+        with self._cond:
+            turn.urgent = True
+            self._cond.notify_all()
+
+    def abandon(self, turn: "ReadTurn | None") -> None:
+        if turn is None:
+            return
+        with self._cond:
+            turn.abandoned = True
+            self._cond.notify_all()
+
+    def _grant(self, ticket: int) -> None:
+        self._granted.add(ticket)
+        while self._turn in self._granted:
+            self._granted.discard(self._turn)
+            self._turn += 1
+
+    def _fits(self, size: int) -> bool:
+        return self.limit is None or self.used == 0 or self.used + size <= self.limit
+
+    def _take(self, size: int) -> None:
+        self.used += int(size)
+        self.peak = max(self.peak, self.used)
+        if self.limit is not None and size > self.limit and not self._warned:
+            self._warned = True
+            print(f"[sample-buffer] a payload of {size / (1 << 30):.1f} GiB is above the read budget "
+                  f"({MAX_INFLIGHT_BYTES_ENV}={self.limit / (1 << 30):.1f} GiB): it is read alone", flush=True)
+
+    def acquire(self, turn: ReadTurn, size: int) -> bool:
+        """Wait for ``turn``'s turn and room for ``size`` bytes, then count them; False
+        (nothing counted) when the read was abandoned meanwhile."""
+        with self._cond:
+            waited = False
+            while not (turn.urgent or turn.abandoned) and (turn.ticket != self._turn or not self._fits(size)):
+                waited = waited or turn.ticket == self._turn
+                self._cond.wait()
+            self.waits += int(waited)
+            in_turn = turn.ticket == self._turn and self._fits(size)
+            self._grant(turn.ticket)
+            self._cond.notify_all()
+            if turn.abandoned:
+                return False
+            self.urged += int(not in_turn)
+            self._take(size)
+            return True
+
+    def try_acquire(self, size: int) -> bool:
+        with self._cond:
+            if self._turn != self._issued or not self._fits(size):
+                return False
+            self._take(size)
+            return True
+
+    def force(self, size: int) -> None:
+        with self._cond:
+            self._take(size)
+            self._cond.notify_all()
+
+    def release(self, size: int) -> None:
+        if not size:
+            return
+        with self._cond:
+            self.used -= int(size)
+            self._cond.notify_all()
+
+
+class _Decoded:
+    """A payload a read thread decoded already (:func:`decodes_in_worker`)."""
+
+    __slots__ = ("group",)
+
+    def __init__(self, group: list[dict[str, Any]]) -> None:
+        self.group = group
+
+
+def decodes_in_worker(data: Any) -> bool:
+    """Whether a budgeted read decodes this payload in its read thread: format v2
+    (``buffer_payload``'s array blobs). Its zstd and numpy copies run outside the GIL,
+    so the read threads decode a round's v2 groups in parallel, and their peak is
+    ~1.4-2x the payload. A v1 payload (JSON + base64, GIL-bound, ~4.6x peak) is
+    decoded on the caller's thread, one at a time, as before."""
+    magic = _payload_format._V2_MAGIC
+    return bytes(data[:len(magic)]) == magic
+
+
+def group_nbytes(group: Sequence[Mapping[str, Any]]) -> int:
+    """About the memory of a decoded group: its arrays' bytes, 32 B per list item
+    (what a decoded group counts in the read budget)."""
+    total = 0
+    for sample in group:
+        for value in sample.values():
+            nbytes = getattr(value, "nbytes", None)
+            if nbytes is not None:
+                total += int(nbytes)
+            elif isinstance(value, (list, tuple)):
+                total += 32 * len(value)
+    return total
+
+
+class _Abandoned(Exception):
+    """A take's read abandoned before it read (``BatchReader._abandon``)."""
+
+
+def _takes_size(read_payload: Any) -> bool:
+    """Whether a buffer's ``read_payload`` takes ``size=`` (``FileSampleBuffer``)."""
+    import inspect
+
+    try:
+        return "size" in inspect.signature(read_payload).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _placeholder() -> Future:
+    """A done read without bytes: what ``chosen`` keeps once a payload is decoded."""
+    done: Future = Future()
+    done.set_result(None)
+    return done
+
 
 class BatchReader:
     """Selects the trainer's rounds from the buffer (single consumer).
@@ -858,7 +1227,8 @@ class BatchReader:
                  cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
                  read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True,
                  incarnation_gate: Any = "auto", group_size: int | None = None,
-                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True) -> None:
+                 max_damaged_run: int = DEFAULT_MAX_DAMAGED_RUN, one_group_per_task: bool = True,
+                 max_inflight_bytes: Any = "auto") -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round.
         ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
@@ -869,17 +1239,21 @@ class BatchReader:
         (``TakeReport.stale_incarnation_groups``). ``"auto"`` builds it over the
         buffer's store (:func:`~yeto.rl.engine.incarnation_lease.default_incarnation_gate`,
         ``YETO_BUFFER_INCARNATION_FENCE=0`` turns it off); None: no gate.
-        ``group_size``: the round must hold exactly ``groups * group_size`` samples
-        (Miles' global batch). A short group (a sampler lost trials) is trained with
-        its own samples (``TakeReport.incomplete_groups``); one with fewer than
-        ``MIN_GROUP_SAMPLES`` or more than ``group_size`` is consumed, not trained.
+        ``group_size``: the round must hold exactly ``groups * group_size`` trials
+        (Miles' global batch counts rollouts; a trial is one sample, or the samples of its
+        compaction segments, ``buffer_payload.trial_count``). A short group (a sampler
+        lost trials) is trained with its own trials (``TakeReport.incomplete_groups``);
+        one with fewer than ``MIN_GROUP_SAMPLES`` or more than ``group_size`` trials is
+        consumed, not trained.
         A round that falls short selects more whole groups while they fit; the first
         that does not is carried over to the next take (the round's end, hence the
         watermark, stays before it); what is still missing is reported as
         ``padded_samples`` (:func:`padding_samples` builds them). None: no check.
         ``max_damaged_run``: the damaged payloads at which a take raises (the class
         doc); 0: no limit. ``one_group_per_task``: a second group of a store-dispenser
-        task is passed over (:class:`TaskSlots`, ``TakeReport.duplicate_task_groups``)."""
+        task is passed over (:class:`TaskSlots`, ``TakeReport.duplicate_task_groups``).
+        ``max_inflight_bytes``: the raw payload bytes held at once (:class:`ByteBudget`;
+        ``"auto"``: :func:`inflight_bytes_limit` from the environment; None or 0: no limit)."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -897,6 +1271,11 @@ class BatchReader:
                       if int(read_workers) > 1 else None)
         self.prefetch = bool(prefetch) and callable(getattr(buffer, "peek", None))
         self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
+        self.budget = ByteBudget(inflight_bytes_limit() if max_inflight_bytes == "auto" else max_inflight_bytes)
+        self._open: set[Future] = set()  # budgeted reads whose bytes are still counted
+        self._open_lock = threading.Lock()
+        self._read_wait_s = 0.0  # seconds a take waited for single reads while decoding
+        self._sized_reads = _takes_size(getattr(buffer, "read_payload", None))
         self._prefetcher: threading.Thread | None = None
         self._stop_lock = threading.Lock()  # executor_set_mode vs reset/take
         # a convertible node's sampler stint (executor_set_mode): no read-ahead starts
@@ -1076,7 +1455,9 @@ class BatchReader:
         entry = self._entry_of.get(int(position))
         ref = getattr(entry, "payload_ref", None)
         try:
-            group = decode_group(read.result())
+            result = read.result()
+            group = result.group if isinstance(result, _Decoded) else decode_group(result)
+            del result
             self._damaged_run = 0
             self._decoded_payloads += 1
             return group
@@ -1086,6 +1467,8 @@ class BatchReader:
             if ref is None or not payload_is_missing(self.buffer, ref, error):
                 raise
             reason = "payload is missing"
+        finally:
+            self._release(read)  # decoded (or not a group): its bytes no longer count
         dispensed = _dispense_position(entry)
         self._damaged.append({"position": int(position), "sample_id": getattr(entry, "sample_id", None),
                               "payload_ref": ref, "reason": reason,
@@ -1128,17 +1511,159 @@ class BatchReader:
         if oldest is None or oldest >= self._floor:
             return False
         self._stale_payloads.append(_dispense_position(self._entry_of.get(int(position))))
+        self._note_stale(group)
         return True
 
+    def _note_stale(self, group: Sequence[Mapping[str, Any]] | None) -> None:
+        """Count a stale group's trials by segment count (``TakeReport.stale_by_segments``);
+        None: a group passed over unread (``group_size`` trials, "unknown")."""
+        from yeto.rl.engine.timeline import segment_bucket  # noqa: PLC0415
+
+        counts = getattr(self, "_stale_segments", None)
+        if counts is None:
+            counts = self._stale_segments = {}
+        if group is None:
+            counts["unknown"] = counts.get("unknown", 0) + int(self.group_size or 1)
+            return
+        if has_siblings(group):
+            self._stale_compacted = True
+        for trial in trial_rows(group):
+            bucket = segment_bucket(len(trial))
+            counts[bucket] = counts.get(bucket, 0) + 1
+
     def _read(self, ref: str, *, inline: bool = False) -> Future:
-        if self._pool is None or inline:
-            done: Future = Future()
+        if self.budget.limit is None:  # no budget: as before it
+            if self._pool is None or inline:
+                done: Future = Future()
+                try:
+                    done.set_result(self.buffer.read_payload(ref))
+                except BaseException as error:  # noqa: BLE001 - raised by result()
+                    done.set_exception(error)
+                return done
+            return self._pool.submit(self.buffer.read_payload, ref)
+        held = [0]  # the bytes this read counts in the budget
+        if self._pool is None or inline:  # the caller's thread: counted, never waits (ByteBudget)
+            done = self._opened(Future(), held)
             try:
-                done.set_result(self.buffer.read_payload(ref))
+                data = self.buffer.read_payload(ref)
+                self.budget.force(len(data))
+                held[0] = len(data)
+                done.set_result(data)
             except BaseException as error:  # noqa: BLE001 - raised by result()
                 done.set_exception(error)
             return done
-        return self._pool.submit(self.buffer.read_payload, ref)
+        turn = self.budget.ticket()
+        read = self._pool.submit(self._read_in_turn, ref, turn, held)
+        read.yeto_turn = turn  # type: ignore[attr-defined]
+        return self._opened(read, held)
+
+    def _opened(self, read: Future, held: list[int]) -> Future:
+        read.yeto_held = held  # type: ignore[attr-defined]
+        with self._open_lock:
+            self._open.add(read)
+        # a failed read holds no bytes: out of the open set at once
+        read.add_done_callback(lambda done: None if done.cancelled() or done.exception() is None
+                               else self._release(done))
+        return read
+
+    def _payload_size(self, ref: str) -> int | None:
+        """The payload's size without reading it (one HEAD on an object store), None
+        when the buffer cannot tell: the read is then counted once it arrived."""
+        size_of = getattr(self.buffer, "payload_size", None)
+        if not callable(size_of):
+            return None
+        size = size_of(ref)  # a store that does not answer: raised, like a read it does not answer
+        return None if size is None else int(size)
+
+    def _read_in_turn(self, ref: str, turn: ReadTurn, held: list[int]) -> Any:
+        """A take's read in a worker: its size, its turn and room in the budget, then the
+        bytes. Every ticket takes its turn (or the later ones never do), also one that
+        fails or is abandoned before it reads."""
+        if turn.abandoned:
+            self.budget.acquire(turn, 0)
+            raise _Abandoned(ref)
+        try:
+            size = self._payload_size(ref)
+        except BaseException:
+            self.budget.abandon(turn)
+            self.budget.acquire(turn, 0)
+            raise
+        if not self.budget.acquire(turn, size or 0):
+            raise _Abandoned(ref)
+        held[0] = size or 0
+        return self._read_counted(ref, held, size)
+
+    def _read_counted(self, ref: str, held: list[int], size: int | None = None) -> Any:
+        """Read ``ref`` with ``held[0]`` bytes counted for it; the count is set to the
+        bytes read (a size that was unknown, or changed), and to 0 when the read fails.
+        A known ``size`` goes to a buffer that takes it (a large payload is then read
+        by parallel ranges, ``FileSampleBuffer.read_payload``)."""
+        try:
+            data = self.buffer.read_payload(ref, size=size) if size is not None and self._sized_reads \
+                else self.buffer.read_payload(ref)
+        except BaseException:
+            self.budget.release(held[0])
+            held[0] = 0
+            raise
+        self._recount(held, len(data))
+        if not decodes_in_worker(data):
+            return data
+        try:  # a v2 payload: decoded here; its bytes go, its arrays count instead
+            group = decode_group(data)
+        except BaseException:  # DamagedPayload included: _group_at records it like a caller decode
+            self._recount(held, 0)
+            raise
+        del data
+        self._recount(held, group_nbytes(group))
+        return _Decoded(group)
+
+    def _recount(self, held: list[int], size: int) -> None:
+        """Count ``size`` bytes for a read that counted ``held[0]``."""
+        if size > held[0]:
+            self.budget.force(size - held[0])
+        else:
+            self.budget.release(held[0] - size)
+        held[0] = int(size)
+
+    def _read_ahead(self, ref: str) -> Future | None:
+        """A read ahead of the next take; None when it does not fit the budget now
+        (the prefetch stops there, the take reads the rest)."""
+        if self.budget.limit is None:
+            return self._read(ref)
+        size = self._payload_size(ref)
+        if not self.budget.try_acquire(size or 0):
+            return None
+        held = [size or 0]
+        if self._pool is None:
+            done = self._opened(Future(), held)
+            try:
+                done.set_result(self._read_counted(ref, held, size))
+            except BaseException as error:  # noqa: BLE001 - raised by result()
+                done.set_exception(error)
+            return done
+        return self._opened(self._pool.submit(self._read_counted, ref, held, size), held)
+
+    def _release(self, read: Future) -> None:
+        """The read's bytes no longer count (decoded, passed over or abandoned)."""
+        held = getattr(read, "yeto_held", None)
+        with self._open_lock:
+            self._open.discard(read)
+            size = held[0] if held else 0
+            if held:
+                held[0] = 0
+        self.budget.release(size)
+
+    def _abandon(self, reads: Any) -> None:
+        """Reads whose bytes are not wanted: one not started yet takes no room (its
+        worker returns at once), the others are released once they end."""
+        for read in list(reads):
+            self.budget.abandon(getattr(read, "yeto_turn", None))
+            read.add_done_callback(self._release)
+
+    def _abandon_open(self) -> None:
+        with self._open_lock:
+            reads = list(self._open)
+        self._abandon(reads)
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -1152,11 +1677,13 @@ class BatchReader:
             raise ValueError("groups must be positive")
         carried_in, deferred_in = self._carry, list(self._deferred)
         self._taken, self._entry_of, self._damaged, self._stale_payloads = [], {}, [], []
+        self._stale_segments, self._stale_compacted = {}, False
         self._damaged_run = self._decoded_payloads = 0
         self._duplicates = []
         try:
             return self._take(int(rollout_id), int(groups), current_version)
         except BaseException:
+            self._abandon_open()  # its reads: selected again by the next take, read again then
             self._retry = self._taken + self._retry
             self._carry = carried_in
             # the groups deferred by an earlier take wait again (those this take
@@ -1202,6 +1729,7 @@ class BatchReader:
             start = min(start, position)
             if floor is not None and version < floor:  # aged out while it waited: stale
                 stale += 1
+                self._note_stale(group)
                 if dispensed is not None:
                     stale_positions.append(dispensed)
             else:
@@ -1255,6 +1783,7 @@ class BatchReader:
                     continue
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
+                    self._note_stale(None)
                     position = _dispense_position(item.entry)
                     if position is not None:
                         stale_positions.append(position)
@@ -1293,15 +1822,24 @@ class BatchReader:
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
                 accounted[int(item.position)] = (item.entry.behavior_version, int(item.entry.tokens or 0))
             selected = selection[0]
+            if ahead and self.budget.limit is not None:
+                # read ahead for the groups this pass did not take (aged out, fenced, the
+                # carried group's place): their bytes would hold the budget the take's own
+                # reads wait for; a later pass that selects one reads it again
+                self._abandon(ahead.values())
+                ahead.clear()
             self._note_selection(rollout_id, len(selected), len(chosen) - kept_before,
                                  self.unidentified_total - unidentified_before)
             if selected or len(chosen) > kept_before:  # decode now (a deferred group judged again
                 # included): a group that is dropped is replaced by the next selection
-                read_s += self._settle([read for _, read, _ in chosen])
-                begun = self.clock()
+                if self.budget.limit is None:  # with a budget each read is waited for at its decode
+                    read_s += self._settle([read for _, read, _ in chosen])
+                begun, waited = self.clock(), self._read_wait_s
                 dropped_small += self._drop_incomplete(chosen, decoded, accounted, versions, source_groups,
                                                        source_tokens, position_sources)
-                decode_s += self.clock() - begun
+                waited = self._read_wait_s - waited
+                read_s += waited
+                decode_s += self.clock() - begun - waited
             if selected:
                 progress = self.clock()  # the samplers are writing: the wait starts again
             if len(chosen) >= groups or selected:
@@ -1343,7 +1881,7 @@ class BatchReader:
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
             self._nonfinite_lp += skipped["nonfinite_logprob"]
-            incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
+            incomplete = sum(1 for position, _, _ in chosen if trial_count(decoded[position]) < self.group_size)
             deferred_now += skipped.get("deferred", 0)
         if self._deferred:  # the watermark never passes a group the gate could not judge yet
             self._deferred.sort(key=lambda pending: pending[0])
@@ -1402,6 +1940,8 @@ class BatchReader:
                                nonfinite_logprob_groups=nonfinite_lp,
                                damaged_payload_groups=len(damaged), damaged_payloads=damaged,
                                stale_payload_groups=len(self._stale_payloads),
+                               stale_by_segments=dict(sorted(getattr(self, "_stale_segments", {}).items())),
+                               stale_compacted=bool(getattr(self, "_stale_compacted", False)),
                                duplicate_task_groups=len(duplicates),
                                duplicate_task_unverified_groups=sum(
                                    1 for d in duplicates if not d["first_trained_here"]),
@@ -1429,7 +1969,7 @@ class BatchReader:
               accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
               position_sources: dict, skipped: dict | None = None,
               lease_reads: dict[str, float] | None = None) -> tuple[int, int, int, int]:
-        """Top the chosen groups up to ``target`` samples with whole groups selected
+        """Top the chosen groups up to ``target`` trials with whole groups selected
         one by one, without waiting (what is not in the buffer yet is padded). The
         first group that would overflow is carried over (``self._carry``) and the
         round ends at its position, so the watermark never passes it untrained.
@@ -1440,7 +1980,7 @@ class BatchReader:
         lease is read again unless the round's recheck read it just now (``lease_reads``)."""
         skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
                                                        "quarantined": 0}
-        missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
+        missing = target - sum(trial_count(decoded[position]) for position, _, _ in chosen)
         dropped = 0
         while missing > 0 and not self._deferred:  # nothing joins behind a deferred group
             selected = self._select(1)
@@ -1450,6 +1990,7 @@ class BatchReader:
             end = self._cursor()
             if floor is not None and item.entry.behavior_version < floor:
                 skipped["stale"] += 1  # too old: consumed unread, as in the main selection
+                self._note_stale(None)
                 dispensed = _dispense_position(item.entry)
                 if dispensed is not None:
                     skipped["stale_positions"].append(dispensed)
@@ -1481,7 +2022,8 @@ class BatchReader:
                 continue
             if self._stale_payload(item.position, group):
                 continue
-            if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
+            trials = trial_count(group)
+            if not MIN_GROUP_SAMPLES <= trials <= int(self.group_size):
                 self._note_source(source, "group_size")
                 dropped += 1
                 continue
@@ -1498,7 +2040,7 @@ class BatchReader:
             oldest = payload_oldest_version(group)
             if oldest is not None:  # what the next take's age gate compares if this group is carried over
                 version = min(int(version), oldest)
-            if len(group) > missing:
+            if trials > missing:
                 # it holds its task when the next take chooses it
                 self._carry = (position, group, version, tokens, source, _dispense_position(item.entry),
                                task_key(item.entry))
@@ -1506,14 +2048,14 @@ class BatchReader:
             self._choose(position, group, version, tokens, source, chosen, decoded, accounted, versions,
                          source_groups, source_tokens, position_sources)
             self._accept(item.entry, position)
-            missing -= len(group)
+            missing -= trials
         return end, 0, max(0, missing), dropped
 
     def _drop_incomplete(self, chosen: list, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
                          source_tokens: dict, position_sources: dict) -> int:
         """Decode the chosen groups not yet decoded; drop (in place) those with a
         damaged payload (:meth:`_group_at`, counted apart) and, with a ``group_size``,
-        those whose sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a
+        those whose trial count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a
         non-finite reward (:func:`finite_rewards`, counted apart), then those whose
         store-dispenser task an earlier group holds (:meth:`_duplicate`), and undo their
         accounting. Returns the number dropped for their size. Their positions stay
@@ -1521,17 +2063,20 @@ class BatchReader:
         fresh = [(position, read) for position, read, _ in chosen if position not in decoded]
         if not fresh:
             return 0
-        self._settle([read for _, read in fresh])
+        if self.budget.limit is None:
+            self._settle([read for _, read in fresh])
+        else:  # ``chosen`` keeps a placeholder: a payload's bytes go once it is decoded
+            ready = {position for position, _ in fresh}
+            chosen[:] = [(p, _placeholder() if p in ready else r, early) for p, r, early in chosen]
         drop: set[int] = set()
         nonfinite = nonfinite_lp = damaged = duplicate = 0
-        for position, read in fresh:
-            group = self._group_at(position, read)
+        for position, group in self._decoded_in_order(fresh):
             if group is not None and self._stale_payload(position, group):
                 group, aged = None, True
             else:
                 aged = False
             sized = group is not None and (
-                self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
+                self.group_size is None or MIN_GROUP_SAMPLES <= trial_count(group) <= int(self.group_size))
             bad_lp = sized and nonfinite_logprob(group) is not None
             good = sized and not bad_lp and (self.group_size is None or finite_rewards(group))
             if not aged:  # a group older than the floor says nothing about its source's data
@@ -1565,6 +2110,27 @@ class BatchReader:
         self._nonfinite += nonfinite
         self._nonfinite_lp += nonfinite_lp
         return len(drop) - nonfinite - nonfinite_lp - damaged - duplicate
+
+    def _decoded_in_order(self, fresh: list[tuple[int, Future]]) -> Any:
+        """``(position, decoded group or None)`` of ``fresh`` reads, in their order,
+        each read waited for at its turn (with a budget the reads wait for room in
+        this order, ByteBudget) and dropped from ``fresh`` before its group is
+        yielded, so its bytes go with its decode. Reads left when the caller stops
+        (a decode that raised) are abandoned: their bytes are released."""
+        fresh.reverse()
+        try:
+            while fresh:
+                position, read = fresh.pop()
+                if not read.done():
+                    # the take waits for this read: it goes now, even past the reads ahead
+                    # holding the room until their later decodes (ByteBudget)
+                    self.budget.urge(getattr(read, "yeto_turn", None))
+                    self._read_wait_s += self._settle([read])
+                group = self._group_at(position, read)
+                del read
+                yield position, group
+        finally:
+            self._abandon(read for _, read in fresh)
 
     def _recheck(self, chosen: list, accounts: tuple, lease_reads: dict[str, float]) -> tuple[int, int]:
         """Judge the ``chosen`` groups again, each shard's lease read again (at most
@@ -1716,7 +2282,10 @@ class BatchReader:
                 for item in wanted:
                     ref = item.entry.payload_ref
                     if ref not in self._reads:
-                        self._reads[ref] = self._read(ref)
+                        read = self._read_ahead(ref)
+                        if read is None:  # the budget is full: the next take reads the rest
+                            return
+                        self._reads[ref] = read
                 if len(wanted) >= groups or self.buffer.data_ended:
                     return
                 self._stop_prefetch.wait(self.poll_s)
@@ -1747,6 +2316,7 @@ class BatchReader:
         # the read-ahead of the last take: its reads end before the restore's refresh
         # (a Volume reload), and it reads ahead of a position that is abandoned now
         self._stop_prefetching()
+        self._abandon(self._reads.values())
         self._reads.clear()
         self.buffer.reset_to(int(watermark))
         self._ends.clear()
@@ -2018,6 +2588,11 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
                 raise SampleBufferRolloutError(
                     "xhw_guard downweight scales the centered rewards; GRPO std normalization "
                     "cancels it (use action=quarantine, or turn std normalization off)")
+            if any(isinstance(d.get("reward"), bool) or not isinstance(d.get("reward"), (int, float))
+                   for d in group):
+                raise SampleBufferRolloutError(
+                    f"xhw_guard downweight of buffer position {position}: a reward is not a scalar "
+                    "(a reward dict cannot be scaled; use action=quarantine)")
             group = downweight_group(group, float(action.get("weight", 1.0)))
             downweighted += 1
         by_source.setdefault(source or "unknown", []).extend(group)
@@ -2030,17 +2605,46 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
     return out, meta
 
 
-def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None) -> None:
+def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None,
+                         args: Any = None) -> None:
     """At the reader's start: ``YETO_RL_XHW_GUARD`` with ``action=downweight`` under GRPO
     std normalization (Miles' default) is refused here, not at the first round the guard
-    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run)."""
+    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run).
+
+    The downweight rewrites a group's rewards as ``c + w (r - c)``; Miles' per-rollout
+    centering cancels ``c``, so every advantage of the group is exactly ``w`` times its
+    own. That holds only for scalar rewards centered as they are: with the Miles ``args``
+    also refused are a length penalty (``--length-penalty-coeff``: added after the
+    scaling, and its correctness test ``reward == 1`` no longer holds), a reward dict
+    (``--reward-key``), and a yeto reward shaper or an advantage transform other than
+    ``grpo_default`` (``advantage.reward_shapers`` / ``advantage.transform``)."""
     from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
 
     guard = XhwGuard.from_env(os.environ if environ is None else environ)
-    if guard is not None and guard.action == "downweight" and std_normalized:
+    if guard is None or guard.action != "downweight":
+        return
+    if std_normalized:
         raise SampleBufferRolloutError(
             "YETO_RL_XHW_GUARD action=downweight scales the centered rewards; GRPO std "
             "normalization (on) cancels it: use action=quarantine, or turn std normalization off")
+    if args is None:
+        return
+    from yeto.rl.algos.reward_pipeline import DEFAULT_TRANSFORM, read_plugins  # noqa: PLC0415
+
+    problems = []
+    if float(getattr(args, "length_penalty_coeff", 0.0) or 0.0) > 0:
+        problems.append("--length-penalty-coeff > 0")
+    if getattr(args, "reward_key", None):
+        problems.append("--reward-key (a reward dict)")
+    pipeline = dict((read_plugins(args, required=False) or {}).get("reward_pipeline") or {})
+    if pipeline.get("reward_shapers"):
+        problems.append(f"reward shapers {[dict(s).get('name') for s in pipeline['reward_shapers']]}")
+    if pipeline.get("advantage_transform") not in (None, DEFAULT_TRANSFORM):
+        problems.append(f"advantage transform {pipeline['advantage_transform']!r}")
+    if problems:
+        raise SampleBufferRolloutError(
+            "YETO_RL_XHW_GUARD action=downweight scales a group's advantages exactly only for "
+            f"scalar GRPO-centered rewards; this trainer has {', '.join(problems)}: use action=quarantine")
 
 
 def executor_set_xhw_actions(_executor: Any, actions: Mapping[str, Mapping[str, Any]]) -> dict | None:

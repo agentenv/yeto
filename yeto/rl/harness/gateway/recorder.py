@@ -22,10 +22,14 @@ session whose trainer sampling parameters differ from them is refused
 (:class:`~yeto.rl.agentic.HarnessConfigError`) instead of sampling with other
 settings than the trainer assumes.
 
-CompactionRL is refused here: a records backend built with a
-``compaction`` config writes one training sample per compaction segment, but
-a verl agent-loop sample is one token stream, so every compacted trajectory
-would be ABORTED by the join.  The recorder fails at construction instead.
+CompactionRL: a records backend built with a ``compaction`` config writes one
+training sample per compaction segment.  A verl agent-loop sample is one token
+stream, so every compacted trajectory would be ABORTED by the join: the
+recorder refuses such a proxy at construction (the default, and what
+:func:`recorder_from_env`, the verl and Miles factory, builds).  The engine
+sampler's agentic round writes one buffer sample per segment: it builds the
+recorder with ``allow_compaction=True`` and reads the calls per segment
+(:meth:`ProxyTokenRecorder.close_segments`).
 
 Miles does not use this recorder: its Harbor path records through Miles'
 own session server (GOAL §9).
@@ -45,6 +49,7 @@ Environment of :func:`recorder_from_env`:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 import os
 from pathlib import Path
@@ -52,10 +57,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from yeto.rl.agentic import HarnessConfigError, SessionAlreadyOpen, TokenAlignmentError, TokenTurn
+from yeto.rl.agentic.finish import CompactionSegment
 
 from .proxy import RecordsProxy
 from . import records_env
-from .records import sampling_params
+from .records import KIND_SUMMARY, sampling_params
 
 # The names themselves live in ``records_env`` (dependency-free, so the launch
 # layer can read them); this module keeps its own spellings as aliases.
@@ -71,39 +77,86 @@ MIN_SECRET_CHARS = 24
 CHECKED_SAMPLING = ("temperature", "top_p", "top_k", "repetition_penalty")
 
 
+def _sample_turns(sample: Mapping[str, Any]) -> list[TokenTurn]:
+    """The model calls of one records sample (one segment of one session) in call order.
+
+    Each recorded turn's prompt is the segment stream before its completion,
+    so :func:`~yeto.rl.agentic.join_turns` sees what the engine saw."""
+    turns: list[TokenTurn] = []
+    ids, mask = list(sample["token_ids"]), list(sample["loss_mask"])
+    cursor, pending_stop = 0, 0
+    for turn in sample["turns"]:
+        cursor += pending_stop + len(turn["prompt_added"])
+        completion = tuple(int(t) for t in turn["completion"])
+        end = cursor + len(completion)
+        if tuple(ids[cursor:end]) != completion or any(m != 1 for m in mask[cursor:end]):
+            raise TokenAlignmentError(f"records turn {turn['turn']} does not sit in its segment stream")
+        turns.append(TokenTurn(prompt_ids=tuple(ids[:cursor]), completion_ids=completion,
+                               completion_logprobs=tuple(float(x) for x in turn["logprobs"]),
+                               policy_version=turn.get("policy_version"),
+                               provenance=turn.get("provenance"),
+                               finish_reason=turn.get("finish_reason"),
+                               policy_error=turn.get("parse_error"),
+                               completion_top_ids=turn.get("top_ids"),
+                               completion_top_logprobs=turn.get("top_logprobs"),
+                               routed_experts=turn.get("routed_experts"),
+                               routed_experts_cut=bool(turn.get("routed_experts_cut", False))))
+        cursor, pending_stop = end, len(turn.get("stop_added") or ())
+    if cursor + pending_stop != len(ids):
+        raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
+                                  "tokens no turn accounts for")
+    return turns
+
+
+def segments_from_records(records: Mapping[str, Any], *,
+                          context_budget: int | None = None) -> list[CompactionSegment]:
+    """The proxy records of one trajectory as model calls per compaction segment.
+
+    A compaction segment (records ``segment`` > 0) starts a new token stream
+    (``system + u_resume(S) + last k steps``), so its calls form a group of
+    their own, joined into a sample of their own.  A later session's first
+    segment is no compaction: its calls follow the current group, as in
+    :func:`turns_from_records` (the join rebases or refuses them).  Without
+    compaction there is one group, the calls of :func:`turns_from_records`.
+
+    ``kept_steps``: whole steps the segment kept from the one before (None on
+    the first); ``summary_ok``: the summary the segment ended with had a closed
+    ``<summary>`` tag (None: it ended without one); ``summary_tokens``: the
+    tokens its summary turn generated (0 without one); ``retry_replays``: the
+    gateway's count for the whole trajectory (None: replay is off), on every
+    segment."""
+    groups: list[CompactionSegment] = []
+    replays = (records.get("gateway") or {}).get("retry_replays")
+    replays = None if replays is None else int(replays)
+    for session in records.get("sessions") or ():
+        for sample in session["samples"]:
+            turns = _sample_turns(sample)
+            if not turns:  # a segment opened but never sampled (its prompt did not fit): no sample
+                continue
+            summary = sum(len(t["completion"]) for t in sample["turns"] if t.get("kind") == KIND_SUMMARY)
+            if groups and int(sample["segment"]) == 0:
+                last = groups[-1]
+                groups[-1] = dataclasses.replace(last, turns=(*last.turns, *turns),
+                                                 summary_ok=sample.get("summary_ok"),
+                                                 summary_tokens=last.summary_tokens + summary)
+                continue
+            groups.append(CompactionSegment(turns=tuple(turns), kept_steps=sample.get("kept_steps"),
+                                            summary_ok=sample.get("summary_ok"),
+                                            context_budget=context_budget, summary_tokens=summary,
+                                            retry_replays=replays))
+    return groups
+
+
 def turns_from_records(records: Mapping[str, Any]) -> list[TokenTurn]:
     """The proxy records of one trajectory as model calls in call order.
 
-    Each recorded turn's prompt is the segment stream before its completion,
-    so :func:`~yeto.rl.agentic.join_turns` sees what the engine saw.  Calls of
-    later sessions or compaction segments follow the first ones; they do not
-    extend its stream, so the join refuses them (one verl sample is one stream).
-    """
+    Calls of later sessions or compaction segments follow the first ones; they
+    do not extend its stream, so the join refuses them (one verl sample is one
+    stream).  :func:`segments_from_records` keeps the segments apart."""
     turns: list[TokenTurn] = []
     for session in records.get("sessions") or ():
         for sample in session["samples"]:
-            ids, mask = list(sample["token_ids"]), list(sample["loss_mask"])
-            cursor, pending_stop = 0, 0
-            for turn in sample["turns"]:
-                cursor += pending_stop + len(turn["prompt_added"])
-                completion = tuple(int(t) for t in turn["completion"])
-                end = cursor + len(completion)
-                if tuple(ids[cursor:end]) != completion or any(m != 1 for m in mask[cursor:end]):
-                    raise TokenAlignmentError(f"records turn {turn['turn']} does not sit in its segment stream")
-                turns.append(TokenTurn(prompt_ids=tuple(ids[:cursor]), completion_ids=completion,
-                                       completion_logprobs=tuple(float(x) for x in turn["logprobs"]),
-                                       policy_version=turn.get("policy_version"),
-                                       provenance=turn.get("provenance"),
-                                       finish_reason=turn.get("finish_reason"),
-                                       policy_error=turn.get("parse_error"),
-                                       completion_top_ids=turn.get("top_ids"),
-                                       completion_top_logprobs=turn.get("top_logprobs"),
-                                       routed_experts=turn.get("routed_experts"),
-                                       routed_experts_cut=bool(turn.get("routed_experts_cut", False))))
-                cursor, pending_stop = end, len(turn.get("stop_added") or ())
-            if cursor + pending_stop != len(ids):
-                raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
-                                          "tokens no turn accounts for")
+            turns.extend(_sample_turns(sample))
     return turns
 
 
@@ -112,13 +165,18 @@ class ProxyTokenRecorder:
 
     def __init__(self, proxy: RecordsProxy, *, host: str = "127.0.0.1", port: int = 0,
                  public_host: str | None = None, public_base: str | None = None,
-                 path_secret: str | None = None) -> None:
+                 path_secret: str | None = None, allow_compaction: bool = False) -> None:
+        """``allow_compaction``: accept a compacting proxy; only a caller that
+        reads :meth:`close_segments` and writes one sample per segment may set it
+        (the engine sampler's agentic round; module doc)."""
         if path_secret is not None and len(path_secret) < MIN_SECRET_CHARS:
             raise HarnessConfigError(f"the path secret must have at least {MIN_SECRET_CHARS} characters")
-        if getattr(getattr(proxy, "backend", None), "compaction", None) is not None:
+        compaction = getattr(getattr(proxy, "backend", None), "compaction", None)
+        if compaction is not None and not allow_compaction:
             raise HarnessConfigError(
                 "the records proxy compacts contexts (CompactionRL segments), but a verl sample is one "
                 "token stream; CompactionRL is not supported on the Harbor path")
+        self.compaction = compaction
         self.proxy = proxy
         self.host = host
         self.port = int(port)
@@ -169,7 +227,7 @@ class ProxyTokenRecorder:
         self._open.add(trajectory_id)
         return f"{base}{self.proxy.path(trajectory_id)}/v1"
 
-    async def close(self, trajectory_id: str) -> Sequence[TokenTurn]:
+    def _close_records(self, trajectory_id: str) -> Mapping[str, Any]:
         if trajectory_id not in self._open:
             raise HarnessConfigError(f"recorder session {trajectory_id!r} is not open")
         self._open.discard(trajectory_id)
@@ -181,7 +239,15 @@ class ProxyTokenRecorder:
         invalid = (records.get("gateway") or {}).get("invalidated")
         if invalid:
             raise TokenAlignmentError(f"records proxy invalidated the trajectory: {invalid}")
-        return turns_from_records(records)
+        return records
+
+    async def close(self, trajectory_id: str) -> Sequence[TokenTurn]:
+        return turns_from_records(self._close_records(trajectory_id))
+
+    async def close_segments(self, trajectory_id: str) -> Sequence[CompactionSegment]:
+        """:meth:`close`, the calls grouped per compaction segment (:func:`segments_from_records`)."""
+        budget = None if self.compaction is None else int(self.compaction.context_budget)
+        return segments_from_records(self._close_records(trajectory_id), context_budget=budget)
 
     def decode(self, ids: Sequence[int]) -> str:
         """Text of ``ids`` under the proxy's chat template (loss reports)."""

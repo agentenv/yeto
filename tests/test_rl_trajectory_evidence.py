@@ -242,8 +242,9 @@ def test_schema_3_records_every_layered_field():
     # the external-cut fields (schema 5) are never persisted in schema 3
     assert set(trajectory_evidence._envelope_mapping(item, 3)) == set(
         trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
-    assert set(asdict(item)) - trajectory_evidence._EXTERNAL_CUT_FIELDS == set(
-        trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
+    # nor the segment count of a compacted trial (written only on its segments)
+    assert set(asdict(item)) - trajectory_evidence._EXTERNAL_CUT_FIELDS - (
+        trajectory_evidence._SEGMENTED_TRIAL_FIELDS) == set(trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
     assert item.active_token_count == item.response_token_count
 
 

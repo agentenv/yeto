@@ -148,7 +148,8 @@ def check_rollout_compaction(
         if not harness_compacts:
             raise ValueError(
                 f"gae_variant {COMPACTED_GAE_VARIANT} (CompactionRL) needs compacted rollouts; "
-                "no agent harness compacts (only the TEST synthetic segments reward)"
+                "no agent harness produces the segments this PPO mode reads (only the TEST synthetic "
+                "segments reward); the sampler spec's agentic.compaction is for GRPO-family estimators"
             )
         if not switch_on:
             raise ValueError(

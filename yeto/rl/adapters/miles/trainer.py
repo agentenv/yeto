@@ -681,8 +681,12 @@ class MilesTrainerGroup:
         from .reshard import batch_guard_problems
 
         configs = [dict(c) for c in self._run(self._actor.run_plugin(TRAIN_PARALLEL_CONFIG, {}))]
-        # One sample per rollout on the GRPO ports path: the fork's rollout id falls back to the sample index.
-        rollout_indices = [i for i, _ in enumerate(s for g in batch.groups for s in g.sample_ids)]
+        # The fork's rollout id is the sample index (one sample per rollout), or the index
+        # the samples of one compacted trial share (buffer_rollout.renumber_group): one
+        # rollout per distinct sample id of the batch (``s<index>``: unique across groups).
+        rollouts: dict[str, int] = {}
+        rollout_indices = [rollouts.setdefault(str(s), len(rollouts))
+                           for g in batch.groups for s in g.sample_ids]
         problems = batch_guard_problems(plan, rank_configs=configs, rollout_indices=rollout_indices,
                                         steps=int(getattr(self._args, "num_steps_per_rollout", 1) or 1))
         if problems:

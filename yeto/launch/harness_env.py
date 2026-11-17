@@ -184,17 +184,23 @@ def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, 
 
 
 def check_compaction_launch(args, environ=None) -> None:
-    """Refuse a CompactionRL launch that cannot work, before any cloud resource.
+    """Refuse a PPO CompactionRL launch that cannot work, before any cloud resource.
 
-    No agent harness compacts rollouts (the Codex OpenEnv bridge was removed).
-    The Harbor path does not produce compaction segments either: on Miles the session server records one stream per
-    agent session, and an agent-side compaction (Codex auto-compact) rewrites
-    the history, which the stream cannot extend; on verl the records proxy is
-    refused when it compacts (``gateway.recorder``).  So any custom agent
-    (``harbor_agent.run``) leaves ``harness_compacts`` False and a CompactionRL
-    spec is refused here, before any cloud resource.  TEST ONLY: the synthetic two-segment reward stands
-    in for a compacting harness; it is accepted only with
-    ``cross_segment_per_sample`` and without a custom agent.
+    This is the PPO + critic CompactionRL (``cross_segment_per_sample`` /
+    ``cross_segment_whole_rollout``, cross-segment GAE): no agent harness
+    produces the segments it reads (the Codex OpenEnv bridge was removed). On
+    Miles the session server records one stream per agent session, and an
+    agent-side compaction (Codex auto-compact) rewrites the history, which the
+    stream cannot extend.  So any custom agent (``harbor_agent.run``) leaves
+    ``harness_compacts`` False and a CompactionRL spec is refused here.  TEST
+    ONLY: the synthetic two-segment reward stands in for a compacting harness;
+    it is accepted only with ``cross_segment_per_sample`` and without a custom
+    agent.
+
+    The async GRPO path compacts in the engine samplers' records proxy (the
+    sampler spec's ``agentic.compaction``); the trainer launch does not see that
+    spec, so :func:`check_grpo_compaction` checks the pair in ``yeto run up``
+    preflight.  This function does not refuse it.
     """
     from ..rl.synthetic_segments import SYNTHETIC_SEGMENTS_REWARD
 
@@ -204,3 +210,73 @@ def check_compaction_launch(args, environ=None) -> None:
         raise ValueError(f"{SYNTHETIC_SEGMENTS_REWARD} is only valid with gae_variant cross_segment_per_sample")
     harness_compacts = synthetic and getattr(args, "custom_agent_function_path", None) is None
     compactionrl_launch_env(args, environ, harness_compacts)
+
+
+# Estimators whose Miles reward normalization runs per rollout
+# (``train_data_conversion._normalize_rewards_by_rollout``): the segments of one
+# trial are one rollout and share its advantage.  ``score_centering`` runs on the
+# ``grpo`` estimator.
+GRPO_COMPACTION_ESTIMATORS = ("grpo", "gspo")
+
+
+def _launch_algorithm(args) -> dict | None:
+    """The trainer's algorithm spec as a dict: the prepared JSON of a launch, else the
+    spec the flags resolve to (``--rl-algorithm-spec`` and ``--rl-loss``); None when it
+    cannot be read here (a spec file on another host: the launch checks it there)."""
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if raw:
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    try:
+        from ..rl.algos.score_centering import spec_from_rl_loss_args
+        from ..rl.engine.algorithm import resolve_ports_algorithm
+
+        return json.loads(spec_from_rl_loss_args(args, resolve_ports_algorithm(args)).canonical_json())
+    except Exception:  # noqa: BLE001 - an unreadable spec: ``yeto launch --dry-run`` reports it
+        return None
+
+
+def check_grpo_compaction(args, compaction) -> None:
+    """Refuse a trainer that cannot train the segment samples of a compacting sampler.
+
+    ``compaction``: the sampler spec's ``agentic.compaction``
+    (:func:`yeto.rl.compaction.config_from_spec`; None: nothing to check).
+    A compacting sampler writes one sample per segment, all with the trial's
+    reward; the trainer must normalize per trial and give every segment the
+    trial's advantage. That is the Miles backend with a GRPO-family estimator
+    (:data:`GRPO_COMPACTION_ESTIMATORS`, ``--rl-loss score_centering`` included).
+    Refused: verl (one sample is one token stream; its records proxy does not
+    compact), any other backend, a critic estimator, and the PPO CompactionRL
+    variants (their cross-segment GAE is not wired to these segments). Raises
+    ValueError."""
+    if compaction is None:
+        return
+    from ..rl.engine.backends import DEFAULT_BACKEND
+
+    backend = getattr(args, "rl_backend", None) or DEFAULT_BACKEND
+    if backend == "verl":
+        raise ValueError(
+            "agentic.compaction is set in the sampler spec but the trainer runs --rl-backend verl: a verl "
+            "sample is one token stream and verl does not train the per-segment samples of a compacted trial; "
+            "use the Miles backend or remove agentic.compaction")
+    if backend != DEFAULT_BACKEND:
+        raise ValueError(f"agentic.compaction needs the {DEFAULT_BACKEND} backend (trial-level GRPO "
+                         f"normalization over segment samples); the trainer runs --rl-backend {backend}")
+    algorithm = _launch_algorithm(args)
+    if algorithm is None:
+        return
+    advantage = algorithm.get("advantage") or {}  # v2; a v1 spec names only the estimator
+    estimator = str(advantage.get("estimator") or algorithm.get("advantage_estimator") or "grpo")
+    variant = advantage.get("gae_variant")
+    if variant is not None and str(variant).startswith("cross_segment"):
+        raise ValueError(
+            f"agentic.compaction with gae_variant {variant} (PPO CompactionRL): the cross-segment GAE is not "
+            "wired to the records proxy's segments; async GRPO compaction needs a GRPO-family estimator "
+            f"({', '.join(GRPO_COMPACTION_ESTIMATORS)})")
+    if estimator not in GRPO_COMPACTION_ESTIMATORS:
+        raise ValueError(
+            f"agentic.compaction needs a GRPO-family advantage estimator ({', '.join(GRPO_COMPACTION_ESTIMATORS)}: "
+            f"normalized per trial, one advantage shared by the trial's segments); the trainer's spec has "
+            f"advantage.estimator {estimator!r}")

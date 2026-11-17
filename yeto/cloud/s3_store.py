@@ -26,12 +26,16 @@ store credentials when its environment has them, else its own AWS credentials.
 
 Large files (policy releases of hundreds of GB) move in parts: a multipart
 upload and parallel ranged downloads (:class:`TransferSettings`, from
-:data:`PART_MB_ENV` / :data:`PART_CONCURRENCY_ENV`). Alibaba Cloud OSS reuses
-this client through its S3-compatible API (``yeto.cloud.oss_store``).
+:data:`PART_MB_ENV` / :data:`PART_CONCURRENCY_ENV`). So does an object API
+write (``write`` / ``create``) larger than :data:`MULTIPART_MB_ENV` (default 1
+GiB): a sample buffer group of long agentic trials is one object and passes the
+5 GiB single-PUT limit of S3, OSS and R2. Alibaba Cloud OSS reuses this client
+through its S3-compatible API (``yeto.cloud.oss_store``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import pickle
@@ -252,11 +256,13 @@ RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (de
 MAX_ATTEMPTS_ENV = "YETO_RL_STORE_MAX_ATTEMPTS"  # requests of one call, the first included (default 9)
 PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
 UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
+# an object API write (write / create) larger than this many MiB goes as a multipart upload
+MULTIPART_MB_ENV = "YETO_RL_STORE_MULTIPART_MB"
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
                 MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV,
-                CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV)
+                CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV, MULTIPART_MB_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
 # cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
@@ -276,6 +282,11 @@ _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
 _MIB = 1 << 20
 MIN_PART_BYTES = 5 * _MIB  # S3 and OSS: every part but the last is at least 5 MiB
 MAX_PARTS = 10_000  # S3 and OSS: parts of one multipart upload
+# the largest single PUT (PutObject or one part): S3 and OSS 5 GiB, R2 5 MiB less
+SINGLE_PUT_MAX_BYTES = 5 * 1024 * _MIB - 5 * _MIB
+# an object API write above this goes in parts (:data:`MULTIPART_MB_ENV`). Below it the
+# write is the one PutObject it always was; a buffer group of a few MB is never split
+DEFAULT_MULTIPART_BYTES = 1024 * _MIB
 # the resume journal of a multipart upload, next to its source file (a stage push
 # skips it: object_store.TMP_SUFFIX); removed when the upload completes
 UPLOAD_JOURNAL_SUFFIX = ".upload.tmp"
@@ -368,21 +379,25 @@ class _UploadJournal:
     belongs to one version of the source: a different key, size, mtime, part size or
     checksum mode makes it stale."""
 
-    def __init__(self, source: str | os.PathLike[str], identity: dict[str, Any]) -> None:
+    def __init__(self, source: str | os.PathLike[str] | None, identity: dict[str, Any]) -> None:
+        """``source`` None: an upload of bytes in memory (``S3ObjectStore.write``),
+        journaled in memory only: nothing to resume once the call returns."""
         import threading
 
-        self.path = Path(str(source) + UPLOAD_JOURNAL_SUFFIX)
+        self.path = None if source is None else Path(str(source) + UPLOAD_JOURNAL_SUFFIX)
         self.identity = identity
         self.upload_id: str | None = None
         self.parts: dict[int, dict[str, Any]] = {}
         self._lock = threading.Lock()
-        self.writable = True
+        self.writable = source is not None
 
     def load(self) -> dict[str, Any] | None:
         """The journal on disk: its contents when it belongs to this upload, a dict
         with only ``stale_upload_id`` when it belongs to another, None when absent."""
         import json
 
+        if self.path is None:
+            return None
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -413,7 +428,8 @@ class _UploadJournal:
             self.save()
 
     def remove(self) -> None:
-        self.path.unlink(missing_ok=True)
+        if self.path is not None:
+            self.path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -445,6 +461,8 @@ class TransferSettings:
     # tries of one multipart upload in one call; each continues the previous one
     # (list_parts), and after the last the upload is kept for the next call
     upload_attempts: int = 3
+    # an object API write (S3ObjectStore.write / create) larger than this goes in parts
+    multipart_bytes: int = DEFAULT_MULTIPART_BYTES
 
     def __post_init__(self) -> None:
         if self.part_bytes < MIN_PART_BYTES:
@@ -457,6 +475,9 @@ class TransferSettings:
             raise ValueError("download processes must be >= 1")
         if self.upload_attempts < 1:
             raise ValueError("upload attempts must be >= 1")
+        if not MIN_PART_BYTES <= self.multipart_bytes <= SINGLE_PUT_MAX_BYTES:
+            raise ValueError(f"multipart threshold {self.multipart_bytes} B ({MULTIPART_MB_ENV}) is outside "
+                             f"{MIN_PART_BYTES}..{SINGLE_PUT_MAX_BYTES} B (the single-PUT limit)")
 
     def part_for(self, size: int) -> int:
         return max(self.part_bytes, -(-int(size) // MAX_PARTS))
@@ -469,7 +490,9 @@ class TransferSettings:
                    file_concurrency=int(environ.get(FILE_CONCURRENCY_ENV) or default.file_concurrency),
                    download_processes=int(environ.get(DOWNLOAD_PROCESSES_ENV) or default.download_processes),
                    part_checksum=part_checksum_default(environ),
-                   upload_attempts=int(environ.get(UPLOAD_ATTEMPTS_ENV) or default.upload_attempts))
+                   upload_attempts=int(environ.get(UPLOAD_ATTEMPTS_ENV) or default.upload_attempts),
+                   multipart_bytes=int(float(environ.get(MULTIPART_MB_ENV) or default.multipart_bytes / _MIB)
+                                       * _MIB))
 
 
 def parse_s3_uri(uri: str, scheme: str = "s3") -> tuple[str, str]:
@@ -677,6 +700,15 @@ def _client(environ: Mapping[str, str], *, require_credentials: bool) -> Any:
                           config=Config(**client_config(environ)))
 
 
+class _CompleteRefused(Exception):
+    """A conditional CompleteMultipartUpload refused: the key exists (``lost``) or
+    the endpoint does not take the condition."""
+
+    def __init__(self, *, lost: bool) -> None:
+        super().__init__("the key exists" if lost else "the condition is not implemented")
+        self.lost = lost
+
+
 class S3ObjectStore:
     """:class:`~yeto.rl.engine.object_store.ObjectStore` over ``s3://BUCKET[/PREFIX]``:
     a key is ``PREFIX/<key>``. ``client``: a boto3 S3 client (or a test double).
@@ -744,24 +776,95 @@ class S3ObjectStore:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def write(self, key: str, data: bytes) -> None:
-        self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
+        """Write ``data`` as object ``key``, replacing it. Up to
+        ``transfer.multipart_bytes`` one PutObject, as always; larger, a multipart
+        upload of the bytes (:meth:`_write_parts`): one request carries at most
+        :data:`SINGLE_PUT_MAX_BYTES` (a buffer group of long agentic trials is
+        more). Either way a reader sees the whole object or none: a multipart
+        object exists only once CompleteMultipartUpload applied."""
+        if len(data) <= self.transfer.multipart_bytes:
+            self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data)
+            return
+        self._write_parts(key, data)
 
     def create(self, key: str, data: bytes) -> bool:
+        """Write ``key`` unless it exists; True when this call created it. Up to
+        ``transfer.multipart_bytes`` one conditional PutObject; larger, a multipart
+        upload whose CompleteMultipartUpload carries the condition (S3 and R2 take
+        ``If-None-Match: *`` there and apply it atomically, like on PutObject; OSS
+        ``x-oss-forbid-overwrite``). An endpoint that refuses the condition falls
+        back to check-then-write, as for a small create."""
         if self.conditional_writes:
-            try:
-                self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data, IfNoneMatch="*")
-                return True
-            except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
-                code = self._code(error)
-                if code in _CREATE_LOST:
-                    return self._created_by_retry(error, key, data)
-                if code != "NotImplemented":
-                    raise
+            if len(data) > self.transfer.multipart_bytes:
+                created = self._write_parts(key, data, if_absent=True)
+                if created is not None:
+                    return created
                 self.conditional_writes = False
+            else:
+                try:
+                    self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data, IfNoneMatch="*")
+                    return True
+                except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+                    code = self._code(error)
+                    if code in _CREATE_LOST:
+                        return self._created_by_retry(error, key, data)
+                    if code != "NotImplemented":
+                        raise
+                    self.conditional_writes = False
         if self.exists(key):
             return False
         self.write(key, data)
         return True
+
+    def _absent_condition(self) -> dict[str, Any]:
+        """The CompleteMultipartUpload argument of a create-if-absent."""
+        return {"IfNoneMatch": "*"}
+
+    def _write_parts(self, key: str, data: bytes, *, if_absent: bool = False) -> bool | None:
+        """Upload bytes in memory as a multipart upload: parts of
+        ``transfer.part_for(len(data))`` (all equal but the last, as R2 requires),
+        ``transfer.concurrency`` at once, each retried and checked like a file's
+        (:meth:`write_file`; the journal stays in memory). ``if_absent``: the
+        complete carries :meth:`_absent_condition`. Returns True (the object is
+        this upload), False (``if_absent``: another object holds the key), None
+        (``if_absent``: the endpoint refuses the condition). An upload this call
+        does not complete is aborted (R2 also drops one after 7 days)."""
+        checks = self._checksums()
+        try:
+            return self._put_parts(key, data, if_absent)
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            if not checks or self._code(error) != "NotImplemented":
+                raise
+            self.part_checksums_refused = True
+            _warn_part_checksums_off(self.uri, error)
+            return self._put_parts(key, data, if_absent)
+
+    def _put_parts(self, key: str, data: bytes, if_absent: bool) -> bool | None:
+        checks = self._checksums()
+        size = len(data)
+        part = self.transfer.part_for(size)
+        count = -(-size // part)
+        full = self._key(key)
+        journal = _UploadJournal(None, {"bucket": self.bucket, "key": full, "size": size, "part_bytes": part,
+                                        "checksum": checks})
+        self._open_upload(journal, full, part, size, checks)
+        try:
+            outcome = self._upload(journal, full, data, part, size, count, checks,
+                                   self._absent_condition() if if_absent else None)
+        except BaseException:
+            self._abort(full, journal.upload_id)
+            raise
+        if outcome is True:
+            self._verified(key, journal, count, checks)
+        return outcome
+
+    def _abort(self, full: str, upload_id: str | None) -> None:
+        if upload_id is None:
+            return
+        try:
+            self.client.abort_multipart_upload(Bucket=self.bucket, Key=full, UploadId=upload_id)
+        except Exception:  # noqa: BLE001 - already gone (completed, aborted, expired)
+            pass
 
     def _created_by_retry(self, error: Exception, key: str, data: bytes) -> bool:
         """Whether a conditional put refused as "the key exists" created the key itself.
@@ -879,15 +982,58 @@ class S3ObjectStore:
                                           "mtime_ns": int(st.st_mtime_ns), "part_bytes": int(part),
                                           "checksum": checks})
         completed = self._open_upload(journal, full, part, size, checks, count=count)
-        for attempt in range(1, 0 if completed else self.transfer.upload_attempts + 1):
+        if not completed:
+            self._upload(journal, full, source, part, size, count, checks)
+        journal.remove()
+        return self._verified(key, journal, count, checks)
+
+    def _verified(self, key: str, journal: _UploadJournal, count: int, checks: bool) -> str | None:
+        """The composite checksum of the parts sent, checked against the one the
+        store reports for ``key``; None without checksums."""
+        if not checks:
+            return None
+        expected = composite_sha256([journal.parts[n]["sha256"] for n in range(1, count + 1)])
+        reported = self.checksum(key)
+        if reported is not None and reported != expected:
+            raise ObjectStoreError(f"{key}: the store reports checksum {reported}, the parts sent make {expected}")
+        return expected
+
+    def _complete(self, full: str, upload_id: str, parts: list[dict[str, Any]],
+                  condition: Mapping[str, Any] | None) -> None:
+        try:
+            self.client.complete_multipart_upload(Bucket=self.bucket, Key=full, UploadId=upload_id,
+                                                  MultipartUpload={"Parts": parts}, **(condition or {}))
+        except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
+            code = self._code(error)
+            if condition is not None and code in _CREATE_LOST:
+                raise _CompleteRefused(lost=True) from error
+            if condition is not None and code == "NotImplemented":
+                raise _CompleteRefused(lost=False) from error
+            raise
+
+    def _upload(self, journal: _UploadJournal, full: str, source: Any, part: int, size: int, count: int,
+                checks: bool, condition: Mapping[str, Any] | None = None) -> bool | None:
+        """Send the missing parts of the open upload ``journal`` and complete it, up
+        to ``upload_attempts`` tries, each continuing the last (``source``: a file
+        path, or the bytes). True once the object is this upload. ``condition`` (a
+        create-if-absent on the complete): False when another object holds the key,
+        None when the endpoint refuses the condition; the upload is aborted then."""
+        for attempt in range(1, self.transfer.upload_attempts + 1):
             try:
                 self._send_parts(journal, full, source, part, size, count, checks)
                 parts = [{"PartNumber": n, "ETag": journal.parts[n]["ETag"],
                           **({"ChecksumSHA256": journal.parts[n]["sha256"]} if checks else {})}
                          for n in range(1, count + 1)]
-                self.client.complete_multipart_upload(Bucket=self.bucket, Key=full, UploadId=journal.upload_id,
-                                                      MultipartUpload={"Parts": parts})
-                break
+                self._complete(full, journal.upload_id, parts, condition)
+                return True
+            except _CompleteRefused as refused:
+                # the key exists: this upload's own complete when the SDK sent it twice
+                # (the first applied, its answer lost) - the object is then these parts
+                if refused.lost and self._completed(full, journal.parts, count, size, checks):
+                    return True
+                self._abort(full, journal.upload_id)
+                journal.remove()
+                return False if refused.lost else None
             except Exception as error:  # noqa: BLE001 - botocore ClientError, by code
                 if checks and self._code(error) == "NotImplemented":
                     try:  # the endpoint takes no part checksums: write_file starts again without
@@ -903,7 +1049,7 @@ class S3ObjectStore:
                 try:
                     listed = self._listed_parts(full, journal.upload_id, part, size)
                     if listed is None and self._completed(full, journal.parts, count, size, checks):
-                        break  # the complete took effect and its answer was lost
+                        return True  # the complete took effect and its answer was lost
                 except Exception:  # noqa: BLE001 - the store is still failing
                     if last:
                         raise error from None
@@ -916,14 +1062,7 @@ class S3ObjectStore:
                 else:
                     journal.parts = self._agreed(journal.parts, listed, checks)
                     journal.save()
-        journal.remove()
-        if not checks:
-            return None
-        expected = composite_sha256([journal.parts[n]["sha256"] for n in range(1, count + 1)])
-        reported = self.checksum(key)
-        if reported is not None and reported != expected:
-            raise ObjectStoreError(f"{key}: the store reports checksum {reported}, the parts sent make {expected}")
-        return expected
+        raise AssertionError("unreachable: the last try returns or raises")  # pragma: no cover
 
     def _open_upload(self, journal: _UploadJournal, full: str, part: int, size: int, checks: bool, *,
                      fresh: bool = False, count: int = 0) -> bool:
@@ -994,10 +1133,13 @@ class S3ObjectStore:
         missing = [n for n in range(1, count + 1) if n not in journal.parts]
         if not missing:
             return
-        with open(source, "rb") as fh:
+        in_memory = isinstance(source, (bytes, bytearray, memoryview))  # S3ObjectStore.write's bytes
+        with contextlib.nullcontext() if in_memory else open(source, "rb") as fh:
             def send(number: int) -> None:
                 offset = (number - 1) * part
-                body = os.pread(fh.fileno(), min(part, size - offset), offset)
+                length = min(part, size - offset)
+                body = bytes(source[offset:offset + length]) if in_memory else \
+                    os.pread(fh.fileno(), length, offset)
                 digest = _b64(hashlib.sha256(body).digest()) if checks else None
                 extra = {"ChecksumSHA256": digest} if checks else {}
                 done = self.client.upload_part(Bucket=self.bucket, Key=full, UploadId=journal.upload_id,
@@ -1139,39 +1281,99 @@ class S3ObjectStore:
             except OSError:  # raced with that download's rename or another cleanup
                 pass
 
+    def _fetch_range(self, key: str, full: str, offset: int, end: int, pin: Mapping[str, Any],
+                     meta: dict[str, Any] | None = None) -> bytes:
+        """Bytes ``offset..end`` of the object (one ranged GET pinned by ``pin``): a
+        body cut short is read again (:data:`RANGE_READ_ATTEMPTS`), a refusal for
+        the request rate lowers :attr:`range_gate` and is tried again. ``meta``
+        receives the answer's ``ETag`` and ``ContentRange``."""
+        attempt = refusals = 0
+        while True:
+            started = None
+            try:
+                with self.range_gate as started:
+                    response = self.client.get_object(Bucket=self.bucket, Key=full,
+                                                      Range=f"bytes={offset}-{end}", **pin)
+                    body = response["Body"].read()
+                    if meta is not None:
+                        meta.update({k: response.get(k) for k in ("ETag", "ContentRange")})
+            except RANGE_READ_RETRYABLE:
+                # botocore retries the request, not the streamed body: a stalled
+                # body read of one part would otherwise fail the whole download
+                attempt += 1
+                if attempt == RANGE_READ_ATTEMPTS:
+                    raise
+                _read_retry_pause(attempt - 1)
+                continue
+            except Exception as error:  # noqa: BLE001 - a ClientError, by code
+                refusals += 1
+                if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
+                    raise
+                self._range_refused(error, started)
+                _read_retry_pause(refusals - 1)
+                continue
+            self.range_gate.succeeded()
+            break
+        if len(body) != end - offset + 1:
+            raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
+        return body
+
+    def read_ranged(self, key: str, size: int | None = None) -> bytes | bytearray | None:
+        """Object ``key`` like :meth:`read` (None when missing); one larger than a
+        part (``transfer.part_for``) by ``transfer.concurrency`` parallel ranges into
+        one buffer, each retried on its own (a reset costs one part, not the object:
+        a single GET of a 20 GB buffer group reads the whole object again) and
+        pinned to the object's ETag (a replaced object fails the read instead of
+        mixing two versions). ``size``: the object's size if the caller knows it
+        (``BatchReader`` asked for it): no HEAD then, the first range gives the ETag
+        and must report that size, else the object is read with one GET. Without
+        it one HEAD first. The large result is a ``bytearray`` (no copy into
+        ``bytes``: the payload decoders take it)."""
+        etag = None
+        if size is None:
+            head = self._head(key)
+            if head is None:
+                return None
+            size, etag = int(head["ContentLength"]), head.get("ETag")
+        size = int(size)
+        part = self.transfer.part_for(size)
+        if size <= part:
+            return self.read(key)
+        full = self._key(key)
+        out = bytearray(size)
+        view = memoryview(out)
+        if etag is None:  # the first range: the version the others are pinned to
+            meta: dict[str, Any] = {}
+            try:
+                view[:part] = self._fetch_range(key, full, 0, part - 1, {}, meta)
+            except self.client.exceptions.NoSuchKey:
+                view.release()
+                return None
+            total = str(meta.get("ContentRange") or "").rpartition("/")[2]
+            if total.isdigit() and int(total) != size:  # not the size the caller had: read it whole
+                view.release()
+                return self.read(key)
+            etag, first = meta.get("ETag"), part
+        else:
+            first = 0
+        pin = {"IfMatch": etag} if etag else {}
+
+        def fetch(offset: int) -> None:
+            end = min(offset + part, size) - 1
+            view[offset:end + 1] = self._fetch_range(key, full, offset, end, pin)
+
+        with ThreadPoolExecutor(min(self.transfer.concurrency, -(-(size - first) // part))) as pool:
+            list(pool.map(fetch, range(first, size, part)))
+        view.release()
+        return out
+
     def _read_ranges(self, key: str, full: str, partial: str, size: int, part: int, pin: Mapping[str, Any]) -> None:
         with open(partial, "wb") as fh:
             fh.truncate(size)
 
             def fetch(offset: int) -> None:
                 end = min(offset + part, size) - 1
-                attempt = refusals = 0
-                while True:
-                    started = None
-                    try:
-                        with self.range_gate as started:
-                            body = self.client.get_object(Bucket=self.bucket, Key=full,
-                                                          Range=f"bytes={offset}-{end}", **pin)["Body"].read()
-                    except RANGE_READ_RETRYABLE:
-                        # botocore retries the request, not the streamed body: a stalled
-                        # body read of one part would otherwise fail the whole download
-                        attempt += 1
-                        if attempt == RANGE_READ_ATTEMPTS:
-                            raise
-                        _read_retry_pause(attempt - 1)
-                        continue
-                    except Exception as error:  # noqa: BLE001 - a ClientError, by code
-                        refusals += 1
-                        if not is_throttled(error) or refusals == THROTTLED_READ_ATTEMPTS:
-                            raise
-                        self._range_refused(error, started)
-                        _read_retry_pause(refusals - 1)
-                        continue
-                    self.range_gate.succeeded()
-                    break
-                if len(body) != end - offset + 1:
-                    raise ObjectStoreError(f"{self.uri}/{key}: range {offset}-{end} returned {len(body)} B")
-                os.pwrite(fh.fileno(), body, offset)
+                os.pwrite(fh.fileno(), self._fetch_range(key, full, offset, end, pin), offset)
 
             done = threading.Event()
 

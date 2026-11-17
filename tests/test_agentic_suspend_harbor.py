@@ -482,6 +482,12 @@ def test_verl_abort_tracking_needs_verl_rollout_engine():
 
 
 def test_compactionrl_is_refused_on_the_harbor_path():
+    """PPO CompactionRL (``cross_segment_per_sample``, critic + cross-segment GAE) stays
+    refused on Harbor: no harness produces the segments it reads. Async GRPO with the
+    sampler spec's ``agentic.compaction`` is a different path and is allowed on Miles
+    (tests/test_compaction_spec_launch.py); the trainer launch check does not refuse
+    it. The recorder assertion below is the records proxy's own refusal (owned by the
+    sampler-side change, which narrows it to verl)."""
     from yeto.launch.harness_env import check_compaction_launch
     from yeto.rl.adapters.miles.harbor_agent import AGENT_FUNCTION
     from yeto.rl.compaction import CompactionConfig

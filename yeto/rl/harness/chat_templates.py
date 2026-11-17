@@ -34,10 +34,14 @@ engine would add if it got the text and tokenized it with special tokens.
 
 from __future__ import annotations
 
+import array
+import bisect
 import collections
 import hashlib
 import json
 import re
+import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -93,8 +97,10 @@ def _glm_value(raw: str) -> Any:
     return raw if isinstance(value, str) else value
 
 
-def parse_glm(text: str) -> Message:
-    reasoning, rest = _split_reasoning(text, opened=True)
+def parse_glm(text: str, *, thinking: bool = True) -> Message:
+    """``thinking=False`` (``enable_thinking: false``): the generation prompt
+    closed the reasoning block, the output has none."""
+    reasoning, rest = _split_reasoning(text, opened=thinking)
     calls = []
     for index, match in enumerate(_GLM_CALL.finditer(rest)):
         body = match.group(1)
@@ -130,9 +136,10 @@ _QWEN38_CALL = re.compile(r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s
 _QWEN38_PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
-def parse_qwen38(text: str) -> Message:
-    """Qwen3.8 output after the ``<think>\\n`` generation prompt."""
-    reasoning, rest = _split_reasoning(text, opened=True)
+def parse_qwen38(text: str, *, thinking: bool = True) -> Message:
+    """Qwen3.8 output after the ``<think>\\n`` generation prompt (``thinking=False``:
+    after the closed ``<think>\\n\\n</think>\\n\\n`` prefill, no reasoning)."""
+    reasoning, rest = _split_reasoning(text, opened=thinking)
     calls = []
     for index, match in enumerate(_QWEN38_CALL.finditer(rest)):
         arguments = {k.strip(): _glm_value(v) for k, v in _QWEN38_PARAM.findall(match.group(2))}
@@ -176,15 +183,23 @@ def _k3_arguments(body: str) -> str:
     return "{" + ",".join(parts) + "}"
 
 
-def parse_kimi_k3(text: str) -> Message:
+def parse_kimi_k3(text: str, *, thinking: bool = True) -> Message:
     """Kimi K3 XTML output after the ``<message role="assistant"><think>``
     generation prompt: reasoning, the ``response`` channel and ``tools`` calls.
     Reasoning and content are kept byte for byte (the template renders them
-    raw), so the next turn's rendering repeats the sampled text."""
-    marker = f"{_K3_CLOSE}think{_K3_SEP}"
-    if marker not in text:
-        return _assistant("", text, [])  # cut inside the think channel
-    reasoning, rest = text.split(marker, 1)
+    raw), so the next turn's rendering repeats the sampled text.
+
+    ``thinking=False`` (template kwarg ``thinking: false``): the generation
+    prompt opened the ``response`` channel instead, the output has no think
+    channel and the message no reasoning (the template renders none)."""
+    reasoning: str | None
+    if thinking:
+        marker = f"{_K3_CLOSE}think{_K3_SEP}"
+        if marker not in text:
+            return _assistant("", text, [])  # cut inside the think channel
+        reasoning, rest = text.split(marker, 1)
+    else:
+        reasoning, rest = None, f"{_K3_OPEN}response{_K3_SEP}{text}"
     response = _K3_RESPONSE.search(rest)
     content = response.group(1) if response else ""
     calls = []
@@ -210,7 +225,7 @@ class TemplateSpec:
 
     name: str
     tokenizer: str
-    parser: Callable[[str], Message]
+    parser: Callable[..., Message]
     stop_tokens: tuple[str, ...]
     template_kwargs: Mapping[str, Any] = field(default_factory=dict)
     keeps_history_reasoning: bool = True
@@ -222,6 +237,10 @@ class TemplateSpec:
     # tool-call arguments go to the template as the JSON text they were parsed from
     # (the template reads them itself and keeps each value's literal text)
     raw_arguments: bool = False
+    # the template kwarg that turns the reasoning block off (default on): the parser takes it as
+    # ``thinking=`` (with it off the generation prompt closes or omits the block, the output has no
+    # reasoning; a parser that assumes an open block would read the whole output as reasoning)
+    thinking_kwarg: str | None = None
     # the tokenizer encodes a rendering segment by segment (structural markers as
     # control tokens, message text as plain BPE even where it spells a marker):
     # ids come from the rendering's segments, never from re-encoding its text
@@ -241,7 +260,7 @@ def register_template(spec: TemplateSpec) -> TemplateSpec:
 register_template(TemplateSpec(
     name="glm5", tokenizer="zai-org/GLM-4.7-Flash", parser=parse_glm,
     stop_tokens=("<|endoftext|>", "<|user|>", "<|observation|>"),
-    template_kwargs={"clear_thinking": False},
+    template_kwargs={"clear_thinking": False}, thinking_kwarg="enable_thinking",
     verified="GLM-4.7-Flash tokenizer as a stand-in; GLM5.3-Flash tokenizer not verified"))
 register_template(TemplateSpec(
     name="qwen3", tokenizer="Qwen/Qwen3-0.6B", parser=parse_qwen3,
@@ -257,24 +276,31 @@ register_template(TemplateSpec(
 register_template(TemplateSpec(
     name="qwen38", tokenizer="Qwen/Qwen3.8-27B", parser=parse_qwen38,
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
-    template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+    template_kwargs={"enable_thinking": True, "preserve_thinking": True}, thinking_kwarg="enable_thinking",
     verified="Qwen3.8-27B@1d4bf0f2 tokenizer", merge_leading_system=True))
 register_template(TemplateSpec(
     # Kimi-K3.1 XTML (``encoding_k3.py`` of the checkpoint); ``thinking_effort``
     # comes from the deployment (agentic.template_kwargs; the tokenizer's default is max)
     name="kimi_k31", tokenizer="moonshotai/Kimi-K3.1-Pro", parser=parse_kimi_k3,
-    stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True},
+    stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True}, thinking_kwarg="thinking",
     verified="Kimi-K3.1-Pro@d9e99b07 tokenizer (CPU alignment test)",
     needs_remote_code=True, raw_arguments=True, segment_encoding=True))
 register_template(TemplateSpec(
     name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
     stop_tokens=("<|im_end|>",),
-    template_kwargs={"enable_thinking": True, "truncate_history_thinking": False},
+    template_kwargs={"enable_thinking": True, "truncate_history_thinking": False}, thinking_kwarg="enable_thinking",
     verified="Nemotron-3.5-Super-VL-120B tokenizer + chat template (CPU alignment test)",
     merge_leading_system=True))
 
 
 # ---------------------------------------------------------------------- template
+def _join(pieces: Sequence[array.array]) -> list[int]:
+    out = array.array("I")
+    for piece in pieces:
+        out.extend(piece)
+    return out.tolist()
+
+
 def _merge_leading_system(messages: Sequence[Message]) -> list[Message]:
     head = 0
     while head < len(messages) and messages[head].get("role") == "system":
@@ -321,8 +347,13 @@ class ChatTemplate:
             ids.append(token_ids[0])
         self.stop_token_ids: tuple[int, ...] = tuple(ids)
         self._stop_by_id = dict(zip(ids, spec.stop_tokens))
-        # segment_encoding: rendered text -> (segment end offsets, ids per segment), newest last
-        self._segmented: "collections.OrderedDict[str, tuple[list[int], list[list[int]]]]" = collections.OrderedDict()
+        # segment_encoding: this thread's newest renderings, (text, segment end offsets, ids per segment)
+        self._recent = threading.local()
+        # segment_encoding: (segment text, allow_special) -> ids, shared by every rendering (a turn
+        # renders the whole history again, and the earlier segments have the same text)
+        self._pieces: "collections.OrderedDict[tuple[str, bool], array.array]" = collections.OrderedDict()
+        self._pieces_bytes = 0
+        self._pieces_lock = threading.Lock()
 
     @classmethod
     def load(cls, name: str, *, tokenizer_path: str | None = None, local_files_only: bool = True,
@@ -362,35 +393,79 @@ class ChatTemplate:
         ready = [dict(m) for m in messages] if self.spec.raw_arguments else _render_ready(messages)
         return _merge_leading_system(ready) if self.spec.merge_leading_system else ready
 
+    # segment_encoding: renderings kept per thread for encode(). The records proxy encodes a
+    # rendering, or a tail of one, before the same thread renders more than three other texts
+    # (RecordingBackend._prompt renders full, start and head, then encodes the tail of full).
+    RECENT_RENDERINGS = 4
+    # segment_encoding: memory bound of the shared per-segment ids (str + array sizes, LRU)
+    PIECE_MEMO_BYTES = 1 << 30
+
     def encode(self, text: str) -> list[int]:
         """Token ids of rendered text; the template writes its own BOS tokens.
 
-        ``segment_encoding``: ``text`` must be a rendering of this template, a
-        stop token, or a tail of a rendering that starts at a segment boundary
-        (what the records proxy encodes); anything else is refused."""
+        ``segment_encoding``: ``text`` must be a stop token, or one of this
+        thread's last :attr:`RECENT_RENDERINGS` renderings or a tail of one that
+        starts at a segment boundary (what the records proxy encodes); anything
+        else is refused. Text that is such a tail of two kept renderings with
+        different ids (message text spelling the markers) is refused too."""
         if not self.spec.segment_encoding:
             return list(self.tokenizer.encode(text, add_special_tokens=False))
         if text in self.spec.stop_tokens:
             return [self.stop_token_ids[self.spec.stop_tokens.index(text)]]
         if text == "":
             return []
-        for rendered, (ends, pieces) in reversed(self._segmented.items()):
-            if not rendered.endswith(text):
+        found: list[int] | None = None
+        for rendered, ends, pieces in reversed(self._renderings()):
+            if len(rendered) < len(text) or not rendered.endswith(text):
                 continue
             start = len(rendered) - len(text)
-            if start == 0:
-                return [i for piece in pieces for i in piece]
-            if start in ends:
-                first = ends.index(start) + 1
-                return [i for piece in pieces[first:] for i in piece]
-        raise TemplateError(f"{self.spec.name}: text to encode is not a tail of a rendering at a segment boundary")
+            first = 0
+            if start:
+                first = bisect.bisect_left(ends, start)
+                if first == len(ends) or ends[first] != start:
+                    continue  # not a segment boundary of this rendering
+                first += 1
+            ids = _join(pieces[first:])
+            if found is None:
+                found = ids
+            elif ids != found:
+                raise TemplateError(f"{self.spec.name}: text to encode is a tail of two renderings "
+                                    "with different ids; encode right after rendering it")
+        if found is None:
+            raise TemplateError(f"{self.spec.name}: text to encode is not a tail of a recent rendering "
+                                "at a segment boundary")
+        return found
+
+    def _renderings(self) -> "collections.deque[tuple[str, list[int], list[array.array]]]":
+        recent = getattr(self._recent, "renderings", None)
+        if recent is None:
+            recent = self._recent.renderings = collections.deque(maxlen=self.RECENT_RENDERINGS)
+        return recent
+
+    def _piece(self, text: str, allow_special: bool) -> array.array:
+        """Ids of one segment: the tokenizer's ``_encode_text_piece`` (a function of
+        the text and the flag), kept in an LRU bounded by :attr:`PIECE_MEMO_BYTES`."""
+        key = (text, allow_special)
+        with self._pieces_lock:
+            ids = self._pieces.get(key)
+            if ids is not None:
+                self._pieces.move_to_end(key)
+                return ids
+        ids = array.array("I", self.tokenizer._encode_text_piece(text, allow_special_tokens=allow_special))
+        size = sys.getsizeof(text) + sys.getsizeof(ids) + 160  # key tuple, dict entry
+        with self._pieces_lock:
+            if key not in self._pieces:
+                self._pieces[key] = ids
+                self._pieces_bytes += size
+            while self._pieces_bytes > self.PIECE_MEMO_BYTES and self._pieces:
+                (old_text, _), old = self._pieces.popitem(last=False)
+                self._pieces_bytes -= sys.getsizeof(old_text) + sys.getsizeof(old) + 160
+        return ids
 
     def _render_segments(self, messages: Sequence[Message], *, tools: Sequence[Message] | None,
                          add_generation_prompt: bool) -> str:
         """Render through the tokenizer's own segment builder (Kimi ``encoding_k3``)
         and keep each segment's ids for :meth:`encode`."""
-        import sys
-
         module = sys.modules[type(self.tokenizer).__module__]
         kwargs = dict(self.spec.template_kwargs)
         thinking = bool(kwargs.pop("thinking", True))
@@ -405,13 +480,9 @@ class ChatTemplate:
         for segment in segments:
             offset += len(segment.text)
             ends.append(offset)
-            pieces.append(list(self.tokenizer._encode_text_piece(segment.text,
-                                                                 allow_special_tokens=segment.allow_special)))
+            pieces.append(self._piece(segment.text, bool(segment.allow_special)))
         text = "".join(segment.text for segment in segments)
-        self._segmented[text] = (ends, pieces)
-        self._segmented.move_to_end(text)
-        while len(self._segmented) > 256:
-            self._segmented.popitem(last=False)
+        self._renderings().append((text, ends, pieces))
         return text
 
     def decode(self, ids: Sequence[int]) -> str:
@@ -421,6 +492,8 @@ class ChatTemplate:
         return self._stop_by_id.get(int(token_id))
 
     def parse(self, text: str) -> Message:
+        if self.spec.thinking_kwarg is not None:
+            return self.spec.parser(text, thinking=bool(self.spec.template_kwargs.get(self.spec.thinking_kwarg, True)))
         return self.spec.parser(text)
 
 

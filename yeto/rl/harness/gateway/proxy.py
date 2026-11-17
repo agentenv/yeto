@@ -29,19 +29,48 @@ Access (threat model: every sandbox on a sampler is hostile to every other):
 
 The sampling fields stay signed by the gateway (a request may not change them).
 Errors fail closed: an invalid trajectory answers 409, an unsupported or
-malformed request 400, a draining member 503, a failed engine call 502
-(nothing is recorded for it, so the agent may retry the same request).
+malformed request 400, a body over :data:`MAX_REQUEST_BYTES` 413, a draining
+member 503, a failed engine call 502 (nothing is recorded for it, so the agent
+may retry the same request).
+
+Request size: the agent sends its whole history on every call (with context
+compaction it keeps growing past the engine's window), megabytes of JSON at a
+262k-token context.  The model routes read their body with their own limit
+(:data:`MAX_REQUEST_BYTES`, checked after the token) instead of aiohttp's
+``client_max_size``: that one is the root application's, so an app mounted as a
+sub-app (the recorder's ``/k/<secret>/`` prefix) would get aiohttp's 1 MiB
+default.
+
+With ``compaction`` the gateway replays a lost reply to a resent request
+(:class:`~.core.GatewayConfig` ``replay_retries``) and fails closed on any
+other fork or break from a session that has compacted (``session_compacted``):
+a new session would start from the whole history, past the engine's window.
+A request for a forgotten trajectory (a detached or cancelled trial whose body
+was still arriving) is refused with 403 (:meth:`RecordsProxy.handle`, and the
+route checks the token again after the body), so no state is made again for it.
+
+Keep-alive (with ``compaction``): a compacting call samples a summary and the
+next segment's first action in one request, which can outlast the agent's HTTP
+idle timeout.  A streamed call still running after :data:`KEEPALIVE_S` gets
+its 200 and SSE headers then, and a ``: keep-alive`` comment every
+:data:`KEEPALIVE_S` until the reply (SSE comments are ignored by SSE clients);
+an error after that point is an SSE ``data: {"error": ...}`` event (its HTTP
+status as ``code``).  A call answered within :data:`KEEPALIVE_S` and every
+non-streamed call answer as before.  The call goes on if the client leaves
+(its resend gets the reply, :class:`~.core.GatewayConfig` ``replay_retries``).
 """
 
 from __future__ import annotations
 
 import copy
 import hmac
+import asyncio
 import ipaddress
 import json
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from contextvars import ContextVar
 from typing import Any
@@ -62,6 +91,11 @@ CURRENT_TRAJECTORY: ContextVar[str | None] = ContextVar("records_proxy_trajector
 Message = dict[str, Any]
 
 TOKEN_BYTES = 32
+# Request body limit of the model routes (module doc); about 4M tokens of history.
+MAX_REQUEST_BYTES = 64 * 1024**2
+_READ_CHUNK = 1 << 20
+KEEPALIVE_S = 30.0  # SSE comment interval of a long streamed call with compaction (module doc)
+FORGOTTEN_KEPT = 4096  # forgotten trajectory ids remembered to refuse their late requests
 LOOPBACK_PEERS: tuple[str, ...] = ("127.0.0.0/8", "::1/128")
 # A request that carries one of these came through a proxy or tunnel hop: its
 # socket peer is the hop, not the caller, so it never passes the control check.
@@ -70,6 +104,26 @@ FORWARDING_HEADERS = ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Rea
 
 class TrajectoryForbidden(GatewayError):
     """Unknown trajectory, wrong token or a control call from outside ``control_peers`` (HTTP 403)."""
+
+
+class RequestTooLarge(GatewayError):
+    """A request body over the model routes' limit (HTTP 413)."""
+
+
+async def read_json_body(request: Any, limit: int) -> Any:
+    """The request body as JSON, at most ``limit`` bytes (module doc: request size).
+
+    Reads the payload stream itself, so the limit holds however the app is
+    mounted; a declared length over the limit is refused before reading."""
+    if request.content_length is not None and request.content_length > limit:
+        raise RequestTooLarge(f"request body of {request.content_length} bytes exceeds {limit}")
+    chunks, size = [], 0
+    while chunk := await request.content.read(_READ_CHUNK):
+        size += len(chunk)
+        if size > limit:
+            raise RequestTooLarge(f"request body exceeds {limit} bytes")
+        chunks.append(chunk)
+    return json.loads(b"".join(chunks).decode(request.charset or "utf-8"))
 
 
 def chat_tools(entry: str, body: dict[str, Any]) -> list[Message]:
@@ -102,7 +156,12 @@ class RecordsProxy:
         self.gateway = Gateway(GatewayConfig(
             model=model, signed_sampling=dict(signed_sampling), max_chains=max_chains,
             keeps_history_reasoning=template.spec.keeps_history_reasoning,
-            harness_board=harness_board, member=member), self.backend)
+            harness_board=harness_board, member=member, replay_retries=compaction is not None,
+            session_compacted=None if compaction is None else self._session_compacted), self.backend)
+        self.max_request_bytes = MAX_REQUEST_BYTES
+        self.keepalive_s: float | None = None if compaction is None else KEEPALIVE_S
+        self._forgotten: OrderedDict[str, None] = OrderedDict()  # under _tokens_lock
+        self._calls: set[asyncio.Future[Any]] = set()  # keep-alive calls still running
         self._responses = 0
         self._tokens: dict[str, str] = {}
         self._tokens_lock = threading.Lock()  # open/forget run on several event loops
@@ -120,6 +179,7 @@ class RecordsProxy:
             if trajectory_id in self._tokens:
                 raise TrajectoryForbidden(f"trajectory {trajectory_id!r} is already open")
             self._tokens[trajectory_id] = token
+            self._forgotten.pop(trajectory_id, None)
         return trajectory_id
 
     def token(self, trajectory_id: str) -> str:
@@ -143,12 +203,19 @@ class RecordsProxy:
         return ok and expected is not None
 
     async def handle(self, entry: str, body: dict[str, Any], *, trajectory_id: str) -> dict[str, Any]:
+        with self._tokens_lock:
+            if trajectory_id in self._forgotten:  # its trial was detached or cancelled meanwhile
+                raise TrajectoryForbidden(f"trajectory {trajectory_id!r} was forgotten")
         self.backend.declare_tools(trajectory_id, chat_tools(entry, body))
         token = CURRENT_TRAJECTORY.set(trajectory_id)
         try:
             return await self.gateway.handle(entry, body, trajectory_id=trajectory_id)
         finally:
             CURRENT_TRAJECTORY.reset(token)
+
+    def _session_compacted(self, session_id: str) -> bool:
+        session = self.backend.sessions.get(session_id)
+        return session is not None and len(session.segments) > 1
 
     def records(self, trajectory_id: str) -> dict[str, Any]:
         out = self.backend.records(trajectory_id)
@@ -164,6 +231,10 @@ class RecordsProxy:
         self.backend.forget(trajectory_id)
         with self._tokens_lock:
             self._tokens.pop(trajectory_id, None)
+            self._forgotten[trajectory_id] = None
+            self._forgotten.move_to_end(trajectory_id)
+            while len(self._forgotten) > FORGOTTEN_KEPT:
+                self._forgotten.popitem(last=False)
 
     # ------------------------------------------------------------------ HTTP
     def app(self, *, public_url: str = "", control: bool = False,
@@ -198,6 +269,33 @@ class RecordsProxy:
             return web.json_response({"trajectory_id": trajectory_id,
                                       "base_url": f"{base}{self.path(trajectory_id)}/v1"})
 
+        def sse(entry: str, body: dict[str, Any], result: dict[str, Any]) -> bytes:
+            self._responses += 1
+            return _responses_sse(body, result, self._responses) if entry == "responses" else _chat_sse(result)
+
+        async def keepalive_stream(request: web.Request, entry: str, body: dict[str, Any],
+                                   call: "asyncio.Future[dict[str, Any]]", interval: float) -> web.StreamResponse:
+            """The 200 and SSE headers now, comments until the reply (module doc: keep-alive)."""
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+            try:
+                await response.prepare(request)
+                while not (await asyncio.wait({call}, timeout=interval))[0]:
+                    await response.write(b": keep-alive\n\n")
+                exc = call.exception()
+                if exc is None:
+                    payload = sse(entry, body, call.result())
+                else:
+                    status = _status(exc)
+                    if status is None:
+                        raise exc
+                    error = {"type": type(exc).__name__, "message": str(exc), "code": status}
+                    payload = b"data: " + json.dumps({"error": error}).encode() + b"\n\n"
+                await response.write(payload)
+                await response.write_eof()
+            except ConnectionError:  # the client left; the call goes on (its resend is replayed)
+                pass
+            return response
+
         def entry_route(entry: str) -> Any:
             async def route(request: web.Request) -> web.StreamResponse:
                 try:
@@ -205,24 +303,32 @@ class RecordsProxy:
                 except TrajectoryForbidden as exc:
                     return _error(403, exc)
                 try:
-                    body = await request.json()
+                    body = await read_json_body(request, self.max_request_bytes)
+                    if not self.authorized(trajectory_id, request.match_info["token"]):
+                        return _error(403, TrajectoryForbidden("forbidden"))  # forgotten while the body arrived
                     if not isinstance(body, dict):
                         raise UnsupportedShape(f"request body must be a JSON object, got {type(body).__name__}")
-                    result = await self.handle(entry, body, trajectory_id=trajectory_id)
-                except (UnsupportedShape, SamplingOverrideError, TemplateError, json.JSONDecodeError,
-                        UnicodeDecodeError) as exc:
-                    return _error(400, exc)
-                except AdmissionClosed as exc:
-                    return _error(503, exc)
-                except (TrajectoryInvalid, GatewayError) as exc:
-                    return _error(409, exc)
-                except SamplerEngineError as exc:  # upstream timeout / bad reply; nothing recorded, retryable
-                    return _error(502, exc)
+                    interval = self.keepalive_s if body.get("stream") else None
+                    if interval is None:
+                        result = await self.handle(entry, body, trajectory_id=trajectory_id)
+                    else:
+                        # a task of its own: the call goes on whatever happens to this handler
+                        call = asyncio.ensure_future(self.handle(entry, body, trajectory_id=trajectory_id))
+                        self._calls.add(call)
+                        call.add_done_callback(self._calls.discard)
+                        call.add_done_callback(lambda f: f.cancelled() or f.exception())  # a left client's error
+                        if not (await asyncio.wait({call}, timeout=interval))[0]:
+                            return await keepalive_stream(request, entry, body, call, interval)
+                        result = call.result()
+                except Exception as exc:  # noqa: BLE001 - mapped to its status, others raise
+                    status = _status(exc)
+                    if status is None:
+                        raise
+                    return _error(status, exc)
                 if not body.get("stream"):
                     return web.json_response(result)
-                self._responses += 1
-                payload = _responses_sse(body, result, self._responses) if entry == "responses" else _chat_sse(result)
-                return web.Response(body=payload, headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+                return web.Response(body=sse(entry, body, result),
+                                    headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
             return route
 
         async def records(request: web.Request) -> web.Response:
@@ -240,7 +346,7 @@ class RecordsProxy:
             self.close(trajectory_id)
             return web.json_response({"closed": True})
 
-        app = web.Application(client_max_size=64 * 1024**2)
+        app = web.Application(client_max_size=MAX_REQUEST_BYTES)
         app.router.add_post("/t/{tid}/{token}/v1/responses", entry_route("responses"))
         app.router.add_post("/t/{tid}/{token}/v1/chat/completions", entry_route("chat"))
         if control:
@@ -248,6 +354,24 @@ class RecordsProxy:
             app.router.add_get("/t/{tid}/{token}/records", records)
             app.router.add_post("/t/{tid}/{token}/close", close)
         return app
+
+
+def _status(exc: BaseException) -> int | None:
+    """HTTP status of a model-route failure (module doc); None: not a request failure (raise)."""
+    if isinstance(exc, TrajectoryForbidden):
+        return 403
+    if isinstance(exc, (UnsupportedShape, SamplingOverrideError, TemplateError, json.JSONDecodeError,
+                        UnicodeDecodeError)):
+        return 400
+    if isinstance(exc, RequestTooLarge):
+        return 413
+    if isinstance(exc, AdmissionClosed):
+        return 503
+    if isinstance(exc, (TrajectoryInvalid, GatewayError)):
+        return 409
+    if isinstance(exc, SamplerEngineError):  # upstream timeout / bad reply; nothing recorded, retryable
+        return 502
+    return None
 
 
 def _error(status: int, exc: Exception) -> Any:

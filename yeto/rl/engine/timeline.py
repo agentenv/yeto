@@ -15,9 +15,11 @@ Two rules from the acceptance text:
 
 from __future__ import annotations
 
-from collections import defaultdict
+import math
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 SPAN_KINDS = ("compute", "wait", "tool-wait", "transfer")
 
@@ -568,3 +570,340 @@ def load_windows(events: Iterable[Mapping[str, object]], window_s: float) -> lis
                 rollout_busy_fraction=_clip_union(roll, lo, hi) / window_s,
             ))
     return sorted(out, key=lambda w: (str(w.profile_hash), w.epoch, w.window_start))
+
+
+# -- CompactionRL segment metrics (``metadata.compaction``) --------------------
+# With context compaction on, one trial (trajectory) becomes ``num_segments``
+# buffer samples that share its reward; each carries ``metadata.compaction``
+# (schema 1: trajectory_id, segment_index, num_segments, context_budget,
+# summary_ok, kept_steps, segment_tokens, tokens_after; optional summary_tokens,
+# compactions, context_full). A sample without that key is one whole trial.
+# The same summary is read on the sampler (one round's written samples, under
+# ``rl_sampler_engine_round.agentic.compaction``) and on the trainer (one step's
+# trained Miles samples). Without any compaction data it returns None, so the
+# events and the payloads keep their field set.
+COMPACTION_KEY = "compaction"
+COMPACTION_STATS_SCHEMA = 1
+# Counts (summed across rounds by readers) and the ratios derived from them.
+COMPACTION_COUNT_KEYS = (
+    "trials", "samples", "compacted_trials", "compactions", "segment_samples", "summaries",
+    "summary_ok", "truncated_trials", "truncated_compacted_trials", "exhausted_trials",
+    "exhausted_truncated_trials", "context_full_trials", "trainable_tokens", "summary_tokens",
+    # gateway (records ``gateway`` snapshot): lost replies replayed; trials invalidated for a
+    # fork / history rewrite of a compacted session; written compacted + fork-lost trials
+    "retry_replays", "retry_replay_trials", "fork_lost_trials", "compaction_exposed_trials",
+)
+COMPACTION_RATIO_KEYS = (
+    "compacted_frac", "compactions_mean", "samples_per_trial", "segment_sample_frac",
+    "summary_ok_frac", "truncated_compacted_frac", "summary_token_frac", "fork_lost_frac",
+)
+FORK_LOST_MARK = "compaction_fork_lost"  # gateway invalidation reason prefix
+
+
+def _int_field(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _field(sample: Any, key: str) -> Any:
+    return sample.get(key) if isinstance(sample, Mapping) else getattr(sample, key, None)
+
+
+def _status_text(sample: Any) -> str:
+    value = _field(sample, "status")
+    value = getattr(value, "value", value)  # Miles Sample.Status
+    return str(value or "").lower()
+
+
+def _ratio(num: float | None, den: float | None) -> float | None:
+    return None if num is None or not den else round(num / den, 4)
+
+
+def derive_compaction_ratios(counts: Mapping[str, Any]) -> dict[str, float | None]:
+    """The ratios of :data:`COMPACTION_RATIO_KEYS` from the summed counts."""
+    return {
+        "compacted_frac": _ratio(counts.get("compacted_trials"), counts.get("trials")),
+        "compactions_mean": _ratio(counts.get("compactions"), counts.get("trials")),
+        "samples_per_trial": _ratio(counts.get("samples"), counts.get("trials")),
+        "segment_sample_frac": _ratio(counts.get("segment_samples"), counts.get("samples")),
+        "summary_ok_frac": _ratio(counts.get("summary_ok"), counts.get("summaries")),
+        "truncated_compacted_frac": _ratio(counts.get("truncated_compacted_trials"),
+                                           counts.get("compacted_trials")),
+        "summary_token_frac": _ratio(counts.get("summary_tokens"), counts.get("trainable_tokens")),
+        "fork_lost_frac": _ratio(counts.get("fork_lost_trials"), counts.get("compaction_exposed_trials")),
+    }
+
+
+# "0": a trial given up before it started (a drain's abandoned slots)
+SEGMENT_BUCKETS = ("0", "1", "2", "3", "4+", "unknown")
+
+
+def segment_bucket(num_segments: int | None) -> str:
+    """The trial-length bucket of a segment count (None: not known)."""
+    n = _int_field(num_segments)
+    if n is None or n < 0:
+        return "unknown"
+    return "4+" if n >= 4 else str(n)
+
+
+def live_segments(recorder: Any, trajectory_id: str) -> int | None:
+    """Segments the records proxy holds now for a trial still running (the most of
+    its backend sessions); None without a records backend or an open session.
+    Read on the recorder's loop thread, before the trial's session is closed."""
+    backend = getattr(getattr(recorder, "proxy", None), "backend", None)
+    sessions = getattr(backend, "sessions", None)
+    if not isinstance(sessions, Mapping):
+        return None
+    counts = [len(getattr(s, "segments", None) or ()) for s in list(sessions.values())
+              if getattr(s, "trajectory_id", None) == trajectory_id]
+    return max(counts) if counts else None
+
+
+def drained_fields(by_bucket: Mapping[str, int]) -> dict[str, Any]:
+    """``rl_agentic_drain`` fields of the trials a drain cut, by segment count."""
+    by = {b: int(by_bucket[b]) for b in SEGMENT_BUCKETS if by_bucket.get(b)}
+    return {"drained_by_segments": by,
+            "drained_compacted_trials": sum(n for b, n in by.items() if b in ("2", "3", "4+")),
+            "drained_uncompacted_trials": by.get("1", 0)}
+
+
+def trial_segments(result: Any) -> int | None:
+    """Segment count of a settled agentic trial (finished or lost): its
+    ``num_segments`` attribute, else its compaction ``parts`` (``FinishedSample``:
+    one per segment, empty for one stream), else the length of a list of
+    ``segments``, else 1 for one joined stream; None when unknown (a trial
+    cancelled without one)."""
+    n = _int_field(getattr(result, "num_segments", None))
+    if n is not None:
+        return n
+    parts = getattr(result, "parts", None)
+    if isinstance(parts, (list, tuple)) and parts:
+        return len(parts)
+    segments = getattr(result, "segments", None)
+    if isinstance(segments, (list, tuple)):
+        return len(segments) or None
+    return 1 if segments is not None else None
+
+
+def _reward(sample: Any) -> float | None:
+    value = _field(sample, "reward")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _mean4(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 4) if values else None
+
+
+class CompactionTally:
+    """Accumulates the light per-sample facts of compaction metrics (no token arrays kept).
+
+    ``add(samples, counters)``: written / trained samples (buffer sample dicts or
+    Miles ``Sample`` objects); ``counters``: optional records-proxy counters by
+    trajectory id (``RecordingBackend.counters``: ``compactions``, ``context_full``).
+    ``lose(result, reason)`` / ``drop(results, reason)``: trials lost before their
+    group was written, and kept trials of a group that was not written, bucketed by
+    segment count (``by_segments``: are long trials dropped more often?)."""
+
+    def __init__(self) -> None:
+        self._trials: dict[Any, dict[str, Any]] = {}
+        self._samples = 0
+        self._seen = False  # any sample carried metadata.compaction
+        self._fate: dict[str, dict[str, Counter]] = {}
+        self._rewards: list[float] = []  # per sample
+        self._xhw: dict[Any, list[tuple[Any, float, float]]] = {}  # group -> (trial, before, after)
+        self._fork_lost = 0
+
+    def _bucket(self, bucket: str) -> dict[str, Counter]:
+        return self._fate.setdefault(bucket, {"lost": Counter(), "dropped": Counter()})
+
+    def lose(self, result: Any, reason: str, num_segments: int | None = None) -> None:
+        n = trial_segments(result) if num_segments is None else num_segments
+        self._seen = self._seen or (n or 0) > 1
+        trajectory = getattr(result, "trajectory", None)
+        loss = getattr(result, "loss", None)
+        why = f"{getattr(trajectory, 'reason', '') or ''} {(loss or {}).get('error', '') if isinstance(loss, Mapping) else ''}"
+        if FORK_LOST_MARK in why:  # the gateway invalidated a fork of a compacted session
+            self._fork_lost += 1
+            self._seen = True
+            reason = FORK_LOST_MARK
+        self._bucket(segment_bucket(n))["lost"][str(reason)] += 1
+
+    def drop(self, results: Iterable[Any], reason: str) -> None:
+        for result in results:
+            n = trial_segments(result)
+            self._seen = self._seen or (n or 0) > 1
+            self._bucket(segment_bucket(n))["dropped"][str(reason)] += 1
+
+    def add(self, samples: Iterable[Any], counters: Mapping[str, Mapping[str, Any]] | None = None) -> None:
+        for sample in samples:
+            meta = _field(sample, "metadata")
+            meta = meta if isinstance(meta, Mapping) else {}
+            comp = meta.get(COMPACTION_KEY)
+            comp = comp if isinstance(comp, Mapping) else None
+            self._seen = self._seen or comp is not None
+            tid = (comp or {}).get("trajectory_id") or meta.get("trajectory_id")
+            key = ("t", str(tid)) if tid else ("i", _field(sample, "group_index"), _field(sample, "index"))
+            reward = _reward(sample)
+            trial = self._trials.setdefault(key, {
+                "segments": 0, "num_segments": 1, "last": -1, "status": "", "compactions": 0,
+                "summaries": 0, "summary_ok": 0, "trainable": 0, "summary_tokens": None,
+                "context_full": None, "reward": reward, "replays": None})
+            self._samples += 1
+            if reward is not None:
+                self._rewards.append(reward)
+            down = meta.get("yeto_xhw_downweight")
+            if isinstance(down, Mapping) and reward is not None and _reward(down) is not None:
+                self._xhw.setdefault(_field(sample, "group_index"), []).append((key, _reward(down), reward))
+            trial["segments"] += 1
+            mask = _field(sample, "loss_mask")
+            tokens = sum(1 for m in mask if m) if mask is not None else _int_field((comp or {}).get("segment_tokens"))
+            trial["trainable"] += tokens or 0
+            index = 0
+            if comp is not None:
+                index = _int_field(comp.get("segment_index")) or 0
+                trial["num_segments"] = max(trial["num_segments"], _int_field(comp.get("num_segments")) or 1)
+                if isinstance(comp.get("summary_ok"), bool):
+                    trial["summaries"] += 1
+                    trial["summary_ok"] += int(comp["summary_ok"])
+                n = _int_field(comp.get("summary_tokens"))
+                if n is not None:
+                    trial["summary_tokens"] = (trial["summary_tokens"] or 0) + n
+                n = _int_field(comp.get("compactions"))
+                if n is not None:
+                    trial["compactions"] = max(trial["compactions"], n)
+                if isinstance(comp.get("context_full"), (bool, int)):
+                    trial["context_full"] = bool(trial["context_full"]) or bool(comp["context_full"])
+                n = _int_field(comp.get("retry_replays"))
+                if n is not None:  # one trial's gateway count, carried by each of its segments
+                    trial["replays"] = max(trial["replays"] or 0, n)
+            if index >= trial["last"]:  # the last segment decides the trial's status
+                trial["last"], trial["status"] = index, _status_text(sample)
+            counted = (counters or {}).get(str(tid)) if tid else None
+            if counted:
+                trial["compactions"] = max(trial["compactions"], _int_field(counted.get("compactions")) or 0)
+                if counted.get("context_full") is not None:
+                    trial["context_full"] = bool(trial["context_full"]) or bool(counted.get("context_full"))
+                if _int_field(counted.get("retry_replays")) is not None:
+                    trial["replays"] = max(trial["replays"] or 0, counted["retry_replays"])
+                self._seen = self._seen or bool(counted.get("compactions"))
+
+    def _xhw_fields(self) -> dict[str, Any]:
+        """xhw_guard downweights rewards around the group's *sample* mean: with
+        segments the group's trial mean moves; ``xhw_trial_mean_shift`` is the mean
+        |trial mean after - before| over the downweighted groups (0 without segments)."""
+        if not self._xhw:
+            return {}
+        shifts = []
+        for rows in self._xhw.values():
+            before: dict[Any, float] = {}
+            after: dict[Any, float] = {}
+            for trial, b, a in rows:
+                before.setdefault(trial, b)
+                after.setdefault(trial, a)
+            shifts.append(abs(sum(after.values()) / len(after) - sum(before.values()) / len(before)))
+        return {"xhw_downweighted_groups": len(self._xhw),
+                "xhw_downweighted_samples": sum(len(rows) for rows in self._xhw.values()),
+                "xhw_downweighted_trials": sum(len({t for t, _, _ in rows}) for rows in self._xhw.values()),
+                "xhw_trial_mean_shift": round(sum(shifts) / len(shifts), 6)}
+
+    def _by_segments(self, written: Mapping[str, int]) -> dict[str, dict[str, Any]]:
+        out = {}
+        for bucket in SEGMENT_BUCKETS:
+            fate = self._fate.get(bucket, {"lost": Counter(), "dropped": Counter()})
+            n_written, n_lost, n_dropped = written.get(bucket, 0), sum(fate["lost"].values()), \
+                sum(fate["dropped"].values())
+            total = n_written + n_lost + n_dropped
+            if total:
+                out[bucket] = {"written": n_written, "lost": dict(sorted(fate["lost"].items())),
+                               "dropped": dict(sorted(fate["dropped"].items())),
+                               "not_written_frac": round((n_lost + n_dropped) / total, 4)}
+        return out
+
+    def summary(self, *, enabled: bool = False, max_compactions: int | None = None) -> dict[str, Any] | None:
+        """The metrics (counts, ratios, ``segments_hist``, ``by_segments``); None
+        without any trial, or when compaction is off (``enabled`` False) and no
+        sample or settled trial carried compaction data."""
+        if not (self._trials or self._fate) or not (self._seen or enabled):
+            return None
+        counts = dict.fromkeys(COMPACTION_COUNT_KEYS, 0)
+        hist: dict[int, int] = {}
+        written: dict[str, int] = {}
+        summary_tokens = full = replays = None
+        trial_rewards: list[float] = []
+        trial_tokens: list[float] = []
+        for trial in self._trials.values():
+            compactions = max(trial["compactions"], trial["num_segments"] - 1)
+            compacted = compactions > 0
+            truncated = trial["status"] == "truncated"
+            exhausted = max_compactions is not None and compactions >= int(max_compactions)
+            hist[trial["num_segments"]] = hist.get(trial["num_segments"], 0) + 1
+            bucket = segment_bucket(trial["num_segments"])
+            written[bucket] = written.get(bucket, 0) + 1
+            counts["trials"] += 1
+            counts["compacted_trials"] += int(compacted)
+            counts["compactions"] += compactions
+            counts["segment_samples"] += trial["segments"] if trial["num_segments"] > 1 else 0
+            counts["summaries"] += trial["summaries"]
+            counts["summary_ok"] += trial["summary_ok"]
+            counts["truncated_trials"] += int(truncated)
+            counts["truncated_compacted_trials"] += int(truncated and compacted)
+            counts["exhausted_trials"] += int(exhausted)
+            counts["exhausted_truncated_trials"] += int(exhausted and truncated)
+            counts["trainable_tokens"] += trial["trainable"]
+            trial_tokens.append(float(trial["trainable"]))
+            if trial["reward"] is not None:
+                trial_rewards.append(trial["reward"])
+            if trial["summary_tokens"] is not None:
+                summary_tokens = (summary_tokens or 0) + trial["summary_tokens"]
+            if trial["context_full"] is not None:
+                full = (full or 0) + int(trial["context_full"])
+            if trial["replays"] is not None:
+                replays = replays or [0, 0]
+                replays[0] += trial["replays"]
+                replays[1] += int(trial["replays"] > 0)
+        counts["samples"] = self._samples
+        counts["summary_tokens"] = summary_tokens  # None: no sample reported its summary length
+        counts["context_full_trials"] = full
+        counts["retry_replays"], counts["retry_replay_trials"] = replays or (None, None)  # None: not reported
+        counts["fork_lost_trials"] = self._fork_lost
+        counts["compaction_exposed_trials"] = counts["compacted_trials"] + self._fork_lost
+        if max_compactions is None:
+            counts["exhausted_trials"] = counts["exhausted_truncated_trials"] = None
+        maxes = [max(t["compactions"], t["num_segments"] - 1) for t in self._trials.values()]
+        return {"schema": COMPACTION_STATS_SCHEMA, **counts, **derive_compaction_ratios(counts),
+                "compactions_max": max(maxes) if maxes else None,
+                "segments_hist": {str(k): hist[k] for k in sorted(hist)},
+                "max_compactions": None if max_compactions is None else int(max_compactions),
+                # per trial (the GRPO unit) and per segment sample: they differ once trials split
+                "reward_mean_trial": _mean4(trial_rewards), "reward_mean_segment": _mean4(self._rewards),
+                "policy_tokens_mean_trial": _mean4(trial_tokens),
+                "policy_tokens_mean_segment": _ratio(counts["trainable_tokens"], self._samples),
+                "by_segments": self._by_segments(written), **self._xhw_fields()}
+
+
+def compaction_stats(samples: Iterable[Any], *, counters: Mapping[str, Mapping[str, Any]] | None = None,
+                     enabled: bool = False, max_compactions: int | None = None) -> dict[str, Any] | None:
+    """:class:`CompactionTally` over ``samples`` in one call (the trainer's step batch)."""
+    tally = CompactionTally()
+    tally.add(samples, counters)
+    return tally.summary(enabled=enabled, max_compactions=max_compactions)
+
+
+def compaction_config(recorder: Any) -> Any:
+    """The records proxy's ``CompactionConfig`` behind an agentic recorder (None: off)."""
+    backend = getattr(getattr(recorder, "proxy", None), "backend", None)
+    return getattr(backend, "compaction", None)
+
+
+def compaction_log_line(stats: Mapping[str, Any]) -> str:
+    """One log line of :func:`compaction_stats` output."""
+    def pct(key: str) -> str:
+        value = stats.get(key)
+        return "n/a" if value is None else f"{100 * value:.1f}%"
+
+    return (f"compaction: trials={stats.get('trials')} samples={stats.get('samples')} "
+            f"compacted={stats.get('compacted_trials')} ({pct('compacted_frac')}) "
+            f"compactions/trial={stats.get('compactions_mean')} segments={stats.get('segments_hist')} "
+            f"summary_ok={pct('summary_ok_frac')} truncated_after_compaction={stats.get('truncated_compacted_trials')} "
+            f"({pct('truncated_compacted_frac')}) summary_tokens={pct('summary_token_frac')}")
