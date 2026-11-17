@@ -100,8 +100,9 @@ def _take_in_time(reader, *args, timeout_s: float = 30.0, **kw):
 # ---------------------------------------------------------------- the setting
 def test_the_budget_setting():
     env = br.MAX_INFLIGHT_BYTES_ENV
-    assert br.inflight_bytes_limit({}) == br.DEFAULT_MAX_INFLIGHT_BYTES == 64 << 30
+    assert br.inflight_bytes_limit({}) is None and br.DEFAULT_MAX_INFLIGHT_BYTES == 0  # off: the reader of main
     assert br.inflight_bytes_limit({env: "0"}) is None  # no limit: as before the budget
+    assert br.RECOMMENDED_262K_INFLIGHT_BYTES == 64 << 30
     assert br.inflight_bytes_limit({env: "1000"}) == 1000
     assert br.inflight_bytes_limit({env: "64GiB"}) == 64 << 30
     assert br.inflight_bytes_limit({env: "512 MiB"}) == 512 << 20
@@ -337,3 +338,119 @@ def test_a_damaged_v2_payload_decoded_in_a_read_thread_is_passed_over(tmp_path, 
     groups, report = _take_in_time(reader, 0, 2, current_version=1)
     assert [pos for pos, _ in groups] == [0, 2] and report.damaged_payload_groups == 1
     assert reader.budget.used == 0
+
+
+
+# ---------------------------------------------------------------- no deadlock behind the read-ahead (R2 F2)
+def _settled_prefetch(reader) -> None:
+    deadline = time.monotonic() + 10
+    while reader._prefetcher is not None and reader._prefetcher.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def _unblock(reader) -> None:
+    """Let a hung take end so the interpreter can exit (pool workers are joined at exit)."""
+    with reader.budget._cond:
+        reader.budget.limit = None
+        reader.budget._cond.notify_all()
+
+
+def _take_or_unblock(reader, *args, **kw):
+    try:
+        return _take_in_time(reader, *args, timeout_s=15.0, **kw)
+    except AssertionError:
+        _unblock(reader)
+        raise
+
+
+def test_a_take_read_after_a_failed_read_ahead_does_not_wait_behind_the_full_budget(tmp_path):
+    """A read ahead fails once (a store hiccup), the read-ahead then fills the budget with
+    the groups after it: the take reads the failed group itself, before the groups whose
+    read-ahead holds the room."""
+    size = _filled(tmp_path, 4)
+    reader, buffer = _reader(tmp_path, budget=3 * size, prefetch=True)
+    reader.wait_s, reader.poll_s = 30.0, 0.05
+    first, _ = _take_in_time(reader, 0, 4, current_version=1)
+    assert [p for p, _ in first] == [0, 1, 2, 3]
+    ref = "payloads/s0-g4.bin"
+    buffer.fail = {ref}
+    _filled(tmp_path, 1, version=1, start=4)
+    deadline = time.monotonic() + 10
+    while not (ref in reader._reads and reader._reads[ref].done()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    buffer.fail = set()
+    _filled(tmp_path, 3, version=1, start=5)  # the read-ahead fills the budget
+    _settled_prefetch(reader)
+    assert reader.budget.used + size > reader.budget.limit  # the failed group's read finds no room
+    groups, report = _take_or_unblock(reader, 1, 4, current_version=1)
+    assert [p for p, _ in groups] == [4, 5, 6, 7] and report.prefetched >= 2
+    assert reader.budget.used == 0 and reader.budget.urged >= 1
+
+
+def test_a_take_read_of_a_group_the_read_ahead_passed_over_does_not_wait_behind_it(tmp_path):
+    """The read-ahead's floor is this take's + 1. A basis version that did not move
+    between two takes (no new publication) leaves a group at the old floor to the
+    take, ahead of the read-ahead groups that fill the budget."""
+    size = _filled(tmp_path, 4, version=5)
+    reader, _ = _reader(tmp_path, budget=3 * size, prefetch=True)  # max_policy_age=4
+    reader.wait_s, reader.poll_s = 30.0, 0.05
+    _take_in_time(reader, 0, 4, current_version=5)  # floor 1, read-ahead floor 2
+    _filled(tmp_path, 1, version=1, start=4)  # at the floor, still in the window
+    _filled(tmp_path, 3, version=5, start=5)
+    _settled_prefetch(reader)
+    assert "payloads/s0-g4.bin" not in reader._reads and len(reader._reads) >= 2
+    assert reader.budget.used + size > reader.budget.limit  # the passed-over group's read finds no room
+    groups, _ = _take_or_unblock(reader, 1, 4, current_version=5)
+    assert [p for p, _ in groups] == [4, 5, 6, 7] and reader.budget.used == 0
+
+
+def test_a_deferred_group_judged_again_does_not_wait_behind_the_read_ahead(tmp_path):
+    """A group whose lease the last take could not read waits for the next take; that
+    take reads it first, before the groups the read-ahead holds the room for."""
+    from yeto.rl.engine.incarnation_lease import LeaseUnknown
+
+    class Gate:
+        def __init__(self) -> None:
+            self.unreadable: set[int] = set()
+
+        def verdict(self, entry, position):
+            if position in self.unreadable:
+                raise LeaseUnknown("lease unreadable")
+            return None
+
+    size = _filled(tmp_path, 7)
+    gate = Gate()
+    reader, _ = _reader(tmp_path, budget=int(2.5 * size), prefetch=True, group_size=4, incarnation_gate=gate,
+                        one_group_per_task=False)
+    reader.wait_s, reader.poll_s = 30.0, 0.05
+    gate.unreadable = {3}
+    first, report = _take_in_time(reader, 0, 3, current_version=1)  # 3 groups of 2: the fill defers 3
+    assert [p for p, _ in first] == [0, 1, 2] and report.end == 3 and [p for p, _ in reader._deferred] == [3]
+    gate.unreadable = set()
+    _settled_prefetch(reader)
+    assert sorted(reader._reads) == ["payloads/s0-g4.bin", "payloads/s0-g5.bin"]
+    assert reader.budget.used + size > reader.budget.limit
+    groups, _ = _take_or_unblock(reader, 1, 3, current_version=1)
+    assert [p for p, _ in groups][:3] == [3, 4, 5] and reader.budget.used == 0
+
+
+def test_byte_budget_urge_and_abandon():
+    budget = br.ByteBudget(10)
+    held = budget.ticket()
+    assert budget.acquire(held, 10)
+    late, early = budget.ticket(), budget.ticket()
+    out = {}
+    threads = [threading.Thread(target=lambda t=t, k=k: out.__setitem__(k, budget.acquire(t, 5)), daemon=True)
+               for k, t in (("late", late), ("early", early))]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    assert out == {}  # no room
+    budget.urge(early)  # the take waits for it: past its turn and the room
+    threads[1].join(5)
+    assert out == {"early": True} and budget.used == 15 and budget.urged == 1
+    budget.abandon(late)
+    threads[0].join(5)
+    assert out["late"] is False and budget.used == 15  # abandoned: no room taken
+    budget.release(15)
+    assert budget.try_acquire(1)  # every ticket took its turn
