@@ -504,13 +504,21 @@ def _buffer_fill(batch: Any) -> dict[str, int]:
             if (value := getattr(batch, key, None)) is not None}
 
 
+def _group_trials(group: Any) -> int:
+    """Trials of one trained group: its distinct sample ids. The segments of a
+    compacted trial (CompactionRL) share the trial's sample index; without
+    compaction every sample is one trial and this is ``len(sample_ids)``."""
+    return len(set(group.sample_ids))
+
+
 def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
-    total = sum(len(g.sample_ids) for g in batch.groups)
+    """Reward mean / std over the batch's trials (groups weighted by their trial count)."""
+    total = sum(_group_trials(g) for g in batch.groups)
     if total == 0:
         return 0.0, 0.0
-    mean = sum(g.reward_mean * len(g.sample_ids) for g in batch.groups) / total
+    mean = sum(g.reward_mean * _group_trials(g) for g in batch.groups) / total
     second = (
-        sum((g.reward_std**2 + g.reward_mean**2) * len(g.sample_ids) for g in batch.groups)
+        sum((g.reward_std**2 + g.reward_mean**2) * _group_trials(g) for g in batch.groups)
         / total
     )
     return mean, math.sqrt(max(0.0, second - mean * mean))
@@ -1689,7 +1697,7 @@ class IslandDriver:
             active_groups=groups,
             completed_groups=groups,
             cancelled_groups=int(batch.aborted),
-            completed_trajectories=sum(len(g.sample_ids) for g in batch.groups),
+            completed_trajectories=sum(_group_trials(g) for g in batch.groups),
             action_tokens=sum(int(g.token_count) for g in batch.groups),
             tool_wait_seconds=float(getattr(batch, "tool_wait_seconds", None) or 0.0),
             group_p50_seconds=0.0,

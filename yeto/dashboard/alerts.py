@@ -48,6 +48,23 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # SFT island status: "stopped" after no step for factor x step time p50 + slack
     "sft_stop_factor": 1.5,
     "sft_stop_slack_s": 300.0,
+    # CompactionRL (sampler rounds' agentic.compaction), over each sampler's last
+    # compaction_window_rounds rounds that carry it, once it has compaction_min_trials
+    # summaries / compacted trials: summary_ok share below warn / severe; share of the
+    # compacted trials truncated after compacting above warn; share of trials that
+    # compacted at all above info (the context budget is small for the tasks)
+    "compaction_window_rounds": 5,
+    "compaction_min_trials": 5,
+    "compaction_summary_ok_warn": 0.9,
+    "compaction_summary_ok_severe": 0.5,
+    "compaction_truncated_warn": 0.2,
+    "compaction_frac_info": 0.5,
+    # share of multi-segment trials not written (lost: drain timeout / other version /
+    # aborted; dropped: group not written) minus the share of one-segment trials
+    "compaction_long_loss_gap": 0.2,
+    # trials the gateway invalidated for a fork / history rewrite of a compacted session
+    # (compaction_fork_lost), as a share of the compacted trials (written + fork-lost)
+    "compaction_fork_lost_warn": 0.05,
 }
 
 
@@ -251,11 +268,67 @@ def source_lost(cards: list[dict], torn_down: bool = False) -> list[dict]:
     # an island that ended (or a run torn down): its tape follow ending is expected
 
 
+def compaction(reducer, th: dict) -> list[dict]:
+    from .async_rl import _row_order, compaction_total
+
+    out = []
+    k, least = int(th["compaction_window_rounds"]), th["compaction_min_trials"]
+    state = getattr(reducer, "async_", None)
+    for iid, s in sorted((state.sampler if state is not None else {}).items()):
+        rows = [r for r in sorted(s["rounds"].values(), key=_row_order) if r.get("compaction")][-k:]
+        c = compaction_total(rows)
+        if c is None:
+            continue
+        last = rows[-1].get("rollout_id")
+        ok, n = c.get("summary_ok_frac"), c.get("summaries") or 0
+        if ok is not None and n >= least and ok < th["compaction_summary_ok_warn"]:
+            sev = 0 if ok < th["compaction_summary_ok_severe"] else 1
+            out.append(_alert(sev, "compaction_summary", f"sampler {iid} compaction summaries failing",
+                              f"summary_ok {ok:.0%} of {n:.0f} summaries in the last {len(rows)} rounds "
+                              f"(threshold {th['compaction_summary_ok_warn']:.0%}): the policy's summaries "
+                              "miss the <summary> block, the next segment resumes from raw text", island=iid,
+                              round=last))
+        tr, nc = c.get("truncated_compacted_frac"), c.get("compacted_trials") or 0
+        if tr is not None and nc >= least and tr > th["compaction_truncated_warn"]:
+            out.append(_alert(1, "compaction_truncated", f"sampler {iid} trials truncated after compaction",
+                              f"{tr:.0%} of {nc:.0f} compacted trials in the last {len(rows)} rounds ended truncated "
+                              f"(threshold {th['compaction_truncated_warn']:.0%}; compactions used up or "
+                              "max_response_len reached)", island=iid, round=last))
+        fate = c.get("by_segments") or {}
+        long_ = [v for b, v in fate.items() if b in ("2", "3", "4+")]
+        n_long = sum(v["written"] + sum(v["lost"].values()) + sum(v["dropped"].values()) for v in long_)
+        if n_long >= least:
+            bad = sum(sum(v["lost"].values()) + sum(v["dropped"].values()) for v in long_)
+            short = (fate.get("1") or {}).get("not_written_frac") or 0.0
+            gap = bad / n_long - short
+            if gap > th["compaction_long_loss_gap"]:
+                out.append(_alert(1, "compaction_long_lost", f"sampler {iid} loses long (compacted) trials",
+                                  f"{bad / n_long:.0%} of {n_long:.0f} multi-segment trials not written vs "
+                                  f"{short:.0%} of one-segment trials in the last {len(rows)} rounds "
+                                  f"(gap threshold {th['compaction_long_loss_gap']:.0%}): the GRPO baseline leans "
+                                  "to short trials; raise drain_timeout_s / reload_max_defer_s / max_policy_age "
+                                  "or use a live engine", island=iid, round=last))
+        fl, ne = c.get("fork_lost_frac"), c.get("compaction_exposed_trials") or 0
+        if fl is not None and ne >= least and fl > th["compaction_fork_lost_warn"]:
+            out.append(_alert(1, "compaction_fork_lost", f"sampler {iid} loses trials to forks of compacted sessions",
+                              f"{fl:.0%} of {ne:.0f} compacted trials in the last {len(rows)} rounds were invalidated "
+                              f"(compaction_fork_lost; threshold {th['compaction_fork_lost_warn']:.0%}): the harness "
+                              "retried or rewrote history after a compaction; check its request timeout and "
+                              "retry_replays", island=iid, round=last))
+        cf, nt = c.get("compacted_frac"), c.get("trials") or 0
+        if cf is not None and nt >= least and cf > th["compaction_frac_info"]:
+            out.append(_alert(2, "compaction_frac", f"sampler {iid} most trials compact",
+                              f"{cf:.0%} of {nt:.0f} trials compacted in the last {len(rows)} rounds, "
+                              f"{c.get('compactions_mean') or 0:.2f} compactions per trial "
+                              f"(threshold {th['compaction_frac_info']:.0%}), info only", island=iid, round=last))
+    return out
+
+
 def evaluate(reducer, *, now: float, rounds: list[dict], cost: dict, cards: list[dict]) -> list[dict]:
     th = reducer.thresholds
     alerts = (recovery(reducer) + heartbeat(cards, th) + consecutive_missed(rounds, th)
               + quorum(rounds, th) + grad_norm(reducer, th) + clip_kl(reducer, th)
-              + budget(cost, th)
+              + budget(cost, th) + compaction(reducer, th)
               + source_lost(cards, torn_down=(reducer.operator_stop() or {}).get("cause") == "teardown"))
     alerts.sort(key=lambda a: a["sev"])
     for i, a in enumerate(alerts):

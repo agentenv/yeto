@@ -104,6 +104,8 @@ from .engine_sampler import (DEFAULT_RELOAD_MAX_DEFER_S, ROUND_EVENT, EngineRoun
 from .sample_buffer import ShardFenced
 from .policy_versions import engine_weight_version
 from .sampler_engine import FINISH_LENGTH, FINISH_STOP, SamplerEngineError, updates_during_generation
+from .timeline import (COMPACTION_KEY, CompactionTally, compaction_config, compaction_log_line, drained_fields,
+                       live_segments, segment_bucket)
 
 logger = logging.getLogger(__name__)
 AGENT_TASK_KEY = "agent_task"
@@ -308,6 +310,7 @@ class _Tally:
     lengths: list[int] = dataclasses.field(default_factory=list)
     retried: Counter[str] = dataclasses.field(default_factory=Counter)  # infra retries
     refilled: int = 0  # groups written whole only thanks to a retry
+    compaction: CompactionTally = dataclasses.field(default_factory=CompactionTally)  # written samples
 
 
 class AgenticRound(EngineRound):
@@ -411,6 +414,8 @@ class AgenticRound(EngineRound):
         self._drain_cut_at: float | None = None  # when the drain's timeout cancelled its trials
         self._drain_abandoned = 0
         self._drain_detached = 0
+        self._drain_by_segments: Counter[str] = Counter()  # metrics: the cut trials by segment count
+        self._drained_segments: dict[str, int | None] = {}  # metrics: session -> segments when cut
         self._drain_id = 0
         self._drain_quiet_at: float | None = None  # when the drain's last trial ended
         self._drain_timer: asyncio.TimerHandle | None = None  # loop thread
@@ -634,17 +639,26 @@ class AgenticRound(EngineRound):
             rest = len(slots)
             for j in slots:
                 group.results[j] = _Lost(LOST_DRAIN)
+                self._drained_segments[group.sessions[j]] = 0  # metrics: never started
             group.started = len(group.sessions)
             group.retry_slots.clear()
             group.abandoned = True
             abandoned += rest
             self._ended(group, rest)
         for task, (group, _j) in list(self._running.items()):
+            self._note_drained(group.sessions[_j])  # metrics only: its segments before the cancel
             group.abandoned = True  # cancel() is a no-op on a task whose callback is pending
             task.cancel()
             abandoned += 1
         self._wake.set()
         return abandoned
+
+    def _note_drained(self, session: str) -> None:
+        """Metrics: the segment count of a trial a drain cuts, read while its records
+        session is still open (``rl_agentic_drain`` and the round's ``by_segments``)."""
+        n = live_segments(self.recorder, session)
+        self._drained_segments[session] = n
+        self._drain_by_segments[segment_bucket(n)] += 1
 
     def _detach_running(self) -> int:
         """The cancelled trials of a timed-out drain that still run after
@@ -808,6 +822,7 @@ class AgenticRound(EngineRound):
         self._drain_cut_at = None
         self._drain_abandoned = 0
         self._drain_detached = 0
+        self._drain_by_segments = Counter()
         self._drain_id += 1
         self._drain_quiet_at = None
         self._paused = True
@@ -836,7 +851,10 @@ class AgenticRound(EngineRound):
                   detached_trials=int(self._drain_detached),
                   # until no trial ran; the rest of waited_s is the write of the groups that ended
                   trials_ended_s=round(max(0.0, quiet - started), 3),
-                  detached_in_flight=len(self._detached))
+                  detached_in_flight=len(self._detached),
+                  # compaction on: the cut trials by segment count (absent otherwise: old field set)
+                  **(drained_fields(self._drain_by_segments) if compaction_config(self.recorder) is not None
+                     else {}))
 
     def _settle(self, group: _Group, tally: _Tally) -> None:
         """Filter, score and write one group whose trials all ended (module doc)."""
@@ -847,11 +865,14 @@ class AgenticRound(EngineRound):
         kept: list[tuple[Any, int, int]] = []  # (finished, behavior version, newest version)
         alignment_reports = rebased = 0  # rl_agentic_trial_lost events / kept trials whose stream restarted
         for j, finished in enumerate(group.results):
+            drained = self._drained_segments.pop(group.sessions[j], None)  # metrics: segments when a drain cut it
             if isinstance(finished, _Lost):
                 lost[finished.reason] += 1
+                tally.compaction.lose(finished, finished.reason, drained)
                 continue
             if finished.segments is None or finished.trajectory.outcome is Outcome.ABORTED:
                 lost[str(finished.trajectory.reason).split(":", 1)[0] or "aborted"] += 1
+                tally.compaction.lose(finished, str(finished.trajectory.reason).split(":", 1)[0] or "aborted")
                 if getattr(finished, "loss", None) is not None:  # token_alignment: what broke, for the tape
                     alignment_reports += 1
                     self.emit(LOST_EVENT, rollout_id=group.rollout_id, prompt_id=group.item.prompt_id,
@@ -864,10 +885,12 @@ class AgenticRound(EngineRound):
                 seen = [v for v in (start, *turns) if v is not None]
                 if not seen:  # no version is known for any of its tokens
                     lost[LOST_VERSION] += 1
+                    tally.compaction.lose(finished, LOST_VERSION)
                     continue
                 kept.append((finished, min(seen), max(seen)))
             elif start != group.version or any(v != group.version for v in turns):
                 lost[LOST_VERSION] += 1
+                tally.compaction.lose(finished, LOST_VERSION)
             else:
                 kept.append((finished, int(group.version), int(group.version)))
         self._unsettled.remove(group)
@@ -917,6 +940,9 @@ class AgenticRound(EngineRound):
                 if group.retry_reasons and len(kept) == n:
                     tally.refilled += 1
                 tally.samples += len(samples)
+                tally.compaction.add(samples)
+        if reason is not None:  # kept trials of a group not written, by segment count
+            tally.compaction.drop([finished for finished, _, _ in kept], reason)
         written = reason is None and group.spot is not None
         # below_min_samples: the trials were lost to infrastructure (ABORTED, version, drain), not
         # scored wrong (a 0 reward is kept): the task goes out again, counted toward the redo limit
@@ -972,6 +998,15 @@ class AgenticRound(EngineRound):
                    "infra_retries_total": dict(sorted(self.retries_total.items())),
                    "infra_retries_exhausted_total": self.retries_exhausted,
                    "session_collisions_total": self.session_collisions}
+        cfg = compaction_config(self.recorder)
+        compaction = tally.compaction.summary(enabled=cfg is not None,
+                                              max_compactions=getattr(cfg, "max_compactions", None))
+        if compaction is not None:  # absent without compaction data (old field set)
+            agentic[COMPACTION_KEY] = compaction
+            # one GRPO unit is a trial: with segments the per-sample means weight long trials more
+            agentic["reward_mean"] = compaction["reward_mean_trial"]
+            agentic["policy_tokens_mean"] = compaction["policy_tokens_mean_trial"]
+            logger.info("agentic round %s %s", rollout_id, compaction_log_line(compaction))
         self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=self.engine.served_version(),
                   groups=tally.written, samples=tally.samples, response_tokens=tally.tokens,
                   finish=dict(sorted(tally.finish.items())), source=self.provenance.key(),
