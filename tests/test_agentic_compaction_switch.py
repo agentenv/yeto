@@ -493,9 +493,6 @@ def test_closing_the_island_during_a_summary_turn_forgets_the_trial(tmp_path, gl
     assert not _events(events, GROUP_EVENT)  # never settled: its round is not in the buffer
 
 
-@pytest.mark.xfail(strict=True, reason="C8: RecordsProxy.handle does not check that the trajectory is still "
-                   "open; a request that passed the route's token check before its trial was forgotten (while it "
-                   "reads its body) recreates the trajectory's state and samples")
 def test_a_request_for_a_forgotten_trajectory_recreates_no_state(glm, budget):
     world = _world(glm, budget, Model(glm))
     world.proxy.open("t")
