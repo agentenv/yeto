@@ -345,6 +345,9 @@ def test_a_compacted_trial_writes_one_sample_per_segment_into_its_group(tmp_path
 
 
 def test_the_context_full_after_the_last_compaction_truncates_only_the_last_segment(tmp_path, glm):
+    """After its last compaction the trial runs until its context reaches
+    context_budget (not the engine's larger max_model_len): the last segment
+    ends there, truncated."""
     engine = _engine(glm, max_model_len=900)
     cfg = _cfg(max_compactions=1)
     recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg), allow_compaction=True)
@@ -356,18 +359,20 @@ def test_the_context_full_after_the_last_compaction_truncates_only_the_last_segm
     assert trial[-1]["metadata"]["finish_reason"] == "length"
     assert {s["reward"] for s in trial} == {0.0}  # the policy filled its context: a policy limit, trained as 0
     assert {s["metadata"]["agent"]["yeto_agent_outcome"] for s in trial} == {Outcome.POLICY_LIMIT.value}
-    assert len(trial[-1]["tokens"]) + 256 > 900  # the next prompt left no room
+    # the next prompt (this stream + a ~140-token tool output) reached context_budget, far below max_model_len
+    assert cfg.context_budget - 200 < len(trial[-1]["tokens"]) <= cfg.context_budget < 900
 
 
 def test_no_room_for_the_summary_request_ends_the_trial_truncated_even_with_one_segment(tmp_path, glm):
     """The third request triggers compaction (stream ~444 > budget 350), but the
-    summary request (~590 tokens) does not fit max_model_len 500: the trial
-    ends there, one segment, truncated, reward 0, counted as compaction_no_room."""
+    summary request does not fit max_model_len 420, not even with the newest tool
+    output left out of it (~450 tokens): the trial ends there, one segment,
+    truncated, reward 0, counted as compaction_no_room."""
     from yeto.rl.engine import agentic_round
     from yeto.rl.harness.gateway import records
 
     assert agentic_round.COMPACTION_NO_ROOM == records.COMPACTION_NO_ROOM
-    engine = _engine(glm, max_model_len=500)
+    engine = _engine(glm, max_model_len=420)  # 380-450 all end this way on GLM-4.7-Flash
     recorder = ProxyTokenRecorder(_proxy(engine, glm, _cfg()), allow_compaction=True)
     samples, events = _round(tmp_path, recorder, engine, Agent(6), n=1)
     (sample,) = samples
@@ -379,8 +384,13 @@ def test_no_room_for_the_summary_request_ends_the_trial_truncated_even_with_one_
 
 
 def test_no_room_for_a_later_summary_truncates_the_last_segment(tmp_path, glm):
-    """Compacted once; the next summary request does not fit: the last segment is truncated."""
-    engine = _engine(glm, max_model_len=600)
+    """Compacted once; the next summary request does not fit: the last segment is truncated.
+
+    The first summary request fits with the newest tool output left out of it
+    (~510 tokens); the second segment's one is longer (it starts from the resume
+    message and the kept step, ~520): max_model_len 475-490 on GLM-4.7-Flash
+    lets the first through and not the second."""
+    engine = _engine(glm, max_model_len=485)
     cfg = _cfg()
     recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg), allow_compaction=True)
     samples, events = _round(tmp_path, recorder, engine, Agent(8), n=1)
@@ -393,9 +403,12 @@ def test_no_room_for_a_later_summary_truncates_the_last_segment(tmp_path, glm):
 
 
 def test_r3_rows_and_topk_are_each_segments_own(tmp_path, glm):
-    """The R3 window of a compacted segment starts at its own first prompt: a
-    segment whose prompt is longer than the trial's first one keeps the rows
-    it needs (the trial's first prompt + max_response_len would cut them)."""
+    """Each segment's R3 rows and top-K are its own: the rows of its last call
+    over its own tokens (its R3 window starts at its own first prompt), the
+    top-K of its own response. With segments bounded by context_budget a later
+    segment no longer outgrows the trial's first prompt + max_response_len (the
+    window that would have cut it); records.RecordingBackend._r3_rows_cap keeps
+    the per-segment window."""
     engine = _engine(glm, arrays=True)
     cfg = _cfg(max_compactions=1)
     max_response_len = 450  # segment 1: prompt ~337 + response ~426 > first prompt ~164 + 450
@@ -405,7 +418,7 @@ def test_r3_rows_and_topk_are_each_segments_own(tmp_path, glm):
     assert len(trial) == 2
     _check_segments(trial, engine, cfg, glm)
     first_prompt = len(trial[0]["tokens"]) - trial[0]["response_length"]
-    assert len(trial[1]["tokens"]) - 1 > first_prompt + max_response_len - 1  # the old window would cut it
+    assert len(trial[1]["tokens"]) - trial[1]["response_length"] > first_prompt  # its own, longer prompt
     for sample in trial:
         tokens, length = sample["tokens"], sample["response_length"]
         rows = numpy.asarray(sample[ROLLOUT_ROUTED_EXPERTS])
