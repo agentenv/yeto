@@ -32,7 +32,7 @@ MAIN_KEYS = {"group_index", "index", "label", "loss_mask", "metadata", "prompt",
 MAIN_META = {"agent", "agent_turns", "engine", "finish_reason", "prompt_id", "prompt_tokens_known", "provenance",
              "task_id", "trajectory_id", "weight_version"}
 COMPACTION_KEYS = {"schema", "trajectory_id", "segment_index", "num_segments", "context_budget", "summary_ok",
-                   "kept_steps", "segment_tokens", "tokens_after"}
+                   "kept_steps", "segment_tokens", "tokens_after", "summary_tokens", "retry_replays"}
 
 
 def scenario(name: str, **kw) -> sim.Scenario:

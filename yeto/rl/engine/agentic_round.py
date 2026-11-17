@@ -86,7 +86,9 @@ each segment's own tokens, mask, log-probs, top-K, R3 and weight versions, and
 segment's trained tokens ``segment_tokens`` and those of the later segments
 ``tokens_after``; ``summary_ok``: the summary the segment ends with is whole,
 None on the last; ``kept_steps``: steps its rebuilt context kept, None on the
-first). Only the last segment can be ``truncated``: cut at
+first; ``summary_tokens``: tokens its summary turn generated, 0 on the last;
+``retry_replays``: the trial's resent requests answered from a lost reply,
+the same on every segment, None with replay off). Only the last segment can be ``truncated``: cut at
 ``max_response_len``, or the context filled (after the last compaction, or no
 room for a summary request). A trial with no compaction is the sample above,
 without ``metadata.compaction``; on a compacting proxy it is ``truncated`` too
@@ -275,7 +277,8 @@ def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance
                               "segment_index": number, "num_segments": len(parts),
                               "context_budget": part.context_budget, "summary_ok": part.summary_ok,
                               "kept_steps": part.kept_steps, "segment_tokens": trained[number],
-                              "tokens_after": sum(trained[number + 1:])}
+                              "tokens_after": sum(trained[number + 1:]),
+                              "summary_tokens": int(part.summary_tokens), "retry_replays": part.retry_replays}
         samples.append(sample)
     return samples
 

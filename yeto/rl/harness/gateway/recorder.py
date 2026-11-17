@@ -61,7 +61,7 @@ from yeto.rl.agentic.finish import CompactionSegment
 
 from .proxy import RecordsProxy
 from . import records_env
-from .records import sampling_params
+from .records import KIND_SUMMARY, sampling_params
 
 # The names themselves live in ``records_env`` (dependency-free, so the launch
 # layer can read them); this module keeps its own spellings as aliases.
@@ -121,21 +121,29 @@ def segments_from_records(records: Mapping[str, Any], *,
 
     ``kept_steps``: whole steps the segment kept from the one before (None on
     the first); ``summary_ok``: the summary the segment ended with had a closed
-    ``<summary>`` tag (None: it ended without one)."""
+    ``<summary>`` tag (None: it ended without one); ``summary_tokens``: the
+    tokens its summary turn generated (0 without one); ``retry_replays``: the
+    gateway's count for the whole trajectory (None: replay is off), on every
+    segment."""
     groups: list[CompactionSegment] = []
+    replays = (records.get("gateway") or {}).get("retry_replays")
+    replays = None if replays is None else int(replays)
     for session in records.get("sessions") or ():
         for sample in session["samples"]:
             turns = _sample_turns(sample)
             if not turns:  # a segment opened but never sampled (its prompt did not fit): no sample
                 continue
+            summary = sum(len(t["completion"]) for t in sample["turns"] if t.get("kind") == KIND_SUMMARY)
             if groups and int(sample["segment"]) == 0:
                 last = groups[-1]
                 groups[-1] = dataclasses.replace(last, turns=(*last.turns, *turns),
-                                                 summary_ok=sample.get("summary_ok"))
+                                                 summary_ok=sample.get("summary_ok"),
+                                                 summary_tokens=last.summary_tokens + summary)
                 continue
             groups.append(CompactionSegment(turns=tuple(turns), kept_steps=sample.get("kept_steps"),
                                             summary_ok=sample.get("summary_ok"),
-                                            context_budget=context_budget))
+                                            context_budget=context_budget, summary_tokens=summary,
+                                            retry_replays=replays))
     return groups
 
 
