@@ -653,6 +653,7 @@ class Run:
                 _log(f"preflight: {problem}" + (f" (pool {self.pools[i].name})" if len(self.pools) > 1 else ""))
                 self.mark("preflight", ok=False)
                 return False
+            self.log_compaction(i)
         ok = True
         for path in self.pool_configs:
             ok &= self._cmd(self.nc("pool", "--config", path, "--dry-run"), log="preflight.log") == 0
@@ -1457,6 +1458,24 @@ class Run:
         found = up_consistency.problems(str(self.cfg["store"]), [str(a) for a in self.cfg["trainer"]["argv"]],
                                         pool_cfg, data_path=self.pools[pool].data_path)
         return "; ".join(found) if found else None
+
+    def log_compaction(self, pool: int = 0) -> None:
+        """Preflight lines of the pool's ``agentic.compaction`` (nothing without it) and a
+        warning when one buffer group can exceed one object PUT
+        (:func:`yeto.rl.up_consistency.payload_size_warning`, with or without compaction)."""
+        from yeto.rl import up_consistency  # noqa: PLC0415
+
+        try:
+            lines = up_consistency.compaction_lines(self.pools[pool].load(),
+                                                    [str(a) for a in self.cfg["trainer"]["argv"]])
+        except (OSError, ValueError):
+            return  # the pool dry-run reports an unreadable pool config
+        warning = up_consistency.payload_size_warning(self.pools[pool].load(),
+                                                       [str(a) for a in self.cfg["trainer"]["argv"]], self.env)
+        if warning is not None:
+            lines.append(f"WARNING: {warning}")
+        for line in lines:
+            _log(f"preflight: {line}" + (f" (pool {self.pools[pool].name})" if len(self.pools) > 1 else ""))
 
     def budget_problem(self) -> str | None:
         """A budget that would stop the run at once: ``budget.usd`` 0 (the guide's

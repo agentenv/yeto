@@ -27,6 +27,9 @@ surface after the trainer island loaded its weights (a K3.1 B300 island: about
   reads the buffer and writes the releases under its own; the first-group wait
   lists the run config's);
 * the release directory a sampler follows must be one the trainer side writes;
+* context compaction: a spec with ``agentic.compaction`` needs a Miles trainer with a
+  GRPO-family estimator (:func:`compaction_problem`; verl and PPO CompactionRL are
+  refused);
 * prices (:func:`price_problem`): with a spend cap (``budget.usd``) every pool of a
   USD-priced provider (Modal / Daytona / Sky) needs a real hourly price, or the run's
   spend estimate counts its islands at 0 and the cap never fires on them.
@@ -215,6 +218,172 @@ def release_dir_problem(spec: dict[str, Any]) -> str | None:
             f"({', '.join(known)}): the sampler would never see a release")
 
 
+def compaction_problem(args: Any, spec: dict[str, Any]) -> str | None:
+    """A bad ``agentic.compaction`` section (:func:`yeto.rl.compaction.config_from_spec`),
+    a trainer that cannot train its segment samples
+    (:func:`yeto.launch.harness_env.check_grpo_compaction`), or a trainer row too
+    narrow for a segment: a segment is up to ``context_budget`` tokens, and a row
+    shorter than that cuts the summary that ends it."""
+    from yeto.launch.harness_env import check_grpo_compaction  # noqa: PLC0415
+    from yeto.rl.compaction import config_from_spec  # noqa: PLC0415
+
+    try:
+        cfg = config_from_spec(spec)
+        check_grpo_compaction(args, cfg)
+    except (TypeError, ValueError) as exc:
+        return str(exc)
+    if cfg is None:
+        return None
+    seq = max(int(getattr(args, "seq_len", 0) or 0), int(getattr(args, "rollout_max_response_len", 0) or 0))
+    if seq < cfg.context_budget:
+        return (f"the trainer's --seq-len {seq} < the sampler spec's agentic.compaction.context_budget "
+                f"{cfg.context_budget}: a compaction segment is up to context_budget tokens and a shorter row "
+                f"cuts the summary at its end; raise --seq-len (and --rollout-max-response-len) to at least "
+                f"{cfg.context_budget} or lower context_budget")
+    return None
+
+
+# The smallest drain cut suggested with agentic.compaction: agentic_round's
+# COMPACTION_DRAIN_FLOOR_S (an estimate, C13); this value until it is there.
+COMPACTION_DRAIN_FLOOR_FALLBACK_S = 2400.0
+
+
+def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[str]:
+    """Preflight warnings of a compacting spec that only the trainer and the sampler
+    together decide. A compacted trial runs several segments, often longer than a
+    release interval; a drain does not spare it. On a drain-mode sampler:
+    (a) an effective drain cut below the suggested floor; (b) the trainer's
+    ``--rl-max-policy-age`` at most 2 (a long group ages past it); (c) a release every
+    version (no ``--rl-release-every N`` > 1, no ``--rl-release-skip-busy``), so a
+    drain starts at every step. On any sampler: the trial wall clock
+    (``agentic.task_defaults.wall_clock_s``) left at the default."""
+    from yeto.rl.agentic.types import AgentBudget  # noqa: PLC0415
+    from yeto.rl.engine import agentic_round as ar  # noqa: PLC0415
+
+    section = spec.get("agentic") if isinstance(spec.get("agentic"), dict) else {}
+    if section.get("compaction") is None:
+        return []
+    out = []
+    switch = str(section.get("weight_switch", "auto"))
+    if not (switch == "live" or (switch == "auto" and ar.spec_live_engine(spec))):
+        floor = float(getattr(ar, "COMPACTION_DRAIN_FLOOR_S", COMPACTION_DRAIN_FLOOR_FALLBACK_S))
+        try:
+            cut, _grace = ar.drain_settings(spec, drain=True)
+        except ValueError:
+            cut = None  # the pool dry-run reports a bad drain setting
+        if cut is not None and cut < floor:
+            out.append(f"agentic.compaction on a drain-mode sampler: the effective drain cut {cut:g} s "
+                       f"(min of agentic.drain_timeout_s, reload_max_defer_s) is below {floor:g} s (an estimate for "
+                       "a 262k budget and 3 compactions): compacted trials running at a release are cancelled "
+                       "with all their segments; raise drain_timeout_s and reload_max_defer_s together, or use "
+                       "weight_switch live on an engine with live_update")
+        age = getattr(args, "rl_max_policy_age", None)
+        if args is not None and age is not None and int(age) <= 2:
+            out.append(f"agentic.compaction on a drain-mode sampler with the trainer's --rl-max-policy-age "
+                       f"{int(age)}: a compacted group is as old as its oldest segment and ages past it; raise it to "
+                       "about the release interval N + 6 (upload and download lag)")
+        if args is not None and int(getattr(args, "rl_release_every", 1) or 1) <= 1 \
+                and not getattr(args, "rl_release_skip_busy", False):
+            out.append("agentic.compaction on a drain-mode sampler with a release every version: every step "
+                       "starts a drain that cuts the long trials; release less often (--rl-release-every N, N about "
+                       "the compacted trials' p90 wall time / step time) or --rl-release-skip-busy")
+    defaults = section.get("task_defaults") if isinstance(section.get("task_defaults"), dict) else {}
+    try:
+        wall = None if defaults.get("wall_clock_s") is None else float(defaults["wall_clock_s"])
+    except (TypeError, ValueError):
+        return out  # the sampler refuses a bad wall_clock_s at its first trial
+    if wall is None or wall <= AgentBudget.wall_clock_s:
+        out.append(f"agentic.compaction with the trial wall clock at "
+                   f"{AgentBudget.wall_clock_s if wall is None else wall:g} s"
+                   f"{' (the default)' if wall is None else ''}: a compacted trial that runs longer is aborted "
+                   "(wall_clock_cap) and not retried; set agentic.task_defaults.wall_clock_s (and agent_timeout_s) "
+                   "to the compacted trials' p99 wall time")
+    return out
+
+
+def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = None) -> list[str]:
+    """Preflight log lines of the pool's ``agentic.compaction``: its effective values
+    and the warnings of :func:`compaction_switch_warnings` (empty: off, or the spec
+    does not load; the pool dry-run reports a bad section)."""
+    from yeto.rl.compaction import config_from_spec, describe  # noqa: PLC0415
+
+    spec = effective_spec(pool_cfg)
+    try:
+        cfg = None if spec is None else config_from_spec(spec)
+    except (TypeError, ValueError):
+        return []
+    if cfg is None:
+        return []
+    args = trainer_args(trainer_argv) if trainer_argv is not None else None
+    return [f"agentic.compaction {describe(cfg)}"] + [
+        f"WARNING: {w}" for w in compaction_switch_warnings(spec, args)]
+
+
+def _group_tokens(spec: dict[str, Any]) -> int | None:
+    """The most stream tokens one trial / sample of the spec carries (None: unknown):
+    the rows the sampler writes (``agentic.max_prompt_len + max_response_len``, or a
+    plain spec's ``max_prompt_tokens + sampling.max_tokens``), at most the engine
+    context length."""
+    from yeto.rl.compaction import spec_max_model_len  # noqa: PLC0415
+
+    try:
+        p_name, prompt, _r_name, response = _caps(spec)
+        limit = spec_max_model_len(spec)
+    except (TypeError, ValueError):
+        return None
+    rows = None if prompt is None or response is None else prompt + response
+    known = [v for v in (rows, limit) if v is not None]
+    return min(known) if known else None
+
+
+def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = None,
+                         environ: dict[str, str] | None = None) -> str | None:
+    """A warning when one buffer group of the pool's samplers can exceed one object
+    PUT (5 GiB on S3 / R2 / OSS): ``sampling.n`` trials x (1 + ``max_compactions``)
+    segments x ``context_budget`` tokens with compaction, else x the row tokens
+    (:func:`_group_tokens`), sized by ``buffer_payload.k31_group_payload_bytes`` (the
+    K3.1 bytes per token: R3 + top-128). Only for specs that return routed experts
+    (R3 is most of the bytes). The codec is ``YETO_SAMPLE_BUFFER_PAYLOAD_CODEC`` of
+    ``environ`` (the run's env). None: below the limit, not a K3.1-shaped spec, or a
+    store without that estimate."""
+    from yeto.rl.engine import buffer_payload  # noqa: PLC0415
+
+    size_of = getattr(buffer_payload, "k31_group_payload_bytes", None)
+    limit = getattr(buffer_payload, "SINGLE_PUT_LIMIT_BYTES", None)
+    if size_of is None or limit is None:
+        return None  # a buffer without the size bound (format v2): nothing to estimate with
+    spec = effective_spec(pool_cfg)
+    if spec is None or not (spec.get("rollout_fields") or {}).get("routed_experts"):
+        return None
+    from yeto.rl.compaction import config_from_spec  # noqa: PLC0415
+
+    try:
+        cfg = config_from_spec(spec)
+    except (TypeError, ValueError):
+        return None  # the pool dry-run reports a bad section
+    args = trainer_args(trainer_argv) if trainer_argv is not None else None
+    trials = (spec.get("sampling") or {}).get("n") or getattr(args, "n_samples_per_prompt", None)
+    tokens = cfg.context_budget if cfg is not None else _group_tokens(spec)
+    if not trials or not tokens:
+        return None
+    compactions = 0 if cfg is None else cfg.max_compactions
+    env_name = getattr(buffer_payload, "PAYLOAD_CODEC_ENV", "YETO_SAMPLE_BUFFER_PAYLOAD_CODEC")
+    codec = str((environ or {}).get(env_name) or "json").strip().lower()
+    try:
+        size = size_of(int(trials), int(tokens), max_compactions=compactions, codec=codec)
+        zstd = size_of(int(trials), int(tokens), max_compactions=compactions, codec="zstd")
+    except (KeyError, TypeError, ValueError):
+        return None
+    if size <= limit:
+        return None
+    shape = (f"{int(trials)} trials x {1 + compactions} segments x {int(tokens)} tokens (agentic.compaction)"
+             if cfg is not None else f"{int(trials)} trials x {int(tokens)} tokens")
+    return (f"one buffer group can reach {size / 2**30:.1f} GiB ({shape}, codec {codec}), over the "
+            f"{limit / 2**30:.0f} GiB single-object PUT limit of S3 / R2 / OSS: such a group needs a multipart "
+            f"write; set {env_name}=zstd on the samplers (about {zstd / 2**30:.1f} GiB) or lower the rows"
+            + (" / context_budget / max_compactions" if cfg is not None else ""))
+
+
 def store_problems(run_store: str, args: Any, pool_cfg: dict[str, Any], *, data_path: str = "r2") -> list[str]:
     problems = []
     run = _norm_store(run_store)
@@ -250,7 +419,7 @@ def problems(run_store: str, trainer_argv: list[str], pool_cfg: dict[str, Any], 
     if spec is None:
         return out
     out += [p for p in (group_problem(args, spec), r3_problem(args, spec), selection_problem(args, spec),
-                        release_dir_problem(spec)) if p]
+                        release_dir_problem(spec), compaction_problem(args, spec)) if p]
     out += length_problems(args, spec)
     return out
 

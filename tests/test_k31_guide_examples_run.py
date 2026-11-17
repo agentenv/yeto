@@ -154,6 +154,8 @@ def _cases():
             merged = {k: v for k, v in pool.items() if k != "accounts"}
             cases.append(pytest.param("pool", {**merged, "slots": [1, 2, 3], **doc},
                                       id=f"guide:{ln}:pool-provider"))
+        elif set(doc) == {"agentic"} and "compaction" in doc["agentic"]:  # a sampler spec fragment
+            cases.append(pytest.param("spec", doc, id=f"guide:{ln}:spec-compaction"))
         else:
             cases.append(pytest.param("unknown", doc, id=f"guide:{ln}:unclassified"))
     return cases
@@ -163,6 +165,11 @@ def _cases():
 def test_guide_json_example_is_accepted(kind, doc, tmp_path, monkeypatch):
     monkeypatch.setattr(nc_cli.tunnel, "state_dir", lambda: tmp_path / "nc-state", raising=False)
     assert kind != "unknown", f"guide JSON block of unknown shape {sorted(doc)}: teach this test where it goes"
+    if kind == "spec":  # the sampler's own reading of agentic.compaction
+        from yeto.rl.compaction import config_from_spec  # noqa: PLC0415
+
+        assert config_from_spec(doc) is not None
+        return
     (_check_run if kind == "run" else _check_pool)(doc, tmp_path)
 
 
