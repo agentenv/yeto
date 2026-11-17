@@ -59,6 +59,7 @@ from .buffer_rollout import (
     register_reader,
     reader_basis_version,
     stamp_merged_release_cuts,
+    with_reader_edits,
     xhw_round,
 )
 from yeto.rl.engine.data_split import row_runs
@@ -208,7 +209,7 @@ class _BufferRound:
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
         self.args = args
-        check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)))
+        check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)), args=args)
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
@@ -276,6 +277,9 @@ class _BufferRound:
             (payload_source_sample(d) for _, group in groups for d in group),
             rollout_id=input.rollout_id, backend="miles",
             trainer_version=-1 if input.weight_version is None else int(input.weight_version))
+        # the xhw downweight and the merged cut stamps edited the decoded groups, and the
+        # pruning dropped some of them: the samples Miles trains carry the same edits
+        converted = with_reader_edits(converted, groups)
         samples = [[Sample.from_dict(d) for d in group] for _, group in converted]
         # Miles trains exactly rollout_batch_size * n samples: a round short of them
         # (short groups, pruned groups) is filled with loss-free padding groups

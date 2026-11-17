@@ -322,6 +322,36 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     return kept, problems
 
 
+def with_reader_edits(converted: Sequence[tuple[int, list[dict[str, Any]]]],
+                      groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]
+                      ) -> list[tuple[int, list[dict[str, Any]]]]:
+    """The converted groups (:func:`miles_groups`) of the positions still in ``groups``,
+    with the reader's later edits of those decoded groups carried over: the ``reward``
+    (the xhw guard's downweight) and the ``metadata`` (the downweight record, the merged
+    release cut stamp). The conversion keeps a sample's other fields and adds only
+    ``metadata["yeto_sampler_identity"]`` (kept), so the result is what converting the
+    edited groups would give, without copying their rollout arrays (R3) again."""
+    edited = {int(position): group for position, group in groups}
+    out = []
+    for position, group in converted:
+        source = edited.get(int(position))
+        if source is None:
+            continue  # pruned after the conversion: not trained
+        if len(source) != len(group):
+            raise SampleBufferRolloutError(f"buffer position {position}: {len(source)} decoded samples, "
+                                           f"{len(group)} converted")
+        samples = []
+        for d, e in zip(group, source):
+            d = dict(d)
+            if "reward" in e:
+                d["reward"] = e["reward"]
+            identity = (d.get("metadata") or {}).get("yeto_sampler_identity")
+            d["metadata"] = {**dict(e.get("metadata") or {}), "yeto_sampler_identity": identity}
+            samples.append(d)
+        out.append((position, samples))
+    return out
+
+
 PADDING_GROUP_BASE = 1 << 40  # group_index of padding samples: past any buffer position
 PADDING_KEY = "yeto_padding"
 
@@ -2018,6 +2048,11 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
                 raise SampleBufferRolloutError(
                     "xhw_guard downweight scales the centered rewards; GRPO std normalization "
                     "cancels it (use action=quarantine, or turn std normalization off)")
+            if any(isinstance(d.get("reward"), bool) or not isinstance(d.get("reward"), (int, float))
+                   for d in group):
+                raise SampleBufferRolloutError(
+                    f"xhw_guard downweight of buffer position {position}: a reward is not a scalar "
+                    "(a reward dict cannot be scaled; use action=quarantine)")
             group = downweight_group(group, float(action.get("weight", 1.0)))
             downweighted += 1
         by_source.setdefault(source or "unknown", []).extend(group)
@@ -2030,17 +2065,46 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
     return out, meta
 
 
-def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None) -> None:
+def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None,
+                         args: Any = None) -> None:
     """At the reader's start: ``YETO_RL_XHW_GUARD`` with ``action=downweight`` under GRPO
     std normalization (Miles' default) is refused here, not at the first round the guard
-    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run)."""
+    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run).
+
+    The downweight rewrites a group's rewards as ``c + w (r - c)``; Miles' per-rollout
+    centering cancels ``c``, so every advantage of the group is exactly ``w`` times its
+    own. That holds only for scalar rewards centered as they are: with the Miles ``args``
+    also refused are a length penalty (``--length-penalty-coeff``: added after the
+    scaling, and its correctness test ``reward == 1`` no longer holds), a reward dict
+    (``--reward-key``), and a yeto reward shaper or an advantage transform other than
+    ``grpo_default`` (``advantage.reward_shapers`` / ``advantage.transform``)."""
     from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
 
     guard = XhwGuard.from_env(os.environ if environ is None else environ)
-    if guard is not None and guard.action == "downweight" and std_normalized:
+    if guard is None or guard.action != "downweight":
+        return
+    if std_normalized:
         raise SampleBufferRolloutError(
             "YETO_RL_XHW_GUARD action=downweight scales the centered rewards; GRPO std "
             "normalization (on) cancels it: use action=quarantine, or turn std normalization off")
+    if args is None:
+        return
+    from yeto.rl.algos.reward_pipeline import DEFAULT_TRANSFORM, read_plugins  # noqa: PLC0415
+
+    problems = []
+    if float(getattr(args, "length_penalty_coeff", 0.0) or 0.0) > 0:
+        problems.append("--length-penalty-coeff > 0")
+    if getattr(args, "reward_key", None):
+        problems.append("--reward-key (a reward dict)")
+    pipeline = dict((read_plugins(args, required=False) or {}).get("reward_pipeline") or {})
+    if pipeline.get("reward_shapers"):
+        problems.append(f"reward shapers {[dict(s).get('name') for s in pipeline['reward_shapers']]}")
+    if pipeline.get("advantage_transform") not in (None, DEFAULT_TRANSFORM):
+        problems.append(f"advantage transform {pipeline['advantage_transform']!r}")
+    if problems:
+        raise SampleBufferRolloutError(
+            "YETO_RL_XHW_GUARD action=downweight scales a group's advantages exactly only for "
+            f"scalar GRPO-centered rewards; this trainer has {', '.join(problems)}: use action=quarantine")
 
 
 def executor_set_xhw_actions(_executor: Any, actions: Mapping[str, Mapping[str, Any]]) -> dict | None:
