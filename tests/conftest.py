@@ -21,6 +21,9 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    from hard_exit import note_configure  # the outermost config is the one hard_exit may end
+
+    note_configure(config)
     config.addinivalue_line(
         "markers",
         "real_nebius_sg_cleanup: keep cli._nebius_sg_cleanup unpatched (the test fakes the cloud itself)",
@@ -305,7 +308,7 @@ from hard_exit import note_exitstatus, pytest_unconfigure  # noqa: E402,F401
 
 
 def pytest_sessionfinish(session, exitstatus):
-    note_exitstatus(exitstatus)
+    note_exitstatus(session, exitstatus)
     _reaper_sessionfinish(session, exitstatus)
 
 
