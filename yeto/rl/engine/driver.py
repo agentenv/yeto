@@ -498,6 +498,12 @@ def _duplicate_tasks(batch: Any) -> dict[str, Any] | None:
             "tasks": list(getattr(batch, "buffer_duplicate_tasks", None) or ())}
 
 
+def _stale_by_segments(batch: Any) -> dict[str, Any]:
+    """``stale_by_segments`` of ``rl_buffer_stale_skipped`` (context compaction only)."""
+    by = getattr(batch, "buffer_stale_by_segments", None)
+    return {"stale_by_segments": {str(k): int(v) for k, v in by.items()}} if by else {}
+
+
 def _buffer_fill(batch: Any) -> dict[str, int]:
     """The sample-buffer reader's short-group handling of a round (reported fields only)."""
     return {name: int(value) for key, name in BUFFER_FILL_FIELDS.items()
@@ -1454,7 +1460,7 @@ class IslandDriver:
                       stale_groups=int(stale), max_policy_age=self._max_policy_age(),
                       # The dispenser positions of those groups (row runs)
                       **({"stale_positions": positions} if positions else {}),
-                      **_buffer_fill(batch))
+                      **_buffer_fill(batch), **_stale_by_segments(batch))
         if (damaged := _damaged_payloads(batch)) is not None:
             self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
         if (duplicates := _duplicate_tasks(batch)) is not None:
@@ -1579,7 +1585,7 @@ class IslandDriver:
         if stale is not None:
             self.emit("rl_buffer_stale_skipped", rollout_id=rollout_id,
                       stale_groups=int(stale), max_policy_age=self._max_policy_age(),
-                      **_buffer_fill(batch))
+                      **_buffer_fill(batch), **_stale_by_segments(batch))
         if (damaged := _damaged_payloads(batch)) is not None:
             self.emit("rl_buffer_damaged_payload_skipped", rollout_id=rollout_id, **damaged)
         if (duplicates := _duplicate_tasks(batch)) is not None:
@@ -1744,6 +1750,9 @@ class IslandDriver:
         by_bucket = getattr(batch, "batch_summary_by_bucket", None)
         if by_bucket:  # rl-eval-difficulty-buckets 4.1; absent = old field set
             fields["batch_summary_by_bucket"] = {str(b): dict(v) for b, v in by_bucket.items()}
+        compaction = getattr(batch, "compaction", None)
+        if compaction:  # context compaction (W&B train/compaction/*); absent = old field set
+            fields["compaction"] = dict(compaction)
         # A buffer trainer (its batch came from the sample buffer) has no
         # rollout-side batch summary: add the trained batch's pooled reward and
         # the step's grad norm, which the dashboard's per-round charts read

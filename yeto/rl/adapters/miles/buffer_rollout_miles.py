@@ -54,6 +54,7 @@ from .buffer_rollout import (
     SamplerRoundWriter,
     apply_data_slot,
     check_segmented_round,
+    stale_segment_buckets,
     compaction_batch_line,
     check_xhw_downweight,
     convertible_mode,
@@ -272,10 +273,12 @@ class _BufferRound:
                                      enabled=bool((os.environ.get(XHW_ENV) or "").strip()
                                                   not in ("", "0", "off", "false")))
         merged_cuts = getattr(self, "relay_pump", None) is None and merged_release_mode()
-        pruned = 0
+        pruned, pruned_groups = 0, []
         if merged_cuts:  # a merged-lane synced trainer: name each group's merged release
             kept = [(position, group) for position, group in groups if stamp_merged_release_cuts(group)]
             pruned = len(groups) - len(kept)
+            kept_at = {position for position, _ in kept}
+            pruned_groups = [group for position, group in groups if position not in kept_at]
             if not kept:
                 raise SampleBufferRolloutError(
                     f"rollout {input.rollout_id}: all {len(groups)} groups came from merged "
@@ -292,6 +295,7 @@ class _BufferRound:
         # compacted trials: refused here if Miles would not keep them whole (no-op without)
         check_segmented_round(self.args, converted)
         compacted = [group for _, group in converted if has_siblings(group)]
+        stale_by_segments = stale_segment_buckets(report, pruned_groups, compacted=bool(compacted))
         # Miles trains exactly rollout_batch_size * n rollouts (trials; a compacted trial is
         # several samples of one rollout_id): a round short of them (short groups, pruned
         # groups) is filled with loss-free padding samples, one rollout each
@@ -329,7 +333,9 @@ class _BufferRound:
                                       1 for g in compacted for t in trial_rows(g) if len(t) > 1),
                                   "buffer_compacted_samples": sum(
                                       len(t) for g in compacted for t in trial_rows(g) if len(t) > 1)}
-                                 if compacted else {}))
+                                 if compacted else {}),
+                              # the stale trials by segment count (with compaction only)
+                              **({"buffer_stale_by_segments": stale_by_segments} if stale_by_segments else {}))
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on

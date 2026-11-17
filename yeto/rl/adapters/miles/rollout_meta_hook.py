@@ -100,7 +100,8 @@ ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups", "b
                                  *BUFFER_COMPACTED_KEYS})
 # buffer_source_tokens {source: tokens}, buffer_source_stats {source: {stat: value}}: the
 # per-source composition and rollout-side statistics of the round (xhw guard)
-ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats"})
+# buffer_stale_by_segments {segment bucket: stale trials} (with compaction only)
+ROUND_METADATA_DICT_KEYS = frozenset({"buffer_source_tokens", "buffer_source_stats", "buffer_stale_by_segments"})
 # buffer_stale_positions: the task-dispenser positions of those groups,
 # as row runs (data_split.row_runs); only groups whose sampler had a dispenser
 # buffer_unidentified_versions: [[version, groups], ...]; buffer_unidentified_positions:
@@ -597,6 +598,15 @@ def build_metadata(
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
+    if trained_samples:
+        # context compaction: the trained batch's segment / trial metrics (after the
+        # segment counts were refreshed by record_trained_groups); absent when no
+        # trained sample carries metadata.compaction (old key set kept)
+        from yeto.rl.engine.timeline import COMPACTION_KEY as STATS_KEY, compaction_stats
+
+        stats = _timed("compaction", compaction_stats, trained_samples)
+        if stats is not None:
+            payload[STATS_KEY] = stats
     if harness.get(TITO_SESSION_MISMATCH_KEY) and batch_summary_enabled(args):
         # Observe only: the per-record mismatches, truncated and capped,
         # so the driver can tape them as ``rl_harness_mismatch``. Absent on the

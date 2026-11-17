@@ -200,6 +200,12 @@ class RolloutBatchHandle:
     # (:data:`OVER_SAMPLING_KEYS`: submit batch sizes, refill calls, filtered /
     # kept / surplus groups, groups in flight at the end). None = not reported.
     over_sampling: Mapping[str, int] | None = field(default=None, compare=False)
+    # Context compaction (async GRPO segments): the trained batch's
+    # ``timeline.compaction_stats`` (taped as ``rl_round_trained.compaction``) and the
+    # stale trials by segment bucket (``rl_buffer_stale_skipped.stale_by_segments``).
+    # None = no compaction in the round (the default field set).
+    compaction: Mapping[str, Any] | None = field(default=None, compare=False)
+    buffer_stale_by_segments: Mapping[str, int] | None = field(default=None, compare=False)
     # The engine backend that built
     # this batch ("miles", "verl", ...), set by the adapter; it labels the
     # driver's ``offpolicy_gate`` event. None = not reported ("unknown").

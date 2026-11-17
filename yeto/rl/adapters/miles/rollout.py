@@ -612,6 +612,11 @@ def handle_from_metadata(
             if payload.get("cross_version_truncated_fraction") is not None else None
         ),
         over_sampling=over_sampling_fields(payload.get("over_sampling")),
+        compaction=dict(payload["compaction"]) if isinstance(payload.get("compaction"), dict) else None,
+        buffer_stale_by_segments=(
+            {str(k): int(v) for k, v in payload["buffer_stale_by_segments"].items()}
+            if isinstance(payload.get("buffer_stale_by_segments"), dict) else None
+        ),
     )
 
 
