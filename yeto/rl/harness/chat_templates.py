@@ -34,10 +34,14 @@ engine would add if it got the text and tokenized it with special tokens.
 
 from __future__ import annotations
 
+import array
+import bisect
 import collections
 import hashlib
 import json
 import re
+import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -290,6 +294,13 @@ register_template(TemplateSpec(
 
 
 # ---------------------------------------------------------------------- template
+def _join(pieces: Sequence[array.array]) -> list[int]:
+    out = array.array("I")
+    for piece in pieces:
+        out.extend(piece)
+    return out.tolist()
+
+
 def _merge_leading_system(messages: Sequence[Message]) -> list[Message]:
     head = 0
     while head < len(messages) and messages[head].get("role") == "system":
@@ -336,8 +347,13 @@ class ChatTemplate:
             ids.append(token_ids[0])
         self.stop_token_ids: tuple[int, ...] = tuple(ids)
         self._stop_by_id = dict(zip(ids, spec.stop_tokens))
-        # segment_encoding: rendered text -> (segment end offsets, ids per segment), newest last
-        self._segmented: "collections.OrderedDict[str, tuple[list[int], list[list[int]]]]" = collections.OrderedDict()
+        # segment_encoding: this thread's newest renderings, (text, segment end offsets, ids per segment)
+        self._recent = threading.local()
+        # segment_encoding: (segment text, allow_special) -> ids, shared by every rendering (a turn
+        # renders the whole history again, and the earlier segments have the same text)
+        self._pieces: "collections.OrderedDict[tuple[str, bool], array.array]" = collections.OrderedDict()
+        self._pieces_bytes = 0
+        self._pieces_lock = threading.Lock()
 
     @classmethod
     def load(cls, name: str, *, tokenizer_path: str | None = None, local_files_only: bool = True,
@@ -377,35 +393,79 @@ class ChatTemplate:
         ready = [dict(m) for m in messages] if self.spec.raw_arguments else _render_ready(messages)
         return _merge_leading_system(ready) if self.spec.merge_leading_system else ready
 
+    # segment_encoding: renderings kept per thread for encode(). The records proxy encodes a
+    # rendering, or a tail of one, before the same thread renders more than three other texts
+    # (RecordingBackend._prompt renders full, start and head, then encodes the tail of full).
+    RECENT_RENDERINGS = 4
+    # segment_encoding: memory bound of the shared per-segment ids (str + array sizes, LRU)
+    PIECE_MEMO_BYTES = 1 << 30
+
     def encode(self, text: str) -> list[int]:
         """Token ids of rendered text; the template writes its own BOS tokens.
 
-        ``segment_encoding``: ``text`` must be a rendering of this template, a
-        stop token, or a tail of a rendering that starts at a segment boundary
-        (what the records proxy encodes); anything else is refused."""
+        ``segment_encoding``: ``text`` must be a stop token, or one of this
+        thread's last :attr:`RECENT_RENDERINGS` renderings or a tail of one that
+        starts at a segment boundary (what the records proxy encodes); anything
+        else is refused. Text that is such a tail of two kept renderings with
+        different ids (message text spelling the markers) is refused too."""
         if not self.spec.segment_encoding:
             return list(self.tokenizer.encode(text, add_special_tokens=False))
         if text in self.spec.stop_tokens:
             return [self.stop_token_ids[self.spec.stop_tokens.index(text)]]
         if text == "":
             return []
-        for rendered, (ends, pieces) in reversed(self._segmented.items()):
-            if not rendered.endswith(text):
+        found: list[int] | None = None
+        for rendered, ends, pieces in reversed(self._renderings()):
+            if len(rendered) < len(text) or not rendered.endswith(text):
                 continue
             start = len(rendered) - len(text)
-            if start == 0:
-                return [i for piece in pieces for i in piece]
-            if start in ends:
-                first = ends.index(start) + 1
-                return [i for piece in pieces[first:] for i in piece]
-        raise TemplateError(f"{self.spec.name}: text to encode is not a tail of a rendering at a segment boundary")
+            first = 0
+            if start:
+                first = bisect.bisect_left(ends, start)
+                if first == len(ends) or ends[first] != start:
+                    continue  # not a segment boundary of this rendering
+                first += 1
+            ids = _join(pieces[first:])
+            if found is None:
+                found = ids
+            elif ids != found:
+                raise TemplateError(f"{self.spec.name}: text to encode is a tail of two renderings "
+                                    "with different ids; encode right after rendering it")
+        if found is None:
+            raise TemplateError(f"{self.spec.name}: text to encode is not a tail of a recent rendering "
+                                "at a segment boundary")
+        return found
+
+    def _renderings(self) -> "collections.deque[tuple[str, list[int], list[array.array]]]":
+        recent = getattr(self._recent, "renderings", None)
+        if recent is None:
+            recent = self._recent.renderings = collections.deque(maxlen=self.RECENT_RENDERINGS)
+        return recent
+
+    def _piece(self, text: str, allow_special: bool) -> array.array:
+        """Ids of one segment: the tokenizer's ``_encode_text_piece`` (a function of
+        the text and the flag), kept in an LRU bounded by :attr:`PIECE_MEMO_BYTES`."""
+        key = (text, allow_special)
+        with self._pieces_lock:
+            ids = self._pieces.get(key)
+            if ids is not None:
+                self._pieces.move_to_end(key)
+                return ids
+        ids = array.array("I", self.tokenizer._encode_text_piece(text, allow_special_tokens=allow_special))
+        size = sys.getsizeof(text) + sys.getsizeof(ids) + 160  # key tuple, dict entry
+        with self._pieces_lock:
+            if key not in self._pieces:
+                self._pieces[key] = ids
+                self._pieces_bytes += size
+            while self._pieces_bytes > self.PIECE_MEMO_BYTES and self._pieces:
+                (old_text, _), old = self._pieces.popitem(last=False)
+                self._pieces_bytes -= sys.getsizeof(old_text) + sys.getsizeof(old) + 160
+        return ids
 
     def _render_segments(self, messages: Sequence[Message], *, tools: Sequence[Message] | None,
                          add_generation_prompt: bool) -> str:
         """Render through the tokenizer's own segment builder (Kimi ``encoding_k3``)
         and keep each segment's ids for :meth:`encode`."""
-        import sys
-
         module = sys.modules[type(self.tokenizer).__module__]
         kwargs = dict(self.spec.template_kwargs)
         thinking = bool(kwargs.pop("thinking", True))
@@ -420,13 +480,9 @@ class ChatTemplate:
         for segment in segments:
             offset += len(segment.text)
             ends.append(offset)
-            pieces.append(list(self.tokenizer._encode_text_piece(segment.text,
-                                                                 allow_special_tokens=segment.allow_special)))
+            pieces.append(self._piece(segment.text, bool(segment.allow_special)))
         text = "".join(segment.text for segment in segments)
-        self._segmented[text] = (ends, pieces)
-        self._segmented.move_to_end(text)
-        while len(self._segmented) > 256:
-            self._segmented.popitem(last=False)
+        self._renderings().append((text, ends, pieces))
         return text
 
     def decode(self, ids: Sequence[int]) -> str:
