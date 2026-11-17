@@ -667,11 +667,16 @@ def drained_fields(by_bucket: Mapping[str, int]) -> dict[str, Any]:
 
 def trial_segments(result: Any) -> int | None:
     """Segment count of a settled agentic trial (finished or lost): its
-    ``num_segments`` attribute, else the length of a list of ``segments``, else 1
-    for one joined stream; None when unknown (a trial cancelled without one)."""
+    ``num_segments`` attribute, else its compaction ``parts`` (``FinishedSample``:
+    one per segment, empty for one stream), else the length of a list of
+    ``segments``, else 1 for one joined stream; None when unknown (a trial
+    cancelled without one)."""
     n = _int_field(getattr(result, "num_segments", None))
     if n is not None:
         return n
+    parts = getattr(result, "parts", None)
+    if isinstance(parts, (list, tuple)) and parts:
+        return len(parts)
     segments = getattr(result, "segments", None)
     if isinstance(segments, (list, tuple)):
         return len(segments) or None
