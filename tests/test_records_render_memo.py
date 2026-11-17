@@ -41,7 +41,9 @@ CHAT_TOOLS = [{"type": "function", "function": {"name": "shell", "description": 
 
 
 def reference_prompt(self, session, segment, context):
-    """``RecordingBackend._prompt`` before the render memo (verbatim)."""
+    """``RecordingBackend._prompt`` before the render memo (verbatim, but for the
+    drift / prefill counts: they are flags on the prompt, counted by ``_sample``
+    when it samples the prompt)."""
     tools = self.tools.get(session.trajectory_id)
     full = self.template.render(context, tools=tools, add_generation_prompt=True)
     if not segment.turns:
@@ -51,12 +53,13 @@ def reference_prompt(self, session, segment, context):
     if len(context) < segment.n_context:
         raise RecordsMismatch("history is shorter than the recorded stream")
     start = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=True)
+    prefill_dropped = False
     if not full.startswith(start):
         head = self.template.render(context[: segment.n_context - 1], tools=tools, add_generation_prompt=False)
         if not (start.startswith(head) and full.startswith(head)):
             raise RecordsMismatch("the rendering of the earlier turns changed (template rewrites history)")
         start = head + records_module._common_prefix(start[len(head):], full[len(head):])
-        self.counters[session.trajectory_id]["prefill_dropped_turns"] += 1
+        prefill_dropped = True
     stop_ids: tuple[int, ...] = ()
     if segment.last_stop is None:
         found = sorted((full.find(s, len(start)), s) for s in self.template.spec.stop_tokens)
@@ -74,9 +77,7 @@ def reference_prompt(self, session, segment, context):
     diff = None
     if self.check_render:
         diff = first_difference([*segment.token_ids, *stop_ids, *tail], self.template.encode(full))
-        if diff is not None:
-            self.counters[session.trajectory_id]["render_drift_turns"] += 1
-    return _Prompt(stop=stop_ids, tail=tail, render_diff=diff)
+    return _Prompt(stop=stop_ids, tail=tail, render_diff=diff, prefill_dropped=prefill_dropped)
 
 
 @pytest.fixture(scope="module")
