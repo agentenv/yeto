@@ -106,24 +106,12 @@ def test_context_budget_must_fit_the_engine_context():
 
 def test_t_comp_must_hold_the_summary_turn():
     """Compaction starts once fewer than t_comp tokens remain: that room takes the
-    summary request and the summary (CompactionConfig's rule where it has one)."""
+    summary request and the summary (CompactionConfig.check_summary_room)."""
     assert C.config_from_spec(_spec({"context_budget": 65536})) is not None  # t_comp 10240, turns of 4096
     with pytest.raises(ValueError, match="t_comp 2048 cannot hold the summary turn"):
         C.config_from_spec(_spec({"context_budget": 65536, "t_comp": 2048}))
 
 
-@pytest.mark.skipif(hasattr(C.CompactionConfig, "check_summary_room"), reason="CompactionConfig owns the rule")
-def test_the_summary_room_before_compaction_config_owns_it():
-    """Before CompactionConfig has the rule, the summary turn is a plain turn
-    (turn_max_tokens) with SUMMARY_PROMPT."""
-    ok = 10240 - (len(C.SUMMARY_PROMPT.encode()) + 64)
-    assert C.config_from_spec(_spec({"context_budget": 65536}, turn_max_tokens=ok)) is not None
-    with pytest.raises(ValueError, match="t_comp 10240 cannot hold the summary turn"):
-        C.config_from_spec(_spec({"context_budget": 65536}, turn_max_tokens=ok + 1))
-
-
-@pytest.mark.skipif(not hasattr(C.CompactionConfig, "check_summary_headroom"),
-                    reason="CompactionConfig has no summary headroom check yet")
 def test_the_summary_turn_must_fit_the_engine_context():
     with pytest.raises(ValueError, match="agentic.compaction: the summary turn can overrun max_model_len 262144"):
         C.config_from_spec(_spec({"context_budget": 262144}, max_model_len=262144, turn_max_tokens=8192))

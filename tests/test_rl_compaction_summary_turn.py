@@ -290,7 +290,11 @@ def test_a_budget_never_reached_records_what_no_compaction_records(glm):
     cfg = CompactionConfig(context_budget=3000, t_comp=1000, summary_max_tokens=128)
     proxy, engine = proxy_for(glm, list(SCRIPT), cfg)
     run_codex(proxy, "t")
-    assert proxy.records("t") == plain.records("t")
+    records, expected = proxy.records("t"), plain.records("t")
+    # the gateway counts compaction forks / replays only for a compacting backend (C8)
+    extra = {k: records["gateway"].pop(k) for k in set(records.get("gateway") or {}) - set(expected.get("gateway") or {})}
+    assert set(extra) <= {"retry_replays", "compaction_fork_lost"} and not any(extra.values())
+    assert records == expected
     assert [r[1] for r in engine.token_requests] == [r[1] for r in plain_engine.token_requests]
 
 

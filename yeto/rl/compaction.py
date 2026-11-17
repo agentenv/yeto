@@ -476,9 +476,8 @@ def refresh_segment_counts(samples: Any) -> int:
 # --- the sampler spec's ``agentic.compaction`` section -------------------------
 # Every CompactionConfig field is a spec key except ``max_turns``: the episode
 # driver's evaluation cap, which the records proxy does not read (an accepted key
-# must reach its consumer). The summary-turn fields (``summary_max_tokens``,
-# ``summary_prompt``, ``resume_template``) are accepted once CompactionConfig has
-# them; CompactionConfig checks their values.
+# must reach its consumer). CompactionConfig checks the summary-turn fields
+# (``summary_max_tokens``, ``summary_prompt``, ``resume_template``).
 SPEC_KEYS: tuple[str, ...] = tuple(f.name for f in fields(CompactionConfig) if f.name != "max_turns")
 # Integer keys and their least value (``summary_max_tokens``: CompactionConfig checks it).
 _INT_MINIMUM = {"context_budget": 1, "t_comp": 1, "keep_recent_steps": 0, "max_compactions": 0}
@@ -503,23 +502,14 @@ def spec_max_model_len(spec: Mapping[str, Any]) -> int | None:
     return None
 
 
-def _check_summary_room(cfg: CompactionConfig, turn_max_tokens: int) -> None:
-    """``t_comp`` must hold the summary turn: its ``max_tokens`` plus the summary request.
-    CompactionConfig owns the rule (``check_summary_room``, with the configurable
-    summary prompt and ``summary_max_tokens``). Until that method is merged the
-    summary turn is a plain turn (``turn_max_tokens``) with :data:`SUMMARY_PROMPT`,
-    and the same bound is applied here: one token per UTF-8 byte of the prompt plus
-    64 for the template's wrapper."""
-    check = getattr(cfg, "check_summary_room", None)
+def _check_summary_room(cfg: CompactionConfig, turn_max_tokens: int, max_model_len: int | None) -> None:
+    """The summary turn must fit: in ``t_comp`` (:meth:`CompactionConfig.check_summary_room`)
+    and, when the engine context is known, within ``max_model_len``
+    (:meth:`CompactionConfig.check_summary_headroom`)."""
     try:
-        if check is not None:
-            check(turn_max_tokens)
-            return
-        need = turn_max_tokens + len(SUMMARY_PROMPT.encode("utf-8")) + 64
-        if need > cfg.t_comp:
-            raise ValueError(f"t_comp {cfg.t_comp} cannot hold the summary turn: max_tokens {turn_max_tokens} "
-                             f"(agentic.turn_max_tokens) + up to {need - turn_max_tokens} tokens of summary "
-                             f"request = {need}; raise t_comp or lower agentic.turn_max_tokens")
+        cfg.check_summary_room(turn_max_tokens)
+        if max_model_len is not None:
+            cfg.check_summary_headroom(max_model_len, turn_max_tokens)
     except ValueError as exc:
         raise ValueError(f"agentic.compaction: {exc}") from None
 
@@ -553,10 +543,9 @@ def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = Non
     * ``context_budget`` above the engine context length (``max_model_len``, else the
       spec's :func:`spec_max_model_len`): the engine refuses a prompt the proxy still
       lets grow;
-    * a ``t_comp`` that cannot hold the summary turn (:func:`_check_summary_room`,
-      with ``agentic.turn_max_tokens``), and, where CompactionConfig has
-      ``check_summary_headroom``, a budget whose summary turn can overrun the
-      engine context;
+    * a ``t_comp`` that cannot hold the summary turn, and a budget whose summary
+      turn can overrun the engine context (:func:`_check_summary_room`, with
+      ``agentic.turn_max_tokens``);
     * ``agentic.max_response_len`` below ``context_budget``: a segment's response is
       cut at that width, and the summary at the end of a segment is what is cut;
     * a default agent that compacts its own history (:func:`_check_agent`)."""
@@ -588,13 +577,7 @@ def config_from_spec(spec: Mapping[str, Any], *, max_model_len: int | None = Non
     for key in ("turn_max_tokens", "max_response_len"):
         if agentic.get(key) is None:
             raise ValueError(f"agentic.compaction needs agentic.{key}")
-    _check_summary_room(cfg, int(agentic["turn_max_tokens"]))
-    headroom = getattr(cfg, "check_summary_headroom", None)  # the summary turn within the engine context
-    if headroom is not None and limit is not None:
-        try:
-            headroom(limit, int(agentic["turn_max_tokens"]))
-        except ValueError as exc:
-            raise ValueError(f"agentic.compaction: {exc}") from None
+    _check_summary_room(cfg, int(agentic["turn_max_tokens"]), limit)
     if int(agentic["max_response_len"]) < budget:
         raise ValueError(f"agentic.max_response_len {int(agentic['max_response_len'])} < agentic.compaction."
                          f"context_budget {budget}: a segment's response is cut at max_response_len, and the "
@@ -608,9 +591,10 @@ def describe(cfg: CompactionConfig) -> str:
     line = (f"on: context_budget {cfg.context_budget}, t_comp {cfg.t_comp} (compacts once fewer than "
             f"{cfg.t_comp} tokens remain), keep_recent_steps {cfg.keep_recent_steps}, max_compactions "
             f"{cfg.max_compactions} (at most {cfg.max_compactions + 1} segments per trial)")
-    summary_max_tokens = getattr(cfg, "summary_max_tokens", None)
-    if summary_max_tokens is not None:
-        line += f", summary_max_tokens {summary_max_tokens}"
+    if cfg.summary_max_tokens is not None:
+        line += f", summary_max_tokens {cfg.summary_max_tokens}"
+    else:
+        line += f", summary max_tokens: the turn's, at most {DEFAULT_SUMMARY_MAX_TOKENS}"
     if cfg.max_compactions == 0:
         line += "; max_compactions 0: the proxy never compacts"
     return line
