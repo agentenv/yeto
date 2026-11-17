@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -294,6 +295,16 @@ class _DyingServer:
         return self.healthy
 
 
+class _ModuleTime:
+    """``time`` as ``s3_delivery`` alone sees it: the real module with ``sleep`` replaced."""
+
+    def __init__(self, sleep):
+        self.sleep = sleep
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 def _run_loop(tmp_path, monkeypatch, server, rounds):
     store = tmp_path / "store"
     (store / cm.RELEASES).mkdir(parents=True)
@@ -306,7 +317,10 @@ def _run_loop(tmp_path, monkeypatch, server, rounds):
         if left[0] <= 0:
             raise _Stop
 
-    monkeypatch.setattr(sd.time, "sleep", sleep)
+    # Only the loop's own sleeps count rounds: ``sd.time`` is the process-wide ``time``
+    # module, and patching its ``sleep`` let any other thread's ``time.sleep`` (one left
+    # running by an earlier test) use up the rounds and stop the loop early.
+    monkeypatch.setattr(sd, "time", _ModuleTime(sleep))
     s3 = FakeS3.__new__(FakeS3)
     s3.get_json = lambda key: None
     with pytest.raises(_Stop):
