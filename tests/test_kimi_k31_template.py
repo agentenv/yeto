@@ -114,3 +114,24 @@ def test_thinking_effort_reaches_the_prompt():
 def test_remote_code_tokenizer_needs_the_callers_opt_in():
     with pytest.raises(TemplateError, match="trust_remote_code"):
         ChatTemplate.load("kimi_k31", tokenizer_path="/nonexistent")
+
+
+def test_parse_without_thinking_reads_the_response_channel():
+    """``thinking: false``: the generation prompt opens ``response``, the output has
+    no think channel; ``ChatTemplate.parse`` follows the template kwarg."""
+    import dataclasses
+
+    text = f"Listing.{C}response{S}{O}tools{S}" + _call("bash", 1, [("command", "string", "ls")]) + f"{C}tools{S}{C}message{S}"
+    message = parse_kimi_k3(text, thinking=False)
+    assert message["content"] == "Listing." and "reasoning_content" not in message
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"command": "ls"}
+
+    class OneTokenStop:
+        def encode(self, text, add_special_tokens=False):
+            return [7]
+
+    spec = TEMPLATES["kimi_k31"]
+    plain = ChatTemplate(dataclasses.replace(spec, template_kwargs={"thinking": False, "thinking_effort": "low"}), OneTokenStop())
+    assert plain.parse(text) == message
+    thinking = ChatTemplate(dataclasses.replace(spec, template_kwargs={"thinking_effort": "low"}), OneTokenStop())
+    assert thinking.parse(_gen("r", "Done.")) == {"role": "assistant", "content": "Done.", "reasoning_content": "r"}

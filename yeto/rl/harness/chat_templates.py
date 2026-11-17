@@ -93,8 +93,10 @@ def _glm_value(raw: str) -> Any:
     return raw if isinstance(value, str) else value
 
 
-def parse_glm(text: str) -> Message:
-    reasoning, rest = _split_reasoning(text, opened=True)
+def parse_glm(text: str, *, thinking: bool = True) -> Message:
+    """``thinking=False`` (``enable_thinking: false``): the generation prompt
+    closed the reasoning block, the output has none."""
+    reasoning, rest = _split_reasoning(text, opened=thinking)
     calls = []
     for index, match in enumerate(_GLM_CALL.finditer(rest)):
         body = match.group(1)
@@ -130,9 +132,10 @@ _QWEN38_CALL = re.compile(r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s
 _QWEN38_PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
-def parse_qwen38(text: str) -> Message:
-    """Qwen3.8 output after the ``<think>\\n`` generation prompt."""
-    reasoning, rest = _split_reasoning(text, opened=True)
+def parse_qwen38(text: str, *, thinking: bool = True) -> Message:
+    """Qwen3.8 output after the ``<think>\\n`` generation prompt (``thinking=False``:
+    after the closed ``<think>\\n\\n</think>\\n\\n`` prefill, no reasoning)."""
+    reasoning, rest = _split_reasoning(text, opened=thinking)
     calls = []
     for index, match in enumerate(_QWEN38_CALL.finditer(rest)):
         arguments = {k.strip(): _glm_value(v) for k, v in _QWEN38_PARAM.findall(match.group(2))}
@@ -176,15 +179,23 @@ def _k3_arguments(body: str) -> str:
     return "{" + ",".join(parts) + "}"
 
 
-def parse_kimi_k3(text: str) -> Message:
+def parse_kimi_k3(text: str, *, thinking: bool = True) -> Message:
     """Kimi K3 XTML output after the ``<message role="assistant"><think>``
     generation prompt: reasoning, the ``response`` channel and ``tools`` calls.
     Reasoning and content are kept byte for byte (the template renders them
-    raw), so the next turn's rendering repeats the sampled text."""
-    marker = f"{_K3_CLOSE}think{_K3_SEP}"
-    if marker not in text:
-        return _assistant("", text, [])  # cut inside the think channel
-    reasoning, rest = text.split(marker, 1)
+    raw), so the next turn's rendering repeats the sampled text.
+
+    ``thinking=False`` (template kwarg ``thinking: false``): the generation
+    prompt opened the ``response`` channel instead, the output has no think
+    channel and the message no reasoning (the template renders none)."""
+    reasoning: str | None
+    if thinking:
+        marker = f"{_K3_CLOSE}think{_K3_SEP}"
+        if marker not in text:
+            return _assistant("", text, [])  # cut inside the think channel
+        reasoning, rest = text.split(marker, 1)
+    else:
+        reasoning, rest = None, f"{_K3_OPEN}response{_K3_SEP}{text}"
     response = _K3_RESPONSE.search(rest)
     content = response.group(1) if response else ""
     calls = []
@@ -210,7 +221,7 @@ class TemplateSpec:
 
     name: str
     tokenizer: str
-    parser: Callable[[str], Message]
+    parser: Callable[..., Message]
     stop_tokens: tuple[str, ...]
     template_kwargs: Mapping[str, Any] = field(default_factory=dict)
     keeps_history_reasoning: bool = True
@@ -222,6 +233,10 @@ class TemplateSpec:
     # tool-call arguments go to the template as the JSON text they were parsed from
     # (the template reads them itself and keeps each value's literal text)
     raw_arguments: bool = False
+    # the template kwarg that turns the reasoning block off (default on): the parser takes it as
+    # ``thinking=`` (with it off the generation prompt closes or omits the block, the output has no
+    # reasoning; a parser that assumes an open block would read the whole output as reasoning)
+    thinking_kwarg: str | None = None
     # the tokenizer encodes a rendering segment by segment (structural markers as
     # control tokens, message text as plain BPE even where it spells a marker):
     # ids come from the rendering's segments, never from re-encoding its text
@@ -241,7 +256,7 @@ def register_template(spec: TemplateSpec) -> TemplateSpec:
 register_template(TemplateSpec(
     name="glm5", tokenizer="zai-org/GLM-4.7-Flash", parser=parse_glm,
     stop_tokens=("<|endoftext|>", "<|user|>", "<|observation|>"),
-    template_kwargs={"clear_thinking": False},
+    template_kwargs={"clear_thinking": False}, thinking_kwarg="enable_thinking",
     verified="GLM-4.7-Flash tokenizer as a stand-in; GLM5.3-Flash tokenizer not verified"))
 register_template(TemplateSpec(
     name="qwen3", tokenizer="Qwen/Qwen3-0.6B", parser=parse_qwen3,
@@ -257,19 +272,19 @@ register_template(TemplateSpec(
 register_template(TemplateSpec(
     name="qwen38", tokenizer="Qwen/Qwen3.8-27B", parser=parse_qwen38,
     stop_tokens=("<|im_end|>", "<|endoftext|>"),
-    template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+    template_kwargs={"enable_thinking": True, "preserve_thinking": True}, thinking_kwarg="enable_thinking",
     verified="Qwen3.8-27B@1d4bf0f2 tokenizer", merge_leading_system=True))
 register_template(TemplateSpec(
     # Kimi-K3.1 XTML (``encoding_k3.py`` of the checkpoint); ``thinking_effort``
     # comes from the deployment (agentic.template_kwargs; the tokenizer's default is max)
     name="kimi_k31", tokenizer="moonshotai/Kimi-K3.1-Pro", parser=parse_kimi_k3,
-    stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True},
+    stop_tokens=("<|end_of_msg|>",), template_kwargs={"thinking": True}, thinking_kwarg="thinking",
     verified="Kimi-K3.1-Pro@d9e99b07 tokenizer (CPU alignment test)",
     needs_remote_code=True, raw_arguments=True, segment_encoding=True))
 register_template(TemplateSpec(
     name="nemotron3", tokenizer="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", parser=parse_qwen38,
     stop_tokens=("<|im_end|>",),
-    template_kwargs={"enable_thinking": True, "truncate_history_thinking": False},
+    template_kwargs={"enable_thinking": True, "truncate_history_thinking": False}, thinking_kwarg="enable_thinking",
     verified="Nemotron-3.5-Super-VL-120B tokenizer + chat template (CPU alignment test)",
     merge_leading_system=True))
 
@@ -421,6 +436,8 @@ class ChatTemplate:
         return self._stop_by_id.get(int(token_id))
 
     def parse(self, text: str) -> Message:
+        if self.spec.thinking_kwarg is not None:
+            return self.spec.parser(text, thinking=bool(self.spec.template_kwargs.get(self.spec.thinking_kwarg, True)))
         return self.spec.parser(text)
 
 
