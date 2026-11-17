@@ -21,7 +21,13 @@ from miles.rollout.inference_rollout.inference_rollout_common import InferenceRo
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
-from yeto.rl.engine.buffer_payload import complete_prompt_tokens, miles_sample_dict
+from yeto.rl.engine.buffer_payload import (
+    complete_prompt_tokens,
+    has_siblings,
+    miles_sample_dict,
+    trial_count,
+    trial_rows,
+)
 from yeto.rl.engine.sampler_resume import new_incarnation, reclaim_requested
 from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event, payload_source_sample
 
@@ -47,6 +53,8 @@ from .buffer_rollout import (
     SampleBufferRolloutError,
     SamplerRoundWriter,
     apply_data_slot,
+    check_segmented_round,
+    compaction_batch_line,
     check_xhw_downweight,
     convertible_mode,
     merged_release_mode,
@@ -59,6 +67,7 @@ from .buffer_rollout import (
     register_reader,
     reader_basis_version,
     stamp_merged_release_cuts,
+    with_reader_edits,
     xhw_round,
 )
 from yeto.rl.engine.data_split import row_runs
@@ -208,7 +217,7 @@ class _BufferRound:
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
         self.args = args
-        check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)))
+        check_xhw_downweight(std_normalized=bool(getattr(args, "grpo_std_normalization", True)), args=args)
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
@@ -276,10 +285,17 @@ class _BufferRound:
             (payload_source_sample(d) for _, group in groups for d in group),
             rollout_id=input.rollout_id, backend="miles",
             trainer_version=-1 if input.weight_version is None else int(input.weight_version))
+        # the xhw downweight and the merged cut stamps edited the decoded groups, and the
+        # pruning dropped some of them: the samples Miles trains carry the same edits
+        converted = with_reader_edits(converted, groups)
         samples = [[Sample.from_dict(d) for d in group] for _, group in converted]
-        # Miles trains exactly rollout_batch_size * n samples: a round short of them
-        # (short groups, pruned groups) is filled with loss-free padding groups
-        missing = max(0, self.groups * self.samples_per_group - sum(len(group) for group in samples))
+        # compacted trials: refused here if Miles would not keep them whole (no-op without)
+        check_segmented_round(self.args, converted)
+        compacted = [group for _, group in converted if has_siblings(group)]
+        # Miles trains exactly rollout_batch_size * n rollouts (trials; a compacted trial is
+        # several samples of one rollout_id): a round short of them (short groups, pruned
+        # groups) is filled with loss-free padding samples, one rollout each
+        missing = max(0, self.groups * self.samples_per_group - sum(trial_count(group) for _, group in converted))
         report.padded_samples = missing
         report.padded_fraction = missing / max(1, self.groups * self.samples_per_group)
         report.damaged_payloads, report.damaged_payload_groups = damaged, len(damaged)
@@ -306,7 +322,14 @@ class _BufferRound:
                                  if duplicates else {}),
                               **({"buffer_stale_positions": row_runs(stale)}
                                  if (stale := getattr(report, "stale_positions", None)) else {}),
-                              **unidentified_metadata(report))
+                              **unidentified_metadata(report),
+                              # compacted trials trained this round (absent without them)
+                              **({"buffer_compacted_groups": len(compacted),
+                                  "buffer_compacted_trials": sum(
+                                      1 for g in compacted for t in trial_rows(g) if len(t) > 1),
+                                  "buffer_compacted_samples": sum(
+                                      len(t) for g in compacted for t in trial_rows(g) if len(t) > 1)}
+                                 if compacted else {}))
         if getattr(self, "relay_pump", None) is not None or merged_cuts:
             # the round's evidence names external merged cuts and bounds
             # their age by the merged version this take gated on
@@ -315,6 +338,8 @@ class _BufferRound:
                                                "trainer took groups without a merged gate version")
             set_proc_state(self.args, EXTERNAL_CUT_ROUND_ATTR,
                            {"rollout_id": int(input.rollout_id), "merged_version": int(report.gate_version)})
+        if compacted:  # the round's trial composition (absent without compaction)
+            print(compaction_batch_line(int(input.rollout_id), [group for _, group in converted]), flush=True)
         self._run_round_hooks(samples)
         if missing > 0:  # after the hooks: the round's yeto metadata counts real samples only
             pads = padding_samples([group for _, group in groups], missing,

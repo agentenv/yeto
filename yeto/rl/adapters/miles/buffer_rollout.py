@@ -58,6 +58,7 @@ from typing import Any
 # engine sampler island writes the same payloads); re-exported here.
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     finite_rewards,
+    COMPACTION_KEY,
     PAYLOAD_SCHEMA,
     DamagedPayload,
     DamagedPayloadLimit,
@@ -71,6 +72,11 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     passed_over_text,
     payload_is_missing,
     payload_oldest_version,
+    check_trials,
+    compaction_meta,
+    has_siblings,
+    trial_count,
+    trial_rows,
 )
 from yeto.rl.engine.merged_release import (
     LANE_ENV,
@@ -281,19 +287,41 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
     and trajectory ids need them unique. The buffer position is unique for the
     buffer's life and the same after a restore re-reads it, so ``group_index`` is
     the position and ``index`` is ``position * samples_per_group + j``. The
-    sampler's numbers stay in ``metadata["yeto_sampler_identity"]``."""
-    if len(samples) > int(samples_per_group):
-        raise SampleBufferRolloutError(
-            f"group at buffer position {position} has {len(samples)} samples > "
-            f"samples per group {samples_per_group}")
+    sampler's numbers stay in ``metadata["yeto_sampler_identity"]``.
+
+    A group with compaction segments (``buffer_payload.has_siblings``: a sample with
+    ``metadata.compaction``) is numbered by trial instead: ``j`` is the
+    trial's number in the group (:func:`~yeto.rl.engine.buffer_payload.check_trials`),
+    and every sample of the trial gets that ``index`` and the same ``rollout_id``. Miles
+    then keys one rollout per trial (``rollout_segments``: one advantage per trial; the
+    rollout-side DP schedule keeps a trial's samples in one step, and with a
+    ``rollout_id`` on the round its samples are not trimmed by count; the trajectory
+    evidence binds the segments of one ``index`` as one trial). Any other group (a Miles
+    sampler's ``rollout_id`` siblings included) is numbered exactly as before."""
+    if not has_siblings(samples):
+        trials = None
+        if len(samples) > int(samples_per_group):
+            raise SampleBufferRolloutError(
+                f"group at buffer position {position} has {len(samples)} samples > "
+                f"samples per group {samples_per_group}")
+    else:
+        rows = check_trials(samples)
+        if len(rows) > int(samples_per_group):
+            raise SampleBufferRolloutError(
+                f"group at buffer position {position} has {len(rows)} trials > "
+                f"samples per group {samples_per_group}")
+        trials = {row: t for t, trial in enumerate(rows) for row in trial}
     out = []
     for j, sample in enumerate(samples):
         sample = dict(sample)
         metadata = dict(sample.get("metadata") or {})
-        metadata["yeto_sampler_identity"] = {"group_index": sample.get("group_index"),
-                                             "index": sample.get("index")}
-        sample.update(metadata=metadata, group_index=int(position),
-                      index=int(position) * int(samples_per_group) + j)
+        identity = {"group_index": sample.get("group_index"), "index": sample.get("index")}
+        index = int(position) * int(samples_per_group) + (j if trials is None else trials[j])
+        if trials is not None:
+            identity["rollout_id"] = sample.get("rollout_id")
+            sample["rollout_id"] = index
+        metadata["yeto_sampler_identity"] = identity
+        sample.update(metadata=metadata, group_index=int(position), index=index)
         out.append(sample)
     return out
 
@@ -322,13 +350,44 @@ def miles_groups(groups: Sequence[tuple[int, Sequence[dict[str, Any]]]], *, samp
     return kept, problems
 
 
+def with_reader_edits(converted: Sequence[tuple[int, list[dict[str, Any]]]],
+                      groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]
+                      ) -> list[tuple[int, list[dict[str, Any]]]]:
+    """The converted groups (:func:`miles_groups`) of the positions still in ``groups``,
+    with the reader's later edits of those decoded groups carried over: the ``reward``
+    (the xhw guard's downweight) and the ``metadata`` (the downweight record, the merged
+    release cut stamp). The conversion keeps a sample's other fields and adds only
+    ``metadata["yeto_sampler_identity"]`` (kept), so the result is what converting the
+    edited groups would give, without copying their rollout arrays (R3) again."""
+    edited = {int(position): group for position, group in groups}
+    out = []
+    for position, group in converted:
+        source = edited.get(int(position))
+        if source is None:
+            continue  # pruned after the conversion: not trained
+        if len(source) != len(group):
+            raise SampleBufferRolloutError(f"buffer position {position}: {len(source)} decoded samples, "
+                                           f"{len(group)} converted")
+        samples = []
+        for d, e in zip(group, source):
+            d = dict(d)
+            if "reward" in e:
+                d["reward"] = e["reward"]
+            identity = (d.get("metadata") or {}).get("yeto_sampler_identity")
+            d["metadata"] = {**dict(e.get("metadata") or {}), "yeto_sampler_identity": identity}
+            samples.append(d)
+        out.append((position, samples))
+    return out
+
+
 PADDING_GROUP_BASE = 1 << 40  # group_index of padding samples: past any buffer position
 PADDING_KEY = "yeto_padding"
 
 
 def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
                     samples_per_group: int) -> list[dict[str, Any]]:
-    """``count`` samples that fill a round to Miles' global batch without training.
+    """``count`` samples that fill a round to Miles' global batch without training
+    (one per missing trial: each is a rollout of its own).
 
     Each is a copy of the round's shortest real sample with a response (the cheapest
     forward pass)
@@ -351,11 +410,101 @@ def padding_samples(groups: Sequence[Sequence[dict[str, Any]]], count: int, *,
         pad["loss_mask"] = [0] * int(pad.get("response_length") or 0)
         pad["remove_sample"] = True
         pad["rollout_id"] = None
-        pad["metadata"] = {**dict(pad.get("metadata") or {}), PADDING_KEY: True}
+        metadata = {**dict(pad.get("metadata") or {}), PADDING_KEY: True}
+        metadata.pop(COMPACTION_KEY, None)  # a padding sample is no segment of a trial
+        pad["metadata"] = metadata
         pad["group_index"] = PADDING_GROUP_BASE + k
         pad["index"] = (PADDING_GROUP_BASE + k) * int(samples_per_group)
         out.append(pad)
     return out
+
+
+def segmented_round_problems(args: Any) -> list[str]:
+    """Why Miles would not train a round that holds multi-sample trials (compaction
+    segments) one rollout per trial; [] when it does.
+
+    With a ``rollout_id`` on the round (:func:`renumber_group`) Miles keeps every sample
+    (no trim by count, ``rollout_data_conversion.postprocess_rollout_data``) and its
+    rollout-side DP schedule (``train_data_conversion.can_precompute_dp_schedule``,
+    ``dp_schedule.build_dp_schedule``) counts ``--global-batch-size`` in rollouts and puts
+    all samples of a rollout in one step. That schedule needs a Megatron trainer without
+    independent DP, multi-LoRA or multimodal inputs; otherwise the training side splits by
+    sample count and a trial's segments can land in different steps or be dropped.
+    ``--use-dynamic-global-batch-size`` is only computed for a round without rollout ids
+    (Miles asserts on one with them). Without ``--use-dynamic-batch-size`` the schedule
+    cuts a step into fixed micro batches and asserts unless the step's sample count (data
+    dependent here) is a multiple of DP x micro batch size."""
+    problems = []
+    if not getattr(args, "use_dynamic_batch_size", False):
+        problems.append("no --use-dynamic-batch-size (--rl-max-tokens-per-gpu)")
+    if getattr(args, "use_dynamic_global_batch_size", False):
+        problems.append("--use-dynamic-global-batch-size")
+    if getattr(args, "indep_dp", False):
+        problems.append("--indep-dp")
+    if getattr(args, "multi_lora", False):
+        problems.append("multi-LoRA")
+    if getattr(args, "multimodal_keys", None):
+        problems.append("--multimodal-keys")
+    backend = getattr(args, "train_backend", None)
+    if backend not in (None, "megatron"):
+        problems.append(f"--train-backend {backend}")
+    return problems
+
+
+def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[str, Any]]]]) -> None:
+    """Refuse a round (its converted ``groups``) with multi-sample trials that Miles would
+    not train one rollout per trial (:func:`segmented_round_problems`), or whose
+    compaction ``context_budget`` is more than this trainer's ``--seq-length`` (a segment
+    would not fit: its summary, at the end, would be cut). Then the sibling check of the
+    loss side (``yeto.rl.algos.segment_weights.sibling_problems``, when present) over all
+    the round's samples. A round without such trials: nothing is checked."""
+    every = groups
+    groups = [(position, group) for position, group in every if has_siblings(group)]
+    if not groups:
+        return
+    positions = [position for position, _ in groups]
+    problems = segmented_round_problems(args)
+    if problems:
+        raise SampleBufferRolloutError(
+            f"groups at buffer positions {positions[:8]} hold compacted trials (several samples "
+            f"per trial); Miles trains them one rollout per trial only on its rollout-side DP schedule, "
+            f"which this trainer does not use ({', '.join(problems)})")
+    budgets = [int(meta["context_budget"]) for _, group in groups for d in group
+               if (meta := compaction_meta(d)) is not None and isinstance(meta.get("context_budget"), int)]
+    seq_length = getattr(args, "seq_length", None)
+    if budgets and (not isinstance(seq_length, int) or seq_length < max(budgets)):
+        raise SampleBufferRolloutError(
+            f"groups at buffer positions {positions[:8]} hold compaction segments of context budget "
+            f"{max(budgets)}; this trainer's --seq-length {seq_length} does not hold one (a segment "
+            "ends with its summary, which would be cut): raise --seq-len to the budget")
+    sibling_problems = _optional("yeto.rl.algos.segment_weights", "sibling_problems")
+    if sibling_problems is not None:
+        problems = sibling_problems([d for _, group in every for d in group])
+        if problems:
+            raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
+
+
+def compaction_batch_line(rollout_id: int, groups: Sequence[Sequence[dict[str, Any]]]) -> str:
+    """The trainer log line of a round with compacted trials: its trials (rollouts), its
+    samples, and how many trials have 1, 2, ... samples (every sample of a trial is in
+    this round, so Miles trains them in one step)."""
+    sizes = [len(trial) for group in groups for trial in trial_rows(group)]
+    per_trial: dict[int, int] = {}
+    for size in sorted(sizes):
+        per_trial[size] = per_trial.get(size, 0) + 1
+    histogram = ",".join(f"{k}:{v}" for k, v in per_trial.items())
+    return (f"[sample-buffer] compaction_batch: rollout={int(rollout_id)} trials={len(sizes)} "
+            f"segments={sum(sizes)} per_trial={{{histogram}}}")
+
+
+def _optional(module: str, name: str) -> Any:
+    """``module.name``, or None while that module (another change's) is not there."""
+    import importlib  # noqa: PLC0415
+
+    try:
+        return getattr(importlib.import_module(module), name, None)
+    except ImportError:
+        return None
 
 
 def is_padding(sample: Any) -> bool:
@@ -869,10 +1018,12 @@ class BatchReader:
         (``TakeReport.stale_incarnation_groups``). ``"auto"`` builds it over the
         buffer's store (:func:`~yeto.rl.engine.incarnation_lease.default_incarnation_gate`,
         ``YETO_BUFFER_INCARNATION_FENCE=0`` turns it off); None: no gate.
-        ``group_size``: the round must hold exactly ``groups * group_size`` samples
-        (Miles' global batch). A short group (a sampler lost trials) is trained with
-        its own samples (``TakeReport.incomplete_groups``); one with fewer than
-        ``MIN_GROUP_SAMPLES`` or more than ``group_size`` is consumed, not trained.
+        ``group_size``: the round must hold exactly ``groups * group_size`` trials
+        (Miles' global batch counts rollouts; a trial is one sample, or the samples of its
+        compaction segments, ``buffer_payload.trial_count``). A short group (a sampler
+        lost trials) is trained with its own trials (``TakeReport.incomplete_groups``);
+        one with fewer than ``MIN_GROUP_SAMPLES`` or more than ``group_size`` trials is
+        consumed, not trained.
         A round that falls short selects more whole groups while they fit; the first
         that does not is carried over to the next take (the round's end, hence the
         watermark, stays before it); what is still missing is reported as
@@ -1343,7 +1494,7 @@ class BatchReader:
             quarantined += skipped["quarantined"]
             self._nonfinite += skipped["nonfinite"]
             self._nonfinite_lp += skipped["nonfinite_logprob"]
-            incomplete = sum(1 for position, _, _ in chosen if len(decoded[position]) < self.group_size)
+            incomplete = sum(1 for position, _, _ in chosen if trial_count(decoded[position]) < self.group_size)
             deferred_now += skipped.get("deferred", 0)
         if self._deferred:  # the watermark never passes a group the gate could not judge yet
             self._deferred.sort(key=lambda pending: pending[0])
@@ -1429,7 +1580,7 @@ class BatchReader:
               accounted: dict, versions: dict, source_groups: dict, source_tokens: dict,
               position_sources: dict, skipped: dict | None = None,
               lease_reads: dict[str, float] | None = None) -> tuple[int, int, int, int]:
-        """Top the chosen groups up to ``target`` samples with whole groups selected
+        """Top the chosen groups up to ``target`` trials with whole groups selected
         one by one, without waiting (what is not in the buffer yet is padded). The
         first group that would overflow is carried over (``self._carry``) and the
         round ends at its position, so the watermark never passes it untrained.
@@ -1440,7 +1591,7 @@ class BatchReader:
         lease is read again unless the round's recheck read it just now (``lease_reads``)."""
         skipped = skipped if skipped is not None else {"stale": 0, "stale_positions": [], "fenced": 0,
                                                        "quarantined": 0}
-        missing = target - sum(len(decoded[position]) for position, _, _ in chosen)
+        missing = target - sum(trial_count(decoded[position]) for position, _, _ in chosen)
         dropped = 0
         while missing > 0 and not self._deferred:  # nothing joins behind a deferred group
             selected = self._select(1)
@@ -1481,7 +1632,8 @@ class BatchReader:
                 continue
             if self._stale_payload(item.position, group):
                 continue
-            if not MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size):
+            trials = trial_count(group)
+            if not MIN_GROUP_SAMPLES <= trials <= int(self.group_size):
                 self._note_source(source, "group_size")
                 dropped += 1
                 continue
@@ -1498,7 +1650,7 @@ class BatchReader:
             oldest = payload_oldest_version(group)
             if oldest is not None:  # what the next take's age gate compares if this group is carried over
                 version = min(int(version), oldest)
-            if len(group) > missing:
+            if trials > missing:
                 # it holds its task when the next take chooses it
                 self._carry = (position, group, version, tokens, source, _dispense_position(item.entry),
                                task_key(item.entry))
@@ -1506,14 +1658,14 @@ class BatchReader:
             self._choose(position, group, version, tokens, source, chosen, decoded, accounted, versions,
                          source_groups, source_tokens, position_sources)
             self._accept(item.entry, position)
-            missing -= len(group)
+            missing -= trials
         return end, 0, max(0, missing), dropped
 
     def _drop_incomplete(self, chosen: list, decoded: dict, accounted: dict, versions: dict, source_groups: dict,
                          source_tokens: dict, position_sources: dict) -> int:
         """Decode the chosen groups not yet decoded; drop (in place) those with a
         damaged payload (:meth:`_group_at`, counted apart) and, with a ``group_size``,
-        those whose sample count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a
+        those whose trial count is outside ``MIN_GROUP_SAMPLES..group_size`` or with a
         non-finite reward (:func:`finite_rewards`, counted apart), then those whose
         store-dispenser task an earlier group holds (:meth:`_duplicate`), and undo their
         accounting. Returns the number dropped for their size. Their positions stay
@@ -1531,7 +1683,7 @@ class BatchReader:
             else:
                 aged = False
             sized = group is not None and (
-                self.group_size is None or MIN_GROUP_SAMPLES <= len(group) <= int(self.group_size))
+                self.group_size is None or MIN_GROUP_SAMPLES <= trial_count(group) <= int(self.group_size))
             bad_lp = sized and nonfinite_logprob(group) is not None
             good = sized and not bad_lp and (self.group_size is None or finite_rewards(group))
             if not aged:  # a group older than the floor says nothing about its source's data
@@ -2018,6 +2170,11 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
                 raise SampleBufferRolloutError(
                     "xhw_guard downweight scales the centered rewards; GRPO std normalization "
                     "cancels it (use action=quarantine, or turn std normalization off)")
+            if any(isinstance(d.get("reward"), bool) or not isinstance(d.get("reward"), (int, float))
+                   for d in group):
+                raise SampleBufferRolloutError(
+                    f"xhw_guard downweight of buffer position {position}: a reward is not a scalar "
+                    "(a reward dict cannot be scaled; use action=quarantine)")
             group = downweight_group(group, float(action.get("weight", 1.0)))
             downweighted += 1
         by_source.setdefault(source or "unknown", []).extend(group)
@@ -2030,17 +2187,46 @@ def xhw_round(groups: Sequence[tuple[int, list[dict[str, Any]]]], report: TakeRe
     return out, meta
 
 
-def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None) -> None:
+def check_xhw_downweight(*, std_normalized: bool, environ: Mapping[str, str] | None = None,
+                         args: Any = None) -> None:
     """At the reader's start: ``YETO_RL_XHW_GUARD`` with ``action=downweight`` under GRPO
     std normalization (Miles' default) is refused here, not at the first round the guard
-    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run)."""
+    trips (:func:`xhw_round` cannot apply it then, and the trainer would stop mid-run).
+
+    The downweight rewrites a group's rewards as ``c + w (r - c)``; Miles' per-rollout
+    centering cancels ``c``, so every advantage of the group is exactly ``w`` times its
+    own. That holds only for scalar rewards centered as they are: with the Miles ``args``
+    also refused are a length penalty (``--length-penalty-coeff``: added after the
+    scaling, and its correctness test ``reward == 1`` no longer holds), a reward dict
+    (``--reward-key``), and a yeto reward shaper or an advantage transform other than
+    ``grpo_default`` (``advantage.reward_shapers`` / ``advantage.transform``)."""
     from yeto.rl.engine.xhw_guard import XhwGuard  # noqa: PLC0415
 
     guard = XhwGuard.from_env(os.environ if environ is None else environ)
-    if guard is not None and guard.action == "downweight" and std_normalized:
+    if guard is None or guard.action != "downweight":
+        return
+    if std_normalized:
         raise SampleBufferRolloutError(
             "YETO_RL_XHW_GUARD action=downweight scales the centered rewards; GRPO std "
             "normalization (on) cancels it: use action=quarantine, or turn std normalization off")
+    if args is None:
+        return
+    from yeto.rl.algos.reward_pipeline import DEFAULT_TRANSFORM, read_plugins  # noqa: PLC0415
+
+    problems = []
+    if float(getattr(args, "length_penalty_coeff", 0.0) or 0.0) > 0:
+        problems.append("--length-penalty-coeff > 0")
+    if getattr(args, "reward_key", None):
+        problems.append("--reward-key (a reward dict)")
+    pipeline = dict((read_plugins(args, required=False) or {}).get("reward_pipeline") or {})
+    if pipeline.get("reward_shapers"):
+        problems.append(f"reward shapers {[dict(s).get('name') for s in pipeline['reward_shapers']]}")
+    if pipeline.get("advantage_transform") not in (None, DEFAULT_TRANSFORM):
+        problems.append(f"advantage transform {pipeline['advantage_transform']!r}")
+    if problems:
+        raise SampleBufferRolloutError(
+            "YETO_RL_XHW_GUARD action=downweight scales a group's advantages exactly only for "
+            f"scalar GRPO-centered rewards; this trainer has {', '.join(problems)}: use action=quarantine")
 
 
 def executor_set_xhw_actions(_executor: Any, actions: Mapping[str, Mapping[str, Any]]) -> dict | None:
