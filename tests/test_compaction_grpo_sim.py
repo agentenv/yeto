@@ -126,7 +126,9 @@ def test_spec_section_builds_the_proxy_config_and_refuses_what_launch_refuses():
     assert scenario("compact_once").compaction_config(engine) == sim.CompactionConfig(**sim.SMALL)
     assert scenario("no_compaction").compaction_config(engine) is None
     assert "cannot hold the summary turn" in scenario("tcomp_overflow").spec_error()
-    assert "max_response_len 3250 < agentic.compaction.context_budget" in scenario("r3_segment_window").spec_error()
+    # rows narrower than the engine context (a segment can grow to it, R1-F2)
+    assert "max_response_len 3250 < the engine context length max_model_len" in \
+        scenario("r3_segment_window").spec_error()
     from yeto.rl.agentic import HarnessConfigError
     from yeto.rl.engine.agentic_round import spec_compaction
 

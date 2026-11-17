@@ -1392,9 +1392,12 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         raise HarnessConfigError("a public records-proxy base needs a path secret (the tunnel is public)")
     compaction = spec_compaction(spec, engine)
     if compaction is not None:
-        from yeto.rl.compaction import describe
+        from yeto.rl.compaction import describe, segment_width
 
         logger.info("agentic.compaction: %s", describe(compaction))
+        _width, width_warning = segment_width(spec, compaction, max_model_len=getattr(engine, "max_model_len", None))
+        if width_warning is not None:
+            logger.warning(width_warning)
     proxy = RecordsProxy(engine, template, model=model, signed_sampling=signed,
                          sampler_id=str(spec.get("sampler_id", "records-proxy")),
                          compaction=compaction,  # None (no agentic.compaction): as before

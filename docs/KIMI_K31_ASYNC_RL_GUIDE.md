@@ -687,7 +687,7 @@ before.
 ```json
 "agentic": {
   "turn_max_tokens": 8192,
-  "max_response_len": 245760,
+  "max_response_len": 262144,
   "compaction": {
     "context_budget": 245760,
     "t_comp": 10240,
@@ -716,12 +716,21 @@ preflight refuse:
 - `context_budget > max_model_len` (the sampler checks again at start, against
   the running engine's own context length);
 - a `t_comp` that cannot hold the summary turn (see the table);
-- `agentic.max_response_len < context_budget`, and a trainer whose `--seq-len`
-  (or `--rollout-max-response-len`) is below `context_budget`: a segment is up to
-  `context_budget` tokens and ends with its summary, so a narrower row cuts
-  exactly the summary. The K3.1 example trainer (`SEQ_LEN=16384`) is refused
-  with compaction on; raise `--seq-len`, `--rollout-max-response-len` and
-  `agentic.max_response_len` to at least `context_budget`;
+- `agentic.max_response_len < max_model_len`, and a trainer whose `--seq-len`
+  (or `--rollout-max-response-len`) is below `max_model_len`: a segment is up to
+  `max_model_len` tokens, not `context_budget`, and ends with its summary, so a
+  narrower row cuts exactly the summary and the whole trial is dropped. A
+  segment outgrows `context_budget` because the trigger is checked before a
+  model call: a step that stays below the trigger still adds its reply and then
+  a tool output of any length, and the summary turn follows. The example above
+  is for an engine at `max_model_len` 262144 (rows of 262144). The K3.1 example
+  trainer (`SEQ_LEN=16384`) is refused with compaction on; raise `--seq-len`,
+  `--rollout-max-response-len` and `agentic.max_response_len` to at least
+  `max_model_len`. With compaction on, the trainer's `--seq-len` is compared
+  with `max_model_len` rather than `max_prompt_len + max_response_len` (a row
+  never exceeds the engine context). A spec that gives no
+  `engine.server.max_model_len` is checked against `context_budget` instead,
+  with a warning that this is not enough;
 - an agent that compacts its own history (`agentic.task_defaults.agent` other
   than `pi`). The proxy compacts on the history it records; an agent-side
   compaction rewrites that history and breaks the token chain. yeto runs pi with
@@ -744,8 +753,9 @@ max_tokens > max_model_len` is refused, with the largest `context_budget` that
 fits.
 
 `agentic.max_prompt_len` bounds the first segment's prompt only. A later
-segment starts from the system prompt, the summary and the kept steps; it is
-bounded by `context_budget`, not by `max_prompt_len`.
+segment starts from the system prompt, the summary and the kept steps; its
+prompt is bounded by `context_budget` (the next compaction), not by
+`max_prompt_len`.
 
 **Behaviour.**
 
@@ -811,7 +821,7 @@ each with its routing replay rows and top-128 log-probs. At 262k a K3.1 group
 of 8 trials is about 11 GB in the default payload encoding without compaction,
 and up to `1 + max_compactions` times that with it: over the 5 GiB that one
 object PUT to S3 / R2 / OSS can carry. `yeto run up` preflight estimates
-`sampling.n x (1 + max_compactions) x context_budget` tokens (or the sample rows
+`sampling.n x (1 + max_compactions) x max_model_len` tokens (or the sample rows
 without compaction) and warns above 5 GiB. Set
 `YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd` on the samplers where the release
 supports it, or lower the rows / `context_budget` / `max_compactions`.
@@ -833,7 +843,7 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
 **What to look at.**
 
 - `pool --dry-run` prints the effective values, for example
-  `agentic.compaction: on: context_budget 262144, t_comp 10240 (...), keep_recent_steps 2, max_compactions 3 (at most 4 segments per trial)`.
+  `agentic.compaction: on: context_budget 245760, t_comp 10240 (...), keep_recent_steps 2, max_compactions 3 (at most 4 segments per trial)`.
   `yeto run up` preflight prints the same line as `preflight: agentic.compaction on: ...`,
   and the sampler logs it at start.
 - The records proxy counts `compactions` (summaries written) and `context_full`

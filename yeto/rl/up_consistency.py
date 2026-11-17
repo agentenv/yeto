@@ -157,7 +157,13 @@ def length_problems(args: Any, spec: dict[str, Any]) -> list[str]:
     # often set to max_model_len - max_tokens: it says nothing about the rows.
     if not p_name.startswith("agentic."):
         return problems
-    if response is not None and prompt is not None and seq and prompt + response > seq:
+    row = None if response is None or prompt is None else prompt + response
+    if row is not None and isinstance(spec.get("agentic"), dict) and spec["agentic"].get("compaction") is not None:
+        # a compacting spec: max_response_len is set to the engine context (a segment can grow to it), so the
+        # sum overstates the row, which is at most max_model_len (compaction_problem checks the trainer's)
+        limit = spec_max_model_len_of(spec)
+        row = row if limit is None else min(row, limit)
+    if row is not None and seq and row > seq:
         problems.append(f"the sampler spec's {p_name} {prompt} + {r_name} {response} = {prompt + response} > "
                         f"the trainer's --seq-len {seq}: the island is planned for shorter rows than the "
                         f"samplers write; raise --seq-len or lower the sampler caps")
@@ -279,13 +285,27 @@ def compaction_problem(args: Any, spec: dict[str, Any]) -> str | None:
     schedule = segment_schedule_problems(args, getattr(args, "_argv", ()))
     if schedule:
         return segment_schedule_text(schedule)
+    from yeto.rl.compaction import segment_width  # noqa: PLC0415
+
+    width, _warning = segment_width(spec, cfg)  # the warning: compaction_lines
     seq = max(int(getattr(args, "seq_len", 0) or 0), int(getattr(args, "rollout_max_response_len", 0) or 0))
-    if seq < cfg.context_budget:
-        return (f"the trainer's --seq-len {seq} < the sampler spec's agentic.compaction.context_budget "
-                f"{cfg.context_budget}: a compaction segment is up to context_budget tokens and a shorter row "
-                f"cuts the summary at its end; raise --seq-len (and --rollout-max-response-len) to at least "
-                f"{cfg.context_budget} or lower context_budget")
+    if seq < width:
+        what = ("engine context length max_model_len" if spec_max_model_len_of(spec) is not None
+                else "agentic.compaction.context_budget")
+        return (f"the trainer's --seq-len {seq} < the sampler spec's {what} {width}: a compaction segment can "
+                f"grow to the engine context (a large tool output after the last step below the trigger, then "
+                f"the summary) and a shorter row cuts the summary at its end; raise --seq-len (and "
+                f"--rollout-max-response-len) to at least {width}")
     return None
+
+
+def spec_max_model_len_of(spec: dict[str, Any]) -> int | None:
+    from yeto.rl.compaction import spec_max_model_len  # noqa: PLC0415
+
+    try:
+        return spec_max_model_len(spec)
+    except (TypeError, ValueError):
+        return None
 
 
 # The smallest drain cut suggested with agentic.compaction: agentic_round's
@@ -360,9 +380,12 @@ def compaction_lines(pool_cfg: dict[str, Any], trainer_argv: list[str] | None = 
         return []
     if cfg is None:
         return []
+    from yeto.rl.compaction import segment_width  # noqa: PLC0415
+
     args = trainer_args(trainer_argv) if trainer_argv is not None else None
+    _width, width_warning = segment_width(spec, cfg)
     return [f"agentic.compaction {describe(cfg)}"] + [
-        f"WARNING: {w}" for w in compaction_switch_warnings(spec, args)]
+        f"WARNING: {w}" for w in [*([width_warning] if width_warning else []), *compaction_switch_warnings(spec, args)]]
 
 
 def _group_tokens(spec: dict[str, Any]) -> int | None:
@@ -386,7 +409,7 @@ def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | Non
                          environ: dict[str, str] | None = None) -> str | None:
     """A warning when one buffer group of the pool's samplers can exceed one object
     PUT (5 GiB on S3 / R2 / OSS): ``sampling.n`` trials x (1 + ``max_compactions``)
-    segments x ``context_budget`` tokens with compaction, else x the row tokens
+    segments x the segment width (:func:`yeto.rl.compaction.segment_width`) with compaction, else x the row tokens
     (:func:`_group_tokens`), sized by ``buffer_payload.k31_group_payload_bytes`` (the
     K3.1 bytes per token: R3 + top-128). Only for specs that return routed experts
     (R3 is most of the bytes). The codec is ``YETO_SAMPLE_BUFFER_PAYLOAD_CODEC`` of
@@ -409,7 +432,9 @@ def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | Non
         return None  # the pool dry-run reports a bad section
     args = trainer_args(trainer_argv) if trainer_argv is not None else None
     trials = (spec.get("sampling") or {}).get("n") or getattr(args, "n_samples_per_prompt", None)
-    tokens = cfg.context_budget if cfg is not None else _group_tokens(spec)
+    from yeto.rl.compaction import segment_width  # noqa: PLC0415
+
+    tokens = segment_width(spec, cfg)[0] if cfg is not None else _group_tokens(spec)  # a segment: up to max_model_len
     if not trials or not tokens:
         return None
     compactions = 0 if cfg is None else cfg.max_compactions
