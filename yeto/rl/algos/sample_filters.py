@@ -69,13 +69,30 @@ def _status(sample: Any) -> str:
     return str(getattr(status, "value", status) or "")
 
 
+def trial_key(sample: Any, row: int) -> Any:
+    """One value per trial: ``metadata["compaction"]["trajectory_id"]`` of a compaction
+    segment (all segments of a trial share it), else the row (never merged)."""
+
+    metadata = sample.get("metadata") if isinstance(sample, dict) else getattr(sample, "metadata", None)
+    meta = metadata.get("compaction") if isinstance(metadata, dict) else None
+    tid = meta.get("trajectory_id") if isinstance(meta, dict) else None
+    return ("trajectory", str(tid)) if tid is not None else ("row", row)
+
+
 def overlong_filter(data: Sequence[Sequence[Any]]) -> int:
-    """Mark truncated samples ``remove_sample=True``; returns the count."""
+    """Mark truncated samples ``remove_sample=True``; returns the count.
+
+    A compacted trial is truncated in its last segment only; every segment of
+    that trial (same ``metadata["compaction"]["trajectory_id"]``) is marked,
+    as the unsplit trial would be. Uncompacted samples: only themselves.
+    """
 
     removed = 0
     for group in data:
-        for sample in _flat(group):
-            if _status(sample) == "truncated" and not getattr(sample, "remove_sample", False):
+        samples = _flat(group)
+        truncated = {trial_key(s, row) for row, s in enumerate(samples) if _status(s) == "truncated"}
+        for row, sample in enumerate(samples):
+            if trial_key(sample, row) in truncated and not getattr(sample, "remove_sample", False):
                 sample.remove_sample = True
                 if getattr(sample, "metadata", None) is None:
                     sample.metadata = {}

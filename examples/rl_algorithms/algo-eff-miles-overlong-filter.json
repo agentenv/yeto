@@ -45,7 +45,7 @@
   "plugins": [
     {
       "path": "yeto.rl.algos.sample_filters.apply_sample_filters",
-      "sha256": "9e16624407058ed66d1f66ecc0e0d0646358b5ce332399f546e4a042e89565cc"
+      "sha256": "850d0963d273f5ba6fa3f3ffa4508e67a8d681b5ed8ab44d3a660da8a30861ad"
     }
   ],
   "sampling": {
