@@ -22,6 +22,12 @@ is what the process exits with, so a failing run still fails.
 
 ``YETO_TEST_SOFT_EXIT=1`` keeps the normal exit (for anything that needs the
 atexit handlers, e.g. a coverage run).
+
+Only the process's own (outermost) pytest session leaves this way. A test that
+runs pytest in process (``pytester.runpytest``, with a copy of this conftest)
+starts a nested session in the same interpreter; its end must return to the
+test, not end the process with the nested run's status (which would stop the
+outer run silently, exit status 0, with the rest of its tests never run).
 """
 
 from __future__ import annotations
@@ -29,12 +35,19 @@ from __future__ import annotations
 import os
 import sys
 
-_STATUS: dict[str, int] = {}
+_STATUS: dict[int, int] = {}  # id(config) -> the exit status its session computed
+_ROOT: list[int] = []  # id() of the first (outermost) config of this process
 
 
-def note_exitstatus(exitstatus) -> None:
+def note_configure(config) -> None:
+    """Remember the first config of the process; called from ``pytest_configure``."""
+    if not _ROOT:
+        _ROOT.append(id(config))
+
+
+def note_exitstatus(session, exitstatus) -> None:
     """Record what pytest will exit with; called from ``pytest_sessionfinish``."""
-    _STATUS["exitstatus"] = int(exitstatus)
+    _STATUS[id(session.config)] = int(exitstatus)
 
 
 def pytest_unconfigure(config):
@@ -43,7 +56,10 @@ def pytest_unconfigure(config):
         return
     if hasattr(config, "workerinput"):  # an xdist worker: the controller collects its result
         return
-    status = _STATUS.get("exitstatus")
+    if not _ROOT or id(config) != _ROOT[0]:  # a nested in-process run (pytester): back to its test
+        _STATUS.pop(id(config), None)
+        return
+    status = _STATUS.get(id(config))
     if status is None:  # no session ran (e.g. --collect-only, a usage error)
         return
     try:
