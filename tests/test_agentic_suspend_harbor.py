@@ -17,6 +17,7 @@ import pytest
 import test_agentic_harbor as agentic
 from test_agentic_harbor import _FakeTrial, _Harness, _result, _task
 
+from tests.sleep_fakes import fake_module_sleep
 from yeto.rl.agentic import AdmissionGate, HarnessConfigError, Outcome, TrialVerdict, run_agent_task
 from yeto.rl.agentic.suspend import (
     SESSION_REF_PREFIX,
@@ -588,7 +589,7 @@ def test_test_only_hold_is_off_by_default_and_delays_the_reopen(monkeypatch):
             events.append(("open", list(slept)))
 
     monkeypatch.setattr(mod, "turn_gate", lambda: Gate())
-    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    fake_module_sleep(monkeypatch, mod, fake_sleep, name="asyncio")
     monkeypatch.delenv(mod.TEST_HOLD_EXTRA_ENV, raising=False)
     asyncio.run(mod.resume(None))
     monkeypatch.setenv(mod.TEST_HOLD_EXTRA_ENV, "420")
