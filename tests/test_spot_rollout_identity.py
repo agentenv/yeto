@@ -243,7 +243,9 @@ def test_local_schemas_keep_their_exact_envelope_fields(tmp_path):
     path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
     raw = json.loads(path.read_text())
     assert "merged_version" not in raw and "behavior_policy_kind" not in raw["envelopes"][0]
-    assert set(asdict(evidence.envelopes[0])) - trajectory_evidence._EXTERNAL_CUT_FIELDS == set(mapping)
+    # nor a compacted trial's segment count (written only on its segments)
+    assert set(asdict(evidence.envelopes[0])) - trajectory_evidence._EXTERNAL_CUT_FIELDS - (
+        trajectory_evidence._SEGMENTED_TRIAL_FIELDS) == set(mapping)
 
 
 def test_miles_evidence_port_writes_schema_5_for_a_relay_round(tmp_path):

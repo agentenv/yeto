@@ -46,7 +46,10 @@ def persist_published_round_evidence(
     rollout (``MilesRolloutPool``); that token is the batch's round and
     policy.  ``published`` maps every version in the policy-age window to
     its weight hash; a trajectory is named by the oldest version on its
-    tokens.  The evidence kind comes from the launch context bound on
+    tokens. A trial that context compaction split into segment samples is
+    named segment by segment (the oldest version on each segment's own
+    tokens: a reload between segments changes it); a segment outside the
+    window refuses the round, so the reader drops such a trial's group first.  The evidence kind comes from the launch context bound on
     ``args``; the context must also bind a schema, but new evidence is
     always schema 4.
 
