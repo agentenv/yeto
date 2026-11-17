@@ -497,8 +497,8 @@ class RecordingBackend:
         else:
             used = tokens(head)
             if used >= int(self.engine.max_model_len):  # the next segment could not sample a token
-                counters["compaction_no_room"] += 1
-                self._context_full(session, segment, f"compaction_no_room: the rebuilt context has {used} "
+                counters[COMPACTION_NO_ROOM] += 1
+                self._context_full(session, segment, f"{COMPACTION_NO_ROOM}: the rebuilt context has {used} "
                                                      f"tokens; max_model_len is {self.engine.max_model_len}")
             if should_compact(used, cfg):  # even k = 0 is over the trigger: _should_compact will not compact it again
                 counters["compaction_rebuild_over_budget"] += 1
