@@ -1090,6 +1090,13 @@ def spec_live_engine(spec: Mapping[str, Any]) -> bool:
     return options.get("live_update") is True
 
 
+# drain_timeout_warning: the smallest drain cut suggested with agentic.compaction (not measured):
+# the uncompacted K3.1 trial p90 (about 980 s) + 3 compactions x about 380 s (a summary of
+# turn_max_tokens 8192 at 40 ms ITL, an uncached 262k prefill at about 5.8k tok/s, the next
+# segment's first prefill), rounded up
+COMPACTION_DRAIN_FLOOR_S = 2400.0
+
+
 def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None = None) -> str | None:
     """A warning for a spec that resolves to the ``drain`` weight switch and whose
     ``agentic.drain_timeout_s`` (or no ``drain_timeout_s``) exceeds
@@ -1097,7 +1104,13 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
     (:func:`effective_drain_timeout`). ``weight_switch: auto`` resolves as the
     sampler does (:func:`resolve_weight_switch`): ``live`` on a live-update engine
     (``live_engine``; None: read from the spec, :func:`spec_live_engine`), so
-    such a spec gets no warning."""
+    such a spec gets no warning.
+
+    With ``agentic.compaction`` set, a drain that has a cut is also warned: a
+    compacted trial is a long one (it filled the context budget at least once,
+    and each compaction adds a summary turn and an uncached prefill of the next
+    segment), and a trial still running at the cut is lost with all its
+    segments (its reward never comes, so none of them trains)."""
     section = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else None
     if section is None:
         return None
@@ -1109,10 +1122,22 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
     if cap is None:
         return None
     drain = section.get("drain_timeout_s")
+    note = None
+    if section.get("compaction") is not None:
+        cut = effective_drain_timeout(None if drain is None else float(drain), cap)
+        note = (f"agentic.compaction with the drain weight switch: every release cuts the trials still running "
+                f"{cut:g} s after its drain began, and a cut compacted trial is lost with all its segments "
+                f"(compacted trials are the long ones, each compaction adds a summary turn), so the groups' "
+                f"baselines come from the short trials; prefer weight_switch live on an engine with live_update, "
+                f"else raise drain_timeout_s and reload_max_defer_s together to at least "
+                f"{COMPACTION_DRAIN_FLOOR_S:g} s (an estimate for a 262k budget and 3 compactions; measure the "
+                f"compacted trials' wall time) and release less often (--rl-release-every N with "
+                f"--rl-max-policy-age raised to match); watch rl_agentic_drain abandoned_trials")
     if drain is not None and float(drain) <= cap:
-        return None
+        return note
     shown = "unset (no bound)" if drain is None else f"{float(drain):g} s"
-    return (f"agentic.drain_timeout_s is {shown}, above reload_max_defer_s {cap:g} s: a drain-mode weight switch "
+    return ("" if note is None else f"{note}; ") + (
+            f"agentic.drain_timeout_s is {shown}, above reload_max_defer_s {cap:g} s: a drain-mode weight switch "
             f"waits at most {cap:g} s on running trials, then cancels them (lost as drain_timeout); set "
             f"drain_timeout_s <= reload_max_defer_s to make that explicit")
 
