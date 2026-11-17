@@ -77,6 +77,22 @@ are unchanged): ``tokens`` = prompt ids + response ids of the joined stream,
 ``loss_mask`` (the response mask: 1 = sampled by the policy, 0 = tool output
 and template tokens), ``reward``; ``metadata`` adds the trial outcome fields.
 
+CompactionRL (a records proxy with a ``compaction`` config): a trial the proxy
+compacted writes one sample per compaction segment (:func:`agentic_samples`)
+into its group: the same ``group_index`` and ``index``, the trial's reward,
+each segment's own tokens, mask, log-probs, top-K, R3 and weight versions, and
+``metadata.compaction`` (``schema``, ``trajectory_id``, ``segment_index``,
+``num_segments``, ``context_budget``, ``summary_ok``, ``kept_steps``, the
+segment's trained tokens ``segment_tokens`` and those of the later segments
+``tokens_after``; ``summary_ok``: the summary the segment ends with is whole,
+None on the last; ``kept_steps``: steps its rebuilt context kept, None on the
+first). Only the last segment can be ``truncated``: cut at
+``max_response_len``, or the context filled (after the last compaction, or no
+room for a summary request). A trial with no compaction is the sample above,
+without ``metadata.compaction``; on a compacting proxy it is ``truncated`` too
+when the context filled. The round event counts the trials that ended with no
+room for a summary (``agentic.compaction_no_room``, only when there are any).
+
 The trials run on one event loop thread kept for the island's life (the
 recorder's HTTP server lives on that loop); the engine calls run in its
 executor, sized to the in-flight limit. Groups are written on the calling
@@ -211,6 +227,68 @@ def agentic_sample(item: PromptItem, finished: Any, *, version: int, provenance:
     return record
 
 
+COMPACTION_SCHEMA = 1
+CONTEXT_FULL = "context_full"  # RecordingBackend's parse_error prefix when the prompt fills max_model_len
+COMPACTION_NO_ROOM = "compaction_no_room"  # records.COMPACTION_NO_ROOM (not imported: the gateway is optional)
+
+
+def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance: Mapping[str, str],
+                    group_index: int, index: int, versions: tuple[int, int] | None = None,
+                    engine_meta: Mapping[str, Any] | None = None,
+                    start_version: int | None = None) -> list[dict[str, Any]]:
+    """One kept trial as its buffer samples (module doc): :func:`agentic_sample`
+    for a trial with one stream; one sample per compaction segment for a
+    compacted one (``finished.parts``: its segments with a trained token). ``version`` / ``versions``: the trial's
+    (drain: every segment's; live: the fallback of a segment no turn version
+    is known for). Live (``versions`` given), each segment's versions are its
+    own turns' (the first segment's also the version served when the trial
+    started, ``start_version``)."""
+    parts = tuple(getattr(finished, "parts", ()) or ())
+    if not parts:
+        sample = agentic_sample(item, finished, version=version, provenance=provenance, group_index=group_index,
+                                index=index, versions=versions, engine_meta=engine_meta)
+        if getattr(finished, "compacting", False) and _context_full(finished.turns):
+            # compaction on, yet the context filled (the summary request did not fit): truncated
+            sample["status"], sample["metadata"]["finish_reason"] = "truncated", FINISH_LENGTH
+        return [sample]
+    trained = [int(sum(part.tokens.response_mask)) for part in parts]
+    samples = []
+    for number, part in enumerate(parts):
+        lo = hi = int(version)
+        if versions is not None:
+            seen = [int(t.policy_version) for t in part.turns if t.policy_version is not None]
+            if number == 0 and start_version is not None:
+                seen.append(int(start_version))
+            lo, hi = (min(seen), max(seen)) if seen else (int(versions[0]), int(versions[1]))
+        one = dataclasses.replace(finished, segments=part.tokens, turns=part.turns, parts=())
+        sample = agentic_sample(item, one, version=lo, provenance=provenance, group_index=group_index,
+                                index=index, versions=None if versions is None else (lo, hi),
+                                engine_meta=engine_meta)
+        meta = sample["metadata"]
+        if number < len(parts) - 1:  # it ended with its summary; the trial went on
+            sample["status"] = "completed"
+        elif _context_full(part.turns):  # full after the last compaction, or no room for a summary
+            sample["status"], meta["finish_reason"] = "truncated", FINISH_LENGTH
+        meta["compaction"] = {"schema": COMPACTION_SCHEMA, "trajectory_id": finished.trajectory.task.trajectory_id,
+                              "segment_index": number, "num_segments": len(parts),
+                              "context_budget": part.context_budget, "summary_ok": part.summary_ok,
+                              "kept_steps": part.kept_steps, "segment_tokens": trained[number],
+                              "tokens_after": sum(trained[number + 1:])}
+        samples.append(sample)
+    return samples
+
+
+def _context_full(turns: Sequence[Any]) -> bool:
+    return bool(turns) and str(getattr(turns[-1], "policy_error", None) or "").startswith(CONTEXT_FULL)
+
+
+def compaction_no_room(finished: Any) -> bool:
+    """The trial ended because its summary request did not fit (records ``compaction_no_room``)."""
+    turns = getattr(finished, "turns", ())
+    last = getattr(turns[-1], "policy_error", None) if turns else None
+    return str(last or "").startswith(f"{CONTEXT_FULL}: {COMPACTION_NO_ROOM}")
+
+
 def infra_failure(result: Any) -> str | None:
     """The failure name when ``result`` (a finished trial) is an
     infrastructure failure *before the policy produced anything* -- ABORTED with no
@@ -308,6 +386,7 @@ class _Tally:
     lengths: list[int] = dataclasses.field(default_factory=list)
     retried: Counter[str] = dataclasses.field(default_factory=Counter)  # infra retries
     refilled: int = 0  # groups written whole only thanks to a retry
+    no_room: int = 0  # kept trials that ended with no room for a compaction summary
 
 
 class AgenticRound(EngineRound):
@@ -479,7 +558,8 @@ class AgenticRound(EngineRound):
                 pass
             raise
         return await finish_sample(trajectory, self.recorder, session, gate.metrics,
-                                   max_response_len=self.max_response_len, max_prompt_len=self.max_prompt_len)
+                                   max_response_len=self.max_response_len, max_prompt_len=self.max_prompt_len,
+                                   segmented=True)  # one sample per compaction segment (module doc)
 
     # ------------------------------------------------------------------ the stream (loop thread)
     def _on_loop(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -844,7 +924,7 @@ class AgenticRound(EngineRound):
 
         n = len(group.sessions)
         lost: Counter[str] = Counter()
-        kept: list[tuple[Any, int, int]] = []  # (finished, behavior version, newest version)
+        kept: list[tuple[Any, int, int, int | None]] = []  # (finished, behavior, newest, start version)
         alignment_reports = rebased = 0  # rl_agentic_trial_lost events / kept trials whose stream restarted
         for j, finished in enumerate(group.results):
             if isinstance(finished, _Lost):
@@ -857,7 +937,8 @@ class AgenticRound(EngineRound):
                     self.emit(LOST_EVENT, rollout_id=group.rollout_id, prompt_id=group.item.prompt_id,
                               trial=j, reason=str(finished.trajectory.reason), **finished.loss)
                 continue
-            rebased += int(getattr(finished.segments, "rebased_turns", 0) > 0)
+            streams = [p.tokens for p in getattr(finished, "parts", ())] or [finished.segments]
+            rebased += int(any(getattr(seg, "rebased_turns", 0) > 0 for seg in streams))
             turns = [int(t.policy_version) for t in finished.turns if t.policy_version is not None]
             start = group.start_versions[j]
             if self.live:  # the oldest version of any turn: the trainer's age gate and TIS see it
@@ -865,11 +946,11 @@ class AgenticRound(EngineRound):
                 if not seen:  # no version is known for any of its tokens
                     lost[LOST_VERSION] += 1
                     continue
-                kept.append((finished, min(seen), max(seen)))
+                kept.append((finished, min(seen), max(seen), start))
             elif start != group.version or any(v != group.version for v in turns):
                 lost[LOST_VERSION] += 1
             else:
-                kept.append((finished, int(group.version), int(group.version)))
+                kept.append((finished, int(group.version), int(group.version), start))
         self._unsettled.remove(group)
         rid = group.rollout_id
         state = self._rounds[rid]
@@ -891,20 +972,23 @@ class AgenticRound(EngineRound):
             self.dropped_groups += 1
             tally.dropped += 1
         record = self.provenance.to_record()
-        behavior = min((v for _, v, _ in kept), default=None)
-        newest = max((v for _, _, v in kept), default=None)
+        behavior = min((v for _, v, _, _ in kept), default=None)
+        newest = max((v for _, _, v, _ in kept), default=None)
         if reason is None:
             samples = []
-            for j, (finished, version, top) in enumerate(kept):
-                sample = agentic_sample(group.item, finished, version=version, provenance=record,
+            for j, (finished, version, top, start) in enumerate(kept):
+                # one sample, or one per compaction segment: the trial's index and reward on each
+                trial = agentic_samples(group.item, finished, version=version, provenance=record,
                                         group_index=group.position, index=group.position * n + j,
                                         versions=(version, top) if self.live else None,
-                                        engine_meta=self.engine_meta)
-                tally.finish[sample["metadata"]["finish_reason"]] += 1
-                tally.tokens += sample["response_length"]
-                tally.rewards.append(sample["reward"])
-                tally.lengths.append(int(sum(sample["loss_mask"])))
-                samples.append(sample)
+                                        engine_meta=self.engine_meta, start_version=start)
+                for sample in trial:
+                    tally.finish[sample["metadata"]["finish_reason"]] += 1
+                    tally.tokens += sample["response_length"]
+                tally.rewards.append(trial[0]["reward"])  # per trial, not per segment
+                tally.no_room += int(compaction_no_room(finished))
+                tally.lengths.append(sum(int(sum(sample["loss_mask"])) for sample in trial))
+                samples.extend(trial)
             try:
                 self._write_group(rid, group.item, samples, record=record, last=state.open == 0,
                                   cursor=state.cursor)
@@ -938,6 +1022,9 @@ class AgenticRound(EngineRound):
                   drain_wait_s=group.drain_s, weight_switch=self.weight_switch,
                   infra_retries=list(group.retries), retry_reasons=list(group.retry_reasons),
                   retried_trials=len(group.retry_reasons), lost_trials=sum(lost.values()))
+        # the trials' arrays (R3 up to a whole segment per compaction segment) are in the buffer
+        # now or never will be: a group object kept alive elsewhere does not keep them
+        group.results = [r if isinstance(r, _Lost) else None for r in group.results]
 
     def _outcomes(self) -> dict[str, int]:
         """The admission counters: totals since the last round event, in flight now."""
@@ -972,6 +1059,8 @@ class AgenticRound(EngineRound):
                    "infra_retries_total": dict(sorted(self.retries_total.items())),
                    "infra_retries_exhausted_total": self.retries_exhausted,
                    "session_collisions_total": self.session_collisions}
+        if tally.no_room:  # CompactionRL only (absent without compaction, as on main)
+            agentic[COMPACTION_NO_ROOM] = tally.no_room
         self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=self.engine.served_version(),
                   groups=tally.written, samples=tally.samples, response_tokens=tally.tokens,
                   finish=dict(sorted(tally.finish.items())), source=self.provenance.key(),
@@ -1199,7 +1288,8 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
                          r3_response_len=max_response_len)  # R3 rows cut to the training window
     recorder = ProxyTokenRecorder(proxy, host=str(proxy_cfg.get("host", "127.0.0.1")),
                                   port=int(proxy_cfg.get("port", 0)), public_base=public_base,
-                                  path_secret=Path(secret_file).read_text().strip() if secret_file else None)
+                                  path_secret=Path(secret_file).read_text().strip() if secret_file else None,
+                                  allow_compaction=True)  # one buffer sample per compaction segment
     settings = dataclasses.replace(HarborSettings.from_env(), turn_max_tokens=signed["max_tokens"])
     harness = HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
     defaults = {"model_name": model, **dict(section.get("task_defaults") or {})}
