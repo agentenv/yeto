@@ -210,6 +210,7 @@ The data is inside the file; no network access is needed.</div>
   <h2>Async GRPO <span class="note">(sample buffer: samplers write groups, trainers read them; every number is from the tapes, n/a = not on the tape)</span></h2>
   <h3>Trainer rounds <span class="note" id="aTrNote"></span></h3><div id="aTrainer" style="overflow-x:auto"></div>
   <h3>Samplers <span class="note">(policy age = trainer version − version the round generated with)</span></h3><div id="aSamplers" style="overflow-x:auto"></div>
+  <div id="aCompBox" hidden><h3>Context compaction <span class="note">(CompactionRL: a compacted trial is written as one sample per segment, all with the trial's reward; sampler rows count written trials, trainer rows trained samples)</span></h3><div id="aComp" style="overflow-x:auto"></div></div>
   <div class="gridc">
     <div><h3>Buffer backlog <span class="note">(groups written by all samplers − the trainers' read position)</span></h3>
       <div class="legend" id="legBacklog"></div><div id="aBacklog"></div></div>

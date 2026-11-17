@@ -84,6 +84,14 @@ _BARE_LOCAL_ROUND_ALIASES = {
 # become ``train/<key>``: plain metric-name keys with finite scalar values only.
 _TRAIN_METRIC_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]{0,63}$")
 _TRAIN_STEP_ALIASES = (TRAIN_STEP_KEY, "train_step")
+# CompactionRL step summary (``rl_round_trained.compaction``, timeline.compaction_stats):
+# these scalars become ``train/compaction/<key>``; absent without compaction data.
+_COMPACTION_WANDB_KEYS = (
+    "trials", "samples", "samples_per_trial", "segment_sample_frac", "compacted_trials",
+    "compacted_frac", "compactions_mean", "summary_ok_frac", "truncated_compacted_trials",
+    "truncated_compacted_frac", "summary_token_frac", "reward_mean_trial", "reward_mean_segment",
+    "xhw_trial_mean_shift",
+)
 _derived_step_logged = False
 
 _TRAIN_OUTPUTS = frozenset(key for key in _METRIC_ALIASES if key.startswith("train/"))
@@ -175,6 +183,12 @@ def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
                 value = _finite_scalar({key: raw}, (key,))
                 if value is not None:
                     train_extra[f"train/{key}"] = value
+        compaction = event.get("compaction")
+        if isinstance(compaction, dict):
+            for key in _COMPACTION_WANDB_KEYS:
+                value = _finite_scalar(compaction, (key,))
+                if value is not None:
+                    train_extra[f"train/compaction/{key}"] = value
     if event_name == "rl_round_trained":
         metrics = {}
     for key in ("rl/pass_rate", "eval/pass_rate"):

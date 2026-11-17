@@ -122,10 +122,61 @@ and the budget can be passed to the launcher with the environment variables
 | Budget | 60% / 80% | 1/0 |
 | RECOVERY_REQUIRED (journal phase or tape `rl_reconfiguration`) | — | 0 |
 | ssh mirror source lost | — | 1 |
+| Compaction `summary_ok` share (per sampler, last 5 rounds with compaction, >= 5 summaries) | < 90% warning, < 50% critical | 1/0 |
+| Compacted trials ending truncated (same window, >= 5 compacted trials) | > 20% | 1 |
+| Trials that compacted at all (same window, >= 5 trials) | > 50% info | 2 |
+| Trials invalidated for a fork / history rewrite of a compacted session (`compaction_fork_lost`) as a share of compacted trials (same window, >= 5) | > 5% | 1 |
+| Multi-segment trials not written minus one-segment trials not written (same window, >= 5 multi-segment trials) | > 20 points | 1 |
 
 Levels: 0 critical, 1 warning, 2 info. Override thresholds with
 `--thresholds t.json` (keys are in `yeto/dashboard/alerts.py:DEFAULT_THRESHOLDS`;
 an unknown key is an error).
+
+## Context compaction (CompactionRL segments)
+
+Shown only when the tapes carry compaction data; without it the page, the view
+JSON and the events keep their old fields. With `agentic.compaction` on, a
+compacted trial is written as one buffer sample per segment
+(`metadata.compaction`), every segment with the trial's reward.
+
+- Sampler: each `rl_sampler_engine_round` carries `agentic.compaction`, the
+  summary of the round's written samples (`yeto/rl/engine/timeline.py:
+  CompactionTally`); the sampler log prints the same as one
+  `agentic round N compaction: ...` line.
+- Trainer: `rl_round_trained.compaction` is the same summary over the step's
+  trained samples; W&B gets its scalars as `train/compaction/<key>` on
+  `train/step`.
+
+| Key | Meaning |
+|---|---|
+| `trials` / `samples` / `samples_per_trial` | trials (distinct trajectories), samples (segments), samples per trial |
+| `compacted_trials` / `compacted_frac` | trials with at least one compaction, and their share of `trials` |
+| `compactions` / `compactions_mean` / `compactions_max` | summary turns in total, per trial, the most in one trial (`max_compactions`: the configured limit) |
+| `segments_hist` | trials by segment count (`{"1": n1, "2": n2, ...}`) |
+| `segment_samples` / `segment_sample_frac` | samples of compacted trials, and their share of `samples` |
+| `summaries` / `summary_ok` / `summary_ok_frac` | summary turns, those with a `<summary>` block, the share |
+| `truncated_trials` / `truncated_compacted_trials` / `truncated_compacted_frac` | trials whose last segment is `truncated`; those that compacted; their share of `compacted_trials` |
+| `exhausted_trials` / `exhausted_truncated_trials` | trials that used every allowed compaction (and also ended truncated); null when the limit is unknown |
+| `context_full_trials` | trials the records proxy stopped for a full context; null when not reported |
+| `trainable_tokens` / `summary_tokens` / `summary_token_frac` | loss-mask tokens, summary-turn tokens, the share; null when the samples carry no `summary_tokens` |
+| `fork_lost_trials` / `compaction_exposed_trials` / `fork_lost_frac` | trials the gateway invalidated because the harness forked or rewrote the history of a compacted session (`compaction_fork_lost`, lost before the group was written); written compacted trials plus those; the share |
+| `retry_replays` / `retry_replay_trials` | lost replies the gateway replayed to a harness retry, and the trials that had any; null when the samples do not report them |
+| `reward_mean_trial` / `reward_mean_segment` | reward mean per trial (the GRPO unit) and per segment sample; with compaction on, the round's `agentic.reward_mean` / `policy_tokens_mean` are the per-trial values |
+| `policy_tokens_mean_trial` / `policy_tokens_mean_segment` | loss-mask tokens per trial and per segment sample |
+| `by_segments` | per segment-count bucket (`0` = given up by a drain before it started, `1`, `2`, `3`, `4+`, `unknown`): trials `written`, `lost` before the group was written by reason (`drain_timeout`, `served_by_other_version`, aborted ...), `dropped` with a group that was not written by reason, `not_written_frac`; the trainer adds `stale` from `rl_buffer_stale_skipped.stale_by_segments` when reported |
+| `xhw_downweighted_groups` / `_trials` / `_samples` / `xhw_trial_mean_shift` | groups xhw_guard downweighted (`metadata.yeto_xhw_downweight`) and the mean absolute move of their per-trial reward mean (the downweight keeps the per-sample mean, not the per-trial one) |
+
+With compaction on, each `rl_agentic_drain` also carries `drained_by_segments`
+(the trials the drain cut, by the segment count the records proxy held when it
+cut them), `drained_compacted_trials` (2 segments or more) and
+`drained_uncompacted_trials` (1 segment); the same cut trials appear in the
+round's `by_segments` as `lost: {"drain_timeout": n}`.
+
+The "Context compaction" table in the Async GRPO section sums the counts over
+all rounds per island (ratios are recomputed from the sums), shows the trial
+fate per segment-count bucket (are long trials dropped more often than short
+ones?) and lists the samplers' last 20 rounds. The alert thresholds are the `compaction_*` keys of
+`DEFAULT_THRESHOLDS`.
 
 ## Missing data
 

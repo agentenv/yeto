@@ -37,6 +37,27 @@ TRAINER_EVENTS = frozenset({"rl_round_trained", "rl_driver_start", "rl_group_pol
 FILL_KEYS = ("incomplete_groups", "dropped_small_groups", "carried_over_groups", "padded_samples")
 SAMPLER_STAT_KEYS = ("reward_mean", "reward_std", "reward_p10", "reward_p50", "reward_p90",
                      "resp_len_mean", "resp_len_p95", "truncated", "zero_variance_seen")
+# CompactionRL summary (sampler ``rl_sampler_engine_round.agentic.compaction``, trainer
+# ``rl_round_trained.compaction``; yeto.rl.engine.timeline.CompactionTally): counts summed
+# across rounds, ratios derived again from the sums. Keep in sync with
+# timeline.COMPACTION_COUNT_KEYS (the dashboard does not import the engine).
+COMPACTION_COUNT_KEYS = ("trials", "samples", "compacted_trials", "compactions", "segment_samples", "summaries",
+                         "summary_ok", "truncated_trials", "truncated_compacted_trials", "exhausted_trials",
+                         "exhausted_truncated_trials", "context_full_trials", "trainable_tokens", "summary_tokens",
+                         "retry_replays", "retry_replay_trials", "fork_lost_trials", "compaction_exposed_trials")
+COMPACTION_RATIOS = {"compacted_frac": ("compacted_trials", "trials"),
+                     "compactions_mean": ("compactions", "trials"),
+                     "samples_per_trial": ("samples", "trials"),
+                     "segment_sample_frac": ("segment_samples", "samples"),
+                     "summary_ok_frac": ("summary_ok", "summaries"),
+                     "truncated_compacted_frac": ("truncated_compacted_trials", "compacted_trials"),
+                     "summary_token_frac": ("summary_tokens", "trainable_tokens"),
+                     "fork_lost_frac": ("fork_lost_trials", "compaction_exposed_trials")}
+# per-round scalars shown as is (not summed): per-trial vs per-segment means, xhw_guard
+COMPACTION_ROUND_KEYS = ("reward_mean_trial", "reward_mean_segment", "policy_tokens_mean_trial",
+                         "policy_tokens_mean_segment", "xhw_downweighted_groups", "xhw_downweighted_trials",
+                         "xhw_downweighted_samples", "xhw_trial_mean_shift")
+SEGMENT_BUCKETS = ("0", "1", "2", "3", "4+", "unknown")  # "0": given up before it started
 # pool events that end a shard's sampler (left: drained / released / fenced; lost: the node went away)
 POOL_LEFT = {"nc_elastic_released": "left", "nc_elastic_released_externally": "left",
              "nc_elastic_shard_fenced": "left", "nc_elastic_sampler_finished": "done",
@@ -59,6 +80,84 @@ POOL_KEYS = ("ticket", "account", "slot", "slot_name", "shard", "why", "reason",
              "retry_in_s", "successor", "level", "action", "expected_ticket", "usable", "halted")
 # a person's operation (pool-scale / nc down / console release / pool-pause): shown as manual
 POOL_MANUAL_PREFIX = "nc_elastic_manual_"
+
+
+def compaction_row(c: Any) -> dict | None:
+    """The scalar counts, ratios and segment histogram of one round's compaction summary."""
+    if not isinstance(c, dict):
+        return None
+    out: dict[str, Any] = {k: _f(c.get(k)) for k in (*COMPACTION_COUNT_KEYS, *COMPACTION_RATIOS, "compactions_max",
+                                                    "max_compactions", *COMPACTION_ROUND_KEYS)}
+    hist = c.get("segments_hist")
+    out["segments_hist"] = {str(k): v for k, v in hist.items() if _f(v) is not None} if isinstance(hist, dict) else {}
+    out["by_segments"] = _bucket_fate(c.get("by_segments"))
+    return out
+
+
+def _reasons(v: Any) -> dict[str, float]:
+    return {str(k): n for k, n in v.items() if _f(n) is not None} if isinstance(v, dict) else {}
+
+
+def _bucket_fate(by: Any) -> dict[str, dict]:
+    """``by_segments`` of one round: per segment-count bucket, trials written and
+    trials lost / dropped by reason."""
+    if not isinstance(by, dict):
+        return {}
+    return {str(b): {"written": _f(v.get("written")) or 0.0, "lost": _reasons(v.get("lost")),
+                     "dropped": _reasons(v.get("dropped"))}
+            for b, v in by.items() if isinstance(v, dict)}
+
+
+def segment_fate(rows: list[dict], stale: list[dict] = ()) -> dict[str, dict]:
+    """Per bucket over rounds: written, lost and dropped (by reason), the share not
+    written, plus the trainers' stale drops (``stale_by_segments``) when reported."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        for b, v in r.items():
+            o = out.setdefault(b, {"written": 0.0, "lost": {}, "dropped": {}, "stale": None})
+            o["written"] += v["written"]
+            for kind in ("lost", "dropped"):
+                for k, n in v[kind].items():
+                    o[kind][k] = o[kind].get(k, 0) + n
+    for r in stale:
+        for b, n in r.items():
+            o = out.setdefault(b, {"written": 0.0, "lost": {}, "dropped": {}, "stale": None})
+            o["stale"] = (o["stale"] or 0) + n
+    for o in out.values():
+        bad = sum(o["lost"].values()) + sum(o["dropped"].values())
+        total = o["written"] + bad
+        o["not_written_frac"] = round(bad / total, 4) if total else None
+    return {b: out[b] for b in sorted(out, key=lambda b: SEGMENT_BUCKETS.index(b) if b in SEGMENT_BUCKETS else 99)}
+
+
+def compaction_total(rows: list[dict]) -> dict | None:
+    """Rounds' compaction rows summed (None when no round carried one)."""
+    rows = [r["compaction"] for r in rows if isinstance(r.get("compaction"), dict)]
+    if not rows:
+        return None
+    out: dict[str, Any] = {"rounds": len(rows)}
+    for k in COMPACTION_COUNT_KEYS:
+        vals = [r[k] for r in rows if r.get(k) is not None]
+        out[k] = sum(vals) if vals else None
+    for k, (num, den) in COMPACTION_RATIOS.items():
+        out[k] = round(out[num] / out[den], 4) if out[num] is not None and out[den] else None
+    maxes = [r["compactions_max"] for r in rows if r.get("compactions_max") is not None]
+    out["compactions_max"] = max(maxes) if maxes else None
+    out["max_compactions"] = next((r["max_compactions"] for r in reversed(rows) if r.get("max_compactions") is not None),
+                                  None)
+    hist: dict[str, float] = {}
+    for r in rows:
+        for k, v in r["segments_hist"].items():
+            hist[k] = hist.get(k, 0) + v
+    out["segments_hist"] = dict(sorted(hist.items(), key=lambda kv: _age_key(kv[0])))
+    out["by_segments"] = segment_fate([r.get("by_segments") or {} for r in rows])
+    xhw = [r for r in rows if r.get("xhw_trial_mean_shift") is not None]
+    out["xhw_downweighted_groups"] = sum(r.get("xhw_downweighted_groups") or 0 for r in xhw) if xhw else None
+    out["xhw_trial_mean_shift_max"] = max(r["xhw_trial_mean_shift"] for r in xhw) if xhw else None
+    last = rows[-1]
+    out.update({k: last.get(k) for k in ("reward_mean_trial", "reward_mean_segment",
+                                         "policy_tokens_mean_trial", "policy_tokens_mean_segment")})
+    return out
 
 
 def _f(v: Any) -> float | None:
@@ -155,6 +254,11 @@ class AsyncState:
             if ev in TRAINER_EVENTS and self.roles.get(iid) != "sampler":
                 self.roles[iid] = "trainer"
             self._fold_trainer(r, iid, ts, ev)
+        elif ev == "rl_agentic_drain" and isinstance(r.get("drained_by_segments"), dict):
+            # compaction on: the trials each drain cut, by segment count (agentic_round)
+            d = self._s(iid).setdefault("drained", {})
+            for b, n in _reasons(r["drained_by_segments"]).items():
+                d[b] = d.get(b, 0) + n
         elif ev == "rl_resource_sample" and iid in self.sampler:
             self.sampler[iid]["resource"] = {"available": r.get("available"), "reason": r.get("reason"),
                                              "source": r.get("source")}
@@ -217,6 +321,9 @@ class AsyncState:
                     row[k] = _f(agentic.get(k))
             if agentic and row.get("reward_mean") is None and _f(agentic.get("reward_mean")) is not None:
                 row["reward_mean"] = _f(agentic.get("reward_mean"))
+            comp = compaction_row((agentic or {}).get("compaction"))
+            if comp is not None:  # absent without compaction (old row keys)
+                row["compaction"] = comp
         elif ev in ("rl_sampler_vram_high", "rl_sampler_vram_ok"):
             # vram_guard.VramWatch: a card above the alert threshold, or every card back under
             v = s["vram"] or {"alerts": 0, "max_frac": None}
@@ -288,11 +395,16 @@ class AsyncState:
             row.update({"ts": ts, "trained_groups": r.get("trained_groups"),
                         "trained_samples": r.get("trained_samples"),
                         "policy_age_mean": r.get("policy_age_mean"), "policy_age_max": r.get("policy_age_max")})
+            comp = compaction_row(r.get("compaction"))
+            if comp is not None:  # absent without compaction (old row keys)
+                row["compaction"] = comp
         elif ev == "rl_buffer_unidentified_policy_skipped":
             row["unidentified_policy_groups"] = r.get("unidentified_policy_groups")
         elif ev == "rl_buffer_stale_skipped":
             row["stale_groups"] = r.get("stale_groups")
             row["max_policy_age"] = r.get("max_policy_age")
+            if isinstance(r.get("stale_by_segments"), dict):  # compaction: stale trials per segment bucket
+                row["stale_by_segments"] = _reasons(r["stale_by_segments"])
             for k in FILL_KEYS:
                 if r.get(k) is not None:
                     row[k] = r.get(k)
@@ -437,6 +549,15 @@ class AsyncState:
                 "incarnation": incs[-1]["incarnation"] if incs else s.get("incarnation"), "shard": s.get("shard"),
                 "first_ts": s.get("start"), "last_ts": s.get("last_ts"),
             }
+            comp = compaction_total(rows)
+            if comp is None and s.get("drained"):
+                comp = {"rounds": 0}
+            if comp is not None:  # absent without compaction (old view keys)
+                if s.get("drained"):  # trials cut by drains (rl_agentic_drain), by segment count
+                    comp["drained_by_segments"] = dict(sorted(
+                        s["drained"].items(), key=lambda kv: SEGMENT_BUCKETS.index(kv[0])
+                        if kv[0] in SEGMENT_BUCKETS else 99))
+                samplers[iid]["compaction"] = comp
         trainers = {}
         for iid, t in self.trainer.items():
             rows = [t["rounds"][k] for k in sorted(t["rounds"])]
@@ -459,6 +580,15 @@ class AsyncState:
                              "over_age_discarded_groups": tot("over_age_discarded_groups"),
                              "trained_groups": tot("trained_groups"), "left": t["left"],
                              **{k: tot(k) for k in FILL_KEYS}}
+            comp = compaction_total(rows)
+            stale = [r["stale_by_segments"] for r in rows if r.get("stale_by_segments")]
+            if comp is None and stale:
+                comp = {"rounds": 0}
+            if comp is not None:  # absent without compaction (old view keys)
+                if stale:  # trained (written) and stale-dropped trials per bucket
+                    comp["by_segments"] = segment_fate([r["compaction"].get("by_segments") or {} for r in rows
+                                                        if r.get("compaction")], stale)
+                trainers[iid]["compaction"] = comp
         return {"samplers": samplers, "trainers": trainers, "backlog": self.backlog_series(),
                 "releases": self.release_rows(), "pool": self.pool[-500:], "pool_scale": self.pool_scale(),
                 "roles": dict(self.roles)}

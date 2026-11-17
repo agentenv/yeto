@@ -396,11 +396,33 @@ function asyncPanel(){
       '</td><td class="num">'+f(x.lag_p50,1)+" / "+f(x.lag_max,0)+'</td><td>'+hist(x.lag_hist)+'</td><td class="num">'+f(x.generate_p50_s,0)+" / "+f(x.generate_max_s,0)+'</td><td class="num">'+f(x.groups,0)+'</td><td class="num">'+f(x.zero_variance_seen,0)+" / "+f(x.zero_variance_dropped,0)+
       '</td><td class="num">'+f(x.truncated,0)+(fin(x.samples)&&fin(x.truncated)?" ("+pct(x.truncated/x.samples)+")":"")+'</td><td class="num">'+f(x.dropped_groups,0)+'</td><td class="num">'+f(x.retried_trials,0)+" / "+f(x.lost_trials,0)+'</td><td class="num">'+f(x.reward_mean_last)+'</td><td class="num">'+f(x.max_backlog_groups,0)+'</td></tr>'}).join("")+'</table>'+
     (sps.some(function(c){var x=S[c.id]||{};return !fin(x.samples)})?'<div class="note">n/a in zero-variance / truncated / reward: the sampler did not write rl_sampler_engine_round with these fields (Miles-generating samplers and older yeto versions do not)</div>':"");
-  aBacklog(A);aRel(A);
+  aBacklog(A);aRel(A);aComp(A);
   var pl=(A.pool||[]).slice(-100).reverse();$("aPoolBox").hidden=!pl.length;
   var sc=A.pool_scale;$("aPoolScale").textContent=sc?("samplers: "+sc.ready.length+" ready"+(sc.draining.length?", "+sc.draining.length+" draining ("+sc.draining.join(", ")+")":"")+(sc.paused&&sc.paused.length?", "+sc.paused.length+" paused by hand ("+sc.paused.join(", ")+")":"")+(sc.target!=null?" · target "+sc.target+(sc.manual?" (set by hand)":""):"")+(sc.ready.length?" · shards "+sc.ready.join(", "):"")):"";
   $("aPool").innerHTML=pl.map(function(e){var bad=POOL_BAD.test(e.event||"");return '<div><span class="t">'+clock(e.ts)+'</span><span class="st '+(bad?"bd":"wn")+'"><i></i>'+(/^nc_elastic_manual_/.test(e.event||"")?"manual":"pool")+'</span><span class="x"><b>'+esc(String(e.event).replace(/^nc_elastic_/,""))+'</b> '+
     esc(["ticket","slot","shard","why","reason","detail","error","old","new","outcome","waited_s","source","by"].filter(function(k){return k=="slot"?(e.slot!=null||e.account!=null):e[k]!=null}).map(function(k){var v=e[k],n=k;if(k=="slot"){n=e.slot_name||"account";v=e.slot!=null?e.slot:e.account}return n+"="+String(v).slice(0,80)}).join(" "))+'</span></div>'}).join("");
+}
+/* CompactionRL: per island totals and the samplers' recent rounds (hidden without compaction data) */
+function segHist(h){var ks=Object.keys(h||{});return ks.length?ks.map(function(k){return esc(k)+" seg: "+f(h[k],0)}).join(" · "):"n/a"}
+function compCells(c){return '<td class="num">'+f(c.trials,0)+'</td><td class="num">'+f(c.samples,0)+" ("+f(c.samples_per_trial,2)+'/trial)</td><td class="num">'+f(c.compacted_trials,0)+" ("+pct(c.compacted_frac)+')</td><td class="num">'+f(c.compactions_mean,2)+" (max "+f(c.compactions_max,0)+(fin(c.max_compactions)?" / limit "+f(c.max_compactions,0):"")+')</td><td>'+segHist(c.segments_hist)+
+  '</td><td class="num">'+pct(c.summary_ok_frac)+" of "+f(c.summaries,0)+'</td><td class="num">'+f(c.truncated_compacted_trials,0)+" ("+pct(c.truncated_compacted_frac)+")"+(fin(c.exhausted_truncated_trials)?" · used up "+f(c.exhausted_truncated_trials,0):"")+'</td><td class="num">'+pct(c.summary_token_frac)+'</td><td class="num">'+f(c.fork_lost_trials,0)+" ("+pct(c.fork_lost_frac)+")"+'</td><td class="num">'+(c.retry_replays==null?"n/a":f(c.retry_replays,0)+" in "+f(c.retry_replay_trials,0)+" trials")+'</td>'}
+function reasons(o){var ks=Object.keys(o||{});return ks.length?ks.map(function(k){return esc(k)+" "+f(o[k],0)}).join(" · "):"0"}
+function fateRows(rows){var out=[];rows.forEach(function(x){var by=x[2].by_segments||{};Object.keys(by).forEach(function(b){var v=by[b];
+  out.push('<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td>'+esc(b)+'</td><td class="num">'+f(v.written,0)+'</td><td>'+reasons(v.lost)+'</td><td>'+reasons(v.dropped)+'</td><td class="num">'+(v.stale==null?"n/a":f(v.stale,0))+'</td><td class="num">'+pct(v.not_written_frac)+'</td></tr>')})});return out}
+var COMP_HEAD='<th>trials</th><th>samples</th><th>compacted trials</th><th>compactions / trial</th><th>segments per trial</th><th>summary_ok</th><th>truncated after compaction</th><th>summary tokens / trainable</th><th>lost to forks after compaction</th><th>retry replays</th>';
+function aComp(A){
+  var rows=[],recent=[];
+  Object.keys(A.samplers||{}).sort().forEach(function(k){var x=A.samplers[k];if(x.compaction)rows.push(["sampler",k,x.compaction]);
+    (x.rounds||[]).forEach(function(r){if(r.compaction)recent.push([k,r])})});
+  Object.keys(A.trainers||{}).sort().forEach(function(k){var x=A.trainers[k];if(x.compaction)rows.push(["trainer",k,x.compaction])});
+  $("aCompBox").hidden=!rows.length;if(!rows.length){$("aComp").innerHTML="";return}
+  recent.sort(function(a,b){return (a[1].ts||0)-(b[1].ts||0)});
+  var fr=fateRows(rows);
+  $("aComp").innerHTML='<table class="c"><tr><th>island</th><th>rounds</th>'+COMP_HEAD+'<th>reward mean per trial / per segment (last round)</th><th>xhw downweighted groups (max trial-mean shift)</th></tr>'+rows.map(function(x){var c=x[2];return '<tr><td>'+esc(x[0])+" "+esc(x[1])+'</td><td class="num">'+f(c.rounds,0)+'</td>'+compCells(c)+'<td class="num">'+f(c.reward_mean_trial)+" / "+f(c.reward_mean_segment)+'</td><td class="num">'+(c.xhw_downweighted_groups==null?"n/a":f(c.xhw_downweighted_groups,0)+" ("+f(c.xhw_trial_mean_shift_max,4)+")")+'</td></tr>'}).join("")+'</table>'+
+    rows.filter(function(x){return x[2].drained_by_segments}).map(function(x){return '<div class="note">'+esc(x[0])+" "+esc(x[1])+': trials cut by drains, by segment count: '+reasons(x[2].drained_by_segments)+'</div>'}).join("")+
+    (fr.length?'<div class="note">trials by segment count: written (trainer: trained), lost before the group was written (drain timeout, other version, aborted), dropped with their group, stale-dropped by the trainer; a much higher share for long trials biases the GRPO baseline to short ones</div><table class="c"><tr><th>island</th><th>segments</th><th>written</th><th>lost</th><th>dropped with group</th><th>stale (trainer)</th><th>not written</th></tr>'+fr.join("")+'</table>':"")+
+    (recent.length?'<div class="note">recent sampler rounds</div><table class="c"><tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>'+recent.slice(-20).reverse().map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction)+'</tr>'}).join("")+'</table>':"")+
+    '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens</div>';
 }
 function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)})}
 function aBacklog(A){
