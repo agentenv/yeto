@@ -1026,7 +1026,7 @@ class AgenticRound(EngineRound):
                 tally.samples += len(samples)
                 tally.compaction.add(samples)
         if reason is not None:  # kept trials of a group not written, by segment count
-            tally.compaction.drop([finished for finished, _, _ in kept], reason)
+            tally.compaction.drop([entry[0] for entry in kept], reason)
         written = reason is None and group.spot is not None
         # below_min_samples: the trials were lost to infrastructure (ABORTED, version, drain), not
         # scored wrong (a 0 reward is kept): the task goes out again, counted toward the redo limit
