@@ -134,7 +134,7 @@ def test_trials_are_bucketed_by_segment_count_written_lost_and_dropped():
 
 def test_lost_trials_alone_report_when_compaction_is_on_and_only_then():
     tally = CompactionTally()
-    tally.lose(SimpleNamespace(segments=object()), "drain_timeout")  # an uncompacted trial (main)
+    tally.lose(SimpleNamespace(segments=object()), "drain_timeout")  # an uncompacted trial
     assert tally.summary() is None
     on = tally.summary(enabled=True)
     assert on["trials"] == 0 and on["by_segments"]["1"]["lost"] == {"drain_timeout": 1}
@@ -143,7 +143,7 @@ def test_lost_trials_alone_report_when_compaction_is_on_and_only_then():
 
 
 def fork_lost():
-    """A trial the gateway invalidated for a fork of a compacted session (C8), as finish_sample aborts it."""
+    """A trial the gateway invalidated for a fork of a compacted session, as finish_sample aborts it."""
     why = ("records proxy invalidated the trajectory: compaction_fork_lost: retry_fork at message 7 "
            "of chain c1, whose session has compacted")
     return SimpleNamespace(trajectory=SimpleNamespace(reason=f"token_alignment: {why}"), segments=None,
@@ -424,7 +424,7 @@ def test_compaction_thresholds_are_overridable():
 
 
 # ---------------------------------------------------------------- driver: trials, not segment samples
-def _main_pooled_reward(batch):  # origin/main's formula, the reference without compaction
+def _main_pooled_reward(batch):  # the per-sample formula, the reference without compaction
     import math
 
     total = sum(len(g.sample_ids) for g in batch.groups)
@@ -459,10 +459,10 @@ def test_driver_counts_segments_of_one_trial_once():
     mean, std = _pooled_reward(batch)
     # per trial: second moment ((0.25 + 0.25) * 2 + 1 * 2) / 4 = 0.75, variance 0.75 - 0.75 ** 2
     assert mean == 0.75 and std == pytest.approx(0.1875 ** 0.5, abs=1e-12)
-    assert _main_pooled_reward(batch)[0] == pytest.approx(2 / 3)  # main weights segments
+    assert _main_pooled_reward(batch)[0] == pytest.approx(2 / 3)  # the per-sample formula weights segments
 
 
-# ---------------------------------------------------------------- the segment writer's FinishedSample (C1)
+# ---------------------------------------------------------------- the segment writer's FinishedSample
 ITEM = PromptItem("p0", "task", metadata={"agent_task": {"instance_id": "fix-git", "agent_name": "codex"}})
 
 
@@ -486,8 +486,8 @@ def _compacted_finished(parts_spec, *, session="t-0", reward=1.0):
 
 
 def test_trial_segments_counts_the_parts_of_a_compacted_trial():
-    # R1 F4: a FinishedSample has no num_segments and its ``segments`` is the last part's
-    # TokenSegments, so the count must come from ``parts`` (it read 1 before)
+    # a FinishedSample has no num_segments and its ``segments`` is the last part's
+    # TokenSegments, so the count must come from ``parts`` (``segments`` alone reads 1)
     from yeto.rl.agentic.finish import FinishedSample
 
     finished = _compacted_finished([(4, True, 2, None), (4, True, 3, None), (3, None, 0, None)])
@@ -503,7 +503,7 @@ def test_trial_segments_counts_the_parts_of_a_compacted_trial():
 
 
 def test_the_segment_writers_samples_give_summary_tokens_and_retry_replays():
-    # R1 F3 closed by C1: agentic_samples writes summary_tokens / retry_replays per segment
+    # agentic_samples writes summary_tokens / retry_replays per segment
     finished = _compacted_finished([(4, True, 2, 1), (5, False, 3, 1), (3, None, 0, 1)])
     samples = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0)
     assert [s["metadata"]["compaction"]["summary_tokens"] for s in samples] == [2, 3, 0]

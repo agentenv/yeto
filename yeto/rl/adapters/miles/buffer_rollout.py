@@ -457,7 +457,7 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
     not train one rollout per trial (:func:`segmented_round_problems`), or whose
     compaction ``context_budget`` is more than this trainer's ``--seq-length`` (a segment
     would not fit: its summary, at the end, would be cut). Then the sibling check of the
-    loss side (``yeto.rl.algos.segment_weights.sibling_problems``, when present) over all
+    loss side (``yeto.rl.algos.segment_weights.sibling_problems``) over all
     the round's samples. A round without such trials: nothing is checked."""
     every = groups
     groups = [(position, group) for position, group in every if has_siblings(group)]
@@ -478,11 +478,11 @@ def check_segmented_round(args: Any, groups: Sequence[tuple[int, Sequence[dict[s
             f"groups at buffer positions {positions[:8]} hold compaction segments of context budget "
             f"{max(budgets)}; this trainer's --seq-length {seq_length} does not hold one (a segment "
             "ends with its summary, which would be cut): raise --seq-len to the budget")
-    sibling_problems = _optional("yeto.rl.algos.segment_weights", "sibling_problems")
-    if sibling_problems is not None:
-        problems = sibling_problems([d for _, group in every for d in group])
-        if problems:
-            raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
+    from yeto.rl.algos.segment_weights import sibling_problems  # noqa: PLC0415
+
+    problems = sibling_problems([d for _, group in every for d in group])
+    if problems:
+        raise SampleBufferRolloutError("compaction segments are not rollout siblings: " + "; ".join(problems))
 
 
 def stale_segment_buckets(report: Any, pruned: Sequence[Sequence[dict[str, Any]]] = (), *,
@@ -515,16 +515,6 @@ def compaction_batch_line(rollout_id: int, groups: Sequence[Sequence[dict[str, A
     histogram = ",".join(f"{k}:{v}" for k, v in per_trial.items())
     return (f"[sample-buffer] compaction_batch: rollout={int(rollout_id)} trials={len(sizes)} "
             f"segments={sum(sizes)} per_trial={{{histogram}}}")
-
-
-def _optional(module: str, name: str) -> Any:
-    """``module.name``, or None while that module (another change's) is not there."""
-    import importlib  # noqa: PLC0415
-
-    try:
-        return getattr(importlib.import_module(module), name, None)
-    except ImportError:
-        return None
 
 
 def is_padding(sample: Any) -> bool:
@@ -1148,10 +1138,10 @@ def decodes_in_worker(data: Any) -> bool:
     """Whether a budgeted read decodes this payload in its read thread: format v2
     (``buffer_payload``'s array blobs). Its zstd and numpy copies run outside the GIL,
     so the read threads decode a round's v2 groups in parallel, and their peak is
-    ~1.4-2x the payload (C12). A v1 payload (JSON + base64, GIL-bound, ~4.6x peak) is
+    ~1.4-2x the payload. A v1 payload (JSON + base64, GIL-bound, ~4.6x peak) is
     decoded on the caller's thread, one at a time, as before."""
-    magic = getattr(_payload_format, "_V2_MAGIC", None)
-    return bool(magic) and bytes(data[:len(magic)]) == magic
+    magic = _payload_format._V2_MAGIC
+    return bytes(data[:len(magic)]) == magic
 
 
 def group_nbytes(group: Sequence[Mapping[str, Any]]) -> int:

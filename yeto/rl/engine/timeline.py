@@ -19,6 +19,7 @@ import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 SPAN_KINDS = ("compute", "wait", "tool-wait", "transfer")
 
@@ -722,7 +723,7 @@ class CompactionTally:
         trajectory = getattr(result, "trajectory", None)
         loss = getattr(result, "loss", None)
         why = f"{getattr(trajectory, 'reason', '') or ''} {(loss or {}).get('error', '') if isinstance(loss, Mapping) else ''}"
-        if FORK_LOST_MARK in why:  # the gateway invalidated a fork of a compacted session (C8)
+        if FORK_LOST_MARK in why:  # the gateway invalidated a fork of a compacted session
             self._fork_lost += 1
             self._seen = True
             reason = FORK_LOST_MARK

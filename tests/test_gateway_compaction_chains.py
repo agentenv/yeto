@@ -228,7 +228,8 @@ class Stop(Exception):
 
 
 def test_main_behavior_forks_from_the_whole_history_and_cannot_fit(glm):
-    """Why compaction needs both guards (C5 P6): without them a resend is a
+    """Why compaction needs both gateway guards (replaying a resent request and
+    refusing a fork of a compacted session): without them a resend is a
     fork, a new session from message 0, and after compactions the whole history
     exceeds the engine's window (ContextFull, the trial lost)."""
     proxy, _, _ = make_proxy(glm)
@@ -586,7 +587,7 @@ def test_http_client_timeout_then_resend_during_the_call(glm, handler_cancellati
 def test_a_body_that_arrives_after_its_trajectory_was_forgotten_makes_no_state(glm):
     """A trial detached or cancelled while its request body is still arriving:
     the route refuses it (403) instead of making the trajectory's state again
-    and sampling (C13)."""
+    and sampling."""
     from aiohttp.test_utils import TestClient, TestServer
 
     proxy, engine, _ = make_proxy(glm)
@@ -611,7 +612,7 @@ def test_a_body_that_arrives_after_its_trajectory_was_forgotten_makes_no_state(g
 
 
 def test_handle_refuses_a_forgotten_trajectory_until_it_is_opened_again(glm):
-    """The direct form of the late request (C13's xfail): no state, no engine call."""
+    """The late request of the test above without HTTP (``handle``): no state, no engine call."""
     proxy, engine, _ = make_proxy(glm)
     proxy.open("t")
     proxy.forget("t")

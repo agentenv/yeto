@@ -1,12 +1,12 @@
-"""Trajectory evidence and policy identity on compaction segments (compaction-1118 C11).
+"""Trajectory evidence and policy identity on compaction segments.
 
 With context compaction on, one trial is k buffer samples (one per segment) that
 share ``group_index``, ``index`` and ``reward`` and carry ``metadata.compaction``
 (segment_index / num_segments / trajectory_id ...). The evidence binds every
 segment, names the policy of each segment (a reload between segments changes
 it), and records enough to restore the trial's segments. Without compaction the
-evidence file is byte-for-byte what main writes (golden digests below were
-produced by main ff50e575 from these same fixtures).
+evidence file is byte-for-byte what it was before compaction support (golden
+digests below were produced at commit ff50e575 from these same fixtures).
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def _build(groups, **kwargs):
 
 
 # --------------------------------------------------------------------------
-# default (no compaction): evidence bytes equal main's
+# default (no compaction): evidence bytes unchanged
 
 
 def _default_groups():
@@ -299,8 +299,8 @@ def test_malformed_segmented_trial_fails_closed(mutate, message):
 
 
 def test_one_trial_split_across_two_indexes_is_refused():
-    """A trainer that numbered each segment as its own sample (C3: renumber per
-    trial, not per sample) would hand the evidence one trajectory under two
+    """A trainer that numbered each segment as its own sample (the buffer reader
+    renumbers per trial, not per sample) would hand the evidence one trajectory under two
     indexes; the evidence refuses it instead of binding two half trials."""
     trial = _trial(group_index=0, index=0, versions_per_segment=[(7,), (7,)])
     trial[1].index = 1
@@ -394,7 +394,7 @@ def test_the_segmented_path_never_calls_the_legacy_ppo_check(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# contracts.validate_compaction_group on buffer sample dicts (C3's reader)
+# contracts.validate_compaction_group on buffer sample dicts (the trainer's buffer reader)
 
 
 def _buffer_trial(index, n, *, reward=1.0, trajectory_id=None, statuses=None):
@@ -417,7 +417,7 @@ def test_validate_compaction_group_counts_trials_not_samples():
     shuffled = [group[2], group[3], group[0], group[5], group[1], group[4]]
     assert [t.positions for t in validate_compaction_group(shuffled)] == [(2, 4, 0), (1,), (5, 3)]
     assert [t.num_segments for t in trials] == [3, 1, 2] and len(trials) == 3
-    # the trainer's numbering (one rollout_id per trial, C3) passes
+    # the trainer's numbering (one rollout_id per trial) passes
     keyed = [{**row, "rollout_id": 20 + row["index"]} for row in group]
     assert [t.positions for t in validate_compaction_group(keyed)] == [(0, 1, 2), (3,), (4, 5)]
     # an uncompacted group: one trial per sample
@@ -472,7 +472,7 @@ def test_segment_envelope_contract():
 
 
 def test_the_unset_ends_of_a_trial_are_null_where_the_contract_says():
-    """Contract decision 8: segment 0 is not rebuilt (kept_steps None) and no summary
+    """The ``metadata.compaction`` schema: segment 0 is not rebuilt (kept_steps None) and no summary
     ends the last segment (summary_ok None); None anywhere else is refused."""
     from yeto.rl.contracts import validate_compaction_group
 

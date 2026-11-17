@@ -291,14 +291,14 @@ def test_a_budget_never_reached_records_what_no_compaction_records(glm):
     proxy, engine = proxy_for(glm, list(SCRIPT), cfg)
     run_codex(proxy, "t")
     records, expected = proxy.records("t"), plain.records("t")
-    # the gateway counts compaction forks / replays only for a compacting backend (C8)
+    # the gateway counts compaction forks / replays only for a compacting backend
     extra = {k: records["gateway"].pop(k) for k in set(records.get("gateway") or {}) - set(expected.get("gateway") or {})}
     assert set(extra) <= {"retry_replays", "compaction_fork_lost"} and not any(extra.values())
     assert records == expected
     assert [r[1] for r in engine.token_requests] == [r[1] for r in plain_engine.token_requests]
 
 
-# ------------------------------------------------------------------ the engine context (C5 P5 / P16)
+# ------------------------------------------------------------------ the engine context
 def test_summary_headroom_check_for_the_formal_budget():
     cfg = CompactionConfig(context_budget=262_144, t_comp=10_240)
     request = cp.summary_request_tokens(cp.SUMMARY_PROMPT)
@@ -405,7 +405,7 @@ def test_a_trajectory_forgotten_during_its_summary_turn_samples_nothing_more(glm
     assert proxy.backend.sessions == {} and proxy.backend.counters == {}
 
 
-# C4's ``tcomp_overflow`` scenario (scripts/sim_compaction_grpo.py on cmp1118/C4, parameters only):
+# The ``tcomp_overflow`` scenario of scripts/sim_compaction_grpo.py (its parameters only):
 # C = max_model_len = 4096, t_comp 512, k 2, 3 compactions, 256-token turns, 9-12 steps of a
 # 30-90 token action and a 300-450 token tool output, 60-120 token summaries. Each step is longer
 # than t_comp leaves, so the step that triggers a compaction has already passed C - t_comp by a
@@ -463,7 +463,7 @@ def test_c4_tcomp_overflow_scenario_compacts_without_running_out_of_room(glm, se
 
 
 def test_a_summary_drafted_in_the_reasoning_is_not_the_summary(glm):
-    """C5 P12: the summary comes from the response channel; a ``<summary>`` the
+    """The summary comes from the response channel; a ``<summary>`` the
     model drafts while thinking is neither taken nor counted as ok."""
     drafted = assistant("plan: <summary></summary> then more", content="<summary>1. listed files</summary>")
     cfg = third_trigger(glm, 2000, keep_recent_steps=1)

@@ -214,7 +214,7 @@ def _by_trial(samples: list[dict]) -> dict[int, list[dict]]:
 
 
 def _check_segments(trial: list[dict], engine: Engine, cfg: CompactionConfig, template) -> None:
-    """Contract section 2 on the samples of one compacted trial."""
+    """The ``metadata.compaction`` schema (``yeto.rl.contracts``) on the samples of one compacted trial."""
     count = len(trial)
     metas = [s["metadata"]["compaction"] for s in trial]
     assert [m["segment_index"] for m in metas] == list(range(count))
@@ -289,9 +289,9 @@ def test_a_later_session_continues_the_segment_and_an_unsampled_segment_is_dropp
     assert [t for g in groups for t in g.turns] == turns_from_records(records)
 
 
-# ---------------------------------------------------------------------- no compaction: main's bytes
+# ---------------------------------------------------------------------- no compaction: the unsegmented bytes
 def test_without_compaction_the_samples_are_the_unsegmented_samples_byte_for_byte(glm):
-    """The same trial on three proxies: no compaction (main's path: ``close`` +
+    """The same trial on three proxies: no compaction (the unsegmented path: ``close`` +
     ``agentic_sample``), the segmented path, and a compaction budget it never
     reaches. Engine arrays (top-K, R3) on, cut to the training window."""
     def run(compaction, segmented, allow):
@@ -322,7 +322,7 @@ def test_a_round_without_compaction_writes_one_sample_per_trial(tmp_path, glm):
     assert [s["index"] for s in samples] == [0, 1] and [s["reward"] for s in samples] == [1.0, 0.0]
     assert all("compaction" not in s["metadata"] and s["status"] == "completed" for s in samples)
     (round_event,) = [f for name, f in events if name == "rl_sampler_engine_round"]
-    assert "compaction_no_room" not in round_event["agentic"]  # the round event keys of main
+    assert "compaction_no_room" not in round_event["agentic"]  # the round event keys without compaction
 
 
 # ---------------------------------------------------------------------- compacted trials

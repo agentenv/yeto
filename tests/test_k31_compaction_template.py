@@ -332,8 +332,6 @@ def test_qwen3_with_thinking_fails_closed_at_the_summary_request(qwen3_base):
 
 
 @needs_k31
-@pytest.mark.xfail(strict=False, reason="records._compact (C7) reads the summary from the raw decoded completion, "
-                                        "reasoning and XTML markers included, not from the parsed response channel")
 def test_k31_summary_comes_from_the_response_channel(k31_base, monkeypatch):
     """The summary request asks for ``<summary></summary>``; a thinking model often
     quotes the tags in its reasoning, and without tags the fallback is the whole

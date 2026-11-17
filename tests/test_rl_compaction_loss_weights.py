@@ -1,4 +1,4 @@
-"""Compaction segments under the GRPO loss (compaction-1118 C15).
+"""Compaction segments under the GRPO loss.
 
 A trial split into ``k`` segment samples (shared reward, siblings of one
 rollout) against the same trial as one sample (the segments' responses and
@@ -420,7 +420,7 @@ def test_overlong_filter_drops_every_segment_of_a_truncated_trial():
 
 
 def test_overlong_filter_uncompacted_rollout_siblings_unchanged():
-    """No compaction metadata: only the truncated sample itself (main behaviour), even if
+    """No compaction metadata: only the truncated sample itself (as without compaction), even if
     two samples share a rollout key."""
     group = _status_group(["completed", "truncated"], [None, None])
     for s in group:

@@ -1088,7 +1088,7 @@ class AgenticRound(EngineRound):
                    "infra_retries_total": dict(sorted(self.retries_total.items())),
                    "infra_retries_exhausted_total": self.retries_exhausted,
                    "session_collisions_total": self.session_collisions}
-        if tally.no_room:  # CompactionRL only (absent without compaction, as on main)
+        if tally.no_room:  # CompactionRL only (absent without compaction)
             agentic[COMPACTION_NO_ROOM] = tally.no_room
         cfg = compaction_config(self.recorder)
         compaction = tally.compaction.summary(enabled=cfg is not None,

@@ -210,7 +210,7 @@ class TrajectoryEnvelope:
             raise ValueError("trajectory compaction context budget is invalid")
 
 
-# ``metadata.compaction`` of one segment sample (compaction-1118 contract 2)
+# ``metadata.compaction`` of one segment sample, written by the sampler (``agentic_round.agentic_samples``)
 COMPACTION_METADATA_KEY = "compaction"
 COMPACTION_METADATA_SCHEMA = 1
 _COMPACTION_INT_FIELDS = ("segment_index", "num_segments", "context_budget",
@@ -379,7 +379,7 @@ def _check_trial_segments(
                              f"{len(segments)} segments in the group")
         if meta["context_budget"] < 1 or meta["context_budget"] != first.get("context_budget"):
             raise ValueError(f"{where}: compaction context budget is invalid or changed")
-        # contract 2 / decision 8: kept_steps is null only on segment 0 (not rebuilt), summary_ok
+        # kept_steps is null only on segment 0 (not rebuilt), summary_ok
         # null only on the last (no summary at its end); retry_replays is the trial's, on each
         if ordinal > 0 and meta.get("kept_steps") is None:
             raise ValueError(f"{where}: segment {ordinal} has no kept_steps")

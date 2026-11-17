@@ -1,4 +1,4 @@
-"""Trainer-side compaction metrics wired end to end (C10's trainer hook points).
+"""Trainer-side compaction metrics wired end to end (the trainer's metric hook points).
 
 * ``build_metadata`` adds ``compaction`` (``timeline.compaction_stats`` of the trained
   samples); ``handle_from_metadata`` keeps it; ``IslandDriver._train_fields`` puts it on

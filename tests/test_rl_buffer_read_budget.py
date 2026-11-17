@@ -100,7 +100,7 @@ def _take_in_time(reader, *args, timeout_s: float = 30.0, **kw):
 # ---------------------------------------------------------------- the setting
 def test_the_budget_setting():
     env = br.MAX_INFLIGHT_BYTES_ENV
-    assert br.inflight_bytes_limit({}) is None and br.DEFAULT_MAX_INFLIGHT_BYTES == 0  # off: the reader of main
+    assert br.inflight_bytes_limit({}) is None and br.DEFAULT_MAX_INFLIGHT_BYTES == 0  # off by default: no byte budget
     assert br.inflight_bytes_limit({env: "0"}) is None  # no limit: as before the budget
     assert br.RECOMMENDED_262K_INFLIGHT_BYTES == 64 << 30
     assert br.inflight_bytes_limit({env: "1000"}) == 1000
@@ -341,7 +341,7 @@ def test_a_damaged_v2_payload_decoded_in_a_read_thread_is_passed_over(tmp_path, 
 
 
 
-# ---------------------------------------------------------------- no deadlock behind the read-ahead (R2 F2)
+# ---------------------------------------------------------------- no deadlock behind the read-ahead
 def _settled_prefetch(reader) -> None:
     deadline = time.monotonic() + 10
     while reader._prefetcher is not None and reader._prefetcher.is_alive() and time.monotonic() < deadline:

@@ -1,4 +1,4 @@
-"""Trainer side of async GRPO with compacted trials (compaction-1118 C3).
+"""Trainer side of async GRPO with compacted trials.
 
 A compacted trial reaches the sample buffer as several segment samples of one group
 (same ``group_index`` and ``index``, the trial's reward, ``metadata.compaction``). The
@@ -43,7 +43,7 @@ from yeto.rl.engine.sample_buffer import FileSampleBuffer
 N = 4  # n_samples_per_prompt: trials per group
 
 
-# ---------------------------------------------------------------------- samples (contract 2)
+# ---------------------------------------------------------------------- samples (``metadata.compaction`` schema)
 def trial(group: int, index: int, reward: float, segments: int, *, version: int = 5,
           prompt: int = 3, top_k: int = 0, layers: int = 0, truncated: bool = False) -> list[dict]:
     """One trial as its buffer samples: one sample without compaction, else ``segments``
@@ -247,14 +247,14 @@ def test_segments_of_a_trial_share_one_advantage_from_trial_level_grpo(tmp_path,
         mine = {out[i] for i, tt in enumerate(trial_of) if tt == t}
         assert len(mine) == 1
     assert len({s.rollout_id for s in rows_a}) == N and {s.index for s in rows_a} == {s.rollout_id for s in rows_a}
-    # the uncompacted group: per-sample GRPO, as on main
+    # the uncompacted group: per-sample GRPO, as without compaction
     assert out[7:] == pytest.approx(_trial_grpo(list(REWARDS_B), std), abs=0)
 
 
 def test_an_uncompacted_group_converts_exactly_as_on_main(tmp_path):
     raw = group(1, REWARDS_B, SEGMENTS_B)
     out = br.renumber_group(raw, position=9, samples_per_group=N)
-    # main's renumber_group: index = position * n + j, the sampler's identity kept, nothing else
+    # renumber_group without compaction: index = position * n + j, the sampler's identity kept, nothing else
     expected = []
     for j, d in enumerate(raw):
         d = dict(d)
@@ -272,7 +272,7 @@ def test_an_uncompacted_group_converts_exactly_as_on_main(tmp_path):
 
 def test_rollout_id_siblings_without_compaction_keep_mains_numbering():
     """Only metadata.compaction makes a group a group of trials: a Miles sampler's
-    rollout_id siblings keep main's per-sample numbering and size rule."""
+    rollout_id siblings keep the per-sample numbering and size rule."""
     raw = [dict(d, rollout_id=7) for d in group(1, (1.0, 1.0), (1, 1))]
     assert not bp.has_siblings(raw) and bp.trial_count(raw) == 2
     out = br.renumber_group(raw, position=2, samples_per_group=N)

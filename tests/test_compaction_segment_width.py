@@ -1,4 +1,4 @@
-"""A compaction segment can be wider than ``context_budget`` (review R1-F2).
+"""A compaction segment can be wider than ``context_budget``.
 
 The records proxy checks the trigger before a model call. A step that does not
 trigger still adds its reply and then a tool output of any length, and the summary

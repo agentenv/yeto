@@ -10,7 +10,7 @@ and then the action turn of the next segment inside that one request).
 Tokenizer: GLM-4.7-Flash (the ``glm5`` template keeps history reasoning, so the
 summary request extends the recorded stream) from the local HF cache.
 
-What a compacted trial does at a weight switch, in short (report C13):
+What a compacted trial does at a weight switch, in short:
 
 * drain cut / detach / close while the trial is in its summary turn: the trial is
   lost (``drain_timeout`` / ``closed``) with every segment; its recorder state is
@@ -55,10 +55,6 @@ aiohttp = pytest.importorskip("aiohttp")
 SIGNED = {"max_tokens": 256, "temperature": 1.0, "top_p": 1.0}
 TASK = {"instance_id": "fix-git", "agent_name": "codex"}
 SUMMARY = assistant("check", content="<summary>1. listed files</summary>")
-# C1 (one buffer sample per compaction segment) adds ProxyTokenRecorder.close_segments; before it,
-# every compacted trial is ABORTED by the join (token_alignment) and the per-segment checks skip.
-C1 = hasattr(ProxyTokenRecorder, "close_segments")
-needs_c1 = pytest.mark.skipif(not C1, reason="needs C1's per-segment samples (ProxyTokenRecorder.close_segments)")
 
 
 @pytest.fixture(scope="module")
@@ -182,11 +178,9 @@ class World:
     def __init__(self, template, engine, budget: int) -> None:
         self.engine = engine
         cfg = CompactionConfig(context_budget=budget, t_comp=1, keep_recent_steps=1, max_compactions=1)
-        self.proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, sampler_id="modal-0")
-        # main's ProxyTokenRecorder refuses a compacting proxy (the verl path): the config is set
-        # after construction. TODO(C1): build it with allow_compaction=True once C1 is merged.
-        self.recorder = ProxyTokenRecorder(self.proxy)
-        self.proxy.backend.compaction = cfg
+        self.proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, sampler_id="modal-0",
+                                  compaction=cfg)
+        self.recorder = ProxyTokenRecorder(self.proxy, allow_compaction=True)
         self.closed: list[dict[str, Any]] = []
         self.chats: list[str] = []
         records, chat = self.proxy.records, self.proxy.backend.chat
@@ -410,8 +404,7 @@ def test_an_agent_that_resends_the_refused_request_compacts_on_the_new_weights_a
     assert _segments(records) == [[("action", 0), ("action", 0), ("summary", 1)], [("action", 1)]]
     (group,) = _events(events, GROUP_EVENT)
     assert not group["written"] and group["kept"] == 0
-    # after C1 the version rule decides; before it the compacted trial is ABORTED by the join first
-    assert group["lost"] == ({LOST_VERSION: 1} if C1 else {"token_alignment": 1})
+    assert group["lost"] == {LOST_VERSION: 1}  # the version rule drops the trial
     assert world.held() == EMPTY
 
 
@@ -436,7 +429,6 @@ async def _drive(world: World) -> None:
         await world.recorder.aclose()
 
 
-@needs_c1
 def test_live_writes_each_segment_at_its_own_oldest_version(tmp_path, glm, budget):
     """live round, reload inside the summary turn: segment 0 is v0 (its turns and the
     trial's start), segment 1 is v1 (its own turns only, not the trial's start version)."""
@@ -472,8 +464,7 @@ def test_finished_compacted_trials_leave_nothing_in_the_recorder(tmp_path, glm, 
     assert len(world.closed) == 4 and all(len(_segments(r)) == 2 for r in world.closed)
     assert all(r["counters"]["compactions"] == 1 for r in world.closed)
     assert world.held() == EMPTY
-    if C1:  # two groups of two trials, two segments each
-        assert len(_samples(tmp_path)) == 8
+    assert len(_samples(tmp_path)) == 8  # two groups of two trials, two segments each
 
 
 def test_closing_the_island_during_a_summary_turn_forgets_the_trial(tmp_path, glm, budget):
@@ -518,8 +509,7 @@ def test_a_trial_that_failed_before_any_model_call_is_retried_with_compaction_on
     assert len(_segments(world.closed[1])) == 2 and world.held() == EMPTY
     (group,) = _events(events, GROUP_EVENT)
     assert group["retried_trials"] == 1
-    if C1:
-        assert group["written"] and len(_samples(tmp_path)) == 2
+    assert group["written"] and len(_samples(tmp_path)) == 2
 
 
 def test_a_trial_that_failed_after_its_summary_turn_is_not_retried(tmp_path, glm, budget):
@@ -541,7 +531,7 @@ def test_a_trial_that_failed_after_its_summary_turn_is_not_retried(tmp_path, glm
 
 def test_infra_failure_reads_the_calls_of_every_segment():
     """``infra_failure`` asks whether any model call was recorded; a compacted trial's
-    ``turns`` are the calls of all its segments (C1's ``parts`` keep the same ``turns``)."""
+    ``turns`` are the calls of all its segments (``close_segments`` parts keep the same ``turns``)."""
     from yeto.rl.agentic import AgentTask, AgentTrajectory, Outcome, TokenTurn
     from yeto.rl.agentic.finish import FinishedSample
 

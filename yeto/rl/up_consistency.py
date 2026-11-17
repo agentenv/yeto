@@ -308,12 +308,6 @@ def spec_max_model_len_of(spec: dict[str, Any]) -> int | None:
         return None
 
 
-# The smallest drain cut suggested with agentic.compaction: agentic_round's
-# COMPACTION_DRAIN_FLOOR_S (an estimate, C13); this value until it is there.
-# TODO(C13): dead once COMPACTION_DRAIN_FLOOR_S is merged; delete the fallback.
-COMPACTION_DRAIN_FLOOR_FALLBACK_S = 2400.0
-
-
 def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[str]:
     """Preflight warnings of a compacting spec that only the trainer and the sampler
     together decide. A compacted trial runs several segments, often longer than a
@@ -332,7 +326,7 @@ def compaction_switch_warnings(spec: dict[str, Any], args: Any | None) -> list[s
     out = []
     switch = str(section.get("weight_switch", "auto"))
     if not (switch == "live" or (switch == "auto" and ar.spec_live_engine(spec))):
-        floor = float(getattr(ar, "COMPACTION_DRAIN_FLOOR_S", COMPACTION_DRAIN_FLOOR_FALLBACK_S))
+        floor = float(ar.COMPACTION_DRAIN_FLOOR_S)  # the smallest drain cut suggested with agentic.compaction
         try:
             cut, _grace = ar.drain_settings(spec, drain=True)
         except ValueError:
@@ -413,14 +407,11 @@ def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | Non
     (:func:`_group_tokens`), sized by ``buffer_payload.k31_group_payload_bytes`` (the
     K3.1 bytes per token: R3 + top-128). Only for specs that return routed experts
     (R3 is most of the bytes). The codec is ``YETO_SAMPLE_BUFFER_PAYLOAD_CODEC`` of
-    ``environ`` (the run's env). None: below the limit, not a K3.1-shaped spec, or a
-    store without that estimate."""
+    ``environ`` (the run's env). None: below the limit or not a K3.1-shaped spec."""
     from yeto.rl.engine import buffer_payload  # noqa: PLC0415
 
-    size_of = getattr(buffer_payload, "k31_group_payload_bytes", None)
-    limit = getattr(buffer_payload, "SINGLE_PUT_LIMIT_BYTES", None)
-    if size_of is None or limit is None:
-        return None  # a buffer without the size bound (format v2): nothing to estimate with
+    size_of = buffer_payload.k31_group_payload_bytes
+    limit = buffer_payload.SINGLE_PUT_LIMIT_BYTES
     spec = effective_spec(pool_cfg)
     if spec is None or not (spec.get("rollout_fields") or {}).get("routed_experts"):
         return None
@@ -438,7 +429,7 @@ def payload_size_warning(pool_cfg: dict[str, Any], trainer_argv: list[str] | Non
     if not trials or not tokens:
         return None
     compactions = 0 if cfg is None else cfg.max_compactions
-    env_name = getattr(buffer_payload, "PAYLOAD_CODEC_ENV", "YETO_SAMPLE_BUFFER_PAYLOAD_CODEC")
+    env_name = buffer_payload.PAYLOAD_CODEC_ENV
     codec = str((environ or {}).get(env_name) or "json").strip().lower()
     try:
         size = size_of(int(trials), int(tokens), max_compactions=compactions, codec=codec)

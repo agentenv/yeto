@@ -114,7 +114,7 @@ def test_a_write_above_the_threshold_goes_in_parts_and_reads_back_whole():
     fake = LimitedS3()
     store = _store(fake)
     data = _data(THRESHOLD + 3 * MIB + 17)  # 11 MiB + 17 B: parts of 5, 5, 1 MiB + 17 B
-    with pytest.raises(ClientError, match="EntityTooLarge"):  # what main's one PUT does with it
+    with pytest.raises(ClientError, match="EntityTooLarge"):  # what a single PUT does with it
         fake.put_object(Bucket="bkt", Key="runs/a/x", Body=data)
     fake.calls.clear()
     store.write("sample-buffer/payloads/g", data)

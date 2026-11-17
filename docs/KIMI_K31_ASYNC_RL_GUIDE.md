@@ -700,14 +700,14 @@ before.
 | Key | Default | Meaning |
 |---|---|---|
 | `context_budget` | required | The context size C in tokens. Must be greater than `t_comp` and at most the engine context length (`engine.server.max_model_len`). |
-| `t_comp` | 10240 | A compaction starts when fewer than `t_comp` tokens of `context_budget` remain before the next model call. Integer >= 1. It must hold the summary turn: its `max_tokens` (`agentic.turn_max_tokens`, or `summary_max_tokens` where available) plus the summary request (bounded by one token per byte of the summary prompt plus 64). |
+| `t_comp` | 10240 | A compaction starts when fewer than `t_comp` tokens of `context_budget` remain before the next model call. Integer >= 1. It must hold the summary turn: its `max_tokens` (`summary_max_tokens`, by default the smaller of `agentic.turn_max_tokens` and 4096) plus the summary request (bounded by one token per byte of the summary prompt plus 64). |
 | `keep_recent_steps` | 2 | How many recent steps (one assistant turn plus its tool results) the next segment keeps word for word. Lowered automatically when the rebuilt context would compact again at once. `0` keeps only the summary. Integer >= 0. |
 | `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` turns compaction off in effect (the dry run says so). Integer >= 0. |
 
-Releases that add them also accept `summary_max_tokens`, `summary_prompt` and
-`resume_template` (the summary turn's length cap, the summary request and the
-resume message; `resume_template` must contain `{summary}`). `pool --dry-run`
-lists the keys it accepts when it refuses an unknown one.
+Optional keys: `summary_max_tokens`, `summary_prompt` and `resume_template`
+(the summary turn's length cap, the summary request and the resume message;
+`resume_template` must contain `{summary}`). `pool --dry-run` lists the keys it
+accepts when it refuses an unknown one.
 
 **Checks before anything is ordered.** `pool --dry-run` and `yeto run up`
 preflight refuse:
@@ -747,10 +747,9 @@ preflight refuse:
 Leave headroom between `context_budget` and `max_model_len` (the example uses
 262144 - 16384 for an engine at 262144): the step before a compaction can add a
 reply and a large tool output past the trigger point, and the summary turn then
-has to fit in what is left of the engine context. Where the release has the
-check, `context_budget - t_comp + turn_max_tokens + summary request + summary
-max_tokens > max_model_len` is refused, with the largest `context_budget` that
-fits.
+has to fit in what is left of the engine context. `context_budget - t_comp +
+turn_max_tokens + summary request + summary max_tokens > max_model_len` is
+refused, with the largest `context_budget` that fits.
 
 `agentic.max_prompt_len` bounds the first segment's prompt only. A later
 segment starts from the system prompt, the summary and the kept steps; its
@@ -823,11 +822,11 @@ and up to `1 + max_compactions` times that with it: over the 5 GiB that one
 object PUT to S3 / R2 / OSS can carry. `yeto run up` preflight estimates
 `sampling.n x (1 + max_compactions) x max_model_len` tokens (or the sample rows
 without compaction) and warns above 5 GiB. Set
-`YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd` on the samplers where the release
-supports it, or lower the rows / `context_budget` / `max_compactions`.
+`YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd` on the samplers, or lower the rows /
+`context_budget` / `max_compactions`.
 
-A release with multipart object writes uploads a group larger than
-`YETO_RL_STORE_MULTIPART_MB` (default 1024 MiB) in parts (64 MiB parts, 16 at
+The sample buffer uploads a group larger than `YETO_RL_STORE_MULTIPART_MB`
+(default 1024 MiB) in parts (64 MiB parts, 16 at
 once; about 100 MB/s per object on R2, so an 11 GB group takes about 2 minutes),
 so the 5 GiB PUT limit no longer applies; the create-if-absent of the index
 records is unchanged. Smaller groups are still one PUT.

@@ -1,9 +1,9 @@
-"""How compaction segments enter the GRPO loss (compaction-1118 C15).
+"""How compaction segments enter the GRPO loss.
 
 With ``agentic.compaction`` on, the records proxy turns one trial into ``k``
 segment samples that share the trial's reward (``metadata["compaction"]``,
-CONTRACT.zh.md section 2). The trainer (Miles, pin ``MILES_NEXT_COMMIT``)
-already treats such samples as *siblings of one rollout*, keyed by
+:data:`yeto.rl.contracts.COMPACTION_METADATA_KEY`). The trainer (Miles, pin
+``MILES_NEXT_COMMIT``) already treats such samples as *siblings of one rollout*, keyed by
 ``Sample.rollout_id`` (``None``: ``Sample.index``):
 
 * rewards: ``_normalize_rewards_by_rollout`` centres one reward per rollout
@@ -60,7 +60,7 @@ from typing import Any
 
 from yeto.rl.engine.algorithm import CRITIC_ESTIMATORS, AlgorithmSpec, AlgorithmSpecError
 
-COMPACTION_KEY = "compaction"  # sample.metadata key written by the records proxy (contract 2)
+COMPACTION_KEY = "compaction"  # sample.metadata key written by the records proxy (yeto.rl.contracts)
 
 # Plugin paths whose sibling handling is known (token-local or rollout-aware).
 KNOWN_CORRECTION_FUNCTIONS = frozenset({
@@ -115,7 +115,7 @@ def miles_rollout_key(sample: Any, row: int) -> Any:
 def sibling_key(sample: Any, row: int) -> Any:
     """One value per trial: the compaction trajectory id, else the row itself.
 
-    Uncompacted samples are never merged (keeps their behaviour as on main).
+    Uncompacted samples are never merged (keeps their behaviour without compaction).
     The overlong filter uses the same key (defined there: its source is the
     filter's plugin identity).
     """
@@ -126,7 +126,7 @@ def sibling_key(sample: Any, row: int) -> Any:
 
 
 # --------------------------------------------------------------------------
-# trainer-side check (C3: Sample conversion)
+# trainer-side check (after the Sample conversion)
 # --------------------------------------------------------------------------
 
 
@@ -187,7 +187,7 @@ def check_segment_siblings(samples: Sequence[Any]) -> None:
 
 
 # --------------------------------------------------------------------------
-# launch check (C2: check_compaction_launch, compaction on)
+# launch check (check_compaction_launch, compaction on)
 # --------------------------------------------------------------------------
 
 
@@ -257,7 +257,7 @@ def check_compaction_algorithm(spec: AlgorithmSpec) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# monitoring (C10: per training step, before the loss)
+# monitoring (per training step, before the loss)
 # --------------------------------------------------------------------------
 
 

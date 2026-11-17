@@ -26,7 +26,6 @@ from yeto.rl.harness.harbor import pi_config
 
 GRPO_SPEC = Path(__file__).resolve().parents[1] / "examples/k31/algorithm-spec.async-age2.json"
 # the summary-turn keys of CompactionConfig (accepted once the config has them)
-HAS_SUMMARY_KEYS = "summary_prompt" in C.SPEC_KEYS
 AGENTIC = {"turn_max_tokens": 4096, "max_response_len": 1 << 20}
 
 
@@ -128,8 +127,8 @@ def test_compaction_needs_the_turn_and_row_caps(missing):
 
 
 def test_the_sampler_row_must_hold_the_engine_context():
-    """A segment can grow past context_budget to the engine context (R1-F2,
-    tests/test_compaction_segment_width.py): the row must hold max_model_len."""
+    """A segment can grow past context_budget to the engine context
+    (tests/test_compaction_segment_width.py): the row must hold max_model_len."""
     with pytest.raises(ValueError, match=r"agentic.max_response_len 245760 < the engine context length "
                                          r"max_model_len 262144: .* drops the trial"):
         C.config_from_spec(_spec({"context_budget": 245760}, max_model_len=262144, max_response_len=245760))
@@ -160,7 +159,6 @@ def test_a_default_agent_that_compacts_itself_is_refused():
     assert C.config_from_spec(_spec({"context_budget": 65536}, task_defaults={"agent": "pi"})) is not None
 
 
-@pytest.mark.skipif(not HAS_SUMMARY_KEYS, reason="CompactionConfig has no summary-turn fields yet")
 def test_the_summary_turn_keys_reach_the_config():
     cfg = C.config_from_spec(_spec({"context_budget": 65536, "summary_max_tokens": 2048,
                                     "summary_prompt": "Summarize.", "resume_template": "Earlier: {summary}"},
@@ -202,7 +200,7 @@ def test_round_factory_passes_the_compaction_to_the_records_proxy(monkeypatch):
 
 
 def test_round_factory_without_the_section_builds_as_before(monkeypatch):
-    """No ``agentic.compaction``: the proxy's arguments are main's (``compaction=None``
+    """No ``agentic.compaction``: the proxy's arguments are unchanged (``compaction=None``
     is RecordsProxy's own default) and the trial builder is the plain one."""
     from functools import partial
 
@@ -465,20 +463,10 @@ def test_run_up_preflight_refuses_a_bad_section_and_says_nothing_without_one(set
 
 # -- buffer group size (one object PUT) -------------------------------------------
 
-def _c12_size(trials, context_budget, *, max_compactions=0, codec="json"):
-    """C12's bound (cmp1118/C12 ``buffer_payload.k31_group_payload_bytes``), for the
-    wiring tests before it is merged."""
+def _expected_size(trials, context_budget, *, max_compactions=0, codec="json"):
+    """The K3.1 group bound written out by hand (bytes per token per codec), checked
+    against ``buffer_payload.k31_group_payload_bytes`` below."""
     return trials * (1 + max_compactions) * context_budget * {"json": 5324, "raw": 4001, "zstd": 2353}[codec]
-
-
-@pytest.fixture
-def sized(monkeypatch):
-    from yeto.rl.engine import buffer_payload
-
-    if not hasattr(buffer_payload, "k31_group_payload_bytes"):
-        monkeypatch.setattr(buffer_payload, "k31_group_payload_bytes", _c12_size, raising=False)
-        monkeypatch.setattr(buffer_payload, "SINGLE_PUT_LIMIT_BYTES", 5 * 2**30, raising=False)
-    return buffer_payload
 
 
 def _pool(tmp_path, spec):
@@ -490,7 +478,7 @@ K31_ROWS = {"rollout_fields": {"routed_experts": True, "top_logprobs_num": 128},
             "engine": {"server": {"max_model_len": 262144}}}
 
 
-def test_a_262k_group_without_compaction_is_over_one_put(sized, tmp_path):
+def test_a_262k_group_without_compaction_is_over_one_put(tmp_path):
     from yeto.rl.up_consistency import payload_size_warning
 
     spec = {**K31_ROWS, "agentic": {"max_prompt_len": 16384, "max_response_len": 262144 - 16384}}
@@ -505,7 +493,7 @@ def test_a_262k_group_without_compaction_is_over_one_put(sized, tmp_path):
     assert payload_size_warning(_pool(tmp_path, {**spec, "rollout_fields": {}}), environ={}) is None
 
 
-def test_a_compacting_group_counts_every_segment(sized, tmp_path):
+def test_a_compacting_group_counts_every_segment(tmp_path):
     from yeto.rl.up_consistency import payload_size_warning
 
     spec = {**K31_ROWS, "agentic": {**AGENTIC, "max_response_len": 262144,
@@ -517,26 +505,15 @@ def test_a_compacting_group_counts_every_segment(sized, tmp_path):
     assert "codec zstd" in zstd
 
 
-def test_no_size_bound_in_the_buffer_skips_the_check(monkeypatch, tmp_path):
-    from yeto.rl.engine import buffer_payload
-    from yeto.rl.up_consistency import payload_size_warning
-
-    monkeypatch.delattr(buffer_payload, "k31_group_payload_bytes", raising=False)
-    spec = {**K31_ROWS, "agentic": {"max_prompt_len": 16384, "max_response_len": 262144 - 16384}}
-    assert payload_size_warning(_pool(tmp_path, spec), environ={}) is None
-
-
-@pytest.mark.skipif(not hasattr(__import__("yeto.rl.engine.buffer_payload", fromlist=["x"]),
-                                "k31_group_payload_bytes"), reason="buffer_payload has no size bound yet (C12)")
 def test_the_real_size_bound_matches_the_wiring():
     from yeto.rl.engine import buffer_payload
 
     for codec in ("json", "raw", "zstd"):
         assert buffer_payload.k31_group_payload_bytes(8, 262144, max_compactions=3, codec=codec) == \
-            _c12_size(8, 262144, max_compactions=3, codec=codec)
+            _expected_size(8, 262144, max_compactions=3, codec=codec)
 
 
-def test_run_up_preflight_warns_on_a_group_over_one_put(setup, sized, capsys):  # noqa: F811
+def test_run_up_preflight_warns_on_a_group_over_one_put(setup, capsys):  # noqa: F811
     _compacting(setup)
     setup.spec["engine"]["server"]["max_model_len"] = 262144
     setup.spec["agentic"] = {"turn_max_tokens": 4096, "max_response_len": 262144,

@@ -1,4 +1,4 @@
-"""The buffer reader trains the groups it edited (C5 review, section 4).
+"""The buffer reader trains the groups it edited.
 
 ``_BufferRound.__call__`` converts the taken groups to Miles samples first, then the
 xhw guard downweights, the merged-lane trainer stamps the release cut and prunes the

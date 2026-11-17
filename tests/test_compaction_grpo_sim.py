@@ -25,7 +25,7 @@ import sim_compaction_grpo as sim  # noqa: E402
 
 pytest.importorskip("aiohttp")
 
-# the buffer sample of a trial without compaction on main (agentic_round.agentic_sample)
+# the buffer sample of a trial without compaction (agentic_round.agentic_sample)
 MAIN_KEYS = {"group_index", "index", "label", "loss_mask", "metadata", "prompt", "response", "response_length",
              "reward", "rollout_log_probs", "rollout_routed_experts", "rollout_top_logprobs",
              "rollout_top_logprobs_ids", "status", "tokens"}
@@ -126,7 +126,7 @@ def test_spec_section_builds_the_proxy_config_and_refuses_what_launch_refuses():
     assert scenario("compact_once").compaction_config(engine) == sim.CompactionConfig(**sim.SMALL)
     assert scenario("no_compaction").compaction_config(engine) is None
     assert "cannot hold the summary turn" in scenario("tcomp_overflow").spec_error()
-    # rows narrower than the engine context (a segment can grow to it, R1-F2)
+    # rows narrower than the engine context (a segment can grow to it, tests/test_compaction_segment_width.py)
     assert "max_response_len 3250 < the engine context length max_model_len" in \
         scenario("r3_segment_window").spec_error()
     from yeto.rl.agentic import HarnessConfigError
@@ -206,7 +206,7 @@ def test_agentic_round_writes_one_sample_per_segment(runs, name):
     assert m["alignment_problem_count"] == 0
     segments = m["segments_per_trial"]
     cfg = r.cfg
-    if name == "no_trigger":  # compaction on but never triggered: the main sample
+    if name == "no_trigger":  # compaction on but never triggered: the unsegmented sample
         assert segments == {1: 16} and m["compactions"] == 0
         for x in (x for t in r.trials for x in t.samples):
             assert set(x) == MAIN_KEYS and set(x["metadata"]) == MAIN_META

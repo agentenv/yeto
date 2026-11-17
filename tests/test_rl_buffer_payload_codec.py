@@ -25,7 +25,7 @@ from yeto.rl.engine.buffer_payload import (
     payload_codec,
 )
 
-# sha256 of encode_group(_golden_group()) on main before format v2 existed
+# sha256 of encode_group(_golden_group()) before format v2 existed
 GOLDEN_V1 = "b821899b0fdbb2fae4edc97e332339a6b24eb7acca0a2aa028309bc449ee8e23"
 
 
