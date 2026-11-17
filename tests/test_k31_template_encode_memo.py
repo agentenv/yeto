@@ -64,7 +64,7 @@ def flat(pieces: list[list[int]], first: int = 0) -> list[int]:
 
 
 def conversation() -> list[dict[str, Any]]:
-    long_text = ("word " * 90_000) + ("x" * 30_000) + " 中文内容 " * 2_000  # > 400k chars, long runs
+    long_text = ("word " * 90_000) + ("x" * 30_000) + " Ελληνικά κείμενο " * 2_000  # > 400k chars, long runs
     args = json.dumps({"command": 'grep -n "<|close|>" /app/*.py', "timeout": 30})
     return [
         {"role": "system", "content": "You are pi.\n" + MARKERS},

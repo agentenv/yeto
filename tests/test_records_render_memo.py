@@ -123,7 +123,7 @@ def chat_loop(template: ChatTemplate, model: Any, *, turns: int, check_render: b
         backend.template.render = counted
     backend.declare_tools("t", CHAT_TOOLS)
     messages: list[dict[str, Any]] = [{"role": "system", "content": "You are a coding agent."},
-                                      {"role": "user", "content": "列出 files, then read a.txt"}]
+                                      {"role": "user", "content": "список files, then read a.txt"}]
     out: dict[str, Any] = {"responses": [], "error": None}
 
     async def go() -> None:
