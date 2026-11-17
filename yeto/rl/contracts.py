@@ -214,7 +214,7 @@ class TrajectoryEnvelope:
 COMPACTION_METADATA_KEY = "compaction"
 COMPACTION_METADATA_SCHEMA = 1
 _COMPACTION_INT_FIELDS = ("segment_index", "num_segments", "context_budget",
-                          "kept_steps", "segment_tokens", "tokens_after")
+                          "segment_tokens", "tokens_after")
 _TRAINABLE_STATUSES = frozenset({"completed", "truncated"})
 
 
@@ -269,8 +269,10 @@ def validate_compaction_group(samples: Sequence[Any]) -> tuple[CompactionTrial, 
     compacted trial's samples all carry ``metadata.compaction`` with schema 1,
     one non-empty ``trajectory_id`` (no sample of another index names it),
     ``segment_index`` 0..n-1 (each once), ``num_segments`` n, one positive
-    ``context_budget``, a boolean ``summary_ok`` and non-negative
-    ``kept_steps`` / ``segment_tokens`` / ``tokens_after``; they share one
+    ``context_budget``, a boolean ``summary_ok`` (None on the last segment: no
+    summary ends it), a non-negative ``kept_steps`` (None on segment 0: it is
+    not rebuilt) and non-negative ``segment_tokens`` / ``tokens_after``
+    (contract decision 8); they share one
     finite ``reward``, and only the last segment may be ``truncated`` (the
     earlier ones are ``completed``). A ``rollout_id`` (Miles' rollout key),
     when a trial's samples carry one, is the same on all of them and differs
@@ -341,8 +343,6 @@ def _check_trial_segments(
             value = meta.get(name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{where}: compaction {name} must be a non-negative integer")
-        if type(meta.get("summary_ok")) is not bool:
-            raise ValueError(f"{where}: compaction summary_ok must be a boolean")
     order = sorted(range(len(positions)), key=lambda k: metas[k]["segment_index"])  # type: ignore[index]
     segments = [samples[positions[k]] for k in order]
     metas = [metas[k] for k in order]
@@ -358,6 +358,14 @@ def _check_trial_segments(
             raise ValueError(f"{where}: segments mix compaction trajectory ids")
         if meta["segment_index"] != ordinal:
             raise ValueError(f"{where}: compaction segment indexes are not 0..n-1")
+        last = ordinal == len(segments) - 1
+        summary_ok = meta.get("summary_ok")
+        if not (type(summary_ok) is bool or (last and summary_ok is None)):
+            raise ValueError(f"{where}: compaction summary_ok must be a boolean (None only on the last segment)")
+        kept = meta.get("kept_steps")
+        if not ((type(kept) is int and kept >= 0) or (ordinal == 0 and kept is None)):
+            raise ValueError(f"{where}: compaction kept_steps must be a non-negative integer "
+                             "(None only on segment 0)")
         if meta["num_segments"] != len(segments):
             raise ValueError(f"{where}: num_segments {meta['num_segments']} != "
                              f"{len(segments)} segments in the group")

@@ -469,3 +469,22 @@ def test_segment_envelope_contract():
                                ({"compaction_context_budget": 0}, "context budget")):
         with pytest.raises(ValueError, match=message):
             TrajectoryEnvelope(**{**base, **overrides})
+
+
+def test_the_unset_ends_of_a_trial_are_null_where_the_contract_says():
+    """Contract decision 8: segment 0 is not rebuilt (kept_steps None) and no summary
+    ends the last segment (summary_ok None); None anywhere else is refused."""
+    from yeto.rl.contracts import validate_compaction_group
+
+    def trial(**at):
+        samples = _trial(group_index=0, index=0, versions_per_segment=[(7, 7), (7, 7), (7, 7)])
+        for k, fields in at.items():
+            samples[int(k)].metadata["compaction"].update(fields)
+        return samples
+
+    ends = {"0": {"kept_steps": None}, "2": {"summary_ok": None}}
+    assert len(validate_compaction_group(trial(**ends))) == 1
+    for bad in ({"1": {"kept_steps": None}}, {"2": {"kept_steps": None}},
+                {"0": {"summary_ok": None}}, {"1": {"summary_ok": None}}):
+        with pytest.raises(ValueError):
+            validate_compaction_group(trial(**{**ends, **bad}))
