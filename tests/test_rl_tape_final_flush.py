@@ -114,11 +114,16 @@ def test_sigint_during_the_final_put_is_held_until_the_chunk_is_stored(tmp_path)
     _append(tape, {"event": "rl_learner_finalized"})
     logs = []
     up = TapeUploader(SlowPut(), tape, island="trainer", incarnation="a", interval_s=999, log=logs.append)
-    with pytest.raises(KeyboardInterrupt):
-        up.stop(timeout_s=10)
+    # An earlier test in the same process may leave another SIGINT handler installed.
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            up.stop(timeout_s=10)
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    finally:
+        signal.signal(signal.SIGINT, previous)
     assert _stored(objects) == tape.read_bytes()
     assert any("held until the final tape upload ends" in line for line in logs)
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
 def test_held_signals_restore_handlers_and_redeliver_once(monkeypatch):
