@@ -692,6 +692,7 @@ def make_miles_island_task(
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
             + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
+            + _agent_ports_flags(spec.cloud)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -720,7 +721,8 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)}"
+            f"{_agent_ports_flags(spec.cloud)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
@@ -849,6 +851,26 @@ def _worker_node_ip_flag(cloud: str) -> str:
         return ""
     return (' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS" '
             '| sed -n "$((SKYPILOT_NODE_RANK + 1))p")"')
+
+
+# Ray's per-node agent ports, fixed on SSH nodes (next to Ray's own fixed
+# dashboard agent HTTP port 52365). Unpinned, ``ray start`` asks the OS for a
+# free port and refuses to start when it falls inside the worker port range
+# (10002-19999 by default; "Ray component worker_ports is trying to use a port
+# number ... used by other components"), and it keeps the choice in the session
+# dir, so a worker's join retries all fail the same way. A host whose ephemeral
+# range starts below 20000 (net.ipv4.ip_local_port_range) hits that.
+RAY_AGENT_PORTS = {"--metrics-export-port": 52366, "--dashboard-agent-grpc-port": 52367,
+                   "--runtime-env-agent-port": 52368}
+PINNED_AGENT_PORT_CLOUDS = frozenset({"ssh"})
+
+
+def _agent_ports_flags(cloud: str) -> str:
+    """The pinned agent ports of :data:`RAY_AGENT_PORTS` on an SSH island's nodes;
+    other clouds: unchanged argv."""
+    if cloud not in PINNED_AGENT_PORT_CLOUDS:
+        return ""
+    return "".join(f" {flag}={port}" for flag, port in RAY_AGENT_PORTS.items())
 
 
 def _island_post_cmd(args) -> str:

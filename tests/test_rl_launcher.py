@@ -919,10 +919,10 @@ def test_island_ray_object_store_and_spill_dir_reach_ray_start():
     assert "--object-store-memory" not in run and "--system-config" not in run
 
 
-def _island_run(extra):
+def _island_run(extra, gpu="aws:2x4xa100@us-east-1"):
     from yeto.gpu_spec import parse_gpu_spec
 
-    args = _args(("--gpu", "aws:2x4xa100@us-east-1", *extra))
+    args = _args(("--gpu", gpu, *extra))
     args.model_revision, args.data_revision = "a" * 40, "b" * 40
     args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
     _prepare_rl_args(args)
@@ -964,6 +964,21 @@ def test_island_ray_head_flags_unset_leave_the_head_command_alone():
     run, head, _ = _island_run(())
     assert head.startswith("  ray start --head --node-ip-address=")
     assert "RAY_preallocate" not in run and "RAY_raylet_" not in run
+
+
+def test_ssh_island_nodes_pin_the_ray_agent_ports_outside_the_worker_port_range():
+    """A free port the OS hands Ray's agents can fall in the worker port range
+    (10002-19999) on a host whose ephemeral range starts lower; Ray then refuses to
+    start, and a worker's join retries reuse the cached port. SSH nodes pin them."""
+    from yeto.launch.rl_island_task import RAY_AGENT_PORTS
+
+    pins = " --metrics-export-port=52366 --dashboard-agent-grpc-port=52367 --runtime-env-agent-port=52368"
+    assert all(not 10002 <= port <= 19999 for port in RAY_AGENT_PORTS.values())
+    assert len(set(RAY_AGENT_PORTS.values()) | {52365, 6379, 8265, 10001}) == 7  # nothing Ray fixes itself
+    run, head, worker = _island_run((), gpu="ssh:2x4xh200@island-0")
+    assert pins in head and pins in worker and run.count(pins) == 2
+    run, head, worker = _island_run(())
+    assert "--metrics-export-port" not in run  # other clouds: argv unchanged
 
 
 @pytest.mark.parametrize("extra, message", [
