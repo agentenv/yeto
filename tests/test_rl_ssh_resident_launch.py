@@ -141,3 +141,42 @@ def test_a_launch_is_refused_when_the_inventory_lacks_a_node(monkeypatch, tmp_pa
     with pytest.raises(SystemExit, match="has 3 node"):
         launcher.run(args)
     assert not cluster.calls
+
+
+def test_a_resident_island_copies_the_weights_onto_every_node_before_its_first_start(
+        monkeypatch, tmp_path, cluster):
+    """--model-store-source on a resident ssh: trainer (trainer-only, no scheduler): the
+    island's preflight runs the weights copy (ssh_weights.sync_weights) on every node,
+    once, before any node starts; a relaunch does not copy again."""
+    import yeto.launch.ssh_weights as ssh_weights
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set(), clock=clock, record=record)
+    for key in ("ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
+        monkeypatch.setenv("YETO_WEIGHTS_S3_" + key, "test")
+    synced = []
+
+    def sync(plan, nodes, addresses, ops, *, images):
+        synced.append((plan.store, plan.source, [n.name for n in nodes], images,
+                       sum(cluster.count("start", k) for k in range(3))))
+
+    monkeypatch.setattr(ssh_weights, "sync_weights", sync)
+    args = _args(tmp_path, "--model-store", "local:///data/models",
+                 "--model-store-source", "s3://weights/models/k31")
+    inv = tmp_path / "inventory.yaml"
+    inv.write_text(inv.read_text().replace("docker_args:", "mounts: {/mnt/nvme/models: /data/models}, docker_args:"))
+    import threading
+
+    def crash_then_finish():
+        for _ in range(500):
+            if all(0 in cluster.runs[n] for n in NAMES):
+                break
+            time.sleep(0.01)
+        cluster.exit("b300-1", 0, 1)  # incarnation 0: rank 1 dies
+        _finish_when_started(cluster, k=1)
+
+    threading.Thread(target=crash_then_finish, daemon=True).start()
+    assert launcher.run(args) == 0
+    image = "ghcr.io/x/y@sha256:" + "a" * 64
+    assert synced == [("/data/models", "s3://weights/models/k31", NAMES, [image] * 3, 0)]
+    assert cluster.count("start", 0) == 3 and cluster.count("start", 1) == 3
