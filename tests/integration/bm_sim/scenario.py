@@ -125,7 +125,13 @@ def install_sky_stub() -> None:
 def launcher_argv(*, inventory: Path, store_uri: str, nodes: int, cards: int, run_id: str,
                   extra: list[str] = ()) -> list[str]:
     """The ``yeto launch`` argv of a K3.1-form trainer island on the SSH nodes
-    (scheduler form: the head starts and stops it from the buffer backlog)."""
+    (scheduler form: the head starts and stops it from the buffer backlog).
+
+    The code reaches the nodes as the launcher sends it: the run code pack in the
+    bucket (``--rl-code-pack auto`` on an ``s3://`` store, packed from git by
+    :func:`build_args` / ``launcher.run``). A tree without its git dir (a worktree
+    mounted alone) runs the nodes' ``--rl-ssh-trainer-workdir`` checkout instead."""
+    code = [] if git_checkout(REPO) else ["--rl-code-pack", "off"]
     return [
         "--gpu", f"ssh:{nodes}x{cards}xb300@bm-sim",
         "--model", "/data/models/bm-sim", "--data", "org/bm-sim-prompts",
@@ -143,7 +149,7 @@ def launcher_argv(*, inventory: Path, store_uri: str, nodes: int, cards: int, ru
         "--rl-trainer-ready-seconds", "240", "--rl-trainer-drain-seconds", "300",
         "--rl-trainer-max-failures", "4",
         "--rl-node-inventory", str(inventory), "--rl-ssh-trainer-workdir", WORKDIR,
-        "--cluster-prefix", run_id, *extra,
+        "--cluster-prefix", run_id, *code, *extra,
     ]
 
 
@@ -165,11 +171,6 @@ def resident_argv(**kwargs: Any) -> list[str]:
         else:
             out.append(argv[i])
             i += 1
-    if not git_checkout(REPO):
-        # the launcher packs the code from git (--rl-code-pack auto); a tree without
-        # its git dir (a worktree mounted alone) runs the nodes' workdir as it is
-        log("resident: the repo is not a git checkout here; --rl-code-pack off")
-        out += ["--rl-code-pack", "off"]
     return out
 
 
@@ -183,6 +184,7 @@ def build_args(argv: list[str]) -> Any:
     from yeto import launch_preflight
     from yeto.cli import parse_args
     from yeto.launch import trainer_loop
+    from yeto.launch.code_pack import prepare_run_code_pack
     from yeto.launcher import _prepare_rl_args
 
     args = parse_args(argv)
@@ -192,6 +194,7 @@ def build_args(argv: list[str]) -> Any:
     args.source_sha256 = "c" * 64
     args.reward_sha256 = "d" * 64
     _prepare_rl_args(args)
+    prepare_run_code_pack(args)  # the run code pack in the bucket, as launcher.run (no-op when off)
     launch_preflight.pre_cloud_checks(args, threads=False)  # as launcher.run, before any island
     trainer_loop.check(args)
     return args

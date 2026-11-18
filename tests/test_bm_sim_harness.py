@@ -48,10 +48,12 @@ def _inventory(tmp_path, nodes=2, runtime="rootfs"):
 
 
 @pytest.mark.parametrize("runtime", ["rootfs", "docker"])
-def test_the_launcher_builds_the_island_the_harness_patches(tmp_path, store_env, runtime):
+def test_the_launcher_builds_the_island_the_harness_patches(tmp_path, store_env, monkeypatch, runtime):
     """The real launcher path (CLI parse, preflight checks, island task, inventory
     spec) for the sim's inventory; the harness swaps only the learner module and
-    the setup, and the island env carries the staged s3 store for every node."""
+    the setup, and the island env carries the staged s3 store for every node.
+    (No code pack: the unit test has no bucket to store it in.)"""
+    monkeypatch.setattr(scenario, "git_checkout", lambda path: False)
     args = scenario.build_args(scenario.launcher_argv(inventory=_inventory(tmp_path, 3, runtime),
                                                       store_uri="s3://bm-sim/r", nodes=3, cards=cluster.CARDS,
                                                       run_id="bmsim-unit"))
@@ -76,16 +78,19 @@ def test_patch_task_swaps_exactly_one_learner_line():
 
 
 def test_the_resident_form_drops_the_trainer_scheduler(tmp_path, monkeypatch):
+    """...and both forms run the nodes' workdir checkout when the tree has no git dir."""
+    monkeypatch.setattr(scenario, "git_checkout", lambda path: True)
     argv = scenario.launcher_argv(inventory=_inventory(tmp_path), store_uri="s3://bm-sim/r", nodes=2,
                                   cards=cluster.CARDS, run_id="bmsim-unit")
-    monkeypatch.setattr(scenario, "git_checkout", lambda path: True)
     resident = scenario.resident_argv(inventory=_inventory(tmp_path), store_uri="s3://bm-sim/r", nodes=2,
                                       cards=cluster.CARDS, run_id="bmsim-unit")
     assert set(scenario.SCHEDULER_FLAGS) & set(argv) and not set(scenario.SCHEDULER_FLAGS) & set(resident)
     assert "--rl-trainer-start-seconds-fixed" not in resident and "--rl-code-pack" not in resident
     monkeypatch.setattr(scenario, "git_checkout", lambda path: False)
-    assert scenario.resident_argv(inventory=_inventory(tmp_path), store_uri="s3://bm-sim/r", nodes=2,
-                                  cards=cluster.CARDS, run_id="bmsim-unit")[-2:] == ["--rl-code-pack", "off"]
+    for form in (scenario.launcher_argv, scenario.resident_argv):
+        argv = form(inventory=_inventory(tmp_path), store_uri="s3://bm-sim/r", nodes=2, cards=cluster.CARDS,
+                    run_id="bmsim-unit")
+        assert argv[argv.index("--rl-code-pack") + 1] == "off"
 
 
 def test_the_sim_inventories_load_and_the_docker_one_passes_the_cuda_rdma_checks(tmp_path):
@@ -118,6 +123,40 @@ def test_docker_shim_passes_only_the_named_env_and_needs_host_networking(tmp_pat
     refused = _shim(tmp_path, "run", "--name", name, "img", "true")
     assert refused.returncode == 125 and "--network host" in refused.stderr
     assert _shim(tmp_path, "pull", "-q", "img:1").returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the shim reads /proc of a Linux node")
+def test_docker_shim_container_holds_its_daemons_until_rm_f(tmp_path):
+    """A daemon that left the payload's session (as ``ray start`` does) is still the
+    container's: ``inspect`` sees it running, ``exec kill -TERM -1`` spares the
+    init, ``rm -f`` ends every process and the container is then gone."""
+    import time
+
+    name = f"bm-sim-unit-d{os.getpid()}"
+    marker = tmp_path / "daemon.pid"
+    # the daemon ignores TERM too, so only rm -f can end it
+    payload = (f"setsid bash -c \"trap '' TERM; exec sleep 300\" & echo $! > {marker}; trap '' TERM; "
+               "while :; do sleep 0.2; done")
+    client = subprocess.Popen([sys.executable, str(SHIM), "run", "--name", name, "--network", "host", "--ipc",
+                               "host", "img", "bash", "-c", payload], env={"PATH": os.environ["PATH"]})
+    try:
+        for _ in range(100):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.1)
+        daemon = int(marker.read_text())
+        status = _shim(tmp_path, "inspect", "-f", "{{.State.Status}}", name)
+        assert status.stdout.strip() == "running" and _shim(tmp_path, "container", "inspect", name).returncode == 0
+        assert _shim(tmp_path, "exec", name, "bash", "-c", "kill -TERM -1").returncode == 0
+        time.sleep(0.5)
+        assert client.poll() is None and Path(f"/proc/{daemon}").exists()  # both ignore TERM
+        assert _shim(tmp_path, "rm", "-f", name).returncode == 0
+        client.wait(timeout=30)
+        assert not Path(f"/proc/{daemon}").exists() or "Z" in Path(f"/proc/{daemon}/stat").read_text().split()[2]
+        assert _shim(tmp_path, "container", "inspect", name).returncode == 1
+    finally:
+        client.kill()
+        _shim(tmp_path, "rm", "-f", name)
 
 
 @pytest.mark.skipif(not os.environ.get("YETO_BM_SIM"), reason="opt in: YETO_BM_SIM=1 (docker here) or =modal")
