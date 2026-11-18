@@ -2648,17 +2648,14 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from huggingface_hub import snapshot_download
-
-    from yeto.models import resolve
+    from yeto.models import resolve, snapshot_path
     model = resolve(args.model)
     if is_local_reference(model):
         model_path = str(Path(model).expanduser().resolve())
     else:
         # a model store hit (storage.model_store_env) is the snapshot: never ask the Hub,
         # whose file list would complete a node-local store's stage-only snapshot
-        model_path = snapshot_download(repo_id=model, revision=args.model_revision,
-                                       local_files_only=bool(os.environ.get("YETO_MODEL_STORE_HIT")))
+        model_path = snapshot_path(model, args.model_revision)  # store hit: local cache only
     rollout_model = resolve(args.rollout_model) if args.rollout_model else model
     if getattr(args, "rl_init_from_release_dir", None):
         from yeto.rl.engine.init_from_release import island_model_path
@@ -2684,10 +2681,7 @@ def main(argv=None) -> None:
         if not Path(rollout_model_path).is_dir():
             raise ValueError("--rollout-model local directory does not exist")
     else:
-        rollout_model_path = snapshot_download(
-            repo_id=rollout_model,
-            revision=args.rollout_model_revision,
-        )
+        rollout_model_path = snapshot_path(rollout_model, args.rollout_model_revision)
     eval_source = _verify_eval_dataset_identity(args)
     island_tasks = _verify_island_task_data(args)
     slot = _island_data_slot(args)

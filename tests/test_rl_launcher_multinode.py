@@ -96,8 +96,8 @@ def test_two_node_island_task(monkeypatch):
     # The dashboard/state API must be reachable from worker nodes
     assert "--include-dashboard=true" in head and "--dashboard-host=0.0.0.0" in head
     # Worker nodes fetch the pinned model snapshot before joining the Ray
-    assert "snapshot_download" in worker and "a" * 40 in worker and "exit 1" in worker
-    assert worker.index("snapshot_download") < worker.index("ray start --address")
+    assert "snapshot_path" in worker and "a" * 40 in worker and "exit 1" in worker
+    assert worker.index("snapshot_path") < worker.index("ray start --address")
     assert worker.index("trap stop_miles_ray EXIT") < worker.index('ray start --address="$MASTER_ADDR:6379"')
     assert "worker could not join the Ray head" in worker
 
