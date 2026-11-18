@@ -142,6 +142,10 @@ class FakeOps(SshOps):
         self.starts.append((n.name, script))
         return FakeProc(["log line\n"])
 
+    def fetch(self, n, script, target, *, timeout):
+        self.fetches = [*getattr(self, "fetches", []), (n.name, script, target)]
+        return 0
+
 
 @pytest.fixture
 def checked_cards(monkeypatch):
