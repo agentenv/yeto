@@ -26,7 +26,7 @@ from .idle import _gpu_util, classify
 from .ledger import ResourceLedger
 
 DEFAULT_GAP_S = 10 * 60
-COMPUTE_KINDS = ("modal_app", "nc_lease", "sky_cluster")
+COMPUTE_KINDS = ("modal_app", "nc_lease", "sky_cluster", "ssh_trainer")
 
 
 def productive_seconds(records: Iterable[tuple[str, dict[str, Any]]], gap_s: float = DEFAULT_GAP_S
