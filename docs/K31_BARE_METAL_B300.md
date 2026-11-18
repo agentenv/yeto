@@ -46,9 +46,8 @@ are filled (`tests/test_k31_baremetal_kit.py` runs this check).
 | Cluster check (`yeto preflight`) | In this repository, unit-tested against recorded tool output |
 | Overlay-safe trainer image | `yeto-miles-k31@sha256:2abbbb00...` (section 5), pulled and run on overlay2 and on the containerd snapshotter (Docker 29.9 / 29.10) |
 
-Items marked **TODO(bm-...)** name commands that are being added. Until
-they land, each step lists what it must establish and, where one exists, a
-manual way to do it.
+Each bring-up step lists what it must establish and the command that checks
+it.
 
 ## 2. Architecture
 
@@ -252,22 +251,35 @@ the first start.
 ## 6. Model weights
 
 The trainer loads `moonshotai/Kimi-K3.1-Pro` (MXFP4, 1.56 TB) at the pinned
-`--model-revision` on every node. Plan the copy before the first launch:
+`--model-revision` from a local copy on every node. The trainer preflight
+makes that copy itself, on all nodes at once, before the first start:
 
-- Every node needs the same files at the same path on local NVMe (the
-  template: host `/mnt/nvme/models`, container `/data/models`), unless a
-  shared file system holds one copy for all nodes.
-- Source: the Hugging Face Hub at the pinned revision, or the object store
-  prefix the sampler pool already pulls from (`model_pull.src_key` of the
-  pool config). One copy per node is 1.56 TB; at 1-2 GB/s that is 13-25 min
-  per node, in parallel across nodes.
-- Verify the copy (file list and sizes against `model.safetensors.index.json`)
-  before the first launch; a missing shard otherwise fails after about 20
-  minutes of loading.
+```
+--model-store local:///data/models                              # container path, under an inventory mount
+--model-store-source s3://<bucket>/models/Kimi-K3.1-Pro         # or a directory with yeto-weights-manifest.json
+--model-store-shards auto                                       # auto | all | stage
+```
 
-TODO(bm-weights): the command that copies the weights from the store to
-every inventory node in parallel, verifies them, and makes the trainer load
-the local copy at the pinned revision.
+- `local:///data/models` names the container path; the node's `mounts`
+  map it to NVMe (template: host `/mnt/nvme/models`). A path no mount covers
+  is refused before any SSH.
+- With `--rl-sample-role trainer` and PP > 1 (`auto`), each node copies only
+  the safetensors files of its pipeline stage plus the shared files (about
+  0.5 TB instead of 1.56 TB per node; 3.15 TB instead of 9.4 TB for six
+  nodes). Stage `s` runs on the two nodes with the `2s`-th and `2s+1`-th
+  smallest cluster `address`.
+- Every file is checked against its sha256 (the source manifest, else the
+  object's `x-amz-meta-sha256`) before it enters the snapshot; a restart skips
+  the verified files in seconds. The node refuses to start the copy with less
+  than 1.2 times the missing bytes free.
+- The store credential is the run's (`YETO_RL_STORE_S3_*`) unless
+  `YETO_WEIGHTS_S3_*` names another; the control host's own `AWS_*` never
+  reaches a node.
+- With the copy in place the trainer reads it with `local_files_only` and
+  never contacts the Hugging Face Hub.
+
+Time per node at 1 GB/s: about 9.5 min for a stage, 26 min for the full
+model. Size the site egress for six parallel copies.
 
 ## 7. Expert selection file
 

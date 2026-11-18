@@ -170,3 +170,13 @@ def test_both_262k_kits_split_31_31_31_and_the_modal_kit_keeps_a_45_min_idle_win
     assert not any("pipeline-num-layers" in a for a in _argv())
     assert (_flag(modal, "--idle-warn-minutes"), _flag(modal, "--idle-stop-minutes")) == ("45", "45")
     assert _flag(_argv(), "--idle-warn-minutes") == "0"
+
+
+def test_the_weights_copy_lands_under_an_inventory_mount():
+    argv = _argv()
+    store = _flag(argv, "--model-store")
+    assert store.startswith("local:///")
+    path = store.removeprefix("local://")
+    for node in load_inventory(INVENTORY):
+        assert any(path == c or path.startswith(c.rstrip("/") + "/") for c in node.mounts.values()), node.name
+    assert _flag(argv, "--model-store-source").startswith("s3://")
