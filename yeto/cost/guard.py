@@ -288,6 +288,21 @@ class CostGuard:
             self._thread.join(timeout=10)
 
 
+DEFAULT_LOAD_GRACE_MINUTES = 45.0
+# A Kimi-K3.1 full-parameter trainer is silent from the start to its first trained round: d1
+# (16 layers, 1 node) took 28 min (setup 3, Megatron init with a 12.7 min weight load 14.5, a first
+# step of 7); a 93-layer PP3 stage holds about twice the layers (load ~25 min, first step 6-12 min),
+# so 45 min is about what it needs and the idle rule would stop it at 75 min.
+K31_FULL_LOAD_GRACE_MINUTES = 90.0
+
+
+def default_load_grace_minutes(args) -> float:
+    """The load grace when ``--load-grace-minutes`` is not given."""
+    if getattr(args, "rl_model_recipe", None) == "kimi_k31" and getattr(args, "tuning", None) == "full":
+        return K31_FULL_LOAD_GRACE_MINUTES
+    return DEFAULT_LOAD_GRACE_MINUTES
+
+
 def guard_config_from_args(args) -> GuardConfig:
     g = lambda name, default=None: getattr(args, name, default)  # noqa: E731
     m = lambda name, default: float(g(name, default) if g(name) is not None else default) * 60  # noqa: E731
@@ -295,7 +310,8 @@ def guard_config_from_args(args) -> GuardConfig:
         budget_usd=g("budget_usd"), budget_warn_usd=g("budget_warn_usd"),
         poll_s=float(g("cost_poll_seconds") or 60), stop_grace_s=m("budget_stop_grace_minutes", 20),
         idle=IdleConfig(idle_after_s=m("idle_warn_minutes", 15), stop_after_s=m("idle_stop_minutes", 15),
-                        load_grace_s=m("load_grace_minutes", 45), max_load_s=m("max_load_minutes", 120)))
+                        load_grace_s=m("load_grace_minutes", default_load_grace_minutes(args)),
+                        max_load_s=m("max_load_minutes", 120)))
 
 
 def guard_enabled(args) -> bool:

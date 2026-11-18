@@ -822,3 +822,20 @@ def test_a_corrupt_nc_lease_time_field_does_not_disable_the_budget(tmp_path):
     s = g.tick()
     assert s.items[0].usd == pytest.approx(72.0)
     assert "cost_budget_exceeded" in events(tmp_path) and calls["graceful"]
+
+
+def test_kimi_k31_full_launch_gets_a_longer_load_grace():
+    """A 93-layer K3.1 full-parameter trainer loads silently for ~30-50 min; 45 min of grace
+    let the idle rule stop it at 75 min."""
+    from types import SimpleNamespace
+
+    from yeto.cost.guard import K31_FULL_LOAD_GRACE_MINUTES
+
+    p = cli.build_parser()
+    base = ["launch", "--model", "m", "--data", "d", "--gpu", "H100:8"]
+    a = p.parse_args([*base, "--rl-model-recipe", "kimi_k31", "--tuning", "full"])
+    assert guard_config_from_args(a).idle.load_grace_s == K31_FULL_LOAD_GRACE_MINUTES * MIN == 90 * MIN
+    a = p.parse_args([*base, "--rl-model-recipe", "kimi_k31", "--tuning", "full", "--load-grace-minutes", "30"])
+    assert guard_config_from_args(a).idle.load_grace_s == 30 * MIN  # an explicit value wins
+    lora = SimpleNamespace(rl_model_recipe="kimi_k31", tuning="lora", load_grace_minutes=None)
+    assert guard_config_from_args(lora).idle.load_grace_s == 45 * MIN
