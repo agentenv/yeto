@@ -414,48 +414,62 @@ On `b300-0`:
    ```
 
    Expect 8 GPUs, the compute HCAs, `unlimited`, and a stable NVLink
-   all-reduce bus bandwidth (record it). The image ships `all_reduce_perf`,
-   `ib_write_bw` and `ibstat`.
-3. The same checks over the whole inventory, host and container side
-   (driver, GPUs, NVSwitch fabric, NVLink matrix, GPU-NIC affinity, HCAs and
-   ports, MTU, GID index, `/dev/infiniband` and memlock in the container,
-   memory, disks, Docker storage driver, the image pull, clock, addresses):
+   all-reduce bus bandwidth (record it as the single-node baseline). The
+   image ships `all_reduce_perf`, `ib_write_bw` and `ibstat`.
+   `all_reduce_perf` links the system NCCL (2.28.3), the trainer uses
+   torch's NCCL (2.30.7): for anything across nodes, trust `yeto preflight`.
+3. Node checks and TCP ports over the whole inventory, no bandwidth
+   benchmark. Host and container side: driver, GPUs, NVSwitch fabric, NVLink
+   matrix, GPU-NIC affinity, HCAs and ports, MTU, GID index,
+   `/dev/infiniband` and memlock in the container, memory, disks, Docker
+   storage driver, the image pull, clock, addresses, and the Ray and torch
+   ports between nodes:
 
    ```
    yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory inventory.yaml --cluster-prefix <run> --no-bench
    ```
 
    It writes a PASS / WARN / FAIL table with a fix per finding to
-   `~/.yeto/runs/<run>/preflight/<time>/` and exits 1 on any FAIL.
+   `~/.yeto/runs/<run>/preflight/<time>/` and exits 1 on any FAIL. It checks
+   the image the trainer runs: `--image` (the run's `--rl-image`) else the
+   inventory's, an overlay-rejected pin as its repack (section 5.1).
+   `yeto launch` and `yeto run up` run this same check automatically before
+   an ssh trainer starts (section 10.3); `--no-ports` also skips the port
+   check.
 
 ### 9.2 Two nodes
 
 Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
 
-1. RDMA per rail, inside the container on both nodes (same flags as above):
+1. RDMA per rail between every pair of nodes:
 
    ```
-   ib_write_bw -d mlx5_0 -F --report_gbits                       # on b300-1
-   ib_write_bw -d mlx5_0 -F --report_gbits <b300-1 address>      # on b300-0
+   yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory inventory.yaml --cluster-prefix <run> --no-nccl
    ```
 
-   Add `-x <gid index>` on RoCE. Repeat for every HCA of `NCCL_IB_HCA`. Each
-   should come close to the port's line rate.
-2. The NCCL check: `yeto preflight` without `--no-bench` runs, in the trainer
-   image with the inventory's environment, TCP reachability of the Ray and
-   torch ports, `ib_write_bw` rail by rail between node pairs, and
-   `all_reduce` / `all_to_all` / `sendrecv` on disjoint node pairs (0+1, 2+3,
-   4+5). It fails when any rank reports `NET/Socket` instead of `NET/IB`, and
-   warns on a bus bandwidth below the rail count's expectation. This is the
-   check that catches a silent TCP fallback before a 48-GPU launch.
+   For each node pair it runs `ib_write_bw` on all rails at once (HCA i to
+   HCA i, eight in parallel), inside the trainer image with the inventory's
+   Docker flags. On RoCE the GID index is `NCCL_IB_GID_INDEX`, else the
+   node's RoCE v2 IPv4 GID. Six nodes are 15 pairs in 5 rounds. Each pair
+   reports GB/s per rail and its slowest rail as a share of the link rate:
+   80% or more PASS, 50-80% WARN, below 50% or no connection FAIL. Add
+   `--ib-pairs ring` to test only neighbouring pairs.
+2. The NCCL check: `yeto preflight` with no `--no-*` flag runs everything:
+   TCP reachability of the Ray and torch ports, `ib_write_bw` on every node
+   pair, `all_reduce` / `all_to_all` / `sendrecv` on disjoint node pairs
+   (0+1, 2+3, 4+5), then the same collectives over all six nodes. It fails
+   when any rank reports `NET/Socket` instead of `NET/IB`, and warns on a
+   bus bandwidth below the rail count's expectation. This is the check that
+   catches a silent TCP fallback before a 48-GPU launch.
 
 ### 9.3 Six nodes, dry run
 
-1. All six nodes pass 9.1; every pair of nodes of a stage passes 9.2
-   (0-1, 2-3, 4-5), and at least one pair across stages (1-2).
+1. All six nodes pass 9.1; every node pair passes the `ib_write_bw` check
+   of 9.2 (this covers the pairs across stages; the node-pair NCCL groups
+   are 0+1, 2+3, 4+5, and the six-node round covers the stage boundaries).
 2. The image is pulled on every node, and the weights are copied and verified
    (section 6) on every node.
-3. `yeto preflight` over the full inventory (it ends with the six-node
+3. The full `yeto preflight` of 9.2 step 2 (it ends with the six-node
    collectives) passes with no FAIL.
 4. Fill the run config and run the preflight (nothing is ordered, no trainer
    starts):
@@ -467,6 +481,9 @@ Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
    Read `preflight.log` (guide section 4.1). It must end with
    `dry run: preflight ok, nothing ordered`; the trainer part reports
    `"total_gpus": 48` and one island `"cloud": "ssh"`, `"num_nodes": 6`.
+   A dry run does not run the cluster preflight; it logs
+   `would run the trainer's cluster preflight: yeto preflight ...`. The real
+   `yeto run up` runs it before anything is ordered.
 
 ### 9.4 Rehearsal, then the formal run
 
@@ -516,6 +533,15 @@ yeto run up --config run.json               # pool, first group, trainer, dashbo
 yeto run status --config run.json
 yeto run down --config run.json             # trainer, pool and sandboxes
 ```
+
+Before anything is ordered, `yeto run up` runs the cluster preflight of
+section 9.1 step 3 (node checks and TCP ports) on the trainer's nodes, with
+the trainer's `--rl-image`; on a FAIL it logs
+`cluster preflight failed: nothing ordered` and exits 2. The trainer's own
+`yeto launch` then gets `--skip-preflight`, so the check runs once. A direct
+`yeto launch` with an `ssh:` island runs the same check and refuses to start
+on a FAIL (warnings are printed and the launch goes on). `--skip-preflight`
+on either command skips it.
 
 The trainer is a resident SSH island: `yeto launch` starts one container per
 node, follows every node, and treats any rank that exits non-zero, a process
@@ -567,6 +593,7 @@ First step (rehearsal and formal run):
 | `failed to register layer: ... not a directory` or `mkparent ...: not a directory` during pull or start | The image with the same-layer whiteout | Use the rebuilt image (section 5.1). |
 | `no space left on device` during pull | Image store on the root disk | Move Docker's data root and `/var/lib/containerd` to NVMe (section 3.2). |
 | Preflight: `docker pull ... failed` | No route to `ghcr.io`, proxy, or disk | Pull by hand on that node and read Docker's message. |
+| `cluster preflight refused the launch: ...` | `yeto launch` / `yeto run up` found a FAIL in the node checks or TCP ports | Read `preflight.txt` in the report directory the message names and apply its FIXES. To launch anyway, add `--skip-preflight`. |
 | Preflight refuses `docker_args` | GPU flag, `/dev/infiniband` or memlock missing | Use the inventory template's `docker_args`. |
 | Trainer stopped as idle (`idle_warn`, then `idle_shutdown`) | The cost guard's idle rule: no progress event and no loading event for its window. Loading the weights takes about 20 min at 0% GPU; a 262k step or a wait for groups can take longer than 30 min | The template turns idle shutdown off (`--idle-warn-minutes 0`). If you turn it on, set `--load-grace-minutes` (default 45) above the start time including pulls, and `--idle-warn-minutes` above the longest step plus buffer wait. |
 | Trainer exits with code 6 | `--rl-stall-timeout` (7200 s): no island event for 2 h | A hang. Read the node logs as for a rank exit. The run monitor's own backstop is `max(4 x --rl-stall-timeout, budget.silence_min)` without log growth. |
