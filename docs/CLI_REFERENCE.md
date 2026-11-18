@@ -262,7 +262,7 @@ check fails, 2 when the inventory is unusable.
 
 ```bash
 yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory nodes.yaml --cluster-prefix k31-bm
-yeto preflight --gpu ssh:nodes.yaml --no-bench          # host + container checks only
+yeto preflight --gpu ssh:nodes.yaml --no-bench          # node checks and TCP ports, no bandwidth bench
 ```
 
 Per node: driver (>= 580 for the CUDA 13 image), GPU count / model / HBM,
@@ -279,13 +279,20 @@ of the Ray / torch ports, `ib_write_bw` between every pair rail by rail, and NCC
 (`yeto/launch/preflight/bench.py`), failing a run that falls back to
 `NET/Socket`.
 
+Every non-dry-run `yeto launch` with an `ssh:` entry in `--gpu` runs the checks of
+`yeto preflight --no-bench` first (`yeto run up` runs them before it orders anything,
+then passes `--skip-preflight` to the trainer's own launch): a FAIL refuses the
+launch, a WARN is printed. `--skip-preflight` on `yeto launch` or `yeto run up`
+skips it; a dry run prints the command it would run.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--gpu` | required | `ssh:NxMxCARD` with `--rl-node-inventory`, or `ssh:<inventory file>` |
 | `--image` | the inventory's | trainer image |
 | `--run-dir` | — | write the report here instead of the run directory |
 | `--no-pull`, `--no-container` | off | skip the pull; host checks only |
-| `--no-bench`, `--no-ib`, `--no-nccl` | off | skip the cross-node benchmarks |
+| `--no-bench` | off | skip the bandwidth benchmarks (`ib_write_bw`, NCCL); the TCP port check still runs |
+| `--no-ports`, `--no-ib`, `--no-nccl` | off | skip the TCP port check, `ib_write_bw`, the NCCL collectives |
 | `--ib-pairs` | `all` | `ib_write_bw` on every pair or on a ring |
 | `--nccl-sizes`, `--nccl-iters` | `16M,128M,1G`, `20` | collective sizes and iterations |
 | `--nccl-pairs-only` | off | skip the all-node collectives run |
@@ -370,6 +377,7 @@ Local checks that run before any cloud resource is created.
 | `--preflight-thread-wait-s` | `1800.0` | wait limit for `--preflight-threads wait` |
 | `--preflight-memory` | `error` | per-GPU peak memory estimate of each RL island: `error`, `warn`, `off` |
 | `--preflight-memory-margin` | `0.9` | allowed peak as a fraction of GPU memory |
+| `--skip-preflight` | off | do not run the cluster preflight of an `ssh:` trainer island (`yeto preflight --no-bench`) before the launch |
 | `--rl-island-sample-role` | — | `M:ROLE` per island (`sampler` or `trainer`): sampler islands plus one trainer island over one `--rl-checkpoint-store`; needs `--rl-single-island-no-sync` |
 | `--rl-sampler-follow` | `merged` | which model sampler islands load: `merged` or `trainer` |
 | `--rl-sampler-spot` | off | sampler islands on spot, the trainer island stays on demand |

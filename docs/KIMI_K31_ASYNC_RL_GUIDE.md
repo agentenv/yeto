@@ -1114,7 +1114,7 @@ Options:
 | Option | Use |
 |---|---|
 | `--dry-run` | Preflight only. |
-| `--skip-preflight` | Resume after a preflight that already passed. |
+| `--skip-preflight` | Resume after a preflight that already passed. It also skips the cluster preflight of an `ssh:` trainer (`yeto preflight --no-bench`), which run up otherwise runs before it orders anything. |
 | `--trainer-now` | Start the trainer immediately instead of waiting for the first group, so the Modal GPUs and the NC node setup come up in parallel. This shortens time to first step. The trainer may idle until samplers deliver groups. |
 | `--no-monitor` | Return after the dashboard starts. Recommended practice: keep the monitor running, since it enforces the budget, wall-clock and silence guards. |
 

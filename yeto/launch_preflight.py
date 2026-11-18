@@ -378,6 +378,10 @@ def add_cli_args(p) -> None:
                    "object-store URI or local directory) exists, is readable and lists every weight "
                    "shard its index names (one LIST, no download): check (default; env "
                    "YETO_PREFLIGHT_MODEL) stops before any order, warn prints and continues, off skips it")
+    g.add_argument("--skip-preflight", action="store_true",
+                   help="do not run the cluster preflight of an ssh: trainer island (yeto preflight "
+                   "--no-bench: node checks and TCP ports) before the launch; by default a FAIL refuses "
+                   "the launch and a WARN is printed")
     g.add_argument("--rl-island-override", action="append", default=None,
                    metavar="ISLAND:KEY=VALUE",
                    help="NEGATIVE TEST ONLY: give one island another value of rl_lr_schedule, "

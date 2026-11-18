@@ -1330,6 +1330,19 @@ def _resolve_auto_fleet(args) -> int:
     return 0
 
 
+def _cluster_preflight(args) -> int | None:
+    """The cluster preflight of an ``ssh:`` trainer island (``yeto.launch.preflight.gate``):
+    1 when it fails (nothing is launched), None to go on."""
+    from .launch.preflight.gate import launch_gate
+
+    try:
+        launch_gate(args)
+    except ValueError as exc:
+        print(f"[yeto] cluster preflight refused the launch: {exc}", file=sys.stderr)
+        return 1
+    return None
+
+
 def cmd_launch(args) -> int:
     error = _fleet_args_error(args)
     if error:
@@ -1379,8 +1392,10 @@ def cmd_launch(args) -> int:
               file=sys.stderr)
         return 1
     if getattr(args, "dry_run", False):
+        from .launch.preflight.gate import launch_gate
         from .launcher import dry_run_plan
 
+        launch_gate(args)  # a dry run only prints the cluster preflight it would run
         try:
             plan = dry_run_plan(args)
         except ValueError as exc:
@@ -1397,6 +1412,8 @@ def cmd_launch(args) -> int:
     except ValueError as exc:
         print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
         return 1
+    if (code := _cluster_preflight(args)) is not None:
+        return code
 
     args_dict = {k: v for k, v in vars(args).items()
                  if k not in ("command", "_launch_preflight_manifest")}
@@ -1719,6 +1736,8 @@ def cmd_launch_head(args) -> int:
     except ValueError as exc:
         print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
         return 1
+    if (code := _cluster_preflight(args)) is not None:
+        return code
     # Every cloud the fleet (and the head) touches must have credentials on
     # this machine, or the head could never launch or tear islands down:
     # refuse before anything is recorded or provisioned.

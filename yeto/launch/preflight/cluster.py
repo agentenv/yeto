@@ -1631,7 +1631,10 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     p.add_argument("--run-dir", default=None, help="write the report here instead")
     p.add_argument("--no-pull", action="store_true", help="do not docker pull the image")
     p.add_argument("--no-container", action="store_true", help="host checks only (no container, no benchmarks)")
-    p.add_argument("--no-bench", action="store_true", help="skip the cross-node TCP / IB / NCCL benchmarks")
+    p.add_argument("--no-bench", action="store_true",
+                   help="skip the bandwidth benchmarks (ib_write_bw, NCCL); the TCP port check still runs "
+                   "(what a launch of an ssh: trainer island runs first)")
+    p.add_argument("--no-ports", action="store_true", help="skip the cross-node TCP port check")
     p.add_argument("--no-nccl", action="store_true", help="skip the NCCL collectives")
     p.add_argument("--no-ib", action="store_true", help="skip ib_write_bw")
     p.add_argument("--ib-pairs", choices=("all", "ring"), default="all", help="ib_write_bw: every pair or a ring")
@@ -1670,7 +1673,8 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
 
         out_dir = runs.run_dir(args.cluster_prefix) / "preflight" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     bench = not (args.no_bench or args.no_container)
-    steps = Steps(pull=not args.no_pull, container=not args.no_container, ports=bench, ib=bench and not args.no_ib,
+    steps = Steps(pull=not args.no_pull, container=not args.no_container,
+                  ports=not (getattr(args, "no_ports", False) or args.no_container), ib=bench and not args.no_ib,
                   nccl=bench and not args.no_nccl, ib_pairs=args.ib_pairs, nccl_sizes=args.nccl_sizes,
                   nccl_iters=args.nccl_iters, nccl_all=not args.nccl_pairs_only)
     req = Requirements(min_driver_major=args.min_driver, min_host_memory_gib=args.min_host_memory_gib,
