@@ -469,6 +469,9 @@ class TreeMirror:
                 files = sorted(rel for rel in changed if self._upload_rank(rel) == tier)
                 if not files:
                     continue
+                if len(files) > 1 and int(getattr(self.objects, "upload_processes", 1) or 1) > 1:
+                    self._upload_in_processes(files, local)  # a release: its files over processes
+                    continue
                 with ThreadPoolExecutor(min(self.file_concurrency, len(files))) as pool:
                     for future in [pool.submit(upload, rel) for rel in files]:
                         future.result()  # the first error stops before the next tier
@@ -481,6 +484,17 @@ class TreeMirror:
             if gone:
                 self._update_state(removed=gone)
         return time.monotonic() - started
+
+    def _upload_in_processes(self, files: list[str], local: dict[str, list[int]]) -> None:
+        """One tier of a push through the backend's multi-process upload
+        (``write_files``, e.g. ``S3ObjectStore.upload_processes``): every file that
+        went up is marked pushed; any failure raises before the next tier."""
+        written, errors = self.objects.write_files([(rel, str(self.root / rel)) for rel in files])
+        self._update_state({rel: local[rel] for rel in written})
+        if errors:
+            first = sorted(errors)[0]
+            raise ObjectStoreError(f"{len(errors)} of {len(files)} files did not upload "
+                                   f"(first {first}: {errors[first]})")
 
     def pull(self) -> None:
         with self._part_locks([TREE_LOCK]):

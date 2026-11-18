@@ -36,6 +36,12 @@ ships no credential (:func:`nodes_hold_store_credentials`), a docker trainer
 reads the file with ``--env-file`` and a rootfs trainer sources it; the preflight
 refuses a file that is not ``0600``-strict (group or others may read it).
 
+When the head releases an incarnation it copies each node's ``~/yeto-output``
+back (:func:`output_fetch_script`, :func:`extract_tar_stream`) into its events
+dir, as the launcher pulls a Modal island's tape Volume at teardown: the files
+of the tape suffixes up to :data:`TAPE_MAX_FILE_BYTES` each. A failed copy is a
+warning; the files stay on the node.
+
 Nothing here deletes ``<scratch>/<run id>``: the writers free what they wrote
 (evicted cut shards and releases, the release staging at each start), and the
 preflight checks the free space (``scratch_min_free_gib``). Files a docker
@@ -102,6 +108,22 @@ def scratch_env(node: Node, run_id: str, env: Mapping[str, str]) -> dict[str, st
     for name in staged_envs(env):  # a staged store's stage moves; an unstaged one stays unstaged
         out[name] = f"{root}/{STORE_STAGE_DIR}"
     return {k: v for k, v in out.items() if k not in node.env}
+
+
+# processes of a staged store's many-file upload on an SSH trainer node (s3_store
+# UPLOAD_PROCESSES_ENV) unless the launcher or the inventory sets it: node 0 pushes
+# each 207 GB Kimi-K3.1 release alone, and one process tops out near 270 MB/s
+UPLOAD_PROCESSES = 4
+
+
+def transfer_env(node: Node, env: Mapping[str, str]) -> dict[str, str]:
+    """The upload processes of a staged store on this node ({} when ``env`` stages
+    no store, or the run or the node's inventory env already says)."""
+    from ..cloud.s3_store import UPLOAD_PROCESSES_ENV
+
+    if not staged_envs(env) or env.get(UPLOAD_PROCESSES_ENV) or UPLOAD_PROCESSES_ENV in node.env:
+        return {}
+    return {UPLOAD_PROCESSES_ENV: str(UPLOAD_PROCESSES)}
 
 
 def docker_options(node: Node, run_id: str) -> list[str]:
@@ -224,3 +246,60 @@ def no_scratch_warning(nodes: list[Node], *, staged: bool) -> str | None:
     """The warning for docker nodes without scratch on a run with a staged store."""
     missing = [n.name for n in nodes if n.runtime == "docker" and n.scratch is None]
     return NO_SCRATCH_WARNING.format(nodes=missing) if missing and staged else None
+
+
+# what the head copies back from a node's ~/yeto-output (modal_runner.TAPE_SUFFIXES /
+# TAPE_MAX_FILE_BYTES: the files the Modal tape Volume carries home)
+TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")
+TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
+OUTPUT_FETCH_TIMEOUT_S = 600.0
+
+
+def output_dir(node: Node, state_dir: str) -> str:
+    """The node's ``~/yeto-output`` as the SSH shell sees it: the incarnation's state
+    dir on a docker node (:func:`job_prelude`), the login home on a rootfs node."""
+    return f"{state_dir}/{OUTPUT_DIR}" if node.runtime == "docker" else f"$HOME/{OUTPUT_DIR}"
+
+
+def output_fetch_script(directory: str) -> str:
+    """Bash that writes a tar of the tape files under ``directory`` (``$HOME``
+    expands) to stdout; an empty archive when there is none. ``directory`` comes from
+    :func:`output_dir` (no quotes in it)."""
+    names = " -o ".join(f"-name '*{suffix}'" for suffix in TAPE_SUFFIXES)
+    limit_k = TAPE_MAX_FILE_BYTES // 1024
+    return (f'd="{directory}"\n'
+            'if [ ! -d "$d" ]; then tar -cf - -T /dev/null; exit 0; fi\n'
+            f'cd "$d" && find . -type f \\( {names} \\) -size -{limit_k + 1}k -print0 '
+            '| tar --null -T - -cf -\n')
+
+
+def extract_tar_stream(stream, target) -> int:
+    """Extract the regular files of a tar stream under ``target`` (nothing outside it:
+    no absolute names, no ``..``, no links); the number of files written."""
+    import tarfile
+    from pathlib import Path, PurePosixPath
+
+    target = Path(target)
+    count = 0
+    try:
+        archive = tarfile.open(fileobj=stream, mode="r|")  # noqa: SIM115 - closed by the with below
+    except tarfile.ReadError:  # no bytes at all (the remote side wrote nothing)
+        return 0
+    with archive:
+        for member in archive:
+            name = PurePosixPath(member.name)
+            if not member.isfile() or name.is_absolute() or ".." in name.parts:
+                continue
+            parts = [p for p in name.parts if p not in (".", "")]
+            if not parts:
+                continue
+            out = target.joinpath(*parts)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                continue
+            with open(out, "wb") as fh:
+                while chunk := source.read(1 << 20):
+                    fh.write(chunk)
+            count += 1
+    return count

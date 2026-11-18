@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import os
 import subprocess
 from pathlib import Path
@@ -353,3 +355,75 @@ def test_preflight_refuses_a_store_env_file_others_may_read(tmp_path, checked_ca
     bad = SshTrainerIslands(b300_spec(nodes), name="t", jobs_path=tmp_path / "j.json", ops=EnvFileOps(mode, rc))
     with pytest.raises(SshIslandError, match=match):
         bad.preflight()
+
+
+# ---------------------------------------------------------------- ~/yeto-output back to the head
+class LocalFetchOps(ScratchOps):
+    """Node scripts run by local bash with HOME=<home>; a node named ``down`` fails."""
+
+    def __init__(self, home):
+        super().__init__()
+        self.home = home
+
+    def command(self, n):
+        from yeto.launch.ssh_trainer_island import READ_SCRIPT
+
+        if n.name == "down":
+            return ["bash", "-c", "cat >/dev/null; echo 'ssh: connect to host down: refused' >&2; exit 255"]
+        return ["env", f"HOME={self.home}", "COPYFILE_DISABLE=1", "bash", "-c", READ_SCRIPT]  # macOS tar: no ._ files
+
+
+def test_release_copies_each_nodes_tape_files_back_and_a_failure_only_warns(tmp_path, checked_cards, capsys):
+    from yeto.launch.ssh_trainer_island import SshOps
+
+    home = tmp_path / "home"
+    state = home / ".yeto/trainer-islands/k31/trainer-i1/yeto-output"
+    (state / "harbor-trials" / "t1").mkdir(parents=True)
+    (state / "yeto-tape.jsonl").write_text('{"event": "x"}\n')
+    (state / "harbor-trials" / "t1" / "result.json").write_text("{}")
+    (state / "weights.safetensors").write_bytes(b"w" * 10)  # not a tape file: left on the node
+    nodes = [b300(0), dataclasses.replace(b300(1), name="down")]
+    ops = LocalFetchOps(home)
+    ops.fetch = functools.partial(SshOps.fetch, ops)
+    islands = SshTrainerIslands(b300_spec(nodes), name="trainer", jobs_path=tmp_path / "j.json", ops=ops,
+                                events_dir=tmp_path / "ev")
+    job = islands.launch(1, None)
+    assert islands.release(job)  # the failed copy of node "down" does not fail the release
+    out = tmp_path / "ev" / "trainer-i1-output" / "node0"
+    assert (out / "yeto-tape.jsonl").read_text() == '{"event": "x"}\n'
+    assert (out / "harbor-trials" / "t1" / "result.json").is_file()
+    assert not (out / "weights.safetensors").exists()
+    printed = capsys.readouterr().out
+    assert "2 output file(s) of b300-0" in printed
+    assert "WARN: could not copy ~/yeto-output of trainer incarnation 1 from down" in printed
+    assert "it stays on the node" in printed
+
+
+def test_a_node_without_output_copies_nothing(tmp_path):
+    from yeto.launch.ssh_trainer_island import SshOps
+
+    ops = LocalFetchOps(tmp_path)
+    n = b300(0)
+    script = storage.output_fetch_script(storage.output_dir(n, "$HOME/nowhere"))
+    assert SshOps.fetch(ops, n, script, tmp_path / "out", timeout=30) == 0
+    rootfs = node()
+    assert storage.output_dir(rootfs, "$HOME/x") == "$HOME/yeto-output"
+
+
+def test_extraction_stays_under_the_target(tmp_path):
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as archive:
+        for name in ("../escape.json", "/abs.json", "ok/a.jsonl"):
+            info = tarfile.TarInfo(name)
+            info.size = 2
+            archive.addfile(info, io.BytesIO(b"{}"))
+        link = tarfile.TarInfo("ok/link.json")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        archive.addfile(link)
+    buf.seek(0)
+    assert storage.extract_tar_stream(buf, tmp_path / "t") == 1
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == ["t/ok/a.jsonl"]
+    assert storage.TAPE_SUFFIXES == __import__("yeto.modal_runner", fromlist=["TAPE_SUFFIXES"]).TAPE_SUFFIXES

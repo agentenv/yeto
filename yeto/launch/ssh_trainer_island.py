@@ -351,6 +351,7 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
                 **(skypilot_env(spec, rank) if spec.run_script else {})}
     # node-local data (store stage, release staging, temp files) under the node's scratch
     full_env.update(ssh_node_storage.scratch_env(node, spec.run_id, full_env))
+    full_env.update(ssh_node_storage.transfer_env(node, full_env))  # a release goes up in processes
     if spec.docker:
         if container is None:
             raise SshIslandError("a docker node needs its container name")
@@ -437,6 +438,28 @@ class SshOps:
 
     def run(self, node: Node, script: str, *, timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
         return subprocess.run(self.command(node), input=script, text=True, capture_output=True, timeout=timeout)
+
+    def fetch(self, node: Node, script: str, target: Path, *, timeout: float) -> int:
+        """Run ``script`` on ``node`` and extract the tar it writes to stdout under
+        ``target`` (:func:`ssh_node_storage.extract_tar_stream`); the files written.
+        Raises on a failed or timed-out copy."""
+        proc = subprocess.Popen(self.command(node), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+        timer = threading.Timer(float(timeout), proc.kill)
+        timer.start()
+        try:
+            proc.stdin.write(script.encode())
+            proc.stdin.close()
+            count = ssh_node_storage.extract_tar_stream(proc.stdout, target)
+            err = proc.stderr.read().decode(errors="replace")
+            rc = proc.wait()
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+        if rc != 0:
+            raise SshIslandError(f"copy from {node.name} ended with rc {rc}: {err.strip()[-300:]}")
+        return count
 
     def start(self, node: Node, script: str) -> Any:
         proc = subprocess.Popen(self.command(node), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -603,7 +626,30 @@ class SshTrainerIslands:
         ok = self._kill_nodes(incarnation)
         if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
             ssh_trainer_ledger.record("released", **self._ledger_key(incarnation))
+        self._fetch_outputs(incarnation)
         return ok
+
+    def _fetch_outputs(self, incarnation: int) -> None:
+        """Copy each node's ``~/yeto-output`` of this incarnation into
+        ``<events dir>/<island>-i<N>-output/node<rank>/`` (ssh_node_storage); a failure
+        is a warning, never a failed release. Nothing without an events dir."""
+        if self.events_dir is None:
+            return
+        paths = _pin_state_home(remote_paths(self.spec.run_id, self.name, incarnation))
+        base = Path(self.events_dir) / f"{self.name}-i{int(incarnation)}-output"
+        for rank, node in enumerate(self.spec.nodes):
+            remote = ssh_node_storage.output_dir(node, paths["dir"])
+            script = f"{STATE_HOME_VAR}=\"$HOME\"\n" + ssh_node_storage.output_fetch_script(remote)
+            try:
+                count = self.ops.fetch(node, script, base / f"node{rank}",
+                                       timeout=ssh_node_storage.OUTPUT_FETCH_TIMEOUT_S)
+                if count:
+                    print(f"[launcher] trainer incarnation {incarnation}: {count} output file(s) of "
+                          f"{node.name} -> {base / f'node{rank}'}", flush=True)
+            except Exception as error:  # noqa: BLE001 - the tape copy never fails the release
+                print(f"[launcher] WARN: could not copy ~/yeto-output of trainer incarnation {incarnation} "
+                      f"from {node.name} ({type(error).__name__}: {error}); it stays on the node",
+                      flush=True)
 
     def _kill_nodes(self, incarnation: int) -> bool:
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
