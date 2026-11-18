@@ -211,3 +211,20 @@ def test_run_up_main_refuses_before_ordering_and_skip_reaches_the_trainer(make_u
     assert up.main(_up_args(dry_run=True)) == 0 and order == []
     assert up.main(_up_args(skip_preflight=True)) == 0
     assert order[:2] == ["sandbox", "pool"] and order[-1][-1] == "--skip-preflight"
+
+
+def test_the_gate_checks_the_run_image(tmp_path, runs_dir):
+    """The run's --rl-image decides the trainer image: the gate's preflight pulls and
+    probes it (not only the inventory's), and refuses an inventory that names another."""
+    from tests.test_cluster_preflight import IMAGE
+
+    argv = ["--gpu", "ssh:6x8xb300", "--rl-node-inventory", "inv.yaml", "--rl-image", f"docker:{IMAGE}"]
+    (cmd,) = gate.commands_for_launch_argv(argv)
+    assert cmd[cmd.index("--image") + 1] == IMAGE
+    ops = _fake()
+    rec = gate.launch_gate(_args(tmp_path, rl_image=f"docker:{IMAGE}"), ops=ops, out=io.StringIO())
+    assert rec["reports"][0]["ok"]
+    assert any("docker pull" in s and IMAGE in s for _, s in ops.scripts)
+    with pytest.raises(ValueError, match="is not the run's --rl-image"):
+        gate.launch_gate(_args(tmp_path, rl_image="docker:ghcr.io/o/other@sha256:" + "c" * 64), ops=_fake(),
+                         out=io.StringIO())
