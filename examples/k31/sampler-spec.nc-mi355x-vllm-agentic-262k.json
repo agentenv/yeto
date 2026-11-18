@@ -1,0 +1,147 @@
+{
+  "_comment": [
+    "Agentic sampler spec of one National Compute MI355X node (8 x MI355X, vLLM ROCm, TP8) for a",
+    "Kimi-K3.1-Pro async GRPO run at 262k context. Use it with pool.nc-mi355x-agentic-262k.json and",
+    "run.agentic-262k.json (one command: yeto run up --config run.json). The checklist and the",
+    "measurements behind every value are in docs/KIMI_K31_ASYNC_RL_GUIDE.md section 3.7.",
+    "Engine: preset rl-precision (validated end to end with in-place expert reload; its cold weight",
+    "load is about 16 min, amd-article loads in about 94 s at the same decode speed but its",
+    "log-prob mismatch against the trainer is not measured). R3 forces DCP 1: the KV cache holds",
+    "about 2.6M tokens (amd-article 2.8M), so keep max_in_flight x mean trial context <= about 2.1M.",
+    "The preset adds --prefix-cache-retention-interval 9216 on this R3 server so a repeated agentic",
+    "prefix hits the prefix cache (128k prefix: 0.71 s instead of 7.7 s).",
+    "Concurrency: per-stream decode measured 50.6 / 42.2 / 36.8 / about 31 tok/s at 8 / 16 / 24 / 48",
+    "streams; max_in_flight 16 keeps a long trial fast enough to finish inside agent_timeout_s.",
+    "Weight switch: vLLM switches by drain (no live update): trials still running",
+    "min(drain_timeout_s, reload_max_defer_s) after a release is on disk are cancelled and lost, so",
+    "keep the trainer's release interval above the p90 trial wall time.",
+    "Every value in angle brackets is a site value; the store and sampler_id are filled by the pool.",
+    "agentic.setup: replace the documentation address 192.0.2.11 / user sbx with your sandbox host,",
+    "and tunnel.listen with the address the sandbox containers reach (the docker bridge of that host);",
+    "setup.tasks.ids are examples: your training task ids, or ids_file (a local file of task ids), not both."
+  ],
+  "sampler_id": "<nc-node-id>",
+  "platform": "rocm",
+  "rollout_fields": {
+    "routed_experts": true,
+    "top_logprobs_num": 128,
+    "fp32_lm_head": true
+  },
+  "expert_selection_sha256": "<sha256 of expert_selection.json>",
+  "engine": {
+    "factory": "yeto.rl.adapters.sampler_engines.from_spec:build",
+    "adapter": "vllm-server",
+    "server": {
+      "base_dir": "/models/kimi-k3.1-pro",
+      "port": 30000,
+      "python": "/opt/runtime-venv/bin/python",
+      "card_model": "MI355X",
+      "device_family": "rocm",
+      "engine_version": "vllm-kimi-k31@0.0.0+mum.14d1ec2336",
+      "precision": "mxfp4",
+      "quant_scheme": "MXFP4_EXPERTS_RTN",
+      "topology": "tp8",
+      "max_model_len": 262144,
+      "in_place_reload": true,
+      "start_timeout_s": 3600.0,
+      "extra_args": []
+    },
+    "options": {
+      "tp": 8,
+      "max_num_seqs": 32,
+      "expert_reload": true,
+      "k31_preset": "rl-precision",
+      "tool_call_parser": "kimi_k3",
+      "reasoning_parser": "kimi_k3",
+      "pin_version": "0.0.0+mum.14d1ec2336"
+    }
+  },
+  "sampling": {
+    "max_tokens": 8192,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "n": 8
+  },
+  "num_rollouts": 1000000,
+  "max_prompt_tokens": 16384,
+  "base_version": 0,
+  "poll_s": 5.0,
+  "min_round_s": null,
+  "store": "/work/stage/<bucket>/runs/__RUN_PREFIX__",
+  "release_dir": "policy-releases",
+  "buffer_shards": [
+    "<nc-node-id>"
+  ],
+  "start_on_latest": true,
+  "reload_max_defer_s": 1800,
+  "max_backlog_groups": 64,
+  "max_consecutive_load_failures": 3,
+  "drop_zero_variance_groups": false,
+  "prompts": {
+    "path": "/work/sampler/prompts.jsonl",
+    "input_key": "prompt",
+    "label_key": "metadata",
+    "task_key": "metadata",
+    "groups_per_round": 2,
+    "format": "agentic",
+    "chat_template_kwargs": {
+      "thinking_effort": "<low | high | max>"
+    }
+  },
+  "checks": {
+    "expected_expert_matrices": null,
+    "allow_unverified_count": true,
+    "require_fixed_answers": false
+  },
+  "incarnation_lease": true,
+  "event_tape": "/work/sampler/events-__RUN_PREFIX__.jsonl",
+  "agentic": {
+    "template": "kimi_k31",
+    "tokenizer": "/models/kimi-k3.1-pro",
+    "model": "kimi-k3.1",
+    "trust_remote_code": true,
+    "template_kwargs": {
+      "thinking_effort": "<low | high | max>"
+    },
+    "max_in_flight": 16,
+    "min_samples": 2,
+    "turn_max_tokens": 8192,
+    "max_prompt_len": 16384,
+    "max_response_len": 245760,
+    "weight_switch": "drain",
+    "drain_timeout_s": 1800,
+    "abandon_grace_s": 120,
+    "infra_retries": 2,
+    "proxy": {
+      "host": "127.0.0.1",
+      "port": 18080
+    },
+    "task_defaults": {
+      "provider": "remote-docker",
+      "agent": "pi",
+      "agent_timeout_s": 7200,
+      "wall_clock_s": 7800
+    },
+    "setup": {
+      "root": "/work/harbor",
+      "sandbox": {
+        "docker_host": "ssh://sbx@192.0.2.11",
+        "alias": "yeto-sandbox",
+        "key": {"path": "<sandbox dial key>"},
+        "known_hosts": {"path": "<sandbox known_hosts>"}
+      },
+      "tunnel": {
+        "listen": "192.0.2.1:18081",
+        "user": "sbx",
+        "host": "192.0.2.11",
+        "key": {"path": "<sandbox tunnel key>"}
+      },
+      "tasks": {
+        "source": "<staged task directory>",
+        "ids": ["example_task_1", "example_task_2"]
+      },
+      "records_secret": "generate"
+    }
+  }
+}

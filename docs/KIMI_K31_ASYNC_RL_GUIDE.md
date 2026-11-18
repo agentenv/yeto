@@ -650,7 +650,10 @@ to `max_model_len - max_prompt_len`, and raise the trainer's `--seq-len` and
 The limit is ITL growing with the decode batch and long-tail trials, not KV
 and not the sandbox host (CPU <= 14% busy); about two thirds of trial time is
 tool execution. Recommended: 48; use 32 when 1M-long trials are mixed in or
-per-trial latency matters. Keep `max_num_seqs` >= `max_in_flight`.
+per-trial latency matters. Keep `max_num_seqs` >= `max_in_flight`. These
+numbers measure node throughput on short Terminal-Bench 2.1 tasks at 1M. When
+the completion time of one trial matters more (long agentic tasks that can hit
+the agent timeout), use 16 instead (section 3.7).
 
 **One weight switch in drain mode** (*measured* under full load at 48 in
 flight, `drain_timeout_s` 300): `LATEST` seen after about 8 s; the release is
@@ -898,6 +901,136 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
   raise `context_budget` (up to `max_model_len`) or `max_compactions`. A high
   `drain_timeout` loss or stale-group count on trials with several segments
   means the weight-switch settings above are too tight.
+
+### 3.7 MI355X 262k agentic launch kit
+
+Three templates in `examples/k31` start a Kimi-K3.1-Pro agentic async GRPO run
+at 262k context on NC MI355X samplers with one command. They hold the values
+measured below; fill in the site values and launch.
+
+| File | Role |
+|---|---|
+| `sampler-spec.nc-mi355x-vllm-agentic-262k.json` | Sampler spec of one 8 x MI355X node (vLLM ROCm, TP8): engine preset, rollout fields, concurrency, weight switch, trial timeouts, sandbox and tasks. |
+| `pool.nc-mi355x-agentic-262k.json` | NC pool: accounts, target and limits, model pull, store task dispenser, the `prompts` node hook, elastic limits and the spend cap. |
+| `run.agentic-262k.json` | Run config: store, sandbox host, the pool above, the 6 x 8 B300 trainer argv (layout in [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md)), first group wait, dashboard and budget. |
+
+Launch: run `yeto run up --config run.json --dry-run` and read
+`preflight.log` (section 4.1). When it ends with
+`dry run: preflight ok, nothing ordered`, run the same command without
+`--dry-run`.
+
+**Measured on 262k** (2026-11-18, one 8 x MI355X node, image
+`vllm/vllm-openai-rocm:kimi-k31` (vLLM `0.0.0+mum.14d1ec2336`), TP8, R3 on so
+DCP 1, top-128 log-probs, fp32 head, gmu 0.84, `max_model_len` 262144;
+`rl-precision` unless noted). Everything in this table is *measured*.
+
+| Item | Value |
+|---|---|
+| KV capacity | `rl-precision` 2,623,652 tokens (10.0 x 262k); `amd-article` 2,813,900 (10.7 x 262k). No preemption while `max_in_flight` x mean trial context <= about 2.1M tokens (80%). |
+| Cold start | Weight load: `rl-precision` 976 s, `amd-article` 94 s. Server ready after container start: `rl-precision` about 20 min, `amd-article` about 5-6 min. |
+| Decode vs concurrency (32k prompts, k questions x 8) | Per stream / node total: C=8 50.6 / about 400 tok/s; C=16 42.2 / about 590 tok/s; C=24 36.8 / about 750 tok/s; C=48 27.3 (client) or 31.4 (engine steady) / about 1507 tok/s (engine). |
+| Decode vs input length (C=8) | 50.6 / 49.3 / 48.2 tok/s per stream at 32k / 128k / 240k input. |
+| Cold prefill (one question) | 128k: 6-7.5 s; 240k: 11-20 s. |
+| Repeated-prefix TTFT with prefix retention | 0.46 / 0.71 / 0.87 s at 32k / 128k / 200k (without `--prefix-cache-retention-interval`: 7.7 s at 128k). |
+| R3 payload | One non-stream n=8 request at 128k input: 4.30 GB response (527.5 MB of routing per choice), client JSON parse 8.2 s. An agentic turn returns the routing of the whole context: about 1 GB at 250k. Top-128 log-probs add about 5 KB per token. |
+| In-place expert reload | 128 experts x 92 layers (193 GB release, 26 GB per rank), `amd-article`, files in page cache: `collective_rpc` 11.2 s, VRAM peak 88%, correct answers after. `rl-precision` in-place reload was measured with a 64-expert release (2026-11-12: download 138 s, load 50 s); at 128 experts it and the store download path are *not verified*. |
+
+`amd-article` decodes as fast as `rl-precision` at C=8, 32k (about 50 tok/s).
+DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
+
+**Template values.**
+
+| Setting | Value | Why |
+|---|---|---|
+| `engine.options.k31_preset` | `rl-precision` | BF16/FP32 precision policy, closest to the trainer's log-probs. Costs about 16 min of weight load per node start; `amd-article` loads in 94 s but its log-prob mismatch against the trainer is not measured. |
+| Prefix retention | preset default (9216 on R3) | Without it R3 disables prefix hits: a repeated 128k prefix costs 7.7 s instead of 0.71 s. |
+| `engine.server.max_model_len` | 262144 | Engine context of the run. |
+| `engine.options.max_num_seqs` | 32 | At least `max_in_flight`, with headroom for retries and detached trials. |
+| `agentic.max_in_flight` | 16 | See below. |
+| `rollout_fields` | `routed_experts` true, `top_logprobs_num` 128, `fp32_lm_head` true | R3 and the top-128 log-probs that `--rl-loss score_centering` trains on. |
+| `sampling.n` | 8 | Equals `--n-samples-per-prompt 8`. |
+| `agentic.max_prompt_len` / `max_response_len` | 16384 / 245760 | Sum 262144 = `--seq-len`; `max_response_len` = `--rollout-max-response-len`. |
+| `task_defaults.agent_timeout_s` / `wall_clock_s` | 7200 / 7800 s | With 3600 / 4200 s most trials of a C=16 run were cut by the 1 h timeout (2026-11-17). At 42 tok/s a 2 h trial can still generate about 100k tokens with two thirds of its time in tools. |
+| `agentic.weight_switch` | `drain` | vLLM ROCm has no live update. |
+| `agentic.drain_timeout_s` / `reload_max_defer_s` | 1800 / 1800 s | See below. The cut is the smaller of the two, so they move together. |
+| `agentic.abandon_grace_s` | 120 s | Default. |
+| `in_place_reload` + `options.expert_reload` | true + true | 11.2 s engine write for 128 experts instead of a cold restart. |
+| Pool `target` / `elastic.max_nodes` / `shard_limit` | 2 / 4 / 16 | `shard_limit` 16 matches the trainer's 16 `--rl-buffer-shards`; replacements take new shards. |
+| Pool `replace_lead_s` | 3600 s | A node lives 4 h; its replacement starts on another account 1 h before the lease ends (about 20 min of it is `rl-precision` start). |
+| `elastic.engine_stall_s` | 900 s | Tolerates a `/metrics` read blocked by a GB-sized R3 reply. |
+| `--rl-release-every` / `--rl-release-skip-busy` / `--rl-max-policy-age` | 6 / on / 12 | Fewer drains; age 12 = N + 6 (the K3.1 upload alone lags 4-6 versions). |
+| `YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES` | 64GiB | Bounded read-ahead of 262k groups next to the optimizer offload (section 3.6). |
+
+**Why `max_in_flight` is 16.** Users of this run care most about the speed of
+one stream: a trial that does not finish inside `agent_timeout_s` is lost. Per
+stream decode falls from 50.6 tok/s at C=8 to 42.2 at C=16, 36.8 at C=24 and
+about 31 at C=48. In a C=16 run on 2026-11-17 with a 1 h agent timeout most
+trials were cut by the timeout; the template doubles the timeout and keeps 16.
+16 is also two groups of 8 and keeps the KV bound up to a mean trial context of
+about 130k tokens. Use 24 only when trials are short; do not use 48 when trial
+completion matters. Section 3.5's 48 measures throughput on short tasks.
+
+**Why the drain cut and the release interval must exceed the p90 trial
+time.** vLLM ROCm has no live update: each release is a drain. Trials still
+running min(`drain_timeout_s`, `reload_max_defer_s`) after the release is on
+disk are cancelled and lost (`drain_timeout`), and they are the longest ones.
+With a cut below the p90 trial wall time, every release drops more than 10% of
+the trials in flight, all of them long. With a release interval below the p90
+trial wall time, a long trial meets a drain almost every time. The template's
+1800 s cut assumes a p90 trial of at most 30 min; raise both values to your
+measured p90 if it is longer.
+
+**Checklist before the first step.**
+
+1. Every angle bracket in the three files is filled (`sampler_id`, `store` and
+   `__RUN_PREFIX__` in the spec are filled by the pool), and `agentic.setup`
+   names your sandbox host, user, tunnel address and task ids instead of the
+   documentation values (192.0.2.x, `sbx`, `example_task_*`).
+2. The pool lists more accounts than `target`, and the dry run does not print
+   `replacement accounts: none`. Never list NC accounts 2 and 3: they are
+   production accounts. Only `delete-ticket` refuses them; the pool config
+   accepts them, so check `accounts` and `YETO_NC_ACCOUNTS` by hand.
+3. `sampling.n` equals `--n-samples-per-prompt`, and
+   `rollout_fields.top_logprobs_num` equals `--rl-rollout-top-logprobs-num`.
+4. `agentic.max_prompt_len` + `agentic.max_response_len` equals `--seq-len`
+   262144, and `max_response_len` equals `--rollout-max-response-len`.
+5. `expert_selection_sha256` in the spec is the sha256 of the trainer's
+   `--rl-expert-selection` file.
+6. The `--rl-algorithm-spec` file has `execution.max_policy_staleness` >= the
+   `--rl-max-policy-age` (12) and a TIS correction: use the shipped
+   `algorithm-spec.async-age12-tis.json` (`algorithm-spec.async-age2-tis.json`
+   has 2 and is refused at this policy age).
+7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
+   the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
+   24 in the template) are your contracted rates: `budget.usd` is checked
+   against an estimate built from them.
+8. The sandbox host is ready: both keys (dial key and tunnel key) are in place,
+   `known_hosts` is filled, and `yeto sandbox prepare` has run (section 2).
+9. The `prompts` node hook in the pool points at the real `prompts.jsonl`; it
+   copies it to `/mnt/nvme/work/sampler/prompts.jsonl` on each node
+   (`/work/sampler/prompts.jsonl` in the sampler container).
+10. The dry run prints one expected WARNING: one buffer group can reach
+    10.4 GiB (8 trials x 262144 tokens, codec json), over the 5 GiB single PUT
+    limit. A multipart write handles it. `YETO_SAMPLE_BUFFER_PAYLOAD_CODEC=zstd`
+    (about 4.6 GiB) is optional and *not verified* on hardware.
+11. For 30 min after `member_ready`, watch VRAM (peak 87-88% expected), KV usage
+    and preemptions on the dashboard.
+12. After the first release, check that `rl_sampler_policy_loaded` reports
+    `reload_mode: in_place` (not `restart`).
+13. After the first few steps, set `--rl-release-every` to
+    N = ceil(p90 trial wall time / step time) and keep `--rl-max-policy-age`
+    >= N + 6 (section 3.6).
+
+**Known risks.**
+
+- R3 returns the routing of the whole context on every turn (about 1 GB at
+  250k). While the server serializes it, `/metrics` can be unreadable; the
+  pool reports `engine_metrics_unreadable`, which is not by itself a stall.
+- Each drain loses the long trials still running at the cut.
+- `amd-article` starts about 15 min faster, but its log-prob mismatch against
+  the trainer is *not verified*.
+- The first prefix hit after each container start pays about 8 s of JIT
+  compilation.
 
 ## 4. Launch
 
