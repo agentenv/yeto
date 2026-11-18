@@ -17,6 +17,7 @@ repeated here:
 | Resource ledger, budget breaker, cleanup | [COST_GUARD.md](COST_GUARD.md) |
 | Trainer flags, rounds, cuts, releases, padding | [MILES_RL.md](MILES_RL.md) |
 | 128-expert full-parameter layout on 6×8 B300 | [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md) |
+| Trainer on your own 6×8 B300 bare-metal cluster (SSH + Docker) | [K31_BARE_METAL_B300.md](K31_BARE_METAL_B300.md) |
 | Dashboard details, alert thresholds | [DASHBOARD.md](DASHBOARD.md) |
 | Every `yeto` command and flag | [CLI_REFERENCE.md](CLI_REFERENCE.md) |
 
@@ -960,6 +961,8 @@ DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
 | `elastic.engine_stall_s` | 900 s | Tolerates a `/metrics` read blocked by a GB-sized R3 reply. |
 | `--rl-release-every` / `--rl-release-skip-busy` / `--rl-max-policy-age` | 6 / on / 12 | Fewer drains; age 12 = N + 6 (the K3.1 upload alone lags 4-6 versions). |
 | `YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES` | 64GiB | Bounded read-ahead of 262k groups next to the optimizer offload (section 3.6). |
+| `--idle-warn-minutes` / `--idle-stop-minutes` | 45 / 45 | The cost guard's idle rule fires when no progress event arrives for its window (default 15 + 15 min). At 262k one step is 64 full-length microbatches (8 prompts x 8 samples) and takes about 25-35 min [estimate]; a wait for sampler groups between steps can be as long. 45 + 45 min keeps a healthy run alive and still stops an idle Modal island within 90 min. |
+| PP split | 31/31/31 | No split flag: 93 layers divide evenly over PP3, and the even split has the lower stage-0 peak ([K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#4-layout)). |
 
 **Why `max_in_flight` is 16.** Users of this run care most about the speed of
 one stream: a trial that does not finish inside `agent_timeout_s` is lost. Per
@@ -997,9 +1000,14 @@ measured p90 if it is longer.
 5. `expert_selection_sha256` in the spec is the sha256 of the trainer's
    `--rl-expert-selection` file.
 6. The `--rl-algorithm-spec` file has `execution.max_policy_staleness` >= the
-   `--rl-max-policy-age` (12) and a TIS correction: use the shipped
-   `algorithm-spec.async-age12-tis.json` (`algorithm-spec.async-age2-tis.json`
-   has 2 and is refused at this policy age).
+   `--rl-max-policy-age` (12) and no `correction.method`: with
+   `--rl-loss score_centering --rl-score-centering-is tis` the loss carries the
+   importance correction, and a spec TIS correction next to it is refused. Use
+   the shipped `algorithm-spec.async-age12.json` (`algorithm-spec.async-age12-tis.json`
+   is for the default policy loss; `algorithm-spec.async-age2.json` has 2 and is
+   refused at this policy age). With `--rl-round-cuts off` the argv carries no
+   cut-only flag (`--rl-stop-after-rounds`, `--rl-cut-every`); `--total-steps`
+   ends the run.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
    the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
    24 in the template) are your contracted rates: `budget.usd` is checked
@@ -2561,20 +2569,22 @@ summary. Where the two differ, that document applies.
   samplers).
 - Measured: 128-expert at 524k total context on 6×8 B300, PP split 32/28/33.
 - Recommended for production: 128-expert at 262k total context on 6×8 B300,
-  PP split 32/29/32. This split is derived from the memory model fitted to
-  the 524k measurement.
+  PP split 31/31/31 (no split flag). This split is derived from the memory
+  model fitted to the 524k and later measurements; it has a lower stage-0
+  peak than the earlier 32/29/32.
 
 ### 10.2 Layouts
 
 | Trainable experts | GPUs | Layout | Context | Status |
 |---|---|---|---|---|
 | 64 | 16 (2×8 B300) | TP8 PP1 EP16 CP1 | 32k | Validated |
-| 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/29/32 | 262k | Recommended |
+| 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 31/31/31 | 262k | Recommended |
 | 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/28/33 | 524k | Measured upper bound |
 
 The 128-expert layout needs `--rl-allow-cross-node-tp`,
-`--rl-max-tokens-per-gpu` = `seq-len / CP`, the split flags and the stage-0
-gradient hook in `YETO_MILES_TRAIN_EXTRA_ARGV`, and
+`--rl-max-tokens-per-gpu` = `seq-len / CP`, the stage-0 gradient hook in
+`YETO_MILES_TRAIN_EXTRA_ARGV` (plus the split flags for an uneven split such
+as 524k's 32/28/33), and
 `--rl-distributed-timeout-minutes 60`. See
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#4-layout).
 
@@ -2888,4 +2898,4 @@ which runs the same exit path as Ctrl-C. To end the run for good, use
   time (`yeto run scale`).
 - Automatic scaling from the buffer backlog and the trainer's wait time.
 - Release-mode images on the K3.1 full-parameter base.
-- A measured first step of the 262k layout (split 32/29/32) under production conditions.
+- A measured first step of the 262k layout (split 31/31/31) under production conditions.
