@@ -13,8 +13,12 @@ scaling, resume, the dashboard, and cost protection.
 | `launch-trainer-modal-b300.sh` | Trainer flags for the Modal B300 island |
 | `sampler-spec.nc-mi355x-vllm.json` | Sampler spec for an NC MI355X node (vLLM) |
 | `sampler-spec.nc-mi355x.json` | Sampler spec for an NC MI355X node |
+| `sampler-spec.nc-mi355x-vllm-agentic-262k.json` | Agentic 262k sampler spec for an NC MI355X node (vLLM, `rl-precision`, 16 trials in flight); guide section 3.7 |
+| `pool.nc-mi355x-agentic-262k.json` | NC pool for the agentic 262k sampler spec; guide section 3.7 |
+| `run.agentic-262k.json` | Run config of the agentic 262k kit (6 x 8 B300 trainer, NC MI355X samplers): `yeto run up --config run.agentic-262k.json`; guide section 3.7 |
 | `sampler-node-nc-mi355x.sh` | Sampler node script |
 | `algorithm-spec.async-age2.json`, `algorithm-spec.async-age2-tis.json` | Algorithm specs for `--rl-max-policy-age 2` |
+| `algorithm-spec.async-age12-tis.json` | Algorithm spec for `--rl-max-policy-age 12` (the 262k agentic run) |
 | `sampler-spec.cpu-fake.json`, `convertible-spec.cpu-fake.json`, `launch-convertible-modal.sh` | CPU rehearsal and convertible-island examples |
 
 ## Health breakers

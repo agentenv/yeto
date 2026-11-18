@@ -248,7 +248,14 @@ def test_k31_algorithm_spec_example_loads(path):
 
 
 def test_every_k31_example_json_is_covered():
-    """Sampler / convertible specs build in test_example_sampler_specs_validate; algorithm specs here."""
+    """Sampler / convertible specs build in test_example_sampler_specs_validate; algorithm specs here;
+    run / pool configs (one-command deploy kits) in test_k31_agentic_262k_kit, which must reach each one."""
+    from test_k31_agentic_262k_kit import KITS  # noqa: PLC0415
+
+    kit_files = {name for kit in KITS for name in kit}
     for path in K31.glob("*.json"):
         doc = json.loads(path.read_text())
+        if path.name.startswith(("run.", "pool.")):
+            assert path.name in kit_files, f"{path.name} is in no run.*.json kit of test_k31_agentic_262k_kit"
+            continue
         assert path.name.startswith("algorithm-spec.") or isinstance(doc.get("engine"), dict), path.name
