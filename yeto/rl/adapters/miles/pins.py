@@ -695,12 +695,39 @@ MILES_K31_IMAGE = pinned_image(
 # other recipe keep MILES_K31_IMAGE). Same registry rule; the digest is fixed.
 MILES_K31_FULL_IMAGE = pinned_image(
     "yeto-miles-k31", "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b")
+# MILES_K31_FULL_IMAGE with only its yeto overlay layer (layer 115) repacked for overlay
+# appliers: that layer whites out the sglang dist-info directory and writes the same
+# directory again, which the containerd overlayfs snapshotter (Docker 29's default store)
+# and docker's overlay2 graphdriver with native diff (overlay redirect_dir off) reject
+# ("not a directory"; Modal's builder accepts it). The repack drops
+# the whiteout and marks the directory opaque instead (what
+# docker/miles-ports/make_layer.py resolve_same_layer_whiteouts now writes): the same
+# files, the same Miles FULL_E; every other layer, the labels and the entrypoint are
+# unchanged. Tag k31-1f29e43-35708f7-overlayfix. The image for hosts whose docker keeps
+# images on overlay (bare-metal ssh trainer islands); the Modal default stays as above.
+MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
+    "yeto-miles-k31", "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14")
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
 # image digest -> the Miles commit inside it, when it is not MILES_NEXT_COMMIT: the island
 # checks its checkout against this commit (--miles-commit) instead of the default pin
 IMAGE_MILES_COMMITS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b": MILES_K31_FULL_E_COMMIT,
+    "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14": MILES_K31_FULL_E_COMMIT,
 }
+# digest of an image an overlay applier rejects -> the digest of the same image with the
+# offending layer repacked (same files, same Miles commit)
+OVERLAY_SAFE_DIGESTS: dict[str, str] = {
+    "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
+        "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
+}
+
+
+def overlay_safe_image(image_ref: str | None) -> str | None:
+    """``image_ref`` with its digest replaced by the overlay-safe repack of the same
+    image (:data:`OVERLAY_SAFE_DIGESTS`); None when there is none to offer."""
+    head, sep, digest = str(image_ref or "").rpartition("@sha256:")
+    fixed = OVERLAY_SAFE_DIGESTS.get(digest) if sep else None
+    return f"{head}@sha256:{fixed}" if fixed else None
 
 
 def image_miles_commit(image_ref: str | None) -> str | None:

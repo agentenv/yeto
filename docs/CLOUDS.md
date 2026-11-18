@@ -96,6 +96,7 @@ export YETO_IMAGE_REGISTRY=<registry>/<org>   # a mirror holding the same digest
 |---|---|
 | `yeto-miles-k31@sha256:63ad0d2a…` | RL trainer default (Kimi-K3.1 LoRA and other recipes) |
 | `yeto-miles-k31@sha256:2de5d796…` | Kimi-K3.1 `--tuning full` trainer default |
+| `yeto-miles-k31@sha256:2abbbb00…` | the same full trainer image with one layer repacked for overlay stores: use it on bare-metal ssh nodes: the containerd snapshotter (Docker 29's default) and the overlay2 graphdriver with native diff reject `2de5d796…` with `not a directory` |
 | `vllm-openai-rocm@sha256:5f47cc10…` | Kimi-K3.1 A-card vLLM sampler |
 
 `--rl-image docker:<repository>@sha256:<digest>` replaces the image of one
