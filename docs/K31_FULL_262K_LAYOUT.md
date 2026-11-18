@@ -12,7 +12,7 @@ here.
 |---|---|
 | 64-expert full-parameter, 2 x 8 B300, end to end (NC samplers, Modal trainer) | Validated on hardware |
 | 128-expert, 6 x 8 B300, **524k** total context, PP split **32/28/33** | Measured on hardware: one full training step with the stage-0 gradient fix active |
-| 128-expert, 6 x 8 B300, **262k** total context, PP split **32/29/32** | Recommended production setting. Derived from a per-stage memory model fitted to the 524k measurement |
+| 128-expert, 6 x 8 B300, **262k** total context, PP split **31/31/31** | Recommended production setting. Derived from a per-stage memory model fitted to the 524k and later measurements |
 | 128-expert, 6 x 8 B300, 1M total context | Current scope: does not fit with PP3 and no activation offload (measured) |
 
 Numbers in this document are labelled **[measured]** or **[estimate]**.
@@ -76,19 +76,20 @@ python -m yeto.rl.adapters.miles.models.partial_experts.selection --validate <se
 | Item | Value |
 |---|---|
 | Parallelism | PP3 x TP8 x CP2 x EP16, DP1, sequence parallel on. TP groups span nodes: pass `--rl-allow-cross-node-tp`. |
-| PP split, 262k | **32 / 29 / 32** [estimate]: `--decoder-first-pipeline-num-layers 32 --decoder-last-pipeline-num-layers 32` |
+| PP split, 262k | **31 / 31 / 31** [estimate]: no split flag (93 layers divide evenly over PP3). Lower stage-0 peak than 32/29/32 (about 157 against 160 GiB allocated, median) in the refined model of section 8 |
 | PP split, 524k | **32 / 28 / 33** [measured]: `--decoder-first-pipeline-num-layers 32 --decoder-last-pipeline-num-layers 33` |
 | Tokens per CP rank | `--rl-max-tokens-per-gpu = seq-len / CP` (131072 at 262k). A full-length sample then never splits across microbatches. A smaller value is refused. |
 | Microbatches per step (m) | At least PP (3). Read the actual value from the `num_microbatches=[...]` log line. Packing short traces lowers m. |
 | Distributed timeout | `--rl-distributed-timeout-minutes 60` at 262k, `120` at 524k. The first step's JIT plus long-sequence pipeline traffic took 662 s [measured], longer than the default. |
 
-The split flags reach Miles through `YETO_MILES_TRAIN_EXTRA_ARGV`. The
+An uneven split's flags reach Miles through `YETO_MILES_TRAIN_EXTRA_ARGV`. The
 launcher validates the split with `check_pipeline_split` before any GPU
 starts (`yeto launch ... --dry-run` shows the result).
 
-Why the split is uneven: under 1F1B, stage 0 holds the most in-flight
-microbatches and is the tightest stage. A split such as 31/29/33 moves the
-pressure to stage 1 and is not recommended.
+Why 524k needs an uneven split: under 1F1B, stage 0 holds the most in-flight
+microbatches and is the tightest stage. At 262k the refined model of section 8
+puts the even split's stage-0 peak below 32/29/32. A split such as 31/29/33
+moves the pressure to stage 1 and is not recommended.
 
 ## 5. Software
 
@@ -139,7 +140,7 @@ as a second safeguard for stage-0 gradients, as in the measured run.
 The trainer-island part of `trainer.argv`. All site values are placeholders.
 
 ```bash
-SEQ=262144; CP=2; MTPG=$((SEQ / CP))   # 524k: SEQ=524288, last stage 33, timeout 120
+SEQ=262144; CP=2; MTPG=$((SEQ / CP))   # 524k: SEQ=524288, split 32/28/33 (append the split flags to YETO_MILES_TRAIN_EXTRA_ARGV), timeout 120
 
 yeto launch --training-mode rl \
   --gpu modal:6x8xb300 --cluster-prefix <run-name> \
@@ -176,7 +177,7 @@ yeto launch --training-mode rl \
   --modal-env NCCL_RAS_ENABLE=0 \
   --modal-env MILES_K31_INDEXER_QUERY_CHUNK=1024 \
   --modal-env MILES_K3_ATTN_RES_TOKEN_CHUNK=2048 \
-  --modal-env "YETO_MILES_TRAIN_EXTRA_ARGV=--log-probs-chunk-size 16384 --no-check-for-nan-in-loss-and-grad --custom-megatron-before-train-step-hook-path yeto.rl.adapters.miles.models.kimi_k31.first_stage_grad.before_train_step --decoder-first-pipeline-num-layers 32 --decoder-last-pipeline-num-layers 32" \
+  --modal-env "YETO_MILES_TRAIN_EXTRA_ARGV=--log-probs-chunk-size 16384 --no-check-for-nan-in-loss-and-grad --custom-megatron-before-train-step-hook-path yeto.rl.adapters.miles.models.kimi_k31.first_stage_grad.before_train_step" \
   --modal-env YETO_RL_NAN_SKIP=max_consecutive=2,max_fraction=0.05,min_rounds=20 \
   --total-steps <N> --rl-stop-after-rounds <N> --rl-cut-every <N>
 ```
@@ -217,7 +218,7 @@ in GiB per stage.
 
 **Current scope**
 
-- The 262k split 32/29/32 comes from a per-stage memory model:
+- The earlier 262k split 32/29/32 came from a per-stage memory model:
   peak = 2.8 GiB x layers + k x 0.4375 GiB x sum(1 + rows) + about 30 GiB,
   with k = 3/2/1 in-flight microbatches on s0/s1/s2. The model matched the
   524k run within about 5 GiB. It predicts about 67 GiB of headroom at 262k

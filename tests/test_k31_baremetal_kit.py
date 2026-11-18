@@ -138,3 +138,15 @@ def test_trainer_argv_passes_the_launch_dry_run(run, tmp_path, monkeypatch, caps
     cloud = "ssh" if run == RUN else "modal"
     assert (island["cloud"], island["gpu"], island["num_nodes"], island["gpus_per_node"]) == (cloud, "B300", 6, 8)
     assert "--rl-sample-role trainer" in island["learner_command"]
+
+
+def test_both_262k_kits_split_31_31_31_and_the_modal_kit_keeps_a_45_min_idle_window():
+    """93 layers split evenly over PP3 (no split flag); the Modal kit keeps idle shutdown on
+    (paid by the hour) with a window above a 262k step of about 25-35 min."""
+    modal = [str(a) for a in json.loads((K31 / "run.agentic-262k.json").read_text())["trainer"]["argv"]]
+    extra = [a for a in modal if a.startswith("YETO_MILES_TRAIN_EXTRA_ARGV=")]
+    assert len(extra) == 1 and "pipeline-num-layers" not in extra[0]
+    assert "first_stage_grad.before_train_step" in extra[0]
+    assert not any("pipeline-num-layers" in a for a in _argv())
+    assert (_flag(modal, "--idle-warn-minutes"), _flag(modal, "--idle-stop-minutes")) == ("45", "45")
+    assert _flag(_argv(), "--idle-warn-minutes") == "0"

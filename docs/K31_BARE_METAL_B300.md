@@ -459,7 +459,7 @@ the inventory. Differences:
 | `--modal-*` flags | none | Their settings live in the inventory `env`; host memory is the node's own. |
 | `env.YETO_RL_STORE_S3_PROFILE` | An AWS profile on the control host | Its key, limited to the store's bucket, is handed to the trainer containers (the trainer never uses the control host's other credentials). `YETO_RL_STORE_S3_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` also work. TODO(bm-store): store staging and upload on SSH nodes. |
 | `--rl-island-ray-spill-dir` | `/root/.cache/ray-spill` | Ray spill on NVMe. |
-| `--idle-warn-minutes` | `0` | Idle shutdown off: at 262k a step (about 25-35 min at m = 64 [estimate]) or a wait for groups can exceed the default 15 + 15 min idle window. Hang detection stays on (`--rl-stall-timeout`, the run monitor). On paid hardware, set it above the longest step plus buffer wait instead. |
+| `--idle-warn-minutes` | `0` | Idle shutdown off: at 262k a step (about 25-35 min at m = 64 [estimate]) or a wait for groups can exceed the default 15 + 15 min idle window. Hang detection stays on (`--rl-stall-timeout`, the run monitor). On paid hardware use `--idle-warn-minutes 45 --idle-stop-minutes 45`, as the Modal kit does. |
 | `trainer.usd_per_h` | `0` | Your own hardware. Set an internal rate to have it counted in `budget.usd`. |
 
 Fill every `<...>` value. The ones that must agree across the trainer, the
