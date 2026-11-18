@@ -1059,7 +1059,8 @@ def _prepare_rl_args(
     if callable(env_check):
         for iargs in rl_island_placement_args(args):
             env_check(placement=getattr(iargs, "rl_placement", "colocated"),
-                      env_pairs=getattr(args, "modal_env", None) or (),
+                      env_pairs=[*(getattr(args, "island_env", None) or ()),
+                                 *(getattr(args, "modal_env", None) or ())],
                       tuning=args.tuning,
                       sample_role=getattr(iargs, "rl_sample_role", None) or "both",
                       offload_train=bool(getattr(iargs, "rl_offload_train", False)))

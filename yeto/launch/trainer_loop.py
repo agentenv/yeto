@@ -100,7 +100,9 @@ def add_arguments(group) -> None:
     group.add_argument(
         "--rl-ssh-trainer-workdir", default=None, metavar="PATH",
         help="with an ssh: trainer island: the yeto checkout on the inventory's trainer nodes "
-        "(inside the container on runtime: docker nodes); the island's run script runs there")
+        "(inside the container on runtime: docker nodes); the island's run script runs there. "
+        "Not needed when the run code pack is in an s3:// --rl-checkpoint-store (every node "
+        "downloads it) or with --rl-code-pack release")
     group.add_argument(
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
@@ -245,8 +247,12 @@ def _check_trainer_island(args) -> None:
             inventory_trainer_nodes(args, specs[m])
         except SshIslandError as error:
             raise SystemExit(f"--rl-trainer-island {m}: {error}") from None
-        if not getattr(args, "rl_ssh_trainer_workdir", None):
-            raise SystemExit(f"--rl-trainer-island {m} is an ssh: island: it needs --rl-ssh-trainer-workdir")
+        from .ssh_trainer_island import code_source
+
+        if code_source(args) is None:
+            raise SystemExit(f"--rl-trainer-island {m} is an ssh: island: its nodes need the run's code: a run "
+                             "code pack in an s3:// --rl-checkpoint-store, --rl-code-pack release, or "
+                             "--rl-ssh-trainer-workdir")
     if cloud == "verda":
         raise SystemExit(f"--rl-trainer-island {m} is a Verda island; the scheduler launches "
                          "a cluster per trainer start, which the Verda launch path does not do")

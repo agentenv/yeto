@@ -637,7 +637,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO",
+        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO; "
+        "applied after --island-env",
+    )
+    infra.add_argument(
+        "--island-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="every --gpu island (Modal, sky, ssh:): extra environment of the island's job "
+        "(repeatable), e.g. trainer switches such as YETO_MILES_TRAIN_EXTRA_ARGV=...; not for "
+        "secrets (a sky task shows its envs). On an ssh: island it comes after the inventory's "
+        "per-node env; on Modal --modal-env comes after it",
     )
     infra.add_argument(
         "--modal-sandbox-secret",
@@ -2354,7 +2365,14 @@ def _cmd_down_clusters(args) -> int:
     head_cluster = meta.get("head_cluster") if meta.get("controller") == "head" else None
     modal_names = [c for c in clusters if is_modal_island(c)]
     on_head = [c for c in clusters if head_cluster and c != head_cluster and c not in modal_names]
-    local_names = [c for c in clusters if c not in modal_names and c not in on_head]
+    # resident ssh: trainer islands (a journal in the run dir): no sky cluster; cmd_down
+    # stops them from the run's resource ledger (their recorded nodes) after this
+    from .launch.ssh_resident import RESIDENT_DIR
+
+    ssh_names = [c for c in clusters if (runs.run_dir(name) / RESIDENT_DIR / f"{c}-jobs.json").exists()]
+    for c in ssh_names:
+        print(f"[yeto] {c}: resident ssh: island, stopped on its nodes through the resource ledger")
+    local_names = [c for c in clusters if c not in modal_names and c not in on_head and c not in ssh_names]
     unconfirmed: list[str] = []
 
     if modal_names:

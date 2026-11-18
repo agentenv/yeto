@@ -125,7 +125,6 @@ def test_inventory_refuses_a_card_of_another_device_family():
     ({"cards_per_node": 1.5}, "cards_per_node must be a positive int"),
     ({"fabric": "myrinet"}, "fabric 'myrinet' is unknown"),
     ({"runtime": "podman"}, "runtime 'podman' is unknown"),
-    ({"image": None}, "runtime docker needs an image"),
     ({"price_per_card_hour": -1}, "price_per_card_hour must be a non-negative"),
     ({"mounts": ["/mnt/shared"]}, "mounts must be a map"),
     ({"gpus": 8}, "unknown inventory field"),
@@ -133,6 +132,11 @@ def test_inventory_refuses_a_card_of_another_device_family():
 def test_inventory_refuses_a_bad_field(overrides, message):
     with pytest.raises(InventoryError, match=message):
         parse_inventory({"nodes": [_inventory_node(**overrides)]})
+
+
+def test_a_docker_node_may_leave_the_image_to_the_run():
+    (node,) = parse_inventory({"nodes": [_inventory_node(image=None, runtime="docker")]})
+    assert node.runtime == "docker" and node.image is None
 
 
 # --- cpu_arch and image selection -------------------------------------
