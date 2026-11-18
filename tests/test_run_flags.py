@@ -297,6 +297,8 @@ _NON_RL_LITERALS = frozenset({
     "--device", "--network", "--privileged", "--init", "--volume",
     # tar of the node's ~/yeto-output copy-back (ssh_node_storage.py)
     "--null",
+    # ray start: the agent ports pinned on SSH nodes (rl_island_task.RAY_AGENT_PORTS)
+    "--metrics-export-port", "--dashboard-agent-grpc-port", "--runtime-env-agent-port",
     # NC agentic node setup: pip, tar, aws s3, the node agent and its own CLI (yeto/launch/agentic_setup.py,
     # agentic_node_agent.py)
     "--agentic-env", "--disable-pip-version-check", "--endpoint-url", "--env-file", "--label",
