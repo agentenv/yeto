@@ -62,12 +62,14 @@ def test_collectives_are_correct_over_gloo_on_two_fake_nodes(tmp_path):
     """all_reduce / all_to_all / sendrecv on 4 CPU ranks as 2 nodes x 2 (the NCCL path
     differs only in the device and the timer)."""
     pytest.importorskip("torch")
-    port = _free_port()
-    done = subprocess.run(
-        [sys.executable, "-m", "torch.distributed.run", "--nnodes=1", "--nproc-per-node=4",
-         "--master-addr=127.0.0.1", f"--master-port={port}", str(SCRIPT), "collectives", "--backend", "gloo",
-         "--local-world", "2", "--sizes", "64K,256K", "--iters", "2", "--warmup", "1"],
-        capture_output=True, text=True, timeout=300, check=False, cwd=tmp_path)
+    for _ in range(3):  # the free port may be taken again before torchrun binds it
+        done = subprocess.run(
+            [sys.executable, "-m", "torch.distributed.run", "--nnodes=1", "--nproc-per-node=4",
+             "--master-addr=127.0.0.1", f"--master-port={_free_port()}", str(SCRIPT), "collectives", "--backend",
+             "gloo", "--local-world", "2", "--sizes", "64K,256K", "--iters", "2", "--warmup", "1"],
+            capture_output=True, text=True, timeout=300, check=False, cwd=tmp_path)
+        if done.returncode == 0 or "address already in use" not in done.stderr.lower():
+            break
     recs = [json.loads(ln.split(" ", 1)[1]) for ln in done.stdout.splitlines() if ln.startswith(bench.MARKER)]
     assert done.returncode == 0, done.stderr[-2000:]
     init = [r for r in recs if r["event"] == "init"]

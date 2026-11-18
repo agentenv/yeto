@@ -1662,7 +1662,7 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
         out_dir = runs.run_dir(args.cluster_prefix) / "preflight" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     bench = not (args.no_bench or args.no_container)
     steps = Steps(pull=not args.no_pull, container=not args.no_container,
-                  ports=not (args.no_ports or args.no_container), ib=bench and not args.no_ib,
+                  ports=not (getattr(args, "no_ports", False) or args.no_container), ib=bench and not args.no_ib,
                   nccl=bench and not args.no_nccl, ib_pairs=args.ib_pairs, nccl_sizes=args.nccl_sizes,
                   nccl_iters=args.nccl_iters, nccl_all=not args.nccl_pairs_only)
     req = Requirements(min_driver_major=args.min_driver, min_host_memory_gib=args.min_host_memory_gib,
