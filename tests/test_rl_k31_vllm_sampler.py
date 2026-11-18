@@ -339,6 +339,102 @@ def test_restart_reload_stays_the_default_upstream(tmp_path):
     assert engine.load(release, 1).reload_mode == "restart"
 
 
+# ------------------------------------------------------------------ R3 prefix-cache retention
+RETAIN = "--prefix-cache-retention-interval"
+
+
+def _retention(argv):
+    return [argv[i + 1] if a == RETAIN else a.split("=", 1)[1]
+            for i, a in enumerate(argv) if a == RETAIN or a.startswith(RETAIN + "=")]
+
+
+def test_rocm_presets_carry_an_r3_retention_interval_on_the_scheduler_block():
+    rocm = {name for name, p in K31_PRESETS.items() if p["platform"] == "rocm"}
+    assert rocm == {"amd-article", "rl-precision"}
+    for name, preset in K31_PRESETS.items():
+        interval = preset.get("r3_prefix_retention_interval")
+        if name in rocm:
+            assert isinstance(interval, int) and interval > 0 and interval % 1152 == 0  # amd-article block 1152
+        else:
+            assert interval is None
+
+
+@pytest.mark.parametrize("preset", ["amd-article", "rl-precision"])
+def test_r3_on_a_rocm_preset_appends_the_preset_retention_interval_once(tmp_path, preset):
+    engine, _ = _engine(tmp_path, "rocm", k31_preset=preset, return_routed_experts=True)
+    assert engine.options.prefix_cache_retention_interval is None
+    want = str(K31_PRESETS[preset]["r3_prefix_retention_interval"])
+    assert _retention(engine.argv(engine.config.base_dir)) == [want]
+    off, _ = _engine(tmp_path, "rocm", k31_preset=preset)  # R3 off: no flag
+    assert _retention(off.argv(off.config.base_dir)) == []
+
+
+@pytest.mark.parametrize("r3", [True, False])
+def test_retention_option_zero_disables_and_positive_overrides(tmp_path, r3):
+    zero, _ = _engine(tmp_path, "rocm", k31_preset="amd-article", return_routed_experts=r3,
+                      prefix_cache_retention_interval=0)
+    assert _retention(zero.argv(zero.config.base_dir)) == []
+    explicit, _ = _engine(tmp_path, "rocm", k31_preset="amd-article", return_routed_experts=r3,
+                          prefix_cache_retention_interval=18432)
+    assert _retention(explicit.argv(explicit.config.base_dir)) == ["18432"]
+
+
+@pytest.mark.parametrize("bad", [-1, True, 9216.0, "9216"])
+def test_a_retention_option_that_is_not_a_non_negative_int_is_a_config_error(tmp_path, bad):
+    with pytest.raises(SamplerEngineError, match="prefix_cache_retention_interval"):
+        _engine(tmp_path, "rocm", k31_preset="rl-precision", return_routed_experts=True,
+                prefix_cache_retention_interval=bad)
+
+
+def test_the_legacy_line_refuses_a_retention_interval(tmp_path):
+    config = _npu_config(tmp_path)
+    with pytest.raises(SamplerEngineError, match="prefix_cache_retention_interval needs upstream vLLM"):
+        VllmServerEngine(config, VllmOptions(platform="npu", tp=4, prefix_cache_retention_interval=9216))
+    engine = VllmServerEngine(config, VllmOptions(platform="npu", tp=4, prefix_cache_retention_interval=0))
+    assert _retention(engine.argv(config.base_dir)) == []
+
+
+@pytest.mark.parametrize("extra", [(RETAIN, "4608"), (f"{RETAIN}=4608",),
+                                   ("--prefix_cache_retention_interval", "4608")])
+def test_retention_in_extra_args_is_not_appended_again(tmp_path, extra):
+    engine, _ = _engine(tmp_path, "rocm", config=_config(tmp_path, extra_args=extra), k31_preset="amd-article",
+                        return_routed_experts=True)
+    argv = engine.argv(engine.config.base_dir)
+    assert _retention(argv) == (["4608"] if extra[0].startswith(RETAIN) else [])
+    assert argv[-len(extra):] == list(extra)
+    assert engine.prefix_retention() == (4608, "extra_args")
+
+
+def test_ready_detail_records_the_retention_interval_and_its_source(tmp_path):
+    routes = {("GET", "/version"): {"version": "0.33.0"}}
+    engine, _ = _engine(tmp_path, "rocm", routes=routes, k31_preset="amd-article", return_routed_experts=True)
+    want = K31_PRESETS["amd-article"]["r3_prefix_retention_interval"]
+    assert engine.after_ready()["prefix_cache_retention_interval"] == {
+        "value": want, "source": "k31_preset amd-article (R3)"}
+    off, _ = _engine(tmp_path, "rocm", routes=routes, k31_preset="amd-article")
+    assert "prefix_cache_retention_interval" not in off.after_ready()
+
+
+@pytest.mark.parametrize("preset", ["vllm-recipe", "rl-precision-cuda"])
+def test_cuda_presets_add_no_retention_under_r3(tmp_path, preset):
+    engine, _ = _engine(tmp_path, k31_preset=preset, return_routed_experts=True)
+    assert _retention(engine.argv(engine.config.base_dir)) == []
+
+
+def test_spec_options_set_the_retention_interval(tmp_path):
+    base = tmp_path / "b"
+    base.mkdir()
+    server = {"base_dir": str(base), "card_model": "MI355X", "device_family": "rocm", "engine_version": "x",
+              "precision": "mxfp4", "quant_scheme": "MXFP4_EXPERTS_RTN", "topology": "tp8", "max_model_len": 1024}
+    section = {"adapter": "vllm-server", "server": server, "platform": "rocm",
+               "options": {"tp": 8, "k31_preset": "rl-precision", "prefix_cache_retention_interval": 18432},
+               "rollout_fields": {"routed_experts": True}}
+    engine = from_spec.build(section)
+    assert engine.options.prefix_cache_retention_interval == 18432 and _retention(engine.argv(base)) == ["18432"]
+    default = from_spec.build({**section, "options": {"tp": 8, "k31_preset": "rl-precision"}})
+    assert _retention(default.argv(base)) == [str(K31_PRESETS["rl-precision"]["r3_prefix_retention_interval"])]
+
+
 # ------------------------------------------------------------------ spec
 def test_spec_on_rocm_builds_the_upstream_adapter_with_the_k31_fields(tmp_path):
     base = tmp_path / "b"

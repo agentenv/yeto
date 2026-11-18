@@ -199,6 +199,19 @@ _K31_ROCM_LAYOUT = ("--language-model-only", "--dcp-comm-backend", "a2a", "--cp-
                     "--attention-config", '{"indexer_kv_dtype":"mxfp4","mla_prefill_backend":"ROCM_AITER_FA"}',
                     "--additional-config", '{"kda_prefill_backend":"fused"}',
                     "--max-num-batched-tokens", "10240", "--gpu-memory-utilization", K31_ROCM_GPU_MEMORY_UTILIZATION)
+# --prefix-cache-retention-interval on an R3 server (preset key "r3_prefix_retention_interval";
+# VllmOptions.prefix_cache_retention_interval overrides it, extra_args win over both): vLLM's R3
+# connector caps a prefix hit (max_cache_hit) at a multiple of the attention block (1152 tokens on
+# MI355X), while the KDA (mamba, align mode) state is kept by default (interval 0) only at the end
+# of the prompt, above that cap, so every hit is 0 and the whole prompt is prefilled again. With an
+# interval of 9216 (a multiple of the scheduler block size, which vLLM requires: ValueError at
+# start otherwise) the hits come back (MI355X, image kimi-k31: TTFT of a repeated 32K / 128K / 200K
+# prefix 0.46 / 0.71 / 0.87 s, 128K was 7.7 s). Only on R3 by default: without R3 the hits are
+# already there, and the DCP8 the presets run without R3 makes the scheduler block larger, where
+# 9216 may not be a valid multiple and the server would not start.
+K31_ROCM_R3_PREFIX_RETENTION_INTERVAL = 9216
+PREFIX_RETENTION_FLAG = "--prefix-cache-retention-interval"
+PREFIX_RETENTION_FLAGS = (PREFIX_RETENTION_FLAG, "--prefix_cache_retention_interval")  # vLLM takes both
 _K31_ROCM_ENV = {"VLLM_ROCM_DCP_AITER_ALLGATHER": "1", "VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA": "1",
                  "AITER_FLYDSL_SPARSE_MLA": "1"}
 K31_PRESETS: dict[str, dict[str, Any]] = {
@@ -207,12 +220,17 @@ K31_PRESETS: dict[str, dict[str, Any]] = {
         "args": (*_K31_ROCM_LAYOUT, "--quantization-config", '{"targets":{"*in_proj_qkvgfab":"fp8_per_channel"}}'),
         "env": {**_K31_ROCM_ENV, "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
                 "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_M8": "16", "AITER_FLYDSL_STAGE2_FP8": "1"},
-        "hf_overrides": K31_INDEXER_FP8_OVERRIDE},
+        "hf_overrides": K31_INDEXER_FP8_OVERRIDE,
+        "r3_prefix_retention_interval": K31_ROCM_R3_PREFIX_RETENTION_INTERVAL},  # measured on MI355X
     "rl-precision": {
         "platform": "rocm", "dcp": True,
         "args": (*_K31_ROCM_LAYOUT, "--mamba-ssm-cache-dtype", "float32"),
         "env": {**_K31_ROCM_ENV, "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "NONE", "AITER_FLYDSL_STAGE2_FP8": "0"},
-        "hf_overrides": K31_INDEXER_FP8_OVERRIDE},
+        "hf_overrides": K31_INDEXER_FP8_OVERRIDE,
+        # scheduler block 1152 on an R3 server as for amd-article (start log of this layout on
+        # MI355X: kv cache group sizes 1152 x 4; FP32 is already the KDA recurrent dtype of
+        # "auto"); the interval itself was measured on amd-article only
+        "r3_prefix_retention_interval": K31_ROCM_R3_PREFIX_RETENTION_INTERVAL},
     "vllm-recipe": {
         "platform": "cuda", "dcp": False, "args": ("--language-model-only", "--load-format", "fastsafetensors"),
         "env": {}, "hf_overrides": {}},
@@ -339,6 +357,12 @@ class VllmOptions:
     # to the ones that release served before. Only for a BF16 release: the quantized
     # schemes of the legacy line (W4A8 ...) re-run no requantization here and are refused
     npu_in_place_reload: bool = False
+    # --prefix-cache-retention-interval (upstream line): None: the preset's
+    # r3_prefix_retention_interval, on an R3 server only; 0: no flag; > 0: this value, with or
+    # without R3. It must be a multiple of the scheduler block size (1152 for the K3.1 ROCm
+    # presets on an R3 server, which runs DCP 1; without R3 they run DCP8 with a different,
+    # unmeasured block size), or vLLM does not start. The flag in extra_args wins
+    prefix_cache_retention_interval: int | None = None
 
 
 def _check_npu_in_place(config: Any, options: VllmOptions) -> bool:
@@ -462,6 +486,9 @@ class VllmServerEngine(ServerEngine):
                 if getattr(options, name):
                     raise SamplerEngineError(f"vllm-server {name} needs upstream vLLM (platform cuda or rocm), "
                                              f"not platform {options.platform!r}")
+            if options.prefix_cache_retention_interval:
+                raise SamplerEngineError("vllm-server prefix_cache_retention_interval needs upstream vLLM "
+                                         f"(platform cuda or rocm), not platform {options.platform!r}")
         super().__init__(config, **kw)
         self.last_resume_failure: dict[str, Any] | None = None
         self.options = options
@@ -501,6 +528,10 @@ class VllmServerEngine(ServerEngine):
                     f"grows ~20 GiB per GPU past vLLM's budget while it serves and an in-place reload stages "
                     f"experts on top of that (0.88 reached 95.5% before any reload); use the preset's "
                     f"{K31_ROCM_GPU_MEMORY_UTILIZATION} or set engine.options.allow_high_gpu_memory")
+        interval = options.prefix_cache_retention_interval
+        if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval < 0):
+            raise SamplerEngineError(f"vllm-server: options.prefix_cache_retention_interval must be an integer "
+                                     f">= 0 or None, got {interval!r}")
         self.cp_overrides: list[dict[str, Any]] = self._r3_cp_overrides() if upstream else []
         if upstream and options.return_routed_experts:
             self._check_r3_layout()
@@ -555,6 +586,24 @@ class VllmServerEngine(ServerEngine):
         if runner in ("0", "false"):
             raise SamplerEngineError("vllm-server: R3 (routed_experts) with VLLM_USE_V2_MODEL_RUNNER=0: vLLM's "
                                      "AuxOutput connector requires Model Runner V2")
+
+    def prefix_retention(self) -> tuple[int | str, str] | None:
+        """``(interval, source)`` of the server's ``--prefix-cache-retention-interval``
+        (None: no flag). Source ``extra_args``: the flag is in ``extra_args`` and passed
+        as is (the adapter adds none); otherwise the adapter adds it."""
+        if not self.upstream:
+            return None
+        given = flag_values(self.config.extra_args, PREFIX_RETENTION_FLAGS)
+        if given:
+            value = given[-1][3]
+            return (int(value) if value.isdigit() else value), "extra_args"
+        interval = self.options.prefix_cache_retention_interval
+        if interval is not None:
+            return (int(interval), "options.prefix_cache_retention_interval") if interval > 0 else None
+        default = self.preset.get("r3_prefix_retention_interval")
+        if self.options.return_routed_experts and default:
+            return int(default), f"k31_preset {self.options.k31_preset} (R3)"
+        return None
 
     def r3_layout_note(self) -> str | None:
         """The log line of the R3 DCP / PCP override (None without one)."""
@@ -626,6 +675,9 @@ class VllmServerEngine(ServerEngine):
             argv += ["--max-logprobs", str(self.top_logprobs_num)]
         if o.return_routed_experts:
             argv += ["--enable-return-routed-experts"]
+        retention = self.prefix_retention()
+        if retention is not None and retention[1] != "extra_args":
+            argv += [PREFIX_RETENTION_FLAG, str(retention[0])]
         if o.expert_reload and c.in_place_reload:
             argv += ["--worker-extension-cls", vllm_expert_reload.EXTENSION]
         argv += self._tied_extension_argv(model_dir)
@@ -726,6 +778,9 @@ class VllmServerEngine(ServerEngine):
         detail: dict[str, Any] = {"server_info": dict(info)}
         if self.cp_overrides:
             detail["r3_cp_overrides"] = [dict(d) for d in self.cp_overrides]
+        retention = self.prefix_retention()
+        if retention is not None:
+            detail["prefix_cache_retention_interval"] = {"value": retention[0], "source": retention[1]}
         return detail
 
     def start(self, release_dir: Path | None, version: int):

@@ -15,7 +15,10 @@
     "overlay go through the yeto worker extension (yeto on the server's PYTHONPATH, as",
     "run_engine_sampler.sh sets it); a staging that does not fit, or a release that is not an",
     "overlay of the served base, falls back to a restart. Set in_place_reload false to always",
-    "restart. Every value in angle brackets is a",
+    "restart. On this R3 server the preset adds --prefix-cache-retention-interval 9216 (KDA",
+    "state checkpoints, so a repeated agentic prefix hits the prefix cache instead of being",
+    "prefilled again); options.prefix_cache_retention_interval changes it (a multiple of the",
+    "1152-token block size) or turns it off (0). Every value in angle brackets is a",
     "site value the launch layer fills in; the store and prompts sections are as in",
     "sampler-spec.nc-mi355x.json."
   ],
