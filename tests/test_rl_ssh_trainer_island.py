@@ -514,3 +514,74 @@ def test_preflight_pulls_the_image_on_every_docker_node(tmp_path, checked_cards)
     ops = PullOps()
     SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops).preflight()
     assert not [s for _, s in ops.runs if s.startswith("docker pull")]
+
+
+class FlakyOps(FakeOps):
+    """``down``: node name -> how many more SSH calls fail (rc 255, as a node
+    without power or network); ``kills_fail``: node names whose kill script fails."""
+
+    def __init__(self, down=None, kills_fail=()):
+        super().__init__()
+        self.down = dict(down or {})
+        self.kills_fail = set(kills_fail)
+
+    def run(self, n, script, *, timeout=300.0):
+        if self.down.get(n.name, 0) > 0:
+            self.down[n.name] -= 1
+            self.runs.append((n.name, script))
+            return subprocess.CompletedProcess([], 255, stdout="", stderr="ssh: connect to host: No route to host")
+        if "kill -TERM" in script and n.name in self.kills_fail:
+            self.runs.append((n.name, script))
+            return subprocess.CompletedProcess([], 255, stdout="", stderr="No route to host")
+        return super().run(n, script, timeout=timeout)
+
+
+def _flaky_islands(tmp_path, ops, **kw):
+    now = [0.0]
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        now[0] += s
+
+    islands = SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops, clock=lambda: now[0],
+                                sleep=sleep, node_poll_s=15.0, **kw)
+    return islands, sleeps
+
+
+def test_a_later_start_waits_for_a_node_that_is_unreachable(tmp_path, checked_cards, capsys):
+    ops = FlakyOps()
+    islands, sleeps = _flaky_islands(tmp_path, ops)
+    islands.launch(0, None)
+    ops.down = {"ppu1": 2}  # rebooting: two probes fail
+    ops.starts.clear()
+    islands.launch(1, None)
+    assert sleeps == [15.0, 15.0] and [n for n, _ in ops.starts] == ["ppu0", "ppu1"]
+    assert "waiting for node(s) ['ppu1'], unreachable over SSH" in capsys.readouterr().out
+
+
+def test_a_later_start_refuses_a_node_still_unreachable_after_the_wait(tmp_path, checked_cards):
+    ops = FlakyOps()
+    islands, _ = _flaky_islands(tmp_path, ops, node_wait_s=60.0)
+    islands.launch(0, None)
+    ops.down = {"ppu1": 100}
+    ops.starts.clear()
+    with pytest.raises(SshIslandError, match=r"node\(s\) \['ppu1'\] unreachable over SSH for 60 s.*No route"):
+        islands.launch(1, None)
+    assert ops.starts == []  # no node got the incarnation
+
+
+def test_an_unconfirmed_release_is_stopped_again_before_the_next_start(tmp_path, checked_cards):
+    ops = FlakyOps(kills_fail={"ppu1"})
+    islands, _ = _flaky_islands(tmp_path, ops)
+    job = islands.launch(0, None)
+    assert islands.release(job) is False and islands.unreleased == {0}
+    ops.starts.clear()
+    with pytest.raises(SshIslandError, match="incarnation 0 is not confirmed stopped on every node"):
+        islands.launch(1, None)  # the node answers again but still cannot stop it
+    assert ops.starts == []
+    ops.kills_fail.clear()
+    islands.launch(2, None)
+    kills = [(n, s) for n, s in ops.runs if "kill -TERM" in s and "t-i0/pgid" in s]
+    assert [n for n, _ in kills][-2:] == ["ppu0", "ppu1"] and islands.unreleased == set()
+    assert [n for n, _ in ops.starts] == ["ppu0", "ppu1"]
