@@ -523,6 +523,23 @@ def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
 
 
 def placement_request(config) -> PlacementRequest:
+    """The island's PlacementRequest; a refused trainer tp*cp group says whether TP itself or
+    only CP spans nodes (Megatron rank order tp-cp-ep-dp-pp)."""
+    try:
+        return _placement_request(config)
+    except ValueError as exc:
+        parallel = config.parallel
+        g = getattr(parallel, "island_gpus_per_node", None)
+        if "(tp*cp) group" not in str(exc) or not g:
+            raise
+        from yeto.rl.engine.multinode import tp_cp_node_note
+
+        note = tp_cp_node_note(int(parallel.tensor_parallel),
+                               int(getattr(parallel, "context_parallel", 1) or 1), int(g))
+        raise type(exc)(f"{exc}; {note}") from None
+
+
+def _placement_request(config) -> PlacementRequest:
     parallel = config.parallel
     trainer = parallel.actor_num_nodes * parallel.actor_num_gpus_per_node
     if parallel.colocated:
