@@ -99,6 +99,16 @@ from .trainer_island import (
 )
 
 KILL_GRACE_S = 30
+
+
+def _overlay_safe_image(image: str) -> str | None:
+    """The overlay-safe repack of a pinned engine image (miles pins), or None."""
+    from yeto.rl.engine import backends
+
+    try:
+        return backends.module("pins", "miles").overlay_safe_image(image)
+    except Exception:  # noqa: BLE001 - a hint only: never mask the pull error itself
+        return None
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30")
 # The remote command: the script comes on stdin. stdin moves to fd 3 and the login
 # shell starts on /dev/null, so a profile (/etc/profile.d, ~/.bash_profile) that reads
@@ -807,8 +817,13 @@ class SshTrainerIslands:
         done = self.ops.run(node, f"docker pull -q {shlex.quote(image)}", timeout=PULL_TIMEOUT_S)
         if done.returncode != 0:
             err = ((getattr(done, "stderr", "") or "") + (getattr(done, "stdout", "") or "")).strip()[-600:]
-            hint = (" (a layer that whites out a path and writes it again: rebuild it with "
-                    "docker/miles-ports/make_layer.py of this repository)" if "not a directory" in err else "")
+            hint = ""
+            if "not a directory" in err:
+                fixed = _overlay_safe_image(image)
+                hint = (f" (a layer that whites out a path and writes it again; the same image with that "
+                        f"layer repacked: {fixed})" if fixed else
+                        " (a layer that whites out a path and writes it again: rebuild it with "
+                        "docker/miles-ports/make_layer.py of this repository)")
             raise SshIslandError(f"node {node.name}: docker pull {image} failed (rc {done.returncode}): {err}{hint}")
 
     # -- TrainerIslands -------------------------------------------------------------

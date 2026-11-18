@@ -518,3 +518,19 @@ def test_preflight_pulls_the_image_on_every_docker_node(tmp_path, checked_cards)
     ops = PullOps()
     SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops).preflight()
     assert not [s for _, s in ops.runs if s.startswith("docker pull")]
+
+
+def test_an_overlay_rejected_pinned_image_names_its_repacked_digest(tmp_path, checked_cards):
+    """The K3.1 FULL_E image fails on overlay stores; the pull error names the repack of
+    the same image (pins.OVERLAY_SAFE_DIGESTS), not only the generic rebuild hint."""
+    from yeto.rl.adapters.miles import pins
+
+    image = pins.MILES_K31_FULL_IMAGE.removeprefix("docker:")
+    err = ("mkparent /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs/opt/sglang/"
+           "lib/python3.12/site-packages/sglang-0.5.24.dev80+g35708f7.dist-info: not a directory")
+    islands = SshTrainerIslands(b300_spec([b300(i, image=image) for i in range(6)]), name="t",
+                                jobs_path=tmp_path / "j.json", ops=PullOps(1, err))
+    with pytest.raises(SshIslandError) as raised:
+        islands.preflight()
+    fixed = pins.MILES_K31_FULL_OVERLAYFIX_IMAGE.removeprefix("docker:")
+    assert f"layer repacked: {fixed})" in str(raised.value) and "make_layer.py" not in str(raised.value)

@@ -204,6 +204,8 @@ def test_every_lineage_is_consistent():
     assert set(later) <= set(pins.IMAGE_MILES_COMMITS.values())
     assert pins.image_miles_commit("docker:x@sha256:" + pins.MILES_K31_FULL_IMAGE.rpartition("@sha256:")[2]) \
         == pins.MILES_K31_FULL_E_COMMIT
+    # the overlay-safe repack of the full image carries the same Miles commit
+    assert pins.image_miles_commit(pins.MILES_K31_FULL_OVERLAYFIX_IMAGE) == pins.MILES_K31_FULL_E_COMMIT
     assert pins.MILES_NEXT_UPSTREAM_COMMIT == current.upstream_base
     assert pins.MILES_NEXT_PINS.commit == pins.MILES_NEXT_COMMIT
     assert pins.MILES_PORTS_V1_PINS.commit == pins.MILES_PORTS_V1_COMMIT
@@ -286,3 +288,19 @@ def test_sglang_k31_pin_is_the_branch_head_full_sha():
     assert pins.SGLANG_K31_BRANCH == "sglang-miles-kimi-k31"
     assert pins.SGLANG_NEXT_COMMIT == pins.SGLANG_K31_COMMIT
     assert pins.SGLANG_PORTS_V1_COMMIT == "2fa880182eefdb31e64d8ea70317be27f9f32121"
+
+
+def test_overlay_safe_digests_map_a_rejected_image_to_its_repack_of_the_same_commit():
+    from yeto.rl.adapters.miles import pins
+
+    for broken, fixed in pins.OVERLAY_SAFE_DIGESTS.items():
+        assert len(broken) == len(fixed) == 64 and broken != fixed
+        assert pins.IMAGE_MILES_COMMITS[fixed] == pins.IMAGE_MILES_COMMITS[broken]
+    full, safe = pins.MILES_K31_FULL_IMAGE, pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
+    assert pins.overlay_safe_image(full) == safe
+    # the registry part of the reference is kept; a docker: prefix too
+    mirror = "registry.example/org/yeto-miles-k31@sha256:" + full.rpartition("@sha256:")[2]
+    assert pins.overlay_safe_image(mirror) == "registry.example/org/yeto-miles-k31@sha256:" \
+        + safe.rpartition("@sha256:")[2]
+    for ref in (safe, pins.MILES_K31_IMAGE, "ghcr.io/o/x:tag", "", None):
+        assert pins.overlay_safe_image(ref) is None
