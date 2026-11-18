@@ -612,12 +612,14 @@ def test_island_main_mirrors_tape_into_the_volume(monkeypatch, tmp_path):
     assert node["rank"] == 1 and node["container_ips"] == ["fdaa::1", "fdaa::2"]
     assert node["gpu_names"][0].startswith("NVIDIA H100")
     assert commits and set(commits) == {"tapes"}
-    # the run script failing still commits the tape
+    # the run script failing still commits the tape (and rank 1 reports it to rank 0)
     commits.clear()
+    reported = []
+    monkeypatch.setattr(mr, "send_peer_failure", lambda *a: reported.append(a))
     monkeypatch.setattr(mr.subprocess, "call", lambda cmd, env=None: 4)
     with pytest.raises(RuntimeError, match="exited with 4"):
         mr.island_main(cfg.to_json())
-    assert commits
+    assert commits and [a[:3] for a in reported] == [("10.1.0.1", mr.PEER_FAILURE_PORT_DEFAULT, 1)]
 
 
 def test_define_mounts_the_tape_volume(monkeypatch):
