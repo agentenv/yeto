@@ -245,7 +245,9 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
     learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
-    io.apply_to_task(task, {**io.island_env(args, m, overrides),
+    from .launch.modal_islands import parse_island_env
+
+    io.apply_to_task(task, {**parse_island_env(args), **io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
                             **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
@@ -277,6 +279,41 @@ def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:
     from .cloud import nebius_reclaim
 
     return nebius_reclaim.spot_sampler_env()
+
+
+def _resident_ssh_names(args, names: list[str], specs: list[ClusterSpec]) -> set[str]:
+    """The ``--gpu`` islands that are resident ``ssh:`` trainer islands (ssh_resident)."""
+    from .launch.ssh_resident import is_resident
+
+    return {n for m, (n, s) in enumerate(zip(names, specs)) if is_resident(args, s, m, len(specs))}
+
+
+def _start_resident_ssh(args, tasks, names, results, errors, events_dir, collectors):
+    """Start (or reattach to) every resident ``ssh:`` island; returns their ops. Node 0's
+    lines go to the launcher log and the island's echo tape collector."""
+    from . import runs
+    from .launch.ssh_resident import RESIDENT_DIR, SshIslandOps
+
+    def sink_for(name: str):
+        collector = collectors.get(name)
+        if collector is None and events_dir is not None:
+            collector = collectors[name] = EventCollector(Path(events_dir) / f"{name}.jsonl", fresh=False)
+
+        def sink(line: str) -> None:
+            print(f"[{name}] {str(line).rstrip()}", flush=True)
+            if collector is not None:
+                collector.feed(line)
+        return sink
+
+    ops = SshIslandOps(run_id=args.cluster_prefix, journal_dir=runs.run_dir(args.cluster_prefix) / RESIDENT_DIR,
+                       events_dir=events_dir, sink_for=sink_for)
+    for name in sorted(names):
+        ops.add(name, tasks[name])
+        try:
+            results[name] = (ops.start(name), None)
+        except Exception as e:  # noqa: BLE001 - reported with the other launch errors
+            errors[name] = e
+    return ops
 
 
 def _ssh_trainer_spec(args, spec: ClusterSpec, task):
@@ -350,6 +387,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
     launch_preflight.pre_cloud_checks(args, threads=False)
     trainer_loop.check(args)  # Refuse before any launch
+    from .launch import ssh_resident
+
+    ssh_resident.check(args, parse_gpu_spec(args.gpu))  # resident ssh: islands, before any cloud work
     _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
@@ -431,6 +471,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # Read by the finally block (Modal stop / tape pull) even on an early failure.
     modal_ops = None
     modal_cfgs: dict[str, object] = {}
+    # Resident ssh: trainer islands (yeto.launch.ssh_resident): the fleet supervises them
+    # over SSH; the finally block releases them and verifies every node.
+    ssh_islands = None
+    ssh_names = _resident_ssh_names(args, learner_names, specs)
+    # The log streams and their echo-tape collectors (an ssh: island streams from its start).
+    tail_threads: list[threading.Thread] = []
+    event_collectors: dict[str, EventCollector] = {}
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -560,6 +607,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
                 continue
+            if name in ssh_names:
+                tasks[name] = _ssh_trainer_spec(args, spec, task)
+                print(f"[launcher] {name} is a resident ssh: trainer island on {spec.num_nodes} inventory "
+                      "node(s): the launcher starts it over SSH and supervises it for the run", flush=True)
+                continue
             if name == held_name:
                 held_task = task  # the scheduler launches one cluster per incarnation
                 print(f"[launcher] {name} is the trainer island: the trainer scheduler "
@@ -637,9 +689,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     errors[name] = RuntimeError("Modal refused to start the island")
                 else:
                     results[name] = (call_id, None)
+        if ssh_names:
+            ssh_islands = _start_resident_ssh(args, tasks, ssh_names, results, errors, events_dir,
+                                              event_collectors)
         for t in threads:
             t.join()
-        for name in list(rids) + list(modal_cfgs):
+        for name in list(rids) + list(modal_cfgs) + sorted(ssh_names):
             if name not in errors:
                 clusters.append(name)
         for name in rids:  # sky clusters (a failed launch may still have left one up)
@@ -657,6 +712,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         #    failed/preempted clusters, and abandons learners that stay down
         #    past --recover-timeout.
         def spawn_tail(name: str, job_id) -> None:
+            if ssh_islands is not None and ssh_islands.owns(name):
+                # node 0's stream already feeds the collector (ssh_resident sink)
+                tail_threads.extend(ssh_islands.threads(name))
+                return
             label = "syncer" if name == syncer_cluster else name
             collector = None
             if name in echo_names:
@@ -687,8 +746,6 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             thread.start()
             tail_threads.append(thread)
 
-        tail_threads: list[threading.Thread] = []
-        event_collectors: dict[str, EventCollector] = {}
         container_guards: list = []
         modal_id_guards: dict = {}  # Modal island name -> its ContainerIdGuard
 
@@ -781,7 +838,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             syncer=None if syncer_cluster is None else (syncer_cluster, syncer_task, syncer_job),
             sky_ops=RoutingOps(
                 engine_cluster.EngineClusterOps(sky_sdk_ops, mixed, sky) if mixed else sky_sdk_ops,
-                modal_island_ops),
+                modal_island_ops, ssh_ops=ssh_islands),
             poll_interval=args.controller_poll,
             recover_timeout=effective_recover_timeout(args),
             on_relaunch=spawn_tail,
@@ -836,7 +893,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
                 no_sync_incomplete.extend(settle_echo_tapes(
                     event_collectors, echo_names, modal_cfgs, events_dir,
-                    modal_tape_dir=modal_tape_dir))
+                    modal_tape_dir=modal_tape_dir,
+                    recover_sky=lambda name, c: (ssh_islands.recover_tape(name, c)
+                                                 if ssh_islands is not None and ssh_islands.owns(name)
+                                                 else _recover_echo_tape(name, c))))
                 _record_trainer_start(args, events_dir)
 
         # a supervisor per two-cluster island relaunches only its
@@ -940,7 +1000,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         rl_mode = getattr(args, "training_mode", "sft") == "rl"
         # Prefer a sky learner as the artifact source (rsync); a Modal
         # island's ~/yeto-output is not reachable that way.
-        sky_done = [n for n in done if n not in modal_cfgs]
+        sky_done = [n for n in done if n not in modal_cfgs and n not in ssh_names]
         source = (
             syncer_cluster
             if rl_mode and syncer_cluster is not None
@@ -955,6 +1015,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         os.makedirs(local_dest, exist_ok=True)
         if rl_mode and head_mode:
             print(f"[launcher] committed RL checkpoint retained at {local_dest}")
+        elif source in ssh_names:
+            # A resident ssh: island (no-sync): its ~/yeto-output stays on the nodes; the
+            # run's store holds its releases and the echo tape is the evidence.
+            print(f"[launcher] the trainer ran on the resident ssh: island {source}; its releases are in "
+                  "--rl-checkpoint-store and its event tape is the evidence", file=sys.stderr)
+            if output:
+                print(f"[launcher] --output {output} cannot be delivered from an ssh: island; exit 2",
+                      file=sys.stderr)
+                return 2
+            return 1 if failed else 0
         elif source in modal_cfgs and no_sync:
             print(
                 f"[launcher] --rl-single-island-no-sync island ran on Modal ({source}); "
@@ -1015,7 +1085,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # Clusters the controller already tore down (abandoned learners, or
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
-        remaining = [c for c in clusters if c not in downed]
+        # an ssh: island the controller released is released again: that call verifies it
+        remaining = [c for c in clusters if c not in downed or c in ssh_names]
         if modal_ops is not None and modal_cfgs:
             # Containers commit their tape every 30 s and at exit; pulled
             # here (before the app stop) and again after it below.
@@ -1025,12 +1096,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         else:
             unverified = []
             collect_diagnostics_parallel(
-                [n for n in remaining if n not in modal_cfgs], head=head_mode
+                [n for n in remaining if n not in modal_cfgs and n not in ssh_names], head=head_mode
             )
             for island in mixed.values():  # two-cluster islands: peer rules first (never raises)
                 island.unlink()
             for name in remaining:
                 print(f"[launcher] tearing down {name}")
+                if name in ssh_names:
+                    # every node must show neither process nor container (else exit 5)
+                    if ssh_islands is None or not ssh_islands.down(name):
+                        unverified.append(name)
+                        teardown_unverified = True
+                    continue
                 if name in modal_cfgs:
                     try:
                         if modal_island_ops is not None:
@@ -1072,6 +1149,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     f"Terminate them from the cloud console, then: yeto down {prefix}",
                     file=sys.stderr,
                 )
+        if ssh_islands is not None:
+            ssh_islands.close()  # streams and locks; a kept island is reattached by the next launch
         if getattr(args, "training_mode", None) == "rl" and not getattr(args, "dry_run", False):
             # the dispenser log of a syncer on this machine, with its check
             from .launch.dispense_evidence import collect_dispense_log
@@ -1170,6 +1249,24 @@ def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
     return plans
 
 
+def _dry_run_ssh_island(args, spec: ClusterSpec, m: int, num_islands: int, task) -> dict:
+    """The per-node commands and the rank layout of an ``ssh:`` island (resident, or the
+    trainer scheduler's); a spec the launch would refuse is refused here."""
+    from .launch import trainer_loop
+    from .launch.ssh_resident import dry_run_record, is_resident
+    from .launch.ssh_trainer_island import SshIslandError
+
+    if not is_resident(args, spec, m, num_islands) and trainer_loop.held_island(args) != m:
+        return {"mode": "sky-ssh-node-pool"}  # a sampler island: SkyPilot's SSH node pool
+    try:
+        ssh_spec = _ssh_trainer_spec(args, spec, task)
+    except SshIslandError as error:
+        raise ValueError(f"ssh: island {m}: {error}") from None
+    name = learner_cluster_names(args.cluster_prefix, parse_gpu_spec(args.gpu))[m]
+    return dry_run_record(args, ssh_spec, name,
+                          mode="resident" if is_resident(args, spec, m, num_islands) else "trainer-scheduler")
+
+
 def dry_run_plan(args) -> dict:
     """``yeto launch --dry-run``: what a launch would request, creating nothing.
 
@@ -1190,6 +1287,12 @@ def dry_run_plan(args) -> dict:
     from .rl.engine import sample_roles
 
     trainer_loop.check(args)  # the launch refuses the same scheduler combinations
+    from .launch import ssh_resident
+
+    try:
+        ssh_resident.check(args, parse_gpu_spec(args.gpu))
+    except SystemExit as error:
+        raise ValueError(str(error)) from None
     if rl:
         from .launch.code_pack import run_code_pack_problem
 
@@ -1266,6 +1369,8 @@ def dry_run_plan(args) -> dict:
                 (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,
             )
+            if spec.cloud == "ssh" and getattr(args, "rl_node_inventory_nodes", None):
+                entry["ssh_island"] = _dry_run_ssh_island(args, spec, learner_id, len(specs), task)
             if learner_id in split_by_id:
                 entry["engine_cluster"] = engine_cluster.dry_run_record(
                     split_by_id[learner_id], lambda learner_id=learner_id, spec=spec, role=role: _island_task(

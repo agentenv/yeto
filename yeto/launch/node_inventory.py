@@ -10,8 +10,11 @@ provider differences live in the file.
 ``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image: a node
 without ``image`` takes ``images[cpu_arch]`` from the top of the file, and a
 node whose image is a yeto catalog image of another architecture or device
-family is refused (``yeto.launch.engine_images``). The trainer preflight also
-compares ``uname -m`` with ``cpu_arch``.
+family is refused (``yeto.launch.engine_images``). A ``runtime: docker`` node
+of a file without ``images:`` may have no image: an ``ssh:`` trainer island runs
+the run's ``--rl-image`` (an inventory image must then name the same one), an SSH
+sampler pool its ``container.image``. The trainer preflight also compares ``uname -m`` with
+``cpu_arch``.
 
 Example::
 
@@ -303,9 +306,10 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
                              f"(known: {list(RUNTIMES)})")
     image = (_require_text(raw["image"], name, "image") if raw.get("image") is not None
              else (images or {}).get(cpu_arch))
-    if runtime == "docker" and image is None:
-        raise InventoryError(f"node {name}: runtime docker needs an image (set image, or "
-                             f"images.{cpu_arch} at the top of the inventory)")
+    if runtime == "docker" and image is None and images:
+        raise InventoryError(f"node {name}: runtime docker and images has no {cpu_arch} entry (set image, or "
+                             f"images.{cpu_arch} at the top of the inventory, or leave images out: an ssh: "
+                             "trainer island then runs --rl-image)")
     if image is not None and (why := image_catalog.image_mismatch(
             image, cpu_arch=cpu_arch, device_family=family)):
         raise InventoryError(f"node {name}: {why}")
