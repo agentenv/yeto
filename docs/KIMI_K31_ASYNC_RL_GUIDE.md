@@ -17,6 +17,7 @@ repeated here:
 | Resource ledger, budget breaker, cleanup | [COST_GUARD.md](COST_GUARD.md) |
 | Trainer flags, rounds, cuts, releases, padding | [MILES_RL.md](MILES_RL.md) |
 | 128-expert full-parameter layout on 6×8 B300 | [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md) |
+| Trainer on your own 6×8 B300 bare-metal cluster (SSH + Docker) | [K31_BARE_METAL_B300.md](K31_BARE_METAL_B300.md) |
 | Dashboard details, alert thresholds | [DASHBOARD.md](DASHBOARD.md) |
 | Every `yeto` command and flag | [CLI_REFERENCE.md](CLI_REFERENCE.md) |
 
@@ -997,9 +998,14 @@ measured p90 if it is longer.
 5. `expert_selection_sha256` in the spec is the sha256 of the trainer's
    `--rl-expert-selection` file.
 6. The `--rl-algorithm-spec` file has `execution.max_policy_staleness` >= the
-   `--rl-max-policy-age` (12) and a TIS correction: use the shipped
-   `algorithm-spec.async-age12-tis.json` (`algorithm-spec.async-age2-tis.json`
-   has 2 and is refused at this policy age).
+   `--rl-max-policy-age` (12) and no `correction.method`: with
+   `--rl-loss score_centering --rl-score-centering-is tis` the loss carries the
+   importance correction, and a spec TIS correction next to it is refused. Use
+   the shipped `algorithm-spec.async-age12.json` (`algorithm-spec.async-age12-tis.json`
+   is for the default policy loss; `algorithm-spec.async-age2.json` has 2 and is
+   refused at this policy age). With `--rl-round-cuts off` the argv carries no
+   cut-only flag (`--rl-stop-after-rounds`, `--rl-cut-every`); `--total-steps`
+   ends the run.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
    the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
    24 in the template) are your contracted rates: `budget.usd` is checked

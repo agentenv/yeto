@@ -86,7 +86,7 @@
       "--rl-max-policy-age",
       "12",
       "--rl-algorithm-spec",
-      "<algorithm-spec.async-age12-tis.json>",
+      "<algorithm-spec.async-age12.json>",
       "--rl-release-every",
       "6",
       "--rl-release-skip-busy",
@@ -142,8 +142,6 @@
       "--modal-env",
       "YETO_RL_NAN_SKIP=max_consecutive=2,max_fraction=0.05,min_rounds=20",
       "--total-steps",
-      "<total-steps>",
-      "--rl-stop-after-rounds",
       "<total-steps>"
     ],
     "usd_per_h": 408,

@@ -222,6 +222,11 @@ in GiB per stage.
   with k = 3/2/1 in-flight microbatches on s0/s1/s2. The model matched the
   524k run within about 5 GiB. It predicts about 67 GiB of headroom at 262k
   [estimate].
+  A later model that adds the per-layer recompute working set puts the
+  262k headroom near zero instead (stage 0 of 32/29/32: about 160 GiB
+  allocated against 166 GiB observed to pass without expandable segments),
+  and favours the even split 31/31/31 [estimate]. See
+  [K31_BARE_METAL_B300.md, section 8](K31_BARE_METAL_B300.md#8-parallel-layout-and-memory).
 - The recommended 262k settings differ from the measured run in three ways:
   expandable segments off, smaller chunk sizes, and log-prob chunk 16384.
 - With real sampler buffers, the 128-expert path has completed
