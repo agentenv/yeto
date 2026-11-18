@@ -376,6 +376,10 @@ def resource_costs(resources: Iterable[Resource], now: float, *, rates: Rates | 
                                     "sampler pool call: estimate after its app's newest billed hour"))
         elif _provider_cost(r.kind) is not None:  # an island provider's machine (nc_lease)
             items.append(_provider_cost(r.kind)(r, now, rates))
+        elif r.kind == "ssh_trainer":  # the operator's machines: the inventory's declared price
+            rate = r.attrs.get("usd_per_hour")
+            items.append(_span_cost(r, r.created_at, now, None if rate is None else float(rate),
+                                    "" if rate is not None else "SSH nodes without price_per_card_hour"))
         elif r.kind == "sky_cluster":
             rate = r.attrs.get("usd_per_hour")
             rate = float(rate) if rate is not None else rates.table_rate(r.attrs.get("cloud") or "", r.attrs)

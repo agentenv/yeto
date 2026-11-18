@@ -34,13 +34,18 @@ One incarnation = one trainer process per node, started over SSH:
    without them is refused: the flags are not known for every family yet; a
    cuda node must pass its GPUs and, on a multi-node ib/roce island, the verbs
    devices and an unlimited memlock: :func:`cuda_docker_problems`). The
-   preflight pulls the image on every docker node;
+   preflight pulls the image on every docker node. The node-local data (store
+   stage, release staging, temp files, init release, ``~/yeto-output``) goes
+   under the node's inventory ``scratch`` and the incarnation's state dir
+   (:mod:`.ssh_node_storage`);
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
    trainer events from it); the other nodes' logs go to local files;
 4. release kills each node's process group (TERM, then KILL after a grace
    period) by the PID file the start wrote; a restarted head does the same for
    an orphan incarnation (the PID file path is derived from the run id, island
-   name and incarnation, recorded in the journal before any start);
+   name and incarnation, recorded in the journal before any start). Each
+   incarnation is also a row of the run's resource ledger, so ``yeto cleanup``
+   and the run's reaper stop it when the head is gone (:mod:`.ssh_trainer_ledger`);
 5. a later start first waits (up to ``node_wait_s``) until every node answers
    over SSH again: a node that lost power or its network is not given a new
    incarnation that can only fail (measured on the simulated cluster,
@@ -59,11 +64,16 @@ records the trainer has not merged yet (``UnmergedShards``).
 
 The launcher holds back an ``ssh:`` island of ``--gpu`` as the trainer island
 and builds its spec from ``--rl-node-inventory`` (:func:`island_spec_from_inventory`).
-Nothing here was run against a real node.
+Without the trainer scheduler the same island is a resident one: the fleet
+starts it once and supervises it for the run (:mod:`.ssh_resident`). The code
+reaches the nodes as the run code pack (downloaded from the run's s3 store), the
+release image, or a checkout at ``--rl-ssh-trainer-workdir``; the image is the
+run's ``--rl-image``. Nothing here was run against a real node.
 """
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import re
 import shlex
@@ -80,6 +90,7 @@ from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
 from ..gpu_spec import DEVICE_FAMILY_ENV
+from . import ssh_node_storage, ssh_trainer_ledger
 from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -133,7 +144,15 @@ class SshTrainerSpec:
     one of the two. ``workdir``: the directory it runs in (inside the container
     on docker nodes); ``requant``: argv of the re-quantizer side process on
     node 0 (None: BF16 samplers only). ``image`` / ``docker_args`` replace the
-    nodes' inventory values on docker nodes (e.g. a trainer image)."""
+    nodes' inventory values on docker nodes (e.g. a trainer image). ``files``: the
+    island task's file mounts (``{path on the node: local path}``, a path under
+    ``~`` as in a sky task), shipped inside the start script to every node: bind-
+    mounted read-only into the container on docker nodes (``~`` is
+    ``container_home`` there), copied under the job's ``$HOME`` on rootfs nodes.
+    ``code_pack``: ``(uri, digest)`` of the run code pack in the run's s3 store; every
+    node downloads and unpacks it (:data:`PACK_FETCH_PY`) and links ``~/sky_workdir``
+    to it, the tree the island checks against ``--code-pack-digest`` (``workdir`` may
+    then be empty: the container starts in ``container_home``, a rootfs job in ``$HOME``)."""
 
     nodes: tuple[Node, ...]
     run_id: str
@@ -148,12 +167,21 @@ class SshTrainerSpec:
     image: str | None = None
     docker_args: tuple[str, ...] | None = None
     memory: Mapping[str, Any] | None = None  # the estimate summary the spec was checked with
+    files: Mapping[str, str] = field(default_factory=dict)
+    container_home: str = "/root"
+    code_pack: tuple[str, str] | None = None  # (s3:// URI, digest) of the run code pack
 
     def __post_init__(self) -> None:
         if not self.nodes:
             raise SshIslandError("an SSH trainer island needs at least one node")
         if bool(self.command) == bool(self.run_script):
             raise SshIslandError("an SSH trainer island needs one trainer command or one run script")
+        if not self.workdir and self.code_pack is None:
+            raise SshIslandError("an SSH trainer island needs a workdir (the yeto checkout on the nodes) or a "
+                                 "run code pack")
+        if self.code_pack is not None and not (str(self.code_pack[0]).startswith("s3://")
+                                               and re.fullmatch(r"[0-9a-f]{64}|<[a-z-]+>", self.code_pack[1])):
+            raise SshIslandError(f"code pack {self.code_pack!r}: expected an s3:// URI and a sha256 digest")
         families = {n.device_family for n in self.nodes}
         if len(families) != 1:
             raise SshIslandError(f"one trainer island spans one device family, got {sorted(families)}")
@@ -180,6 +208,9 @@ class SshTrainerSpec:
         if len(self.nodes) > 1:
             for node in self.nodes:
                 rendezvous_address(node)  # raises on a node the others cannot dial
+        for target in self.files:
+            if not (str(target).startswith(("~/", "/")) and ".." not in Path(str(target)).parts):
+                raise SshIslandError(f"file mount {target!r}: the node path must be absolute or under ~/")
         if self.env.get(DEVICE_FAMILY_ENV, self.device_family) != self.device_family:
             raise SshIslandError(f"env sets {DEVICE_FAMILY_ENV}={self.env[DEVICE_FAMILY_ENV]}, but the "
                                  f"inventory nodes are {self.device_family}; the inventory decides")
@@ -297,14 +328,75 @@ def skypilot_env(spec: SshTrainerSpec, rank: int) -> dict[str, str]:
             "SKYPILOT_NUM_GPUS_PER_NODE": str(spec.nodes[rank].cards_per_node)}
 
 
-def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str) -> str:
-    """The node's job as bash; it exits with the trainer's exit code."""
+# Runs on every node (in the container on docker nodes) before the island: download
+# the run code pack from the run's s3 store with the island's store credentials, check
+# its sha256 and unpack it with the pack's own unpacker (yeto.codepack.unpack: the tree
+# the island then verifies against --code-pack-digest) into the codepacks cache. Kept
+# free of yeto imports until the pack is there; boto3 is in every trainer image.
+PACK_CACHE = "$HOME/.cache/yeto/codepacks"
+PACK_FETCH_PY = r"""
+import hashlib, io, os, shutil, sys, tarfile, tempfile
+uri, digest, cache = sys.argv[1], sys.argv[2].lower(), os.path.expanduser(sys.argv[3])
+if os.path.isfile(os.path.join(cache, digest, "CODEPACK.json")):
+    sys.exit(0)
+import boto3
+from botocore.config import Config
+env = os.environ
+kw = {}
+if env.get("YETO_RL_STORE_S3_ACCESS_KEY_ID") and env.get("YETO_RL_STORE_S3_SECRET_ACCESS_KEY"):
+    kw = {"aws_access_key_id": env["YETO_RL_STORE_S3_ACCESS_KEY_ID"],
+          "aws_secret_access_key": env["YETO_RL_STORE_S3_SECRET_ACCESS_KEY"],
+          "aws_session_token": env.get("YETO_RL_STORE_S3_SESSION_TOKEN") or None}
+client = boto3.session.Session(**kw).client(
+    "s3", endpoint_url=env.get("YETO_RL_STORE_S3_ENDPOINT_URL") or None,
+    region_name=env.get("YETO_RL_STORE_S3_REGION") or None,
+    config=Config(retries={"mode": "standard", "max_attempts": 9}))
+bucket, _, key = uri.split("://", 1)[1].partition("/")
+data = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+if hashlib.sha256(data).hexdigest() != digest:
+    sys.exit(f"[yeto-island] code pack {uri} does not have digest {digest}")
+os.makedirs(cache, exist_ok=True)
+tmp = tempfile.mkdtemp(prefix=".fetch-", dir=cache)
+try:
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
+        members = [m for m in tar.getmembers() if m.name.startswith("yeto/") and m.isfile()
+                   and not os.path.isabs(m.name) and ".." not in m.name.split("/")]
+        tar.extractall(tmp, members=members)
+    sys.path.insert(0, tmp)
+    from yeto.codepack import unpack
+    print(f"[yeto-island] code pack {digest[:12]} unpacked to {unpack(data, digest, cache)}", flush=True)
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+"""
+
+
+def _code_link(spec: SshTrainerSpec) -> str:
+    """Bash that points ``~/sky_workdir`` at the node's code: the run code pack (fetched
+    first) or the spec's workdir; nothing when neither (a release image links it)."""
+    if spec.code_pack is not None:
+        uri, digest = spec.code_pack
+        tree = f"\"{PACK_CACHE}/{digest}\""
+        return (f"python3 -I -c {shlex.quote(PACK_FETCH_PY)} {shlex.quote(uri)} {shlex.quote(digest)} "
+                f"\"{PACK_CACHE}\" || {{ echo '[yeto-island] could not fetch the run code pack' >&2; exit 1; }}\n"
+                'if [ -d "$HOME/sky_workdir" ] && [ ! -L "$HOME/sky_workdir" ]; then '
+                "echo '[yeto-island] ~/sky_workdir is a directory: the run code pack cannot be linked there' >&2; "
+                "exit 1; fi\n"
+                f'ln -sfn {tree} "$HOME/sky_workdir"\n')
+    if spec.workdir:
+        return f'[ -e "$HOME/sky_workdir" ] || ln -s {shlex.quote(spec.workdir)} "$HOME/sky_workdir"\n'
+    return ""
+
+
+def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str, state_dir: str | None = None) -> str:
+    """The node's job as bash; it exits with the trainer's exit code. ``state_dir``:
+    the incarnation's state dir as the job sees it (the node-local storage prelude,
+    :func:`ssh_node_storage.job_prelude`)."""
     node = spec.nodes[rank]
+    prelude = ssh_node_storage.job_prelude(node, spec.run_id, state_dir)
     if spec.run_script:
         # The island run script (rl_island_task) enters ~/sky_workdir, where sky syncs
-        # the code; an SSH node has no sync, its checkout is the spec's workdir.
-        link = f'[ -e "$HOME/sky_workdir" ] || ln -s {shlex.quote(spec.workdir)} "$HOME/sky_workdir"\n'
-        trainer = f"{link}(\n{spec.run_script.rstrip()}\n)"  # a subshell: the script's exit and exec stay inside
+        # the code; an SSH node has no sync: the run code pack, or the spec's workdir.
+        trainer = f"{_code_link(spec)}(\n{spec.run_script.rstrip()}\n)"  # a subshell: exit and exec stay inside
     else:
         trainer = shlex.join([spec.torchrun, f"--nnodes={len(spec.nodes)}", f"--node-rank={rank}",
                               f"--nproc-per-node={node.cards_per_node}",
@@ -313,13 +405,14 @@ def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str) -> str:
     if rank == 0 and spec.requant:
         # The loop converts releases while the trainer runs; after the trainer
         # ends, one more pass converts the last BF16 release.
-        return (f"{shlex.join(spec.requant)} --loop --poll-seconds {spec.requant_poll_s:g} > {requant_log} 2>&1 &\n"
+        return (f"{prelude}{shlex.join(spec.requant)} --loop --poll-seconds {spec.requant_poll_s:g} "
+                f"> {requant_log} 2>&1 &\n"
                 "req=$!\n"
                 f"{trainer} && rc=0 || rc=$?\n"
                 "kill $req 2>/dev/null; wait $req 2>/dev/null\n"
                 f"{shlex.join(spec.requant)} >> {requant_log} 2>&1 || {{ [ $rc -ne 0 ] || rc=1; }}\n"
                 "exit $rc\n")
-    return f"{trainer}\n"
+    return f"{prelude}{trainer}\n"
 
 
 def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[str]) -> list[str]:
@@ -330,9 +423,38 @@ def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[
             *spec.docker_args_of(node)]
     for host_path, container_path in sorted(node.mounts.items()):
         argv += ["-v", f"{host_path}:{container_path}"]
+    argv += ssh_node_storage.docker_options(node, spec.run_id)
     for key in sorted(env_names):
         argv += ["-e", key]
-    return [*argv, "-w", spec.workdir, str(spec.image or node.image)]
+    return [*argv, "-w", spec.workdir or spec.container_home, str(spec.image or node.image)]
+
+
+def node_env(spec: SshTrainerSpec, rank: int, env: Mapping[str, str]) -> dict[str, str]:
+    """The environment of node ``rank``'s job: its family, the fabric defaults
+    (``topology.island_comm_env``), the inventory's ``env`` (e.g. NCCL_IB_HCA refines
+    the defaults), the spec's environment, ``env`` and the sky task variables."""
+    node = spec.nodes[rank]
+    comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
+    # The learner reads the family to pick its card type and collective backend (accel).
+    full = {DEVICE_FAMILY_ENV: node.device_family, **comm, **node.env, **spec.env, **env,
+            **(skypilot_env(spec, rank) if spec.run_script else {})}
+    # node-local data (store stage, release staging, temp files) under the node's scratch
+    full.update(ssh_node_storage.scratch_env(node, spec.run_id, full))
+    return full
+
+
+def docker_job(spec: SshTrainerSpec, rank: int, paths: Mapping[str, str], container: str,
+               full_env: Mapping[str, str], inner_word: str) -> str:
+    """The ``docker run`` command line of node ``rank`` (``paths`` pinned, ``$HOME``
+    expands on the node; ``inner_word``: the quoted ``bash -c`` argument). The
+    environment goes by name; the incarnation's state dir and the shipped files are
+    bind-mounted."""
+    *options, image = docker_argv(spec, rank, container, list(full_env))
+    mount = f"-v \"{paths['dir']}:{CONTAINER_STATE_DIR}\""
+    home = str(full_env.get("HOME") or spec.container_home)
+    mount += "".join(f" -v \"{paths['dir']}/files/{i}:{_home_path(target, home)}:ro\""
+                     for i, target in enumerate(sorted(spec.files)))
+    return f"{shlex.join(options)} {mount} {shlex.quote(image)} bash -c {inner_word}"
 
 
 def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths: Mapping[str, str],
@@ -340,26 +462,26 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     """The bash script one node runs: start the island in its own session, then
     stream its log until it exits (node 0's stream carries the trainer events).
     ``container``: the docker container name (docker nodes)."""
-    node = spec.nodes[rank]
     paths = _pin_state_home(paths)
-    comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
-    # The learner reads the family to pick its card type and collective backend (accel).
-    # The inventory's fabric settings (e.g. NCCL_IB_HCA) refine the family defaults.
-    full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **node.env, **spec.env, **env,
-                **(skypilot_env(spec, rank) if spec.run_script else {})}
+    node = spec.nodes[rank]
+    full_env = node_env(spec, rank, env)
+    files = _file_payloads(spec)
     if spec.docker:
         if container is None:
             raise SshIslandError("a docker node needs its container name")
-        # The state dir is mounted so the re-quantizer log lands next to the trainer log.
-        inner = _trainer_body(spec, rank, f"{CONTAINER_STATE_DIR}/requant.log")
-        *options, image = docker_argv(spec, rank, container, list(full_env))
-        mount = f"-v \"{paths['dir']}:{CONTAINER_STATE_DIR}\""  # $HOME expands on the node
-        job = f"{shlex.join(options)} {mount} {shlex.quote(image)} bash -c {shlex.quote(inner)}"
-        enter = ""
+        # The state dir is mounted so the re-quantizer log lands next to the trainer log
+        # (and ~/yeto-output in it: the tape outlives the container).
+        inner = _trainer_body(spec, rank, f"{CONTAINER_STATE_DIR}/requant.log", CONTAINER_STATE_DIR)
+        job = docker_job(spec, rank, paths, container, full_env, shlex.quote(inner))
+        enter = place = ""
     else:
         requant_log = f"\"{paths['requant_log']}\""
         job = f"bash -c {shlex.quote(_trainer_body(spec, rank, requant_log))}"
-        enter = f"cd {shlex.quote(spec.workdir)}\n"
+        enter = f"cd {shlex.quote(spec.workdir)}\n" if spec.workdir else 'cd "$HOME"\n'
+        place = "".join(
+            f"__yeto_f={_home_path(target, '$HOME', quote=False)}\n"
+            f"mkdir -p \"$(dirname \"$__yeto_f\")\" && cp \"{paths['dir']}/files/{i}\" \"$__yeto_f\"\n"
+            for i, target, _ in files)
     body = f"{job} && rc=0 || rc=$?\necho $rc > \"{paths['rc']}\"\n"
     return (
         "set -eu\n"
@@ -373,7 +495,11 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         # Exported: the rc and requant-log paths expand inside the job's own bash.
         + f"export {STATE_HOME_VAR}=\"$HOME\"\n"
         + _exports(full_env)
-        + f"mkdir -p \"{paths['dir']}\"\n"
+        # owner-only: the logs and the tape of the job live there
+        + f"(umask 077 && mkdir -p \"{paths['dir']}\")\n"
+        + ssh_node_storage.host_prepare(node, spec.run_id)
+        + _write_files(files, paths)
+        + place
         + enter
         + f"rm -f \"{paths['rc']}\"\n"
         # Job control is off in a non-interactive shell, so the background setsid
@@ -382,20 +508,137 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         # zombie would keep both ``tail --pid`` and the kill check waiting).
         + f"( setsid bash -c {shlex.quote(body)} > \"{paths['log']}\" 2>&1 < /dev/null &\n"
         + f"  echo $! > \"{paths['pid']}\" )\n"
-        + f"exec tail -n +1 -F --pid=\"$(cat \"{paths['pid']}\")\" \"{paths['log']}\" 2>/dev/null\n"
+        + _follow(paths)
     )
+
+
+def _follow(paths: Mapping[str, str]) -> str:
+    """Stream the incarnation's log from its start until its process group leader exits."""
+    return f"exec tail -n +1 -F --pid=\"$(cat \"{paths['pid']}\")\" \"{paths['log']}\" 2>/dev/null\n"
+
+
+def follow_script(paths: Mapping[str, str]) -> str:
+    """Reattach to a running (or ended) incarnation: replay its log from the start and
+    follow it until the island exits (a restarted head, or an SSH stream that dropped)."""
+    return f"{STATE_HOME_VAR}=\"$HOME\"\n" + _follow(_pin_state_home(paths))
+
+
+NODE_STATE_MARK = "yeto-node-state"
+NODE_STATES = ("running", "exited", "lost", "absent")
+
+
+@dataclass(frozen=True)
+class NodeState:
+    """One node of one incarnation, as :func:`status_script` reports it: ``running``
+    (its process group lives), ``exited`` (its job wrote the exit code ``rc``),
+    ``lost`` (the state dir exists but neither process nor exit code: killed,
+    OOM-killed or the node rebooted) or ``absent`` (never started there).
+    ``container``: the docker container status (``none`` when there is none)."""
+
+    state: str
+    rc: int | None = None
+    container: str = "none"
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+
+def status_script(paths: Mapping[str, str], *, container: str | None = None) -> str:
+    """One line ``yeto-node-state state=... rc=... container=...`` (:class:`NodeState`)."""
+    p = _pin_state_home(paths)
+    probe = (f"c=$(docker inspect -f '{{{{.State.Status}}}}' {shlex.quote(container)} 2>/dev/null) || c=none\n"
+             if container else "c=none\n")
+    return (
+        f"{STATE_HOME_VAR}=\"$HOME\"\nrc=\n"
+        f"if [ -f \"{p['rc']}\" ]; then s=exited; rc=$(tr -d '[:space:]' < \"{p['rc']}\" 2>/dev/null)\n"
+        f"elif pid=$(cat \"{p['pid']}\" 2>/dev/null) && [ -n \"$pid\" ] && kill -0 -- -$pid 2>/dev/null; "
+        "then s=running\n"
+        f"elif [ -d \"{p['dir']}\" ]; then s=lost\n"
+        "else s=absent\nfi\n"
+        + probe
+        + f"echo \"{NODE_STATE_MARK} state=$s rc=$rc container=${{c:-none}}\"\n"
+    )
+
+
+def parse_node_state(text: str) -> NodeState | None:
+    """The :class:`NodeState` in ``text`` (a :func:`status_script` output); None without one."""
+    for line in str(text or "").splitlines():
+        if not line.startswith(NODE_STATE_MARK + " "):
+            continue
+        fields = dict(item.partition("=")[::2] for item in line.split()[1:])
+        state = fields.get("state", "")
+        if state not in NODE_STATES:
+            return None
+        rc = fields.get("rc") or ""
+        return NodeState(state, int(rc) if re.fullmatch(r"-?\d+", rc) else None,
+                         fields.get("container") or "none")
+    return None
+
+
+def _home_path(target: str, home: str, *, quote: bool = True) -> str:
+    """``target`` with a leading ``~`` replaced by ``home``. ``quote=False``: a shell
+    word in which ``home`` (e.g. ``$HOME``) still expands."""
+    target = str(target)
+    if not target.startswith("~"):
+        return target if quote else shlex.quote(target)
+    rest = target[1:]
+    if quote:
+        return f"{home}{rest}"
+    return f"\"{home}\"{shlex.quote(rest) if rest else ''}"
+
+
+def _file_payloads(spec: SshTrainerSpec) -> list[tuple[int, str, str]]:
+    """``(index, node path, base64 content)`` of every file mount of the spec."""
+    out = []
+    for i, (target, local) in enumerate(sorted(spec.files.items())):
+        try:
+            data = Path(str(local)).expanduser().read_bytes()
+        except OSError as error:
+            raise SshIslandError(f"file mount {target!r}: cannot read {local!r} ({error})") from None
+        out.append((i, str(target), base64.b64encode(data).decode("ascii")))
+    return out
+
+
+def _write_files(files: Sequence[tuple[int, str, str]], paths: Mapping[str, str]) -> str:
+    """Bash that writes the shipped files into the incarnation's state dir (mode 600)."""
+    if not files:
+        return ""
+    out = f"mkdir -p \"{paths['dir']}/files\"\n"
+    for i, _target, payload in files:
+        wrapped = "\n".join(payload[j:j + 76] for j in range(0, len(payload), 76))
+        out += (f"( umask 077; base64 -d > \"{paths['dir']}/files/{i}\" <<'__YETO_FILE_{i}__'\n"
+                f"{wrapped}\n__YETO_FILE_{i}__\n)\n")
+    return out
 
 
 def kill_script(paths: Mapping[str, str], grace_s: int = KILL_GRACE_S, *, container: str | None = None) -> str:
     """TERM the island's process group, KILL it after ``grace_s``; exit 0 when it
-    is gone. ``container``: remove that docker container first (a killed
-    ``docker run`` client does not stop its container).
+    is gone. ``container``: stop and remove that docker container first (a killed
+    ``docker run`` client does not stop its container): TERM to its processes,
+    ``docker rm -f`` after ``grace_s``; a container still there exits 4.
 
     The pid file is read from the login HOME, where :func:`start_script` pins the
     state dir. No pid file: a warning, and exit 0 only when the state dir does not
     exist either (this incarnation never started on the node); a state dir with no
     pid file exits 3, so a release cannot report ok while the island may still run."""
-    remove = f"docker rm -f {shlex.quote(container)} >/dev/null 2>&1 || true\n" if container else ""
+    remove = ""
+    if container:
+        c = shlex.quote(container)
+        # TERM to every process of the container but its init (``docker stop`` signals
+        # only PID 1, a bash that ignores TERM): the trainer gets the stop signal it
+        # gets on Modal (a preemption marker, no save), then the container goes.
+        remove = (
+            f"if docker container inspect {c} >/dev/null 2>&1; then\n"
+            f"  docker exec {c} bash -c 'kill -TERM -1' >/dev/null 2>&1 || true\n"
+            f"  for _ in $(seq {int(grace_s)}); do "
+            f"[ \"$(docker inspect -f '{{{{.State.Running}}}}' {c} 2>/dev/null)\" = true ] || break; sleep 1; done\n"
+            f"  docker rm -f {c} >/dev/null 2>&1 || true\n"
+            "fi\n"
+            f"if docker container inspect {c} >/dev/null 2>&1; then\n"
+            f"  echo \"[yeto] kill: container {container} still exists after docker rm -f\" >&2; exit 4\n"
+            "fi\n"
+        )
     paths = _pin_state_home(paths)
     return (
         remove
@@ -449,14 +692,24 @@ class _SshJob:
     procs: list[Any]
     events: IslandEvents
     threads: list[threading.Thread] = field(default_factory=list)
+    attached: bool = False  # follows an incarnation an earlier head started
 
 
 class SshTrainerIslands:
-    """``TrainerIslands`` over SSH nodes (module doc)."""
+    """``TrainerIslands`` over SSH nodes (module doc).
+
+    ``scheduled=False``: an island the fleet keeps up for the whole run
+    (:mod:`.ssh_resident`), not one the trainer scheduler drives: its incarnations
+    start without the scheduler's control environment (``island_env``), so the
+    trainer runs its own rounds to the end. ``on_line``: every line of node 0's
+    stream (the launcher's log and echo tape); ``tape``: write the scheduler's
+    per-incarnation event tape into ``events_dir``."""
 
     def __init__(self, spec: SshTrainerSpec, *, name: str, jobs_path: Path, ops: SshOps | None = None,
                  poll_s: float | None = None, events_dir: Path | None = None,
                  clock: Callable[[], float] = time.time, kill_grace_s: int = KILL_GRACE_S,
+                 scheduled: bool = True, tape: bool = True,
+                 on_line: Callable[[str], None] | None = None,
                  node_wait_s: float = NODE_WAIT_S, node_poll_s: float = NODE_POLL_S,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.spec = spec
@@ -467,6 +720,9 @@ class SshTrainerIslands:
         self.events_dir = events_dir
         self.clock = clock
         self.kill_grace_s = int(kill_grace_s)
+        self.scheduled = bool(scheduled)
+        self.tape = bool(tape)
+        self.on_line = on_line
         self.node_wait_s = float(node_wait_s)
         self.node_poll_s = float(node_poll_s)
         self.sleep = sleep
@@ -476,27 +732,64 @@ class SshTrainerIslands:
 
     # -- preflight ----------------------------------------------------------------
     def preflight(self) -> None:
-        """Every node's CPU architecture and cards must match the inventory
-        (raises before any start)."""
-        for node in self.spec.nodes:
-            done = self.ops.run(node, "uname -m", timeout=60.0)
-            if done.returncode != 0:
-                raise SshIslandError(f"node {node.name}: uname -m failed (rc {done.returncode})")
-            try:
-                node.check_cpu_arch(done.stdout)
-            except InventoryError as exc:
-                raise SshIslandError(str(exc)) from None
-            for argv in node.preflight_commands():
-                done = self.ops.run(node, shlex.join(argv), timeout=120.0)
-                if done.returncode == 0:
-                    node.check_cards(done.stdout)
-                    break
-            else:
-                raise SshIslandError(f"node {node.name}: no card tool of family {node.device_family} "
-                                     f"answered ({[shlex.join(a) for a in node.preflight_commands()]})")
-            if self.spec.docker:
-                self._pull(node)
+        """Every node's CPU architecture and cards must match the inventory, and a
+        docker node must pull the image (raises before any start). The nodes are
+        checked in parallel (a first pull of a trainer image takes minutes per node)."""
+        nodes = list(self.spec.nodes)
+        if len(nodes) == 1:
+            self._preflight_node(nodes[0])
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=min(16, len(nodes)), thread_name_prefix="yeto-preflight") as pool:
+                for future in [pool.submit(self._preflight_node, node) for node in nodes]:
+                    future.result()  # the first failed node in inventory order raises
+        warning = ssh_node_storage.no_scratch_warning(
+            list(self.spec.nodes), staged=bool(ssh_node_storage.staged_envs(self.spec.env)))
+        if warning:
+            print(warning, flush=True)
         self.checked = True
+
+    def _preflight_node(self, node: Node) -> None:
+        done = self.ops.run(node, "uname -m", timeout=60.0)
+        if done.returncode != 0:
+            raise SshIslandError(f"node {node.name}: uname -m failed (rc {done.returncode})")
+        try:
+            node.check_cpu_arch(done.stdout)
+        except InventoryError as exc:
+            raise SshIslandError(str(exc)) from None
+        for argv in node.preflight_commands():
+            done = self.ops.run(node, shlex.join(argv), timeout=120.0)
+            if done.returncode == 0:
+                node.check_cards(done.stdout)
+                break
+        else:
+            raise SshIslandError(f"node {node.name}: no card tool of family {node.device_family} "
+                                 f"answered ({[shlex.join(a) for a in node.preflight_commands()]})")
+        self._check_scratch(node)
+        if self.spec.docker:
+            self._pull(node)
+
+    def _check_scratch(self, node: Node) -> None:
+        """The node's scratch directory exists, is writable and has the free space
+        the inventory asks for; its store env file is owner-only (ssh_node_storage)."""
+        script = ssh_node_storage.env_file_preflight_script(node)
+        if script is not None:
+            done = self.ops.run(node, script, timeout=60.0)
+            try:
+                ssh_node_storage.check_env_file(node, done.returncode, done.stdout or "")
+            except ssh_node_storage.ScratchError as error:
+                raise SshIslandError(str(error)) from None
+        script = ssh_node_storage.preflight_script(node, self.spec.run_id)
+        if script is None:
+            return
+        done = self.ops.run(node, script, timeout=120.0)
+        try:
+            free = ssh_node_storage.check_preflight(node, done.returncode, done.stdout or "",
+                                                    getattr(done, "stderr", "") or "")
+        except ssh_node_storage.ScratchError as error:
+            raise SshIslandError(str(error)) from None
+        print(f"[launcher] node {node.name}: scratch {node.scratch} has {free:.0f} GiB free", flush=True)
 
     def _pull(self, node: Node) -> None:
         """Pull the trainer image before the first start: a first ``docker run`` of a
@@ -518,10 +811,14 @@ class SshTrainerIslands:
             self._wait_reachable(incarnation)
         self._stop_unreleased(incarnation)
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
-        env = {**island_env(incarnation, resume_from, poll_s=self.poll_s), SUBMITTED_ENV: f"{self.clock():.3f}"}
+        control = island_env(incarnation, resume_from, poll_s=self.poll_s) if self.scheduled else {}
+        env = {**control, SUBMITTED_ENV: f"{self.clock():.3f}"}
         save_job(self.jobs_path, incarnation, f"ssh:{self.name}-i{int(incarnation)}")  # before any start
-        job = _SshJob(int(incarnation), paths, [],
-                      IslandEvents(incarnation_tape(self.events_dir, self.name, incarnation)))
+        # in the run's resource ledger: a cleanup (or the reaper) stops it without this head
+        ssh_trainer_ledger.record("created", **self._ledger_key(incarnation), attrs=ssh_trainer_ledger.created_attrs(
+            **self._ledger_key(incarnation), nodes=self.spec.nodes, docker=self.spec.docker,
+            kill_grace_s=self.kill_grace_s))
+        job = self._job(incarnation, paths)
         try:
             for rank, node in enumerate(self.spec.nodes):
                 job.procs.append(self.ops.start(node, start_script(
@@ -529,16 +826,54 @@ class SshTrainerIslands:
         except Exception:
             self.release(job)
             raise
-        for rank, proc in enumerate(job.procs):
-            sink = job.events.feed if rank == 0 else self._node_log(incarnation, rank)
-            thread = threading.Thread(target=_pump, args=(proc, sink), daemon=True,
-                                      name=f"{self.name}-i{incarnation}-n{rank}")
-            thread.start()
-            job.threads.append(thread)
+        for rank in range(len(job.procs)):
+            self._pump(job, rank)
         self.jobs.append(job)
         print(f"[launcher] trainer incarnation {incarnation} on {len(self.spec.nodes)} SSH node(s) "
               f"(resume {None if resume_from is None else resume_from.cut_id})", flush=True)
         return job
+
+    def attach(self, incarnation: int) -> _SshJob:
+        """Follow incarnation ``incarnation`` that an earlier head started (its log
+        replays from the start, then streams until the island exits)."""
+        paths = remote_paths(self.spec.run_id, self.name, incarnation)
+        job = self._job(incarnation, paths)
+        job.attached = True
+        try:
+            for node in self.spec.nodes:
+                job.procs.append(self.ops.start(node, follow_script(paths)))
+        except Exception:
+            for proc in job.procs:
+                if proc.poll() is None:
+                    proc.terminate()
+            raise
+        for rank in range(len(job.procs)):
+            self._pump(job, rank)
+        self.jobs.append(job)
+        self.checked = True  # the nodes run this island: no preflight before a later start
+        print(f"[launcher] reattached to trainer incarnation {incarnation} on {len(self.spec.nodes)} "
+              "SSH node(s)", flush=True)
+        return job
+
+    def follow(self, job: _SshJob, rank: int) -> Any:
+        """A new stream of node ``rank`` (its previous SSH stream dropped while the
+        island still runs there)."""
+        old = job.procs[rank]
+        if old.poll() is None:
+            old.terminate()
+        job.procs[rank] = self.ops.start(self.spec.nodes[rank], follow_script(job.paths))
+        self._pump(job, rank)
+        return job.procs[rank]
+
+    def node_state(self, incarnation: int, rank: int, *, timeout: float = 60.0) -> NodeState | None:
+        """What node ``rank`` reports for ``incarnation``; None when it does not answer."""
+        script = status_script(remote_paths(self.spec.run_id, self.name, incarnation),
+                               container=self._container(incarnation, rank))
+        try:
+            done = self.ops.run(self.spec.nodes[rank], script, timeout=timeout)
+        except Exception:  # noqa: BLE001 - timeout / ssh missing: no answer
+            return None
+        return parse_node_state(getattr(done, "stdout", "") or "")
 
     def events(self, job: _SshJob) -> list[Mapping[str, Any]]:
         return job.events.take()
@@ -565,8 +900,30 @@ class SshTrainerIslands:
         return [e for job in self.jobs for e in job.events.all]
 
     # -- internals ------------------------------------------------------------------
+    def _job(self, incarnation: int, paths: dict[str, str]) -> _SshJob:
+        tape = incarnation_tape(self.events_dir, self.name, incarnation) if self.tape else None
+        return _SshJob(int(incarnation), paths, [], IslandEvents(tape))
+
+    def _pump(self, job: _SshJob, rank: int) -> None:
+        if rank == 0:
+            on_line = self.on_line
+
+            def sink(line: str) -> None:
+                job.events.feed(line)
+                if on_line is not None:
+                    on_line(line)
+        else:
+            sink = self._node_log(job.incarnation, rank)
+        thread = threading.Thread(target=_pump, args=(job.procs[rank], sink), daemon=True,
+                                  name=f"{self.name}-i{job.incarnation}-n{rank}")
+        thread.start()
+        job.threads.append(thread)
+
     def _container(self, incarnation: int, rank: int) -> str | None:
         return container_name(self.spec.run_id, self.name, incarnation, rank) if self.spec.docker else None
+
+    def _ledger_key(self, incarnation: int) -> dict[str, Any]:
+        return {"run_id": self.spec.run_id, "island": self.name, "incarnation": int(incarnation)}
 
     def _unreachable(self) -> dict[str, str]:
         """Node name -> why it does not answer over SSH (nodes that answer are left out)."""
@@ -607,6 +964,12 @@ class SshTrainerIslands:
             print(f"[launcher] trainer incarnation {earlier}: stopped on every node now", flush=True)
 
     def _kill(self, incarnation: int) -> bool:
+        ok = self._kill_nodes(incarnation)
+        if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
+            ssh_trainer_ledger.record("released", **self._ledger_key(incarnation))
+        return ok
+
+    def _kill_nodes(self, incarnation: int) -> bool:
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
         ok = True
         for rank, node in enumerate(self.spec.nodes):
@@ -708,22 +1071,83 @@ def inventory_trainer_nodes(args: Any, island: Any) -> tuple[Node, ...]:
     return tuple(trainers)
 
 
+def run_image(args: Any, nodes: Sequence[Node]) -> str | None:
+    """The trainer image of docker nodes: the run's ``--rl-image`` (the image its pins
+    are checked against); an inventory image is optional and must name the same one."""
+    ref = str(getattr(args, "rl_image", None) or "")
+    ref = ref[len("docker:"):] if ref.startswith("docker:") else ref
+    docker = [n for n in nodes if n.runtime == "docker"]
+    if not docker:
+        return None
+    if not ref:
+        return None  # the inventory's images (SshTrainerSpec refuses a node without one)
+    other = sorted({n.image for n in docker if n.image and n.image != ref})
+    if other:
+        names = [n.name for n in docker if n.image and n.image != ref]
+        raise SshIslandError(f"inventory image {other} of nodes {names} is not the run's --rl-image {ref}: the "
+                             "run's image decides; drop the inventory image (or images:), or pass it as --rl-image")
+    return ref
+
+
+CODE_PACK_SOURCE, RELEASE_SOURCE, WORKDIR_SOURCE = "code-pack", "release", "workdir"
+
+
+def code_source(args: Any) -> str | None:
+    """How the run's code reaches an ssh: island's nodes: the run code pack from the
+    s3 store (``code-pack``), the release image (``release``), the checkout at
+    ``--rl-ssh-trainer-workdir`` (``workdir``), or None (it does not)."""
+    from .code_pack import CODE_PACK_GIT_PATCH, CODE_PACK_RELEASE, code_pack_mode
+
+    mode = code_pack_mode(args) if getattr(args, "training_mode", "sft") == "rl" else None
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if mode == CODE_PACK_RELEASE:
+        return RELEASE_SOURCE
+    if mode == CODE_PACK_GIT_PATCH and store.startswith("s3://"):
+        return CODE_PACK_SOURCE
+    return WORKDIR_SOURCE if getattr(args, "rl_ssh_trainer_workdir", None) else None
+
+
+def island_code_pack(args: Any) -> tuple[str, str] | None:
+    """``(uri, digest)`` of the run code pack the nodes download (None: no pack). A launch
+    has stored it already (``prepare_run_code_pack``); a dry run only plans it."""
+    if code_source(args) != CODE_PACK_SOURCE:
+        return None
+    pack = getattr(args, "code_pack", None)
+    if pack is not None and pack.pack_uri:
+        return str(pack.pack_uri), str(pack.digest)
+    store = str(args.rl_checkpoint_store).rstrip("/")
+    return f"{store}/code_packs/<digest>.tar", "<digest>"
+
+
 def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerSpec:
     """The :class:`SshTrainerSpec` of the held-back ``ssh:`` trainer island: the
     inventory's trainer nodes run the island's sky task (setup, then run) as
-    ``run_script`` with the task's environment, in ``--rl-ssh-trainer-workdir``
-    (the code pack must be there already: SSH nodes get no sky workdir sync)."""
-    workdir = getattr(args, "rl_ssh_trainer_workdir", None)
-    if not workdir:
-        raise SshIslandError("an ssh: trainer island needs --rl-ssh-trainer-workdir (the yeto checkout on "
-                             "the nodes; SSH nodes get no sky workdir sync)")
+    ``run_script`` with the task's environment. The code: the run code pack (every node
+    downloads it from the store, :func:`code_source`), the release image, or the
+    checkout at ``--rl-ssh-trainer-workdir`` (SSH nodes get no sky workdir sync). The
+    image: ``--rl-image`` (:func:`run_image`). The task's file mounts (e.g. the expert
+    selection) travel in the start script."""
+    workdir = getattr(args, "rl_ssh_trainer_workdir", None) or ""
+    code_pack = island_code_pack(args)
+    if not workdir and code_pack is None and code_source(args) != "release":
+        raise SshIslandError("an ssh: trainer island needs the run's code on its nodes: a run code pack (an "
+                             "s3:// --rl-checkpoint-store with --rl-code-pack auto or git-patch: every node "
+                             "downloads it), a release image (--rl-code-pack release), or "
+                             "--rl-ssh-trainer-workdir (a yeto checkout already on the nodes)")
     run = getattr(task, "run", None)
     if not isinstance(run, str) or not run.strip():
         raise SshIslandError("the ssh: trainer island's task has no run script")
     setup = getattr(task, "setup", None) or ""
     env = {**(getattr(task, "envs", None) or {}), **(getattr(task, "secrets", None) or {})}
-    return SshTrainerSpec(nodes=inventory_trainer_nodes(args, island), run_id=str(args.cluster_prefix),
-                          workdir=str(workdir),
+    files = {str(k): str(v) for k, v in (getattr(task, "file_mounts", None) or {}).items()
+             if isinstance(v, (str, Path))}  # a bucket mount (dict / Storage) is no file
+    remote = sorted(k for k, v in files.items() if "://" in v)
+    if remote:
+        raise SshIslandError(f"the ssh: trainer island's task mounts {remote} from a bucket; SSH nodes "
+                             "get local files only")
+    nodes = inventory_trainer_nodes(args, island)
+    return SshTrainerSpec(nodes=nodes, run_id=str(args.cluster_prefix), workdir=str(workdir),
+                          image=run_image(args, nodes), code_pack=code_pack,
                           # sky runs setup and run as two scripts; a failed setup ends the job
                           run_script=f"bash -c {shlex.quote(setup)} || exit $?\n{run}" if setup.strip() else run,
-                          env={k: str(v) for k, v in env.items() if v is not None})
+                          env={k: str(v) for k, v in env.items() if v is not None}, files=files)

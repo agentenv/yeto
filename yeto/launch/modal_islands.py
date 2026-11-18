@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -47,17 +48,25 @@ def verl_needs_nccl_shm_off(args, spec: ClusterSpec) -> bool:
     return backend == "verl" and int(spec.gpus_per_node or 1) > 1
 
 
-def parse_modal_env(items) -> dict[str, str]:
-    """``--modal-env KEY=VALUE`` items as a dict. A malformed item is not quoted in
-    the error: it is often a secret value pasted without its name."""
+def parse_modal_env(items, *, flag: str = "--modal-env") -> dict[str, str]:
+    """``--modal-env KEY=VALUE`` items (``--island-env`` with ``flag``) as a dict. A
+    malformed item is not quoted in the error: it is often a secret value pasted
+    without its name."""
     out: dict[str, str] = {}
     for index, item in enumerate(items):
         key, sep, value = str(item).partition("=")
         if not sep or not key:
-            raise ValueError(f"--modal-env takes KEY=VALUE; item {index + 1} has no "
+            raise ValueError(f"{flag} takes KEY=VALUE; item {index + 1} has no "
                              f"{'name' if sep else '='} ({len(str(item))} characters, value not shown)")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"{flag} item {index + 1}: {key!r} is not an environment variable name")
         out[key] = value
     return out
+
+
+def parse_island_env(args) -> dict[str, str]:
+    """``--island-env``: the environment every island's job gets."""
+    return parse_modal_env(getattr(args, "island_env", None) or [], flag="--island-env")
 
 
 def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str,

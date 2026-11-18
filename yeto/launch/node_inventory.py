@@ -10,8 +10,11 @@ provider differences live in the file.
 ``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image: a node
 without ``image`` takes ``images[cpu_arch]`` from the top of the file, and a
 node whose image is a yeto catalog image of another architecture or device
-family is refused (``yeto.launch.engine_images``). The trainer preflight also
-compares ``uname -m`` with ``cpu_arch``.
+family is refused (``yeto.launch.engine_images``). A ``runtime: docker`` node
+of a file without ``images:`` may have no image: an ``ssh:`` trainer island runs
+the run's ``--rl-image`` (an inventory image must then name the same one), an SSH
+sampler pool its ``container.image``. The trainer preflight also compares ``uname -m`` with
+``cpu_arch``.
 
 Example::
 
@@ -45,6 +48,19 @@ without them). ``env`` holds the node's fabric settings that yeto cannot derive
 (e.g. ``NCCL_IB_HCA``, ``NCCL_IB_GID_INDEX`` on RoCE, ``NCCL_COLLNET_ENABLE``
 with SHARP); the trainer island exports them after the fabric defaults of
 ``topology.island_comm_env`` and before the run's own environment.
+``scratch`` is an absolute host path on the node's local disk (NVMe) that holds
+the run's node-local data under ``<scratch>/<run id>``: the stage of an object
+store, the staging of policy releases, temporary files, the init release and the
+Ray directory (``ssh_node_storage``). Without it a docker trainer writes them
+into the container's writable layer (the root disk), and loses them with the
+container. ``scratch_min_free_gib``: the trainer preflight refuses a node with
+less free space there. ``store_env_file`` is an owner-only (``0600``) env file on
+the node with the object store credential (``YETO_RL_STORE_S3_ACCESS_KEY_ID`` /
+``..._SECRET_ACCESS_KEY``, or ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``):
+like a Modal Secret, the key then never passes through the launcher; a docker
+trainer reads it with ``docker run --env-file``. Without it the launcher's store
+credential reaches the node in the start script on the SSH session's stdin
+(never in an argv or a file) and the container by name (``-e NAME``).
 
 An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
 
@@ -52,8 +68,8 @@ An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
       x86_64: ghcr.io/OWNER/yeto-miles-k31@sha256:...
     nodes:
       - name: b300-0
-        host: ops@10.0.0.10
-        address: 10.1.0.10            # IP on the interface below
+        host: ops@192.0.2.20
+        address: 198.51.100.20        # IP on the interface below
         interface: bond0
         device_family: cuda
         cpu_arch: x86_64
@@ -65,7 +81,9 @@ An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
         runtime: docker
         docker_args: [--gpus, all, --device, /dev/infiniband, --ulimit, memlock=-1:-1,
                       --ulimit, stack=67108864, --cap-add, IPC_LOCK]
-        mounts: {/mnt/nvme/yeto: /root/.cache, /mnt/nvme/models: /data/models}
+        mounts: {/mnt/nvme/models: /data/models}
+        scratch: /mnt/nvme/yeto
+        scratch_min_free_gib: 1500
         env: {NCCL_IB_HCA: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"}
 """
 
@@ -98,7 +116,11 @@ RUNTIMES = ("docker", "rootfs")
 _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_node", "hbm_gib",
              "host_memory_gib")
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
-                      "docker_args", "env", "price_per_card_hour", "roles")
+                      "docker_args", "env", "price_per_card_hour", "roles", "scratch", "scratch_min_free_gib",
+                      "store_env_file")
+# characters a host path field (scratch, store_env_file) may not hold: it is spliced
+# into shell lines and `docker run` options
+_SCRATCH_FORBIDDEN = frozenset("$`\\\"' :,;&|<>*?\n\t")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -129,6 +151,13 @@ class Node:
     env: Mapping[str, str] = field(default_factory=dict)  # fabric settings yeto cannot derive
     price_per_card_hour: float | None = None
     roles: tuple[str, ...] = ()
+    # an absolute host path on the node's local disk (NVMe) for the run's node-local
+    # data: store stage, release staging, temp files, init release (ssh_node_storage)
+    scratch: str | None = None
+    scratch_min_free_gib: float | None = None  # the trainer preflight refuses less free space
+    # an owner-only (0600) env file on the node holding the object store credential: the
+    # trainer reads it there (docker --env-file), the launcher ships none (ssh_node_storage)
+    store_env_file: str | None = None
 
     @property
     def hbm_gib_per_node(self) -> float:
@@ -201,6 +230,19 @@ def _cpu_arch(value: Any, where: str) -> str:
         raise InventoryError(f"node {where}: {exc}") from None
 
 
+def _host_path(raw: Mapping[str, Any], node: str, key: str) -> str | None:
+    """An absolute host path field (``scratch``, ``store_env_file``) or None: it is
+    spliced into shell lines and ``docker run`` options, so plain characters only."""
+    value = raw.get(key)
+    if value is None:
+        return None
+    path = _require_text(value, node, key).rstrip("/")
+    if not path.startswith("/") or ".." in path.split("/") or set(path) & _SCRATCH_FORBIDDEN:
+        raise InventoryError(f"node {node}: {key} must be an absolute host path other than /, "
+                             f"without '..', blanks, quotes or shell characters, got {value!r}")
+    return path
+
+
 def parse_images(raw: Any) -> dict[str, str]:
     """The top-level ``images:`` map (CPU architecture -> image reference)."""
     if raw is None:
@@ -264,9 +306,10 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
                              f"(known: {list(RUNTIMES)})")
     image = (_require_text(raw["image"], name, "image") if raw.get("image") is not None
              else (images or {}).get(cpu_arch))
-    if runtime == "docker" and image is None:
-        raise InventoryError(f"node {name}: runtime docker needs an image (set image, or "
-                             f"images.{cpu_arch} at the top of the inventory)")
+    if runtime == "docker" and image is None and images:
+        raise InventoryError(f"node {name}: runtime docker and images has no {cpu_arch} entry (set image, or "
+                             f"images.{cpu_arch} at the top of the inventory, or leave images out: an ssh: "
+                             "trainer island then runs --rl-image)")
     if image is not None and (why := image_catalog.image_mismatch(
             image, cpu_arch=cpu_arch, device_family=family)):
         raise InventoryError(f"node {name}: {why}")
@@ -301,6 +344,13 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
     roles = raw.get("roles") or ()
     if not isinstance(roles, (list, tuple)) or not all(isinstance(r, str) for r in roles):
         raise InventoryError(f"node {name}: roles must be a list of strings, got {roles!r}")
+    scratch = _host_path(raw, name, "scratch")
+    store_env_file = _host_path(raw, name, "store_env_file")
+    min_free = raw.get("scratch_min_free_gib")
+    if min_free is not None:
+        if scratch is None:
+            raise InventoryError(f"node {name}: scratch_min_free_gib needs scratch")
+        min_free = _require_positive(min_free, name, "scratch_min_free_gib")
     node = Node(
         name=name,
         host=_require_text(raw["host"], name, "host"),
@@ -323,6 +373,9 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
         env={k: str(v) for k, v in env.items()},
         price_per_card_hour=(float(price) if price is not None else None),
         roles=tuple(roles),
+        scratch=scratch,
+        scratch_min_free_gib=min_free,
+        store_env_file=store_env_file,
     )
     try:
         node.compat_group  # noqa: B018 - an unknown HBM variant fails here, not at launch

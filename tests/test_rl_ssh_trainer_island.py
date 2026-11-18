@@ -504,7 +504,7 @@ def test_preflight_pulls_the_image_on_every_docker_node(tmp_path, checked_cards)
     ops = PullOps()
     SshTrainerIslands(b300_spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops).preflight()
     pulls = [n for n, s in ops.runs if s.startswith("docker pull -q ghcr.io/o/yeto-miles-k31@sha256:")]
-    assert pulls == [f"b300-{i}" for i in range(6)]
+    assert sorted(pulls) == [f"b300-{i}" for i in range(6)]  # the nodes are checked in parallel
     err = ("failed to register layer: openat opt/sglang/lib/python3.12/site-packages/"
            "sglang-0.5.24.dev80+g35708f7.dist-info/INSTALLER: not a directory")
     islands = SshTrainerIslands(b300_spec(), name="t", jobs_path=tmp_path / "j.json", ops=PullOps(1, err))

@@ -212,9 +212,23 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
     from ..cloud.s3_store import island_envs
 
     # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
-    # stages the store on its own disk and moves it by object API.
+    # stages the store on its own disk and moves it by object API. SSH trainer nodes
+    # with an inventory store_env_file hold the credential themselves (no launcher key).
     return island_envs(store, store_client_environ(args),
-                       stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS)
+                       stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
+                       credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
+
+
+def ssh_nodes_hold_store_credentials(args) -> bool:
+    """The ``ssh:`` trainer nodes of ``--rl-node-inventory`` read the store credential
+    from their own env file (``ssh_node_storage.nodes_hold_store_credentials``)."""
+    nodes = getattr(args, "rl_node_inventory_nodes", None)
+    if not nodes:
+        return False
+    from .node_inventory import island_nodes
+    from .ssh_node_storage import nodes_hold_store_credentials
+
+    return nodes_hold_store_credentials(island_nodes(list(nodes), "trainer"))
 
 
 def store_client_environ(args, environ=None) -> dict[str, str]:

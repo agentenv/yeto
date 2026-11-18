@@ -32,7 +32,7 @@ from yeto.launch.pool import provider as providers
 
 from .ledger import Resource, ResourceLedger
 
-ORDER = {"modal_call": 0, "modal_app": 1, "sky_cluster": 3,
+ORDER = {"modal_call": 0, "modal_app": 1, "ssh_trainer": 2, "sky_cluster": 3,
          **{kind: e.cleanup_order for kind, e in providers.ledger_kinds().items()}}
 
 
@@ -137,6 +137,13 @@ def _release_one(r: Resource, ops: CleanupOps, ledger: ResourceLedger, dry_run: 
     entry = providers.ledger_kinds().get(r.kind)
     if entry is not None and entry.release_resource is not None:  # an island provider's machine
         ok, action, res = providers.resolve(entry.release_resource)(r, ops, dry_run)
+        if ok and not dry_run:
+            ledger.released(r.kind, r.id, r.name, by="cleanup", result=res)
+        return Action(r.key, action, ok)
+    if r.kind == "ssh_trainer":  # a trainer incarnation on SSH nodes: the kill script on each
+        from yeto.launch.ssh_trainer_ledger import cleanup_release
+
+        ok, action, res = cleanup_release(r, ops, dry_run)
         if ok and not dry_run:
             ledger.released(r.kind, r.id, r.name, by="cleanup", result=res)
         return Action(r.key, action, ok)
