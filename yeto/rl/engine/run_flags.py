@@ -531,7 +531,22 @@ _PLACEMENT = (
              "nebius-fs://<computefilesystem-id> attaches that Nebius shared filesystem "
              "at /mnt/yeto-models on every node (needs nebius@<region>) and points "
              "HF_HUB_CACHE at it when it holds a completed --model@--model-revision "
-             "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download"),
+             "(scripts/populate_nebius_model_store.sh); otherwise WARNING + Hub download. "
+             "local:///PATH: a node-local hub cache at PATH (as the trainer sees it; on a docker "
+             "SSH node under an inventory mount), used the same way; --model-store-source fills it"),
+    cli_flag("--model-store-source", default=None, metavar="URI",
+             help="SSH trainer island with --model-store local:///PATH: before the first start every "
+             "node copies --model@--model-revision from URI (s3://BUCKET/PREFIX of an S3-compatible "
+             "store such as R2, or a directory such as an NFS mount) into PATH in parallel: chunked, "
+             "resumable, sha256-checked against the source manifest (yeto-weights-manifest.json or "
+             "the objects' sha256 metadata), refused below 1.2x the free disk space "
+             "(yeto.launch.ssh_weights). Credentials: YETO_WEIGHTS_S3_* on the launcher, else the "
+             "s3:// --rl-checkpoint-store's"),
+    cli_flag("--model-store-shards", default="auto", choices=("auto", "all", "stage"),
+             help="--model-store-source: 'stage' copies to each node only the safetensors files of the "
+             "pipeline stages its GPUs run (plus embedding/head/vision files and all small files; "
+             "the index stays whole), 'all' every file; 'auto' = stage for --rl-sample-role trainer "
+             "with --pipeline-parallel > 1, else all"),
     # two-cluster island (yeto.launch.engine_cluster)
     cli_flag("--rl-engine-cluster", default=None, metavar="SPEC",
              help="two-cluster RL island (Nebius sky islands): the LAST n nodes of the "

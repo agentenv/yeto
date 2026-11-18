@@ -2655,7 +2655,10 @@ def main(argv=None) -> None:
     if is_local_reference(model):
         model_path = str(Path(model).expanduser().resolve())
     else:
-        model_path = snapshot_download(repo_id=model, revision=args.model_revision)
+        # a model store hit (storage.model_store_env) is the snapshot: never ask the Hub,
+        # whose file list would complete a node-local store's stage-only snapshot
+        model_path = snapshot_download(repo_id=model, revision=args.model_revision,
+                                       local_files_only=bool(os.environ.get("YETO_MODEL_STORE_HIT")))
     rollout_model = resolve(args.rollout_model) if args.rollout_model else model
     if getattr(args, "rl_init_from_release_dir", None):
         from yeto.rl.engine.init_from_release import island_model_path

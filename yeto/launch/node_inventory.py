@@ -46,7 +46,9 @@ without them). ``env`` holds the node's fabric settings that yeto cannot derive
 with SHARP); the trainer island exports them after the fabric defaults of
 ``topology.island_comm_env`` and before the run's own environment.
 
-An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
+An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300
+(with ``--model-store local:///data/models --model-store-source s3://...`` the
+trainer preflight fills ``/mnt/nvme/models`` on every node, :mod:`.ssh_weights`)::
 
     images:
       x86_64: ghcr.io/OWNER/yeto-miles-k31@sha256:...

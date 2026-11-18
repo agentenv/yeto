@@ -119,6 +119,17 @@ def modal_volume_files(volume: str, path: str) -> tuple[list[str], Callable[[str
     return names, read
 
 
+def model_store_source_files(source: str, environ: dict[str, str] | None = None
+                             ) -> tuple[list[str], Callable[[str], bytes | None]]:
+    """The file list and a small-file reader of a ``--model-store-source``, with the
+    credentials the nodes get (``ssh_weights.source_env``)."""
+    from . import ssh_weights, weights_sync  # noqa: PLC0415
+
+    env = dict(os.environ if environ is None else environ)
+    src = weights_sync.open_source(source, ssh_weights.source_env(source, env, env))
+    return list(src.list()), src.read
+
+
 def _is_uri(value: str) -> bool:
     return "://" in value
 
@@ -155,6 +166,16 @@ def trainer_model_check(args, *, hub=None, volume=None, store=None) -> dict[str,
             record["problems"] += local_problems(model)
         else:
             record["warnings"].append(f"--model {model} is not on this host; it must exist on the trainer node")
+        return record
+    source = getattr(args, "model_store_source", None)
+    if source:  # the SSH trainer nodes copy the model from there (ssh_weights), not from the Hub
+        record["source"] = "model-store-source"
+        try:
+            names, read = model_store_source_files(str(source))
+        except Exception as error:  # noqa: BLE001 - the nodes may reach what this host cannot
+            record["warnings"].append(f"cannot list --model-store-source {source} from this host: {error!r}"[:400])
+            return record
+        record["problems"] += weight_problems(names, read, str(source).rstrip("/"))
         return record
     vol = getattr(args, "modal_model_volume", None)
     if vol and revision and len(str(revision)) == 40:

@@ -34,7 +34,9 @@ One incarnation = one trainer process per node, started over SSH:
    without them is refused: the flags are not known for every family yet; a
    cuda node must pass its GPUs and, on a multi-node ib/roce island, the verbs
    devices and an unlimited memlock: :func:`cuda_docker_problems`). The
-   preflight pulls the image on every docker node;
+   preflight pulls the image on every docker node, then, with a weights plan
+   (``--model-store-source``, :mod:`.ssh_weights`), every node copies the
+   model (or its pipeline stages' files) into its local store at once;
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
    trainer events from it); the other nodes' logs go to local files;
 4. release kills each node's process group (TERM, then KILL after a grace
@@ -139,6 +141,7 @@ class SshTrainerSpec:
     image: str | None = None
     docker_args: tuple[str, ...] | None = None
     memory: Mapping[str, Any] | None = None  # the estimate summary the spec was checked with
+    weights: Any = None  # ssh_weights.WeightsPlan: the preflight copies the model onto every node
 
     def __post_init__(self) -> None:
         if not self.nodes:
@@ -481,7 +484,20 @@ class SshTrainerIslands:
                                      f"answered ({[shlex.join(a) for a in node.preflight_commands()]})")
             if self.spec.docker:
                 self._pull(node)
+        if self.spec.weights is not None:
+            self._sync_weights()
         self.checked = True
+
+    def _sync_weights(self) -> None:
+        """Every node copies the model into its local store at once (ssh_weights)."""
+        from .ssh_weights import WeightsSyncError, sync_weights
+
+        try:
+            sync_weights(self.spec.weights, self.spec.nodes, self.spec.addresses(), self.ops,
+                         images=[str(self.spec.image or n.image) if self.spec.docker else None
+                                 for n in self.spec.nodes])
+        except WeightsSyncError as exc:
+            raise SshIslandError(str(exc)) from None
 
     def _pull(self, node: Node) -> None:
         """Pull the trainer image before the first start: a first ``docker run`` of a
@@ -662,8 +678,16 @@ def island_spec_from_inventory(args: Any, island: Any, task: Any) -> SshTrainerS
         raise SshIslandError("the ssh: trainer island's task has no run script")
     setup = getattr(task, "setup", None) or ""
     env = {**(getattr(task, "envs", None) or {}), **(getattr(task, "secrets", None) or {})}
-    return SshTrainerSpec(nodes=inventory_trainer_nodes(args, island), run_id=str(args.cluster_prefix),
+    env = {k: str(v) for k, v in env.items() if v is not None}
+    nodes = inventory_trainer_nodes(args, island)
+    from .ssh_weights import WeightsSyncError, weights_plan_from_args
+
+    try:
+        weights = weights_plan_from_args(args, env, nodes)
+    except WeightsSyncError as exc:
+        raise SshIslandError(str(exc)) from None
+    return SshTrainerSpec(nodes=nodes, run_id=str(args.cluster_prefix),
                           workdir=str(workdir),
                           # sky runs setup and run as two scripts; a failed setup ends the job
                           run_script=f"bash -c {shlex.quote(setup)} || exit $?\n{run}" if setup.strip() else run,
-                          env={k: str(v) for k, v in env.items() if v is not None})
+                          env=env, weights=weights)

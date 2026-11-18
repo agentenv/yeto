@@ -35,7 +35,8 @@ from .storage import (
     RL_INIT_RELEASE_DIR,
     RL_INITIAL_ADAPTER_PATH,
     _rl_checkpoint_mount, _rl_checkpoint_storage_name, modal_volume_store_env, model_store_env,
-    model_store_filesystem, nebius_baked_image_id, rl_checkpoint_store_plan, store_object_envs,
+    model_store_filesystem, model_store_local_path, nebius_baked_image_id, rl_checkpoint_store_plan,
+    store_object_envs,
 )
 from .island_tasks import island_task_data
 from .rl_ports import _ports_algorithm_flags
@@ -515,8 +516,12 @@ def make_miles_island_task(
             "from huggingface_hub import snapshot_download; "
             f"print(snapshot_download(repo_id={model!r}, revision={args.model_revision!r}))"
         )
+        # A model store hit (YETO_MODEL_STORE_HIT) is the snapshot itself: the
+        # worker fetches nothing (a node-local store may hold only its pipeline
+        # stages' files, which an online snapshot_download would complete from the Hub).
         worker_model_fetch = (
-            f"  python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
+            '  [ -n "${YETO_MODEL_STORE_HIT:-}" ] || '
+            f"python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
             "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
             "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
         )
@@ -628,6 +633,12 @@ def make_miles_island_task(
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
     elif store_fs and not is_local_reference(model):
         store_env = model_store_env(model, args.model_revision) + "\n"
+        setup_steps.append(store_env.rstrip("\n"))
+        prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
+    elif model_store_local_path(getattr(args, "model_store", None)) and not is_local_reference(model):
+        # a node-local hub cache (filled by --model-store-source on an SSH trainer island)
+        store_env = model_store_env(model, args.model_revision,
+                                    mount=model_store_local_path(args.model_store)) + "\n"
         setup_steps.append(store_env.rstrip("\n"))
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
     setup_steps.append(prefetch)
