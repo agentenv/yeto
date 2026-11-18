@@ -139,9 +139,16 @@ def test_trainer_argv_passes_the_launch_dry_run(run, tmp_path, monkeypatch, caps
     import yeto.cli as cli
     import yeto.launcher as launcher
 
+    from yeto.cloud import s3_store
+
     for key, value in (("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test"), ("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test"),
                        ("HF_HUB_OFFLINE", "1")):
         monkeypatch.setenv(key, value)
+    # cmd_launch exports --rl-object-store-endpoint into os.environ (apply_object_store_endpoint):
+    # register the endpoint variables so monkeypatch removes them again after the test
+    for key in (s3_store.ENDPOINT_ENV, s3_store.REGION_ENV, s3_store.PROFILE_ENV, "AWS_ENDPOINT_URL"):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     import yeto.modal_runner as modal_runner
 
     monkeypatch.setattr(modal_runner, "modal_available", lambda: True)  # CI has no Modal token
