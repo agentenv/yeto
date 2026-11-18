@@ -102,7 +102,10 @@ class Requirements:
     all_to_all_fraction: float = 0.5  # busbw vs the HCA bound of all_to_all
     sendrecv_fraction: float = 0.6  # busbw of one GPU vs one HCA
     min_mtu: int = 4096  # IB / RoCE active MTU
-    ports: tuple[int, ...] = (6379, 8265, 10001, 29500, 20000, 40000, 60000)
+    # Ray head (GCS, dashboard, client), torch rendezvous, samples of the worker and
+    # ephemeral ranges, and Ray's per-node agent ports (52365 fixed by Ray; 52366-52368
+    # pinned on SSH nodes, rl_island_task.RAY_AGENT_PORTS)
+    ports: tuple[int, ...] = (6379, 8265, 10001, 29500, 20000, 40000, 60000, 52365, 52366, 52367, 52368)
 
 
 @dataclass

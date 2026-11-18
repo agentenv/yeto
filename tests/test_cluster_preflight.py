@@ -801,3 +801,12 @@ def test_preflight_checks_the_image_the_launcher_runs(monkeypatch):
     with pytest.raises(Stop):
         cp.main(args, ops=object())
     assert seen["image"] == repack
+
+
+def test_the_port_probe_covers_the_ray_agent_ports_ssh_nodes_pin():
+    """The agent ports the SSH island pins (rl_island_task.RAY_AGENT_PORTS) and Ray's
+    fixed dashboard agent port are probed between nodes, as the head's ports are."""
+    from yeto.launch.rl_island_task import RAY_AGENT_PORTS
+
+    ports = set(cp.Requirements().ports)
+    assert set(RAY_AGENT_PORTS.values()) | {52365, 6379, 8265, 10001, 29500} <= ports
