@@ -52,8 +52,8 @@ An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
       x86_64: ghcr.io/OWNER/yeto-miles-k31@sha256:...
     nodes:
       - name: b300-0
-        host: ops@10.0.0.10
-        address: 10.1.0.10            # IP on the interface below
+        host: ops@192.0.2.20
+        address: 198.51.100.20        # IP on the interface below
         interface: bond0
         device_family: cuda
         cpu_arch: x86_64
