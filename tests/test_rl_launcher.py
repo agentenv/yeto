@@ -1871,6 +1871,7 @@ def test_stop_miles_ray_kills_only_the_island_ray_pids(tmp_path):
                         (bystander.pid, "raylet /tmp/ray/session_latest")):
             (proc / str(p)).mkdir(parents=True)
             (proc / str(p) / "cmdline").write_bytes(argv.replace(" ", "\0").encode())
+        (proc / "999999").mkdir()  # a process that ended between the glob and the read
         script = (f"{MILES_RAY_STOP_FUNCTIONS}set -e\n"
                   "mkdir -p \"$YETO_PROC_ROOT/$$\"; printf 'x $MILES_RAY_DIR/y' > \"$YETO_PROC_ROOT/$$/cmdline\"\n"
                   "stop_miles_ray\necho done\n")
@@ -1878,6 +1879,7 @@ def test_stop_miles_ray_kills_only_the_island_ray_pids(tmp_path):
                              env={"PATH": "/usr/bin:/bin", "YETO_PROC_ROOT": str(proc),
                                   "MILES_RAY_DIR": str(ray_dir)})
         assert out.returncode == 0 and out.stdout.strip() == "done", out.stderr
+        assert "No such file" not in out.stderr, out.stderr  # no noise for a vanished process
         for child in (stubborn, polite):
             child.wait(timeout=10)
         assert bystander.poll() is None

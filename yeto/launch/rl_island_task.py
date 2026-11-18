@@ -59,7 +59,9 @@ MILES_RAY_STOP_FUNCTIONS = (
     "  for d in \"${YETO_PROC_ROOT:-/proc}\"/[0-9]*; do\n"
     '    p=${d##*/}\n'
     '    case "$p" in "$$"|"$PPID"|"${BASHPID:-$$}") continue ;; esac\n'
-    "    c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null) || continue\n"
+    # a process that ended after the glob has no cmdline: braces, so bash's own
+    # "No such file" for the redirection is silenced too (it filled the worker logs)
+    "    c=$( { tr '\\0' ' ' < \"$d/cmdline\"; } 2>/dev/null) || continue\n"
     '    case "$c" in *"$MILES_RAY_DIR/"*) echo "$p" ;; esac\n'
     "  done\n"
     "}\n"
