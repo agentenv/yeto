@@ -167,6 +167,9 @@ def _output_tail(proc: subprocess.CompletedProcess) -> str:
     return redact_text(proc.stderr or "")[-3000:]
 
 
+# yeto preflight --no-bench of an ssh: trainer: a first pull of the trainer image (~24 GB) is in it
+CLUSTER_PREFLIGHT_TIMEOUT_S = 5400.0
+
 class RunConfigError(ValueError):
     """The run config (or the run's state directory) cannot be used: one line for the user."""
 
@@ -670,6 +673,32 @@ class Run:
         self.mark("preflight", ok=bool(ok))
         return bool(ok)
 
+    # The trainer's cluster preflight (yeto.launch.preflight.gate): run before anything is
+    # ordered; once it passed (or --skip-preflight skipped it) the trainer's own launch skips it.
+    cluster_preflight_passed = False
+
+    def cluster_preflight(self, *, dry_run: bool = False) -> bool:
+        """``yeto preflight --no-bench`` of the trainer's ``ssh:`` islands (node checks and
+        TCP ports): False on a FAIL; a dry run only logs the command. True without one."""
+        from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
+
+        commands = commands_for_launch_argv([str(a) for a in self.cfg["trainer"]["argv"]])
+        if not commands:
+            return True
+        shown = "; ".join("yeto " + " ".join(c) for c in commands)
+        if dry_run:
+            _log(f"dry run: before ordering, run up would run the trainer's cluster preflight: {shown}")
+            return True
+        ok = all(self._cmd(self.yeto(*c), log="preflight.log", timeout=CLUSTER_PREFLIGHT_TIMEOUT_S) == 0
+                 for c in commands)
+        self.mark("cluster_preflight", ok=ok)
+        if ok:
+            self.cluster_preflight_passed = True
+        else:
+            _log(f"cluster preflight failed: {shown} (see {self.dir / 'preflight.log'} and the report in the "
+                 "trainer's run dir; --skip-preflight skips it)")
+        return ok
+
     def sandbox_prepare(self) -> bool:
         if not self.envs:
             return True
@@ -931,6 +960,11 @@ class Run:
             argv += ["--rl-ledger-set-aside-before", f"{time.time() if now is None else now:.0f}"]
         if self.continue_from_release(argv):
             argv += ["--rl-init-from-release", "latest"]
+        if self.cluster_preflight_passed and "--skip-preflight" not in argv:
+            from yeto.launch.preflight.gate import commands_for_launch_argv  # noqa: PLC0415
+
+            if commands_for_launch_argv(argv):  # an ssh: trainer: run up ran it before ordering anything
+                argv.append("--skip-preflight")
         return argv
 
     def continue_from_release(self, argv: list[str]) -> bool:
@@ -2397,7 +2431,8 @@ def add_parser(sub: Any) -> None:
     up = rsub.add_parser("up", help="preflight, sandbox, pool, first group, trainer, dashboard, monitor")
     up.add_argument("--config", required=True)
     up.add_argument("--dry-run", action="store_true", help="preflight only; nothing is ordered")
-    up.add_argument("--skip-preflight", action="store_true", help="resume: preflight already passed")
+    up.add_argument("--skip-preflight", action="store_true",
+                    help="resume: preflight already passed (also skips the cluster preflight of an ssh: trainer)")
     up.add_argument("--no-monitor", action="store_true", help="return after the dashboard starts")
     up.add_argument("--allow-after-forced-stop", action="store_true",
                     help="run up again after a budget breaker forced the sampler pool down (nc_forced_stop)")
@@ -2550,6 +2585,11 @@ def main(args: Any) -> int:
         log = run.dir / "preflight.log"
         _log("preflight failed: nothing ordered" + (f" (see {log})" if log.exists() else
                                                      " (the reason is the preflight line above)"))
+        return 2
+    if args.skip_preflight:
+        run.cluster_preflight_passed = True  # the escape hatch also reaches the trainer's own launch
+    elif not run.cluster_preflight(dry_run=args.dry_run):
+        _log("cluster preflight failed: nothing ordered")
         return 2
     if args.dry_run:
         _log("dry run: preflight ok, nothing ordered" + (
