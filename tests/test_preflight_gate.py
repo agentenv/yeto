@@ -213,14 +213,11 @@ def test_run_up_main_refuses_before_ordering_and_skip_reaches_the_trainer(make_u
     assert order[:2] == ["sandbox", "pool"] and order[-1][-1] == "--skip-preflight"
 
 
-def test_the_gate_checks_the_run_image(tmp_path, runs_dir):
-    """The run's --rl-image decides the trainer image: the gate's preflight pulls and
-    probes it (not only the inventory's), and refuses an inventory that names another."""
+def test_the_gate_refuses_an_inventory_image_that_is_not_the_run_image(tmp_path, runs_dir):
+    """A docker:-prefixed --rl-image is pulled and probed, and an inventory that names
+    another image is refused before any node is touched."""
     from tests.test_cluster_preflight import IMAGE
 
-    argv = ["--gpu", "ssh:6x8xb300", "--rl-node-inventory", "inv.yaml", "--rl-image", f"docker:{IMAGE}"]
-    (cmd,) = gate.commands_for_launch_argv(argv)
-    assert cmd[cmd.index("--image") + 1] == IMAGE
     ops = _fake()
     rec = gate.launch_gate(_args(tmp_path, rl_image=f"docker:{IMAGE}"), ops=ops, out=io.StringIO())
     assert rec["reports"][0]["ok"]
@@ -228,3 +225,27 @@ def test_the_gate_checks_the_run_image(tmp_path, runs_dir):
     with pytest.raises(ValueError, match="is not the run's --rl-image"):
         gate.launch_gate(_args(tmp_path, rl_image="docker:ghcr.io/o/other@sha256:" + "c" * 64), ops=_fake(),
                          out=io.StringIO())
+
+
+def test_gate_checks_the_image_the_trainer_runs(tmp_path, runs_dir):
+    """An inventory pinned to the overlay-unsafe FULL_E digest runs (and is checked) as its
+    overlay-safe repack; --rl-image is the image of the run."""
+    from tests.test_cluster_preflight import BAD_IMAGE, IMAGE
+    from yeto.rl.adapters.miles import pins
+
+    safe = pins.overlay_safe_image(BAD_IMAGE)
+    nodes = [b300(0, image=BAD_IMAGE), b300(1, image=BAD_IMAGE)]
+    ops = FakeCluster(nodes)
+    ops.NOW = time.time()
+    args = _args(tmp_path)
+    inv = Path(args.rl_node_inventory)
+    inv.write_text(inv.read_text().replace(IMAGE, BAD_IMAGE))
+    rec = gate.launch_gate(args, ops=ops, out=io.StringIO())
+    assert rec["reports"][0]["ok"]
+    pulls = [s for _, s in ops.scripts if s.startswith("docker pull")]
+    assert pulls and all(safe in s and BAD_IMAGE not in s for s in pulls)
+    ops = _fake()
+    gate.launch_gate(_args(tmp_path, rl_image=IMAGE), ops=ops, out=io.StringIO())
+    assert all(IMAGE in s for _, s in ops.scripts if s.startswith("docker pull"))
+    argv = [*SSH_ARGV, "--rl-image", "docker:" + IMAGE]
+    assert gate.commands_for_launch_argv(argv)[0][5:7] == ["--image", "docker:" + IMAGE]
