@@ -1076,9 +1076,9 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     lora = lora_mode(miles_args)
     # module doc: a trainer island stages its full releases unless --rl-release-inline
     staged = config.role == TRAINER and not lora and not config.release_inline
-    all_ranks_write = staged and env.get(STAGED_EXPORT_ENV, "") != "miles"
+    all_ranks_write = staged_export_by_all_ranks(miles_args, env, staged=staged)
 
-    # local disk: every rank writes a share of the files
+    # local disk: every rank writes a share of the files (one node), else rank 0 all of them
     write_full = full_checkpoint_writer(actor_model, runner, all_ranks=all_ranks_write,
                                         base_dir=_local_dir(getattr(miles_args, "hf_checkpoint", None)))
 
@@ -1114,6 +1114,17 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if _quant_tier(miles_args) == TIER_TRAINER_FP8:
         start_trainer_releaser(miles_args, config, environ)
     return publisher
+
+
+def staged_export_by_all_ranks(miles_args: Any, env: Mapping[str, str], *, staged: bool) -> bool:
+    """Whether every rank writes a share of a staged release
+    (``release_plugin.write_full_checkpoint``) instead of rank 0 all of it. The
+    staging directory is on each node's local disk, and the driver uploads only
+    its own node's: a trainer on several nodes (an SSH or Modal island of 6 x 8
+    cards) would release only node 0's share of the files, so there rank 0
+    writes them (``export_hf``), as ``hf_exports_for`` does for round exports."""
+    one_node = int(getattr(miles_args, "actor_num_nodes", 1) or 1) == 1
+    return staged and one_node and env.get(STAGED_EXPORT_ENV, "") != "miles"
 
 
 def _local_dir(path: Any) -> Path | None:

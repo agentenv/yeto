@@ -34,13 +34,18 @@ One incarnation = one trainer process per node, started over SSH:
    without them is refused: the flags are not known for every family yet; a
    cuda node must pass its GPUs and, on a multi-node ib/roce island, the verbs
    devices and an unlimited memlock: :func:`cuda_docker_problems`). The
-   preflight pulls the image on every docker node;
+   preflight pulls the image on every docker node. The node-local data (store
+   stage, release staging, temp files, init release, ``~/yeto-output``) goes
+   under the node's inventory ``scratch`` and the incarnation's state dir
+   (:mod:`.ssh_node_storage`);
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
    trainer events from it); the other nodes' logs go to local files;
 4. release kills each node's process group (TERM, then KILL after a grace
    period) by the PID file the start wrote; a restarted head does the same for
    an orphan incarnation (the PID file path is derived from the run id, island
-   name and incarnation, recorded in the journal before any start).
+   name and incarnation, recorded in the journal before any start). Each
+   incarnation is also a row of the run's resource ledger, so ``yeto cleanup``
+   and the run's reaper stop it when the head is gone (:mod:`.ssh_trainer_ledger`).
 
 Rendezvous: the other nodes dial node 0 at its ``address`` from the inventory
 (the IP on the cluster network); an SSH alias resolves on the head only. A
@@ -73,6 +78,7 @@ from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
 from ..gpu_spec import DEVICE_FAMILY_ENV
+from . import ssh_node_storage, ssh_trainer_ledger
 from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -288,9 +294,12 @@ def skypilot_env(spec: SshTrainerSpec, rank: int) -> dict[str, str]:
             "SKYPILOT_NUM_GPUS_PER_NODE": str(spec.nodes[rank].cards_per_node)}
 
 
-def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str) -> str:
-    """The node's job as bash; it exits with the trainer's exit code."""
+def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str, state_dir: str | None = None) -> str:
+    """The node's job as bash; it exits with the trainer's exit code. ``state_dir``:
+    the incarnation's state dir as the job sees it (the node-local storage prelude,
+    :func:`ssh_node_storage.job_prelude`)."""
     node = spec.nodes[rank]
+    prelude = ssh_node_storage.job_prelude(node, spec.run_id, state_dir)
     if spec.run_script:
         # The island run script (rl_island_task) enters ~/sky_workdir, where sky syncs
         # the code; an SSH node has no sync, its checkout is the spec's workdir.
@@ -304,13 +313,14 @@ def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str) -> str:
     if rank == 0 and spec.requant:
         # The loop converts releases while the trainer runs; after the trainer
         # ends, one more pass converts the last BF16 release.
-        return (f"{shlex.join(spec.requant)} --loop --poll-seconds {spec.requant_poll_s:g} > {requant_log} 2>&1 &\n"
+        return (f"{prelude}{shlex.join(spec.requant)} --loop --poll-seconds {spec.requant_poll_s:g} "
+                f"> {requant_log} 2>&1 &\n"
                 "req=$!\n"
                 f"{trainer} && rc=0 || rc=$?\n"
                 "kill $req 2>/dev/null; wait $req 2>/dev/null\n"
                 f"{shlex.join(spec.requant)} >> {requant_log} 2>&1 || {{ [ $rc -ne 0 ] || rc=1; }}\n"
                 "exit $rc\n")
-    return f"{trainer}\n"
+    return f"{prelude}{trainer}\n"
 
 
 def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[str]) -> list[str]:
@@ -321,6 +331,7 @@ def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[
             *spec.docker_args_of(node)]
     for host_path, container_path in sorted(node.mounts.items()):
         argv += ["-v", f"{host_path}:{container_path}"]
+    argv += ssh_node_storage.docker_options(node, spec.run_id)
     for key in sorted(env_names):
         argv += ["-e", key]
     return [*argv, "-w", spec.workdir, str(spec.image or node.image)]
@@ -338,11 +349,14 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     # The inventory's fabric settings (e.g. NCCL_IB_HCA) refine the family defaults.
     full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **node.env, **spec.env, **env,
                 **(skypilot_env(spec, rank) if spec.run_script else {})}
+    # node-local data (store stage, release staging, temp files) under the node's scratch
+    full_env.update(ssh_node_storage.scratch_env(node, spec.run_id, full_env))
     if spec.docker:
         if container is None:
             raise SshIslandError("a docker node needs its container name")
-        # The state dir is mounted so the re-quantizer log lands next to the trainer log.
-        inner = _trainer_body(spec, rank, f"{CONTAINER_STATE_DIR}/requant.log")
+        # The state dir is mounted so the re-quantizer log lands next to the trainer log
+        # (and ~/yeto-output in it: the tape outlives the container).
+        inner = _trainer_body(spec, rank, f"{CONTAINER_STATE_DIR}/requant.log", CONTAINER_STATE_DIR)
         *options, image = docker_argv(spec, rank, container, list(full_env))
         mount = f"-v \"{paths['dir']}:{CONTAINER_STATE_DIR}\""  # $HOME expands on the node
         job = f"{shlex.join(options)} {mount} {shlex.quote(image)} bash -c {shlex.quote(inner)}"
@@ -364,7 +378,9 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         # Exported: the rc and requant-log paths expand inside the job's own bash.
         + f"export {STATE_HOME_VAR}=\"$HOME\"\n"
         + _exports(full_env)
-        + f"mkdir -p \"{paths['dir']}\"\n"
+        # owner-only: the logs and the tape of the job live there
+        + f"(umask 077 && mkdir -p \"{paths['dir']}\")\n"
+        + ssh_node_storage.host_prepare(node, spec.run_id)
         + enter
         + f"rm -f \"{paths['rc']}\"\n"
         # Job control is off in a non-interactive shell, so the background setsid
@@ -479,9 +495,35 @@ class SshTrainerIslands:
             else:
                 raise SshIslandError(f"node {node.name}: no card tool of family {node.device_family} "
                                      f"answered ({[shlex.join(a) for a in node.preflight_commands()]})")
+            self._check_scratch(node)
             if self.spec.docker:
                 self._pull(node)
+        warning = ssh_node_storage.no_scratch_warning(
+            list(self.spec.nodes), staged=bool(ssh_node_storage.staged_envs(self.spec.env)))
+        if warning:
+            print(warning, flush=True)
         self.checked = True
+
+    def _check_scratch(self, node: Node) -> None:
+        """The node's scratch directory exists, is writable and has the free space
+        the inventory asks for; its store env file is owner-only (ssh_node_storage)."""
+        script = ssh_node_storage.env_file_preflight_script(node)
+        if script is not None:
+            done = self.ops.run(node, script, timeout=60.0)
+            try:
+                ssh_node_storage.check_env_file(node, done.returncode, done.stdout or "")
+            except ssh_node_storage.ScratchError as error:
+                raise SshIslandError(str(error)) from None
+        script = ssh_node_storage.preflight_script(node, self.spec.run_id)
+        if script is None:
+            return
+        done = self.ops.run(node, script, timeout=120.0)
+        try:
+            free = ssh_node_storage.check_preflight(node, done.returncode, done.stdout or "",
+                                                    getattr(done, "stderr", "") or "")
+        except ssh_node_storage.ScratchError as error:
+            raise SshIslandError(str(error)) from None
+        print(f"[launcher] node {node.name}: scratch {node.scratch} has {free:.0f} GiB free", flush=True)
 
     def _pull(self, node: Node) -> None:
         """Pull the trainer image before the first start: a first ``docker run`` of a
@@ -502,6 +544,10 @@ class SshTrainerIslands:
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
         env = {**island_env(incarnation, resume_from, poll_s=self.poll_s), SUBMITTED_ENV: f"{self.clock():.3f}"}
         save_job(self.jobs_path, incarnation, f"ssh:{self.name}-i{int(incarnation)}")  # before any start
+        # in the run's resource ledger: a cleanup (or the reaper) stops it without this head
+        ssh_trainer_ledger.record("created", **self._ledger_key(incarnation), attrs=ssh_trainer_ledger.created_attrs(
+            **self._ledger_key(incarnation), nodes=self.spec.nodes, docker=self.spec.docker,
+            kill_grace_s=self.kill_grace_s))
         job = _SshJob(int(incarnation), paths, [],
                       IslandEvents(incarnation_tape(self.events_dir, self.name, incarnation)))
         try:
@@ -550,7 +596,16 @@ class SshTrainerIslands:
     def _container(self, incarnation: int, rank: int) -> str | None:
         return container_name(self.spec.run_id, self.name, incarnation, rank) if self.spec.docker else None
 
+    def _ledger_key(self, incarnation: int) -> dict[str, Any]:
+        return {"run_id": self.spec.run_id, "island": self.name, "incarnation": int(incarnation)}
+
     def _kill(self, incarnation: int) -> bool:
+        ok = self._kill_nodes(incarnation)
+        if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
+            ssh_trainer_ledger.record("released", **self._ledger_key(incarnation))
+        return ok
+
+    def _kill_nodes(self, incarnation: int) -> bool:
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
         ok = True
         for rank, node in enumerate(self.spec.nodes):
