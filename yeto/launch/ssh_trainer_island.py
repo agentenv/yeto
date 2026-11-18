@@ -47,7 +47,14 @@ One incarnation = one trainer process per node, started over SSH:
    an orphan incarnation (the PID file path is derived from the run id, island
    name and incarnation, recorded in the journal before any start). Each
    incarnation is also a row of the run's resource ledger, so ``yeto cleanup``
-   and the run's reaper stop it when the head is gone (:mod:`.ssh_trainer_ledger`).
+   and the run's reaper stop it when the head is gone (:mod:`.ssh_trainer_ledger`);
+5. a later start first waits (up to ``node_wait_s``) until every node answers
+   over SSH again: a node that lost power or its network is not given a new
+   incarnation that can only fail (measured on the simulated cluster,
+   tests/integration/bm_sim: such a start ran 78 s and ended "without a stopped
+   event", naming no node). It then stops again every incarnation whose release
+   was not confirmed on every node (a node that was unreachable then may have
+   kept it running), and refuses to start over one it still cannot stop.
 
 Rendezvous: the other nodes dial node 0 at its ``address`` from the inventory
 (the IP on the cluster network); an SSH alias resolves on the head only. A
@@ -102,6 +109,8 @@ from .trainer_island import (
 )
 
 KILL_GRACE_S = 30
+NODE_WAIT_S = 600.0  # a later start waits this long for an unreachable node (a reboot)
+NODE_POLL_S = 15.0
 
 
 def _overlay_safe_image(image: str) -> str | None:
@@ -739,7 +748,9 @@ class SshTrainerIslands:
                  poll_s: float | None = None, events_dir: Path | None = None,
                  clock: Callable[[], float] = time.time, kill_grace_s: int = KILL_GRACE_S,
                  scheduled: bool = True, tape: bool = True,
-                 on_line: Callable[[str], None] | None = None) -> None:
+                 on_line: Callable[[str], None] | None = None,
+                 node_wait_s: float = NODE_WAIT_S, node_poll_s: float = NODE_POLL_S,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.spec = spec
         self.name = name
         self.jobs_path = Path(jobs_path)
@@ -751,8 +762,12 @@ class SshTrainerIslands:
         self.scheduled = bool(scheduled)
         self.tape = bool(tape)
         self.on_line = on_line
+        self.node_wait_s = float(node_wait_s)
+        self.node_poll_s = float(node_poll_s)
+        self.sleep = sleep
         self.jobs: list[_SshJob] = []
         self.checked = False
+        self.unreleased: set[int] = set()  # incarnations not confirmed stopped on every node
 
     # -- preflight ----------------------------------------------------------------
     def preflight(self) -> None:
@@ -849,6 +864,9 @@ class SshTrainerIslands:
     def launch(self, incarnation: int, resume_from: CutRef | None) -> _SshJob:
         if not self.checked:
             self.preflight()
+        else:
+            self._wait_reachable(incarnation)
+        self._stop_unreleased(incarnation)
         paths = remote_paths(self.spec.run_id, self.name, incarnation)
         control = island_env(incarnation, resume_from, poll_s=self.poll_s) if self.scheduled else {}
         env = {**control, SUBMITTED_ENV: f"{self.clock():.3f}"}
@@ -964,6 +982,44 @@ class SshTrainerIslands:
     def _ledger_key(self, incarnation: int) -> dict[str, Any]:
         return {"run_id": self.spec.run_id, "island": self.name, "incarnation": int(incarnation)}
 
+    def _unreachable(self) -> dict[str, str]:
+        """Node name -> why it does not answer over SSH (nodes that answer are left out)."""
+        down: dict[str, str] = {}
+        for node in self.spec.nodes:
+            try:
+                done = self.ops.run(node, "true", timeout=60.0)
+            except Exception as error:  # noqa: BLE001 - a timeout is an unreachable node
+                down[node.name] = repr(error)[:300]
+                continue
+            if done.returncode != 0:
+                err = (getattr(done, "stderr", "") or "").strip()
+                down[node.name] = f"rc {done.returncode}" + (f": {err[-300:]}" if err else "")
+        return down
+
+    def _wait_reachable(self, incarnation: int) -> None:
+        """Before a later start: every node answers over SSH, else wait (up to
+        ``node_wait_s``) and raise naming the nodes that still do not."""
+        deadline = self.clock() + self.node_wait_s
+        while True:
+            down = self._unreachable()
+            if not down:
+                return
+            detail = "; ".join(f"{name}: {why}" for name, why in sorted(down.items()))
+            if self.clock() >= deadline:
+                raise SshIslandError(f"trainer incarnation {incarnation}: node(s) {sorted(down)} unreachable over "
+                                     f"SSH for {self.node_wait_s:.0f} s ({detail})")
+            print(f"[launcher] trainer incarnation {incarnation}: waiting for node(s) {sorted(down)}, "
+                  f"unreachable over SSH ({detail})", flush=True)
+            self.sleep(self.node_poll_s)
+
+    def _stop_unreleased(self, incarnation: int) -> None:
+        """Stop again the incarnations whose release a node did not confirm."""
+        for earlier in sorted(self.unreleased):
+            if not self._kill(earlier):
+                raise SshIslandError(f"trainer incarnation {incarnation}: incarnation {earlier} is not confirmed "
+                                     "stopped on every node; not starting another over it")
+            print(f"[launcher] trainer incarnation {earlier}: stopped on every node now", flush=True)
+
     def _kill(self, incarnation: int) -> bool:
         ok = self._kill_nodes(incarnation)
         if ok:  # every node confirmed: the ledger row closes (else a cleanup retries it)
@@ -1009,6 +1065,10 @@ class SshTrainerIslands:
                 print(f"[launcher] stop of trainer incarnation {incarnation} on {node.name} failed: {error}",
                       flush=True)
                 ok = False
+        if ok:
+            self.unreleased.discard(int(incarnation))
+        else:
+            self.unreleased.add(int(incarnation))
         return ok
 
     def _node_log(self, incarnation: int, rank: int) -> Callable[[str], None]:

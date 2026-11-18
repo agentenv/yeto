@@ -118,6 +118,8 @@ class FakeCluster(SshOps):
             return done(255, "", "ssh: connect to host: Connection timed out")
         if script == "uname -m":
             return done(0, "x86_64\n")
+        if script == "true":  # the reachability probe before a later start
+            return done(0)
         if "nvidia-smi" in script or script.startswith("docker pull"):
             return done(0, "ok\n")
         k, runs = self._k(script), self.runs[node.name]

@@ -201,9 +201,11 @@ class SshIslandOps:
             if sink is not None:
                 sink(line)
 
+        # node_wait_s=0: a start finds an unreachable node at once and names it; the
+        # fleet controller retries the relaunch every poll (a wait here would hold it)
         rec.islands = SshTrainerIslands(spec, name=name, jobs_path=self.jobs_path(name), ops=self.ops,
                                         events_dir=self.events_dir, kill_grace_s=self.kill_grace_s,
-                                        scheduled=False, tape=False, on_line=on_line)
+                                        scheduled=False, tape=False, on_line=on_line, node_wait_s=0.0)
         self.islands[name] = rec
 
     def threads(self, name: str) -> list[threading.Thread]:
