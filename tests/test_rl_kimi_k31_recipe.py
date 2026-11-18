@@ -324,3 +324,22 @@ def test_mxfp4_expert_recompute_check_reads_the_last_flag_and_the_redequant_swit
     with caplog.at_level(logging.WARNING):
         check(block, on)
     assert miles_config.MXFP4_REDEQUANT_ENV not in caplog.text
+
+
+def test_per_stage_block_recompute_needs_full_block_and_one_count_per_stage():
+    from yeto.rl.adapters.miles import config as miles_config
+
+    check = miles_config.check_mxfp4_expert_recompute
+    env = {miles_config.MXFP4_REDEQUANT_ENV: "1", miles_config.STAGE_RECOMPUTE_ENV: "31,27,24"}
+    pp3 = ["--pipeline-model-parallel-size", "3"]
+    full = [*pp3, "--recompute-granularity", "full", "--recompute-method", "uniform", "--recompute-num-layers", "1"]
+    block = [*full, "--recompute-method", "block", "--recompute-num-layers", "32"]
+    check(block, env)
+    with pytest.raises(miles_config.MilesConfigError, match="--recompute-method block"):
+        check(full, env)
+    with pytest.raises(miles_config.MilesConfigError, match="one layer count"):
+        check(block, {**env, miles_config.STAGE_RECOMPUTE_ENV: "31,27"})
+    with pytest.raises(miles_config.MilesConfigError, match="one layer count"):
+        check(block, {**env, miles_config.STAGE_RECOMPUTE_ENV: "31,-1,24"})
+    # unset or empty: stock Megatron flags only
+    check(full, {**env, miles_config.STAGE_RECOMPUTE_ENV: " "})

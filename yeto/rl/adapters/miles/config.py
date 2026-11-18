@@ -1541,6 +1541,9 @@ FULL_RECOMPUTE_ARGV = ("--recompute-granularity", "full", "--recompute-method", 
 # Miles k31/integ-trainer-a2 (miles_plugins/models/kimi_k3/mxfp4_redequant.py): the frozen MXFP4 experts' graph
 # keeps the packed bytes and the backward dequantizes them again, so no layer holds BF16 experts until its backward
 MXFP4_REDEQUANT_ENV = "MILES_K31_MXFP4_REDEQUANT_BACKWARD"
+# Miles k31/a2-stage-recompute (miles_plugins/models/kimi_k3/stage_recompute.py): one --recompute-num-layers per
+# pipeline stage for --recompute-method block, e.g. "31,27,24" (stage s keeps its last L_s - N_s layers)
+STAGE_RECOMPUTE_ENV = "MILES_K31_RECOMPUTE_NUM_LAYERS_PER_STAGE"
 
 
 def _last_flag_value(values: Sequence[str], flag: str) -> str | None:
@@ -1571,7 +1574,8 @@ def check_mxfp4_expert_recompute(values: Sequence[str], environ: Mapping[str, st
     """kimi_k31, on the final argv (extra argv and ``YETO_MILES_TRAIN_EXTRA_ARGV`` included, last flag wins):
     a granularity other than full keeps every layer's dequantized MXFP4 experts until its backward, unless
     ``MILES_K31_MXFP4_REDEQUANT_BACKWARD=1`` (needs a Miles with ``mxfp4_redequant``; on an older Miles the
-    variable does nothing). ``--recompute-method block`` keeps them for the layers it does not recompute."""
+    variable does nothing). ``--recompute-method block`` keeps them for the layers it does not recompute.
+    ``MILES_K31_RECOMPUTE_NUM_LAYERS_PER_STAGE`` needs full + block and one count per pipeline stage."""
     granularity = _last_flag_value(values, "--recompute-granularity")
     redequant = environ.get(MXFP4_REDEQUANT_ENV, "0") == "1"
     if granularity not in (None, "full") and not redequant:
@@ -1579,7 +1583,20 @@ def check_mxfp4_expert_recompute(values: Sequence[str], environ: Mapping[str, st
             f"kimi_k31 recipe: --recompute-granularity {granularity} keeps the frozen MXFP4 experts' "
             "dequantized weights for the backward; use full recompute (--rl-activation-recompute), or set "
             f"{MXFP4_REDEQUANT_ENV}=1 on a Miles that re-dequantizes them in the backward")
-    if granularity == "full" and _last_flag_value(values, "--recompute-method") == "block" and not redequant:
+    method = _last_flag_value(values, "--recompute-method")
+    per_stage = environ.get(STAGE_RECOMPUTE_ENV, "").replace(",", " ").split()
+    if per_stage:
+        # Miles refuses the same at model build, after the checkpoint load; fail at launch instead
+        if granularity != "full" or method != "block":
+            raise MilesConfigError(
+                f"kimi_k31 recipe: {STAGE_RECOMPUTE_ENV} needs --recompute-granularity full --recompute-method block "
+                f"on the final argv, got granularity {granularity}, method {method}")
+        pp = int(_last_flag_value(values, "--pipeline-model-parallel-size") or 1)
+        if len(per_stage) != pp or not all(n.isdigit() for n in per_stage):
+            raise MilesConfigError(
+                f"kimi_k31 recipe: {STAGE_RECOMPUTE_ENV}={environ[STAGE_RECOMPUTE_ENV]!r} needs one layer count "
+                f"(>= 0) per pipeline stage, {pp} stages")
+    if granularity == "full" and method == "block" and not redequant:
         logging.getLogger(__name__).warning(
             "kimi_k31: --recompute-method block keeps the frozen MXFP4 experts' dequantized weights of every layer "
             "it does not recompute until the backward (about 3 GB per MoE layer per GPU at EP16); set %s=1",
