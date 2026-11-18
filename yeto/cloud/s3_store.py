@@ -256,6 +256,10 @@ READ_TIMEOUT_ENV = "YETO_RL_STORE_READ_TIMEOUT_S"  # seconds without a byte of a
 RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (default) / adaptive / legacy
 MAX_ATTEMPTS_ENV = "YETO_RL_STORE_MAX_ATTEMPTS"  # requests of one call, the first included (default 9)
 PART_CHECKSUM_ENV = "YETO_RL_STORE_PART_CHECKSUM"  # SHA-256 per uploaded part: 1 / 0 / auto (default)
+# "1": reload() leaves out the round-cut shards a committed manifest lists; each rank
+# fetches its own (cut.fetch_shard_to_rank). Set by the launch on a multi-node island,
+# whose nodes have one stage each: node 0 would download every node's shards
+LAZY_CUT_SHARDS_ENV = "YETO_RL_STORE_LAZY_CUT_SHARDS"
 UPLOAD_ATTEMPTS_ENV = "YETO_RL_STORE_UPLOAD_ATTEMPTS"  # tries of one multipart upload, resumed between them
 # an object API write (write / create) larger than this many MiB goes as a multipart upload
 MULTIPART_MB_ENV = "YETO_RL_STORE_MULTIPART_MB"
@@ -1662,6 +1666,14 @@ class S3Store(BucketMountStore):
             return None
         return self._tree().object_checksum(relative)
 
+    def fetch_local_file(self, relative: str) -> int | None:
+        """Download one file of the store into the stage now (the cut shard a rank
+        restores from, which a lazy :meth:`reload` left out); its size, None when this
+        store has no stage."""
+        if not self.staged:
+            return None
+        return self._tree().fetch_file(relative)
+
     def evict_local_file(self, relative: str) -> int:
         """Drop the stage copy of a file :meth:`push_local_file` uploaded (a cut shard:
         a K3.1 cut is ~1.35 TB per node); the bucket keeps it. Returns the bytes freed."""
@@ -1686,10 +1698,20 @@ class S3Store(BucketMountStore):
 
     def reload(self) -> None:
         if self.staged:
-            self._tree().pull()
+            self._tree().pull(skip_keys=lazy_cut_shards(self._environ))
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "uri": self.uri, "staged": self.staged}
+
+
+def lazy_cut_shards(environ: Mapping[str, str]):
+    """The ``TreeMirror.pull`` filter of a lazy store (:data:`LAZY_CUT_SHARDS_ENV`): the
+    round-cut shards committed manifests list; None (pull everything) otherwise."""
+    if str(environ.get(LAZY_CUT_SHARDS_ENV, "")).strip().lower() not in _TRUE:
+        return None
+    from yeto.rl.engine.cut import manifest_shard_keys
+
+    return manifest_shard_keys
 
 
 def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], client: Any = None) -> S3Store:

@@ -199,12 +199,12 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
         # moves the whole store by object (one stage per container). The credentials
         # ride the named Secret when --modal-store-secret is given; else the launcher's
         # store credential is shipped like on sky.
-        return island_envs(store, store_client_environ(args), stage=True,
-                           credentials=modal_store_secret_name(args) is None)
+        return _lazy_cut_shards(island_envs(store, store_client_environ(args), stage=True,
+                                            credentials=modal_store_secret_name(args) is None), num_nodes)
     if store.startswith("oss://"):
         from ..cloud.oss_store import island_envs as oss_island_envs
 
-        return oss_island_envs(store)
+        return _lazy_cut_shards(oss_island_envs(store), num_nodes)  # an oss store always stages
     if not store.startswith("s3://"):
         return {}
     if not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
@@ -214,9 +214,22 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
     # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
     # stages the store on its own disk and moves it by object API. SSH trainer nodes
     # with an inventory store_env_file hold the credential themselves (no launcher key).
-    return island_envs(store, store_client_environ(args),
+    envs = island_envs(store, store_client_environ(args),
                        stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
                        credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
+    return _lazy_cut_shards(envs, num_nodes)
+
+
+def _lazy_cut_shards(envs: dict[str, str], num_nodes: int) -> dict[str, str]:
+    """A staged store on several nodes (one stage per node): its reload leaves the
+    round-cut shards in the object store and each rank fetches its own
+    (``s3_store.LAZY_CUT_SHARDS_ENV``), instead of node 0 downloading every node's."""
+    from ..cloud import oss_store, s3_store
+
+    staged = envs.get(s3_store.STAGE_ENV) or envs.get(oss_store.URI_ENV)
+    if staged and int(num_nodes) > 1:
+        envs[s3_store.LAZY_CUT_SHARDS_ENV] = "1"
+    return envs
 
 
 def ssh_nodes_hold_store_credentials(args) -> bool:
