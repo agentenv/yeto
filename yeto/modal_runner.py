@@ -1644,6 +1644,37 @@ class ReclaimRelay:
             self._thread.join(timeout=2.0)
 
 
+STATUS_TRANSPORT_LIMIT_ENV = "YETO_MODAL_STATUS_TRANSPORT_POLLS"
+# Status polls in a row that may fail in the client's transport before the call
+# reads FAILED (the controller polls every --controller-poll s, default 30).
+STATUS_TRANSPORT_LIMIT = 10
+# Exception classes (by name, anywhere in the MRO) of the launcher's own link to
+# Modal: grpclib's StreamTerminatedError, modal.exception.ConnectionError /
+# ServiceError / ClientClosed, the builtin ConnectionError family, DNS failures.
+TRANSPORT_ERROR_NAMES = frozenset({"StreamTerminatedError", "ConnectionError", "ServiceError",
+                                   "ClientClosed", "gaierror"})
+TRANSPORT_GRPC_STATUSES = frozenset({"UNAVAILABLE", "DEADLINE_EXCEEDED"})
+
+
+def status_transport_limit(environ=None) -> int:
+    env = os.environ if environ is None else environ
+    raw = env.get(STATUS_TRANSPORT_LIMIT_ENV)
+    return max(1, int(raw)) if raw else STATUS_TRANSPORT_LIMIT
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """True for an error of the client's connection to Modal, not of the call."""
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if names & TRANSPORT_ERROR_NAMES:
+        return True
+    status = getattr(exc, "status", None)
+    return "GRPCError" in names and getattr(status, "name", str(status)) in TRANSPORT_GRPC_STATUSES
+
+
+def _exc_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
 class ModalOps:
     """The SDK surface the launcher uses, as one small class (tests
     substitute a fake). One instance per run/app."""
@@ -1654,6 +1685,9 @@ class ModalOps:
         self._functions: dict[str, object] = {}
         # the run's resource ledger (yeto.cost.ledger); None: $YETO_RESOURCE_LEDGER, if set
         self.ledger = None
+        # call id -> status polls in a row that failed in the client's own transport
+        self._transport_errors: dict[str, int] = {}
+        self._failure_logged: set[str] = set()
 
     # -- building --------------------------------------------------------------
 
@@ -1806,17 +1840,45 @@ class ModalOps:
         return str(call.object_id)
 
     def status(self, call_id: str) -> str:
-        """RUNNING | SUCCEEDED | FAILED for a call id."""
+        """RUNNING | SUCCEEDED | FAILED for a call id.
+
+        An error of this client's own connection to Modal (``StreamTerminatedError:
+        Connection lost``, ``modal.exception.ConnectionError``, gRPC UNAVAILABLE ...)
+        says nothing about the call: it reads RUNNING and the next poll asks again,
+        up to :data:`STATUS_TRANSPORT_LIMIT` polls in a row (then FAILED). Reading it
+        as FAILED let the launcher tear down an island whose learner had finalized
+        but was still uploading its last tape chunk (k31-mfu16-n1: the head was cut
+        off by the teardown SIGINT inside the final R2 put)."""
         modal = self._modal()
-        call = modal.FunctionCall.from_id(call_id)
+        errors = getattr(self, "_transport_errors", None)
+        if errors is None:
+            errors = self._transport_errors = {}
         try:
+            call = modal.FunctionCall.from_id(call_id)
             call.get(timeout=0)
         except TimeoutError:
+            errors.pop(call_id, None)
             return "RUNNING"
         except Exception as exc:  # noqa: BLE001 - any raised result is a failed island
             if type(exc).__name__ in ("TimeoutError", "OutputExpiredError") and "timeout" in str(exc).lower():
+                errors.pop(call_id, None)
                 return "RUNNING"
+            if is_transport_error(exc):
+                errors[call_id] = errors.get(call_id, 0) + 1
+                limit = status_transport_limit()
+                if errors[call_id] < limit:
+                    print(f"[modal] status of {call_id} unknown ({_exc_text(exc)}); "
+                          f"poll {errors[call_id]}/{limit}, asking again next poll", file=sys.stderr)
+                    return "RUNNING"
+            errors.pop(call_id, None)
+            logged = getattr(self, "_failure_logged", None)
+            if logged is None:
+                logged = self._failure_logged = set()
+            if call_id not in logged:
+                logged.add(call_id)
+                print(f"[modal] call {call_id} ended as FAILED: {_exc_text(exc)}", file=sys.stderr)
             return "FAILED"
+        errors.pop(call_id, None)
         return "SUCCEEDED"
 
     def cancel(self, call_id: str) -> None:

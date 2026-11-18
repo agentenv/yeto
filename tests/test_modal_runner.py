@@ -289,6 +289,69 @@ def test_spawn_status_cancel_and_logs(monkeypatch):
     assert list(ops.tail_logs(cid)) == ["log line"]
 
 
+class StreamTerminatedError(Exception):
+    """grpclib's: the launcher's own connection to Modal dropped."""
+
+
+class _GRPCStatus:
+    def __init__(self, name):
+        self.name = name
+
+
+class GRPCError(Exception):
+    def __init__(self, status):
+        super().__init__(status)
+        self.status = _GRPCStatus(status)
+
+
+def test_a_dropped_client_connection_is_not_a_failed_island(monkeypatch, capsys):
+    """yeto #14 (k31-mfu16-n1): `StreamTerminatedError: Connection lost` in the launcher's
+    poll read FAILED while both containers ran; the finalized island was torn down
+    inside its last R2 tape put. A transport error now reads RUNNING, bounded."""
+    state = fake_modal(monkeypatch)
+    ops = mr.ModalOps("yeto-run")
+    cfg = _cfg()
+    ops.define(cfg)
+    cid = ops.spawn(cfg)
+    call = state["calls"][cid]
+    errors = [StreamTerminatedError("Connection lost"), ConnectionResetError("reset"),
+              GRPCError("UNAVAILABLE")]
+    call.get = lambda timeout=None, index=0: (_ for _ in ()).throw(errors.pop(0))
+    assert [ops.status(cid) for _ in range(3)] == ["RUNNING"] * 3
+    assert "status of fc-0 unknown (StreamTerminatedError: Connection lost)" in capsys.readouterr().err
+    call.get = lambda timeout=None, index=0: 0
+    assert ops.status(cid) == "SUCCEEDED" and ops._transport_errors == {}
+
+
+def test_transport_errors_in_a_row_end_as_failed(monkeypatch):
+    state = fake_modal(monkeypatch)
+    monkeypatch.setenv(mr.STATUS_TRANSPORT_LIMIT_ENV, "3")
+    ops = mr.ModalOps("yeto-run")
+    cfg = _cfg()
+    ops.define(cfg)
+    cid = ops.spawn(cfg)
+
+    def lost(timeout=None, index=0):
+        raise StreamTerminatedError("Connection lost")
+
+    state["calls"][cid].get = lost
+    assert [ops.status(cid) for _ in range(3)] == ["RUNNING", "RUNNING", "FAILED"]
+
+
+def test_a_remote_failure_still_reads_failed_and_is_logged_once(monkeypatch, capsys):
+    state = fake_modal(monkeypatch)
+    ops = mr.ModalOps("yeto-run")
+    cfg = _cfg()
+    ops.define(cfg)
+    cid = ops.spawn(cfg)
+    state["calls"][cid].outcome = "failed"
+    assert ops.status(cid) == "FAILED" and ops.status(cid) == "FAILED"
+    err = capsys.readouterr().err
+    assert err.count("call fc-0 ended as FAILED: RuntimeError: island exited with 1") == 1
+    assert not mr.is_transport_error(GRPCError("INTERNAL"))
+    assert not mr.is_transport_error(RuntimeError("island 0 rank 0 exited with 1"))
+
+
 def test_island_ops_relaunch_keeps_the_learner_id_and_routing(monkeypatch):
     state = fake_modal(monkeypatch)
     ops = mr.ModalOps("yeto-run")
