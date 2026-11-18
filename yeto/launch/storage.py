@@ -336,15 +336,35 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
 MODEL_STORE_MOUNT = "/mnt/yeto-models"
 
 
+MODEL_STORE_LOCAL_SCHEME = "local"
+
+
+def model_store_local_path(uri):
+    """The node directory of ``--model-store local:///PATH`` (as the trainer sees
+    it), else None. On an SSH trainer island ``--model-store-source`` fills it
+    before the first start (:mod:`yeto.launch.ssh_weights`); elsewhere the
+    operator does, and the island uses it only when it holds a completed snapshot
+    (:func:`model_store_env`)."""
+    if not uri:
+        return None
+    scheme, sep, path = str(uri).partition("://")
+    if scheme != MODEL_STORE_LOCAL_SCHEME:
+        return None
+    path = path.rstrip("/")
+    if not sep or not path.startswith("/") or ".." in PurePosixPath(path).parts or path == "":
+        raise ValueError(f"--model-store: expected local:///ABSOLUTE/PATH, got {uri!r}")
+    return path
+
+
 def model_store_filesystem(uri, cloud, region):
     """Nebius filesystem id for ``--model-store nebius-fs://<id>`` on a
     ``nebius@region`` island, else None (with a WARNING when a store was
-    asked for but cannot be attached there)."""
-    if not uri:
+    asked for but cannot be attached there; None for a ``local://`` store)."""
+    if not uri or model_store_local_path(uri) is not None:
         return None
     scheme, sep, fs_id = uri.partition("://")
     if scheme != "nebius-fs" or not sep or not fs_id.startswith("computefilesystem-"):
-        raise ValueError(f"--model-store: expected nebius-fs://computefilesystem-..., got {uri!r}")
+        raise ValueError(f"--model-store: expected nebius-fs://computefilesystem-... or local:///PATH, got {uri!r}")
     if cloud != "nebius" or not region:
         print(f"[launcher] WARNING: --model-store {uri} needs a nebius@<region> island "
               f"(got {cloud}@{region}); models download from the Hub")

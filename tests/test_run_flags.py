@@ -307,6 +307,11 @@ _NON_RL_LITERALS = frozenset({
     # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
     # git rev-parse, curl, and the engine_sampler entry's own CLI
     "--short", "--cacert", "--retry-connrefused", "--spec",
+    # the node-side weights copy and its CLI (weights_sync.py, ssh_weights.py), and the Megatron
+    # pipeline split it reads from YETO_MILES_TRAIN_EXTRA_ARGV
+    "--attempts", "--chunk-mb", "--hash", "--headroom", "--pp", "--pp-first", "--pp-last", "--procs",
+    "--progress-s", "--rehash", "--revision", "--root", "--source", "--stages", "--workers", "--user",
+    "--decoder-first", "--decoder-first-pipeline-num-layers", "--decoder-last-pipeline-num-layers",
 })
 
 

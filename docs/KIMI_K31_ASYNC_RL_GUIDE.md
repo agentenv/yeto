@@ -227,6 +227,7 @@ same way before any order:
 | Hub id with `--modal-model-volume <volume>` | `hf/<name>/<revision[:8]>/` of the volume, when its `MANIFEST.json` matches. Otherwise a warning (the trainer falls back to the Hub) and the Hub check. |
 | `s3://` / `r2://` URI | One listing with the control host's store credentials. |
 | Local directory | The directory, when it exists on the control host; otherwise a warning (it must exist on the trainer node). |
+| Hub id with `--model-store-source <uri>` | The source's listing and index (the files the SSH trainer nodes copy). A control host that cannot list it only warns. The Hub is not asked. |
 
 An RL trainer launched with `yeto launch` (and so `yeto run up`) still needs a
 revision-pinned Hub model: a local directory or an `s3://` / `r2://` URI passes
@@ -260,6 +261,27 @@ the checkpoint files and a `MANIFEST.json` with `"repo": "<org>/<name>"`,
 `"revision": "<40-hex sha>"` and `"all_ok": true`. If the manifest is missing
 or does not match, the trainer logs `[yeto-model-volume] WARNING` and
 downloads from the Hub instead.
+
+**Trainer on SSH bare-metal nodes (optional).** With `--model-store
+local:///data/models --model-store-source s3://<bucket>/models/<name>` the
+preflight of an `ssh:` trainer island copies the checkpoint onto every node
+at once, before the first start, into a Hugging Face hub cache under
+`/data/models` (on a docker node, the host directory of an inventory mount of
+`/data/models`). The copy is chunked and resumable, checks every file's
+sha256 against the source manifest (`yeto-weights-manifest.json` next to the
+files, else each object's `sha256` metadata), skips files verified by an
+earlier launch, and refuses a node whose file system has less than 1.2 times
+the bytes still to download. The trainer then reads that snapshot
+(`YETO_MODEL_STORE_HIT`) and never the Hub. With `--rl-sample-role trainer`
+and `--pipeline-parallel` > 1 each node copies only the safetensors files of
+the pipeline stages its GPUs run, plus the embedding / head / vision files and
+every small file (`--model-store-shards stage`; `all` copies everything): for
+K3.1 at PP3 (32/29/32) about 496-546 GB per node instead of 1.56 TB. The
+source can also be a directory (an NFS mount on the nodes); it then needs a
+manifest (`python -m yeto.launch.weights_sync manifest --source <dir> --out
+<dir>/yeto-weights-manifest.json`). The nodes read an object-store source with
+`YETO_WEIGHTS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_ENDPOINT_URL` of the
+launcher's environment, else with the `--rl-checkpoint-store` credentials.
 
 **Expert selection** (K3.1): the trainer's `--rl-expert-selection <file>` and the
 spec's `expert_selection_sha256` must describe the same file. Format and

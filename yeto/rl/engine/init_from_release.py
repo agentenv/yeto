@@ -301,7 +301,9 @@ def _base_path(model: str, revision: str | None) -> str:
         return str(Path(model).expanduser().resolve())
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(repo_id=model, revision=revision)
+    # a model store hit (storage.model_store_env) is the snapshot: the Hub is not asked
+    return snapshot_download(repo_id=model, revision=revision,
+                             local_files_only=bool(os.environ.get("YETO_MODEL_STORE_HIT")))
 
 
 def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:

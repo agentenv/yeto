@@ -62,7 +62,9 @@ trainer reads it with ``docker run --env-file``. Without it the launcher's store
 credential reaches the node in the start script on the SSH session's stdin
 (never in an argv or a file) and the container by name (``-e NAME``).
 
-An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
+An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300
+(with ``--model-store local:///data/models --model-store-source s3://...`` the
+trainer preflight fills ``/mnt/nvme/models`` on every node, :mod:`.ssh_weights`)::
 
     images:
       x86_64: ghcr.io/OWNER/yeto-miles-k31@sha256:...
