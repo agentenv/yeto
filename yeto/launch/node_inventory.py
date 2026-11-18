@@ -34,23 +34,56 @@ Example::
         mounts: {/mnt/shared: /mnt/shared}
         runtime: docker
         docker_args: [--device, /dev/davinci0, ...]
+        env: {HCCL_IF_IP: 192.0.2.10}
         price_per_card_hour: 0.0
 
 ``address`` is the node's IP on the cluster network (the ``interface``), which
 the other nodes dial for rendezvous; ``host`` may be an SSH alias that only the
 head resolves. ``docker_args`` are the device flags of ``docker run`` for the
 node's device family (a ``runtime: docker`` trainer island refuses to start
-without them).
+without them). ``env`` holds the node's fabric settings that yeto cannot derive
+(e.g. ``NCCL_IB_HCA``, ``NCCL_IB_GID_INDEX`` on RoCE, ``NCCL_COLLNET_ENABLE``
+with SHARP); the trainer island exports them after the fabric defaults of
+``topology.island_comm_env`` and before the run's own environment.
+
+An NVIDIA (``cuda``) multi-node island over ``ib`` / ``roce``, e.g. 6 x 8 B300::
+
+    images:
+      x86_64: ghcr.io/OWNER/yeto-miles-k31@sha256:...
+    nodes:
+      - name: b300-0
+        host: ops@10.0.0.10
+        address: 10.1.0.10            # IP on the interface below
+        interface: bond0
+        device_family: cuda
+        cpu_arch: x86_64
+        card: B300
+        cards_per_node: 8
+        hbm_gib: 288
+        host_memory_gib: 2048
+        fabric: ib
+        runtime: docker
+        docker_args: [--gpus, all, --device, /dev/infiniband, --ulimit, memlock=-1:-1,
+                      --ulimit, stack=67108864, --cap-add, IPC_LOCK]
+        mounts: {/mnt/nvme/yeto: /root/.cache, /mnt/nvme/models: /data/models}
+        env: {NCCL_IB_HCA: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"}
 """
 
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..gpu_spec import DEVICE_FAMILIES, UnknownCard, canonical_card, device_family_of
+from ..gpu_spec import (
+    DEVICE_FAMILIES,
+    DEVICE_FAMILY_ENV,
+    UnknownCard,
+    canonical_card,
+    device_family_of,
+)
 from ..hw import card_tools
 from ..hw.catalog import UnknownCardType, compat_group
 from . import engine_images as image_catalog
@@ -65,7 +98,8 @@ RUNTIMES = ("docker", "rootfs")
 _REQUIRED = ("name", "host", "device_family", "cpu_arch", "card", "cards_per_node", "hbm_gib",
              "host_memory_gib")
 _KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
-                      "docker_args", "price_per_card_hour", "roles")
+                      "docker_args", "env", "price_per_card_hour", "roles")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class InventoryError(ValueError):
@@ -92,6 +126,7 @@ class Node:
     image: str | None = None
     runtime: str = "docker"
     docker_args: tuple[str, ...] = ()  # device flags of `docker run` (runtime docker)
+    env: Mapping[str, str] = field(default_factory=dict)  # fabric settings yeto cannot derive
     price_per_card_hour: float | None = None
     roles: tuple[str, ...] = ()
 
@@ -250,6 +285,14 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
     docker_args = raw.get("docker_args") or ()
     if not isinstance(docker_args, (list, tuple)) or not all(isinstance(a, str) for a in docker_args):
         raise InventoryError(f"node {name}: docker_args must be a list of strings, got {docker_args!r}")
+    env = raw.get("env") or {}
+    if not isinstance(env, dict) or not all(
+            isinstance(k, str) and _ENV_NAME.fullmatch(k) and isinstance(v, (str, int, float))
+            and not isinstance(v, bool) for k, v in env.items()):
+        raise InventoryError(f"node {name}: env must be a map of variable names to strings or numbers, "
+                             f"got {env!r}")
+    if DEVICE_FAMILY_ENV in env:
+        raise InventoryError(f"node {name}: env must not set {DEVICE_FAMILY_ENV} (device_family decides)")
     price = raw.get("price_per_card_hour")
     if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float))
                               or price < 0):
@@ -277,6 +320,7 @@ def parse_node(raw: Any, *, index: int, images: Mapping[str, str] | None = None)
         image=image,
         runtime=runtime,
         docker_args=tuple(docker_args),
+        env={k: str(v) for k, v in env.items()},
         price_per_card_hour=(float(price) if price is not None else None),
         roles=tuple(roles),
     )

@@ -31,7 +31,10 @@ One incarnation = one trainer process per node, started over SSH:
    on ``runtime: docker`` nodes the trainer runs in a container
    (``docker run --network host``) of the spec's image with the node's mounts
    and the device flags of its family (``docker_args``; a docker island
-   without them is refused: the flags are not known for every family yet);
+   without them is refused: the flags are not known for every family yet; a
+   cuda node must pass its GPUs and, on a multi-node ib/roce island, the verbs
+   devices and an unlimited memlock: :func:`cuda_docker_problems`). The
+   preflight pulls the image on every docker node;
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
    trainer events from it); the other nodes' logs go to local files;
 4. release kills each node's process group (TERM, then KILL after a grace
@@ -92,6 +95,19 @@ SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAl
 READ_SCRIPT = "exec 3<&0 </dev/null; exec bash -lc 'eval \"$(cat <&3)\" 3<&-'"
 STATE_DIR = ".yeto/trainer-islands"  # under the remote $HOME
 CONTAINER_STATE_DIR = "/yeto-island-state"  # the incarnation's state dir inside a docker trainer
+PULL_TIMEOUT_S = 3600.0  # a first pull of a trainer image (~24 GB compressed for yeto-miles-k31)
+RDMA_FABRICS = ("ib", "roce")
+# `docker run` flags (as NAME=VALUE) that give a cuda container its GPUs: the
+# NVIDIA runtime by --gpus, --runtime nvidia, or a CDI device.
+CUDA_GPU_FLAGS = ("--gpus=", "--runtime=nvidia", "--device=nvidia.com/gpu")
+# What a cuda island on an RDMA fabric needs on top (multi-node): the verbs devices,
+# without which NCCL finds no IB device and silently runs its collectives over TCP
+# sockets; and an unlimited locked-memory limit for NCCL's ibv_reg_mr (a container
+# inherits dockerd's limit, often 64 KiB, which --privileged does not lift).
+RDMA_DEVICE_FLAGS = ("--privileged", "--device=/dev/infiniband", "--volume=/dev/infiniband")
+MEMLOCK_FLAGS = ("--ulimit=memlock=-1", "--ulimit=memlock=unlimited")
+CUDA_RDMA_DOCKER_ARGS = ("--gpus", "all", "--device", "/dev/infiniband", "--ulimit", "memlock=-1:-1",
+                         "--ulimit", "stack=67108864", "--cap-add", "IPC_LOCK")
 
 
 class SshIslandError(RuntimeError):
@@ -145,6 +161,13 @@ class SshTrainerSpec:
                 raise SshIslandError(
                     f"node {node.name}: runtime docker needs docker_args, the device flags of `docker run` "
                     f"for device family {node.device_family} (inventory docker_args)")
+            if node.device_family == "cuda":
+                missing = cuda_docker_problems(self.docker_args_of(node),
+                                               rdma=len(self.nodes) > 1 and node.fabric in RDMA_FABRICS)
+                if missing:
+                    raise SshIslandError(
+                        f"node {node.name}: docker_args lack {'; '.join(missing)} (fabric {node.fabric}); "
+                        f"e.g. docker_args: {list(CUDA_RDMA_DOCKER_ARGS)}")
         if len(self.nodes) > 1:
             for node in self.nodes:
                 rendezvous_address(node)  # raises on a node the others cannot dial
@@ -168,6 +191,39 @@ class SshTrainerSpec:
         if len(self.nodes) == 1 and self.nodes[0].address is None and not _ip_host(self.nodes[0]):
             return ["127.0.0.1"]
         return [rendezvous_address(n) for n in self.nodes]
+
+
+def _flag_forms(argv: Sequence[str]) -> list[str]:
+    """``docker run`` options as ``NAME=VALUE`` (``-v`` as the long volume option), so the
+    spellings ``--gpus all`` and ``--gpus=all`` compare alike."""
+    short = {"-v": "--volume"}
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        flag = short.get(argv[i], argv[i])
+        if flag.startswith("--") and "=" not in flag and i + 1 < len(argv) and not argv[i + 1].startswith("-") \
+                and flag not in ("--privileged", "--init", "--rm"):
+            out.append(f"{flag}={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(flag)
+        i += 1
+    return out
+
+
+def cuda_docker_problems(docker_args: Sequence[str], *, rdma: bool) -> list[str]:
+    """What the ``docker run`` flags of a cuda trainer node miss: the GPUs, and on a
+    multi-node RDMA island the verbs devices and the locked-memory limit."""
+    flags = _flag_forms(docker_args)
+    has = lambda prefixes: any(f.startswith(prefixes) for f in flags)
+    problems = []
+    if not has(CUDA_GPU_FLAGS):
+        problems.append("the GPUs (--gpus all, --runtime nvidia or a CDI --device nvidia.com/gpu=...)")
+    if rdma and not has(RDMA_DEVICE_FLAGS):
+        problems.append("the RDMA devices (--device /dev/infiniband; without them NCCL falls back to TCP sockets)")
+    if rdma and not has(MEMLOCK_FLAGS):
+        problems.append("an unlimited locked-memory limit (--ulimit memlock=-1:-1)")
+    return problems
 
 
 def ssh_trainer_spec(nodes: Sequence[Node], *, shape: Any, plan_overrides: Mapping[str, Any],
@@ -236,7 +292,10 @@ def _trainer_body(spec: SshTrainerSpec, rank: int, requant_log: str) -> str:
     """The node's job as bash; it exits with the trainer's exit code."""
     node = spec.nodes[rank]
     if spec.run_script:
-        trainer = f"(\n{spec.run_script.rstrip()}\n)"  # a subshell: the script's exit and exec stay inside
+        # The island run script (rl_island_task) enters ~/sky_workdir, where sky syncs
+        # the code; an SSH node has no sync, its checkout is the spec's workdir.
+        link = f'[ -e "$HOME/sky_workdir" ] || ln -s {shlex.quote(spec.workdir)} "$HOME/sky_workdir"\n'
+        trainer = f"{link}(\n{spec.run_script.rstrip()}\n)"  # a subshell: the script's exit and exec stay inside
     else:
         trainer = shlex.join([spec.torchrun, f"--nnodes={len(spec.nodes)}", f"--node-rank={rank}",
                               f"--nproc-per-node={node.cards_per_node}",
@@ -276,7 +335,8 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     paths = _pin_state_home(paths)
     comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
     # The learner reads the family to pick its card type and collective backend (accel).
-    full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **spec.env, **env,
+    # The inventory's fabric settings (e.g. NCCL_IB_HCA) refine the family defaults.
+    full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **node.env, **spec.env, **env,
                 **(skypilot_env(spec, rank) if spec.run_script else {})}
     if spec.docker:
         if container is None:
@@ -419,7 +479,21 @@ class SshTrainerIslands:
             else:
                 raise SshIslandError(f"node {node.name}: no card tool of family {node.device_family} "
                                      f"answered ({[shlex.join(a) for a in node.preflight_commands()]})")
+            if self.spec.docker:
+                self._pull(node)
         self.checked = True
+
+    def _pull(self, node: Node) -> None:
+        """Pull the trainer image before the first start: a first ``docker run`` of a
+        24 GB image would spend the start timeout, and a layer the node's docker
+        cannot unpack shows here, not as a dead incarnation."""
+        image = str(self.spec.image or node.image)
+        done = self.ops.run(node, f"docker pull -q {shlex.quote(image)}", timeout=PULL_TIMEOUT_S)
+        if done.returncode != 0:
+            err = ((getattr(done, "stderr", "") or "") + (getattr(done, "stdout", "") or "")).strip()[-600:]
+            hint = (" (a layer that whites out a path and writes it again: rebuild it with "
+                    "docker/miles-ports/make_layer.py of this repository)" if "not a directory" in err else "")
+            raise SshIslandError(f"node {node.name}: docker pull {image} failed (rc {done.returncode}): {err}{hint}")
 
     # -- TrainerIslands -------------------------------------------------------------
     def launch(self, incarnation: int, resume_from: CutRef | None) -> _SshJob:

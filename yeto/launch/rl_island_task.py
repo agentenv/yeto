@@ -831,12 +831,19 @@ def _island_compat_group(args, spec, learner_id: int) -> str:
     return group
 
 
+# Clouds whose Ray workers pin their node IP to their SKYPILOT_NODE_IPS line.
+PINNED_WORKER_IP_CLOUDS = frozenset({"modal", "ssh"})
+
+
 def _worker_node_ip_flag(cloud: str) -> str:
-    """Modal only: a Modal container has both an
+    """Modal and SSH nodes: a Modal container has both an
     i6pn IPv6 and an IPv4 interface, so a worker lets Ray pick and may register an
-    unreachable address.  Pin it to this rank's IPv4 from SKYPILOT_NODE_IPS
-    (modal_runner maps the IPv4 list, rank order).  Other clouds: unchanged argv."""
-    if cloud != "modal":
+    unreachable address; a bare-metal node has a management NIC, the cluster NIC and
+    the IB/RoCE ports, and Ray's guess is the first route it finds.  Pin it to this
+    rank's address from SKYPILOT_NODE_IPS (modal_runner maps the IPv4 list in rank
+    order; an SSH trainer island lists the inventory addresses).  Other clouds:
+    unchanged argv."""
+    if cloud not in PINNED_WORKER_IP_CLOUDS:
         return ""
     return (' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS" '
             '| sed -n "$((SKYPILOT_NODE_RANK + 1))p")"')

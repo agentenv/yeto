@@ -18,8 +18,9 @@ import pytest
 from tests.test_rl_oss_store import _entry, _objects
 from tests.test_rl_quant_requant import world  # noqa: F401 - fixture
 from yeto.hw import card_tools
-from yeto.launch.node_inventory import Node
+from yeto.launch.node_inventory import InventoryError, Node, parse_node
 from yeto.launch.ssh_trainer_island import (
+    CUDA_RDMA_DOCKER_ARGS,
     READ_SCRIPT,
     SshIslandError,
     SshOps,
@@ -29,6 +30,7 @@ from yeto.launch.ssh_trainer_island import (
     remote_paths,
     requant_argv,
     ssh_binding,
+    cuda_docker_problems,
     ssh_trainer_spec,
     start_script,
 )
@@ -428,3 +430,87 @@ def test_the_remote_command_runs_the_whole_stdin_script_past_a_profile_that_read
                           text=True, capture_output=True, timeout=60)
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"first\nliteral $V\nyes|{value}\neof\n20000\n"
+
+
+# ---------------------------------------------------------------- NVIDIA bare-metal nodes (6 x 8 B300)
+def b300(i=0, **kw) -> Node:
+    base = {"device_family": "cuda", "cpu_arch": "x86_64", "card": "B300", "cards_per_node": 8,
+            "hbm_gib": 288.0, "host_memory_gib": 2048.0, "runtime": "docker", "fabric": "ib",
+            "interface": "bond0", "address": f"10.1.0.{10 + i}",
+            "image": "ghcr.io/o/yeto-miles-k31@sha256:" + "a" * 64, "docker_args": CUDA_RDMA_DOCKER_ARGS}
+    return Node(name=f"b300-{i}", host=f"ops@10.0.0.{10 + i}", **(base | kw))
+
+
+def b300_spec(nodes=None, **kw) -> SshTrainerSpec:
+    return SshTrainerSpec(nodes=tuple(nodes or [b300(i) for i in range(6)]), run_id="k31",
+                          run_script="cd ~/sky_workdir && ray start --head", workdir="/opt/yeto", **kw)
+
+
+def test_inventory_env_is_validated_and_exported_after_the_fabric_defaults():
+    raw = {"name": "b300-0", "host": "ops@10.0.0.10", "device_family": "cuda", "cpu_arch": "x86_64",
+           "card": "B300", "cards_per_node": 8, "hbm_gib": 288, "host_memory_gib": 2048, "fabric": "roce",
+           "interface": "bond0", "runtime": "rootfs",
+           "env": {"NCCL_IB_GID_INDEX": 3, "NCCL_IB_HCA": "mlx5_0,mlx5_1"}}
+    parsed = parse_node(raw, index=0)
+    assert parsed.env == {"NCCL_IB_GID_INDEX": "3", "NCCL_IB_HCA": "mlx5_0,mlx5_1"}
+    for bad in ({"NCCL IB": "x"}, {"X": True}, {"YETO_DEVICE_FAMILY": "npu"}, ["NCCL_IB_HCA"]):
+        with pytest.raises(InventoryError, match="env"):
+            parse_node({**raw, "env": bad}, index=0)
+    nodes = [b300(i, env={"NCCL_IB_HCA": "mlx5_0", "NCCL_DEBUG": "INFO"}) for i in range(2)]
+    script = start_script(b300_spec(nodes, env={"NCCL_DEBUG": "TRACE"}), 1, {}, remote_paths("k31", "t", 1),
+                          container="c1")
+    subprocess.run(["bash", "-n"], input=script, text=True, check=True)
+    assert "export NCCL_IB_HCA=mlx5_0" in script and "export NCCL_IB_DISABLE=0" in script
+    assert "export NCCL_DEBUG=TRACE" in script and "NCCL_DEBUG=INFO" not in script  # the run's env wins
+    assert "-e NCCL_IB_HCA" in script  # reaches the container by name
+
+
+def test_cuda_docker_nodes_need_gpus_and_on_rdma_the_verbs_devices_and_memlock():
+    b300_spec()  # the recommended flags pass
+    assert cuda_docker_problems(["--gpus=all", "-v", "/dev/infiniband:/dev/infiniband",
+                                 "--ulimit=memlock=-1"], rdma=True) == []
+    assert cuda_docker_problems(["--runtime", "nvidia", "--privileged", "--ulimit", "memlock=-1:-1"],
+                                rdma=True) == []
+    with pytest.raises(SshIslandError, match="the GPUs"):
+        b300_spec([b300(i, docker_args=("--device", "/dev/infiniband")) for i in range(2)])
+    with pytest.raises(SshIslandError, match="RDMA devices.*locked-memory"):
+        b300_spec([b300(i, docker_args=("--gpus", "all")) for i in range(2)])
+    # one node, or a tcp fabric: the GPUs are enough
+    b300_spec([b300(0, docker_args=("--gpus", "all"))])
+    b300_spec([b300(i, docker_args=("--gpus", "all"), fabric="tcp") for i in range(2)])
+
+
+def test_run_script_enters_the_workdir_through_sky_workdir():
+    script = start_script(b300_spec(), 0, {}, remote_paths("k31", "t", 1), container="c0")
+    assert '[ -e "$HOME/sky_workdir" ] || ln -s /opt/yeto "$HOME/sky_workdir"' in script
+    paths = remote_paths("k31", "t", 1)
+    for rank in range(6):  # the run script reads the inventory addresses in rank order
+        assert f"export SKYPILOT_NODE_RANK={rank}" in start_script(b300_spec(), rank, {}, paths, container="c")
+
+
+class PullOps(FakeOps):
+    def __init__(self, pull_rc=0, pull_err=""):
+        super().__init__()
+        self.pull_rc, self.pull_err = pull_rc, pull_err
+
+    def run(self, n, script, *, timeout=300.0):
+        if script.startswith("docker pull"):
+            self.runs.append((n.name, script))
+            return subprocess.CompletedProcess([], self.pull_rc, stdout="", stderr=self.pull_err)
+        return super().run(n, script, timeout=timeout)
+
+
+def test_preflight_pulls_the_image_on_every_docker_node(tmp_path, checked_cards):
+    ops = PullOps()
+    SshTrainerIslands(b300_spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops).preflight()
+    pulls = [n for n, s in ops.runs if s.startswith("docker pull -q ghcr.io/o/yeto-miles-k31@sha256:")]
+    assert pulls == [f"b300-{i}" for i in range(6)]
+    err = ("failed to register layer: openat opt/sglang/lib/python3.12/site-packages/"
+           "sglang-0.5.24.dev80+g35708f7.dist-info/INSTALLER: not a directory")
+    islands = SshTrainerIslands(b300_spec(), name="t", jobs_path=tmp_path / "j.json", ops=PullOps(1, err))
+    with pytest.raises(SshIslandError, match="b300-0: docker pull .* failed.*make_layer.py"):
+        islands.launch(1, None)
+    # rootfs nodes pull nothing
+    ops = PullOps()
+    SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops).preflight()
+    assert not [s for _, s in ops.runs if s.startswith("docker pull")]

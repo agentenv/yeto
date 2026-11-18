@@ -294,7 +294,7 @@ _NON_RL_LITERALS = frozenset({
     "--awq-scales", "--loop", "--master-addr", "--master-port", "--no-awq", "--node-rank", "--nproc-per-node",
     "--pid", "--poll-seconds", "--recipe", "--store", "--template", "--frozen-base", "--frozen-pattern",
     # docker run of a runtime: docker SSH trainer node (ssh_trainer_island.py, node_inventory.py example)
-    "--device", "--network",
+    "--device", "--network", "--privileged", "--init", "--volume",
     # NC agentic node setup: pip, tar, aws s3, the node agent and its own CLI (yeto/launch/agentic_setup.py,
     # agentic_node_agent.py)
     "--agentic-env", "--disable-pip-version-check", "--endpoint-url", "--env-file", "--label",

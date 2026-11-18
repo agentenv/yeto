@@ -70,6 +70,9 @@ def modal_store_secret_name(args, spec=None) -> str | None:
 # (yeto.cloud.s3_store STAGE_ENV); the credentials come from --modal-store-secret or the
 # launcher's store credential.
 MODAL_OBJECT_STORE_SCHEMES = ("s3",)
+# Sky islands without a bucket mount of an s3:// store (the SSH trainer island
+# starts the run script over SSH, not through sky Storage).
+NO_BUCKET_MOUNT_CLOUDS = frozenset({"ssh"})
 
 
 def is_object_store_uri(value) -> bool:
@@ -208,7 +211,10 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
         return {}
     from ..cloud.s3_store import island_envs
 
-    return island_envs(store, store_client_environ(args), stage=int(num_nodes) == 1)
+    # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
+    # stages the store on its own disk and moves it by object API.
+    return island_envs(store, store_client_environ(args),
+                       stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS)
 
 
 def store_client_environ(args, environ=None) -> dict[str, str]:
