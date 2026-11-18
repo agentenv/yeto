@@ -149,6 +149,19 @@ def test_launch_refuses_expandable_segments_on_a_colocated_island():
     assert plan["island_requests"][0]["placement"]["placement"] == "colocated"
 
 
+def test_dry_run_applies_the_island_train_extra_allow_list():
+    # k31-mfu16-x3: the island refused YETO_MILES_TRAIN_EXTRA_ARGV after a paid start; the
+    # dry run (same _prepare_rl_args as a launch) now runs the island's own check first
+    from yeto.rl.adapters.miles.config import TRAIN_EXTRA_ENV
+
+    with pytest.raises(ValueError, match=f"{TRAIN_EXTRA_ENV} is only for"):
+        _plan("modal:1x2xh100", "--rollout-num-gpus-per-engine", "2",
+              "--modal-env", f"{TRAIN_EXTRA_ENV}=--moe-permute-fusion")
+    plan = _plan("modal:1x2xh100", "--rollout-num-gpus-per-engine", "2",
+                 "--modal-env", f"{TRAIN_EXTRA_ENV}=")  # empty: nothing to check
+    assert plan["island_requests"][0]["placement"]["placement"] == "colocated"
+
+
 def test_launch_allows_expandable_segments_on_a_full_parameter_trainer_island():
     # --rl-sample-role trainer: no engine on the island, the trainer stays resident
     # (--debug-train-only --no-offload-train), so torch_memory_saver is not loaded

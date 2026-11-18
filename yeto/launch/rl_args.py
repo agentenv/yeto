@@ -1086,6 +1086,11 @@ def _prepare_rl_args(
                       tuning=args.tuning,
                       sample_role=getattr(iargs, "rl_sample_role", None) or "both",
                       offload_train=bool(getattr(iargs, "rl_offload_train", False)))
+    # The trainer's extra Megatron flags: the island's own allow-list, applied here first
+    extra_env_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_train_extra_env", None)
+    if callable(extra_env_check):
+        extra_env_check(recipe=getattr(args, "rl_model_recipe", None),
+                        env_pairs=getattr(args, "modal_env", None) or ())
     # A backend without the Miles agentic wiring refuses its flags.
     agentic_check = getattr(_rl_backend_module(args, "run_config_rules"), "check_agentic", None)
     if callable(agentic_check):

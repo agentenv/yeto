@@ -1480,6 +1480,10 @@ TRAIN_EXTRA_FLAGS = frozenset({
     # step window, Miles --profile-target); the trace goes to --tensorboard-dir
     "--use-pytorch-profiler", "--profile-step-start", "--profile-step-end", "--profile-ranks",
     "--profile-target", "--tensorboard-dir",
+    # what that profiler records: op input shapes / Python call stacks (Megatron
+    # common_config pytorch_profiler_collect_*, read by Miles profile_utils at 0938787d
+    # and 06b047ed); trace content only, not the step
+    "--pytorch-profiler-collect-shapes", "--pytorch-profiler-collect-callstack",
     # YETO_RL_NAN_SKIP: Megatron's DDP check raises on a NaN grad; off, Miles skips that optimizer step
     "--no-check-for-nan-in-loss-and-grad",
     # kimi_k31 first_stage_grad (PP stage 0 expert grads under full recompute on
