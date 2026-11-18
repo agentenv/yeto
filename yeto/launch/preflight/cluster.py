@@ -1645,10 +1645,22 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     return p
 
 
+def trainer_image(image: str | None, nodes: Sequence[Node]) -> str | None:
+    """The image the launcher would run on these nodes (``ssh_trainer_island.run_image``):
+    ``--image`` else the inventory's, a pinned image that overlay appliers refuse mapped
+    to its overlay-safe repack, so the pull and the probes check what the trainer runs."""
+    from types import SimpleNamespace
+
+    from ..ssh_trainer_island import run_image
+
+    return run_image(SimpleNamespace(rl_image=image), nodes) or image
+
+
 def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
     try:
         nodes = resolve_nodes(args.gpu, args.rl_node_inventory)
-    except (InventoryError, ValueError) as exc:
+        image = trainer_image(args.image, nodes)
+    except (InventoryError, SshIslandError, ValueError) as exc:
         print(f"[yeto] preflight: {exc}", file=sys.stderr)
         return 2
     if args.run_dir:
@@ -1663,7 +1675,7 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
                   nccl_iters=args.nccl_iters, nccl_all=not args.nccl_pairs_only)
     req = Requirements(min_driver_major=args.min_driver, min_host_memory_gib=args.min_host_memory_gib,
                        min_disk_free_gib=args.min_disk_free_gib)
-    pf = ClusterPreflight(nodes, image=args.image, ops=ops, req=req, steps=steps, out_dir=out_dir)
+    pf = ClusterPreflight(nodes, image=image, ops=ops, req=req, steps=steps, out_dir=out_dir)
     report = pf.run()
     print(json.dumps(report.to_json(), indent=2) if args.json else report.table(), end="" if not args.json else "\n")
     print(f"[yeto] preflight report: {out_dir}", file=sys.stderr)

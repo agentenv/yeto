@@ -806,6 +806,28 @@ def test_the_trainer_image_is_the_run_image_and_an_inventory_image_must_agree():
     assert run_image(_code_args(), [b300(0, runtime="rootfs", docker_args=())]) is None
 
 
+def test_an_overlay_rejected_pinned_image_runs_as_its_repack_on_ssh_nodes():
+    """The K3.1 full trainer image of the pins (2de5d796) has a layer Docker 29 cannot
+    unpack; an ssh island runs its overlay-safe repack (same files and Miles commit),
+    whether the run names it by --rl-image or only the inventory does."""
+    from yeto.launch.ssh_trainer_island import run_image
+    from yeto.rl.adapters.miles import pins
+
+    old, new = next(iter(pins.OVERLAY_SAFE_DIGESTS.items()))
+    rejected, repack = f"ghcr.io/o/yeto-miles-k31@sha256:{old}", f"ghcr.io/o/yeto-miles-k31@sha256:{new}"
+    args = _code_args(rl_image=f"docker:{rejected}")
+    assert run_image(args, [b300(0, image=None), b300(1, image=None)]) == repack
+    # an inventory may name either digest of the same image
+    assert run_image(args, [b300(0, image=rejected), b300(1, image=repack)]) == repack
+    with pytest.raises(SshIslandError, match="is not the run's --rl-image"):
+        run_image(args, [b300(0, image="ghcr.io/o/other@sha256:" + "b" * 64)])
+    # no --rl-image: the inventory's one image is mapped the same way
+    assert run_image(_code_args(rl_image=None), [b300(0, image=rejected), b300(1, image=rejected)]) == repack
+    assert run_image(_code_args(rl_image=None), [b300(0, image="ghcr.io/o/i:1")]) is None
+    # the repack keeps the Miles commit the pins check
+    assert pins.image_miles_commit(repack) == pins.image_miles_commit(rejected) is not None
+
+
 def test_check_refuses_an_inventory_that_does_not_match_the_island_before_any_ssh(tmp_path):
     from yeto.gpu_spec import parse_gpu_spec
 

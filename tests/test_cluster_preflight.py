@@ -767,3 +767,37 @@ def test_node_without_rendezvous_address_is_left_out_of_the_cross_node_steps():
     assert status(report, "address", "b300-2") == {cp.FAIL}
     assert {c.scope for c in find(report, "ib_write_bw")} == {"b300-0<->b300-1"}
     assert {c.scope for c in find(report, "nccl_all_reduce")} == {"b300-0+b300-1"}
+
+
+def test_preflight_checks_the_image_the_launcher_runs(monkeypatch):
+    """An inventory that names the pinned K3.1 image that overlay appliers refuse is
+    probed with its overlay-safe repack, as ssh_trainer_island.run_image runs it."""
+    from yeto.rl.adapters.miles import pins
+
+    old, new = next(iter(pins.OVERLAY_SAFE_DIGESTS.items()))
+    rejected, repack = f"ghcr.io/o/yeto-miles-k31@sha256:{old}", f"ghcr.io/o/yeto-miles-k31@sha256:{new}"
+    nodes = [b300(i, image=rejected) for i in range(2)]
+    assert cp.trainer_image(None, nodes) == repack
+    assert cp.trainer_image(rejected, nodes) == repack
+    assert cp.trainer_image("ghcr.io/o/i:1", [b300(0, image=None)]) == "ghcr.io/o/i:1"
+    with pytest.raises(cp.SshIslandError, match="is not the run's --rl-image"):
+        cp.trainer_image("ghcr.io/o/other@sha256:" + "b" * 64, nodes)
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def capture(nodes, *, image, **kw):
+        seen["image"] = image
+        raise Stop
+
+    monkeypatch.setattr(cp, "ClusterPreflight", capture)
+    monkeypatch.setattr(cp, "resolve_nodes", lambda gpu, inv: nodes)
+    from types import SimpleNamespace
+    args = SimpleNamespace(gpu="ssh:2x8xb300", rl_node_inventory="x", image=None, run_dir="/tmp/unused",
+                           no_bench=True, no_container=False, no_pull=False, no_ib=True, no_nccl=True,
+                           ib_pairs="all", nccl_sizes="16M", nccl_iters=1, nccl_pairs_only=True,
+                           min_driver=580, min_host_memory_gib=1.0, min_disk_free_gib=1.0, json=False)
+    with pytest.raises(Stop):
+        cp.main(args, ops=object())
+    assert seen["image"] == repack

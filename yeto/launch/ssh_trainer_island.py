@@ -71,6 +71,7 @@ import ipaddress
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -109,6 +110,8 @@ def _overlay_safe_image(image: str) -> str | None:
         return backends.module("pins", "miles").overlay_safe_image(image)
     except Exception:  # noqa: BLE001 - a hint only: never mask the pull error itself
         return None
+
+
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30")
 # The remote command: the script comes on stdin. stdin moves to fd 3 and the login
 # shell starts on /dev/null, so a profile (/etc/profile.d, ~/.bash_profile) that reads
@@ -1074,19 +1077,35 @@ def inventory_trainer_nodes(args: Any, island: Any) -> tuple[Node, ...]:
 
 def run_image(args: Any, nodes: Sequence[Node]) -> str | None:
     """The trainer image of docker nodes: the run's ``--rl-image`` (the image its pins
-    are checked against); an inventory image is optional and must name the same one."""
+    are checked against); an inventory image is optional and must name the same one.
+
+    A pinned image whose layers an overlay applier refuses (moby overlay2, the
+    containerd snapshotter of Docker 29; ``pins.OVERLAY_SAFE_DIGESTS``) runs as its
+    overlay-safe repack: the same files and Miles commit, so the pins still hold. An
+    inventory may name either digest."""
     ref = str(getattr(args, "rl_image", None) or "")
     ref = ref[len("docker:"):] if ref.startswith("docker:") else ref
     docker = [n for n in nodes if n.runtime == "docker"]
     if not docker:
         return None
     if not ref:
-        return None  # the inventory's images (SshTrainerSpec refuses a node without one)
-    other = sorted({n.image for n in docker if n.image and n.image != ref})
+        images = {n.image for n in docker}
+        only = next(iter(images)) if len(images) == 1 else None
+        safe = _overlay_safe_image(only) if only else None
+        if safe:
+            print(f"[launcher] ssh trainer image {only} -> its overlay-safe repack {safe}", file=sys.stderr,
+              flush=True)
+        return safe  # None: the inventory's images (SshTrainerSpec refuses a node without one)
+    safe = _overlay_safe_image(ref)
+    other = sorted({n.image for n in docker if n.image and n.image not in (ref, safe)})
     if other:
-        names = [n.name for n in docker if n.image and n.image != ref]
+        names = [n.name for n in docker if n.image and n.image not in (ref, safe)]
         raise SshIslandError(f"inventory image {other} of nodes {names} is not the run's --rl-image {ref}: the "
                              "run's image decides; drop the inventory image (or images:), or pass it as --rl-image")
+    if safe:
+        print(f"[launcher] ssh trainer image {ref} -> its overlay-safe repack {safe}", file=sys.stderr,
+              flush=True)
+        return safe
     return ref
 
 
