@@ -142,6 +142,9 @@ def test_trainer_argv_passes_the_launch_dry_run(run, tmp_path, monkeypatch, caps
     for key, value in (("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test"), ("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test"),
                        ("HF_HUB_OFFLINE", "1")):
         monkeypatch.setenv(key, value)
+    import yeto.modal_runner as modal_runner
+
+    monkeypatch.setattr(modal_runner, "modal_available", lambda: True)  # CI has no Modal token
     calls = []
     monkeypatch.setattr(launcher, "run", lambda *a, **k: calls.append("run"))
     monkeypatch.setattr(cli, "_spawn_worker", lambda *a, **k: calls.append("spawn"))
