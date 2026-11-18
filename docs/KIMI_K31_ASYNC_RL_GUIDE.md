@@ -549,6 +549,7 @@ as `<nc-node-id>` are filled per node by the pool. Key fields:
 | `engine.server.max_model_len` | Engine context length. |
 | `engine.server.extra_args` | Extra engine flags. They come after the preset's flags and take precedence. |
 | `engine.options.k31_preset` | Serving preset (`amd-article`, `rl-precision`, `vllm-recipe`, `rl-precision-cuda`). The ROCm presets set `--gpu-memory-utilization 0.84` and refuse a value above 0.86 (`engine.options.allow_high_gpu_memory` overrides). |
+| `engine.options.prefix_cache_retention_interval` | KDA state checkpoint interval in tokens (`--prefix-cache-retention-interval`). `null` (default): the ROCm presets add 9216 on an R3 server only; `0`: off; a positive value must be a multiple of the vLLM scheduler block size (1152 for both ROCm presets on an R3 server, which runs DCP 1; without R3 the presets run DCP8 with another, unmeasured block size), otherwise vLLM fails to start. The flag in `extra_args` takes precedence. See "Prefix caching with R3" below. |
 | `engine.options.tp`, `max_num_seqs` | Tensor parallel degree and concurrent sequences per engine. |
 | `sampling.n` | Samples per prompt (group size). |
 | `sampling.max_tokens`, `temperature`, `top_p`, `top_k` | Generation settings. |
@@ -574,6 +575,23 @@ within 30 minutes, outside vLLM's budget, at both `max_model_len` 262144 and
 sampler refuses a value above 0.86 unless
 `engine.options.allow_high_gpu_memory` is set. At 0.84 the KV cache still
 holds about 2.5M tokens, far more than 20 agentic trials of 32K tokens use.
+
+**Prefix caching with R3.** With R3 (`rollout_fields.routed_experts: true`)
+vLLM cuts a prefix-cache hit down to a multiple of the attention block (1152
+tokens for both ROCm presets on MI355X). The KDA linear-attention layers keep
+their recurrent state only at the end of the prompt by default, which lies
+above that cut, so the hit falls to zero and every agentic turn prefills the
+whole context again. The ROCm presets (`amd-article`, `rl-precision`)
+therefore add `--prefix-cache-retention-interval 9216` on an R3 server: vLLM
+also keeps a KDA state every 9216 tokens, and a hit reaches the last
+checkpoint below the cut. Each turn then recomputes at most about one interval
+(9216 tokens) of the cached prefix; the KV capacity is unchanged (2,813,900
+tokens with and without the flag). Measured on MI355X TP8 with `amd-article`
+only: the TTFT of a repeated 128K-token prefix fell from 7.7 s to 0.71 s,
+and a 200K-token prefix took 0.87 s at a 99.6% hit; the first request on
+the hit path pays a one-time kernel JIT of about 8 s. Set
+`engine.options.prefix_cache_retention_interval` to change the interval (a
+multiple of the block size) or to `0` to turn it off.
 
 **GPU memory guard.** The sampler samples every GPU's memory once a minute.
 When a GPU is above 97% it writes `rl_sampler_vram_high` to its event tape.
@@ -2272,6 +2290,7 @@ whose payload holds an older policy version: the payload decides.
 | `run up` exits with `an earlier run up ... FORCED the sampler pool down` | The 1.2x budget breaker fired (`nc_forced_stop` in the run state) | Check the spend, raise `budget.usd` / `wall_h` if needed, rerun with `--allow-after-forced-stop` |
 | Pool log `pool: N orders placed, max_orders M: not ordering` (or `max_nodes`, `max_run_spend_*`) | A pool budget limit refuses new orders | Raise the limit in the pool config |
 | Trainer exits with `incarnation gate: fatal store error` | The store refuses the trainer's credentials or the bucket does not exist | Fix the trainer's store env; this is not a pause or starvation |
+| R3 on, every agentic turn re-prefills the whole context / TTFT does not drop for a repeated prefix | The R3 prefix-cache hit is cut to a block multiple, below the only KDA state vLLM kept, so the hit is zero; the spec sets `prefix_cache_retention_interval: 0` or `extra_args` overrides the flag | Use the preset default (`null`) or a multiple of the block size (section 3.4, "Prefix caching with R3"); expect a one-time slow first hit (kernel JIT, about 8 s) |
 
 **The tape shows `rl_buffer_duplicate_task_skipped`.**
 Two groups of one store-dispenser task reached the buffer (a sampler stalled
