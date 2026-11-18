@@ -351,6 +351,7 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
                 **(skypilot_env(spec, rank) if spec.run_script else {})}
     # node-local data (store stage, release staging, temp files) under the node's scratch
     full_env.update(ssh_node_storage.scratch_env(node, spec.run_id, full_env))
+    full_env.update(ssh_node_storage.transfer_env(node, full_env))  # a release goes up in processes
     if spec.docker:
         if container is None:
             raise SshIslandError("a docker node needs its container name")

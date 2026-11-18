@@ -104,6 +104,22 @@ def scratch_env(node: Node, run_id: str, env: Mapping[str, str]) -> dict[str, st
     return {k: v for k, v in out.items() if k not in node.env}
 
 
+# processes of a staged store's many-file upload on an SSH trainer node (s3_store
+# UPLOAD_PROCESSES_ENV) unless the launcher or the inventory sets it: node 0 pushes
+# each 207 GB Kimi-K3.1 release alone, and one process tops out near 270 MB/s
+UPLOAD_PROCESSES = 4
+
+
+def transfer_env(node: Node, env: Mapping[str, str]) -> dict[str, str]:
+    """The upload processes of a staged store on this node ({} when ``env`` stages
+    no store, or the run or the node's inventory env already says)."""
+    from ..cloud.s3_store import UPLOAD_PROCESSES_ENV
+
+    if not staged_envs(env) or env.get(UPLOAD_PROCESSES_ENV) or UPLOAD_PROCESSES_ENV in node.env:
+        return {}
+    return {UPLOAD_PROCESSES_ENV: str(UPLOAD_PROCESSES)}
+
+
 def docker_options(node: Node, run_id: str) -> list[str]:
     """``docker run`` options of the node-local storage: the scratch root's volume and
     the store credential's env file ([] without either)."""

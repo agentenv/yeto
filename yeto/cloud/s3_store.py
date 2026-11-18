@@ -250,6 +250,7 @@ PART_CONCURRENCY_ENV = "YETO_RL_STORE_PART_CONCURRENCY"  # parts of one file mov
 FILE_CONCURRENCY_ENV = "YETO_RL_STORE_FILE_CONCURRENCY"  # files of one push tier moved in parallel
 MAX_CONNECTIONS_ENV = "YETO_RL_STORE_MAX_CONNECTIONS"  # HTTP connection pool of the client (default: the threads)
 DOWNLOAD_PROCESSES_ENV = "YETO_RL_STORE_DOWNLOAD_PROCESSES"  # processes of a many-file download (read_files)
+UPLOAD_PROCESSES_ENV = "YETO_RL_STORE_UPLOAD_PROCESSES"  # processes of a many-file upload (write_files)
 CONNECT_TIMEOUT_ENV = "YETO_RL_STORE_CONNECT_TIMEOUT_S"  # seconds to open a connection (default 10)
 READ_TIMEOUT_ENV = "YETO_RL_STORE_READ_TIMEOUT_S"  # seconds without a byte of a response (default 60)
 RETRY_MODE_ENV = "YETO_RL_STORE_RETRY_MODE"  # botocore retry mode: standard (default) / adaptive / legacy
@@ -261,7 +262,8 @@ MULTIPART_MB_ENV = "YETO_RL_STORE_MULTIPART_MB"
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV, PART_MB_ENV, PART_CONCURRENCY_ENV, FILE_CONCURRENCY_ENV,
-                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV, UPLOAD_ATTEMPTS_ENV,
+                MAX_CONNECTIONS_ENV, DOWNLOAD_PROCESSES_ENV, UPLOAD_PROCESSES_ENV, PART_CHECKSUM_ENV,
+                UPLOAD_ATTEMPTS_ENV,
                 CONNECT_TIMEOUT_ENV, READ_TIMEOUT_ENV, RETRY_MODE_ENV, MAX_ATTEMPTS_ENV, MULTIPART_MB_ENV)
 DEFAULT_STAGE = "~/.cache/yeto/store-stage"
 # what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
@@ -449,12 +451,20 @@ class TransferSettings:
     a policy release) splits its files over that many processes. One Python process
     tops out near 700 MB/s of R2 range reads (MI355X node, 64 threads, nothing
     written); 4 / 8 processes of 16 threads read 1.7 / 3.0 GB/s. 4 stays well under
-    the ~7 GB/s that dropped an MI355X node off the network (GPU-B section 4.1)."""
+    the ~7 GB/s that dropped an MI355X node off the network (GPU-B section 4.1).
+
+    ``upload_processes``: the same for a many-file upload (:meth:`S3ObjectStore.write_files`,
+    a staged store's push of a policy release): the files are split over that many
+    processes by size, each moving its share as multipart uploads with
+    ``ceil(file_concurrency / processes)`` files at once. Default 1 (the one-process
+    upload measured above, ~270 MB/s); a node whose egress is above that (a bare-metal
+    trainer with 5-10 Gbit/s) sets more."""
 
     part_bytes: int = 64 * _MIB
     concurrency: int = 16
     file_concurrency: int = 8
     download_processes: int = 4
+    upload_processes: int = 1
     # SHA-256 per uploaded part: the store refuses a part whose body does not match
     # it, and the object's composite checksum is checked after the upload
     part_checksum: bool = True
@@ -473,6 +483,8 @@ class TransferSettings:
             raise ValueError("file concurrency must be >= 1")
         if self.download_processes < 1:
             raise ValueError("download processes must be >= 1")
+        if self.upload_processes < 1:
+            raise ValueError("upload processes must be >= 1")
         if self.upload_attempts < 1:
             raise ValueError("upload attempts must be >= 1")
         if not MIN_PART_BYTES <= self.multipart_bytes <= SINGLE_PUT_MAX_BYTES:
@@ -489,6 +501,7 @@ class TransferSettings:
                    concurrency=int(environ.get(PART_CONCURRENCY_ENV) or default.concurrency),
                    file_concurrency=int(environ.get(FILE_CONCURRENCY_ENV) or default.file_concurrency),
                    download_processes=int(environ.get(DOWNLOAD_PROCESSES_ENV) or default.download_processes),
+                   upload_processes=int(environ.get(UPLOAD_PROCESSES_ENV) or default.upload_processes),
                    part_checksum=part_checksum_default(environ),
                    upload_attempts=int(environ.get(UPLOAD_ATTEMPTS_ENV) or default.upload_attempts),
                    multipart_bytes=int(float(environ.get(MULTIPART_MB_ENV) or default.multipart_bytes / _MIB)
@@ -628,6 +641,66 @@ def _read_files_child() -> None:
 
 
 READ_FILES_CHILD = "from yeto.cloud.s3_store import _read_files_child; _read_files_child()"
+
+
+def _write_files_here(objects: "S3ObjectStore", items: Sequence[tuple[str, str]],
+                      threads: int) -> tuple[list[str], dict[str, str]]:
+    """Upload each ``(key, source)`` with ``threads`` files at once: the keys written,
+    and an error line per key that failed (the others still move)."""
+    def one(item: tuple[str, str]) -> tuple[str, str | None]:
+        try:
+            objects.write_file(*item)
+            return item[0], None
+        except Exception as error:  # noqa: BLE001 - reported per key, the caller raises
+            return item[0], f"{type(error).__name__}: {error}"[:500]
+
+    with ThreadPoolExecutor(max(1, min(int(threads), len(items) or 1))) as pool:
+        results = list(pool.map(one, items))
+    return [key for key, error in results if error is None], {key: error for key, error in results if error}
+
+
+def _write_files_child() -> None:
+    """One child process of :meth:`S3ObjectStore.write_files` (as :func:`_read_files_child`):
+    ``(written keys, {key: error})`` goes back pickled on stdout."""
+    uri, client_factory, transfer, threads, items = pickle.loads(sys.stdin.buffer.read())
+    objects = S3ObjectStore(uri, client=client_factory(), transfer=TransferSettings(**transfer))
+    sys.stdout.buffer.write(pickle.dumps(_write_files_here(objects, items, threads)))
+    sys.stdout.buffer.flush()
+
+
+WRITE_FILES_CHILD = "from yeto.cloud.s3_store import _write_files_child; _write_files_child()"
+
+
+def split_by_size(items: Sequence[tuple[str, str]], groups: int) -> list[list[tuple[str, str]]]:
+    """``items`` (key, file) in ``groups`` lists of about equal bytes (largest first
+    onto the lightest group): one 100 GB file and nine small ones must not land on
+    one process while the others idle."""
+    bins: list[tuple[int, int, list[tuple[str, str]]]] = [(0, i, []) for i in range(max(1, int(groups)))]
+    for item in sorted(items, key=lambda it: (-os.path.getsize(it[1]), it[0])):
+        total, index, members = min(bins)
+        members.append(item)
+        bins[index] = (total + os.path.getsize(item[1]), index, members)
+    return [members for _, _, members in sorted(bins, key=lambda b: b[1]) if members]
+
+
+def _run_children(code: str, payloads: Sequence[Any]) -> tuple[list[Any], list[int]]:
+    """Run one ``python -c code`` child per payload (pickled on stdin); their pickled
+    answers, and the exit codes of the children that failed."""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    children = []
+    for payload in payloads:
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        children.append(child)
+        child.stdin.write(pickle.dumps(payload))
+        child.stdin.close()
+    answers, failed = [], []
+    for child in children:
+        out = child.stdout.read()
+        if child.wait() != 0:
+            failed.append(child.returncode)
+            continue
+        answers.append(pickle.loads(out))
+    return answers, failed
 
 
 BOTOCORE_DEFAULT_POOL = 10  # botocore's max_pool_connections
@@ -1418,25 +1491,44 @@ class S3ObjectStore:
             return _read_files_here(self, items, self.transfer.file_concurrency)
         threads = max(1, -(-int(self.transfer.file_concurrency) // procs))
         groups = [items[i::procs] for i in range(procs)]
-        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
-        children = []
-        for group in groups:
-            child = subprocess.Popen([sys.executable, "-c", READ_FILES_CHILD], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, env=env)
-            children.append(child)
-            child.stdin.write(pickle.dumps((self.uri, self.client_factory, asdict(self.transfer), threads, group)))
-            child.stdin.close()
-        missing, failed = [], []
-        for child in children:
-            out = child.stdout.read()
-            if child.wait() != 0:
-                failed.append(child.returncode)
-                continue
-            missing += pickle.loads(out)
+        answers, failed = _run_children(READ_FILES_CHILD, [
+            (self.uri, self.client_factory, asdict(self.transfer), threads, group) for group in groups])
         if failed:
-            raise ObjectStoreError(f"{self.uri}: {len(failed)} of {len(children)} download processes "
+            raise ObjectStoreError(f"{self.uri}: {len(failed)} of {len(groups)} download processes "
                                    f"failed (exit {failed}); their stderr is above")
-        return missing
+        return [key for missing in answers for key in missing]
+
+    @property
+    def upload_processes(self) -> int:
+        """Processes a many-file upload uses (:meth:`write_files`); 1 without a
+        ``client_factory`` (an injected client cannot be rebuilt in another process)."""
+        return int(self.transfer.upload_processes) if self.client_factory is not None else 1
+
+    def write_files(self, items: Sequence[tuple[str, str | os.PathLike[str]]]) -> tuple[list[str], dict[str, str]]:
+        """Upload each ``(key, source)`` like :meth:`write_file`: ``(written keys,
+        {key: error})``; a failed file does not stop the others. With
+        :attr:`upload_processes` > 1 the files are split by size over that many child
+        interpreters (as :meth:`read_files`), each moving
+        ``ceil(file_concurrency / processes)`` files at once with ``concurrency`` parts
+        each, so the parts in flight stay ``file_concurrency * concurrency``. A
+        multipart upload keeps its resume journal next to its source, so a file a
+        failed child left half sent continues on the next push."""
+        items = [(key, str(source)) for key, source in items]
+        procs = min(self.upload_processes, len(items))
+        if procs <= 1:
+            return _write_files_here(self, items, self.transfer.file_concurrency)
+        threads = max(1, -(-int(self.transfer.file_concurrency) // procs))
+        groups = split_by_size(items, procs)
+        answers, failed = _run_children(WRITE_FILES_CHILD, [
+            (self.uri, self.client_factory, asdict(self.transfer), threads, group) for group in groups])
+        written: list[str] = [key for done, _ in answers for key in done]
+        errors: dict[str, str] = {key: error for _, errs in answers for key, error in errs.items()}
+        if failed:
+            answered = set(written) | set(errors)
+            for key, _ in items:
+                if key not in answered:
+                    errors[key] = f"its upload process failed (exit {failed})"
+        return written, errors
 
     def list(self, prefix: str, *, start_after: str = "") -> list[str]:
         strip = len(self.prefix) + 1 if self.prefix else 0
