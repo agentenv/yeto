@@ -40,9 +40,11 @@ are filled (`tests/test_k31_baremetal_kit.py` runs this check).
 | Item | Status |
 |---|---|
 | Layout PP3 x TP8 x CP2 x EP16, 128 trainable experts | Measured at 524k on 6 x 8 B300 (Modal, IB); 262k recommended from the fitted memory model ([K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#1-which-262k)) |
-| SSH + Docker trainer island on NVIDIA nodes | CPU-tested only. It has not run on a bare-metal NVIDIA cluster yet: the first bring-up follows section 9 step by step |
-| Inventory, Docker flag checks, image pre-pull, per-node environment, object-store staging on SSH nodes | In this repository, unit-tested |
-| Overlay-safe trainer image | Root cause fixed in the image build; rebuilt image digest: TODO(bm-image) |
+| SSH + Docker trainer island on NVIDIA nodes | CPU-tested only (fake SSH clusters, the launcher end to end). It has not run on a bare-metal NVIDIA cluster yet: the first bring-up follows section 9 step by step |
+| Resident trainer island (a trainer-only launch supervised by the fleet: relaunch, reattach, teardown per node) | In this repository, unit-tested |
+| Inventory, Docker flag checks, image pre-pull, per-node environment, node scratch, object-store staging, code pack on the nodes | In this repository, unit-tested |
+| Cluster check (`yeto preflight`) | In this repository, unit-tested against recorded tool output |
+| Overlay-safe trainer image | `yeto-miles-k31@sha256:2abbbb00...` (section 5), pulled and run on overlay2 and on the containerd snapshotter (Docker 29.9 / 29.10) |
 
 Items marked **TODO(bm-...)** name commands that are being added. Until
 they land, each step lists what it must establish and, where one exists, a
@@ -139,7 +141,7 @@ merge key, changing only `name`, `host` and `address`.
 
 | Field | Value for this cluster | Notes |
 |---|---|---|
-| `images.x86_64` | The trainer image by digest (section 5) | Used by every node without its own `image`. Keep it equal to the run config's `--rl-image`. |
+| `images.x86_64` | Optional | The run config's `--rl-image` decides the image (section 5); an inventory image must name the same one. |
 | `name` | `b300-0` .. `b300-5` | Unique. Node 0 (the first entry) is the Ray head and the rendezvous node. |
 | `host` | SSH target, `user@ip` or an alias in the control host's SSH config | Unique. |
 | `proxy_jump` | Optional jump host | Passed as `ssh -o ProxyJump=...`. |
@@ -150,24 +152,31 @@ merge key, changing only `name`, `host` and `address`.
 | `fabric` | `ib` or `roce` | Sets `NCCL_IB_DISABLE=0` for both. |
 | `runtime` | `docker` | |
 | `docker_args` | `--gpus all --device /dev/infiniband --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add IPC_LOCK` | Refused if the GPUs are missing, or (multi-node ib / roce) the verbs devices or the unlimited memlock. `--network host --ipc host` are always added. |
-| `mounts` | Host path to container path | See below. |
+| `scratch` | An NVMe directory, for example `/mnt/nvme/yeto` | See below. |
+| `scratch_min_free_gib` | For example `2000` | The trainer preflight refuses a node with less free space under `scratch`. |
+| `store_env_file` | Optional: an owner-only (`0600`) env file on the node with the store credential | When every trainer node has one, the control host ships no store credential to the nodes. |
+| `mounts` | Host path to container path | The weights copy (section 6). |
 | `env` | Per-node environment | See below. |
 
-**Mounts.** The container's root file system lives in Docker's image store.
-Everything large goes to NVMe instead:
+**Scratch.** The container's root file system lives in Docker's image store.
+Everything large goes to `<scratch>/<run>` on NVMe instead, mounted into the
+container as `/yeto-scratch`: the store stage (cut shards and releases before
+their upload), the release staging (one mount with the stage, so a release is
+hard linked, not copied), temporary files, the init release (reused by the
+next start) and the Ray session directory. Point Ray spill there too
+(`--rl-island-ray-spill-dir /yeto-scratch/ray-spill`). The weights copy is a
+plain mount (`/mnt/nvme/models: /data/models`).
 
-| Host path | Container path | Holds |
-|---|---|---|
-| `/mnt/nvme/yeto` | `/root/.cache` | The store stage (releases, cuts before upload), caches, Ray spill (`--rl-island-ray-spill-dir /root/.cache/ray-spill`) |
-| `/mnt/nvme/yeto/miles-ray` | `/root/miles-ray` | Ray session directory and logs |
-| `/mnt/nvme/models` | `/data/models` | The weights copy (section 6) |
-| `/opt/yeto` | `/opt/yeto` | The yeto checkout the trainer runs from (`--rl-ssh-trainer-workdir /opt/yeto`); the same commit as the control host. TODO(bm-resident): shipped automatically. |
+**Code.** The yeto code reaches the nodes as the run's code pack: the control
+host uploads it to the s3 store, every node downloads it, checks its sha256 and
+runs from it. No yeto checkout is needed on the nodes
+(`--rl-ssh-trainer-workdir` is only for runs without an s3 store).
 
-**Environment.** `env` is exported in every node's container after the
-fabric defaults and before the run's own environment. It carries the site's
-fabric settings and, on SSH islands, the trainer settings that a Modal run
-passes with `--modal-env`. Keep it identical on every node (the merge key
-does this).
+**Environment.** The inventory `env` holds the site's fabric settings; it is
+exported in every node's container after the fabric defaults. The model and
+run settings, which a Modal run passes with `--modal-env`, go in the run
+config as `--island-env KEY=VALUE` (one copy for all nodes); they are exported
+after the inventory `env`.
 
 | Variable | Value | Why |
 |---|---|---|
@@ -175,7 +184,7 @@ does this).
 | `NCCL_IB_GID_INDEX` | RoCE only, usually `3` | The RoCE v2 GID of the cluster address (`show_gids`). Wrong value: NCCL cannot connect, or uses a RoCE v1 GID. |
 | `NCCL_IB_TC` | RoCE only | The lossless traffic class of your switches. |
 | `NCCL_SOCKET_IFNAME` | Set from `interface` | Override here only if NCCL's bootstrap must use another NIC. |
-| `NCCL_RAS_ENABLE` | `0` | As in the measured runs. |
+| `NCCL_RAS_ENABLE` | `0` (`--island-env`) | As in the measured runs. The rows below are `--island-env` too. |
 | `OMP_NUM_THREADS` | `8` | |
 | `MILES_MXFP4_QAT_TRITON` | `1` | MXFP4 QAT kernels for the routed experts. |
 | `MILES_K31_INDEXER_QUERY_CHUNK` | `1024` | DSA indexer query block (stage-0 memory). |
@@ -199,9 +208,17 @@ python -c "from yeto.launch.node_inventory import load_inventory as l; print(len
 
 ### 5.1 Use the overlay-safe image
 
-Use the full-parameter K3.1 trainer image rebuilt with the same-layer
-whiteout fix: TODO(bm-image) digest. Put it in both `images.x86_64` of the
-inventory and `--rl-image docker:<ref>` of the run config.
+Use the full-parameter K3.1 trainer image with its overlay layer repacked:
+
+```
+ghcr.io/agentenv/yeto-miles-k31@sha256:2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14
+```
+
+Put it in `--rl-image docker:<ref>` of the run config. It holds the same
+files and the same Miles commit (`1f29e43043`) as the Modal default
+`2de5d796...`; only one layer is packed differently. An SSH trainer island
+given `2de5d796...` (by `--rl-image` or by the inventory) runs this repack
+instead and says so on stderr.
 
 Why: the earlier build of the image
 (`ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796...`) has one layer that
@@ -228,8 +245,9 @@ for 24 GB per node:
 docker pull <image>          # on every node; about 24 GB compressed, 85-100 GB in the image store
 ```
 
-TODO(bm-image): a `yeto` command that pulls and verifies the image on every
-inventory node.
+`yeto preflight` (section 9) pulls the image on every node and probes it
+with the node's `docker_args`; the trainer preflight pulls it again before
+the first start.
 
 ## 6. Model weights
 
@@ -386,8 +404,17 @@ On `b300-0`:
    Expect 8 GPUs, the compute HCAs, `unlimited`, and a stable NVLink
    all-reduce bus bandwidth (record it). The image ships `all_reduce_perf`,
    `ib_write_bw` and `ibstat`.
-3. TODO(bm-netcheck): the single-node check command (GPUs, HCAs, memlock,
-   NVLink bandwidth) as one step over the inventory.
+3. The same checks over the whole inventory, host and container side
+   (driver, GPUs, NVSwitch fabric, NVLink matrix, GPU-NIC affinity, HCAs and
+   ports, MTU, GID index, `/dev/infiniband` and memlock in the container,
+   memory, disks, Docker storage driver, the image pull, clock, addresses):
+
+   ```
+   yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory inventory.yaml --cluster-prefix <run> --no-bench
+   ```
+
+   It writes a PASS / WARN / FAIL table with a fix per finding to
+   `~/.yeto/runs/<run>/preflight/<time>/` and exits 1 on any FAIL.
 
 ### 9.2 Two nodes
 
@@ -402,11 +429,13 @@ Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
 
    Add `-x <gid index>` on RoCE. Repeat for every HCA of `NCCL_IB_HCA`. Each
    should come close to the port's line rate.
-2. TODO(bm-netcheck): the two-node NCCL check (all-reduce and all-to-all over
-   16 GPUs with the inventory's environment). It must report the IB/RoCE
-   transport (`NET/IB`) on every rank, not `NET/Socket`, and a bus bandwidth
-   in line with the rail count. This is the check that catches a silent TCP
-   fallback before a 48-GPU launch.
+2. The NCCL check: `yeto preflight` without `--no-bench` runs, in the trainer
+   image with the inventory's environment, TCP reachability of the Ray and
+   torch ports, `ib_write_bw` rail by rail between node pairs, and
+   `all_reduce` / `all_to_all` / `sendrecv` on disjoint node pairs (0+1, 2+3,
+   4+5). It fails when any rank reports `NET/Socket` instead of `NET/IB`, and
+   warns on a bus bandwidth below the rail count's expectation. This is the
+   check that catches a silent TCP fallback before a 48-GPU launch.
 
 ### 9.3 Six nodes, dry run
 
@@ -414,7 +443,8 @@ Between two nodes that will hold one pipeline stage (`b300-0` and `b300-1`):
    (0-1, 2-3, 4-5), and at least one pair across stages (1-2).
 2. The image is pulled on every node, and the weights are copied and verified
    (section 6) on every node.
-3. TODO(bm-netcheck): the six-node check over the full inventory.
+3. `yeto preflight` over the full inventory (it ends with the six-node
+   collectives) passes with no FAIL.
 4. Fill the run config and run the preflight (nothing is ordered, no trainer
    starts):
 
@@ -455,10 +485,10 @@ the inventory. Differences:
 |---|---|---|
 | `--gpu` | `ssh:6x8xb300` | The inventory's six trainer nodes. |
 | `--rl-node-inventory` | `<inventory.b300-6x8-baremetal.yaml>` | Section 4. |
-| `--rl-ssh-trainer-workdir` | `/opt/yeto` | The yeto checkout inside the container (mounted by the inventory). |
-| `--modal-*` flags | none | Their settings live in the inventory `env`; host memory is the node's own. |
-| `env.YETO_RL_STORE_S3_PROFILE` | An AWS profile on the control host | Its key, limited to the store's bucket, is handed to the trainer containers (the trainer never uses the control host's other credentials). `YETO_RL_STORE_S3_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` also work. TODO(bm-store): store staging and upload on SSH nodes. |
-| `--rl-island-ray-spill-dir` | `/root/.cache/ray-spill` | Ray spill on NVMe. |
+| `--island-env` | The model and run settings (section 4) | One copy for all nodes. |
+| `--modal-*` flags | none | Their settings are `--island-env`; host memory is the node's own. |
+| `env.YETO_RL_STORE_S3_PROFILE` | An AWS profile on the control host | Its key, limited to the store's bucket, is handed to the trainer containers (the trainer never uses the control host's other credentials). `YETO_RL_STORE_S3_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` also work. Or give every node a `store_env_file` (section 4). Every node stages the store under its scratch and uploads by object API. |
+| `--rl-island-ray-spill-dir` | `/yeto-scratch/ray-spill` | Ray spill on the node's scratch (NVMe). |
 | `--idle-warn-minutes` | `0` | Idle shutdown off: at 262k a step (about 25-35 min at m = 64 [estimate]) or a wait for groups can exceed the default 15 + 15 min idle window. Hang detection stays on (`--rl-stall-timeout`, the run monitor). On paid hardware use `--idle-warn-minutes 45 --idle-stop-minutes 45`, as the Modal kit does. |
 | `trainer.usd_per_h` | `0` | Your own hardware. Set an internal rate to have it counted in `budget.usd`. |
 
@@ -475,11 +505,15 @@ yeto run status --config run.json
 yeto run down --config run.json             # trainer, pool and sandboxes
 ```
 
-TODO(bm-resident): until the resident SSH trainer island lands, a trainer-only
-`ssh:` launch (no `--rl-trainer-scheduler`) is not started on the inventory
-nodes: it goes to SkyPilot's SSH node pool path instead. The dry run passes;
-the real launch needs that change. The same change ships the selection file
-and the algorithm spec to the nodes.
+The trainer is a resident SSH island: `yeto launch` starts one container per
+node, follows every node, and treats any rank that exits non-zero, a process
+that vanishes, or a node that stops answering SSH as a failure of the whole
+island; it then stops every node (and confirms it) before it starts the next
+incarnation. A restarted launcher reattaches to a running incarnation instead
+of starting a second one. `yeto run down`, a stop and the end of the run stop
+the containers node by node; `yeto cleanup` stops them from the resource
+ledger if the launcher itself died. The expert selection and the algorithm
+spec travel in the start script.
 
 A relaunch continues from the newest release in the store with a fresh
 optimizer (`--rl-round-cuts off`); budget about 20 minutes of initialization

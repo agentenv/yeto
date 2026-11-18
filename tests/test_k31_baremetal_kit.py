@@ -47,29 +47,46 @@ def test_inventory_docker_args_pass_the_multi_node_rdma_checks():
         assert cuda_docker_problems(node.docker_args, rdma=True) == [], node.name
 
 
-def test_inventory_env_is_the_same_on_every_node_and_carries_the_run_settings():
+def _island_env(argv: list[str]) -> dict[str, str]:
+    pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "--island-env"]
+    return dict(p.split("=", 1) for p in pairs)
+
+
+def test_inventory_env_is_the_fabric_and_the_run_settings_ride_island_env():
     nodes = load_inventory(INVENTORY)
     envs = {json.dumps(dict(n.env), sort_keys=True) for n in nodes}
-    assert len(envs) == 1, "the run settings must be identical on every node"
-    env = dict(nodes[0].env)
-    assert env["NCCL_IB_HCA"]
+    assert len(envs) == 1, "the fabric settings are the same on every node"
+    assert nodes[0].env["NCCL_IB_HCA"]
+    env = _island_env(_argv())
     for key in ("MILES_MXFP4_QAT_TRITON", "MILES_K31_INDEXER_QUERY_CHUNK", "MILES_K3_ATTN_RES_TOKEN_CHUNK",
                 "YETO_MILES_TRAIN_EXTRA_ARGV", "YETO_RL_NAN_SKIP"):
         assert key in env, key
+        assert key not in nodes[0].env, f"{key}: one copy, in the run config"
     # 93 layers split 31/31/31 over PP3 without any split flag
     assert "pipeline-num-layers" not in env["YETO_MILES_TRAIN_EXTRA_ARGV"]
     assert "first_stage_grad.before_train_step" in env["YETO_MILES_TRAIN_EXTRA_ARGV"]
 
 
 def test_inventory_image_is_the_trainer_image_of_the_run_config():
+    from types import SimpleNamespace
+
+    from yeto.launch.ssh_trainer_island import run_image
+
     image = _flag(_argv(), "--rl-image").removeprefix("docker:")
-    assert {n.image for n in load_inventory(INVENTORY)} == {image}
+    nodes = load_inventory(INVENTORY)
+    assert {n.image for n in nodes} <= {None, image}  # the run's --rl-image decides
+    # the overlay-safe repack: run_image keeps it as it is
+    assert run_image(SimpleNamespace(rl_image=f"docker:{image}"), nodes) == image
 
 
-def test_inventory_mounts_the_node_workdir_of_the_run_config():
-    workdir = _flag(_argv(), "--rl-ssh-trainer-workdir")
+def test_nodes_keep_the_run_data_on_scratch_and_get_the_code_from_the_store():
+    argv = _argv()
+    assert "--rl-ssh-trainer-workdir" not in argv, "the code pack comes from the s3 store"
+    assert _flag(argv, "--rl-checkpoint-store").startswith("s3://")
+    assert _flag(argv, "--rl-island-ray-spill-dir").startswith("/yeto-scratch/")
     for node in load_inventory(INVENTORY):
-        assert workdir in node.mounts.values(), node.name
+        assert node.scratch and node.scratch.startswith("/"), node.name
+        assert node.scratch_min_free_gib and node.scratch_min_free_gib >= 1500, node.name
 
 
 def test_run_config_names_the_shipped_inventory_and_the_layout():
