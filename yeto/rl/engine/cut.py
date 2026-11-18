@@ -571,7 +571,12 @@ def verify_cut(
     manifest = load_manifest(root, cut_id)
     problems = manifest.completeness_problems()
     if check_files:
-        problems += file_problems(cut_dir(root, cut_id), manifest.files)
+        directory = cut_dir(root, cut_id)
+        # a shard a lazy staged store left in the object store (multi-node island): its
+        # size is checked by HEAD here, its sha256 by the rank that fetches it
+        absent = [f for f in manifest.files if not (directory / f.path).is_file()]
+        problems += file_problems(directory, manifest.files,
+                                  remote_sizes=remote_shard_sizes(directory, absent) if absent else None)
     algorithm_problem = manifest.algorithm.mismatch(expect.algorithm)
     if algorithm_problem is not None:
         problems.append(algorithm_problem)
@@ -643,6 +648,100 @@ def push_shard_from_rank(final: str | os.PathLike[str], *, environ: Mapping[str,
                   flush=True)
     return {"object_key": relative, "object_bytes": int(size),
             **({"object_checksum": checksum} if checksum else {})}
+
+
+def _staged_store_of(path: Path, environ: Mapping[str, str] | None, store_kwargs: Mapping[str, Any] | None):
+    """``(store, key of path in it)`` when the island's store stages its files on each
+    node (it can ``fetch_local_file``); None otherwise (a shared mount, no store)."""
+    from .resume import STORE_IMPL_ENV, store_for
+
+    env = os.environ if environ is None else environ
+    if not env.get(STORE_IMPL_ENV):
+        return None
+    store = store_for(str(path.parent), environ=env, **dict(store_kwargs or {}))
+    if getattr(store, "fetch_local_file", None) is None or getattr(store, "staged", True) is False:
+        return None  # a bucket mount: a file missing there is missing
+    try:
+        key = path.relative_to(Path(store.root).expanduser().resolve()).as_posix()
+    except ValueError:  # not under this node's stage
+        return None
+    return store, key
+
+
+def fetch_shard_to_rank(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None = None,
+                        store_kwargs: Mapping[str, Any] | None = None) -> int | None:
+    """On the rank that reads it: download the cut shard ``path`` from the object store
+    into this node's stage when it is not on this disk and the island's store stages
+    its files per node (the counterpart of :func:`push_shard_from_rank`: on a
+    multi-node island a shard lives on the node that wrote it and in the object store,
+    and a lazy store's reload left it out). Returns the bytes fetched, None when the
+    file is here already or there is no staged store; raises when the store does not
+    hold it."""
+    path = Path(os.path.abspath(path))
+    if path.is_file():
+        return None
+    found = _staged_store_of(path.parent.resolve() / path.name, environ, store_kwargs)
+    if found is None:
+        return None
+    store, key = found
+    return store.fetch_local_file(key)
+
+
+def drop_fetched_shard(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None = None,
+                       store_kwargs: Mapping[str, Any] | None = None) -> int:
+    """Free the disk a shard :func:`fetch_shard_to_rank` downloaded takes once it is
+    loaded (the bucket keeps it); :data:`SHARD_EVICT_ENV` ``0`` keeps it. Bytes freed."""
+    env = os.environ if environ is None else environ
+    if str(env.get(SHARD_EVICT_ENV, "1")).strip().lower() in {"0", "false", "no", "off"}:
+        return 0
+    path = Path(os.path.abspath(path))
+    found = _staged_store_of(path.parent.resolve() / path.name, env, store_kwargs)
+    evict = None if found is None else getattr(found[0], "evict_local_file", None)
+    return int(evict(found[1])) if callable(evict) else 0
+
+
+def remote_shard_sizes(directory: str | os.PathLike[str], files: Iterable[CutFile], *,
+                       environ: Mapping[str, str] | None = None,
+                       store_kwargs: Mapping[str, Any] | None = None) -> dict[str, int | None] | None:
+    """The sizes the object store reports (one HEAD each) for shards of ``directory``
+    that are not on this disk, for :func:`file_problems` (``remote_sizes``); None when
+    the store does not stage per node (every shard must then be on this disk)."""
+    from .object_store import object_size
+
+    files = list(files)
+    if not files:
+        return None
+    directory = Path(os.path.abspath(directory))
+    found = _staged_store_of(directory.resolve() / files[0].path, environ, store_kwargs)
+    if found is None:
+        return None
+    store, first = found
+    prefix = first[: len(first) - len(files[0].path)]
+    return {f.path: object_size(store.objects, prefix + f.path) for f in files}
+
+
+def manifest_shard_keys(objects: Any, keys: Iterable[str]) -> set[str]:
+    """The keys among ``keys`` that are rank shards of a committed cut: the files the
+    ``manifest.json`` next to them lists (each manifest read by key). A staged store
+    of a multi-node island leaves them out of its reload (``s3_store.LAZY_CUT_SHARDS_ENV``);
+    the manifest, the files it does not list and the shards of an uncommitted cut are
+    still downloaded."""
+    keys = list(keys)
+    present = set(keys)
+    out: set[str] = set()
+    for key in keys:
+        if key.rsplit("/", 1)[-1] != MANIFEST_NAME:
+            continue
+        raw = objects.read(key)
+        if raw is None:
+            continue
+        try:
+            listed = [str(f["path"]) for f in json.loads(raw).get("files") or ()]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue  # not a cut manifest: download what is there
+        base = key[: -len(MANIFEST_NAME)]
+        out |= {base + name for name in listed if base + name in present}
+    return out
 
 
 def uploaded_shard_sizes(store: Any, summaries: Iterable[Mapping[str, Any]]) -> dict[str, int | None] | None:

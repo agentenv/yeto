@@ -65,6 +65,8 @@ from yeto.rl.engine.cut import (
     commit_manifest,
     context_problems,
     cut_dir,
+    drop_fetched_shard,
+    fetch_shard_to_rank,
     fsync_dir,
     fsync_file,
     sha256_file,
@@ -318,11 +320,14 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
     if len(files) != world:
         raise CutError(f"cut has {len(files)} rank files, this run has {world} ranks (DP change unsupported)")
     path = Path(directory) / entry.path
-    if sha256_file(path) != entry.sha256:
+    fetched = fetch_shard_to_rank(path)  # another node wrote it (one stage per node): from the store
+    if not path.is_file() or sha256_file(path) != entry.sha256:
         raise CutError(f"rank {rank}: {entry.path} checksum differs from the manifest")
     if any(state for state in handles.optimizer.state.values()):
         raise CutError("restore_cut needs a freshly built trainer (the optimizer already has state)")
     saved = torch.load(path, map_location="cpu", weights_only=True)
+    if fetched is not None:
+        drop_fetched_shard(path)
     if saved.get("schema") != RANK_FILE_SCHEMA or saved.get("cut_id") != cut_id or saved.get("rank") != rank:
         raise CutError(f"rank {rank}: {entry.path} is not this rank's file of cut {cut_id!r}")
 
