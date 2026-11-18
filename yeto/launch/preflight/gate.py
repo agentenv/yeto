@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import IO, Any
 
+from ..ssh_trainer_island import SshIslandError
 from .cluster import (
     FAIL,
     PASS,
@@ -27,6 +28,7 @@ from .cluster import (
     Report,
     Steps,
     resolve_nodes,
+    trainer_image,
 )
 
 SKIP_FLAG = "--skip-preflight"
@@ -51,13 +53,17 @@ def argv_value(argv: Sequence[str], flag: str) -> str | None:
     return value
 
 
-def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | None) -> list[list[str]]:
-    """``yeto preflight`` argv (after ``yeto``) of every ``ssh:`` entry of ``gpu``."""
+def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | None,
+                       image: str | None = None) -> list[list[str]]:
+    """``yeto preflight`` argv (after ``yeto``) of every ``ssh:`` entry of ``gpu``;
+    ``image``: the run's ``--rl-image`` (the image the trainer runs)."""
     out = []
     for entry in ssh_entries(gpu):
         argv = ["preflight", "--gpu", entry]
         if inventory:
             argv += ["--rl-node-inventory", str(inventory)]
+        if image:
+            argv += ["--image", str(image)]
         out.append(argv + ["--no-bench", "--cluster-prefix", str(prefix or DEFAULT_PREFIX)])
     return out
 
@@ -65,7 +71,7 @@ def preflight_commands(gpu: str | None, inventory: str | None, prefix: str | Non
 def commands_for_launch_argv(argv: Sequence[str]) -> list[list[str]]:
     """The preflight commands of a ``yeto launch`` argv (``yeto run up``'s trainer)."""
     return preflight_commands(argv_value(argv, "--gpu"), argv_value(argv, "--rl-node-inventory"),
-                              argv_value(argv, "--cluster-prefix"))
+                              argv_value(argv, "--cluster-prefix"), argv_value(argv, "--rl-image"))
 
 
 def _say(out: IO[str], line: str) -> None:
@@ -91,7 +97,8 @@ def launch_gate(args: Any, *, ops: Any = None, out: IO[str] | None = None,
     gpu = getattr(args, "gpu", None)
     inventory = getattr(args, "rl_node_inventory", None)
     prefix = getattr(args, "cluster_prefix", None) or DEFAULT_PREFIX
-    commands = preflight_commands(gpu, inventory, prefix)
+    rl_image = getattr(args, "rl_image", None)
+    commands = preflight_commands(gpu, inventory, prefix, rl_image)
     if not commands:
         return None
     shown = "; ".join("yeto " + shlex.join(c) for c in commands)
@@ -106,11 +113,15 @@ def launch_gate(args: Any, *, ops: Any = None, out: IO[str] | None = None,
     reports = []
     for entry in ssh_entries(gpu):
         nodes = resolve_nodes(entry, inventory)  # InventoryError is a ValueError: the launch is refused
+        try:  # the image the trainer runs: --rl-image, an overlay-unsafe pin as its overlay-safe repack
+            image = trainer_image(rl_image, nodes)
+        except SshIslandError as exc:
+            raise ValueError(str(exc)) from None
         out_dir = (runs.run_dir(prefix) / "preflight"
                    / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(clock())))
         _say(out, f"[yeto] cluster preflight on {len(nodes)} ssh node(s) of {entry} (node checks and TCP ports; "
                   f"{SKIP_FLAG} skips it) -> {out_dir}")
-        report = ClusterPreflight(nodes, ops=ops, steps=GATE_STEPS, out_dir=out_dir,
+        report = ClusterPreflight(nodes, image=image, ops=ops, steps=GATE_STEPS, out_dir=out_dir,
                                   log=lambda m: _say(out, m), clock=clock).run()
         for line in summary_lines(report):
             _say(out, line)

@@ -211,3 +211,27 @@ def test_run_up_main_refuses_before_ordering_and_skip_reaches_the_trainer(make_u
     assert up.main(_up_args(dry_run=True)) == 0 and order == []
     assert up.main(_up_args(skip_preflight=True)) == 0
     assert order[:2] == ["sandbox", "pool"] and order[-1][-1] == "--skip-preflight"
+
+
+def test_gate_checks_the_image_the_trainer_runs(tmp_path, runs_dir):
+    """An inventory pinned to the overlay-unsafe FULL_E digest runs (and is checked) as its
+    overlay-safe repack; --rl-image is the image of the run."""
+    from tests.test_cluster_preflight import BAD_IMAGE, IMAGE
+    from yeto.rl.adapters.miles import pins
+
+    safe = pins.overlay_safe_image(BAD_IMAGE)
+    nodes = [b300(0, image=BAD_IMAGE), b300(1, image=BAD_IMAGE)]
+    ops = FakeCluster(nodes)
+    ops.NOW = time.time()
+    args = _args(tmp_path)
+    inv = Path(args.rl_node_inventory)
+    inv.write_text(inv.read_text().replace(IMAGE, BAD_IMAGE))
+    rec = gate.launch_gate(args, ops=ops, out=io.StringIO())
+    assert rec["reports"][0]["ok"]
+    pulls = [s for _, s in ops.scripts if s.startswith("docker pull")]
+    assert pulls and all(safe in s and BAD_IMAGE not in s for s in pulls)
+    ops = _fake()
+    gate.launch_gate(_args(tmp_path, rl_image=IMAGE), ops=ops, out=io.StringIO())
+    assert all(IMAGE in s for _, s in ops.scripts if s.startswith("docker pull"))
+    argv = [*SSH_ARGV, "--rl-image", "docker:" + IMAGE]
+    assert gate.commands_for_launch_argv(argv)[0][5:7] == ["--image", "docker:" + IMAGE]
