@@ -1,0 +1,9 @@
+#!/bin/bash
+# bm-sim stand-in for the NVIDIA card tool: answers the trainer preflight query
+# (index,name,memory.total as csv,noheader,nounits) with the node's simulated cards.
+{ read -r count; read -r name; read -r mib; } < /etc/bm-sim/cards
+case " $* " in
+  *" --query-gpu=index,name,memory.total "*)
+    for ((i = 0; i < count; i++)); do echo "$i, $name, $mib"; done ;;
+  *) echo "bm-sim nvidia-smi: unsupported arguments: $*" >&2; exit 2 ;;
+esac
