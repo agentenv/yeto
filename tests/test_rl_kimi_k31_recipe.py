@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -296,4 +297,30 @@ def test_full_recompute_is_turned_on_for_the_frozen_mxfp4_experts():
     kept = ["--recompute-granularity", "full", "--recompute-method", "block"]
     assert miles_config._full_recompute_for_mxfp4_experts(kept) == kept
     with pytest.raises(miles_config.MilesConfigError, match="selective"):
-        miles_config._full_recompute_for_mxfp4_experts(["--recompute-granularity", "selective"])
+        miles_config.check_mxfp4_expert_recompute(["--recompute-granularity", "selective"], {})
+
+
+def test_mxfp4_expert_recompute_check_reads_the_last_flag_and_the_redequant_switch(caplog):
+    from yeto.rl.adapters.miles import config as miles_config
+
+    check = miles_config.check_mxfp4_expert_recompute
+    on = {miles_config.MXFP4_REDEQUANT_ENV: "1"}
+    full = ["--recompute-granularity", "full", "--recompute-method", "uniform", "--recompute-num-layers", "1"]
+    check(full, {})
+    # YETO_MILES_TRAIN_EXTRA_ARGV lands after the recipe's full recompute and argparse keeps the last value
+    overridden = [*full, "--recompute-granularity", "selective", "--recompute-modules", "moe_act"]
+    with pytest.raises(miles_config.MilesConfigError, match=miles_config.MXFP4_REDEQUANT_ENV):
+        check(overridden, {})
+    with pytest.raises(miles_config.MilesConfigError):
+        check(overridden, {miles_config.MXFP4_REDEQUANT_ENV: "0"})
+    check(overridden, on)
+    # the selective-to-full order is full again
+    check(["--recompute-granularity", "selective", "--recompute-granularity", "full"], {})
+    block = [*full, "--recompute-method", "block", "--recompute-num-layers", "30"]
+    with caplog.at_level(logging.WARNING):
+        check(block, {})
+    assert miles_config.MXFP4_REDEQUANT_ENV in caplog.text
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        check(block, on)
+    assert miles_config.MXFP4_REDEQUANT_ENV not in caplog.text

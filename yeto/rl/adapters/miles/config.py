@@ -1367,6 +1367,9 @@ def translate_run_config(
         check_pipeline_split(geometry.num_layers, parallel.pipeline_parallel,
                              parallel.uneven_pipeline_layers, (*extra_argv, *train_extra))
     values.extend(train_extra)
+    if recipe.name == RECIPE_KIMI_K31:
+        # extra argv and YETO_MILES_TRAIN_EXTRA_ARGV come after the recipe's default: check what Miles parses
+        check_mxfp4_expert_recompute(values)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
@@ -1535,27 +1538,52 @@ FULL_RECOMPUTE_ARGV = ("--recompute-granularity", "full", "--recompute-method", 
                        "--recompute-num-layers", "1")
 
 
+# Miles k31/integ-trainer-a2 (miles_plugins/models/kimi_k3/mxfp4_redequant.py): the frozen MXFP4 experts' graph
+# keeps the packed bytes and the backward dequantizes them again, so no layer holds BF16 experts until its backward
+MXFP4_REDEQUANT_ENV = "MILES_K31_MXFP4_REDEQUANT_BACKWARD"
+
+
+def _last_flag_value(values: Sequence[str], flag: str) -> str | None:
+    """The value argparse keeps for ``flag``: the last one."""
+    value = None
+    for name, item in zip(values, values[1:]):
+        if name == flag:
+            value = item
+    return value
+
+
 def _full_recompute_for_mxfp4_experts(values: list[str]) -> list[str]:
     """kimi_k31: the frozen routed experts stay MXFP4 and every GEMM dequantizes a
     whole layer of them to BF16 (Miles ``mxfp4_experts``). Without full recompute
     autograd keeps each layer's dequantized weights for the backward, about 7 GB per
     MoE layer per GPU at EP8, which no pipeline stage of the full model fits; full
     recompute frees them after each layer's backward. The recipe turns it on when the
-    launch did not (as --rl-activation-recompute would) and refuses any other
-    recompute granularity."""
-    granularity = None
-    for flag, value in zip(values, values[1:]):
-        if flag == "--recompute-granularity":
-            granularity = value
-    if granularity is None:
+    launch did not (as --rl-activation-recompute would); :func:`check_mxfp4_expert_recompute`
+    refuses any other granularity on the final argv unless the trainer re-dequantizes in the backward."""
+    if _last_flag_value(values, "--recompute-granularity") is None:
         logging.getLogger(__name__).warning("kimi_k31: turning on full uniform activation recompute (the frozen MXFP4 "
                        "experts' dequantized weights would otherwise stay alive until the backward)")
         return [*values, *FULL_RECOMPUTE_ARGV]
-    if granularity != "full":
+    return values
+
+
+def check_mxfp4_expert_recompute(values: Sequence[str], environ: Mapping[str, str] = os.environ) -> None:
+    """kimi_k31, on the final argv (extra argv and ``YETO_MILES_TRAIN_EXTRA_ARGV`` included, last flag wins):
+    a granularity other than full keeps every layer's dequantized MXFP4 experts until its backward, unless
+    ``MILES_K31_MXFP4_REDEQUANT_BACKWARD=1`` (needs a Miles with ``mxfp4_redequant``; on an older Miles the
+    variable does nothing). ``--recompute-method block`` keeps them for the layers it does not recompute."""
+    granularity = _last_flag_value(values, "--recompute-granularity")
+    redequant = environ.get(MXFP4_REDEQUANT_ENV, "0") == "1"
+    if granularity not in (None, "full") and not redequant:
         raise MilesConfigError(
             f"kimi_k31 recipe: --recompute-granularity {granularity} keeps the frozen MXFP4 experts' "
-            "dequantized weights for the backward; use full recompute (--rl-activation-recompute)")
-    return values
+            "dequantized weights for the backward; use full recompute (--rl-activation-recompute), or set "
+            f"{MXFP4_REDEQUANT_ENV}=1 on a Miles that re-dequantizes them in the backward")
+    if granularity == "full" and _last_flag_value(values, "--recompute-method") == "block" and not redequant:
+        logging.getLogger(__name__).warning(
+            "kimi_k31: --recompute-method block keeps the frozen MXFP4 experts' dequantized weights of every layer "
+            "it does not recompute until the backward (about 3 GB per MoE layer per GPU at EP16); set %s=1",
+            MXFP4_REDEQUANT_ENV)
 
 
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
