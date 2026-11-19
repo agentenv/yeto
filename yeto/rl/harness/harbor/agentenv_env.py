@@ -27,8 +27,9 @@ task, unless an exec or file transfer failed on it; then it is deleted.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -41,7 +42,36 @@ from .agentenv_sandbox import AgentenvSandbox, SandboxSpec
 
 T = TypeVar("T")
 
+logger = logging.getLogger(__name__)
+
 AGENTENV_IMPORT_PATH = "yeto.rl.harness.harbor.agentenv_env:AgentenvEnvironment"
+
+# Env-var names whose values are service URLs an AgentENV microVM must be able to
+# reach before a trial can score, mapped to the logical sidecar name the
+# reachability self-check reports under.  A microVM is a Firecracker guest, not a
+# container on a docker bridge, so it reaches these only by egress to a routable
+# address (:mod:`.agentenv_network`); a misconfigured or unreachable records /
+# judge endpoint is the silent-zero (sbx-3) failure the self-check guards against.
+#
+#   TASK_SERVER_URL                 judge task-server, if the task declares one
+#                                   (read from the task's ``[environment].env``)
+#   YETO_RECORDS_PROXY_PUBLIC_BASE  the rollout records-proxy the microVM posts
+#                                   trajectories to (set in the sampler process
+#                                   env by the agentic launch, see agentic.env)
+#
+# NOTE: the per-trial sampler endpoint (``OPENAI_BASE_URL``) is injected into the
+# *agent process* env by :func:`...trial.agent_env` from the session URL and is
+# not visible to the environment object here, so it is not probed by this hook.
+REACH_URL_ENV_VARS: tuple[tuple[str, str], ...] = (
+    ("TASK_SERVER_URL", "task-server"),
+    ("YETO_RECORDS_PROXY_PUBLIC_BASE", "records-proxy"),
+)
+# Set to "1" to skip the fail-loud reachability self-check (escape hatch only;
+# skipping it re-exposes the silent-zero-burn failure mode).
+SKIP_REACH_ENV = "YETO_AGENTENV_SKIP_REACH_CHECK"
+# Optional tuning of the in-microVM curl self-check (defaults from agentenv_network).
+REACH_TRIES_ENV = "YETO_AGENTENV_REACH_TRIES"
+REACH_TIMEOUT_ENV = "YETO_AGENTENV_REACH_TIMEOUT_S"
 
 
 class AgentenvEnvironment(BaseEnvironment):
@@ -61,8 +91,12 @@ class AgentenvEnvironment(BaseEnvironment):
 
     def __init__(self, *args: Any, ttl_s: int | None = None, client: Any = None,
                  quota: AgentenvQuota | None = None,
-                 pool: bool | AgentenvSandboxPool | None = None, **kwargs: Any) -> None:
+                 pool: bool | AgentenvSandboxPool | None = None,
+                 reach_endpoints: Mapping[str, str] | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # Explicit ``{name: url}`` reachability targets (tests / advanced callers);
+        # ``None`` discovers them from the trial + process env (:meth:`_reach_endpoints`).
+        self._reach_override = dict(reach_endpoints) if reach_endpoints is not None else None
         self._sandbox_kwargs: dict[str, Any] = {}
         if ttl_s is not None:
             self._sandbox_kwargs["ttl_s"] = ttl_s
@@ -144,23 +178,73 @@ class AgentenvEnvironment(BaseEnvironment):
             await self.stop(delete=True)
             raise
 
-    async def _network_check(self) -> None:
-        """Reserved call point for AgentENV egress / reachability setup.
+    def _reach_endpoints(self) -> dict[str, str]:
+        """``{name: url}`` the microVM must reach, from the trial + process env.
 
-        AgentENV denies egress to private ranges by default, so a microVM may
-        need egress rules or a relay before it can reach the judge task-server /
-        records-proxy.  That logic lives in a separate module ``agentenv_network``
-        (owned elsewhere; interface in docs/NETWORK_DESIGN.md).  This hook calls
-        it when present and is a no-op until it ships -- this provider does not
-        implement reachability itself.
+        Explicit ``reach_endpoints`` (constructor) win; otherwise every
+        :data:`REACH_URL_ENV_VARS` name that is **set and non-empty** -- in the
+        task's ``[environment].env`` (:meth:`_startup_env`) or the sampler
+        process env -- is collected.  A value that is set but malformed (e.g. a
+        ``__TODO__`` placeholder) is kept on purpose: :func:`agentenv_network.
+        self_check` validates the URL and fails loud rather than silently
+        skipping a path the microVM needs.  An unset name is simply omitted (a
+        self-contained task with a local verifier has nothing to reach).
         """
+        if self._reach_override is not None:
+            return dict(self._reach_override)
+        startup = self._startup_env()
+        out: dict[str, str] = {}
+        for env_name, logical in REACH_URL_ENV_VARS:
+            value = startup.get(env_name) or os.environ.get(env_name)
+            if value:
+                out[logical] = value
+        return out
+
+    async def _network_check(self) -> None:
+        """Fail loud if the microVM cannot reach its judge / records endpoints.
+
+        A microVM is not a container on a docker bridge, so it reaches the judge
+        task-server and the rollout records-proxy only by egress to a routable
+        address.  A misconfigured or unreachable endpoint makes every rollout
+        score a silent zero while burning GPU time (the sbx-3 failure); this hook
+        probes each endpoint with ``curl`` from *inside* the microVM via
+        :mod:`.agentenv_network` and raises :class:`NetworkError` before any
+        trial runs if a required one is unreachable.
+
+        The probe needs ``curl`` in the task image; a image without it reports
+        the endpoint as a ``curl error`` and also fails loud (fix the image).
+        """
+        if os.environ.get(SKIP_REACH_ENV, "").strip() == "1":
+            logger.warning("agentenv reachability self-check skipped (%s=1): a misconfigured "
+                           "judge/records endpoint will silently zero-score", SKIP_REACH_ENV)
+            return
         try:
-            from . import agentenv_network  # type: ignore[attr-defined]
+            from . import agentenv_network
         except ImportError:
             return
-        ensure = getattr(agentenv_network, "ensure_reachable", None)
-        if ensure is not None:
-            await ensure(self._box())
+        mapping = self._reach_endpoints()
+        if not mapping:
+            logger.info("agentenv reachability self-check: no judge/records endpoint configured "
+                        "(%s); nothing to probe", ", ".join(n for n, _ in REACH_URL_ENV_VARS))
+            return
+
+        timeout_s = float(os.environ.get(REACH_TIMEOUT_ENV, "").strip()
+                          or agentenv_network.DEFAULT_TIMEOUT_S)
+        kwargs: dict[str, Any] = {"timeout_s": timeout_s}
+        tries = os.environ.get(REACH_TRIES_ENV, "").strip()
+        if tries:
+            kwargs["tries"] = int(tries)
+
+        box = self._box()
+
+        async def probe(command: str) -> Any:
+            # Raw guest exec (the SDK already wraps it in /bin/bash -c); allow the
+            # curl its own --max-time plus margin for process start/stop overhead.
+            return await box.vm_exec(command, timeout_s=timeout_s + 10.0)
+
+        endpoints = agentenv_network.endpoints_from_mapping(mapping)
+        await agentenv_network.self_check(probe, endpoints, **kwargs)
+        logger.info("agentenv reachability self-check passed: %s", ", ".join(sorted(mapping)))
 
     async def stop(self, delete: bool) -> None:
         if self._sandbox is None:

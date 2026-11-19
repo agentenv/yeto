@@ -21,6 +21,10 @@ from yeto.rl.harness.harbor.agentenv_client import (
 )
 from yeto.rl.harness.harbor.agentenv_sandbox import AgentenvSandbox, SandboxSpec, wrap_bash
 
+# agentenv_env imports harbor at module load; reference its tuning knob by name so
+# collection does not require harbor (the env tests pytest.importorskip it).
+REACH_TRIES_ENV = "YETO_AGENTENV_REACH_TRIES"
+
 
 def _tar_of(files: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
@@ -36,10 +40,15 @@ class FakeAgentenv:
     """In-memory AgentENV account: microVMs, background commands, guest files."""
 
     def __init__(self, *, fail_on: str | None = None, hang_on: str | None = None,
-                 create_raises: bool = False) -> None:
+                 create_raises: bool = False, curl_code: int | None = 200,
+                 curl_exit: int = 0) -> None:
         self.fail_on = fail_on
         self.hang_on = hang_on
         self.create_raises = create_raises
+        # The in-microVM reachability self-check probes each endpoint with curl;
+        # emulate a reply (``curl_code``, exit 0) or a network failure (``curl_exit``).
+        self.curl_code = curl_code
+        self.curl_exit = curl_exit
         self.live: set[str] = set()
         self.deleted: list[str] = []
         self.ttls: list[tuple[str, int]] = []
@@ -85,6 +94,12 @@ class FakeAgentenv:
             return CommandStatus(running=True, exit_code=None, stdout="", stderr="")
         if self.fail_on and self.fail_on in command:
             return CommandStatus(running=False, exit_code=125, stdout="", stderr="boom")
+        if "curl" in command:  # reachability self-check probe
+            if self.curl_exit != 0:
+                return CommandStatus(running=False, exit_code=self.curl_exit, stdout="",
+                                     stderr=f"curl: ({self.curl_exit}) could not connect")
+            return CommandStatus(running=False, exit_code=0,
+                                 stdout=f"{self.curl_code} 0.012", stderr="")
         if "echo w=" in command:
             return CommandStatus(running=False, exit_code=0, stdout="w=0 s=0\n", stderr="")
         return CommandStatus(running=False, exit_code=0, stdout="ok\n", stderr="")
@@ -377,3 +392,80 @@ def test_agentenv_environment_on_harbor_interface(tmp_path: Path):
         AgentenvEnvironment(environment_dir=tmp_path, environment_name="t1", session_id="s",
                             trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
                             task_env_config=EnvironmentConfig(), client=fake)
+
+
+def _reach_env(tmp_path: Path, fake: FakeAgentenv, **reach_kwargs):
+    from harbor.models.task.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    from yeto.rl.harness.harbor.agentenv_env import AgentenvEnvironment
+
+    return AgentenvEnvironment(
+        environment_dir=tmp_path, environment_name="t1", session_id="t1__x__env",
+        trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
+        task_env_config=EnvironmentConfig(docker_image="img:1", memory_mb=2048, cpus=1),
+        client=fake, quota=AgentenvQuota(2, 30), **reach_kwargs)
+
+
+def test_agentenv_network_check_raises_when_judge_unreachable(tmp_path: Path, monkeypatch):
+    """P0-1: an unreachable required endpoint fails the start loud, not silently."""
+    pytest.importorskip("harbor")
+    from yeto.rl.harness.harbor.agentenv_network import NetworkError
+
+    monkeypatch.setenv(REACH_TRIES_ENV, "1")  # no retry backoff in the test
+    # curl inside the microVM cannot connect to the judge/records endpoint.
+    fake = FakeAgentenv(curl_exit=7)
+    env = _reach_env(tmp_path, fake,
+                     reach_endpoints={"task-server": "http://judge.invalid:8000",
+                                      "records-proxy": "http://records.invalid:9000"})
+
+    with pytest.raises(NetworkError, match="required sidecar"):
+        asyncio.run(env.start(force_build=False))
+    assert fake.deleted == ["sb_1"]  # the microVM is torn down on a failed self-check
+
+
+def test_agentenv_network_check_passes_when_reachable(tmp_path: Path, monkeypatch):
+    """A reachable endpoint lets the start proceed (and the probe actually ran)."""
+    pytest.importorskip("harbor")
+
+    monkeypatch.setenv(REACH_TRIES_ENV, "1")
+    fake = FakeAgentenv(curl_code=200)
+    env = _reach_env(tmp_path, fake, reach_endpoints={"records-proxy": "http://records.ok:9000"})
+
+    async def go():
+        await env.start(force_build=False)
+        await env.stop(delete=True)
+
+    asyncio.run(go())
+    assert any("curl" in c for c in fake.commands)  # the reachability probe ran
+
+
+def test_agentenv_network_check_discovers_records_proxy_from_process_env(tmp_path: Path, monkeypatch):
+    """YETO_RECORDS_PROXY_PUBLIC_BASE in the sampler process env is probed (and must be reachable)."""
+    pytest.importorskip("harbor")
+    from yeto.rl.harness.harbor.agentenv_network import NetworkError
+
+    monkeypatch.setenv(REACH_TRIES_ENV, "1")
+    monkeypatch.setenv("YETO_RECORDS_PROXY_PUBLIC_BASE", "http://records.invalid:9000")
+    fake = FakeAgentenv(curl_exit=7)  # unreachable
+    env = _reach_env(tmp_path, fake)  # no explicit override: discover from env
+
+    with pytest.raises(NetworkError, match="records-proxy"):
+        asyncio.run(env.start(force_build=False))
+
+
+def test_agentenv_network_check_noop_without_endpoints(tmp_path: Path, monkeypatch):
+    """A self-contained task (no judge/records endpoint set) skips the probe cleanly."""
+    pytest.importorskip("harbor")
+
+    monkeypatch.delenv("YETO_RECORDS_PROXY_PUBLIC_BASE", raising=False)
+    monkeypatch.delenv("TASK_SERVER_URL", raising=False)
+    fake = FakeAgentenv(curl_exit=7)  # would fail IF a probe ran
+    env = _reach_env(tmp_path, fake)
+
+    async def go():
+        await env.start(force_build=False)
+        await env.stop(delete=True)
+
+    asyncio.run(go())
+    assert not any("curl" in c for c in fake.commands)  # nothing to probe, no probe ran

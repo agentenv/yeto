@@ -223,8 +223,14 @@ class SdkAgentenvClient:
         if env:
             body["envVars"] = env
         try:
+            # trust_env=False: the control plane is a cluster endpoint, not a web
+            # service to reach through the user's proxy.  Default httpx honours
+            # ALL_PROXY/HTTPS_PROXY, so on a host with a Clash SOCKS proxy set this
+            # call tries to go through SOCKS and crashes with an ImportError when
+            # the 'socksio' extra is absent.
             resp = httpx.post(f"{base.rstrip('/')}/sandboxes-cold", json=body,
-                              headers={"X-API-Key": self._api_key}, timeout=self._request_timeout_s)
+                              headers={"X-API-Key": self._api_key}, timeout=self._request_timeout_s,
+                              trust_env=False)
             resp.raise_for_status()
             data = resp.json()
         except httpx.HTTPStatusError as exc:
