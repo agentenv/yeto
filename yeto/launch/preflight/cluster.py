@@ -108,6 +108,34 @@ class Requirements:
     ports: tuple[int, ...] = (6379, 8265, 10001, 29500, 20000, 40000, 60000, 52365, 52366, 52367, 52368)
 
 
+# Site overrides of the host memory / disk limits, read by ``yeto preflight`` and by the
+# launch gate (which builds its own Requirements): a cluster whose fit was measured with
+# less memory, or that copies only its pipeline stage's weights, sets them instead of
+# skipping the whole preflight.
+REQ_ENV = {"min_host_memory_gib": "YETO_PREFLIGHT_MIN_HOST_MEMORY_GIB",
+           "min_disk_free_gib": "YETO_PREFLIGHT_MIN_DISK_FREE_GIB"}
+
+
+def requirements_from_env(environ: Mapping[str, str] | None = None) -> Requirements:
+    """:class:`Requirements` with the :data:`REQ_ENV` overrides that are set."""
+    import os
+
+    environ = os.environ if environ is None else environ
+    kwargs: dict[str, float] = {}
+    for name, var in REQ_ENV.items():
+        raw = str(environ.get(var, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"{var} must be a number of GiB, got {raw!r}") from None
+        if not value >= 0:
+            raise ValueError(f"{var} must be >= 0, got {raw!r}")
+        kwargs[name] = value
+    return Requirements(**kwargs)
+
+
 @dataclass
 class Check:
     scope: str  # node name, "a<->b", "cluster" or "inventory"
@@ -1645,8 +1673,10 @@ def add_parser(sub: Any) -> argparse.ArgumentParser:
     p.add_argument("--nccl-iters", type=int, default=20)
     p.add_argument("--nccl-pairs-only", action="store_true", help="skip the all-node collectives run")
     p.add_argument("--min-driver", type=int, default=Requirements.min_driver_major)
-    p.add_argument("--min-host-memory-gib", type=float, default=Requirements.min_host_memory_gib)
-    p.add_argument("--min-disk-free-gib", type=float, default=Requirements.min_disk_free_gib)
+    p.add_argument("--min-host-memory-gib", type=float, default=None,
+                   help=f"default {Requirements.min_host_memory_gib:g}, or ${REQ_ENV['min_host_memory_gib']}")
+    p.add_argument("--min-disk-free-gib", type=float, default=None,
+                   help=f"default {Requirements.min_disk_free_gib:g}, or ${REQ_ENV['min_disk_free_gib']}")
     p.add_argument("--json", action="store_true", help="print the report as JSON")
     return p
 
@@ -1680,8 +1710,16 @@ def main(args: argparse.Namespace, *, ops: SshOps | None = None) -> int:
                   ports=not (getattr(args, "no_ports", False) or args.no_container), ib=bench and not args.no_ib,
                   nccl=bench and not args.no_nccl, ib_pairs=args.ib_pairs, nccl_sizes=args.nccl_sizes,
                   nccl_iters=args.nccl_iters, nccl_all=not args.nccl_pairs_only)
-    req = Requirements(min_driver_major=args.min_driver, min_host_memory_gib=args.min_host_memory_gib,
-                       min_disk_free_gib=args.min_disk_free_gib)
+    try:
+        env_req = requirements_from_env()
+    except ValueError as exc:
+        print(f"[yeto] preflight: {exc}", file=sys.stderr)
+        return 2
+    memory = args.min_host_memory_gib
+    disk = args.min_disk_free_gib
+    req = Requirements(min_driver_major=args.min_driver,
+                       min_host_memory_gib=env_req.min_host_memory_gib if memory is None else memory,
+                       min_disk_free_gib=env_req.min_disk_free_gib if disk is None else disk)
     pf = ClusterPreflight(nodes, image=image, ops=ops, req=req, steps=steps, out_dir=out_dir)
     report = pf.run()
     print(json.dumps(report.to_json(), indent=2) if args.json else report.table(), end="" if not args.json else "\n")

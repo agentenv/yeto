@@ -27,6 +27,7 @@ from .cluster import (
     ClusterPreflight,
     Report,
     Steps,
+    requirements_from_env,
     resolve_nodes,
     trainer_image,
 )
@@ -121,8 +122,8 @@ def launch_gate(args: Any, *, ops: Any = None, out: IO[str] | None = None,
                    / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(clock())))
         _say(out, f"[yeto] cluster preflight on {len(nodes)} ssh node(s) of {entry} (node checks and TCP ports; "
                   f"{SKIP_FLAG} skips it) -> {out_dir}")
-        report = ClusterPreflight(nodes, image=image, ops=ops, steps=GATE_STEPS, out_dir=out_dir,
-                                  log=lambda m: _say(out, m), clock=clock).run()
+        report = ClusterPreflight(nodes, image=image, ops=ops, req=requirements_from_env(), steps=GATE_STEPS,
+                                  out_dir=out_dir, log=lambda m: _say(out, m), clock=clock).run()
         for line in summary_lines(report):
             _say(out, line)
         reports.append({"gpu": entry, "ok": report.ok, "counts": report.counts, "report": str(out_dir)})

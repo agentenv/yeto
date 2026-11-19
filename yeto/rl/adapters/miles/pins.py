@@ -225,6 +225,13 @@ MILES_K31_FULL_D_COMMIT = "c351a33c643326c478a9edaf9bae6c43299508fb"
 # loss at head mass >= 1 (0cb40f2f). It is the Miles of MILES_K31_FULL_IMAGE (2de5d796,
 # read back from the image: git -C ~/miles rev-parse HEAD). No new features.
 MILES_K31_FULL_E_COMMIT = "1f29e43043e4c9aace8287a445eca3851e8b52c7"
+# k31/integ-next9 f61eb35d = FULL_E + the trainer MFU work behind env switches that
+# default off (indexer TP split, KDA / MLA CP relayout, MXFP4 LUT and Triton dequant,
+# attention-residual fusion, router fp32 GEMM, DSA query split, EP all-to-all overlap,
+# KDA SP relayout fusion, ...). Every switch off is FULL_E's math. It is the Miles of
+# the next9 overlay-safe image 3a0c5445 (tag k31-f61eb35-35708f7-a1-overlayfix). No new
+# features.
+MILES_K31_NEXT9_COMMIT = "f61eb35dd2d9e63323aea2f5bac7ef6ee5c3e912"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_PORTS_V1_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
@@ -582,7 +589,8 @@ MILES_LINEAGES: Mapping[str, MilesLineage] = {
                          MILES_K31_B4_COMMIT, MILES_K31_B8_COMMIT, MILES_K31_GPUA_COMMIT,
                          MILES_K31_FULL_COMMIT, MILES_K31_FULL_STUB_COMMIT,
                          MILES_K31_FULL_B_COMMIT, MILES_K31_FULL_C_COMMIT,
-                         MILES_K31_FULL_D_COMMIT, MILES_K31_FULL_E_COMMIT),
+                         MILES_K31_FULL_D_COMMIT, MILES_K31_FULL_E_COMMIT,
+                         MILES_K31_NEXT9_COMMIT),
                         K31_FEATURES),
 }
 CURRENT_LINEAGE = "k31"
@@ -713,6 +721,8 @@ MILES_NEXT_IMAGE = MILES_K31_IMAGE
 IMAGE_MILES_COMMITS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b": MILES_K31_FULL_E_COMMIT,
     "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14": MILES_K31_FULL_E_COMMIT,
+    # next9 on the overlay-safe base (tag k31-f61eb35-35708f7-a1-overlayfix)
+    "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225": MILES_K31_NEXT9_COMMIT,
 }
 # digest of an image an overlay applier rejects -> the digest of the same image with the
 # offending layer repacked (same files, same Miles commit)
