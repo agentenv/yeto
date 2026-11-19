@@ -87,6 +87,7 @@ from yeto.rl.agentic.suspend import SuspendLedger, after_suspension
 from yeto.rl.agentic.types import TokenTurn
 from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
+from yeto.rl.harness.harbor.agentenv_client import check_in_flight_cap as check_agentenv_cap
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
 from .rollout_engine import bind_rollout_client, track_aborts, untrack_aborts, weight_steps
@@ -165,6 +166,8 @@ def task_from_row(kwargs: dict[str, Any]) -> AgentTask:
         task = AgentTask.from_mapping(row, defaults={"provider": provider or None})
         if task.provider == "boat":
             check_in_flight_cap(_max_in_flight())
+        if task.provider == "agentenv":
+            check_agentenv_cap(_max_in_flight())
     except ValueError as exc:
         raise HarnessConfigError(str(exc)) from exc
     return task
