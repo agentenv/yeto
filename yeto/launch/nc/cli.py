@@ -8,6 +8,9 @@
     probe    --ticket T [--spec F]        card check, image pull, vllm --version, rocm-smi, spec preflight
     ssh-pull start|status --ticket T      rate-limited model pull (aws-cli container, <= 3000 MB/s)
     ssh-sampler start|stop|status --ticket T --shard S   engine sampler container
+    register-node --name N --host USER@IP  a node an operator brought up by hand: ticket ext-N for the
+                                          per-node commands above; never released by this tool
+    unregister-node --name N              drop that record and alias (the node is not touched)
     hello    --ticket T                   sky hello task on the node's pool, then the cluster goes down
     pull     --ticket T --src S3 --dest D rate-limited model pull as a sky task
     sampler  --ticket T --spec F ...      engine sampler as a sky task (own buffer shard)
@@ -46,7 +49,7 @@ from typing import Any
 from .. import agentic_setup
 from ..pool import status as island_status
 from ..pool.island_pool import Member
-from . import elastic, node_pool, scale_args, ssh_sampler, tasks, tunnel
+from . import elastic, external_node, node_pool, scale_args, ssh_sampler, tasks, tunnel
 from .client import (Ledger, NcClient, NcError, NodeLease, hourly_cost_ucr, parse_time, state_file_lock,
                      write_json_atomic)
 from .lease_pool import PoolConfig
@@ -84,6 +87,18 @@ def save_lease(lease: NodeLease) -> None:
         doc = json.loads(path.read_text()) if path.exists() else {}
         doc[lease.ticket] = lease.to_json()
         write_json_atomic(path, doc)
+
+
+def drop_lease(ticket: str) -> bool:
+    """Remove one lease record (same lock and atomic rename as :func:`save_lease`)."""
+    path = leases_path()
+    with state_file_lock(path):
+        doc = json.loads(path.read_text()) if path.exists() else {}
+        if ticket not in doc:
+            return False
+        del doc[ticket]
+        write_json_atomic(path, doc)
+        return True
 
 
 def load_lease(ticket: str) -> NodeLease:
@@ -1235,6 +1250,20 @@ def main(argv: list[str] | None = None) -> int:
     ad.add_argument("--account", type=int, required=True)
     ad.add_argument("--ticket", required=True)
     ad.add_argument("--yes", action="store_true", help="I checked that this ticket is this tool's order")
+    rn = sub.add_parser("register-node", help="use a node an operator brought up by hand (ticket ext-NAME)",
+                        description="A node ordered outside this tool (the National Compute console, another "
+                        "provider) gets the ticket ext-NAME for probe, ssh-pull, ssh-sampler and agentic-setup: "
+                        "a direct ssh alias with the host key pinned now, and a lease record. Nothing goes in "
+                        "the order ledger, so this tool never releases, deletes or replaces the node; release "
+                        "it where it was ordered.")
+    rn.add_argument("--name", required=True, help="lower-case letters, digits, '-' (ticket ext-NAME)")
+    rn.add_argument("--host", required=True, help="USER@IP the operator's ssh key logs in to")
+    rn.add_argument("--port", type=int, default=22)
+    rn.add_argument("--identity-file", help="ssh key for the node (default: the operator's own ssh keys)")
+    rn.add_argument("--lease-until", help="ISO time the node goes away, if it has one (informational)")
+    rn.add_argument("--gpus", type=int, default=8)
+    un = sub.add_parser("unregister-node", help="drop a register-node record and alias (the node is not touched)")
+    un.add_argument("--name", required=True)
     ch = sub.add_parser("clear-halt", help="lift the halt of an account (a delete hit, or may have hit, a foreign ticket)")
     ch.add_argument("--account", type=int, required=True)
     ch.add_argument("--yes", action="store_true", help="I checked the account and told the ticket's owner")
@@ -1284,6 +1313,31 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--events", type=int, default=20, help="last events to print (default 20)")
     args = p.parse_args(argv)
 
+    if getattr(args, "ticket", None) and args.cmd in ("down", "delete-ticket", "adopt") \
+            and external_node.is_external(args.ticket):
+        print(external_node.refuse(args.cmd, args.ticket), file=sys.stderr)
+        return 2
+    if args.cmd == "register-node":
+        try:
+            report = external_node.register(args.name, args.host, save_lease=save_lease, port=args.port,
+                                            identity_file=args.identity_file, lease_until=args.lease_until,
+                                            gpus=args.gpus)
+        except (ValueError, RuntimeError) as error:
+            print(f"register-node: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, indent=1))
+        if not report["login_ok"]:
+            print(f"register-node: recorded, but `ssh {report['alias']}` did not log in; add the key to the "
+                  "node or pass --identity-file", file=sys.stderr)
+            return 1
+        return 0
+    if args.cmd == "unregister-node":
+        try:
+            print(json.dumps(external_node.unregister(args.name, drop_lease=drop_lease), indent=1))
+        except ValueError as error:
+            print(f"unregister-node: {error}", file=sys.stderr)
+            return 2
+        return 0
     if args.cmd == "proxy":
         return tunnel.proxy(args.account, args.host, args.port, relay_port=args.relay_port)
     if args.cmd == "preflight":
