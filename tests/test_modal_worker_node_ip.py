@@ -1,12 +1,13 @@
-"""Modal worker pins `ray start --node-ip-address` to its rank's IPv4;
+"""Modal and SSH workers pin `ray start --node-ip-address` to their rank's address;
 every other cloud keeps the worker argv byte-identical."""
 from yeto import launcher
 
 
 def test_modal_worker_pins_rank_ipv4():
-    flag = launcher._worker_node_ip_flag("modal")
-    assert flag.startswith(' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS"')
-    assert '$((SKYPILOT_NODE_RANK + 1))p' in flag
+    for cloud in ("modal", "ssh"):  # ssh: the inventory address of the rank, not Ray's route guess
+        flag = launcher._worker_node_ip_flag(cloud)
+        assert flag.startswith(' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS"')
+        assert '$((SKYPILOT_NODE_RANK + 1))p' in flag
 
 
 def test_other_clouds_unchanged():

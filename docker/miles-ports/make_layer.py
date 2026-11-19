@@ -138,6 +138,43 @@ def layer_holds_sglang_metadata(names) -> bool:
     return sglang_metadata_names(names) is not None
 
 
+OPAQUE = ".wh..wh..opq"
+
+
+def resolve_same_layer_whiteouts(entries: dict) -> dict:
+    """Entries without a whiteout of a path the same layer writes again.
+
+    Overlay appliers (moby's overlay2 graphdriver, the containerd overlayfs
+    snapshotter Docker 29 uses by default, containers/storage) turn ``D/.wh.N``
+    into a 0:0 character device at ``D/N`` in the layer's upper directory, so a
+    later ``D/N/child`` of the same layer fails ("mkparent D/N: not a
+    directory" / "openat D/N/child: not a directory"; Modal's builder unpacks it
+    fine). That happens whenever the fork's SGLang version equals the base's: the
+    stale dist-info is whited out and rewritten under the same name. Here a
+    re-written file drops its whiteout (the new file replaces the lower one),
+    and a re-written directory gets its own entry plus an opaque whiteout
+    (``D/N/.wh..wh..opq``: the lower contents are hidden, the directory stays).
+    Keys are tar paths, a directory key ends with ``/`` (``main``'s ``entries``).
+    """
+    written = {key.rstrip("/") for key, (kind, *_rest) in entries.items()
+               if not key.rstrip("/").rsplit("/", 1)[-1].startswith(".wh.")}
+    parents = {key.rsplit("/", i)[0] for key in written for i in range(1, key.count("/") + 1)}
+    parents |= {key.rstrip("/") for key, (kind, *_rest) in entries.items() if kind == "dir"}
+    out = dict(entries)
+    for key in list(entries):
+        head, _, name = key.rpartition("/")
+        if not name.startswith(".wh.") or name == OPAQUE:
+            continue
+        target = f"{head}/{name[4:]}" if head else name[4:]
+        if target in parents:
+            del out[key]
+            out.setdefault(target + "/", ("dir", None, 0o755, None))
+            out[f"{target}/{OPAQUE}"] = ("file", b"", 0o644, None)
+        elif target in written:
+            del out[key]
+    return out
+
+
 _SGLANG_STEP_HINTS = ("/sgl-workspace/sglang", "sglang_deps", "pip install -e")
 
 
@@ -448,6 +485,7 @@ def main() -> None:
                  (IMAGE_ASSERT_SRC / "assert_image_versions.py").read_bytes(), 0o755)
         add_file(f"{IMAGE_ASSERT_DIR}/entrypoint.sh", (IMAGE_ASSERT_SRC / "entrypoint.sh").read_bytes(), 0o755)
 
+    entries = resolve_same_layer_whiteouts(entries)
     with tarfile.open(a.out, "w", format=tarfile.PAX_FORMAT) as tar:
         for path in sorted(entries):
             kind, data, mode, link = entries[path]

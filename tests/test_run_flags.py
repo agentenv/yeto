@@ -294,7 +294,11 @@ _NON_RL_LITERALS = frozenset({
     "--awq-scales", "--loop", "--master-addr", "--master-port", "--no-awq", "--node-rank", "--nproc-per-node",
     "--pid", "--poll-seconds", "--recipe", "--store", "--template", "--frozen-base", "--frozen-pattern",
     # docker run of a runtime: docker SSH trainer node (ssh_trainer_island.py, node_inventory.py example)
-    "--device", "--network",
+    "--device", "--network", "--privileged", "--init", "--volume",
+    # tar of the node's ~/yeto-output copy-back (ssh_node_storage.py)
+    "--null",
+    # ray start: the agent ports pinned on SSH nodes (rl_island_task.RAY_AGENT_PORTS)
+    "--metrics-export-port", "--dashboard-agent-grpc-port", "--runtime-env-agent-port",
     # NC agentic node setup: pip, tar, aws s3, the node agent and its own CLI (yeto/launch/agentic_setup.py,
     # agentic_node_agent.py)
     "--agentic-env", "--disable-pip-version-check", "--endpoint-url", "--env-file", "--label",
@@ -305,6 +309,11 @@ _NON_RL_LITERALS = frozenset({
     # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
     # git rev-parse, curl, and the engine_sampler entry's own CLI
     "--short", "--cacert", "--retry-connrefused", "--spec",
+    # the node-side weights copy and its CLI (weights_sync.py, ssh_weights.py), and the Megatron
+    # pipeline split it reads from YETO_MILES_TRAIN_EXTRA_ARGV
+    "--attempts", "--chunk-mb", "--hash", "--headroom", "--pp", "--pp-first", "--pp-last", "--procs",
+    "--progress-s", "--rehash", "--revision", "--root", "--source", "--stages", "--workers", "--user",
+    "--decoder-first", "--decoder-first-pipeline-num-layers", "--decoder-last-pipeline-num-layers",
 })
 
 

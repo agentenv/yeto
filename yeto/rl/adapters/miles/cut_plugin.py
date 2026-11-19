@@ -1371,13 +1371,24 @@ def _interned(value: Any) -> Any:
 def _load_verified(directory: str, entry: Mapping[str, Any], cut_id: str) -> dict[str, Any]:
     import torch
 
+    from yeto.rl.engine.cut import drop_fetched_shard, fetch_shard_to_rank
+
     path = os.path.join(directory, entry["path"])
+    # a shard another node wrote (multi-node island, one stage per node): from the
+    # object store into this node's stage; dropped again once loaded
+    try:
+        fetched = fetch_shard_to_rank(path)
+    except Exception as error:  # noqa: BLE001 - reported as the missing shard below
+        raise CutPluginError(f"cut shard {path} is not on this node and could not be fetched: "
+                             f"{type(error).__name__}: {error}") from None
     if not os.path.isfile(path) or os.path.getsize(path) != int(entry["bytes"]):
         raise CutPluginError(f"cut shard {path} is missing or truncated")
     if _sha256(path) != entry["sha256"]:
         raise CutPluginError(f"cut shard {path} checksum mismatch")
     # weights_only: a cut shard is data, never code (test_provenance).
     shard = from_safe(torch.load(path, map_location="cpu", weights_only=True))
+    if fetched is not None:
+        drop_fetched_shard(path)
     if shard.get("schema") != SHARD_SCHEMA or shard.get("cut_id") != cut_id:
         raise CutPluginError(f"{path} is not a shard of cut {cut_id!r}")
     return shard

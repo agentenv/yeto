@@ -70,6 +70,9 @@ def modal_store_secret_name(args, spec=None) -> str | None:
 # (yeto.cloud.s3_store STAGE_ENV); the credentials come from --modal-store-secret or the
 # launcher's store credential.
 MODAL_OBJECT_STORE_SCHEMES = ("s3",)
+# Sky islands without a bucket mount of an s3:// store (the SSH trainer island
+# starts the run script over SSH, not through sky Storage).
+NO_BUCKET_MOUNT_CLOUDS = frozenset({"ssh"})
 
 
 def is_object_store_uri(value) -> bool:
@@ -196,19 +199,49 @@ def store_object_envs(args, cloud: str, num_nodes: int = 1) -> dict[str, str]:
         # moves the whole store by object (one stage per container). The credentials
         # ride the named Secret when --modal-store-secret is given; else the launcher's
         # store credential is shipped like on sky.
-        return island_envs(store, store_client_environ(args), stage=True,
-                           credentials=modal_store_secret_name(args) is None)
+        return _lazy_cut_shards(island_envs(store, store_client_environ(args), stage=True,
+                                            credentials=modal_store_secret_name(args) is None), num_nodes)
     if store.startswith("oss://"):
         from ..cloud.oss_store import island_envs as oss_island_envs
 
-        return oss_island_envs(store)
+        return _lazy_cut_shards(oss_island_envs(store), num_nodes)  # an oss store always stages
     if not store.startswith("s3://"):
         return {}
     if not (sample_roles.is_pair(args) or sample_roles.sample_role(args) != sample_roles.BOTH):
         return {}
     from ..cloud.s3_store import island_envs
 
-    return island_envs(store, store_client_environ(args), stage=int(num_nodes) == 1)
+    # An SSH node has no bucket mount (no sky Storage): like on Modal, every node
+    # stages the store on its own disk and moves it by object API. SSH trainer nodes
+    # with an inventory store_env_file hold the credential themselves (no launcher key).
+    envs = island_envs(store, store_client_environ(args),
+                       stage=int(num_nodes) == 1 or cloud in NO_BUCKET_MOUNT_CLOUDS,
+                       credentials=not (cloud == "ssh" and ssh_nodes_hold_store_credentials(args)))
+    return _lazy_cut_shards(envs, num_nodes)
+
+
+def _lazy_cut_shards(envs: dict[str, str], num_nodes: int) -> dict[str, str]:
+    """A staged store on several nodes (one stage per node): its reload leaves the
+    round-cut shards in the object store and each rank fetches its own
+    (``s3_store.LAZY_CUT_SHARDS_ENV``), instead of node 0 downloading every node's."""
+    from ..cloud import oss_store, s3_store
+
+    staged = envs.get(s3_store.STAGE_ENV) or envs.get(oss_store.URI_ENV)
+    if staged and int(num_nodes) > 1:
+        envs[s3_store.LAZY_CUT_SHARDS_ENV] = "1"
+    return envs
+
+
+def ssh_nodes_hold_store_credentials(args) -> bool:
+    """The ``ssh:`` trainer nodes of ``--rl-node-inventory`` read the store credential
+    from their own env file (``ssh_node_storage.nodes_hold_store_credentials``)."""
+    nodes = getattr(args, "rl_node_inventory_nodes", None)
+    if not nodes:
+        return False
+    from .node_inventory import island_nodes
+    from .ssh_node_storage import nodes_hold_store_credentials
+
+    return nodes_hold_store_credentials(island_nodes(list(nodes), "trainer"))
 
 
 def store_client_environ(args, environ=None) -> dict[str, str]:
@@ -303,15 +336,35 @@ def _rl_checkpoint_storage_name(cluster_prefix: str, learner_id: int) -> str:
 MODEL_STORE_MOUNT = "/mnt/yeto-models"
 
 
+MODEL_STORE_LOCAL_SCHEME = "local"
+
+
+def model_store_local_path(uri):
+    """The node directory of ``--model-store local:///PATH`` (as the trainer sees
+    it), else None. On an SSH trainer island ``--model-store-source`` fills it
+    before the first start (:mod:`yeto.launch.ssh_weights`); elsewhere the
+    operator does, and the island uses it only when it holds a completed snapshot
+    (:func:`model_store_env`)."""
+    if not uri:
+        return None
+    scheme, sep, path = str(uri).partition("://")
+    if scheme != MODEL_STORE_LOCAL_SCHEME:
+        return None
+    path = path.rstrip("/")
+    if not sep or not path.startswith("/") or ".." in PurePosixPath(path).parts or path == "":
+        raise ValueError(f"--model-store: expected local:///ABSOLUTE/PATH, got {uri!r}")
+    return path
+
+
 def model_store_filesystem(uri, cloud, region):
     """Nebius filesystem id for ``--model-store nebius-fs://<id>`` on a
     ``nebius@region`` island, else None (with a WARNING when a store was
-    asked for but cannot be attached there)."""
-    if not uri:
+    asked for but cannot be attached there; None for a ``local://`` store)."""
+    if not uri or model_store_local_path(uri) is not None:
         return None
     scheme, sep, fs_id = uri.partition("://")
     if scheme != "nebius-fs" or not sep or not fs_id.startswith("computefilesystem-"):
-        raise ValueError(f"--model-store: expected nebius-fs://computefilesystem-..., got {uri!r}")
+        raise ValueError(f"--model-store: expected nebius-fs://computefilesystem-... or local:///PATH, got {uri!r}")
     if cloud != "nebius" or not region:
         print(f"[launcher] WARNING: --model-store {uri} needs a nebius@<region> island "
               f"(got {cloud}@{region}); models download from the Hub")

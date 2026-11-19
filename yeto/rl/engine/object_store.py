@@ -390,6 +390,22 @@ class TreeMirror:
     def object_checksum(self, rel: str) -> str | None:
         return object_checksum(self.objects, check_key(rel))
 
+    def fetch_file(self, rel: str) -> int:
+        """Download the object ``rel`` into the mirror now (a trainer rank on any node
+        fetches the cut shard it restores from, which a lazy :meth:`pull` left out) and
+        mark it pushed, so no push of this host uploads it again. Returns its size;
+        raises :class:`ObjectStoreError` when the store does not hold it."""
+        rel = check_key(rel)
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + TMP_SUFFIX)
+        if not download_file(self.objects, rel, tmp):
+            tmp.unlink(missing_ok=True)
+            raise ObjectStoreError(f"{rel} is not in the object store")
+        os.replace(tmp, path)
+        self.record_pushed(rel)
+        return path.stat().st_size
+
     def evict_file(self, rel: str) -> int:
         """Delete the local copy of the pushed file ``rel`` and forget it in the pushed
         state, leaving its object in the store (a later push must not take the missing
@@ -469,6 +485,9 @@ class TreeMirror:
                 files = sorted(rel for rel in changed if self._upload_rank(rel) == tier)
                 if not files:
                     continue
+                if len(files) > 1 and int(getattr(self.objects, "upload_processes", 1) or 1) > 1:
+                    self._upload_in_processes(files, local)  # a release: its files over processes
+                    continue
                 with ThreadPoolExecutor(min(self.file_concurrency, len(files))) as pool:
                     for future in [pool.submit(upload, rel) for rel in files]:
                         future.result()  # the first error stops before the next tier
@@ -482,11 +501,28 @@ class TreeMirror:
                 self._update_state(removed=gone)
         return time.monotonic() - started
 
-    def pull(self) -> None:
+    def _upload_in_processes(self, files: list[str], local: dict[str, list[int]]) -> None:
+        """One tier of a push through the backend's multi-process upload
+        (``write_files``, e.g. ``S3ObjectStore.upload_processes``): every file that
+        went up is marked pushed; any failure raises before the next tier."""
+        written, errors = self.objects.write_files([(rel, str(self.root / rel)) for rel in files])
+        self._update_state({rel: local[rel] for rel in written})
+        if errors:
+            first = sorted(errors)[0]
+            raise ObjectStoreError(f"{len(errors)} of {len(files)} files did not upload "
+                                   f"(first {first}: {errors[first]})")
+
+    def pull(self, skip_keys=None) -> None:
+        """``skip_keys``: ``(objects, keys of a subtree) -> keys not to download`` (the
+        cut shards of a multi-node island: each rank fetches its own, ``fetch_file``)."""
         with self._part_locks([TREE_LOCK]):
             done: dict[str, list[int]] = {}
             for subtree in self.subtrees:
-                for key in self.objects.list(subtree):
+                keys = self.objects.list(subtree)
+                skipped = set(skip_keys(self.objects, keys)) if skip_keys is not None else set()
+                for key in keys:
+                    if key in skipped:
+                        continue
                     path = self.root / key
                     pointer = key.rsplit("/", 1)[-1] in self.pointers
                     if path.is_file() and not pointer:

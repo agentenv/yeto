@@ -17,6 +17,7 @@ repeated here:
 | Resource ledger, budget breaker, cleanup | [COST_GUARD.md](COST_GUARD.md) |
 | Trainer flags, rounds, cuts, releases, padding | [MILES_RL.md](MILES_RL.md) |
 | 128-expert full-parameter layout on 6×8 B300 | [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md) |
+| Trainer on your own 6×8 B300 bare-metal cluster (SSH + Docker) | [K31_BARE_METAL_B300.md](K31_BARE_METAL_B300.md) |
 | Dashboard details, alert thresholds | [DASHBOARD.md](DASHBOARD.md) |
 | Every `yeto` command and flag | [CLI_REFERENCE.md](CLI_REFERENCE.md) |
 
@@ -226,6 +227,7 @@ same way before any order:
 | Hub id with `--modal-model-volume <volume>` | `hf/<name>/<revision[:8]>/` of the volume, when its `MANIFEST.json` matches. Otherwise a warning (the trainer falls back to the Hub) and the Hub check. |
 | `s3://` / `r2://` URI | One listing with the control host's store credentials. |
 | Local directory | The directory, when it exists on the control host; otherwise a warning (it must exist on the trainer node). |
+| Hub id with `--model-store-source <uri>` | The source's listing and index (the files the SSH trainer nodes copy). A control host that cannot list it only warns. The Hub is not asked. |
 
 An RL trainer launched with `yeto launch` (and so `yeto run up`) still needs a
 revision-pinned Hub model: a local directory or an `s3://` / `r2://` URI passes
@@ -259,6 +261,27 @@ the checkpoint files and a `MANIFEST.json` with `"repo": "<org>/<name>"`,
 `"revision": "<40-hex sha>"` and `"all_ok": true`. If the manifest is missing
 or does not match, the trainer logs `[yeto-model-volume] WARNING` and
 downloads from the Hub instead.
+
+**Trainer on SSH bare-metal nodes (optional).** With `--model-store
+local:///data/models --model-store-source s3://<bucket>/models/<name>` the
+preflight of an `ssh:` trainer island copies the checkpoint onto every node
+at once, before the first start, into a Hugging Face hub cache under
+`/data/models` (on a docker node, the host directory of an inventory mount of
+`/data/models`). The copy is chunked and resumable, checks every file's
+sha256 against the source manifest (`yeto-weights-manifest.json` next to the
+files, else each object's `sha256` metadata), skips files verified by an
+earlier launch, and refuses a node whose file system has less than 1.2 times
+the bytes still to download. The trainer then reads that snapshot
+(`YETO_MODEL_STORE_HIT`) and never the Hub. With `--rl-sample-role trainer`
+and `--pipeline-parallel` > 1 each node copies only the safetensors files of
+the pipeline stages its GPUs run, plus the embedding / head / vision files and
+every small file (`--model-store-shards stage`; `all` copies everything): for
+K3.1 at PP3 (32/29/32) about 496-546 GB per node instead of 1.56 TB. The
+source can also be a directory (an NFS mount on the nodes); it then needs a
+manifest (`python -m yeto.launch.weights_sync manifest --source <dir> --out
+<dir>/yeto-weights-manifest.json`). The nodes read an object-store source with
+`YETO_WEIGHTS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_ENDPOINT_URL` of the
+launcher's environment, else with the `--rl-checkpoint-store` credentials.
 
 **Expert selection** (K3.1): the trainer's `--rl-expert-selection <file>` and the
 spec's `expert_selection_sha256` must describe the same file. Format and
@@ -960,6 +983,8 @@ DCP 8 without R3 (the AMD recipe) decodes at 43 tok/s per stream.
 | `elastic.engine_stall_s` | 900 s | Tolerates a `/metrics` read blocked by a GB-sized R3 reply. |
 | `--rl-release-every` / `--rl-release-skip-busy` / `--rl-max-policy-age` | 6 / on / 12 | Fewer drains; age 12 = N + 6 (the K3.1 upload alone lags 4-6 versions). |
 | `YETO_SAMPLE_BUFFER_MAX_INFLIGHT_BYTES` | 64GiB | Bounded read-ahead of 262k groups next to the optimizer offload (section 3.6). |
+| `--idle-warn-minutes` / `--idle-stop-minutes` | 45 / 45 | The cost guard's idle rule fires when no progress event arrives for its window (default 15 + 15 min). At 262k one step is 64 full-length microbatches (8 prompts x 8 samples) and takes about 25-35 min [estimate]; a wait for sampler groups between steps can be as long. 45 + 45 min keeps a healthy run alive and still stops an idle Modal island within 90 min. |
+| PP split | 31/31/31 | No split flag: 93 layers divide evenly over PP3, and the even split has the lower stage-0 peak ([K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#4-layout)). |
 
 **Why `max_in_flight` is 16.** Users of this run care most about the speed of
 one stream: a trial that does not finish inside `agent_timeout_s` is lost. Per
@@ -997,9 +1022,14 @@ measured p90 if it is longer.
 5. `expert_selection_sha256` in the spec is the sha256 of the trainer's
    `--rl-expert-selection` file.
 6. The `--rl-algorithm-spec` file has `execution.max_policy_staleness` >= the
-   `--rl-max-policy-age` (12) and a TIS correction: use the shipped
-   `algorithm-spec.async-age12-tis.json` (`algorithm-spec.async-age2-tis.json`
-   has 2 and is refused at this policy age).
+   `--rl-max-policy-age` (12) and no `correction.method`: with
+   `--rl-loss score_centering --rl-score-centering-is tis` the loss carries the
+   importance correction, and a spec TIS correction next to it is refused. Use
+   the shipped `algorithm-spec.async-age12.json` (`algorithm-spec.async-age12-tis.json`
+   is for the default policy loss; `algorithm-spec.async-age2.json` has 2 and is
+   refused at this policy age). With `--rl-round-cuts off` the argv carries no
+   cut-only flag (`--rl-stop-after-rounds`, `--rl-cut-every`); `--total-steps`
+   ends the run.
 7. `budget.wall_h`, `budget.usd` and `elastic.max_run_spend_ucr` are set, and
    the prices (`trainer.usd_per_h` 408 for 6 x 8 B300, `budget.nc_usd_per_h`
    24 in the template) are your contracted rates: `budget.usd` is checked
@@ -1084,7 +1114,7 @@ Options:
 | Option | Use |
 |---|---|
 | `--dry-run` | Preflight only. |
-| `--skip-preflight` | Resume after a preflight that already passed. |
+| `--skip-preflight` | Resume after a preflight that already passed. It also skips the cluster preflight of an `ssh:` trainer (`yeto preflight --no-bench`), which run up otherwise runs before it orders anything. |
 | `--trainer-now` | Start the trainer immediately instead of waiting for the first group, so the Modal GPUs and the NC node setup come up in parallel. This shortens time to first step. The trainer may idle until samplers deliver groups. |
 | `--no-monitor` | Return after the dashboard starts. Recommended practice: keep the monitor running, since it enforces the budget, wall-clock and silence guards. |
 
@@ -2561,20 +2591,22 @@ summary. Where the two differ, that document applies.
   samplers).
 - Measured: 128-expert at 524k total context on 6×8 B300, PP split 32/28/33.
 - Recommended for production: 128-expert at 262k total context on 6×8 B300,
-  PP split 32/29/32. This split is derived from the memory model fitted to
-  the 524k measurement.
+  PP split 31/31/31 (no split flag). This split is derived from the memory
+  model fitted to the 524k and later measurements; it has a lower stage-0
+  peak than the earlier 32/29/32.
 
 ### 10.2 Layouts
 
 | Trainable experts | GPUs | Layout | Context | Status |
 |---|---|---|---|---|
 | 64 | 16 (2×8 B300) | TP8 PP1 EP16 CP1 | 32k | Validated |
-| 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/29/32 | 262k | Recommended |
+| 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 31/31/31 | 262k | Recommended |
 | 128 | 48 (6×8 B300) | PP3 x TP8 x CP2 x EP16, DP1, split 32/28/33 | 524k | Measured upper bound |
 
 The 128-expert layout needs `--rl-allow-cross-node-tp`,
-`--rl-max-tokens-per-gpu` = `seq-len / CP`, the split flags and the stage-0
-gradient hook in `YETO_MILES_TRAIN_EXTRA_ARGV`, and
+`--rl-max-tokens-per-gpu` = `seq-len / CP`, the stage-0 gradient hook in
+`YETO_MILES_TRAIN_EXTRA_ARGV` (plus the split flags for an uneven split such
+as 524k's 32/28/33), and
 `--rl-distributed-timeout-minutes 60`. See
 [K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md#4-layout).
 
@@ -2888,4 +2920,4 @@ which runs the same exit path as Ctrl-C. To end the run for good, use
   time (`yeto run scale`).
 - Automatic scaling from the buffer backlog and the trainer's wait time.
 - Release-mode images on the K3.1 full-parameter base.
-- A measured first step of the 262k layout (split 32/29/32) under production conditions.
+- A measured first step of the 262k layout (split 31/31/31) under production conditions.

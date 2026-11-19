@@ -252,6 +252,53 @@ yeto dashboard mirror --target user@host --remote /path/tape.jsonl --local ./tap
 | `--target`, `--remote`, `--local` | — | mirror | SSH target, remote tape path, local mirror path |
 | `--island` | — | mirror | island id recorded on source-lost events |
 
+### `yeto preflight`
+
+Checks SSH bare-metal trainer nodes (the `--rl-node-inventory` nodes with role
+`trainer`) before a launch and writes a PASS / WARN / FAIL table with a fix per
+finding to `~/.yeto/runs/<--cluster-prefix>/preflight/<UTC time>/`
+(`preflight.txt`, `preflight.json`, `raw/<step>/<node>.log`). Exit 1 when a
+check fails, 2 when the inventory is unusable.
+
+```bash
+yeto preflight --gpu ssh:6x8xb300 --rl-node-inventory nodes.yaml --cluster-prefix k31-bm
+yeto preflight --gpu ssh:nodes.yaml --no-bench          # node checks and TCP ports, no bandwidth bench
+```
+
+Per node: driver (>= 580 for the CUDA 13 image), GPU count / model / HBM,
+NVSwitch fabric state, NVLink matrix and GPU-NIC affinity (`nvidia-smi topo -m`),
+IB / RoCE ports of the HCAs NCCL uses (`NCCL_IB_HCA` of the node `env`, else the
+fabric's link layer), MTU, RoCE v2 GID index, `/dev/infiniband` and the
+locked-memory limit on the host and in the container, host memory, free space
+of the mounted paths and of the image store (Docker data root, or
+`/var/lib/containerd` with the containerd image store), Docker version and
+storage driver, the image pull, clock sync and skew, the rendezvous `address`.
+Across nodes, in the trainer image with the node's `docker_args`: TCP reachability
+of the Ray / torch ports, `ib_write_bw` between every pair rail by rail, and NCCL
+`all_reduce` / `all_to_all` / `sendrecv` on disjoint node pairs and on all nodes
+(`yeto/launch/preflight/bench.py`), failing a run that falls back to
+`NET/Socket`.
+
+Every non-dry-run `yeto launch` with an `ssh:` entry in `--gpu` runs the checks of
+`yeto preflight --no-bench` first (`yeto run up` runs them before it orders anything,
+then passes `--skip-preflight` to the trainer's own launch): a FAIL refuses the
+launch, a WARN is printed. `--skip-preflight` on `yeto launch` or `yeto run up`
+skips it; a dry run prints the command it would run.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--gpu` | required | `ssh:NxMxCARD` with `--rl-node-inventory`, or `ssh:<inventory file>` |
+| `--image` | the inventory's | trainer image |
+| `--run-dir` | — | write the report here instead of the run directory |
+| `--no-pull`, `--no-container` | off | skip the pull; host checks only |
+| `--no-bench` | off | skip the bandwidth benchmarks (`ib_write_bw`, NCCL); the TCP port check still runs |
+| `--no-ports`, `--no-ib`, `--no-nccl` | off | skip the TCP port check, `ib_write_bw`, the NCCL collectives |
+| `--ib-pairs` | `all` | `ib_write_bw` on every pair or on a ring |
+| `--nccl-sizes`, `--nccl-iters` | `16M,128M,1G`, `20` | collective sizes and iterations |
+| `--nccl-pairs-only` | off | skip the all-node collectives run |
+| `--min-driver`, `--min-host-memory-gib`, `--min-disk-free-gib` | `580`, `1554`, `2000` | limits |
+| `--json` | off | print the report as JSON |
+
 ### `yeto rl`
 
 An experimental single-process PPO loop against a CyberGym server (or a mock
@@ -330,6 +377,7 @@ Local checks that run before any cloud resource is created.
 | `--preflight-thread-wait-s` | `1800.0` | wait limit for `--preflight-threads wait` |
 | `--preflight-memory` | `error` | per-GPU peak memory estimate of each RL island: `error`, `warn`, `off` |
 | `--preflight-memory-margin` | `0.9` | allowed peak as a fraction of GPU memory |
+| `--skip-preflight` | off | do not run the cluster preflight of an `ssh:` trainer island (`yeto preflight --no-bench`) before the launch |
 | `--rl-island-sample-role` | — | `M:ROLE` per island (`sampler` or `trainer`): sampler islands plus one trainer island over one `--rl-checkpoint-store`; needs `--rl-single-island-no-sync` |
 | `--rl-sampler-follow` | `merged` | which model sampler islands load: `merged` or `trainer` |
 | `--rl-sampler-spot` | off | sampler islands on spot, the trainer island stays on demand |

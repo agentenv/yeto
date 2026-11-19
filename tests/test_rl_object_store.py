@@ -549,6 +549,8 @@ def test_store_object_envs_only_for_sky_islands_with_a_sample_role(monkeypatch):
     assert store_object_envs(trainer, "nebius")[s3_store.URI_ENV] == URI
     assert store_object_envs(trainer, "nebius")[s3_store.STAGE_ENV] == s3_store.DEFAULT_STAGE
     assert s3_store.STAGE_ENV not in store_object_envs(trainer, "nebius", num_nodes=2)  # ranks on 2 disks
+    # an SSH trainer island has no bucket mount: each node stages, as on Modal
+    assert store_object_envs(trainer, "ssh", num_nodes=6)[s3_store.STAGE_ENV] == s3_store.DEFAULT_STAGE
     # a Modal island with an s3 store has no mount: the whole store goes by object API
     # from a local stage, the credential shipped like on sky...
     modal_envs = store_object_envs(trainer, "modal", num_nodes=2)

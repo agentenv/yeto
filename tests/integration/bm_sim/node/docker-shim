@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""bm-sim stand-in for the ``docker`` CLI on a simulated ``runtime: docker`` node.
+
+The simulated nodes are themselves containers without a container runtime, so
+this shim runs the island's ``docker run`` payload as a local process with the
+semantics the SSH trainer island relies on:
+
+* ``docker run`` needs ``--name``, ``--network host`` and ``--ipc host``; a name
+  in use is a conflict (exit 125), like a stale container on a real node;
+* the payload gets only the variables passed by ``-e`` (plus PATH/HOME/LANG), so
+  a variable the island forgot to pass is missing as it would be in a container;
+* ``-w`` is the working directory; ``-v SRC:DST`` works for destinations the
+  node image pre-links into /tmp/bm-sim-mounts (``/yeto-island-state``);
+* the payload runs in its own session, as a container's processes are outside
+  the client's process group: killing the client's group does not stop it; the
+  client forwards TERM/INT to it (``--sig-proxy``);
+* the container's processes are the payload and everything it starts (they
+  inherit ``BM_SIM_CONTAINER=<name>``, even daemons that leave the session, such
+  as Ray's): when the payload ends they are killed (PID 1 exiting ends a
+  container), ``docker rm -f`` KILLs them all, and ``docker exec <name> bash -c
+  'kill -<SIG> -1'`` signals all of them but the payload (the container's init);
+* ``docker inspect`` / ``docker container inspect`` (``-f '{{.State.Status}}'``,
+  ``'{{.State.Running}}'``) answer for a container until it is removed (``--rm``
+  at its end, or ``rm -f``), and fail for one that does not exist;
+* ``docker pull -q`` succeeds unless /tmp/bm-sim-pull-fail exists (its text is
+  the error), which simulates a layer the node's storage driver cannot unpack.
+
+Every ``run`` argv is kept in /tmp/bm-sim-docker/<name>.json for the harness.
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+STATE = "/tmp/bm-sim-docker"
+MARK = "BM_SIM_CONTAINER"
+MOUNTS = "/tmp/bm-sim-mounts"
+TAKES_VALUE = {"--name", "--network", "--ipc", "-e", "--env", "-v", "--volume", "-w", "--workdir", "--gpus",
+               "--device", "--ulimit", "--cap-add", "--runtime", "--shm-size", "--entrypoint", "--user", "-u",
+               "--security-opt", "--label", "-l", "--add-host", "--pid", "--hostname", "-h"}
+
+
+def fail(message, code=125):
+    print(f"docker: {message}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def pid_of(name):
+    try:
+        with open(f"{STATE}/{name}.pid") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def members(name):
+    """Pids of the container's processes (the inherited marker)."""
+    want = f"{MARK}={name}".encode()
+    out = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{entry}/environ", "rb") as fh:
+                env = fh.read().split(b"\0")
+        except OSError:
+            continue
+        if want in env and alive(int(entry)):
+            out.append(int(entry))
+    return out
+
+
+def signal_all(pids, signum):
+    for pid in pids:
+        try:
+            os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def kill_container(name, root=None):
+    """KILL every process of the container; True once none is left."""
+    for _ in range(100):
+        pids = members(name) + ([root] if root is not None and alive(root) else [])
+        if not pids:
+            return True
+        signal_all(pids, signal.SIGKILL)
+        time.sleep(0.1)
+    return False
+
+
+def exists(name):
+    return os.path.exists(f"{STATE}/{name}.pid")
+
+
+def running(name):
+    pid = pid_of(name)
+    return pid is not None and (alive(pid) or bool(members(name)))
+
+
+def parse_run(argv):
+    opts = {"rm": False, "name": None, "network": None, "ipc": None, "env": [], "volumes": [], "workdir": None,
+            "flags": []}
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        arg = argv[i]
+        if arg.startswith("--") and "=" in arg:
+            flag, value = arg.split("=", 1)
+        elif arg in TAKES_VALUE:
+            if i + 1 >= len(argv):
+                fail(f"flag needs an argument: {arg}")
+            flag, value = arg, argv[i + 1]
+            i += 1
+        else:
+            flag, value = arg, None
+        i += 1
+        opts["flags"].append(flag if value is None else f"{flag}={value}")
+        if flag == "--rm":
+            opts["rm"] = True
+        elif flag == "--name":
+            opts["name"] = value
+        elif flag == "--network":
+            opts["network"] = value
+        elif flag == "--ipc":
+            opts["ipc"] = value
+        elif flag in ("-e", "--env"):
+            opts["env"].append(value)
+        elif flag in ("-v", "--volume"):
+            opts["volumes"].append(value)
+        elif flag in ("-w", "--workdir"):
+            opts["workdir"] = value
+    if i >= len(argv):
+        fail("\"docker run\" requires at least 1 argument (the image)")
+    return opts, argv[i], argv[i + 1:]
+
+
+def run(argv):
+    opts, image, command = parse_run(argv)
+    name = opts["name"]
+    if not name:
+        fail("bm-sim: the island's containers must be named (--name)")
+    if opts["network"] != "host" or opts["ipc"] != "host":
+        fail(f"bm-sim: expected --network host --ipc host, got {opts['network']} / {opts['ipc']}")
+    if not command:
+        fail(f"bm-sim: no command for image {image}")
+    os.makedirs(STATE, exist_ok=True)
+    old = pid_of(name)
+    if old is not None and alive(old):
+        fail(f"Error response from daemon: Conflict. The container name \"/{name}\" is already in use")
+    if exists(name) and not running(name):
+        fail(f"Error response from daemon: Conflict. The container name \"/{name}\" is already in use "
+             "(an exited container that was not removed)")
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+    for item in opts["env"]:
+        key, sep, value = item.partition("=")
+        if sep:
+            env[key] = value
+        elif key in os.environ:
+            env[key] = os.environ[key]
+    for volume in opts["volumes"]:
+        src, _, rest = volume.partition(":")
+        dst = rest.split(":", 1)[0]
+        link = os.path.join(MOUNTS, dst.strip("/").replace("/", "_"))
+        if not (os.path.islink(dst) and os.readlink(dst) == link):
+            fail(f"bm-sim: cannot mount {src} at {dst} (the node image pre-links only "
+                 f"{MOUNTS}/* destinations)")
+        os.makedirs(src, exist_ok=True)
+        tmp = f"{link}.tmp-{os.getpid()}"
+        os.symlink(src, tmp)
+        os.replace(tmp, link)
+    workdir = opts["workdir"] or "/"
+    if not os.path.isdir(workdir):
+        fail(f"bm-sim: workdir {workdir} does not exist in the image", 126)
+    with open(f"{STATE}/{name}.json", "w") as fh:
+        json.dump({"image": image, "flags": opts["flags"], "env": sorted(env), "command": command,
+                   "time": time.time()}, fh)
+    proc = subprocess.Popen(command, cwd=workdir, env={**env, MARK: name}, start_new_session=True)
+    with open(f"{STATE}/{name}.pid", "w") as fh:
+        fh.write(str(proc.pid))
+
+    def proxy(signum, _frame):
+        try:
+            os.killpg(proc.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGTERM, proxy)
+    signal.signal(signal.SIGINT, proxy)
+    rc = proc.wait()
+    kill_container(name)  # the init ended: so does every process of the container
+    if opts["rm"]:
+        try:
+            os.remove(f"{STATE}/{name}.pid")
+        except OSError:
+            pass
+    return 128 - rc if rc < 0 else rc
+
+
+def rm(argv):
+    names = [a for a in argv if not a.startswith("-")]
+    code = 0
+    for name in names:
+        if not exists(name):
+            print(f"Error response from daemon: No such container: {name}", file=sys.stderr)
+            code = 1
+            continue
+        if running(name) and "-f" not in argv and "--force" not in argv:
+            print(f"Error response from daemon: cannot remove running container {name}: stop it or use -f",
+                  file=sys.stderr)
+            code = 1
+            continue
+        if not kill_container(name, pid_of(name)):
+            print(f"Error response from daemon: could not kill container {name}", file=sys.stderr)
+            code = 1
+            continue
+        try:
+            os.remove(f"{STATE}/{name}.pid")
+        except OSError:
+            pass
+        print(name)
+    return code
+
+
+def inspect(argv):
+    fmt, names, i = None, [], 0
+    while i < len(argv):
+        if argv[i] in ("-f", "--format"):
+            fmt, i = argv[i + 1], i + 2
+            continue
+        if argv[i].startswith("--format="):
+            fmt = argv[i].split("=", 1)[1]
+        elif not argv[i].startswith("-"):
+            names.append(argv[i])
+        i += 1
+    code = 0
+    for name in names:
+        if not exists(name):
+            print(f"Error: No such object: {name}", file=sys.stderr)
+            code = 1
+            continue
+        up = running(name)
+        state = {"Status": "running" if up else "exited", "Running": up}
+        if fmt is None:
+            print(json.dumps([{"Name": f"/{name}", "State": state}]))
+        elif fmt.replace(" ", "") == "{{.State.Status}}":
+            print(state["Status"])
+        elif fmt.replace(" ", "") == "{{.State.Running}}":
+            print("true" if up else "false")
+        else:
+            fail(f"bm-sim docker shim: unsupported inspect format {fmt!r}", 1)
+    return code
+
+
+def exec_(argv):
+    """``docker exec NAME CMD...``; ``kill -SIG -1`` reaches the container's processes only."""
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):  # exec options (-i, -t, -d) take no value here
+        i += 1
+    if len(argv) - i < 2:
+        fail("\"docker exec\" requires at least 2 arguments")
+    name, command = argv[i], argv[i + 1:]
+    if not running(name):
+        print(f"Error response from daemon: container {name} is not running", file=sys.stderr)
+        return 1
+    script = " ".join(command[2:]) if command[:2] == ["bash", "-c"] else " ".join(command)
+    words = script.split()
+    if len(words) == 3 and words[0] == "kill" and words[2] == "-1":
+        signum = getattr(signal, "SIG" + words[1].lstrip("-").upper().removeprefix("SIG"))
+        root = pid_of(name)
+        signal_all([p for p in members(name) if p != root], signum)
+        return 0
+    return subprocess.run(command, env={**os.environ, MARK: name}).returncode
+
+
+def pull(argv):
+    image = [a for a in argv if not a.startswith("-")][-1]
+    if os.path.exists("/tmp/bm-sim-pull-fail"):
+        with open("/tmp/bm-sim-pull-fail") as fh:
+            print(fh.read().strip(), file=sys.stderr)
+        return 1
+    print(image if "@sha256:" in image else f"{image}@sha256:{'0' * 64}")
+    return 0
+
+
+def main(argv):
+    if not argv:
+        fail("bm-sim docker shim: no command")
+    verb, rest = argv[0], argv[1:]
+    if verb == "run":
+        return run(rest)
+    if verb == "rm":
+        return rm(rest)
+    if verb == "inspect":
+        return inspect(rest)
+    if verb == "container" and rest[:1] == ["inspect"]:
+        return inspect(rest[1:])
+    if verb == "exec":
+        return exec_(rest)
+    if verb == "pull":
+        return pull(rest)
+    if verb in ("version", "info"):
+        print("bm-sim docker shim")
+        return 0
+    fail(f"bm-sim docker shim: unsupported command {verb!r}", 1)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

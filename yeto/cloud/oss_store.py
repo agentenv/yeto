@@ -233,8 +233,14 @@ class OssStore(CheckpointStore):
         """Delete every object under ``relative``, including what other nodes uploaded."""
         return self._tree().delete_tree(relative)
 
+    def fetch_local_file(self, relative: str) -> int | None:
+        """Download one file into the stage now (``S3Store.fetch_local_file``)."""
+        return self._tree().fetch_file(relative)
+
     def reload(self) -> None:
-        self._tree().pull()
+        from .s3_store import lazy_cut_shards
+
+        self._tree().pull(skip_keys=lazy_cut_shards(self._environ))
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "uri": self.uri}

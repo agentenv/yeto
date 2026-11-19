@@ -236,3 +236,63 @@ def test_build_sh_reads_the_pins_by_running_them_and_passes_the_drift_flag():
     import runpy
     ns = runpy.run_path(str(REPO / "yeto" / "rl" / "adapters" / "miles" / "pins.py"))
     assert ns["SGLANG_NEXT_REPOSITORY"].startswith("https://") and ns["MILES_NEXT_REPOSITORY"].startswith("https://")
+
+
+def _overlay_replay(paths: list[str]) -> list[str]:
+    """Paths an overlay applier refuses: ``D/.wh.N`` becomes a 0:0 char device at
+    ``D/N`` in the upper dir (moby overlay2, containerd overlayfs), so a later
+    entry under ``D/N`` fails with "not a directory"."""
+    devices: set[str] = set()
+    refused = []
+    for path in paths:
+        path = path.rstrip("/")
+        parts = path.split("/")
+        if any("/".join(parts[:i]) in devices for i in range(1, len(parts))):
+            refused.append(path)
+            continue
+        head, _, name = path.rpartition("/")
+        if name.startswith(".wh.") and name != ".wh..wh..opq":
+            devices.add(f"{head}/{name[4:]}")
+        else:
+            devices.discard(path)  # a regular entry replaces the device
+    return refused
+
+
+def test_same_layer_whiteouts_are_resolved_for_overlay_appliers(ml):
+    """The FULL_E / 63ad0d2a overlay: the fork's SGLang version equals the base's, so the
+    stale dist-info is whited out and rewritten under the same name in one layer --
+    docker 29 refused it ("mkparent .../sglang-0.5.24.dev80+g35708f7.dist-info: not a
+    directory"). The resolved layer replaces that whiteout by an opaque directory and
+    keeps every whiteout of a path the layer does not write."""
+    v = "0.5.24.dev80+g35708f7"
+    file = lambda data=b"x": ("file", data, 0o644, None)
+    entries = {
+        f"{SITE}/.wh.sglang-{v}.dist-info": file(b""),
+        f"{SITE}/.wh.__editable__.sglang-{v}.pth": file(b""),
+        f"{SITE}/.wh.peft-0.18.1.dist-info": file(b""),
+        f"{SITE}/sglang-{v}.dist-info/INSTALLER": file(),
+        f"{SITE}/sglang-{v}.dist-info/RECORD": file(),
+        f"{SITE}/__editable__.sglang-{v}.pth": file(),
+        f"{SITE}/peft-0.20.0.dist-info/METADATA": file(),
+        "root/miles/": ("dir", None, 0o755, None),
+        "root/miles/.git/.wh..wh..opq": file(b""),
+        "root/miles/scripts/.wh.deleted.py": file(b""),
+    }
+    assert _overlay_replay(sorted(entries)) == [f"{SITE}/sglang-{v}.dist-info/INSTALLER",
+                                                f"{SITE}/sglang-{v}.dist-info/RECORD"]
+    out = ml.resolve_same_layer_whiteouts(entries)
+    assert _overlay_replay(sorted(out)) == []
+    assert f"{SITE}/.wh.sglang-{v}.dist-info" not in out
+    assert out[f"{SITE}/sglang-{v}.dist-info/"][0] == "dir"
+    assert f"{SITE}/sglang-{v}.dist-info/.wh..wh..opq" in out  # the base's other files stay hidden
+    assert f"{SITE}/.wh.__editable__.sglang-{v}.pth" not in out  # the new file replaces the lower one
+    for kept in (f"{SITE}/.wh.peft-0.18.1.dist-info", "root/miles/.git/.wh..wh..opq",
+                 "root/miles/scripts/.wh.deleted.py"):
+        assert out[kept] == entries[kept]
+    # the opaque marker sorts right after its directory entry, before the files (the tar order)
+    order = sorted(out)
+    i = order.index(f"{SITE}/sglang-{v}.dist-info/")
+    assert order[i + 1] == f"{SITE}/sglang-{v}.dist-info/.wh..wh..opq"
+    # a layer without such a collision is unchanged
+    plain = {k: e for k, e in entries.items() if "sglang" not in k}
+    assert ml.resolve_same_layer_whiteouts(plain) == plain

@@ -35,7 +35,8 @@ from .storage import (
     RL_INIT_RELEASE_DIR,
     RL_INITIAL_ADAPTER_PATH,
     _rl_checkpoint_mount, _rl_checkpoint_storage_name, modal_volume_store_env, model_store_env,
-    model_store_filesystem, nebius_baked_image_id, rl_checkpoint_store_plan, store_object_envs,
+    model_store_filesystem, model_store_local_path, nebius_baked_image_id, rl_checkpoint_store_plan,
+    store_object_envs,
 )
 from .island_tasks import island_task_data
 from .rl_ports import _ports_algorithm_flags
@@ -59,7 +60,9 @@ MILES_RAY_STOP_FUNCTIONS = (
     "  for d in \"${YETO_PROC_ROOT:-/proc}\"/[0-9]*; do\n"
     '    p=${d##*/}\n'
     '    case "$p" in "$$"|"$PPID"|"${BASHPID:-$$}") continue ;; esac\n'
-    "    c=$(tr '\\0' ' ' < \"$d/cmdline\" 2>/dev/null) || continue\n"
+    # a process that ended after the glob has no cmdline: braces, so bash's own
+    # "No such file" for the redirection is silenced too (it filled the worker logs)
+    "    c=$( { tr '\\0' ' ' < \"$d/cmdline\"; } 2>/dev/null) || continue\n"
     '    case "$c" in *"$MILES_RAY_DIR/"*) echo "$p" ;; esac\n'
     "  done\n"
     "}\n"
@@ -515,8 +518,12 @@ def make_miles_island_task(
             "from huggingface_hub import snapshot_download; "
             f"print(snapshot_download(repo_id={model!r}, revision={args.model_revision!r}))"
         )
+        # A model store hit (YETO_MODEL_STORE_HIT) is the snapshot itself: the
+        # worker fetches nothing (a node-local store may hold only its pipeline
+        # stages' files, which an online snapshot_download would complete from the Hub).
         worker_model_fetch = (
-            f"  python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
+            '  [ -n "${YETO_MODEL_STORE_HIT:-}" ] || '
+            f"python3 -c {shlex.quote(fetch_py)} >/tmp/hf-prefetch-worker.log 2>&1 "
             "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
             "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
         )
@@ -630,6 +637,12 @@ def make_miles_island_task(
         store_env = model_store_env(model, args.model_revision) + "\n"
         setup_steps.append(store_env.rstrip("\n"))
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
+    elif model_store_local_path(getattr(args, "model_store", None)) and not is_local_reference(model):
+        # a node-local hub cache (filled by --model-store-source on an SSH trainer island)
+        store_env = model_store_env(model, args.model_revision,
+                                    mount=model_store_local_path(args.model_store)) + "\n"
+        setup_steps.append(store_env.rstrip("\n"))
+        prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
     setup_steps.append(prefetch)
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
     # PYTHONPATH; the pinned fork checkout must shadow it.
@@ -690,6 +703,7 @@ def make_miles_island_task(
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
             + rl_island_ray_storage(args, head=True, cloud=spec.cloud)
+            + _agent_ports_flags(spec.cloud)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -718,7 +732,8 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False, cloud=spec.cloud)}"
+            f"{_agent_ports_flags(spec.cloud)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"
@@ -831,15 +846,42 @@ def _island_compat_group(args, spec, learner_id: int) -> str:
     return group
 
 
+# Clouds whose Ray workers pin their node IP to their SKYPILOT_NODE_IPS line.
+PINNED_WORKER_IP_CLOUDS = frozenset({"modal", "ssh"})
+
+
 def _worker_node_ip_flag(cloud: str) -> str:
-    """Modal only: a Modal container has both an
+    """Modal and SSH nodes: a Modal container has both an
     i6pn IPv6 and an IPv4 interface, so a worker lets Ray pick and may register an
-    unreachable address.  Pin it to this rank's IPv4 from SKYPILOT_NODE_IPS
-    (modal_runner maps the IPv4 list, rank order).  Other clouds: unchanged argv."""
-    if cloud != "modal":
+    unreachable address; a bare-metal node has a management NIC, the cluster NIC and
+    the IB/RoCE ports, and Ray's guess is the first route it finds.  Pin it to this
+    rank's address from SKYPILOT_NODE_IPS (modal_runner maps the IPv4 list in rank
+    order; an SSH trainer island lists the inventory addresses).  Other clouds:
+    unchanged argv."""
+    if cloud not in PINNED_WORKER_IP_CLOUDS:
         return ""
     return (' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS" '
             '| sed -n "$((SKYPILOT_NODE_RANK + 1))p")"')
+
+
+# Ray's per-node agent ports, fixed on SSH nodes (next to Ray's own fixed
+# dashboard agent HTTP port 52365). Unpinned, ``ray start`` asks the OS for a
+# free port and refuses to start when it falls inside the worker port range
+# (10002-19999 by default; "Ray component worker_ports is trying to use a port
+# number ... used by other components"), and it keeps the choice in the session
+# dir, so a worker's join retries all fail the same way. A host whose ephemeral
+# range starts below 20000 (net.ipv4.ip_local_port_range) hits that.
+RAY_AGENT_PORTS = {"--metrics-export-port": 52366, "--dashboard-agent-grpc-port": 52367,
+                   "--runtime-env-agent-port": 52368}
+PINNED_AGENT_PORT_CLOUDS = frozenset({"ssh"})
+
+
+def _agent_ports_flags(cloud: str) -> str:
+    """The pinned agent ports of :data:`RAY_AGENT_PORTS` on an SSH island's nodes;
+    other clouds: unchanged argv."""
+    if cloud not in PINNED_AGENT_PORT_CLOUDS:
+        return ""
+    return "".join(f" {flag}={port}" for flag, port in RAY_AGENT_PORTS.items())
 
 
 def _island_post_cmd(args) -> str:

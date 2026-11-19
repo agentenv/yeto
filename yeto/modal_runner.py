@@ -2108,14 +2108,18 @@ class ModalIslandOps:
 
 class RoutingOps:
     """One `sky_ops` for a mixed fleet: Modal islands (by name) go to
-    `modal_ops`, everything else to `sky_ops`. `now`/`sleep` come from
-    the sky side so the controller's clock is unchanged."""
+    `modal_ops`, resident ssh: islands (``ssh_ops.owns(name)``,
+    ``yeto.launch.ssh_resident``) to `ssh_ops`, everything else to `sky_ops`.
+    `now`/`sleep` come from the sky side so the controller's clock is unchanged."""
 
-    def __init__(self, sky_ops, modal_ops: ModalIslandOps | None) -> None:
+    def __init__(self, sky_ops, modal_ops: ModalIslandOps | None, ssh_ops=None) -> None:
         self.sky_ops = sky_ops
         self.modal_ops = modal_ops
+        self.ssh_ops = ssh_ops
 
     def _for(self, name: str):
+        if self.ssh_ops is not None and self.ssh_ops.owns(name):
+            return self.ssh_ops
         if self.modal_ops is not None and is_modal_island(name):
             return self.modal_ops
         return self.sky_ops

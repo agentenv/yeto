@@ -1,0 +1,64 @@
+# Kimi K3.1 full-parameter trainer on a customer's 6 x 8 B300 bare-metal cluster.
+# Runbook: docs/K31_BARE_METAL_B300.md (section 4 explains every field).
+#
+# Replace the documentation addresses (192.0.2.x management, 198.51.100.x
+# cluster network), the SSH user, the interface name, the HCA list and the
+# mount paths with your site's values. Validate the file without touching a
+# node:
+#   python -c "from yeto.launch.node_inventory import load_inventory; \
+#     print(len(load_inventory('inventory.b300-6x8-baremetal.yaml')))"
+# The trainer dry run (yeto launch ... --dry-run) validates it again.
+#
+# Every node runs one trainer container: the run's --rl-image (overlay-safe
+# repack of the full-parameter K3.1 image; an inventory `images:` entry is
+# optional and must name the same image), the node's docker_args (GPUs, verbs
+# devices, unlimited memlock), its scratch, mounts and env. Node 0 is the Ray
+# head and the rendezvous address (its `address`). The yeto code reaches the
+# nodes as the run's code pack from the s3 store; no checkout is needed there.
+#
+# scratch: an NVMe directory; the run's data lives under <scratch>/<run>
+# (store stage, release staging, temp files, init release, Ray session and
+# spill), mounted into the container as /yeto-scratch. The preflight refuses
+# a node with less than scratch_min_free_gib free there.
+#
+# env: site fabric settings yeto cannot derive. They are exported after the
+# fabric defaults (NCCL_IB_DISABLE=0, NCCL_SOCKET_IFNAME/GLOO_SOCKET_IFNAME from
+# `interface`) and before the run's own environment (--island-env in the run
+# config carries the model and run settings, the same for every node).
+#   NCCL_IB_HCA        the compute HCAs only (exclude storage / management ports;
+#                      `ibv_devinfo -l` lists them). A leading `=` makes the
+#                      match exact (mlx5_1 does not also match mlx5_10).
+#   NCCL_IB_GID_INDEX  RoCE only: the RoCE v2 GID of the cluster IP (often 3;
+#                      `show_gids` prints it). Leave it out on InfiniBand.
+#   NCCL_IB_TC         RoCE only: the lossless traffic class your switches use.
+
+nodes:
+  - &b300
+    name: b300-0
+    host: ops@192.0.2.20              # SSH target from the control host (alias or user@ip)
+    address: 198.51.100.20            # this node's IP on the cluster network (`interface`)
+    interface: bond0                  # NIC that carries the cluster IP (Ray, NCCL bootstrap)
+    device_family: cuda
+    cpu_arch: x86_64
+    card: B300
+    cards_per_node: 8
+    hbm_gib: 288
+    host_memory_gib: 2048             # >= 1600 required, 2048 recommended
+    fabric: ib                        # ib or roce
+    runtime: docker
+    docker_args: [--gpus, all, --device, /dev/infiniband, --ulimit, "memlock=-1:-1",
+                  --ulimit, stack=67108864, --cap-add, IPC_LOCK]
+    scratch: /mnt/nvme/yeto                    # run data under <scratch>/<run>: NVMe, not the root disk
+    scratch_min_free_gib: 2000                 # one cut stage (~0.9 TB) and two releases (~0.2 TB each)
+    mounts:
+      /mnt/nvme/models: /data/models           # weights copy (runbook section 6)
+    env:
+      NCCL_IB_HCA: "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+      # RoCE only (fabric: roce):
+      # NCCL_IB_GID_INDEX: 3
+      # NCCL_IB_TC: 106
+  - {<<: *b300, name: b300-1, host: ops@192.0.2.21, address: 198.51.100.21}
+  - {<<: *b300, name: b300-2, host: ops@192.0.2.22, address: 198.51.100.22}
+  - {<<: *b300, name: b300-3, host: ops@192.0.2.23, address: 198.51.100.23}
+  - {<<: *b300, name: b300-4, host: ops@192.0.2.24, address: 198.51.100.24}
+  - {<<: *b300, name: b300-5, host: ops@192.0.2.25, address: 198.51.100.25}

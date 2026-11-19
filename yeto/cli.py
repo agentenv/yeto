@@ -637,7 +637,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO",
+        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO; "
+        "applied after --island-env",
+    )
+    infra.add_argument(
+        "--island-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="every --gpu island (Modal, sky, ssh:): extra environment of the island's job "
+        "(repeatable), e.g. trainer switches such as YETO_MILES_TRAIN_EXTRA_ARGV=...; not for "
+        "secrets (a sky task shows its envs). On an ssh: island it comes after the inventory's "
+        "per-node env; on Modal --modal-env comes after it",
     )
     infra.add_argument(
         "--modal-sandbox-secret",
@@ -914,7 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(
         dest="command",
         metavar="{launch,shape,merge,rl,sample-diffusion,engine-sampler-modal,status,"
-        "dashboard,logs,down,stop-run}",
+        "dashboard,logs,down,stop-run,preflight}",
     )
 
     launch = sub.add_parser(
@@ -1108,6 +1119,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .launch.rollout.entry import add_parser as _add_rollout_parser
 
     _add_rollout_parser(sub)
+
+    from .launch.preflight.cluster import add_parser as _add_preflight_parser
+
+    _add_preflight_parser(sub)
 
     logs = sub.add_parser("logs", help="stream a run's launcher log (Ctrl-C detaches)")
     logs.add_argument("run", help="run name (its --cluster-prefix)")
@@ -1315,6 +1330,19 @@ def _resolve_auto_fleet(args) -> int:
     return 0
 
 
+def _cluster_preflight(args) -> int | None:
+    """The cluster preflight of an ``ssh:`` trainer island (``yeto.launch.preflight.gate``):
+    1 when it fails (nothing is launched), None to go on."""
+    from .launch.preflight.gate import launch_gate
+
+    try:
+        launch_gate(args)
+    except ValueError as exc:
+        print(f"[yeto] cluster preflight refused the launch: {exc}", file=sys.stderr)
+        return 1
+    return None
+
+
 def cmd_launch(args) -> int:
     error = _fleet_args_error(args)
     if error:
@@ -1364,8 +1392,10 @@ def cmd_launch(args) -> int:
               file=sys.stderr)
         return 1
     if getattr(args, "dry_run", False):
+        from .launch.preflight.gate import launch_gate
         from .launcher import dry_run_plan
 
+        launch_gate(args)  # a dry run only prints the cluster preflight it would run
         try:
             plan = dry_run_plan(args)
         except ValueError as exc:
@@ -1382,6 +1412,8 @@ def cmd_launch(args) -> int:
     except ValueError as exc:
         print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
         return 1
+    if (code := _cluster_preflight(args)) is not None:
+        return code
 
     args_dict = {k: v for k, v in vars(args).items()
                  if k not in ("command", "_launch_preflight_manifest")}
@@ -1704,6 +1736,8 @@ def cmd_launch_head(args) -> int:
     except ValueError as exc:
         print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
         return 1
+    if (code := _cluster_preflight(args)) is not None:
+        return code
     # Every cloud the fleet (and the head) touches must have credentials on
     # this machine, or the head could never launch or tear islands down:
     # refuse before anything is recorded or provisioned.
@@ -2354,7 +2388,14 @@ def _cmd_down_clusters(args) -> int:
     head_cluster = meta.get("head_cluster") if meta.get("controller") == "head" else None
     modal_names = [c for c in clusters if is_modal_island(c)]
     on_head = [c for c in clusters if head_cluster and c != head_cluster and c not in modal_names]
-    local_names = [c for c in clusters if c not in modal_names and c not in on_head]
+    # resident ssh: trainer islands (a journal in the run dir): no sky cluster; cmd_down
+    # stops them from the run's resource ledger (their recorded nodes) after this
+    from .launch.ssh_resident import RESIDENT_DIR
+
+    ssh_names = [c for c in clusters if (runs.run_dir(name) / RESIDENT_DIR / f"{c}-jobs.json").exists()]
+    for c in ssh_names:
+        print(f"[yeto] {c}: resident ssh: island, stopped on its nodes through the resource ledger")
+    local_names = [c for c in clusters if c not in modal_names and c not in on_head and c not in ssh_names]
     unconfirmed: list[str] = []
 
     if modal_names:
@@ -2581,6 +2622,10 @@ def main(argv=None) -> int:
         from .launch.rollout.entry import main as rollout_main
 
         return rollout_main(args)
+    if args.command == "preflight":
+        from .launch.preflight.cluster import main as preflight_main
+
+        return preflight_main(args)
     if args.command == "sandbox":
         from .sandbox.cli import main as sandbox_main
 
