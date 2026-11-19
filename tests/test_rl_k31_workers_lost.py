@@ -1,10 +1,10 @@
-"""Miles k31/b4-lost efc83590 (fast-forwarded onto k31/b8): a cell whose workers died
+"""Miles k31/b4-lost 6c7046e6 (fast-forwarded onto k31/b8): a cell whose workers died
 is described ``workers_lost`` with the dead workers in ``lost_workers``.
 
 * the pin and the feature: ``workers_lost`` is registered on the k31 head only;
 * ``MilesRolloutPool.member_states`` passes the state and ``lost_workers`` through
   (None in every other state and on a fork that does not report the field);
-* the watchdog's classification on the efc83590 ``describe_cells`` shape is
+* the watchdog's classification on the 6c7046e6 ``describe_cells`` shape is
   ``workers_lost``; the explicit stop that acknowledges the loss reads ``stopped``;
 * the runtime manifest probes the cell state property, and no capability needs it.
 """
@@ -16,7 +16,7 @@ import pytest
 from yeto.rl.adapters.miles import pins
 from yeto.rl.adapters.miles import runtime_manifest as rm
 
-LOST = "efc83590dcb8daf9b230c71b45ffb4f1e6b54cb3"
+LOST = "6c7046e6a2d7d32a7ee98bb2ddb5102f7512c995"
 
 
 def _pool(described):
@@ -31,7 +31,7 @@ def _pool(described):
 
 
 def _entry(state, lost=None, **kw):
-    """One InferenceController.describe_cells entry of efc83590: the worker manager's
+    """One InferenceController.describe_cells entry of 6c7046e6: the worker manager's
     CellInfo-like fields plus the controller's tracked / serving / awaiting_admission."""
     base = {"cell_id": "c", "alias": None, "pool_id": "engine", "deferred": False, "state": state,
             "lost_workers": lost, "generation": 1, "pg_name": "rollout", "pg_slot_offset": 0,
@@ -67,7 +67,7 @@ def test_member_states_pass_the_worker_loss_through():
 
 
 def test_member_states_without_the_field_or_outside_the_state():
-    # k31 before efc83590: no lost_workers key, a dead engine reads "stopped"
+    # k31 before 6c7046e6: no lost_workers key, a dead engine reads "stopped"
     old = {"state": "stopped", "tracked": False, "serving": False, "awaiting_admission": False}
     assert _pool({"c0": old}).member_states()["engine:c0"]["lost_workers"] is None
     # a stray list outside workers_lost is not reported as a loss
@@ -94,7 +94,7 @@ class _Ray:
         return ref
 
 
-def test_watchdog_classifies_the_efc83590_shape():
+def test_watchdog_classifies_the_6c7046e6_shape():
     from yeto.rl.adapters.miles.elastic_wiring import _lost_workers_of
 
     described = {"c1": _entry("workers_lost", ["engine-1-0"]), "c2": _entry("stopped")}
@@ -110,11 +110,11 @@ def test_runtime_manifest_probes_the_cell_state():
     assert not [c for c, need in rm.CAPABILITY_REQUIREMENTS.items() if "fork_b4_workers_lost" in need]
 
 
-def test_the_probe_resolves_in_an_efc83590_checkout():
+def test_the_probe_resolves_in_an_6c7046e6_checkout():
     pytest.importorskip("ray")
     mod = pytest.importorskip("miles.utils.workers.ray_worker_manager")
     if not isinstance(getattr(getattr(mod, "_CellManager", None), "state", None), property):
-        pytest.skip("Miles checkout before k31/b4-lost efc83590")
+        pytest.skip("Miles checkout before k31/b4-lost 6c7046e6")
     from yeto.rl.engine.runtime_manifest import _probe
 
     assert _probe(*rm.INTERFACES["fork_b4_workers_lost"])

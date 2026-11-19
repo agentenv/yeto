@@ -9,7 +9,7 @@ segments in one training step. A group without segments converts exactly as befo
 The Miles side is checked two ways:
 
 * :class:`MilesRef` copies the Miles functions involved line for line (fork commit
-  ``MILES_NEXT_COMMIT`` c351a33c, ``miles/rollout/reward_shaping.py`` L34-69,
+  ``MILES_NEXT_COMMIT`` 9fa600b9, ``miles/rollout/reward_shaping.py`` L34-69,
   ``miles/ray/rollout/train_data_conversion.py`` L125 and L365-423 and L466-479,
   ``miles/ray/rollout/rollout_data_conversion.py`` L12-47, ``miles/utils/dp_schedule.py``
   L79-111);
@@ -93,7 +93,7 @@ def _reader(root, **kwargs) -> br.BatchReader:
 
 # ---------------------------------------------------------------------- Miles, copied
 class MilesRef:
-    """Miles fork c351a33c (MILES_NEXT_COMMIT), copied line for line on
+    """Miles fork 9fa600b9 (MILES_NEXT_COMMIT), copied line for line on
     ``SimpleNamespace`` samples (module doc for the file and line ranges)."""
 
     @staticmethod

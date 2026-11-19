@@ -199,7 +199,7 @@ MILES_DECLARED_EVIDENCE: dict[str, tuple[EvidenceRef, ...]] = {
 # entry stops applying once a k31 EvidenceRef in MILES_DECLARED_EVIDENCE covers
 # the pin (:func:`needs_k31_reverification`).
 K31_REVERIFY: dict[str, str] = {
-    **{m: ("loss and metrics bitwise equal to the fork on CPU (k31/b8 4ff093a8), but the flags reach "
+    **{m: ("loss and metrics bitwise equal to the fork on CPU (k31/b8 250a63e3), but the flags reach "
            "the loss through the typed config slice and the CUDA torch.compile path is unverified")
        for m in ("losses:cispo", "losses:sapo", "losses:gmpo")},
     "features:dual_clip": ("loss bitwise equal; the evidence metric moved from the fork's dual_clipfrac "

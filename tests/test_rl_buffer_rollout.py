@@ -162,7 +162,7 @@ def test_payload_keeps_per_token_logprobs_versions_and_arrays():
 
 
 def test_entry_reads_miles_per_call_weight_version_dicts():
-    """Miles Sample.to_dict() (k31 pin 63834eaa) writes one WeightVersionsPerCall
+    """Miles Sample.to_dict() (k31 pin 3af42469) writes one WeightVersionsPerCall
     dict per generate call, {"spans": [...], "prefill_spans": [...], ...}."""
     from yeto.rl.engine import buffer_payload
 

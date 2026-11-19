@@ -1710,11 +1710,11 @@ class MilesRolloutPool:
 
         ``state`` is ``unbound`` (a deferred cell with no binding), ``stopped``,
         ``running`` or ``workers_lost``: the fork's liveness scan found workers of the
-        cell dead and tore the cell down (Miles k31/b4-lost efc83590; the ports-v1 fork
+        cell dead and tore the cell down (Miles k31/b4-lost 6c7046e6; the ports-v1 fork
         since 857fc9592), as opposed to a cell stopped on purpose or never started.
         ``lost_workers`` names the dead workers in state ``workers_lost`` and is None in
         every other state, and on a fork whose ``describe_cells`` has no such field
-        (k31 before efc83590 reports such a cell ``stopped``)."""
+        (k31 before 6c7046e6 reports such a cell ``stopped``)."""
         describe = getattr(self._controller, "describe_cells", None)
         if not callable(describe):
             return None

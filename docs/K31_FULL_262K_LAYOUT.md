@@ -98,18 +98,18 @@ moves the pressure to stage 1 and is not recommended.
 Use the full-parameter default image:
 
 ```
-docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b
+docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325
 ```
 
-It carries Miles `k31/integ-trainer` `1f29e43043`, which contains every Miles
+It carries Miles `k31/integ-trainer` `aa6b6ff5f7`, which contains every Miles
 change this layout depends on:
 
 | Miles change | Purpose | Setting |
 |---|---|---|
-| DSA indexer scored in query blocks (`c5393bbeb4`) | Keeps the frozen indexer's score matrix bounded at long context | `MILES_K31_INDEXER_QUERY_CHUNK` (default 8192) |
-| Attention-residual aggregation in token blocks (`a0cef1d401`) | Bounds the fp32 temporaries at 262k per rank | `MILES_K3_ATTN_RES_TOKEN_CHUNK` (default 4096) |
-| Stage-0 expert gradients under full recompute (`2fc2b14adc`) | Ensures the trainable experts on PP stage 0 receive gradients | built in |
-| Finite score-centering loss at head mass >= 1 (`0cb40f2fcf`) | Keeps loss and gradients finite | built in |
+| DSA indexer scored in query blocks (`d55ab6b977`) | Keeps the frozen indexer's score matrix bounded at long context | `MILES_K31_INDEXER_QUERY_CHUNK` (default 8192) |
+| Attention-residual aggregation in token blocks (`507a850507`) | Bounds the fp32 temporaries at 262k per rank | `MILES_K3_ATTN_RES_TOKEN_CHUNK` (default 4096) |
+| Stage-0 expert gradients under full recompute (`7c00563986`) | Ensures the trainable experts on PP stage 0 receive gradients | built in |
+| Finite score-centering loss at head mass >= 1 (`2c2a3db06d`) | Keeps loss and gradients finite | built in |
 
 The 524k measurement ran with these same Miles changes applied on an earlier
 base image. The full-parameter image above is the one this repository pins
@@ -144,7 +144,7 @@ SEQ=262144; CP=2; MTPG=$((SEQ / CP))   # 524k: SEQ=524288, split 32/28/33 (appen
 
 yeto launch --training-mode rl \
   --gpu modal:6x8xb300 --cluster-prefix <run-name> \
-  --rl-image "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b" \
+  --rl-image "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325" \
   --model moonshotai/Kimi-K3.1-Pro --model-revision <revision> \
   --modal-model-volume <weights-volume> \
   --data <prompt-dataset> --data-revision <revision> \

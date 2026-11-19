@@ -25,7 +25,7 @@ B3B7_FEATURES = (
 
 
 def test_k31_lineage_registers_the_b3b7_features():
-    assert pins.MILES_K31_B3B7_COMMIT == "a07553f0a4f361b1618a707b416b690c5666e03d"
+    assert pins.MILES_K31_B3B7_COMMIT == "65c31aa61dd66c98c784fbd6590f85ca1cab3c32"
     k31 = pins.MILES_LINEAGES["k31"].commits
     assert k31[:3] == (pins.MILES_K31_F1_COMMIT, pins.MILES_K31_B2_COMMIT, pins.MILES_K31_B3B7_COMMIT)
     for feature in B3B7_FEATURES:

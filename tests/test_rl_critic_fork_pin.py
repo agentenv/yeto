@@ -13,7 +13,7 @@ from yeto.rl.adapters.miles import algorithm_flags as af
 
 load_extensions()
 
-PIN = "efc83590dcb8daf9b230c71b45ffb4f1e6b54cb3"  # Miles k31/b8 head: the critic family in the k31 lineage
+PIN = "6c7046e6a2d7d32a7ee98bb2ddb5102f7512c995"  # Miles k31/b8 head: the critic family in the k31 lineage
 SAO_UNDECLARED = ("advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
                   "features:gae_decoupled", "features:gae_length_adaptive", "features:sao_dis",
                   "features:value_hl_gauss")

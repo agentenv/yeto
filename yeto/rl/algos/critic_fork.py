@@ -33,8 +33,8 @@ losses.py / math_utils.py conflicts keep c35702e's ``--policy-loss-variant``
 dispatch (cispo/sapo/gmpo) under the non-SAO branch; ``sao_dis`` with a
 non-default variant is refused by the fork.
 
-k31: the B8 batch (Miles k31/b8 6442e19e, head efc83590; squashing the fork commits above
-plus cfafdaec's GAE variants / VAPO) carries the whole family in the main k31
+k31: the B8 batch (Miles k31/b8 54e766b1, head 6c7046e6; squashing the fork commits above
+plus 3a359c09's GAE variants / VAPO) carries the whole family in the main k31
 lineage, so :data:`CRITIC_FORK_LINEAGE` is the k31 lineage from k31/b8 on
 (``pins.K31_FEATURES["critic_family"]``) and no overlay patches the image any
 more (the c35702e island-setup overlay and its sha256 record are gone). The CLI

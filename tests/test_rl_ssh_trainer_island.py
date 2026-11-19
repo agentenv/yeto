@@ -521,11 +521,13 @@ def test_preflight_pulls_the_image_on_every_docker_node(tmp_path, checked_cards)
 
 
 def test_an_overlay_rejected_pinned_image_names_its_repacked_digest(tmp_path, checked_cards):
-    """The K3.1 FULL_E image fails on overlay stores; the pull error names the repack of
-    the same image (pins.OVERLAY_SAFE_DIGESTS), not only the generic rebuild hint."""
+    """An overlay-rejected pinned image's pull error names the repack of the same image
+    (pins.OVERLAY_SAFE_DIGESTS), not only the generic rebuild hint. The mapping holds the
+    legacy full-image pair; the current full image's repack follows the image rebuild."""
     from yeto.rl.adapters.miles import pins
 
-    image = pins.MILES_K31_FULL_IMAGE.removeprefix("docker:")
+    broken, _ = next(iter(pins.OVERLAY_SAFE_DIGESTS.items()))
+    image = f"ghcr.io/agentenv/yeto-miles-k31@sha256:{broken}"
     err = ("mkparent /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs/opt/sglang/"
            "lib/python3.12/site-packages/sglang-0.5.24.dev80+g35708f7.dist-info: not a directory")
     islands = SshTrainerIslands(b300_spec([b300(i, image=image) for i in range(6)]), name="t",
