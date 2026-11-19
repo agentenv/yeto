@@ -35,6 +35,10 @@ modal = ["modal>=1.0"]
 # the wire/data path is shared with the CUDA learners.
 mlx = ["mlx>=0.31", "mlx-lm>=0.29"]
 qlora = ["bitsandbytes>=0.46.1"]
+# Harbor AgentENV sandbox provider (yeto.rl.harness.harbor.agentenv_*): the E2B
+# Python SDK drives the E2B-compatible AgentENV control plane. e2b>=2.12 needs
+# python>=3.10 and carries native fork/pause/resume (developed against 2.64.0).
+agentenv = ["e2b>=2.12"]
 local-rl = ["gymnasium>=0.29.0", "requests>=2.31.0", "numpy>=1.24"]
 diffusion = ["diffusers>=0.35", "pillow", "imageio[ffmpeg]", "yeto[qlora]"]
 diffusion-protenix = ["protenix; python_version >= '3.11'"]

@@ -1364,6 +1364,7 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
     from yeto.rl.harness.gateway.proxy import RecordsProxy
     from yeto.rl.harness.gateway.recorder import ProxyTokenRecorder
     from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
+    from yeto.rl.harness.harbor.agentenv_client import check_in_flight_cap as check_agentenv_cap
     from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
     section = dict(spec["agentic"])
@@ -1422,6 +1423,8 @@ def round_factory(spec: Mapping[str, Any], engine: Any, environ: Mapping[str, st
         raise HarnessConfigError("spec agentic.weight_switch live needs an engine with live_update")
     if defaults.get("provider") == "boat":
         check_in_flight_cap(max_in_flight)
+    if defaults.get("provider") == "agentenv":
+        check_agentenv_cap(max_in_flight)
     if defaults.get("provider"):
         # A trial waiting for a sandbox slot would spend its wall-clock budget waiting:
         # the cap (HARBOR_MAX_SANDBOXES, required for remote-docker) must cover max_in_flight.

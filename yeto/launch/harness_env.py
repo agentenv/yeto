@@ -88,7 +88,7 @@ def harbor_example_pythonpath(args, miles_root: str = "$HOME/miles") -> str:
     return "".join(f"{miles_root}/{d}:" for d in HARBOR_EXAMPLE_DIRS)
 
 
-def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None,
+def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None, load_agentenv_token=None,
                        port_env: str | None = None, base_env: str | None = None) -> dict[str, str]:
     """Environment a Modal Harbor island adds to ``envs`` (which it does not change).
 
@@ -96,6 +96,9 @@ def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None,
       and the launch did not give one: the token of the launching machine
       (``boat_client.load_token``: ``BOAT_API_KEY``, else the boat CLI config).
       It travels as a Modal Secret like ``HF_TOKEN`` and is never printed.
+    * ``AGENTENV_API_KEY`` when the sandbox provider is agentenv
+      (``HARBOR_ENV_TYPE=agentenv``) and the launch did not give one: the token
+      of the launching machine (``agentenv_client.load_token``). Same handling.
     * the callback port (default :data:`DEFAULT_HARBOR_RELAY_PORT`) unless the
       launch set a public base itself: the island's rank 0 forwards that port
       through a Modal tunnel (``harbor_relay_tunnel_port``).  ``port_env`` /
@@ -107,10 +110,15 @@ def harbor_island_envs(envs: dict[str, str], *, load_boat_token=None,
     port_env = port_env or relay_env.RELAY_PORT_ENV
     base_env = base_env or relay_env.RELAY_PUBLIC_BASE_ENV
     out: dict[str, str] = {}
-    if str(envs.get("HARBOR_ENV_TYPE", "")).strip().lower() == "boat" and not envs.get("BOAT_API_KEY"):
+    env_type = str(envs.get("HARBOR_ENV_TYPE", "")).strip().lower()
+    if env_type == "boat" and not envs.get("BOAT_API_KEY"):
         if load_boat_token is None:
             from ..rl.harness.harbor.boat_client import load_token as load_boat_token
         out["BOAT_API_KEY"] = load_boat_token()
+    if env_type == "agentenv" and not envs.get("AGENTENV_API_KEY"):
+        if load_agentenv_token is None:
+            from ..rl.harness.harbor.agentenv_client import load_token as load_agentenv_token
+        out["AGENTENV_API_KEY"] = load_agentenv_token()
     if not envs.get(base_env) and not envs.get(port_env):
         out[port_env] = str(DEFAULT_HARBOR_RELAY_PORT)
     return out

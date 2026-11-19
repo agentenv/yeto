@@ -46,6 +46,8 @@ TrialConfigBuilder = Callable[[AgentTask, str], Any]
 # (Harbor unchanged).  Key = ``AgentTask.provider``.
 CUSTOM_PROVIDERS: Mapping[str, str] = {
     "boat": "yeto.rl.harness.harbor.boat_env:BoatEnvironment",
+    # AgentENV (E2B-compatible firecracker microVMs); the microVM is the task env
+    "agentenv": "yeto.rl.harness.harbor.agentenv_env:AgentenvEnvironment",
     # Harbor's docker environment on the daemon of DOCKER_HOST (another host)
     "remote-docker": "yeto.rl.harness.harbor.remote_docker_env:RemoteDockerEnvironment",
 }
