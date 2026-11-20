@@ -18,7 +18,7 @@ def test_ports_learner_tape_shows_missing_fields_as_no_data():
     train = [line for line in lines if line.startswith("TRAIN")]
     assert train == [
         "TRAIN island=0 round=2 train_step=n/a reward=0.4688 loss=n/a pg_loss=n/a "
-        "grad_norm=0.5178 kl=n/a entropy=n/a clipfrac=n/a lr=8.75e-06 adv_mean=n/a "
+        "grad_norm=0.5178 ppo_kl=n/a train_rollout_kl=n/a entropy=n/a clipfrac=n/a lr=8.75e-06 adv_mean=n/a "
         "resp_len=n/a trunc=n/a tok/s=n/a"
     ]
 
@@ -27,8 +27,8 @@ def test_new_fields_are_rendered(tmp_path):
     tape = tmp_path / "t.jsonl"
     tape.write_text(
         '{"event":"rl_round_trained","island_id":1,"rollout_id":0,"train_step":7,'
-        '"train_metrics":{"loss":0.25,"entropy":1.5,"ppo_kl":0.003},"adv_mean":0.0,'
+        '"mean_kl":0.09,"train_metrics":{"loss":0.25,"entropy":1.5,"ppo_kl":0.003,"train_rollout_kl":0.09},"adv_mean":0.0,'
         '"resp_len_mean":612.0,"truncated_frac":0.02,"tok_per_s":5100.0}\n')
     (line,) = [x for x in render_tape_summary(tape) if x.startswith("TRAIN")]
     assert "train_step=7" in line and "loss=0.25" in line and "entropy=1.5" in line
-    assert "kl=0.003" in line and "adv_mean=0" in line and "tok/s=5100" in line
+    assert "ppo_kl=0.003" in line and "train_rollout_kl=0.09" in line and "adv_mean=0" in line and "tok/s=5100" in line

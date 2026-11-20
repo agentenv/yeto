@@ -9,7 +9,7 @@ var OFFLINE=!!INLINE,POLL_MS=5000,NS="http:"+"//www.w3.org/2000/svg"; // SVG nam
 var V=null,O=null,RS=[],SEL=null,cur=null,layout="auto",metric="reward",themeI=2,pinned=false;
 var PH=[["R","rollout"],["T","training"],["S","post-train sync"],["P","publish"]];
 var ISL_COLORS=["var(--i0)","var(--i1)","var(--i2)"];
-var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","KL"],["kl_tr","train-rollout KL"],["tis_clip","TIS clipfrac"],["grad_norm","grad_norm"],
+var METRICS=[["reward","reward"],["trunc","truncation"],["logprob_diff","logprob diff"],["kl","PPO KL"],["kl_tr","train-rollout KL"],["tis_clip","TIS clipfrac"],["grad_norm","grad_norm"],
   ["clip","clip"],["entropy","entropy"],["resp_len","response length"],["tok_s","tok/s"]];
 function $(id){return document.getElementById(id)}
 (function(){var nj=document.getElementById("nojs");if(nj)nj.style.display="none"})();
@@ -27,6 +27,9 @@ function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)
   /* a fixed viewBox stretched to a full-width panel scales its text 3-4x: cap the drawn width at 1.4x the viewBox */
   if(tag==="svg"&&a&&a.viewBox){var vw=+String(a.viewBox).split(" ")[2];if(vw>0)e.style.maxWidth=Math.round(vw*1.4)+"px"}
   if(parent)parent.appendChild(e);return e}
+/* draw at the chart's pixel width (1 viewBox unit = 1 px, so 11px text stays 11px); def when not laid out.
+   Measured on the parent: an emptied chart box is display:none (#cTl:empty ...) while it is redrawn */
+function boxW(box,def){var p=box&&box.parentNode,w=p&&p.clientWidth;return w>=240?Math.floor(w):def}
 // launch-preflight-guards 3.5: negative-test island badge (rl_island_override)
 function negBadge(c){return c&&c.negative_test?' <span class="st wn" title="'+esc(c.negative_test.label)+'"><i></i>'+esc(c.negative_test.label)+'</span> ':""}
 function islColor(id){var ids=(O.islands||[]).map(function(c){return c.id}),i=ids.indexOf(id);return i>=0&&i<3?ISL_COLORS[i]:"var(--i3)"}
@@ -98,7 +101,7 @@ function chartMetric(){
   if(metric==="trunc"||metric==="logprob_diff"){series=ids.map(function(id){var rr=(V.islands[id]||{}).rounds||[];return {id:id,pts:rr.filter(function(r){return fin(r[metric])}).map(function(r){return [r.round+1,r[metric]]})}})}
   var all=[];series.forEach(function(s){s.pts.forEach(function(p){all.push(p)})});
   var band=metric==="reward"&&!multi?RS.filter(function(r){return fin(r.p10)&&fin(r.p90)}):[];
-  var W=560,H=230,m={l:46,r:12,t:10,b:26},box=$("cMetric");box.innerHTML="";
+  var box=$("cMetric");box.innerHTML="";var W=boxW(box,560),H=250,m={l:52,r:14,t:12,b:26};
   $("legMetric").innerHTML=(multi?ids.map(function(id){return '<span><i class="sw" style="background:'+islColor(id)+'"></i>Island '+esc(id)+'</span>'}).join(""):'<span><i class="sw" style="background:var(--T)"></i>'+esc(METRICS.find(function(x){return x[0]===metric})[1])+'</span>')+
     (band.length?'<span><i class="sw" style="background:var(--band)"></i>p10–p90</span>':"");
   if(!all.length){box.innerHTML='<div class="note">no data</div>';xOf=null;return}
@@ -129,7 +132,7 @@ function chartDur(){
   $("legDur").innerHTML=PH.map(function(p){return '<span><i class="sw" style="background:var(--'+p[0]+')"></i>'+p[1]+'</span>'}).join("");
   var box=$("cDur");box.innerHTML="";var rows=RS.slice(-20);
   if(!rows.some(function(r){return Object.keys(r.dur).length})){box.innerHTML='<div class="note">no phase data (no rl_timeline_span in the tapes)</div>';return}
-  var W=420,rowH=26,m={l:56,r:56,t:4,b:4},H=m.t+m.b+rowH*rows.length;
+  var W=boxW(box,420),rowH=30,m={l:64,r:60,t:4,b:4},H=m.t+m.b+rowH*rows.length;
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Per-round time breakdown"},box);
   var tot=rows.map(function(r){return PH.reduce(function(a,p){return a+(r.dur[p[0]]||0)},0)}),mx=Math.max.apply(null,tot.concat([1]));
   rows.forEach(function(r,i){var y0=m.t+i*rowH,x0=m.l;
@@ -147,13 +150,13 @@ function chartTl(){
   var segs=[];RS.forEach(function(r){Object.keys(r.phases).forEach(function(k){segs.push([k,r.phases[k][0],r.phases[k][1],r.round])})});
   if(!segs.length){box.innerHTML='<div class="note">no phase data</div>';return}
   var t0=Math.min.apply(null,segs.map(function(q){return q[1]}).concat(fin(ex.first_ts)?[ex.first_ts]:[])),t1=Math.max.apply(null,segs.map(function(q){return q[2]}));
-  var W=1000,H=84,m={l:56,r:10,t:4,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)};
+  var W=boxW(box,1000),LH=30,H=4+2*LH+24,m={l:70,r:16,t:4,b:24},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Phase timeline"},box);
-  el("text",{x:m.l-8,y:m.t+16,"text-anchor":"end"},s).textContent="rollout";el("text",{x:m.l-8,y:m.t+42,"text-anchor":"end"},s).textContent="training";
-  if(fin(ex.first_ts)&&fin(ex.driver_start_ts))el("rect",{x:sx(ex.first_ts),y:m.t,width:Math.max(sx(ex.driver_start_ts)-sx(ex.first_ts),1),height:48,fill:"var(--line)",rx:3},s);
-  segs.forEach(function(q){var rc=el("rect",{x:sx(q[1]),y:q[0]==="R"?m.t:m.t+26,width:Math.max(sx(q[2])-sx(q[1])-1,1),height:22,rx:3,fill:"var(--"+q[0]+")","class":"tseg","data-r":q[3]},s);
+  el("text",{x:m.l-8,y:m.t+LH/2+3,"text-anchor":"end"},s).textContent="rollout";el("text",{x:m.l-8,y:m.t+LH*1.5+3,"text-anchor":"end"},s).textContent="training";
+  if(fin(ex.first_ts)&&fin(ex.driver_start_ts))el("rect",{x:sx(ex.first_ts),y:m.t,width:Math.max(sx(ex.driver_start_ts)-sx(ex.first_ts),1),height:2*LH-4,fill:"var(--line)",rx:3},s);
+  segs.forEach(function(q){var rc=el("rect",{x:sx(q[1]),y:q[0]==="R"?m.t:m.t+LH,width:Math.max(sx(q[2])-sx(q[1])-1,1),height:LH-6,rx:3,fill:"var(--"+q[0]+")","class":"tseg","data-r":q[3]},s);
     rc.addEventListener("mousemove",function(e){setCur(q[3],e)});rc.addEventListener("mouseleave",hideTip);rc.addEventListener("click",function(e){pinned=!pinned;setCur(q[3],e)})});
-  for(var j=0;j<=6;j++){var t=t0+(t1-t0)*j/6;el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)}
+  var nT=Math.max(2,Math.min(8,Math.floor((W-m.l-m.r)/110)));for(var j=0;j<=nT;j++){var t=t0+(t1-t0)*j/nT;el("text",{x:sx(t),y:H-6,"text-anchor":j===0?"start":j===nT?"end":"middle"},s).textContent=clock(t)}
 }
 /* linked hover state */
 function setCur(r,e){cur=r;highlight();if(e)showTip(e)}
@@ -306,7 +309,7 @@ function chartNodes(){
   $("legNodes").innerHTML=ks.map(function(k){return '<span><i class="sw" style="background:'+col(k)+'"></i>node '+esc(k)+(k==="0"?" (driver)":"")+'</span>'}).join("");
   var all=[];ks.forEach(function(k){ns[k].forEach(function(p){all.push(p)})});
   var t0=Math.min.apply(null,all.map(function(p){return p[0]})),t1=Math.max.apply(null,all.map(function(p){return p[0]})),vm=Math.max.apply(null,all.map(function(p){return p[1]}).concat([1]));
-  var W=560,H=190,m={l:40,r:10,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
+  var W=boxW(box,560),H=210,m={l:44,r:14,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"GPU memory per node"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=(vm*q).toFixed(0)});
   ks.forEach(function(k){el("path",{d:"M"+ns[k].map(function(p){return sx(p[0])+","+sy(p[1])}).join("L"),fill:"none",stroke:col(k),"stroke-width":2},s)});
@@ -385,9 +388,9 @@ function asyncPanel(){
   var T=(A.trainers||{})[tid]||{};
   $("aTrainer").innerHTML=!rr.length?'<div class="note">no trained rounds on this trainer</div>':
     '<div class="note">totals: trained groups '+f(T.trained_groups,0)+' · dropped as stale (older than max_policy_age) '+f(T.stale_groups,0)+' · no policy identity (dropped after a resume) '+f(T.unidentified_policy_groups,0)+(T.unidentified_starved?' <b>[reader starved: '+f(T.unidentified_starved.selections,0)+' selections kept no group]</b>':'')+' · off-policy gate dropped '+f(T.gate_dropped,0)+' · short groups trained '+f(T.incomplete_groups,0)+' · too small dropped '+f(T.dropped_small_groups,0)+' · carried over '+f(T.carried_over_groups,0)+' · padded samples '+f(T.padded_samples,0)+' · policy ages of trained groups: '+hist(T.age_hist)+'</div>'+
-    '<table class="c"><tr><th>round</th><th>reward mean ± std</th><th>p10 / p50 / p90</th><th>train-rollout KL</th><th>logprob |diff|</th><th>TIS clipfrac</th><th>grad_norm</th><th>resp len mean / p95</th><th>truncated</th><th>tok/s</th><th>groups</th><th>stale dropped</th><th>policy ages</th></tr>'+
+    '<table class="c"><tr><th>round</th><th>reward mean ± std</th><th>p10 / p50 / p90</th><th title="train_metrics.train_rollout_kl: trainer vs sampler logprobs">train-rollout KL</th><th title="train_metrics.ppo_kl: trainer policy vs the old logprobs of the batch">PPO KL</th><th>logprob |diff|</th><th>TIS clipfrac</th><th>grad_norm</th><th title="model-generated tokens per trained sample (loss mask); full = whole response incl. tool / env tokens, when the tape has it">generated tokens mean / p95</th><th>truncated</th><th>tok/s</th><th>groups</th><th>stale dropped</th><th>policy ages</th></tr>'+
     rr.slice(-40).reverse().map(function(r){var a=ar[r.round]||{};return '<tr><td class="num">'+r.round+'</td><td class="num">'+f(r.reward)+(fin(r.reward_std)?" ± "+f(r.reward_std):"")+'</td><td class="num">'+f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2)+
-      '</td><td class="num">'+f(r.kl_tr,5)+'</td><td class="num">'+f(r.logprob_diff,4)+'</td><td class="num">'+f(r.tis_clip,4)+'</td><td class="num">'+f(r.grad_norm,4)+'</td><td class="num">'+f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+
+      '</td><td class="num">'+f(r.kl_tr,5)+'</td><td class="num">'+(fin(r.kl)&&Math.abs(r.kl)<1e-3&&r.kl!==0?r.kl.toExponential(2):f(r.kl,5))+'</td><td class="num">'+f(r.logprob_diff,4)+'</td><td class="num">'+f(r.tis_clip,4)+'</td><td class="num">'+f(r.grad_norm,4)+'</td><td class="num">'+f(r.resp_mean,0)+(r.resp_derived?"*":"")+" / "+f(r.resp_p95,0)+(fin(r.resp_full_mean)?'<div class="note">full '+f(r.resp_full_mean,0)+'</div>':"")+
       '</td><td class="num">'+pct(r.trunc)+'</td><td class="num">'+f(r.tok_s,0)+'</td><td class="num">'+f(a.trained_groups,0)+'</td><td class="num">'+f(a.stale_groups,0)+'</td><td>'+hist(a.ages)+'</td></tr>'}).join("")+'</table>'+
     (rr.some(function(r){return r.resp_derived})?'<div class="note">* mean response length = trained response tokens ÷ trained samples (rl_rollout_carry_over), the tape has no batch summary</div>':"");
   var S=A.samplers||{};
@@ -424,14 +427,14 @@ function aComp(A){
     (recent.length?'<div class="note">recent sampler rounds</div><table class="c"><tr><th>sampler</th><th>round</th><th>time</th>'+COMP_HEAD+'</tr>'+recent.slice(-20).reverse().map(function(x){return '<tr><td>'+esc(x[0])+'</td><td class="num">'+esc(x[1].rollout_id)+'</td><td class="num">'+clock(x[1].ts)+'</td>'+compCells(x[1].compaction)+'</tr>'}).join("")+'</table>':"")+
     '<div class="note">alert cards fire on a low summary_ok share and on many compacted trials ending truncated (docs/DASHBOARD.md, compaction_* thresholds); summary tokens n/a = the samples do not report summary_tokens</div>';
 }
-function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)})}
+function tAxis(s,t0,t1,sx,H){[t0,(t0+t1)/2,t1].forEach(function(t,i){el("text",{x:sx(t),y:H-6,"text-anchor":["start","middle","end"][i]},s).textContent=clock(t)})}
 function aBacklog(A){
   var box=$("aBacklog"),b=A.backlog;box.innerHTML="";$("legBacklog").innerHTML="";
   if(!b||!(b.points||[]).length){box.innerHTML='<div class="note">no data (no rl_sampler_round with groups)</div>';return}
   var pts=b.points,rep=b.reported||{},rk=Object.keys(rep),all=pts.map(function(p){return p[0]});rk.forEach(function(k){rep[k].forEach(function(p){all.push(p[0])})});
   var t0=Math.min.apply(null,all),t1=Math.max.apply(null,all),vm=Math.max.apply(null,pts.map(function(p){return fin(p[3])?p[3]:0}).concat([1]));
   rk.forEach(function(k){rep[k].forEach(function(p){vm=Math.max(vm,p[1])})});
-  var W=560,H=190,m={l:44,r:10,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
+  var W=boxW(box,560),H=220,m={l:44,r:14,t:10,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},sy=function(v){return m.t+(1-v/vm)*(H-m.t-m.b)};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Buffer backlog"},box),g=el("g",{"class":"grid"},s);
   [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=Math.round(vm*q)});
   var bp=pts.filter(function(p){return fin(p[3])});
@@ -447,7 +450,7 @@ function aRel(A){
   var ts=[];rows.forEach(function(r){if(fin(r.released_at))ts.push(r.released_at);Object.keys(r.loads||{}).forEach(function(k){if(fin(r.loads[k].loaded_at))ts.push(r.loads[k].loaded_at)})});pool.forEach(function(e){ts.push(e.ts)});
   if(!ts.length){box.innerHTML='<div class="note">no data (no rl_policy_released / rl_sampler_policy_loaded / nc_elastic_* events)</div>';$("legRel").innerHTML="";return}
   var t0=Math.min.apply(null,ts),t1=Math.max.apply(null,ts),lanes=["trainer release"].concat(sids.map(function(k){return "sampler "+k}));
-  var rowH=24,W=560,m={l:86,r:10,t:6,b:22},H=m.t+m.b+rowH*lanes.length,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},ly=function(i){return m.t+rowH*i+rowH/2};
+  var W=boxW(box,560),rowH=34,ml=Math.min(Math.round(W*0.4),Math.max(86,14+6.7*Math.max.apply(null,lanes.map(function(n){return n.length})))),m={l:ml,r:16,t:14,b:22},H=m.t+m.b+rowH*lanes.length,sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)},ly=function(i){return m.t+rowH*i+rowH/2};
   var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"Policy release timeline"},box);
   lanes.forEach(function(n,i){el("text",{x:m.l-8,y:ly(i)+4,"text-anchor":"end"},s).textContent=n;el("line",{x1:m.l,x2:W-m.r,y1:ly(i),y2:ly(i),stroke:"var(--line)"},s)});
   pool.forEach(function(e){var x=sx(e.ts),bad=POOL_BAD.test(e.event||"");el("line",{x1:x,x2:x,y1:m.t,y2:H-m.b,stroke:bad?"var(--bad)":"var(--warn)","stroke-dasharray":"3 3"},s);
@@ -483,5 +486,6 @@ function load(){
     V=x[0];EVENTS=EVENTS.concat(x[1].events||[]).slice(-3000);EV_CURSOR=x[1].cursor||EV_CURSOR;render()}).catch(function(e){$("sub").textContent="fetch failed: "+e})
 }
 if(typeof YetoExt!=="undefined")YetoExt.setReload(load);
+var resizeT=null;if(typeof window!=="undefined"&&window.addEventListener)window.addEventListener("resize",function(){clearTimeout(resizeT);resizeT=setTimeout(render,250)}); // charts drawn at the box width
 load();if(!OFFLINE)setInterval(load,POLL_MS);
 })();

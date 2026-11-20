@@ -54,9 +54,15 @@ METRICS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("reward_p10", "reward p10", ("reward_p10",)),
     ("reward_p90", "reward p90", ("reward_p90",)),
     ("pg_loss", "pg_loss", ("pg_loss", "train_metrics.pg_loss", "train/pg_loss")),
-    ("kl", "KL", ("mean_kl", "train_metrics.ppo_kl", "train_metrics.kl_loss", "train/train_rollout_kl")),
-    # async GRPO: the train-vs-rollout KL (a buffer step's PPO KL is 0 by construction)
-    ("kl_tr", "train-rollout KL", ("mean_kl", "train_metrics.train_rollout_kl", "mismatch.train_rollout_kl",
+    # PPO KL (trainer policy vs the batch's old logprobs). ``mean_kl`` is ambiguous on
+    # the tapes: rl_local_round carries the trainer's loss-dict KL there (ppo_kl), while
+    # an async buffer round's rl_round_trained overwrites it with train_rollout_kl; the
+    # explicit keys win and _round_metrics drops a ``mean_kl`` that is the train-rollout KL.
+    ("kl", "PPO KL", ("train_metrics.ppo_kl", "train/ppo_kl", "ppo_kl", "train_metrics.kl_loss",
+                      "train/kl_loss", "mean_kl")),
+    # train-vs-rollout KL (trainer logprobs vs the sampler's rollout logprobs): explicit keys
+    # only, so a record without them (rl_local_round) never overwrites it with ``mean_kl``
+    ("kl_tr", "train-rollout KL", ("train_metrics.train_rollout_kl", "mismatch.train_rollout_kl",
                                    "train/train_rollout_kl")),
     ("tis_clip", "TIS clipfrac", ("mismatch.tis_clipfrac", "train_metrics.tis_clipfrac", "train/tis_clipfrac")),
     ("entropy", "entropy", ("entropy", "train_metrics.entropy", "train_metrics.entropy_loss")),
@@ -83,6 +89,8 @@ EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("trunc", ("truncated_frac",)),
     ("reward_p50", ("reward_p50",)),
     ("resp_p95", ("resp_len_p95",)),
+    # full response length (generated + tool / env tokens); resp_len_mean counts loss-mask tokens
+    ("resp_full", ("resp_full_len_mean",)),
     ("logprob_diff", ("train_metrics.train_rollout_logprob_abs_diff", "train/train_rollout_logprob_abs_diff")),
     ("train_step", ("train_step",)),
     ("step_s", ("step_seconds",)),
@@ -111,6 +119,20 @@ def first_finite(record: dict, paths: Iterable[str]) -> float | None:
         if v is not None:
             return v
     return None
+
+
+def ppo_kl(record: dict) -> float | None:
+    """PPO KL of a trainer round record. ``mean_kl`` counts only when the record has no
+    explicit KL key and it is not the record's train-rollout KL (the async driver writes
+    train_rollout_kl into ``mean_kl`` of rl_round_trained)."""
+    paths = dict((key, p) for key, _label, p in METRICS)
+    explicit = first_finite(record, [p for p in paths["kl"] if p != "mean_kl"])
+    if explicit is not None:
+        return explicit
+    mean = finite(record.get("mean_kl"))
+    if mean is None or mean == first_finite(record, paths["kl_tr"]):
+        return None
+    return mean
 
 
 def nonfinite_seen(record: dict, paths: Iterable[str]) -> bool:
@@ -652,6 +674,7 @@ class Reducer:
                 "p10": pt.get("reward_p10"), "p50": pt.get("reward_p50"), "p90": pt.get("reward_p90"),
                 "trunc": pt.get("trunc"), "logprob_diff": pt.get("logprob_diff"),
                 "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
+                "resp_full_mean": pt.get("resp_full"),
                 "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"), "kl_tr": pt.get("kl_tr"),
                 "tis_clip": pt.get("tis_clip"), "resp_derived": bool(pt.get("resp_len_derived")),
                 "ts": pt.get("t"), "lr": pt.get("lr"), "step_s": pt.get("step_s"), "round_s": pt.get("round_s"),
@@ -801,6 +824,7 @@ class Reducer:
         isl["round"] = x if isl["round"] is None else max(isl["round"], x)
         values = {key: first_finite(r, paths) for key, _label, paths in METRICS}
         values.update({key: first_finite(r, paths) for key, paths in EXTRA_SERIES})
+        values["kl"] = ppo_kl(r)
         if values.get("tok_s") is None and isl["points"].get(x, {}).get("tok_s_derived") is not False \
                 and isl["points"].get(x, {}).get("tok_s") is None:
             toks = finite(r.get("action_tokens"))

@@ -33,6 +33,14 @@ function durTicks(lo,hi,n){var u=durUnit(Math.max(Math.abs(lo),Math.abs(hi)))[0]
 function durAxis(ticks){var m=Math.max.apply(null,ticks.map(Math.abs)),u=durUnit(m),st=ticks.length>1?Math.abs(ticks[1]-ticks[0]):m||1,q=st/u[0],
     dec=q>=0.999?0:Math.min(3,Math.ceil(-Math.log10(q)-1e-9));
   return function(v){return v===0?"0":(v/u[0]).toFixed(dec)+" "+u[1]}}
+/* numeric axis labels: one decimal count for every tick (from the tick step), scientific
+   notation below 1e-3 so 0.000200 does not overflow the left margin */
+function numAxis(ticks){var m=Math.max.apply(null,ticks.map(Math.abs)),st=ticks.length>1?Math.abs(ticks[1]-ticks[0]):(m||1);
+  if(m>=1e4)return function(v){return k(v)};
+  if(m>0&&m<1e-3){var e=Math.floor(Math.log10(m)),dd=Math.max(0,Math.min(3,Math.ceil(-Math.log10(st/Math.pow(10,e))-1e-9)));
+    return function(v){return v===0?"0":(v/Math.pow(10,e)).toFixed(dd)+"e"+e}}
+  var dec=Math.max(0,Math.min(6,Math.ceil(-Math.log10(st)-1e-9)));return function(v){return v.toFixed(dec)}}
+var SPARSE=4; // a series with this many points or fewer is drawn as dots with a faint connector
 /* stacked series on one time grid: each series is linearly interpolated between its own samples
    (islands step at different moments, so summing raw step points saw-tooths). Samples outside the
    range anchor the edges. Inside a gap longer than brk the series holds for one step after its last
@@ -89,37 +97,43 @@ function chart(id,opts){
   var vals=[];ser.forEach(function(s){s.pts.forEach(function(p){vals.push(p[1]);if(p.length>2)vals.push(p[2])})});(opts.refs||[]).forEach(function(r){if(fin(r.y))vals.push(r.y)});
   var off=null;if(opts.clip&&!stack&&vals.length>=10){var sv=vals.slice().sort(function(a,b){return a-b}),q9=rank(sv,0.9),mx=sv[sv.length-1];
     if(q9>0&&mx>4*q9){var cap=1.5*q9;off={cap:cap,max:mx,n:0};vals=vals.filter(function(v){return v<=cap});vals.push(cap)}} // a few huge values (8 h first round) would flatten the rest
-  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals);if(opts.y0!==false&&(stack||opts.y0||lo>=0&&lo<hi*0.35))lo=Math.min(0,lo);if(fin(opts.ymin))lo=Math.min(lo,opts.ymin);if(hi-lo<=Math.abs(hi)*0.02||hi===lo){var c=(hi+lo)/2,dd=Math.abs(c)*0.1||1;hi=c+dd;lo=(c>=0&&c-dd<0)?0:c-dd}
+  var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),dlo=lo,dhi=hi;if(opts.y0!==false&&(stack||opts.y0||lo>=0&&lo<hi*0.35))lo=Math.min(0,lo);
+  if(!stack&&hi>lo&&(lo>0||hi<0)){var pd=(hi-lo)*0.12;lo=(lo>0&&lo-pd<0)?0:lo-pd;hi=(hi<0&&hi+pd>0)?0:hi+pd} // headroom: no point on the frame
+  var zoom=!stack&&(lo>0||hi<0)&&dhi>dlo&&(dhi-dlo)<0.2*Math.max(Math.abs(dhi),Math.abs(dlo))?"axis not from 0 \u00b7 spread "+(100*(dhi-dlo)/Math.max(Math.abs(dhi),Math.abs(dlo))).toFixed(1)+"% of max":"";if(fin(opts.ymin))lo=Math.min(lo,opts.ymin);if(hi-lo<=Math.abs(hi)*0.02||hi===lo){var c=(hi+lo)/2,dd=Math.abs(c)*0.1||1;hi=c+dd;lo=(c>=0&&c-dd<0)?0:c-dd}
   var ticks=(opts.yfmt===dur?durTicks:nice)(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
-  var x=function(t){return M.l+(t-t0)*(W-M.l-M.r)/(t1-t0)},y=function(v){return M.t+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-M.t-M.b)};
-  var yf=opts.yfmt||function(v){return k(v)},o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+M.l+'" y="'+M.t+'" width="'+(W-M.l-M.r)+'" height="'+(H-M.t-M.b)+'"/></clipPath></defs>'];
-  var yl=yf===dur?durAxis(ticks):yf;
-  ticks.forEach(function(v){o.push('<line class="gl" x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(M.l-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yl(v))+'</text>')});
+  var yf=opts.yfmt||function(v){return k(v)},yl=yf===dur?durAxis(ticks):(opts.yaxis||!opts.yfmt||opts.yfmt===k)?numAxis(ticks):yf;
+  var ML=Math.max(30,Math.min(96,Math.ceil(8+5.4*Math.max.apply(null,ticks.map(function(v){return String(yl(v)).length})))));
+  var x=function(t){return ML+(t-t0)*(W-ML-M.r)/(t1-t0)},y=function(v){return M.t+(hi-Math.min(v,off?hi:v))/(hi-lo)*(H-M.t-M.b)};
+  var o=['<svg viewBox="0 0 '+W+' '+H+'" class="ch" role="img" aria-label="'+esc(opts.title||id)+'"><defs><clipPath id="cp-'+id+'"><rect x="'+(ML-4)+'" y="'+(M.t-4)+'" width="'+(W-ML-M.r+8)+'" height="'+(H-M.t-M.b+8)+'"/></clipPath></defs>'];
+  ticks.forEach(function(v){o.push('<line class="gl" x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(v).toFixed(1)+'" y2="'+y(v).toFixed(1)+'"/><text x="'+(ML-6)+'" y="'+(y(v)+3.5).toFixed(1)+'" text-anchor="end">'+esc(yl(v))+'</text>')});
   var ax=axisX(t0,t1);ax.ticks.forEach(function(t){o.push('<text x="'+x(t).toFixed(1)+'" y="'+(H-6)+'" text-anchor="middle">'+esc(ax.fmt(t))+'</text>')});
-  var PW=W-M.l-M.r,bw=Math.max(1,Math.min(PW*bk/span*0.8,PW/Math.max(1,NB||1)*0.8));
+  var PW=W-ML-M.r,bw=Math.max(1,Math.min(PW*bk/span*0.8,PW/Math.max(1,NB||1)*0.8));
   o.push('<g clip-path="url(#cp-'+id+')">');
   (opts.vmarks||[]).filter(function(m){return fin(m.t)&&m.t>=t0&&m.t<=t1}).sort(function(a,b){return a.t-b.t}).forEach(function(m,i){var mx0=x(m.t).toFixed(1),cl=m.color||GREY; // restarts / joins / exits
     o.push('<g><title>'+esc(m.label||"")+'</title><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="transparent" stroke-width="8"/><line x1="'+mx0+'" x2="'+mx0+'" y1="'+M.t+'" y2="'+(H-M.b)+'" stroke="'+cl+'" stroke-width="1" stroke-dasharray="2 3"/><text x="'+(+mx0+2)+'" y="'+(M.t+9+10*(i%3))+'" font-size="9" fill="'+cl+'">'+esc(m.short||"")+'</text></g>')});
   ser.forEach(function(s){var P=s.pts;if(!P.length)return;
-    if(opts.kind==="bars"){P.forEach(function(p){if(p[3]>0)o.push('<rect x="'+Math.min(W-M.r-bw,Math.max(M.l,x(p[0])-bw/2)).toFixed(1)+'" y="'+y(p[1]).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0.5,y(p[2])-y(p[1])).toFixed(1)+'" fill="'+s.color+'"/>')});return}
+    if(opts.kind==="bars"){P.forEach(function(p){if(p[3]>0)o.push('<rect x="'+Math.min(W-M.r-bw,Math.max(ML,x(p[0])-bw/2)).toFixed(1)+'" y="'+y(p[1]).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0.5,y(p[2])-y(p[1])).toFixed(1)+'" fill="'+s.color+'"/>')});return}
     var line=P.map(function(p,i){return (i?"L":"M")+x(p[0]).toFixed(1)+","+y(p[1]).toFixed(1)}).join("");
     if(opts.kind==="stack"){var base=P.slice().reverse().map(function(p){return "L"+x(p[0]).toFixed(1)+","+y(p[2]).toFixed(1)}).join("");
       o.push('<path d="'+line+base+'Z" fill="'+s.color+'" fill-opacity=".32"/>')}
-    if(P.length===1||opts.dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
+    var sparse=P.length<=SPARSE&&opts.kind!=="stack";
+    if(sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-opacity=".35" stroke-width="1"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+'/>');
+    if(sparse||opts.dots)P.forEach(function(p){if(off&&p[1]>hi){off.n++;var cx0=x(p[0]),cy0=M.t+1;
         o.push('<path class="off" d="M'+(cx0-3.5).toFixed(1)+','+(cy0+6)+'L'+(cx0+3.5).toFixed(1)+','+(cy0+6)+'L'+cx0.toFixed(1)+','+cy0+'Z" fill="'+s.color+'"/>');return}
-      o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(opts.dots?1.6:2.5)+'" fill="'+s.color+'"/>')});
-    if(P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="3 3"':"")+' stroke-linejoin="round"/>')});
+      o.push('<circle cx="'+x(p[0]).toFixed(1)+'" cy="'+y(p[1]).toFixed(1)+'" r="'+(sparse?(s.dash?2.4:3):1.6)+'" fill="'+(s.dash&&sparse?"var(--panel)":s.color)+'" stroke="'+s.color+'" stroke-width="'+(s.dash&&sparse?1.4:0)+'"/>')});
+    if(!sparse&&P.length>1&&!opts.dots)o.push('<path d="'+line+'" fill="none" stroke="'+s.color+'" stroke-width="'+(s.width||1.5)+'"'+(s.dash?' stroke-dasharray="'+(typeof s.dash==="string"?s.dash:"3 3")+'"':"")+' stroke-linejoin="round"/>')});
   o.push('</g>');
-  if(off&&off.n)o.push('<text x="'+(M.l+4)+'" y="'+(M.t+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
-  (opts.refs||[]).forEach(function(r){if(!fin(r.y)||r.y<lo||r.y>hi)return;o.push('<line x1="'+M.l+'" x2="'+(W-M.r)+'" y1="'+y(r.y).toFixed(1)+'" y2="'+y(r.y).toFixed(1)+'" stroke="'+(r.color||GREY)+'" stroke-dasharray="4 3" stroke-width="1"/>'+
+  if(off&&off.n)o.push('<text x="'+(ML+4)+'" y="'+(M.t+16)+'" class="rt offn">\u25b2 '+off.n+' off scale \u00b7 max '+esc(yf(off.max))+'</text>');
+  if(zoom)o.push('<text x="'+(W-M.r-2)+'" y="'+(M.t+8)+'" text-anchor="end" class="rt">'+esc(zoom)+'</text>');
+  (opts.refs||[]).forEach(function(r){if(!fin(r.y)||r.y<lo||r.y>hi)return;o.push('<line x1="'+ML+'" x2="'+(W-M.r)+'" y1="'+y(r.y).toFixed(1)+'" y2="'+y(r.y).toFixed(1)+'" stroke="'+(r.color||GREY)+'" stroke-dasharray="4 3" stroke-width="1"/>'+
     (r.label?'<text x="'+(W-M.r-2)+'" y="'+(y(r.y)-4).toFixed(1)+'" text-anchor="end" class="rt">'+esc(r.label)+'</text>':""))});
   o.push('<line class="cx" x1="0" x2="0" y1="'+M.t+'" y2="'+(H-M.b)+'" visibility="hidden"/></svg>');
   box.innerHTML='<div class="cw">'+o.join("")+'<div class="tt"></div></div>'+leg;
-  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack};
+  CH[id]={ser:ser,x:x,t0:t0,t1:t1,yf:yf,stack:stack,ml:ML};
   box.onmousemove=function(e){hover(id,box,e)};box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
 }
 function hover(id,box,e){var c=CH[id];if(!c||!box.querySelector)return;var svg=box.querySelector("svg"),tt=box.querySelector(".tt"),cx=box.querySelector(".cx");if(!svg||!tt)return;
-  var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width;var t=c.t0+(vx-M.l)*(c.t1-c.t0)/(W-M.l-M.r);if(t<c.t0||t>c.t1){tt.style.display="none";return}
+  var b=svg.getBoundingClientRect(),vx=(e.clientX-b.left)*W/b.width;var t=c.t0+(vx-c.ml)*(c.t1-c.t0)/(W-c.ml-M.r);if(t<c.t0||t>c.t1){tt.style.display="none";return}
   var rows=[],bestT=null;c.ser.forEach(function(s){var best=null,bd=1e18;s.pts.forEach(function(p){var d=Math.abs(p[0]-t);if(d<bd){bd=d;best=p}});
     if(best&&bd<(c.t1-c.t0)/20){bestT=best[0];rows.push('<div><i style="background:'+s.color+'"></i>'+esc(s.name)+'<b>'+esc(c.yf(c.stack?best[3]:best[1]))+'</b></div>')}});
   if(!rows.length){tt.style.display="none";return}
@@ -179,7 +193,15 @@ function evalChart(id,E){
     tt.innerHTML=evalTip(best,names);tt.style.display="block";var bx=box.getBoundingClientRect(),px=e.clientX-bx.left;tt.style.left=(px>bx.width/2?px-tt.offsetWidth-12:px+12)+"px";tt.style.top="8px"};
   box.onmouseleave=function(){var t=box.querySelector&&box.querySelector(".tt");if(t)t.style.display="none";var c=box.querySelector&&box.querySelector(".cx");if(c)c.setAttribute("visibility","hidden")};
 }
-function card(id,title,sub,wide){return '<div class="cc'+(wide?" wide":"")+'"><div class="ct">'+esc(title)+'</div><div class="cs">'+esc(sub||"")+'</div><div id="'+id+'"></div></div>'}
+function card(id,title,sub,wide){return '<div class="cc'+(wide?" wide":"")+'"><div class="ct">'+esc(title)+'</div><div class="cs" title="'+esc(sub||"")+'">'+esc(sub||"")+'</div><div id="'+id+'"></div></div>'}
+/* columns of a card grid: up to maxN cards of at least minW px per row; one fewer when that
+   would leave a single card alone on the last row */
+function balanceGrid(id,minW,maxN){var g=$(id);if(!g||!g.style||!g.children)return;var n=g.children.length,w=g.clientWidth||0,gap=14;
+  var c=Math.max(1,Math.min(maxN,Math.floor((w+gap)/(minW+gap))));if(c>2&&n>c&&n%c===1)c--;
+  g.style.gridTemplateColumns=c>1?"repeat("+c+",minmax(0,1fr))":""}
+/* cards whose chart had no data in the range: drop them from the grid, list them in one line */
+function foldEmpty(ids,lineId){var gone=[];ids.forEach(function(x){if(CH[x[0]])return;var b=$(x[0]),cc=b&&b.parentNode;if(cc&&cc.parentNode){cc.parentNode.removeChild(cc);gone.push(x)}});
+  var ln=$(lineId);if(!ln)return;ln.hidden=!gone.length;ln.innerHTML=gone.length?'No data in the last '+esc(rangeLabel())+', card hidden: '+gone.map(function(x){return '<b>'+esc(x[1])+'</b>'+(x[2]?' ('+esc(x[2])+')':"")}).join(" \u00b7 "):""}
 
 /* histogram on a log axis, dashed p10/p90/p99, solid p50, outer 0.2% tails not drawn */
 function rank(sorted,q){if(!sorted.length)return null;return sorted[Math.min(sorted.length-1,Math.max(0,Math.ceil(q*sorted.length)-1))]} // nearest rank: always a sample
@@ -409,7 +431,7 @@ function rlm(V){
   var lts=cs.map(function(c){return (X[c.id]||{}).last_ts}).filter(function(t){return fin(t)&&t>0});
   $("rNodesNote").textContent=(lts.length?"last event "+ago(Math.max.apply(null,lts)):"no events yet")+(pl?" · NC pool: "+pl.event.replace("nc_elastic_","")+" "+ago(pl.ts):"");
   var hbm=function(c){var ns=(X[c.id]||{}).node_series||{},pk=null;Object.keys(ns).forEach(function(n){ns[n].forEach(function(p){if(fin(p[1]))pk=pk==null?p[1]:Math.max(pk,p[1])})});return pk};
-  var head='<tr><th>Island</th><th>Round / policy</th><th>Reward</th><th>KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th><th class="bar">HBM peak</th><th>Last release / load</th><th>Shard · incarnation</th></tr>';
+  var head='<tr><th>Island</th><th>Round / policy</th><th>Reward</th><th>train-rollout KL</th><th>logprob |diff|</th><th>grad_norm</th><th>Step / round time</th><th>Tokens/s</th><th class="bar">HBM peak</th><th>Last release / load</th><th>Shard · incarnation</th></tr>';
   var rowOf=function(c){var ex=X[c.id]||{},s=S[c.id],rr=RR(c),r=rr[rr.length-1]||{},liv=rlLive(c.status),h=hbm(c),lim=ex.hbm_total_gib,mx=Math.max(64,fin(lim)?lim*1.15:0),pc=fin(h)?Math.min(100,100*h/mx):0;
       var row='<tr'+(liv?'':' class="off"')+'><td><div class="nn">'+rlDot(c.status)+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">'+esc([c.name,c.gpu?c.gpu+" × "+c.cards:null].filter(Boolean).join(" · ")||"n/a")+' · '+esc(c.status+(c.waiting_reason?": "+c.waiting_reason:"")+(c.left?" ("+(c.left.reason||"")+")":"")+(c.starting&&c.startup_stage?": "+c.startup_stage.label+(fin(c.startup_stage.age_s)?" "+dur(c.startup_stage.age_s):"")+(fin(c.startup_s)?" · start "+dur(c.startup_s):""):"")+((c.launches||[]).length>1?" · launch "+(c.launches.length)+" ("+(c.launches.length-1)+" superseded)":""))+'</div></td>';
       var hb='<td class="bar"><div class="bl">'+(fin(h)?h.toFixed(1)+" GiB"+(fin(lim)?" of "+lim+" GiB":""):"not sampled")+'</div><div class="bt"><div class="bf'+(liv?"":" idle")+'" style="width:'+pc.toFixed(1)+'%"></div>'+(fin(lim)?'<div class="bm" style="left:'+(100*lim/mx).toFixed(1)+'%"></div>':"")+'</div>'+(fin(h)?"":'<div class="ns" title="'+esc(ex.gpu_mem_note||"")+'">'+(/unavailable/.test(ex.gpu_mem_note||"")?"telemetry library missing":"enable --rl-resource-sample-interval")+'</div>')+'</td>';
@@ -417,7 +439,7 @@ function rlm(V){
         return row+'<td>'+k(s.n_rounds-(s.empty_rounds||0),0)+' rounds with groups'+(s.empty_rounds?' (+'+k(s.empty_rounds,0)+' idle polls)':'')+' / '+(s.policy_version==null?"n/a":"v"+s.policy_version)+'<div class="ns">'+ago(l.ts)+' · age p50 '+k(s.lag_p50,1)+'</div></td><td>'+k(s.reward_mean_last,3)+(fin(s.reward_last_ts)?'<div class="ns">round '+esc(s.reward_last_rollout_id)+' · '+ago(s.reward_last_ts)+'</div>':"")+'</td><td>n/a</td><td>n/a</td><td>n/a</td><td>'+dur(l.generate_s)+'<div class="ns">generate, p50 '+dur(s.generate_p50_s)+'</div></td><td>'+(fin(l.response_tokens)&&l.generate_s?k(l.response_tokens/l.generate_s):"n/a")+'</td>'+hb+
           '<td>'+(ld?dur(ld[1].load_wall_s)+'<div class="ns">load v'+ld[0]+' · '+ago(ld[1].loaded_at)+' · '+dur(ld[1].latency_s)+' after release</div>':"none yet")+'</td><td>'+esc(s.shard||c.id)+'<div class="ns">'+esc(s.incarnation||"n/a")+(pl?" · pool "+esc(pl.event.replace("nc_elastic_",""))+(pl.ticket?" "+esc(pl.ticket):""):"")+'</div></td></tr>'}
       var mr=(A.releases||[]).filter(function(x){return String(x.trainer)===String(c.id)}).pop(),kl=lastW(rr,"kl_tr")||lastW(rr,"kl")||{};
-      return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+k(fin(kl.kl_tr)?kl.kl_tr:kl.kl,4)+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
+      return row+'<td>'+(r.round==null?"n/a":r.round)+' / '+(c.policy_version==null?"n/a":"v"+c.policy_version)+'<div class="ns">'+ago(r.ts)+'</div></td><td>'+k((lastW(rr,"reward")||{}).reward,3)+'</td><td>'+(fin(kl.kl_tr)?k(kl.kl_tr,4)+(fin(kl.kl)?'<div class="ns">PPO '+k(kl.kl,4)+'</div>':""):fin(kl.kl)?'n/a<div class="ns">PPO '+k(kl.kl,4)+'</div>':"n/a")+'</td><td>'+k((lastW(rr,"logprob_diff")||{}).logprob_diff,4)+'</td><td>'+k((lastW(rr,"grad_norm")||{}).grad_norm,3)+'</td>'+
         '<td>'+dur(r.step_s)+'<div class="ns">round '+dur(r.round_s)+'</div></td><td>'+k(r.tok_s)+'</td>'+hb+'<td>'+(mr?dur(mr.upload_s)+'<div class="ns">release v'+mr.policy_version+' · '+ago(mr.released_at)+'</div>':"none"+(c.status==="left"?"":" by this trainer"))+'</td><td>trainer '+esc(c.id)+'<div class="ns">'+esc(((TR[c.id]||{}).left||{}).reason||"")+'</div></td></tr>'};
   var unkRow=function(c){var ex=X[c.id]||{};return '<tr class="off"><td><div class="nn">'+rlDot("unknown")+'<i class="sq" style="background:'+c.color+'"></i>'+esc(c.label)+'</div><div class="ns">no trainer or sampler events in this tape; not counted</div></td><td colspan="10">'+
     esc(c.source_lost?"tape source lost: "+String(c.source_lost.error||"").slice(0,120):"")+'</td></tr>'};
@@ -431,14 +453,15 @@ function rlm(V){
   var sser=function(key,f){return sps.map(function(c){return {name:c.label,color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,f?f(r):r[key]]})}})};
   var evs=cs.filter(function(c){return ((X[c.id]||{}).evals||[]).length});
   var g=[];if(evs.length)g.push(["rfEval","Held-out eval","rl_eval: "+esc(((X[evs[0].id].evals[0])||[])[2]||"")]);
-  g=g.concat([["rfRew","Reward","trained batch mean per trainer round (solid); sampler round mean (dashed), one line per shard across its restarts. Dotted marks: −sN NC pool took sampler shard N out (restart / fenced / released / lost), +sN shard N ready again (#k = k-th restart), ↻ new sampler incarnation / trainer relaunch; hover a mark for the reason"],["rfKl","KL","train-vs-rollout KL (mean_kl / train_rollout_kl) per trainer round"],
+  g=g.concat([["rfRew","Reward","trained batch mean per trainer round (solid); sampler round mean (dashed), one line per shard across its restarts. Dotted marks: −sN NC pool took sampler shard N out (restart / fenced / released / lost), +sN shard N ready again (#k = k-th restart), ↻ new sampler incarnation / trainer relaunch; hover a mark for the reason"],["rfKl","train-rollout KL","trainer vs sampler logprobs (train_metrics.train_rollout_kl) per trainer round"],["rfPkl","PPO KL","trainer policy vs the old logprobs of the batch (train_metrics.ppo_kl); near 0 with one optimizer step per batch"],
     ["rfLp","logprob |diff|","train vs rollout logprob abs diff per round"],["rfTis","TIS clipfrac","share of tokens whose IS weight was clipped"],["rfGn","grad_norm","per trainer round"],
     ["rfLr","Learning rate","applied lr per round"],["rfStep","Trainer step time","train step seconds (solid); round wall time (dashed)"],["rfTps","Tokens / s","stacked by trainer; tok_per_s interpolated onto one time grid, then summed"],
     ["rfHbm","HBM","mean used GiB over each island's GPUs (NVML / host probe)"],["rfHost","Host memory","per node, from the Modal host probe (YETO_MODAL_HOSTMEM_SAMPLE_S)"],
     ["rfRound","Sampler round time","generate seconds per sampler round"],["rfAge","Group policy age","trained groups' mean policy age per trainer round (solid); sampler version lag (dashed)"],
-    ["rfResp","Response length","mean tokens; trainer batch (solid), sampler round (dashed)"],["rfBl","Buffer backlog","groups written − trainers' read position (solid); sampler-reported (dots)"],
+    ["rfResp","Response length","mean tokens per sample. Trainer (solid): model-generated tokens only (loss mask); trainer full (dotted, newer tapes) and sampler (dashed): whole response incl. tool / env tokens"],["rfBl","Buffer backlog","groups written − trainers' read position (solid); sampler-reported (dots)"],
     ["rfRel","Release → load latency","per sampler: load done − trainer release, one point per policy version"],["rfDrop","Rejected groups / samples","per bucket: stale (trainers), zero-variance, truncated, infra drops (samplers)"]]);
   $("rFleet").innerHTML=g.map(function(x){return card(x[0],x[1],x[2])}).join("");
+  var axs=function(o){o.yaxis=true;return o},mag=function(o){o.yaxis=true;o.y0=true;return o}; // magnitudes / fractions: the axis starts at 0
   var f3=function(v){return k(v,3)},f4=function(v){return v.toPrecision(3)};
   if(evs.length)chart("rfEval",{series:evs.map(function(c){return {name:c.label,color:c.color,pts:X[c.id].evals.map(function(e){return [e[0],e[1]]})}}),yfmt:f3,y0:false,dots:true});
   var shN=function(x){var m=/-(\d+)$/.exec(String(x==null?"":x));return m?"s"+m[1]:String(x==null?"?":x)};
@@ -450,9 +473,9 @@ function rlm(V){
     var sc=sps.filter(function(c){return String(c.id)===String(p.shard)})[0];vm.push({t:p.ts,color:sc?sc.color:null,short:m[0]+shN(p.shard)+" "+m[1]+(e==="member_ready"&&fin(p.restarts)&&p.restarts>0?" #"+p.restarts:""),
       label:"NC pool: sampler shard "+(p.shard==null?"?":p.shard)+" "+m[1]+(p.ticket?" · ticket "+p.ticket:"")+(fin(p.restarts)?" · restarts "+p.restarts:"")+(why?" · "+String(why).slice(0,160):"")})});
   chart("rfRew",{series:ser(trs,"reward").concat(sser("reward_mean")),yfmt:f3,y0:false,vmarks:vm});
-  chart("rfKl",{series:ser(trs,null,function(r){return fin(r.kl_tr)?r.kl_tr:r.kl}),yfmt:f4});
-  chart("rfLp",{series:ser(trs,"logprob_diff"),yfmt:f4});chart("rfTis",{series:ser(trs,"tis_clip"),yfmt:f4});chart("rfGn",{series:ser(trs,"grad_norm"),yfmt:f3});
-  chart("rfLr",{series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(1)}});
+  chart("rfKl",mag({series:ser(trs,"kl_tr"),yfmt:f4}));chart("rfPkl",mag({series:ser(trs,"kl"),yfmt:f4}));
+  chart("rfLp",mag({series:ser(trs,"logprob_diff"),yfmt:f4}));chart("rfTis",mag({series:ser(trs,"tis_clip"),yfmt:f4}));chart("rfGn",mag({series:ser(trs,"grad_norm"),yfmt:f3}));
+  chart("rfLr",axs({series:ser(trs,"lr"),yfmt:function(v){return v.toExponential(2)}}));
   chart("rfStep",{series:ser(trs,"step_s").concat(trs.map(function(c){return {name:c.label+" round",color:c.color,dash:true,legend:false,pts:RR(c).map(function(r){return [r.ts,r.round_s]})}})),yfmt:dur});
   chart("rfTps",{kind:"stack",interp:600,series:ser(trs,"tok_s"),yfmt:k});
   chart("rfHbm",{series:cs.map(function(c){var ns=(X[c.id]||{}).node_series||{},n=Object.keys(ns)[0];return {name:c.label,color:c.color,pts:n?ns[n].map(function(p){return [p[0],p[1]]}):[]}}),yfmt:function(v){return v.toFixed(0)+" G"}});
@@ -460,7 +483,9 @@ function rlm(V){
   chart("rfRound",{series:sps.map(function(c){return {name:c.label,color:c.color,pts:SR(c).map(function(r){return [r.ts,r.generate_s]})}}),yfmt:dur});
   var ageMean=function(r){var a=(TR[r._c]||{}),h=r.ages||{},n=0,s=0;Object.keys(h).forEach(function(x){if(fin(h[x])&&!isNaN(+x)){n+=h[x];s+=h[x]*(+x)}});return n?s/n:null};
   chart("rfAge",{series:trs.map(function(c){return {name:c.label,color:c.color,pts:((TR[c.id]||{}).rounds||[]).map(function(r){return [r.ts,ageMean(r)]})}}).concat(sser("version_lag")),yfmt:function(v){return v.toFixed(1)},dots:true});
-  chart("rfResp",{series:ser(trs,"resp_mean").concat(sser("resp_len_mean")),yfmt:k});
+  chart("rfResp",mag({series:trs.map(function(c){return {name:c.label+" generated (loss mask)",color:c.color,pts:RR(c).map(function(r){return [r.ts,r.resp_mean]})}})
+    .concat(trs.map(function(c){return {name:c.label+" full",color:c.color,dash:"1 3",pts:RR(c).map(function(r){return [r.ts,r.resp_full_mean]})}}).filter(function(x){return x.pts.some(function(p){return fin(p[1])})}))
+    .concat(sps.map(function(c){return {name:c.label+" full",color:c.color,dash:true,pts:SR(c).map(function(r){return [r.ts,r.resp_len_mean]})}})),yfmt:k}));
   chart("rfBl",{series:[{name:"backlog",color:PAL[3],pts:bl?bl.points.map(function(p){return [p[0],p[3]]}):[]}].concat(sps.map(function(c){return {name:c.label+" reported",color:c.color,pts:((S[c.id]||{}).backlog||[]).map(function(p){return [p[0],p[1]]}),legend:true}})),yfmt:k,
     refs:caps.length?[{y:sum(caps),label:"caps "+sum(caps),legend:"sum of backlog caps",color:"#eab308"}]:[]});
   chart("rfRel",{dots:true,series:sps.map(function(c){return {name:c.label,color:c.color,pts:(A.releases||[]).map(function(x){var l=(x.loads||{})[c.id];return l&&!l.at_start?[l.loaded_at,l.latency_s]:null}).filter(Boolean)}}),yfmt:dur});
@@ -468,6 +493,7 @@ function rlm(V){
   var sb=function(key){var o=[];sps.forEach(function(c){SR(c).forEach(function(r){if(r[key]>0)o.push([r.ts,r[key]])})});return o};
   chart("rfDrop",{kind:"bars",series:[{name:"stale",color:PAL[3],pts:tb("stale_groups")},{name:"zero-variance",color:PAL[5],pts:sb("zero_variance_dropped").length?sb("zero_variance_dropped"):sb("zero_variance_seen")},
     {name:"truncated (samples)",color:PAL[1],pts:sb("truncated")},{name:"infra",color:PAL[8],pts:sb("dropped_groups")}],yfmt:function(v){return +v.toFixed(1)+""}});
+  foldEmpty(g,"rFleetNone");balanceGrid("rFleet",340,4);
   rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp);
 }
 function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
@@ -502,6 +528,7 @@ function rlCost(V,cs,trs,sps,RR,SR,t0,t1,tp){
   chart("rcW",{kind:"bars",bucket:3600,series:trs.map(function(c){return {name:c.label,color:c.color,pts:((X[c.id]||{}).rounds||[]).filter(function(r){return r.phases&&r.phases.R}).map(function(r){return [r.phases.R[1],r.dur.R]})}}),yfmt:dur});
   var pv={};sps.forEach(function(c){SR(c).forEach(function(r){var v=r.policy_version==null?"?":"v"+r.policy_version;(pv[v]=pv[v]||[]).push([r.ts,r.groups])})});
   chart("rcPv",{kind:"bars",bucket:3600,series:Object.keys(pv).sort().map(function(v,i){return {name:v,color:PAL[i%PAL.length],pts:pv[v]}}),yfmt:k});
+  foldEmpty([["rcG","Groups per hour","stacked by sampler"],["rcCh","Card-hours per hour",""],["rcW","Trainer waiting per hour",""],["rcPv","Groups by policy version",""]],"rCostNone");balanceGrid("rCost",340,4);
 }
 function render(view,offline){
   V=view;OFF=offline;if(!V)return;var S=V.sft;
@@ -521,5 +548,5 @@ function render(view,offline){
   else{rlDist(V);if(RL){var lay=String((($("title")||{}).innerHTML)||"").replace(/<[^>]*>/g,"").split(" · ")[0],tg=(V.async?"RL · async GRPO":"RL")+(lay?" · "+lay:"");$("title").innerHTML='yeto metrics <span class="tg">'+esc(run||"unnamed run")+'</span><span class="tg">'+tg+'</span>';
     document.title="yeto metrics · "+(run||"RL");$("sub").textContent="updated "+clock(offline?NOW:Date.now()/1000,true)+" · times in your local zone"+(offline?" · offline export, data as of "+day(NOW):" · live");rlm(V)}}
 }
-return {bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
+return {bins:bins,evalTip:evalTip,durAxis:durAxis,durTicks:durTicks,numAxis:numAxis,nice:nice,interpStack:interpStack,render:render,setReload:function(fn){onReload=fn},rangeH:function(){return RANGE_H}};
 })();

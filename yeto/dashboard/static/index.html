@@ -89,7 +89,11 @@ h3{font-size:13px;margin:14px 0 6px}
 /* Details charts: a grid of small cards like "Fleet over the last hour" (3-5 per row, ~200px high) */
 .gridc{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;align-items:start}
 .gridc>div,.ucols>div{min-width:0}
-#rounds svg,#async svg,#util svg,#nodes svg{width:100%;height:auto;max-height:200px}
+#util svg,#nodes svg{width:100%;height:auto;max-height:200px}
+/* per-round and async charts are drawn at their box's pixel width (app.js), so text stays at 11px */
+#rounds svg,#async svg{width:100%;height:auto}#rounds svg text,#async svg text{font-size:12px}
+.gridw{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));gap:14px 22px;align-items:start}
+.gridw>div{min-width:0}.gridw>.full{grid-column:1/-1}
 #cMetric:empty,#cDur:empty,#cTl:empty,#aBacklog:empty,#aRelChart:empty,#cNodes:empty,.ucols:empty{display:none}
 .nodata{font-size:12px;color:var(--ink2);padding:2px 0}
 .ucols .rl{font-size:12px;font-weight:600;margin-bottom:2px}
@@ -121,9 +125,12 @@ td.bar,th.bar{text-align:left!important;min-width:200px}.bl{font-size:11px;margi
 .bt{position:relative;height:5px;background:#3a3a40;border-radius:3px}.bf{height:5px;background:#facc15;border-radius:3px}.bf.over{background:var(--bad)}.bf.idle{background:var(--ink2)}.nt tr.off td{color:var(--ink2)}.nt tr.off .sq{opacity:.45}
 .bm{position:absolute;top:-2px;width:2px;height:9px;background:var(--ink)}
 .sh{margin:26px 0 12px;border-top:1px solid var(--line);padding-top:18px}.sh h2{font-size:15px;margin:0;font-weight:600}.sh .cs{margin-top:3px}
-.cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(max(330px,calc((100% - 56px) / 5)),1fr));gap:14px}
-.cc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px;min-width:0}
+/* at most 4 chart cards per row (fewer as the page narrows); cards of a row share one height */
+.cg{display:grid;grid-template-columns:repeat(auto-fill,minmax(max(340px,calc((100% - 42px) / 4)),1fr));gap:14px}
+.cc{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 12px 8px;min-width:0;display:flex;flex-direction:column}
 .ct{font-size:12.5px;font-weight:600}.cs{font-size:11px;color:var(--ink2);margin:2px 0 8px}
+.cc>.cs{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.9em}
+.cfold{font-size:11.5px;color:var(--ink2);margin:10px 2px 0}.cfold b{color:var(--ink);font-weight:500}.cfold[hidden]{display:none}
 .cw{position:relative;overflow:hidden}.cc{overflow:hidden}svg.ch,svg.hs{display:block;width:100%;height:auto}
 svg.ch text,svg.hs text{fill:var(--ink2);font:9.5px var(--sans)}svg .gl{stroke:var(--line);stroke-width:.8}svg .cx{stroke:var(--ink2);stroke-dasharray:2 2}
 svg text.rt{fill:#c9cad0;font-size:9px}
@@ -182,11 +189,13 @@ The data is inside the file; no network access is needed.</div>
 <section class="blk"><div class="bh"><b>Islands now</b><span id="rNodesNote"></span></div><div id="rNodes"></div></section>
 <div class="sh"><h2 id="rFleetH">Fleet</h2><div class="cs">per island; points are trainer rounds, sampler rounds and releases</div></div>
 <div class="cg" id="rFleet"></div>
+<div class="cfold" id="rFleetNone" hidden></div>
 <div class="sh"><h2 id="rlDistH">Distribution</h2><div class="cs">share of rounds per bin on a log axis; dashed lines p10 / p90 / p99, solid p50; the outer 0.2% tails are not drawn</div></div>
 <div class="dgrid" id="rlDist" style="margin-bottom:14px"></div>
 <div class="sh"><h2 id="rCostH">Cost / efficiency</h2><div class="cs">card time = cards × billed wall time; effective = train step + generate time; compared with the previous window of the same length</div></div>
 <section class="krow" id="rCostK"></section>
 <div class="cg" id="rCost"></div>
+<div class="cfold" id="rCostNone" hidden></div>
 <div class="sh"><h2>Details</h2><div class="cs">per-round tables, async GRPO buffer and releases, island health, events</div></div>
 
 <section class="panel" id="islandWall" hidden data-rlm="replaced by Islands now"><h2>Island wall <span class="note">(pick an island to switch the charts below to it)</span></h2><div class="wall" id="wall"></div></section>
@@ -195,13 +204,13 @@ The data is inside the file; no network access is needed.</div>
 
 <section class="panel" id="rounds" tabindex="0" aria-label="Per-round charts; left/right arrows switch rounds">
   <h2>Per round <span class="note" id="roundsIsl"></span> <span class="note">(hover, click or use left/right arrows to step rounds; the three charts move together)</span></h2>
-  <div class="gridc">
+  <div class="gridw">
     <div><div class="tabs" id="tabs"></div><div class="legend" id="legMetric"></div>
       <div id="cMetric"></div><div class="note">Each round has different tasks; do not read a dip as a decline before a trend shows.</div></div>
     <div><h3>Round time breakdown</h3><div class="legend" id="legDur"></div><div id="cDur"></div></div>
-    <div><h3>Phase timeline (wall clock)</h3><div class="legend" id="legTl"></div><div id="cTl"></div></div>
     <div><h3>Node GPU memory <span class="note">(mean over each node's GPUs, GiB)</span></h3>
       <div class="legend" id="legNodes"></div><div id="cNodes"></div><div class="note" id="nodesNote"></div></div>
+    <div class="full"><h3>Phase timeline (wall clock)</h3><div class="legend" id="legTl"></div><div id="cTl"></div></div>
   </div>
   <div class="tip" id="tip"></div>
 </section>
@@ -211,7 +220,7 @@ The data is inside the file; no network access is needed.</div>
   <h3>Trainer rounds <span class="note" id="aTrNote"></span></h3><div id="aTrainer" style="overflow-x:auto"></div>
   <h3>Samplers <span class="note">(policy age = trainer version − version the round generated with)</span></h3><div id="aSamplers" style="overflow-x:auto"></div>
   <div id="aCompBox" hidden><h3>Context compaction <span class="note">(CompactionRL: a compacted trial is written as one sample per segment, all with the trial's reward; sampler rows count written trials, trainer rows trained samples)</span></h3><div id="aComp" style="overflow-x:auto"></div></div>
-  <div class="gridc">
+  <div class="gridw">
     <div><h3>Buffer backlog <span class="note">(groups written by all samplers − the trainers' read position)</span></h3>
       <div class="legend" id="legBacklog"></div><div id="aBacklog"></div></div>
     <div><h3>Policy releases <span class="note">(trainer release → each sampler's load done; NC pool events as dashed lines)</span></h3>
