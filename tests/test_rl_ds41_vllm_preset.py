@@ -57,8 +57,8 @@ def test_ds41_preset_options_win_and_rules(tmp_path):
         _engine(tmp_path, "cuda", model_preset="ds41-mi355x")
     with pytest.raises(SamplerEngineError, match="need upstream vLLM"):
         _engine(tmp_path, "npu", tokenizer_mode="deepseek_v41")
-    with pytest.raises(SamplerEngineError, match="in-place reload is refused"):
-        _engine(tmp_path, "rocm", config=_config(tmp_path, in_place_reload=True), model_preset="ds41-mi355x")
+    hot, _ = _engine(tmp_path, "rocm", config=_config(tmp_path, in_place_reload=True), model_preset="ds41-mi355x")
+    assert hot._linear_reload()  # in place through vllm_linear_reload, not reload_weights
     assert {p["platform"] for p in MODEL_PRESETS.values()} == {"rocm"}
 
 
