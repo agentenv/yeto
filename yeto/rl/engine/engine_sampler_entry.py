@@ -45,6 +45,12 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   (``sample_roles.DataSlot``; several samplers of one run draw disjoint prompts);
   ``chat`` applies the tokenizer's chat template of ``tokenizer`` (default
   ``base_dir``) to a message list (``trust_remote_code``: optional, false);
+  ``agentic`` rows carry an agent task mapping in ``task_key`` (default
+  ``metadata``): before any engine starts, every task the sampler would draw
+  must have its task directory under ``HARBOR_TASKS_DIR`` (:func:`check_task_dirs`);
+  ``missing_tasks``: ``"error"`` (default: refuse the start, naming the first ids
+  and the count) or ``"skip"`` (draw only the rows whose task is staged, and say
+  which were left out; not with ``dispense``);
 * ``reward``: ``"module:function"`` called as ``function(item, completion)``
   -> float, or a Miles reward (``async score(args, sample)``) when
   ``reward_kind`` is ``"miles"``;
@@ -122,6 +128,9 @@ from .sampler_engine import (
 )
 
 PROMPT_FORMATS = ("text", "chat", "agentic")
+MISSING_TASKS = ("error", "skip")  # prompts.missing_tasks
+MISSING_TASKS_SHOWN = 10  # task ids a missing-task message names
+TASKS_DIR_ENV = "HARBOR_TASKS_DIR"
 ROLLOUT_FIELDS = "rollout_fields"
 ROLLOUT_FIELD_KEYS = ("routed_experts", "top_logprobs_num", "fp32_lm_head")
 PLATFORM = "platform"
@@ -218,9 +227,11 @@ class JsonlPrompts:
 
     def __init__(self, path: str | Path, *, input_key: str, label_key: str | None, groups_per_round: int,
                  render: Callable[[Any], str] = str, data_slot: str | None = None,
-                 task_key: str | None = None) -> None:
+                 task_key: str | None = None, task_check: TaskDirCheck | None = None) -> None:
         """``task_key``: the row field holding the agent task mapping (format
-        ``agentic``); it goes into the item metadata as ``agent_task``."""
+        ``agentic``); it goes into the item metadata as ``agent_task``.
+        ``task_check``: the task directories this slot's rows must have
+        (:func:`check_task_dirs`)."""
         self.path = Path(path)
         rows = list(enumerate(json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
                               if line.strip()))
@@ -231,6 +242,9 @@ class JsonlPrompts:
             rows = self.slot.rows(rows)
         except ValueError as error:
             raise SamplerSpecError(f"prompts.data_slot: {error}") from None
+        if task_check is not None and task_key is not None:
+            rows = task_check.apply(rows, task_key, where=f"{self.path}"
+                                    + ("" if data_slot is None else f" (slot {data_slot})"))
         # the prompt ids keep the file's row numbers, so two slots never share one
         self.row_numbers = [i for i, _ in rows]
         self.rows = [row for _, row in rows]
@@ -270,6 +284,83 @@ class JsonlPrompts:
                                     label=row.get(self.label_key) if self.label_key else None,
                                     metadata=metadata))
         return items
+
+
+class TaskDirCheck:
+    """Every agent task a sampler draws has its task directory under ``root``
+    (``HARBOR_TASKS_DIR``; ``trust.task_dir``): a trial of a task that was never
+    staged fails as ``HarnessConfigError: no task directory`` and is recorded
+    INFRA_FAILED, round after round. ``mode`` ``error`` refuses the start,
+    ``skip`` leaves those rows out (``prompts.missing_tasks``)."""
+
+    def __init__(self, root: str | Path, *, mode: str = "error", defaults: Mapping[str, Any] | None = None,
+                 log: Callable[[str], None] | None = None) -> None:
+        if mode not in MISSING_TASKS:
+            raise SamplerSpecError(f"prompts.missing_tasks {mode!r} is not one of {MISSING_TASKS}")
+        self.root, self.mode, self.defaults = Path(root), mode, dict(defaults or {})
+        self.log = log or (lambda line: print(line, file=sys.stderr, flush=True))
+
+    def task_id(self, row: Mapping[str, Any], task_key: str) -> Any:
+        task = row.get(task_key)
+        if not isinstance(task, Mapping):
+            return None  # the row's own error comes when it is drawn
+        merged = {**self.defaults, **{k: v for k, v in task.items() if v is not None}}
+        return merged.get("task_id", merged.get("instance_id"))
+
+    def missing(self, rows: Sequence[tuple[int, Mapping[str, Any]]], task_key: str) -> list[tuple[int, str]]:
+        """``(row number, task id)`` of the rows whose task directory is not there."""
+        from yeto.rl.agentic import AgentTask  # noqa: PLC0415
+        from yeto.rl.agentic.trust import task_dir  # noqa: PLC0415
+
+        out = []
+        for index, row in rows:
+            task_id = self.task_id(row, task_key)
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            probe = AgentTask(task_id=task_id, agent="probe", provider="probe")  # an unsafe id raises here
+            try:
+                task_dir(self.root, probe)  # a task id escaping the root raises TrustViolation
+            except FileNotFoundError:
+                out.append((index, task_id))
+        return out
+
+    def apply(self, rows: list[tuple[int, Any]], task_key: str, *, where: str) -> list[tuple[int, Any]]:
+        """``rows`` without the rows of unstaged tasks (``skip``), or raise (``error``)."""
+        missing = self.missing(rows, task_key)
+        if not missing:
+            return rows
+        ids = sorted({task_id for _, task_id in missing})
+        shown = ", ".join(ids[:MISSING_TASKS_SHOWN]) + (" ..." if len(ids) > MISSING_TASKS_SHOWN else "")
+        what = (f"{len(missing)} of {len(rows)} prompt row(s) of {where} name {len(ids)} task(s) with no "
+                f"task directory under {self.root}: {shown}")
+        if self.mode == "error":
+            raise SamplerSpecError(f"{what}; stage them (agentic.setup.tasks ids), drop those rows from the "
+                                   "prompts file, or set prompts.missing_tasks \"skip\"")
+        dropped = {index for index, _ in missing}
+        kept = [(i, row) for i, row in rows if i not in dropped]
+        if not kept:
+            raise SamplerSpecError(f"{what}; prompts.missing_tasks skip leaves no row to draw")
+        self.log(f"[sampler] prompts.missing_tasks skip: {what}; drawing the other {len(kept)} row(s)")
+        return kept
+
+
+def check_task_dirs(spec: Mapping[str, Any], environ: Any = None) -> TaskDirCheck | None:
+    """The task directory check of an agentic sampler (``prompts.missing_tasks``):
+    None for another prompt format, or when ``HARBOR_TASKS_DIR`` is not set (the
+    harness then names no local task root)."""
+    prompts = spec.get("prompts") or {}
+    mode = str(prompts.get("missing_tasks") or "error")
+    if mode not in MISSING_TASKS:
+        raise SamplerSpecError(f"prompts.missing_tasks {mode!r} is not one of {MISSING_TASKS}")
+    if str(prompts.get("format", "text")) != "agentic":
+        return None
+    env = os.environ if environ is None else environ
+    root = str(env.get(TASKS_DIR_ENV) or "").strip()
+    if not root:
+        return None
+    agentic = spec.get("agentic") if isinstance(spec.get("agentic"), Mapping) else {}
+    defaults = agentic.get("task_defaults") if isinstance(agentic.get("task_defaults"), Mapping) else {}
+    return TaskDirCheck(root, mode=mode, defaults=defaults)
 
 
 def dispensed_prompts(path: str | Path, config: Mapping[str, Any], *, input_key: str,
@@ -386,9 +477,18 @@ def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
     if (fmt == "agentic") != bool(spec.get("agentic")):
         raise SamplerSpecError("prompts.format agentic and the spec's agentic section go together")
     task_key = str(prompts.get("task_key", "metadata")) if fmt == "agentic" else None
+    task_check = check_task_dirs(spec, environ)
     if prompts.get("dispense"):  # Rows from the task dispenser, not a slot
         if prompts.get("data_slot"):
             raise SamplerSpecError("prompts.dispense and prompts.data_slot exclude each other")
+        if task_check is not None:
+            if task_check.mode == "skip":
+                # every sampler of a dispenser draws from one plan over the whole file
+                raise SamplerSpecError("prompts.missing_tasks skip does not apply with prompts.dispense: "
+                                       "drop the rows of unstaged tasks from the prompts file instead")
+            path = Path(_require(prompts, "path", "prompts"))
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            task_check.apply(list(enumerate(rows)), task_key, where=str(path))
         if str((prompts["dispense"] or {}).get("backend") or "tcp") == "store":
             return store_dispensed_prompts(spec, render=render, task_key=task_key, environ=environ)
         from yeto.protocol import island_hmac_key_from_env  # noqa: PLC0415
@@ -402,7 +502,7 @@ def build_prompts(spec: Mapping[str, Any], environ: Any = None) -> JsonlPrompts:
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
                         groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
-                        data_slot=prompts.get("data_slot"), task_key=task_key)
+                        data_slot=prompts.get("data_slot"), task_key=task_key, task_check=task_check)
 
 
 # ------------------------------------------------------------------- reward

@@ -277,11 +277,87 @@ def test_jsonl_prompts_carry_the_agent_task_and_the_spec_pairs_format_and_sectio
     path.write_text(json.dumps({"prompt": "TB2.1 task fix-git", "metadata": TASK}) + "\n")
     spec = {"prompts": {"path": str(path), "input_key": "prompt", "groups_per_round": 1, "format": "agentic"},
             "agentic": {"template": "nemotron3"}}
-    (item,) = build_prompts(spec)(0)
+    (item,) = build_prompts(spec, {})(0)
     assert item.metadata["agent_task"] == TASK
     assert build_reward(spec)(item, None) == 0.0
     with pytest.raises(SamplerSpecError, match="go together"):
-        build_prompts({**spec, "agentic": None})
+        build_prompts({**spec, "agentic": None}, {})
+
+
+def _agentic_spec(tmp_path, ids, **prompts):
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(json.dumps({"prompt": f"task {i}", "metadata": {"instance_id": i}}) + "\n"
+                            for i in ids))
+    return {"prompts": {"path": str(path), "input_key": "prompt", "groups_per_round": 1, "format": "agentic",
+                        **prompts},
+            "agentic": {"template": "nemotron3", "task_defaults": {"agent": "codex", "provider": "remote-docker"}}}
+
+
+def _staged(tmp_path, ids):
+    root = tmp_path / "tasks"
+    for i in ids:
+        (root / i).mkdir(parents=True)
+        (root / i / "task.toml").write_text("")
+    return {"HARBOR_TASKS_DIR": str(root)}
+
+
+def test_a_prompt_whose_task_was_never_staged_refuses_the_sampler_start(tmp_path):
+    """71 prompts but 40 staged task directories: the start names the missing ids
+    and their count instead of every such trial failing as INFRA_FAILED later."""
+    from yeto.rl.engine.engine_sampler_entry import SamplerSpecError, build_prompts
+
+    ids = [f"t{i:02d}" for i in range(71)]
+    env = _staged(tmp_path, ids[:40])
+    with pytest.raises(SamplerSpecError) as error:
+        build_prompts(_agentic_spec(tmp_path, ids), env)
+    text = str(error.value)
+    assert "31 of 71 prompt row(s)" in text and "31 task(s) with no task directory" in text
+    assert "t40, t41" in text and "t49 ..." in text and "t50" not in text  # the first 10 ids
+    assert 'prompts.missing_tasks "skip"' in text
+    # every task staged, or no local task root: the sampler starts as before
+    assert len(build_prompts(_agentic_spec(tmp_path, ids[:40]), env).rows) == 40
+    assert len(build_prompts(_agentic_spec(tmp_path, ids), {}).rows) == 71
+
+
+def test_missing_tasks_skip_draws_only_the_staged_tasks(tmp_path, capsys):
+    from yeto.rl.engine.engine_sampler_entry import SamplerSpecError, build_prompts
+
+    ids = ["a", "b", "c", "d"]
+    env = _staged(tmp_path, ["a", "c"])
+    prompts = build_prompts(_agentic_spec(tmp_path, ids, missing_tasks="skip"), env)
+    assert [item.metadata["agent_task"]["instance_id"] for r in range(4) for item in prompts(r)] == ["a", "c"] * 2
+    assert [item.prompt_id for item in prompts(0) + prompts(1)] == ["row0", "row2"]  # file row numbers kept
+    assert "prompts.missing_tasks skip: 2 of 4 prompt row(s)" in capsys.readouterr().err
+    # a slot checks only its own rows
+    assert len(build_prompts(_agentic_spec(tmp_path, ids, data_slot="0/2"), env).rows) == 2
+    with pytest.raises(SamplerSpecError, match="leaves no row"):
+        build_prompts(_agentic_spec(tmp_path, ["b", "d"], missing_tasks="skip"), env)
+    with pytest.raises(SamplerSpecError, match="not one of"):
+        build_prompts(_agentic_spec(tmp_path, ids, missing_tasks="ignore"), env)
+
+
+def test_the_task_check_applies_to_dispensed_prompts_and_refuses_skip_there(tmp_path):
+    from yeto.rl.engine.engine_sampler_entry import SamplerSpecError, build_prompts
+
+    env = _staged(tmp_path, ["a"])
+    spec = _agentic_spec(tmp_path, ["a", "b"], dispense={"address": "127.0.0.1:1", "learner_id": 0})
+    with pytest.raises(SamplerSpecError, match="1 of 2 prompt row.*: b"):
+        build_prompts(spec, env)
+    spec["prompts"]["missing_tasks"] = "skip"
+    with pytest.raises(SamplerSpecError, match="does not apply with prompts.dispense"):
+        build_prompts(spec, env)
+
+
+def test_a_task_id_that_names_a_path_still_stops_the_start(tmp_path):
+    """The check reads task ids as AgentTask does: an id naming a path outside the
+    task root is refused, never counted as a missing (skippable) task."""
+    from yeto.rl.engine.engine_sampler_entry import build_prompts
+
+    env = _staged(tmp_path, ["a"])
+    (tmp_path / "outside").mkdir()
+    for mode in ("error", "skip"):
+        with pytest.raises(ValueError, match="safe identifier"):
+            build_prompts(_agentic_spec(tmp_path, ["a", "../outside"], missing_tasks=mode), env)
 
 
 # ---------------------------------------------------------------------- nemotron3 template
