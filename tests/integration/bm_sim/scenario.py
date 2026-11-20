@@ -102,11 +102,9 @@ class Report:
 
 
 # ------------------------------------------------------------------- launcher pieces
-def install_sky_stub() -> None:
+def sky_stub() -> types.SimpleNamespace:
     """``make_miles_island_task`` builds a ``sky.Task``; the head needs no SkyPilot
     for an ``ssh:`` island, so a plain record object stands in for it."""
-    if "sky" in sys.modules:
-        return
 
     class _Record:
         def __init__(self, **kwargs: Any) -> None:
@@ -118,8 +116,17 @@ def install_sky_stub() -> None:
         def set_storage_mounts(self, mounts: Any) -> None:
             self.storage_mounts = mounts
 
-    sys.modules["sky"] = types.SimpleNamespace(Task=_Record, Resources=_Record, Storage=_Record,
-                                               StorageMode=types.SimpleNamespace(MOUNT="MOUNT", COPY="COPY"))
+    return types.SimpleNamespace(Task=_Record, Resources=_Record, Storage=_Record,
+                                 StorageMode=types.SimpleNamespace(MOUNT="MOUNT", COPY="COPY"))
+
+
+def install_sky_stub() -> None:
+    """Puts :func:`sky_stub` in ``sys.modules`` for the rest of the process (the
+    bm-sim head is its own process). In-process tests install the stub themselves
+    with ``monkeypatch.setitem(sys.modules, "sky", sky_stub())`` so it is undone
+    after the test; with a ``sky`` already imported this is a no-op."""
+    if "sky" not in sys.modules:
+        sys.modules["sky"] = sky_stub()
 
 
 def launcher_argv(*, inventory: Path, store_uri: str, nodes: int, cards: int, run_id: str,
