@@ -117,8 +117,9 @@ def overlaid_release_scheme(release: PolicyRelease, directory: Path, base_dir: A
     scheme when its ``quantization_config`` is the base's; every other release
     keeps :func:`release_scheme` (trained weights: bf16)."""
     if release.weights == LORA and release.derived_from is None and base_dir is not None:
-        # an adapter merged into the engine's base (lora_release_merge): only BF16 modules
-        # change, every quantized tensor stays the base's, so the base's scheme is served
+        # an adapter merged into the engine's base (lora_release_merge): BF16 modules and
+        # block-scaled FP8 modules (re-quantized in their own MXFP8 format) change, every
+        # other quantized tensor stays the base's, so the base's scheme is served
         return served
     if release.derived_from is not None or not is_partial_release(release.manifest) or base_dir is None:
         return release_scheme(release)
