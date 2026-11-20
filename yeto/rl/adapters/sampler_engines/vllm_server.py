@@ -116,7 +116,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 
-from . import k31_release, vllm_expert_reload, vllm_tied_reload
+from . import k31_release, vllm_expert_reload, vllm_linear_reload, vllm_tied_reload
 from .server import ServerConfig, ServerEngine
 from .sglang_server import dense_layer_count, moe_layer_count, rocm_card_count
 
@@ -257,11 +257,18 @@ K31_PRESETS: dict[str, dict[str, Any]] = {
 #   65536): cold start about 3 min (weights 30 s, profile + graphs + warmup 100 s), 71.3 GiB of
 #   weights and about 248 of 288 GiB per GPU in use, an 11.86M-token KV cache; tool calls, top-128
 #   log-probs and R3 (uint16 [prompt + output - 1, 40, 6], every layer MoE) come back. In-place
-#   reload does NOT work: /collective_rpc reload_weights of the served checkpoint returns 200 but
-#   its rotary embedding and Engram hash state are not reloaded ("Failed to load weights") and the
-#   server then answers with NaN log-probs and degenerate text, so the preset refuses
-#   in_place_reload (a release is served by restart).
+#   reload ("in_place_reload": "linear") goes through the yeto worker extension of
+#   :mod:`vllm_linear_reload`, never vLLM's reload_weights: reload_weights of the unchanged base
+#   returns 200 but leaves the MXFP4 routed experts of all 40 layers (w13 / w2 weights and scales,
+#   every rank) with bytes a cold start does not have, and the server then answers NaN
+#   log-probs (fingerprinted against a cold start; it also kept 11.4 GiB more per GPU and took
+#   25 s). A LoRA release here is merged into the attention projections only, and the
+#   extension re-runs the cold start's load + post-load processing for just those modules:
+#   1.0 s for pause + reload + resume of all 160 projections, about 10 MB of staging per GPU,
+#   and every one of the 1264 served tensors per rank byte-equal to a cold start of the release
+#   (CUDA graphs captured). A release that is not an attention-only overlay of the base restarts.
 DS41_MI355X_GPU_MEMORY_UTILIZATION = "0.85"
+LINEAR_RELOAD = "linear"  # a model preset's "in_place_reload": the vllm_linear_reload extension
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "ds41-mi355x": {
         "platform": "rocm", "dcp": False,
@@ -271,7 +278,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
                  "--gpu-memory-utilization", DS41_MI355X_GPU_MEMORY_UTILIZATION),
         "env": {"VLLM_ROCM_USE_AITER_MOE": "1", "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
                 "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": "1", "AITER_TRITON_LOG_LEVEL": "ERROR"},
-        "hf_overrides": {}, "in_place_reload": False,
+        "hf_overrides": {}, "in_place_reload": LINEAR_RELOAD,
         "tokenizer_mode": "deepseek_v41", "tool_call_parser": "deepseek_v41", "reasoning_parser": "deepseek_v41"},
 }
 
@@ -560,6 +567,11 @@ class VllmServerEngine(ServerEngine):
             raise SamplerEngineError(f"vllm model_preset {options.model_preset!r}: in-place reload is refused "
                                      "(measured: reload_weights leaves the server answering NaN log-probs); "
                                      "set server.in_place_reload false (restart per release)")
+        if options.model_preset is not None and config.in_place_reload and options.expert_reload \
+                and MODEL_PRESETS[options.model_preset].get("in_place_reload") == LINEAR_RELOAD:
+            raise SamplerEngineError(f"vllm model_preset {options.model_preset!r} reloads attention projections "
+                                     "in place (vllm_linear_reload); options.expert_reload is the K3.1 overlay "
+                                     "reload, not both")
         if (options.model_preset or options.tokenizer_mode) and not upstream:
             raise SamplerEngineError("vllm-server model_preset / tokenizer_mode need upstream vLLM "
                                      f"(platform cuda or rocm), not platform {options.platform!r}")
@@ -707,12 +719,20 @@ class VllmServerEngine(ServerEngine):
     def _reloads_in_place(self) -> bool:
         return bool(self.config.in_place_reload) and (self.upstream or self.npu_in_place)
 
+    def _linear_reload(self) -> bool:
+        """In-place reload through :mod:`vllm_linear_reload` (a model preset's
+        ``"in_place_reload": "linear"``) instead of vLLM's ``reload_weights``."""
+        return self._reloads_in_place() and self.preset.get("in_place_reload") == LINEAR_RELOAD
+
     def _tied_extension_argv(self, model_dir: Path) -> list[str]:
         """The tied-embeddings worker extension (:mod:`vllm_tied_reload`) for a
         release whose config ties the word embeddings, when it reloads in place
         (empty otherwise: the argv of an untied model is unchanged)."""
         if not self._reloads_in_place() or not vllm_tied_reload.config_ties(model_dir):
             return []
+        if self._linear_reload():
+            raise SamplerEngineError(f"{model_dir}: tie_word_embeddings on a model preset with the linear in-place "
+                                     "reload; the extension is for an untied model")
         if self.options.expert_reload:
             raise SamplerEngineError(f"{model_dir}: tie_word_embeddings with options.expert_reload: the K3.1 "
                                      "overlay extension is for an untied model")
@@ -752,6 +772,8 @@ class VllmServerEngine(ServerEngine):
             argv += [PREFIX_RETENTION_FLAG, str(retention[0])]
         if o.expert_reload and c.in_place_reload:
             argv += ["--worker-extension-cls", vllm_expert_reload.EXTENSION]
+        if self._linear_reload():
+            argv += ["--worker-extension-cls", vllm_linear_reload.EXTENSION]
         argv += self._tied_extension_argv(model_dir)
         overrides = self.hf_overrides()
         if overrides:
@@ -892,6 +914,8 @@ class VllmServerEngine(ServerEngine):
                                      "or platform npu with options.npu_in_place_reload")
         if self._tied_layout is not None or vllm_tied_reload.config_ties(model_dir):
             return self._reload_tied(model_dir, version)
+        if self._linear_reload():
+            return self._reload_linears(model_dir)
         if self.options.expert_reload:
             return self._reload_experts(model_dir)
         result = self._paused_rpc({"method": "reload_weights", "kwargs": {"weights_path": str(model_dir)}})
@@ -942,6 +966,39 @@ class VllmServerEngine(ServerEngine):
                                                              else ""),
                 "rpc_results": len((result or {}).get("results") or []), "tied_layout": self._tied_layout,
                 "tied_path": why, "tied_check": check}
+
+    def _reload_linears(self, model_dir: Path) -> dict[str, Any]:
+        """A merged attention-only release through the worker extension
+        (:mod:`vllm_linear_reload`): the projections the new release or the served
+        one changed are reloaded from ``model_dir``. A release that is not an
+        attention-only overlay of the base (or a served one that is not) restarts.
+        A failed RPC may have written some modules: the server is killed then, so
+        the next load starts it on the release instead of serving a mix."""
+        served = self._served_dir or Path(self.config.base_dir)
+        names, why = vllm_linear_reload.update_plan(model_dir, served, self.config.base_dir)
+        if names is None:
+            report = self.start(model_dir, self._version or 0)
+            return {"reload": "restart", "linear_reload_off": why, "restart_s": report.pause_s}
+        began = self._clock()
+        body = {"method": vllm_linear_reload.RELOAD_METHOD,
+                "kwargs": {"weights_path": str(model_dir), "names": json.dumps(names)}}
+        try:
+            result = self._paused_rpc(body)
+        except BaseException as err:
+            if self._process is not None:
+                err.add_note("vllm-server: the linear in-place reload failed part way; the server was killed so "
+                             "the next load restarts it on the release")
+                self._kill()
+            self._served_dir = None
+            raise
+        self._served_dir = Path(model_dir)
+        ranks = [r for r in (result or {}).get("results") or [] if isinstance(r, dict)]
+        return {"reload": "collective_rpc " + vllm_linear_reload.RELOAD_METHOD,
+                "rpc_results": len((result or {}).get("results") or []), "tensors": len(names),
+                "modules": max((int(r.get("modules", 0)) for r in ranks), default=None),
+                "pause_s": round(self._clock() - began, 3),
+                "rank_seconds": max((float(r.get("seconds", 0.0)) for r in ranks), default=None),
+                "staging_peak_bytes": max((int(r.get("staging_peak_bytes", 0)) for r in ranks), default=None)}
 
     def _reload_experts(self, model_dir: Path) -> dict[str, Any]:
         """The overlay's released experts through the worker extension
