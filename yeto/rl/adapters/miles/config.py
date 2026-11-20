@@ -890,6 +890,7 @@ def translate_run_config(
 
     from yeto.rl.engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_DEEPSEEK_V41,
         RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
         RECIPE_KIMI_K31,
@@ -900,6 +901,7 @@ def translate_run_config(
     from .lr_schedule import lr_schedule_argv
     from .models import glm5_next, nemotron_h
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
+    from .models.deepseek_v41 import ports_recipe as deepseek_v41
     from .models.kimi_k31 import ports_recipe as kimi_k31_recipe
     from .models.kimi_k31 import release as kimi_k31_release
 
@@ -989,6 +991,8 @@ def translate_run_config(
     elif recipe.name == RECIPE_DEEPSEEK_V4_FLASH:
         model_name = deepseek_v4.MODEL_NAME
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
+    elif recipe.name == RECIPE_DEEPSEEK_V41:
+        model_name = deepseek_v41.MODEL_NAME  # the recipe replaces the geometry flags below
     else:
         model_name = recipe.provider_class
         if recipe.name == RECIPE_GENERIC:
@@ -1378,6 +1382,8 @@ def translate_run_config(
         except kimi_k31_recipe.KimiK31RecipeError as error:
             raise MilesConfigError(f"kimi_k31 recipe: {error}") from None
         values = _full_recompute_for_mxfp4_experts(values)
+    if recipe.name == RECIPE_DEEPSEEK_V41:
+        values = _deepseek_v41_values(values, config, deepseek_v41)
     values.extend(extra_argv)
     train_extra = train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, ""))
     if any(flag in train_extra for flag in PIPELINE_SPLIT_FLAGS):
@@ -1550,6 +1556,32 @@ def _kimi_k31_lora_values(values: list[str], trainable: Any, recipe: Any) -> lis
         raise MilesConfigError(f"kimi_k31 recipe: {error}") from None
     values = [v for v in values if v != "--lora-base-cpu-backup"]
     return [*values, *kimi_k31_lora.extra_lora_argv(trainable.lora_targets)]
+
+
+def _deepseek_v41_values(values: list[str], config: Any, deepseek_v41: Any) -> list[str]:
+    """deepseek_v41 (``models/deepseek_v41/ports_recipe``): the Miles V4.1 model and
+    trainer flags replace the Bridge-geometry ones; LoRA only, on attention (+ the
+    shared expert), routed experts excluded, full recompute. The layer count follows
+    the checkpoint; the CSA compress ratios are Miles' (scripts/models/deepseek-v4.1.py:
+    the HF config's own encoding of them is not what --csa-compress-ratios takes)."""
+    trainable, geometry, parallel = config.trainable, config.geometry, config.parallel
+    if trainable.parameter_mode != "lora":
+        raise MilesConfigError("the deepseek_v41 recipe is LoRA-only")
+    if "--use-dynamic-batch-size" in values:
+        # Miles miles_validate_args: bshd (the V4.1 plugin's layout) has no dynamic batch size
+        raise MilesConfigError("the deepseek_v41 recipe trains --qkv-format bshd, which has no dynamic "
+                               "batch size: drop --rl-max-tokens-per-gpu (micro-batch 1)")
+    try:
+        deepseek_v41.target_modules(trainable.lora_targets)
+        moe = geometry.moe
+        deepseek_v41.check_geometry(
+            hidden_size=geometry.hidden_size, num_attention_heads=geometry.num_attention_heads,
+            num_experts=getattr(moe, "num_experts", 0), router_topk=getattr(moe, "router_topk", 0),
+            vocab_size=geometry.vocab_size)
+        return deepseek_v41.apply_recipe(values, deepseek_v41.recipe_argv(
+            num_layers=geometry.num_layers, tensor_parallel=parallel.tensor_parallel))
+    except deepseek_v41.DeepseekV41RecipeError as error:
+        raise MilesConfigError(f"deepseek_v41 recipe: {error}") from None
 
 
 FULL_RECOMPUTE_ARGV = ("--recompute-granularity", "full", "--recompute-method", "uniform",

@@ -251,7 +251,8 @@ def test_generic_images_are_read_from_engine_images():
                 continue
             for image in (r.trainer_image, r.sampler_image):
                 assert image in table | registry_only, (r.name, image)
-            if r.hardware[0] == "cuda" and r.rl_model_recipe != "kimi_k31":
+            # recipes with ROCm samplers (kimi_k31, deepseek_v41) take the ROCm sampler image
+            if r.hardware[0] == "cuda" and not str(getattr(r, "sampler_hardware", "") or "").startswith("rocm"):
                 assert r.sampler_image == row("cuda", "sampler", r.sampler).ref, r.name
                 if r.trainer_image != families.VERL_MEGATRON:
                     assert r.trainer_image == row("cuda", "trainer", r.trainer).ref, r.name

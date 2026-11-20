@@ -2043,6 +2043,24 @@ def run_miles(
             # checks the partial experts' masters, which a LoRA run does not have.
             _require_env(kimi_k31_runtime.ENV_FLAG, "1")
             kimi_k31_runtime.install()
+    elif getattr(args, "rl_model_recipe", "generic") == "deepseek_v41":
+        # AutoBridge cannot read deepseek_v41; Miles trains it through its plugin spec in
+        # raw bridge mode with native LoRA (attention + shared expert), so the island reads
+        # the geometry from config.json (models/deepseek_v41/provider.py) and the state
+        # plugin exports through Miles' native adapter slots (layout learned at first export).
+        from yeto.rl.adapters.miles.models.deepseek_v41 import ports_recipe as deepseek_v41_recipe
+        from yeto.rl.adapters.miles.models.deepseek_v41 import provider as deepseek_v41_view
+
+        if full_parameter or expert_full or clone_only_lora:
+            raise ValueError("the deepseek_v41 recipe trains a plain LoRA adapter only (--tuning lora)")
+        if yeto_policy_sync:
+            raise ValueError("the deepseek_v41 recipe needs --rl-single-island-no-sync (no synced "
+                             "LoRA layout contract yet)")
+        model_bridge = None
+        provider = deepseek_v41_view.deepseek_v41_provider(model_path)
+        attention_specs = specs = ()
+        canonical_targets = list(deepseek_v41_recipe.target_modules(args.lora_targets))
+        native_lora_export = deepseek_v41_recipe.MODEL_TYPE
     else:
         from megatron.bridge import AutoBridge
 
