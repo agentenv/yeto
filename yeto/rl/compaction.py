@@ -624,5 +624,6 @@ def describe(cfg: CompactionConfig) -> str:
     else:
         line += f", summary max_tokens: the turn's, at most {DEFAULT_SUMMARY_MAX_TOKENS}"
     if cfg.max_compactions == 0:
-        line += "; max_compactions 0: the proxy never compacts"
+        line += ("; max_compactions 0: the proxy never compacts, but still ends a trial at context_budget "
+                 "(remove agentic.compaction to turn it off)")
     return line

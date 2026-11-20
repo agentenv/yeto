@@ -746,7 +746,7 @@ before.
 | `context_budget` | required | The context size C in tokens. Must be greater than `t_comp` and at most the engine context length (`engine.server.max_model_len`). |
 | `t_comp` | 10240 | A compaction starts when fewer than `t_comp` tokens of `context_budget` remain before the next model call. Integer >= 1. It must hold the summary turn: its `max_tokens` (`summary_max_tokens`, by default the smaller of `agentic.turn_max_tokens` and 4096) plus the summary request (bounded by one token per byte of the summary prompt plus 64). |
 | `keep_recent_steps` | 2 | How many recent steps (one assistant turn plus its tool results) the next segment keeps word for word. Lowered automatically when the rebuilt context would compact again at once. `0` keeps only the summary. Integer >= 0. |
-| `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` turns compaction off in effect (the dry run says so). Integer >= 0. |
+| `max_compactions` | 3 | Most compactions per trial, so at most `max_compactions + 1` segments. After the last one the trial runs until the context is full and its last segment is truncated. `0` writes no summary, but it is not the same as leaving `agentic.compaction` out: every trial still ends (its one segment truncated) once its context reaches `context_budget`, not the engine's `max_model_len`, and the compaction launch checks still apply (the dry run says so). Remove the section to turn compaction off. Integer >= 0. |
 
 Optional keys: `summary_max_tokens`, `summary_prompt` and `resume_template`
 (the summary turn's length cap, the summary request and the resume message;

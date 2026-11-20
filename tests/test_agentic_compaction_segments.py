@@ -363,6 +363,19 @@ def test_the_context_full_after_the_last_compaction_truncates_only_the_last_segm
     assert cfg.context_budget - 200 < len(trial[-1]["tokens"]) <= cfg.context_budget < 900
 
 
+def test_max_compactions_zero_still_ends_the_trial_at_context_budget(tmp_path, glm):
+    """``max_compactions 0`` writes no summary but is not compaction off: the one
+    segment still ends at ``context_budget``, below the engine's ``max_model_len``."""
+    engine = _engine(glm, max_model_len=900)
+    cfg = _cfg(max_compactions=0)
+    recorder = ProxyTokenRecorder(_proxy(engine, glm, cfg), allow_compaction=True)
+    samples, _ = _round(tmp_path, recorder, engine, Agent(12), n=1)
+    (trial,) = _by_trial(samples).values()
+    assert len(trial) == 1 and trial[0]["status"] == "truncated"
+    assert trial[0]["metadata"]["finish_reason"] == "length"
+    assert cfg.context_budget - 200 < len(trial[0]["tokens"]) <= cfg.context_budget < 900
+
+
 def test_no_room_for_the_summary_request_ends_the_trial_truncated_even_with_one_segment(tmp_path, glm):
     """The third request triggers compaction (stream ~444 > budget 350), but the
     summary request does not fit max_model_len 420, not even with the newest tool

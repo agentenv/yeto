@@ -56,7 +56,7 @@ def test_every_key_reaches_the_config():
                                     "max_compactions": 0}, max_model_len=262144))
     assert (cfg.context_budget, cfg.t_comp, cfg.keep_recent_steps, cfg.max_compactions) == (262144, 10240, 0, 0)
     assert "context_budget 262144" in C.describe(cfg) and "at most 1 segments" in C.describe(cfg)
-    assert "max_compactions 0: the proxy never compacts" in C.describe(cfg)
+    assert "max_compactions 0: the proxy never compacts, but still ends a trial at context_budget" in C.describe(cfg)
 
 
 def test_max_turns_is_no_spec_key():
