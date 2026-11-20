@@ -162,6 +162,26 @@ DEEPSEEK_V4_FLASH = FamilyEntry(
     ),
 )
 
+DEEPSEEK_V41_FLASH = FamilyEntry(
+    "deepseek_v41", ("DeepseekV41ForCausalLM",), ("deepseek_v41",),
+    (
+        _r("deepseek_v41/cuda-trainer/miles", ["cuda"], "miles", "vllm", "deepseek_v41", ["lora"], (0, INF),
+           MILES_K31, VLLM_ROCM, Q_CUDA, "inferred",
+           "Miles f61eb35d scripts/run_deepseek_v4_1.py --train-mode lora (native LoRA registry deepseek_v41)",
+           sampler_hardware="rocm:gfx950",
+           pitfalls=("LoRA only: attention (+ shared expert with --lora-targets all-linear); routed experts, "
+                     "router, compressor, indexer and engram stay frozen",
+                     "the trainer loads a BF16 HF checkpoint (--hf-checkpoint = --ref-load); cast the "
+                     "FP8/FP4 release once",
+                     "TP8 needs --make-vocab-size-divisible-by 32 (the recipe emits it)",
+                     "B300/GB300: NCCL_CUMEM_ENABLE=1 or the cross-node EP all-to-all fails",
+                     "AutoBridge cannot read deepseek_v41: the provider view is models/deepseek_v41/provider.py")),
+        _unsupported("deepseek_v41/ascend", ["ascend"], (0, INF),
+                     "the deepseek_v41 recipe is a Miles recipe and Miles has no NPU path",
+                     "NVIDIA: miles trainer (deepseek_v41/cuda-trainer/miles)"),
+    ),
+)
+
 GLM5_NEXT = FamilyEntry(
     "glm5_next", (), ("glm5_next", "glm5_next_text"),
     (
@@ -230,7 +250,7 @@ GENERIC_MOE = FamilyEntry(
 )
 
 FAMILIES: tuple[FamilyEntry, ...] = (
-    QWEN3_DENSE, QWEN3_MOE, LLAMA3, MISTRAL_GEMMA, DEEPSEEK_V3, DEEPSEEK_V4_FLASH, GLM5_NEXT,
-    KIMI_K31, NEMOTRON_H,
+    QWEN3_DENSE, QWEN3_MOE, LLAMA3, MISTRAL_GEMMA, DEEPSEEK_V3, DEEPSEEK_V4_FLASH, DEEPSEEK_V41_FLASH,
+    GLM5_NEXT, KIMI_K31, NEMOTRON_H,
 )
 ALL_ENTRIES: tuple[FamilyEntry, ...] = FAMILIES + (GENERIC_DENSE, GENERIC_MOE)

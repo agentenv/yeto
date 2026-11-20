@@ -44,10 +44,11 @@ _MODE = (
     ),
     shared_flag(
         "--rl-model-recipe",
-        choices=["generic", "deepseek-v4-flash", "glm5_next", "kimi_k31"],
+        choices=["generic", "deepseek-v4-flash", "deepseek_v41", "glm5_next", "kimi_k31"],
         default="generic",
         help="model-specific Miles memory/kernel contract (kimi_k31: Kimi-K3.1 partial "
-        "experts, needs --rl-expert-selection)",
+        "experts, needs --rl-expert-selection; deepseek_v41: DeepSeek-V4.1-Flash LoRA on "
+        "attention / shared expert over a BF16 HF checkpoint)",
     ),
     shared_flag(
         "--rl-transformer-impl",

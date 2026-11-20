@@ -19,7 +19,7 @@ from yeto.rl.adapters.miles.models.partial_experts.selection import ExpertSelect
 # Recipe names that export through Miles' own converters (raw) instead of
 # Megatron-Bridge; config.translate_run_config consults this for
 # ``--megatron-to-hf-mode``.
-RAW_HF_MODE_RECIPES = frozenset({"glm5_next", "kimi_k31"})
+RAW_HF_MODE_RECIPES = frozenset({"glm5_next", "kimi_k31", "deepseek_v41"})
 
 
 def uses_raw_hf_mode(recipe_name: str) -> bool:

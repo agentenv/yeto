@@ -50,6 +50,11 @@ RECIPE_NEMOTRON_H = "nemotron_h"
 # Miles plugin spec; 128 experts per MoE layer trained in place from an
 # expert_selection.json (adapters/miles/models/kimi_k31), raw bridge mode.
 RECIPE_KIMI_K31 = "kimi_k31"
+# DeepSeek-V4.1-Flash (deepseek_v41): CSA/DSA MLA + mHC + 384-expert MoE through the
+# Miles plugin spec (adapters/miles/models/deepseek_v41), raw bridge mode, native
+# LoRA on attention (+ shared expert) over a BF16 HF checkpoint; LoRA only.
+RECIPE_DEEPSEEK_V41 = "deepseek_v41"
+DEEPSEEK_V41_LORA_TARGETS = ("attention", "auto", "all-linear")
 TRANSFORMER_IMPLS = ("transformer_engine", "local")
 GATED_DELTA_NET = "gated_delta_net"
 
@@ -815,8 +820,9 @@ def resolve_rl_run_config(
     recipe = getattr(args, "rl_model_recipe", RECIPE_GENERIC)
     # the native Flash-Next plugin and the Kimi-K3.1 plugin (shared-outer expert LoRA)
     # shard routed-expert LoRA by EP themselves
-    if (fn_variant is None and recipe != RECIPE_KIMI_K31 and is_moe and expert_parallel > 1
-            and args.lora_targets == "all-linear"):
+    # (deepseek_v41 all-linear = attention + the replicated shared expert, routed experts excluded)
+    if (fn_variant is None and recipe not in (RECIPE_KIMI_K31, RECIPE_DEEPSEEK_V41) and is_moe
+            and expert_parallel > 1 and args.lora_targets == "all-linear"):
         raise ValueError(
             "EP>1 requires replicated attention LoRA, not expert-sharded all-linear LoRA"
         )
@@ -979,6 +985,17 @@ def resolve_rl_run_config(
             raise ValueError("the kimi_k31 recipe needs the Kimi-K3.1 MoE/MLA provider view")
         # Megatron picks the backend (Miles scripts/run_kimi_k3.py passes none)
         recipe_name, attention_backend = RECIPE_KIMI_K31, "auto"
+    elif recipe == RECIPE_DEEPSEEK_V41:
+        if parameter_mode != "lora":
+            raise ValueError("the deepseek_v41 recipe is LoRA-only (--tuning lora)")
+        if args.lora_targets not in DEEPSEEK_V41_LORA_TARGETS:
+            raise ValueError(
+                f"the deepseek_v41 recipe takes --lora-targets {'/'.join(DEEPSEEK_V41_LORA_TARGETS)} "
+                "(attention, or attention + shared expert); routed experts stay frozen")
+        if not is_moe or not multi_latent_attention:
+            raise ValueError("the deepseek_v41 recipe needs the DeepSeek-V4.1 MoE/MLA provider view")
+        # Megatron picks the backend (Miles' V4.1 bridge sets AttnBackend.auto)
+        recipe_name, attention_backend = RECIPE_DEEPSEEK_V41, "auto"
     elif fn_variant is not None:
         if parameter_mode != "lora":
             raise ValueError("the Qwen3.8-Flash-Next recipe is LoRA-only")

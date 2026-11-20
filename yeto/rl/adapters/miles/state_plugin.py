@@ -552,12 +552,16 @@ def is_native_flash_next(actor: Any) -> bool:
     return ext_attr(getattr(actor, "args", None), "rl_native_lora_export", None) == "qwen3_8_next"
 
 
+# recipes whose LoRA lives in Miles' native adapter slots (raw bridge mode)
+NATIVE_SLOTS_EXPORTS = frozenset({"kimi_k31", "deepseek_v41"})
+
+
 def is_native_slots(actor: Any) -> bool:
     """Kimi-K3.1 LoRA trains in Miles' raw bridge mode: its adapter is read and written
     through Miles' adapter slots (:mod:`.native_slots_state`), not Bridge conversion
     tasks. The learner marks the run (``yeto_rl_native_lora_export = "kimi_k31"``)."""
 
-    return ext_attr(getattr(actor, "args", None), "rl_native_lora_export", None) == "kimi_k31"
+    return ext_attr(getattr(actor, "args", None), "rl_native_lora_export", None) in NATIVE_SLOTS_EXPORTS
 
 
 def _export_native_slots(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
