@@ -383,9 +383,12 @@ class EventTape:
 
 # fleet-dashboard 1.3: rollout batch summary keys copied into rl_round_trained.
 BATCH_SUMMARY_KEYS = (
-    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "resp_full_len_mean", "truncated_frac",
+    "adv_mean", "adv_std", "resp_len_mean", "resp_len_p95", "truncated_frac",
     "reward_p10", "reward_p50", "reward_p90",
 )
+# Copied only when the summary has it (keeps the field set of older summaries):
+# whole response length incl. tool / env tokens; resp_len_* count loss-mask tokens.
+BATCH_SUMMARY_OPTIONAL_KEYS = ("resp_full_len_mean",)
 
 
 def _round_metrics(batch: RolloutBatchHandle) -> dict[str, float]:
@@ -1747,6 +1750,9 @@ class IslandDriver:
         summary = getattr(batch, "batch_summary", None) or {}
         for key in BATCH_SUMMARY_KEYS:
             fields[key] = summary.get(key)
+        for key in BATCH_SUMMARY_OPTIONAL_KEYS:
+            if summary.get(key) is not None:
+                fields[key] = summary[key]
         by_bucket = getattr(batch, "batch_summary_by_bucket", None)
         if by_bucket:  # rl-eval-difficulty-buckets 4.1; absent = old field set
             fields["batch_summary_by_bucket"] = {str(b): dict(v) for b, v in by_bucket.items()}
@@ -1769,7 +1775,8 @@ class IslandDriver:
             fields["grad_norm"] = float(grad_norm)
         # The PPO KL of a buffer step is 0 by construction (one optimizer step on
         # the batch's own old logprobs); its policy drift is the train-vs-rollout
-        # KL, which the dashboard's KL panel reads first as ``mean_kl``.
+        # KL, written as ``mean_kl``. The dashboard reads train_rollout_kl and
+        # ppo_kl from train_metrics and shows them apart (train-rollout KL / PPO KL).
         kl = train_metrics.get("train_rollout_kl")
         if isinstance(kl, (int, float)) and math.isfinite(kl):
             fields["mean_kl"] = float(kl)
