@@ -84,7 +84,7 @@ AgentENV microVMs (``"provider": "agentenv"``, or ``task_defaults.provider``
     }
 
 Steps: ``layout``, ``harbor`` (plus the pinned ``e2b`` SDK), ``records_secret``,
-``tasks``, ``agentenv_key`` (the key file to ``<root>/home/agentenv.key``, 0600;
+``tasks``, ``agentenv_key`` (the key file ``agentenv.key`` under ``<root>/home``, 0600;
 the container reads it through ``AGENTENV_API_KEY_FILE``, so the key is in no env
 file and no dry-run line). The microVMs deny private egress: the records proxy
 must be reached over a public HTTPS base; a missing or placeholder
