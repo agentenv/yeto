@@ -306,6 +306,8 @@ _NON_RL_LITERALS = frozenset({
     "--agentic-env", "--disable-pip-version-check", "--endpoint-url", "--env-file", "--label",
     "--no-same-owner", "--only-show-errors", "--r2-env-file", "--restart", "--retry", "--strip-components",
     "--target", "--upgrade", "--version", "--events", "--max-backoff-s", "--retry-s", "--settle-s",
+    # the records relay's systemd unit probe (systemctl show --value, journalctl --no-pager)
+    "--value", "--no-pager",
     # the partial-expert selection tool named in k31_checks.py's hint
     "--ep-size", "--input", "--num-trainable", "--validate",
     # remote samplers (daytona_sampler.py, nc/ssh_sampler.py, nc/tasks.py, nc/modal_provider.py):
