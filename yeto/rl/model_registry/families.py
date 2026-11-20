@@ -34,7 +34,7 @@ VLLM_ROCM = _generic("rocm", "sampler", "vllm")
 # Registry-only images (engine_images has no row for them): the K3.1 forms, the verl
 # Megatron engine variant, and the unverified CANN base (engine_images' ascend rows
 # carry no pinned ref; the registry names it with an "unverified" pitfall).
-MILES_K31_FULL = f"{MILES_PINS}:MILES_K31_FULL_IMAGE"
+MILES_K31_FULL = f"{MILES_PINS}:MILES_K31_NEXT9_IMAGE"
 MILES_K31 = f"{MILES_PINS}:MILES_K31_IMAGE"
 VERL_MEGATRON = f"{VERL_PINS}:VERL_MEGATRON_IMAGE"
 VERL_NPU = f"{VERL_PINS}:VERL_NPU_BASE_IMAGE"

@@ -300,11 +300,12 @@ def test_overlay_safe_digests_map_a_rejected_image_to_its_repack_of_the_same_com
         assert len(broken) == len(fixed) == 64 and broken != fixed
         assert pins.IMAGE_MILES_COMMITS[fixed] == pins.IMAGE_MILES_COMMITS[broken]
     # the mapping holds the legacy pair (the former full image and its repack); the
-    # current full image's overlay-safe repack follows the trainer image rebuild
+    # full-image default (next9) is overlay-safe as built
     legacy, safe = "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b", \
         pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
     assert pins.OVERLAY_SAFE_DIGESTS == {legacy: safe.rpartition("@sha256:")[2]}
-    assert pins.overlay_safe_image(pins.MILES_K31_FULL_IMAGE) is None  # repack pending
+    assert pins.overlay_safe_image(pins.MILES_K31_FULL_IMAGE) is None  # no repack
+    assert pins.overlay_safe_image(pins.MILES_K31_NEXT9_IMAGE) is None  # nothing to repack
     # the registry part of the reference is kept; a docker: prefix too
     mirror = "registry.example/org/yeto-miles-k31@sha256:" + legacy
     assert pins.overlay_safe_image(mirror) == "registry.example/org/yeto-miles-k31@sha256:" \

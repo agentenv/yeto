@@ -26,6 +26,32 @@ def test_next9_image_runs_its_own_miles_commit():
     assert pins.overlay_safe_image(ref) is None
 
 
+def test_next9_is_the_k31_full_trainer_default():
+    assert pins.MILES_K31_NEXT9_IMAGE == (
+        f"docker:ghcr.io/agentenv/yeto-miles-k31@sha256:{NEXT9_DIGEST}")
+    assert pins.default_rl_image(recipe="kimi_k31", tuning="full") == pins.MILES_K31_NEXT9_IMAGE
+    assert pins.image_miles_commit(pins.MILES_K31_NEXT9_IMAGE) == pins.MILES_K31_NEXT9_COMMIT
+    # next9 was measured on the full-parameter form only: LoRA and the other recipes keep theirs
+    assert pins.default_rl_image(recipe="kimi_k31", tuning="lora") == pins.MILES_K31_IMAGE
+    assert pins.default_rl_image() == pins.MILES_NEXT_IMAGE
+    # the previous full default stays pinned for runs that name it
+    assert pins.image_miles_commit(pins.MILES_K31_FULL_IMAGE) == pins.MILES_K31_FULL_E_COMMIT
+
+
+def test_omitted_rl_image_resolves_to_next9_for_k31_full():
+    from yeto.launch.rl_backend import resolve_default_rl_image
+
+    args = types.SimpleNamespace(training_mode="rl", rl_backend=None, rl_image=None,
+                                 rl_model_recipe="kimi_k31", tuning="full")
+    resolve_default_rl_image(args)
+    assert args.rl_image == pins.MILES_K31_NEXT9_IMAGE
+    explicit = "docker:registry.example/yeto-miles-k31@sha256:" + "0" * 64
+    args = types.SimpleNamespace(training_mode="rl", rl_backend=None, rl_image=explicit,
+                                 rl_model_recipe="kimi_k31", tuning="full")
+    resolve_default_rl_image(args)
+    assert args.rl_image == explicit
+
+
 def test_requirements_from_env():
     req = cp.requirements_from_env({})
     assert req == cp.Requirements()

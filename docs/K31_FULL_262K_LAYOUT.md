@@ -98,11 +98,15 @@ moves the pressure to stage 1 and is not recommended.
 Use the full-parameter default image:
 
 ```
-docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325
+docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225
 ```
 
-It carries Miles `k31/integ-trainer` `aa6b6ff5f7`, which contains every Miles
-change this layout depends on:
+It carries Miles `k31/integ-next9` `f61eb35d`: `k31/integ-trainer` (its commit
+before the fork's author-metadata rewrite, `1f29e43043`) plus the trainer MFU
+work behind switches that default off
+([KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section 9.1.1). It
+contains every Miles change this layout depends on (hashes below are the
+rewritten ones; the same changes are in `1f29e43043`):
 
 | Miles change | Purpose | Setting |
 |---|---|---|
@@ -112,8 +116,9 @@ change this layout depends on:
 | Finite score-centering loss at head mass >= 1 (`2c2a3db06d`) | Keeps loss and gradients finite | built in |
 
 The 524k measurement ran with these same Miles changes applied on an earlier
-base image. The full-parameter image above is the one this repository pins
-and the one the validated Modal end-to-end run used.
+base image. The validated Modal end-to-end run used the previous full image
+`yeto-miles-k31@sha256:fa70fe28...` (Miles `aa6b6ff5f7`), which stays pinned
+for runs that name it.
 
 ### 5.2 yeto
 
@@ -144,7 +149,7 @@ SEQ=262144; CP=2; MTPG=$((SEQ / CP))   # 524k: SEQ=524288, split 32/28/33 (appen
 
 yeto launch --training-mode rl \
   --gpu modal:6x8xb300 --cluster-prefix <run-name> \
-  --rl-image "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325" \
+  --rl-image "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225" \
   --model moonshotai/Kimi-K3.1-Pro --model-revision <revision> \
   --modal-model-volume <weights-volume> \
   --data <prompt-dataset> --data-revision <revision> \

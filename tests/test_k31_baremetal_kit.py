@@ -75,8 +75,17 @@ def test_inventory_image_is_the_trainer_image_of_the_run_config():
     image = _flag(_argv(), "--rl-image").removeprefix("docker:")
     nodes = load_inventory(INVENTORY)
     assert {n.image for n in nodes} <= {None, image}  # the run's --rl-image decides
-    # the overlay-safe repack: run_image keeps it as it is
+    # the overlay-safe next9 image: run_image keeps it as it is
     assert run_image(SimpleNamespace(rl_image=f"docker:{image}"), nodes) == image
+
+
+@pytest.mark.parametrize("run", [RUN, K31 / "run.agentic-262k.json"], ids=lambda p: p.name)
+def test_both_262k_kits_pin_the_k31_full_trainer_default(run):
+    from yeto.rl.adapters.miles import pins
+
+    argv = [str(a) for a in json.loads(run.read_text())["trainer"]["argv"]]
+    assert _flag(argv, "--rl-image") == pins.default_rl_image(recipe="kimi_k31", tuning="full") \
+        == pins.MILES_K31_NEXT9_IMAGE
 
 
 def test_nodes_keep_the_run_data_on_scratch_and_get_the_code_from_the_store():

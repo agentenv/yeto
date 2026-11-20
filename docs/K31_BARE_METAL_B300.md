@@ -44,7 +44,7 @@ are filled (`tests/test_k31_baremetal_kit.py` runs this check).
 | Resident trainer island (a trainer-only launch supervised by the fleet: relaunch, reattach, teardown per node) | In this repository, unit-tested |
 | Inventory, Docker flag checks, image pre-pull, per-node environment, node scratch, object-store staging, code pack on the nodes | In this repository, unit-tested |
 | Cluster check (`yeto preflight`) | In this repository, unit-tested against recorded tool output |
-| Overlay-safe trainer image | `yeto-miles-k31@sha256:2abbbb00...` (section 5), pulled and run on overlay2 and on the containerd snapshotter (Docker 29.9 / 29.10) |
+| Overlay-safe trainer image | `yeto-miles-k31@sha256:3a0c5445...` (next9, the `--tuning full` default; section 5); the overlay-safe base was pulled and run on overlay2 and on the containerd snapshotter (Docker 29.9 / 29.10) |
 
 Each bring-up step lists what it must establish and the command that checks
 it.
@@ -207,18 +207,24 @@ python -c "from yeto.launch.node_inventory import load_inventory as l; print(len
 
 ### 5.1 Use the overlay-safe image
 
-Use the full-parameter K3.1 trainer image with its overlay layer repacked:
+Use the full-parameter K3.1 trainer default, next9:
 
 ```
-ghcr.io/agentenv/yeto-miles-k31@sha256:2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14
+ghcr.io/agentenv/yeto-miles-k31@sha256:3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225
 ```
 
-Put it in `--rl-image docker:<ref>` of the run config. It holds the same
-files and the same Miles commit (`1f29e43043`) as the former Modal default
-`2de5d796...`; only one layer is packed differently. An SSH trainer island
-given `2de5d796...` (by `--rl-image` or by the inventory) runs this repack
-instead and says so on stderr. The overlay-safe repack of the current full
-image (`fa70fe28...`, Miles `aa6b6ff5`) follows the trainer image rebuild.
+Put it in `--rl-image docker:<ref>` of the run config (it is also what an
+omitted `--rl-image` resolves to for `--rl-model-recipe kimi_k31 --tuning
+full`). It carries Miles `f61eb35d` (the trainer MFU work behind switches that
+default off; [KIMI_K31_ASYNC_RL_GUIDE.md](KIMI_K31_ASYNC_RL_GUIDE.md) section
+9.1.1) on the overlay-safe base, so no repack is needed.
+
+The repack of the former Modal default `2de5d796...`,
+`yeto-miles-k31@sha256:2abbbb00...`, holds the same files and the same Miles
+commit (`1f29e43043`) as that image; only one layer is packed differently. An
+SSH trainer island given `2de5d796...` (by `--rl-image` or by the inventory)
+runs this repack instead and says so on stderr. The previous full default
+`fa70fe28...` (Miles `aa6b6ff5`) has no overlay-safe repack.
 
 Why: the earlier build of the image
 (`ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796...`) has one layer that

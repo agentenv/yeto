@@ -9,8 +9,8 @@
 #     print(len(load_inventory('inventory.b300-6x8-baremetal.yaml')))"
 # The trainer dry run (yeto launch ... --dry-run) validates it again.
 #
-# Every node runs one trainer container: the run's --rl-image (overlay-safe
-# repack of the full-parameter K3.1 image; an inventory `images:` entry is
+# Every node runs one trainer container: the run's --rl-image (the overlay-safe
+# next9 full-parameter K3.1 image; an inventory `images:` entry is
 # optional and must name the same image), the node's docker_args (GPUs, verbs
 # devices, unlimited memlock), its scratch, mounts and env. Node 0 is the Ray
 # head and the rendezvous address (its `address`). The yeto code reaches the

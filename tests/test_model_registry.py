@@ -99,7 +99,7 @@ def test_kimi_k31_sizes_to_the_delivered_six_b300_nodes():
     t = rec.trainer_parallel
     assert rec.supported and rec.hardware.card == "B300"
     assert (t["nodes"], t["expert_parallel"], t["tuning"]) == (6, 8, "full")
-    assert rec.recipe.trainer_image.endswith(":MILES_K31_FULL_IMAGE")
+    assert rec.recipe.trainer_image.endswith(":MILES_K31_NEXT9_IMAGE")
     assert rec.recipe.sampler_image.endswith(":VLLM_SAMPLER_IMAGE_ROCM")
     assert rec.sampler_parallel["card"] == "MI355X" and rec.sampler_parallel["nodes"] == 1
     assert "--rl-expert-selection" in rec.to_cli_flags()

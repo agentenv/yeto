@@ -95,8 +95,9 @@ export YETO_IMAGE_REGISTRY=<registry>/<org>   # a mirror holding the same digest
 | Image | Used by |
 |---|---|
 | `yeto-miles-k31@sha256:028e505d…` | RL trainer default (Kimi-K3.1 LoRA and other recipes) |
-| `yeto-miles-k31@sha256:fa70fe28…` | Kimi-K3.1 `--tuning full` trainer default |
-| `yeto-miles-k31@sha256:2abbbb00…` | the former full trainer image `2de5d796…` with one layer repacked for overlay stores (bare-metal ssh nodes: the containerd snapshotter (Docker 29's default) and the overlay2 graphdriver with native diff reject it with `not a directory`); the repack of `fa70fe28…` follows the trainer image rebuild |
+| `yeto-miles-k31@sha256:3a0c5445…` | Kimi-K3.1 `--tuning full` trainer default (next9: Miles `f61eb35d`, the MFU work behind env switches that default off; overlay-safe, so it also runs on bare-metal ssh nodes as it is) |
+| `yeto-miles-k31@sha256:fa70fe28…` | the previous Kimi-K3.1 `--tuning full` default (Miles `aa6b6ff5`), kept for runs pinned to it |
+| `yeto-miles-k31@sha256:2abbbb00…` | the former full trainer image `2de5d796…` with one layer repacked for overlay stores (bare-metal ssh nodes: the containerd snapshotter (Docker 29's default) and the overlay2 graphdriver with native diff reject it with `not a directory`) |
 | `vllm-openai-rocm@sha256:5f47cc10…` | Kimi-K3.1 A-card vLLM sampler |
 
 `--rl-image docker:<repository>@sha256:<digest>` replaces the image of one
