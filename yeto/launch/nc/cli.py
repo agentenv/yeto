@@ -1135,7 +1135,7 @@ def agentic_setup_cmd(args) -> int:
     lease = load_lease(args.ticket)
     alias = node_pool.host_alias(lease.ticket)
     node = agentic_setup.SshNode(alias, args.image, ssh_sampler.NVME, ssh_sampler.upload_code(alias),
-                                 ssh_sampler.PYTHON, lease.user, prelude=ssh_sampler.SSH_HOME_LINK)
+                                 ssh_sampler.python_for(args.image), lease.user, prelude=ssh_sampler.SSH_HOME_LINK)
     if args.tunnel_events:
         for event in agentic_setup.tunnel_events(node, setup)[0]:
             print(json.dumps(event, sort_keys=True))

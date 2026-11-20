@@ -81,3 +81,17 @@ def test_chat_renderer_uses_the_checkpoint_encoder_without_a_chat_template(tmp_p
     assert chat_renderer(tmp_path)("hi") == "<bos><user>hi<assistant><think>"
     chat = chat_renderer(tmp_path, template_kwargs={"thinking_mode": "chat"})
     assert chat([{"role": "user", "content": "a"}]) == "<bos><user>a<assistant></think>"
+
+
+def test_nc_launcher_picks_the_interpreter_and_mounts_the_ds41_model():
+    from yeto.launch.nc import ssh_sampler
+
+    ds41 = ("vllm/vllm-openai-rocm:nightly-e68efc685ab1e6f1eda004ced7157e3ca411da2f@sha256:"
+            "520e098f54ec96837228aaddea0a833cbf6374dbdffd480c1d65f26ffab7701b")
+    assert ssh_sampler.python_for(ds41) == "/usr/bin/python3"
+    assert ssh_sampler.python_for(ssh_sampler.IMAGE) == ssh_sampler.PYTHON == "/opt/runtime-venv/bin/python3"
+    assert ssh_sampler.python_for(None) == ssh_sampler.PYTHON
+    assert "exec /usr/bin/python3 -m yeto.rl.engine.engine_sampler" in ssh_sampler.sampler_command(
+        "/work/sampler/s.json", python="/usr/bin/python3")[-1]
+    assert ssh_sampler.MOUNTS["/mnt/nvme/models/DeepSeek-V4.1-Flash"] == "/models/deepseek-v4.1-flash"
+    assert ssh_sampler.MOUNTS[ssh_sampler.MODEL_HOST] == "/models/kimi-k3.1-pro"  # K3.1 unchanged

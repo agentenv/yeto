@@ -34,11 +34,23 @@ NVME = "/mnt/nvme"
 # the pinned digest of the verified K3.1 ROCm vLLM image (not its moving tag)
 IMAGE = VLLM_SAMPLER_IMAGE_ROCM.removeprefix("docker:")
 PYTHON = "/opt/runtime-venv/bin/python3"
+# The server interpreter of other pinned images: the DeepSeek-V4.1 recipe image (vLLM ROCm
+# nightly e68efc685, the AgentX MI355X row) has no /opt/runtime-venv; vLLM and the sampler's
+# pure-Python dependencies (boto3, zstandard, httpx) are in the system python3.
+SYSTEM_PYTHON = "/usr/bin/python3"
+DS41_IMAGE_COMMIT = "e68efc685ab1e6f1eda004ced7157e3ca411da2f"
+
+
+def python_for(image: str | None) -> str:
+    """The sampler's interpreter inside ``image``: the K3.1 image's runtime venv, the
+    system python3 of the DeepSeek-V4.1 recipe image."""
+    return SYSTEM_PYTHON if image and DS41_IMAGE_COMMIT in image else PYTHON
 ROCM_DOCKER_ARGS = ("--device", "/dev/kfd", "--device", "/dev/dri", "--group-add", "video",
                     "--security-opt", "seccomp=unconfined", "--cap-add", "SYS_PTRACE",
                     "--ulimit", "memlock=-1", "--shm-size", "64g")
 MODEL_HOST = f"{NVME}/models/Kimi-K3.1-Pro"
-MOUNTS = {MODEL_HOST: "/models/kimi-k3.1-pro", f"{NVME}/work": "/work", f"{NVME}/cache/vllm": "/root/.cache"}
+MOUNTS = {MODEL_HOST: "/models/kimi-k3.1-pro", f"{NVME}/models/DeepSeek-V4.1-Flash": "/models/deepseek-v4.1-flash",
+          f"{NVME}/work": "/work", f"{NVME}/cache/vllm": "/root/.cache"}
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -133,13 +145,13 @@ SSH_HOME_LINK = ('P="$(getent passwd "$(id -u)" | cut -d: -f6)"; '
                  'ln -s "$HOME/.ssh" "$P/.ssh"; fi; ')
 
 
-def sampler_command(spec_in_container: str) -> list[str]:
+def sampler_command(spec_in_container: str, *, python: str = PYTHON) -> list[str]:
     # bucket and endpoint are only known inside (env file); the URI is built there
     return ["bash", "-c",
             (SSH_HOME_LINK +
              'export YETO_RL_STORE_S3_URI="s3://${R2_BUCKET}/runs/${YETO_NC_RUN_PREFIX}" '
              'YETO_RL_STORE_S3_ENDPOINT_URL="$AWS_ENDPOINT_URL"; '
-             f"exec {PYTHON} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_in_container)}")]
+             f"exec {python} -m yeto.rl.engine.engine_sampler --spec {shlex.quote(spec_in_container)}")]
 
 
 PREFLIGHT_PY = r"""
@@ -158,14 +170,14 @@ print("YETO_NC_PREFLIGHT_OK", json.dumps({"sampler_id": spec["sampler_id"], "ada
 """
 
 
-def probe_command(spec_in_container: str | None) -> list[str]:
+def probe_command(spec_in_container: str | None, *, python: str = PYTHON) -> list[str]:
     """``vllm --version`` + ``rocm-smi`` + (with a spec) the sampler's spec/import/store
     checks against a scratch local store; no engine start, no object store."""
     script = ("set -u; echo YETO_NC_VLLM $(vllm --version 2>/dev/null | tail -1); "
               "rocm-smi --showproductname 2>&1 | grep -E 'GPU\\[' | head -16; "
               "echo YETO_NC_GPUS $(rocm-smi --showproductname 2>/dev/null | grep -c 'Card Series')")
     if spec_in_container:
-        script += (f"; cd /tmp && PYTHONPATH=/yeto {PYTHON} -c {shlex.quote(PREFLIGHT_PY)} "
+        script += (f"; cd /tmp && PYTHONPATH=/yeto {python} -c {shlex.quote(PREFLIGHT_PY)} "
                    f"{shlex.quote(spec_in_container)} /work/dry-preflight")
     return ["bash", "-c", script]
 
@@ -248,12 +260,12 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     # with --network host the host name is the node's, which NC nodes need not keep distinct
     env["YETO_RL_RELEASE_SPREAD_KEY"] = f"{prefix}/{shard}"
     if setup is not None:
-        target = agentic_setup.SshNode(alias, node.image or IMAGE, NVME, yeto_dir, PYTHON, lease.user,
+        target = agentic_setup.SshNode(alias, node.image or IMAGE, NVME, yeto_dir, python_for(image), lease.user,
                                        prelude=SSH_HOME_LINK, run=run)
         agentic_setup.Provisioner(setup, target, emit=emit or _print_event, store_env_file=env_on_node).run()
         setup_env = state_dir / f"{shard}.agentic-setup.env"
         setup_env.write_text("".join(f"{k}={v}\n" for k, v in sorted(
-            setup.container_env(python_bin=str(Path(PYTHON).parent)).items())))
+            setup.container_env(python_bin=str(Path(python_for(image)).parent)).items())))
         extra.append(f"{NVME}/work/sampler/{shard}.agentic-setup.env")
         upload_file(alias, setup_env, extra[-1], mode="600", run=run)
         env["PYTHONPATH"] = setup.python_path()
@@ -261,7 +273,7 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
         extra.append(f"{NVME}/work/sampler/{shard}.agentic.env")  # after the setup's: the operator's file wins
         upload_file(alias, agentic_env_file, extra[-1], mode="600", run=run)
     name = container_name(shard)
-    argv = docker_run_argv(node, name=name, command=sampler_command(f"/work/sampler/{shard}.json"),
+    argv = docker_run_argv(node, name=name, command=sampler_command(f"/work/sampler/{shard}.json", python=python_for(image)),
                            env=env, yeto_dir=yeto_dir, env_file=env_on_node,
                            detach=True, extra_env_files=extra)
     out = ssh(alias, f"sudo docker rm -f {name} >/dev/null 2>&1; {shlex.join(argv)}", run=run, timeout=900)
@@ -310,7 +322,7 @@ def probe(lease: NodeLease, *, spec: Mapping[str, Any] | None, state_dir: Path, 
         local.write_text(json.dumps(spec, indent=1))
         upload_file(alias, local, f"{NVME}/work/sampler/probe.json", mode="644", run=run)
         spec_path = "/work/sampler/probe.json"
-    argv = docker_run_argv(node, name="yeto-nc-probe", command=probe_command(spec_path), env={},
+    argv = docker_run_argv(node, name="yeto-nc-probe", command=probe_command(spec_path, python=python_for(image)), env={},
                            yeto_dir=yeto_dir, env_file=None, detach=False,
                            mounts={f"{NVME}/work": "/work"})
     out = ssh(alias, shlex.join(argv), run=run, timeout=900)
