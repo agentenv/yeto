@@ -379,7 +379,7 @@ def test_parsers_follow_the_thinking_switch():
         assert parse(text)["reasoning_content"] == text.strip("\n")  # thinking on: still inside the block
     assert {n: s.thinking_kwarg for n, s in TEMPLATES.items()} == {
         "glm5": "enable_thinking", "qwen3": None, "qwen3_2507": None, "qwen38": "enable_thinking",
-        "kimi_k31": "thinking", "nemotron3": "enable_thinking"}
+        "kimi_k31": "thinking", "nemotron3": "enable_thinking", "deepseek_v41": "thinking"}
 
 
 @needs_k31
