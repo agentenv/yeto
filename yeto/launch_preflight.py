@@ -48,6 +48,10 @@ class PreflightError(ValueError):
     """A preflight check refused the launch (no cloud resource was created)."""
 
 
+class NoProcFilesystem(PreflightError):
+    """The launcher host has no /proc (macOS, BSD): the thread count cannot be read."""
+
+
 # ---------------------------------------------------------------------------
 # thread counting
 # ---------------------------------------------------------------------------
@@ -90,6 +94,8 @@ def count_threads(proc_root: str | os.PathLike[str] = "/proc", uid: int | None =
     A process that ends while it is read is skipped."""
 
     root = Path(proc_root)
+    if not root.is_dir():
+        raise NoProcFilesystem(f"thread preflight: {root} does not exist on this host ({sys.platform})")
     uid = os.getuid() if uid is None else int(uid)
     procs: dict[int, tuple[int, int, str]] = {}  # pid -> (ppid, threads, cmdline)
     try:
@@ -228,7 +234,15 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
         return {"mode": "off", "disabled": True, "relaxed": relaxed}
     counter = counter or count_threads
     started = clock()
-    count = counter()
+    try:
+        count = counter()
+    except NoProcFilesystem as error:
+        # The guard protects a Linux launcher host (its multinode_run.sh thread limit);
+        # a host without /proc (a macOS laptop) has neither the guard nor the reading.
+        print(f"[preflight] thread preflight SKIPPED: {error}; the per-user thread guard it "
+              "protects runs on Linux launcher hosts only", file=out, flush=True)
+        return {"mode": cfg.mode, "skipped": "no /proc on the launcher host", "platform": sys.platform,
+                "relaxed": relaxed}
     readings = [count.total]
     waited = False
     while True:

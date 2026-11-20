@@ -147,6 +147,23 @@ def test_threads_off_skips_and_warns():
     assert "OFF" in out.getvalue() and "RELAXED" in out.getvalue()
 
 
+def test_threads_skip_on_a_launcher_host_without_proc(tmp_path):
+    """The thread count is this (launcher) host's: a macOS control machine has no
+    /proc, so the check skips with a line instead of refusing the launch."""
+    with pytest.raises(lp.NoProcFilesystem, match="does not exist"):
+        REAL_COUNT_THREADS(tmp_path / "no-proc")
+    for mode in ("wait", "error"):
+        out = io.StringIO()
+        rec = lp.thread_preflight(_targs(preflight_threads=mode),
+                                  counter=lambda: REAL_COUNT_THREADS(tmp_path / "no-proc"), out=out,
+                                  sleep=lambda s: pytest.fail("must not wait"))
+        assert rec["skipped"] == "no /proc on the launcher host" and rec["mode"] == mode
+        assert "thread preflight SKIPPED" in out.getvalue() and "Linux launcher hosts only" in out.getvalue()
+    with pytest.raises(lp.PreflightError, match="cannot read"):  # a /proc that exists but fails still refuses
+        lp.thread_preflight(_targs(), counter=lambda: (_ for _ in ()).throw(
+            lp.PreflightError("thread preflight: cannot read /proc: denied")))
+
+
 def test_threads_default_is_on_and_not_relaxed():
     out = io.StringIO()
     rec = lp.thread_preflight(_targs(), counter=_counter([100]), out=out)
