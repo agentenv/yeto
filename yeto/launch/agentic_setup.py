@@ -89,6 +89,34 @@ the container reads it through ``AGENTENV_API_KEY_FILE``, so the key is in no en
 file and no dry-run line). The microVMs deny private egress: the records proxy
 must be reached over a public HTTPS base; a missing or placeholder
 ``records_proxy.public_base`` is a warning in a dry run and a failure at setup.
+
+A sampler node that is reachable on port 22 only (a National Compute node: a
+private address behind a 1:1 NAT whose cloud firewall passes 22 alone) cannot
+serve the records proxy at ``http://<node ip>:<port>``: the microVMs' SYNs never
+arrive and every trial fails with no recorded model call (a silent zero reward).
+``records_relay`` (instead of ``records_proxy``) puts the proxy behind a relay
+host the microVMs reach::
+
+      "records_relay": {"host": "<relay ssh host>",                            # required
+                        "user": "root", "port": 22,
+                        "key": {"path": "<local key; {shard} -> shard index>"} | {"env": ...},  # required
+                        "known_hosts": {"path": ...} | {"env": ...},
+                        "listen_port": <port> | "<lo>-<hi>",                   # required; shard k -> lo + k
+                        "public_host": "<address the microVMs dial>",          # default: host
+                        "bind": "0.0.0.0",
+                        "allow_cidrs": ["<sandbox egress cidr>", ...],         # relay firewall (records-relay)
+                        "settle_s": 5, "ready_timeout_s": 60}
+
+Step ``records_relay``: the key (and known_hosts) under ``<nvme>/records-relay``
+(0700, outside the sampler's ``/work``), and a systemd unit
+``yeto-records-relay.service`` (``Restart=always``) running ``ssh -N
+-o ExitOnForwardFailure=yes -R <bind>:<listen_port>:127.0.0.1:<agentic.proxy.port>``
+to the relay; checked by the unit staying active without a restart for
+``settle_s``. The sampler's ``YETO_RECORDS_PROXY_PUBLIC_BASE`` becomes
+``http://<public_host>:<listen_port>``. The relay host side (sshd ``GatewayPorts
+clientspecified``, the restricted ``authorized_keys`` line of every node key,
+the firewall of the listen ports) is one idempotent command:
+``python -m yeto.launch.nc records-relay --spec <spec>`` (:mod:`yeto.launch.nc.records_relay`).
 """
 
 from __future__ import annotations
@@ -131,12 +159,17 @@ PROVIDERS = (REMOTE_DOCKER, AGENTENV)
 E2B_REQUIREMENT = "e2b==2.64.0"  # the SDK version the AgentENV adapter was verified with
 AGENTENV_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # yeto.rl.harness.harbor.agentenv_client.API_KEY_FILE_ENV
 PLACEHOLDER = re.compile(r"__TODO|<[^>]*>")
+RELAY_UNIT = "yeto-records-relay.service"
+RELAY_UNIT_PATH = f"/etc/systemd/system/{RELAY_UNIT}"
+RELAY_TAG = "yeto-records-relay"  # the authorized_keys comment of every line records-relay writes
 
 _KEYS = {
     "": {"root", "harbor", "docker_cli", "sandbox", "tunnel", "tasks", "records_secret", "provider", "agentenv",
-         "records_proxy"},
+         "records_proxy", "records_relay"},
     "agentenv": {"gateway_url", "sandbox_url", "api_key", "machine_type", "max_sandboxes", "pool"},
     "records_proxy": {"public_base"},
+    "records_relay": {"host", "user", "port", "key", "known_hosts", "listen_port", "public_host", "bind",
+                      "allow_cidrs", "settle_s", "ready_timeout_s"},
     "harbor": {"version", "commit", "keep"},
     "docker_cli": {"version", "compose_version"},
     "sandbox": {"docker_host", "alias", "key", "known_hosts"},
@@ -241,6 +274,81 @@ class TasksSpec:
 
 
 @dataclass(frozen=True)
+class RelaySection:
+    """``agentic.setup.records_relay`` before a shard is picked (the relay side needs
+    every shard's port and key: :mod:`yeto.launch.nc.records_relay`)."""
+
+    host: str
+    user: str
+    port: int
+    key: SecretRef  # a path may hold ``{shard}``
+    known_hosts: SecretRef | None
+    port_lo: int
+    port_hi: int
+    public_host: str
+    bind: str
+    allow_cidrs: tuple[str, ...]
+    settle_s: float
+    ready_timeout_s: float
+
+    @property
+    def ports(self) -> range:
+        return range(self.port_lo, self.port_hi + 1)
+
+    @property
+    def per_shard_key(self) -> bool:
+        return bool(self.key.path and "{shard}" in self.key.path)
+
+    def key_of(self, shard: int) -> SecretRef:
+        return SecretRef(path=self.key.path.replace("{shard}", str(shard))) if self.per_shard_key else self.key
+
+    def for_shard(self, sampler_id: Any, *, target_port: int) -> RelaySpec:
+        if self.port_lo == self.port_hi and not self.per_shard_key:
+            shard = None
+            listen = self.port_lo
+        else:
+            tail = str(sampler_id or "").rpartition("-")[2]
+            if not tail.isdigit():
+                raise ValueError(f"agentic.setup.records_relay: a listen_port range or a {{shard}} key path needs "
+                                 f"a sampler_id ending in -<shard index>, got {sampler_id!r}")
+            shard = int(tail)
+            listen = self.port_lo + shard
+            if listen > self.port_hi:
+                raise ValueError(f"agentic.setup.records_relay.listen_port {self.port_lo}-{self.port_hi} has no "
+                                 f"port for shard {sampler_id!r}: widen it to at least one port per shard")
+        return RelaySpec(host=self.host, user=self.user, port=self.port,
+                         key=self.key_of(shard) if shard is not None else self.key, known_hosts=self.known_hosts,
+                         listen_port=listen, target_port=target_port, public_host=self.public_host, bind=self.bind,
+                         settle_s=self.settle_s, ready_timeout_s=self.ready_timeout_s)
+
+
+@dataclass(frozen=True)
+class RelaySpec:
+    """One sampler node's reverse forward to the records relay."""
+
+    host: str
+    user: str
+    port: int
+    key: SecretRef
+    known_hosts: SecretRef | None
+    listen_port: int
+    target_port: int
+    public_host: str
+    bind: str
+    settle_s: float
+    ready_timeout_s: float
+
+    @property
+    def public_base(self) -> str:
+        host = f"[{self.public_host}]" if ":" in self.public_host else self.public_host
+        return f"http://{host}:{self.listen_port}"
+
+    @property
+    def forward(self) -> str:
+        return f"{self.bind}:{self.listen_port}:127.0.0.1:{self.target_port}"
+
+
+@dataclass(frozen=True)
 class AgentenvSpec:
     """``agentic.setup.agentenv``: the AgentENV gateway the sampler's Harbor trials dial."""
 
@@ -250,7 +358,8 @@ class AgentenvSpec:
     machine_type: str | None
     max_sandboxes: int | None
     pool: bool
-    records_public_base: str | None  # agentic.setup.records_proxy.public_base
+    records_public_base: str | None  # agentic.setup.records_proxy.public_base (or the relay's)
+    relay: RelaySpec | None = None  # agentic.setup.records_relay
 
     @property
     def records_placeholder(self) -> bool:
@@ -297,6 +406,10 @@ class AgenticSetup:
     @property
     def agentenv_key_file(self) -> str:
         return f"{self.home}/agentenv.key"
+
+    @property
+    def relay(self) -> RelaySpec | None:
+        return self.agentenv.relay if self.agentenv is not None else None
 
     def container_env(self, *, python_bin: str = "/opt/runtime-venv/bin") -> dict[str, str]:
         """The sampler container's environment for this setup (an env file ahead of
@@ -431,8 +544,9 @@ def parse(spec: Mapping[str, Any], *, base_dir: str | Path | None = None) -> Age
     provider = _provider(doc, agentic)
     if provider == AGENTENV:
         return _parse_agentenv(doc, root=root, version=version, commit=commit, keep=keep,
-                               cli_version=cli_version, compose=compose, local=local, ref=ref)
-    for key in ("agentenv", "records_proxy"):
+                               cli_version=cli_version, compose=compose, local=local, ref=ref,
+                               spec=spec, agentic=agentic)
+    for key in ("agentenv", "records_proxy", "records_relay"):
         if doc.get(key):
             raise ValueError(f"agentic.setup.{key} is for provider agentenv (agentic.setup.provider is "
                              f"{provider!r})")
@@ -538,7 +652,8 @@ def _url(value: Any, what: str) -> str:
 
 def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: str,
                     keep: tuple[str, ...], cli_version: str, compose: str, local: Callable[[str], str],
-                    ref: Callable[[Any, str], SecretRef]) -> AgenticSetup:
+                    ref: Callable[[Any, str], SecretRef], spec: Mapping[str, Any],
+                    agentic: Mapping[str, Any]) -> AgenticSetup:
     """The ``agentic.setup`` of an AgentENV run: no docker host, no reverse tunnel."""
     for key in ("sandbox", "tunnel", "docker_cli"):
         if doc.get(key):
@@ -558,17 +673,37 @@ def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: 
     if not isinstance(ae.get("pool", False), bool):
         raise ValueError("agentic.setup.agentenv.pool must be true or false")
     public = _section(doc, "records_proxy").get("public_base")
-    spec = AgentenvSpec(gateway_url=gateway, sandbox_url=sandbox_url, api_key=key,
-                        machine_type=str(ae["machine_type"]) if ae.get("machine_type") else None,
-                        max_sandboxes=cap, pool=bool(ae.get("pool", False)),
-                        records_public_base=str(public).strip().rstrip("/") if public else None)
-    if spec.records_placeholder:
+    proxy_port = (agentic.get("proxy") or {}).get("port")
+    relay = None
+    if doc.get("records_relay"):
+        if public:
+            raise ValueError("agentic.setup: give records_proxy.public_base or records_relay, not both (the relay "
+                             "sets the public base)")
+        if not proxy_port:
+            raise ValueError("agentic.setup.records_relay needs a fixed records proxy port: set agentic.proxy.port")
+        relay = parse_relay(doc, ref=ref).for_shard(
+            spec.get("sampler_id"), target_port=_port(proxy_port, "agentic.proxy.port"))
+        public = relay.public_base
+        if relay.known_hosts is None:
+            notes.append("records_relay.known_hosts is unset: the first connection trusts the relay's host key "
+                         "(StrictHostKeyChecking accept-new); pin it for production")
+    a = AgentenvSpec(gateway_url=gateway, sandbox_url=sandbox_url, api_key=key,
+                     machine_type=str(ae["machine_type"]) if ae.get("machine_type") else None,
+                     max_sandboxes=cap, pool=bool(ae.get("pool", False)),
+                     records_public_base=str(public).strip().rstrip("/") if public else None, relay=relay)
+    if a.records_placeholder:
         notes.append(f"WARNING: agentic.setup.records_proxy.public_base is {public!r}: the microVMs deny private "
                      "egress, so trials cannot reach the records proxy and no trial is judged; set a public "
-                     "https base (the node setup refuses to start without one)")
-    elif urlsplit(spec.records_public_base).scheme != "https":
-        notes.append(f"records_proxy.public_base {spec.records_public_base} is not https: the records secret "
-                     "travels in the URL path in clear text")
+                     "https base or a records_relay (the node setup refuses to start without one)")
+    elif relay is not None:
+        notes.append(f"records_relay base {a.records_public_base} is plain http: the records secret travels in "
+                     "the URL path in clear text; keep records_relay.allow_cidrs to the sandbox egress addresses")
+    else:
+        if direct := direct_node_warning(a.records_public_base, proxy_port):
+            notes.append(direct)
+        if urlsplit(a.records_public_base).scheme != "https":
+            notes.append(f"records_proxy.public_base {a.records_public_base} is not https: the records secret "
+                         "travels in the URL path in clear text")
     if urlsplit(gateway).scheme != "https":
         notes.append(f"agentenv.gateway_url {gateway} is plain http: the API key travels in clear text")
     tasks = _tasks(doc, local)
@@ -576,7 +711,93 @@ def _parse_agentenv(doc: Mapping[str, Any], *, root: str, version: str, commit: 
     secret = "generate" if raw == "generate" else ref(raw, "agentic.setup.records_secret")
     return AgenticSetup(root=root, harbor_version=version, harbor_commit=commit, harbor_keep=keep,
                         docker_cli_version=cli_version, compose_version=compose, sandbox=None, tunnel=None,
-                        tasks=tasks, records_secret=secret, notes=tuple(notes), agentenv=spec)
+                        tasks=tasks, records_secret=secret, notes=tuple(notes), agentenv=a)
+
+
+def parse_relay(doc: Mapping[str, Any], *, ref: Callable[[Any, str], SecretRef] | None = None) -> RelaySection:
+    """``agentic.setup.records_relay`` of an ``agentic.setup`` section ``doc``."""
+    ref = ref or SecretRef.parse
+    rl = _section(doc, "records_relay")
+    host = str(rl.get("host") or "").strip()
+    if not host or PLACEHOLDER.search(host) or "/" in host or "@" in host:
+        raise ValueError(f"agentic.setup.records_relay.host must be the relay's ssh host name or address, "
+                         f"got {rl.get('host')!r}")
+    user = str(rl.get("user", "root"))
+    if not _NAME.match(user):
+        raise ValueError(f"agentic.setup.records_relay.user {user!r} is not a user name")
+    if "key" not in rl:
+        raise ValueError("agentic.setup.records_relay.key is required (this node's forward key: {\"path\"} or "
+                         "{\"env\"}; a path may hold {shard} for one key per shard)")
+    raw = str(rl.get("listen_port") or "")
+    lo_s, dash, hi_s = raw.partition("-")
+    if not lo_s:
+        raise ValueError("agentic.setup.records_relay.listen_port is required (<port> or <lo>-<hi>: shard k "
+                         "listens on lo + k)")
+    lo = _port(lo_s, "agentic.setup.records_relay.listen_port")
+    hi = _port(hi_s, "agentic.setup.records_relay.listen_port range end") if dash else lo
+    if hi < lo:
+        raise ValueError(f"agentic.setup.records_relay.listen_port range {raw!r} is empty")
+    public_host = str(rl.get("public_host") or host).strip()
+    if PLACEHOLDER.search(public_host) or "/" in public_host:
+        raise ValueError(f"agentic.setup.records_relay.public_host {public_host!r} must be a host name or address")
+    bind = str(rl.get("bind", "0.0.0.0"))
+    cidrs = rl.get("allow_cidrs") or []
+    if isinstance(cidrs, str) or not isinstance(cidrs, Sequence):
+        raise ValueError("agentic.setup.records_relay.allow_cidrs must be a list of CIDRs")
+    import ipaddress  # noqa: PLC0415
+
+    allow = []
+    for c in cidrs:
+        try:
+            allow.append(str(ipaddress.ip_network(str(c), strict=False)))
+        except ValueError:
+            raise ValueError(f"agentic.setup.records_relay.allow_cidrs: {c!r} is not a CIDR") from None
+    known = ref(rl["known_hosts"], "agentic.setup.records_relay.known_hosts") if rl.get("known_hosts") else None
+    return RelaySection(host=host, user=user, port=_port(rl.get("port", 22), "agentic.setup.records_relay.port"),
+                        key=ref(rl["key"], "agentic.setup.records_relay.key"), known_hosts=known, port_lo=lo,
+                        port_hi=hi, public_host=public_host, bind=bind, allow_cidrs=tuple(allow),
+                        settle_s=float(rl.get("settle_s", 5)), ready_timeout_s=float(rl.get("ready_timeout_s", 60)))
+
+
+DIRECT_NODE_HINT = ("a sampler node reachable on port 22 only (National Compute: a private address behind a 1:1 "
+                    "NAT whose cloud firewall passes 22 alone) never sees the microVMs' SYNs, so every trial "
+                    "fails with no recorded model call and a zero reward; put the proxy behind a "
+                    "records_relay (docs/NC_POOL.md, AgentENV sandboxes)")
+
+
+# documentation ranges count as public here (``is_private`` says otherwise): examples and tests use them
+_DOC_NETS = ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
+_SHARED_NET = "100.64.0.0/10"  # carrier-grade NAT: not ``is_private``, still internal
+
+
+def direct_node_warning(public_base: str | None, proxy_port: Any, *, node_ip: str | None = None) -> str | None:
+    """A warning when the records public base points straight at a sampler node's
+    records proxy: the node's own address (``node_ip``, when known), or a public IP
+    literal on ``agentic.proxy.port`` (a dry run, which does not know the node)."""
+    if not public_base or PLACEHOLDER.search(public_base):
+        return None
+    url = urlsplit(public_base)
+    host = url.hostname or ""
+    if node_ip and host == node_ip:
+        return f"WARNING: records public base {public_base} is the sampler node's own address: {DIRECT_NODE_HINT}"
+    import ipaddress  # noqa: PLC0415
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    nets = [ipaddress.ip_network(n) for n in (*_DOC_NETS, _SHARED_NET)]
+    doc = any(ip.version == net.version and ip in net for net in nets[:-1])
+    if ip.is_loopback or ip.is_link_local or (ip.is_private and not doc) or (ip.version == 4 and ip in nets[-1]):
+        return None  # an internal address (a private sandbox network): the egress allow-list decides
+    try:
+        direct = proxy_port is not None and url.port is not None and int(url.port) == int(proxy_port)
+    except (TypeError, ValueError):
+        direct = False
+    if direct:
+        return (f"WARNING: records public base {public_base} is an IP on the records proxy port "
+                f"{proxy_port} (the sampler node's own address?): {DIRECT_NODE_HINT}")
+    return None
 
 
 def _tasks(doc: Mapping[str, Any], local: Callable[[str], str]) -> TasksSpec | None:
@@ -655,7 +876,9 @@ def local_problems(setup: AgenticSetup, *, environ: Mapping[str, str] | None = N
     for what, r, private in (("sandbox.key", s.key if s else None, True),
                              ("sandbox.known_hosts", s.known_hosts if s else None, False),
                              ("tunnel.key", setup.tunnel.key if setup.tunnel else None, True),
-                             ("agentenv.api_key", setup.agentenv.api_key if setup.agentenv else None, True)):
+                             ("agentenv.api_key", setup.agentenv.api_key if setup.agentenv else None, True),
+                             ("records_relay.key", setup.relay.key if setup.relay else None, True),
+                             ("records_relay.known_hosts", setup.relay.known_hosts if setup.relay else None, False)):
         if r is not None and (p := r.problem(environ, private=private)):
             out.append(f"agentic.setup.{what}: {p}")
         elif what == "agentenv.api_key" and r is not None:
@@ -727,6 +950,10 @@ def describe(setup: AgenticSetup) -> list[str]:
         lines.append(f"  agentenv: gateway {a.gateway_url}, data plane {a.sandbox_url}, key {a.api_key.describe()} "
                      f"-> {setup.agentenv_key_file} (0600, ${AGENTENV_KEY_FILE_ENV}); no docker host, no tunnel")
         lines.append(f"  records_proxy: public base {a.records_public_base or '-'}")
+    if (r := setup.relay) is not None:
+        lines.append(f"  records_relay: {RELAY_UNIT} (Restart=always) ssh -N -R {r.forward} {r.user}@{r.host}:{r.port}"
+                     f", key {r.key.describe()}, known_hosts {r.known_hosts.describe() if r.known_hosts else 'accept-new'}"
+                     f"; the relay side: python -m yeto.launch.nc records-relay --spec <spec>")
     if t:
         lines.append(f"  tunnel: -R {t.listen} -> 127.0.0.1:{t.target_port} via {t.user}@{t.host}:{t.port}, "
                      f"key {t.key.describe()}, container {TUNNEL_CONTAINER} (restart unless-stopped, "
@@ -867,6 +1094,40 @@ def classify_ssh_failure(text: str, *, who: str, key: str, fingerprint: str, pur
         return (f"{who} accepted the key but has no docker daemon for this user (rootless docker of the "
                 "sandbox user, docs/KIMI_K31_ASYNC_RL_GUIDE.md, Sandbox host)")
     return f"{who}: {text.strip()[-300:] or 'failed without output'}"
+
+
+def classify_relay_failure(text: str, *, who: str, fingerprint: str, listen: str) -> str:
+    """An operator message for a failed reverse forward to the records relay."""
+    low = text.lower()
+    fix = "run `python -m yeto.launch.nc records-relay --spec <spec>` against the relay (docs/NC_POOL.md, " \
+          "AgentENV sandboxes)"
+    if "permission denied" in low and "publickey" in low:
+        return (f"the records relay refused this node's key ({who}): the public key with fingerprint "
+                f"{fingerprint} needs its restricted authorized_keys line there; {fix}")
+    if "remote port forwarding failed" in low or "forwarding failed" in low:
+        return (f"the records relay refused the reverse forward {listen} ({who}): the key's authorized_keys line "
+                f"needs permitlisten for it and sshd needs GatewayPorts clientspecified ({fix}); or another "
+                "tunnel holds the port (an older hand-made relay service on this node or another shard's node)")
+    return classify_ssh_failure(text, who=who, key="records relay key", fingerprint=fingerprint,
+                                purpose=f"records relay forward {listen}")
+
+
+def relay_ssh_config(r: RelaySpec, relay_dir: str) -> str:
+    return "\n".join([
+        f"Host {RELAY_TAG}", f"  HostName {r.host}", f"  User {r.user}", f"  Port {r.port}",
+        f"  IdentityFile {relay_dir}/key", "  IdentitiesOnly yes", "  BatchMode yes",
+        f"  StrictHostKeyChecking {'yes' if r.known_hosts else 'accept-new'}",
+        f"  UserKnownHostsFile {relay_dir}/known_hosts", "  ExitOnForwardFailure yes",
+        "  ServerAliveInterval 15", "  ServerAliveCountMax 3", "  ConnectTimeout 20", ""])
+
+
+def relay_unit(r: RelaySpec, relay_dir: str) -> str:
+    """The systemd unit of a node's reverse forward: restarted forever (no start limit)."""
+    return "\n".join([
+        "[Unit]", "Description=yeto records-proxy reverse forward to the records relay",
+        "After=network-online.target", "Wants=network-online.target", "StartLimitIntervalSec=0", "",
+        "[Service]", f"ExecStart=/usr/bin/ssh -N -F {relay_dir}/config -R {r.forward} {RELAY_TAG}",
+        "Restart=always", "RestartSec=5", "", "[Install]", "WantedBy=multi-user.target", ""])
 
 
 # -- provisioning ----------------------------------------------------------------
@@ -1015,8 +1276,58 @@ class Provisioner:
         self.records_secret()
         self.tasks()
         self.agentenv_key()
+        self.records_relay()
         self.tunnel()
         return dict(self.report)
+
+    @property
+    def relay_dir(self) -> str:
+        """The records relay key directory on the node (outside the sampler's ``/work``)."""
+        return f"{self.node.nvme}/records-relay"
+
+    def _relay_state(self) -> tuple[str, str]:
+        out = self.node.sh(f"sudo systemctl is-active {RELAY_UNIT} 2>/dev/null; sudo systemctl show -p NRestarts "
+                           f"--value {RELAY_UNIT} 2>/dev/null", timeout=60)
+        parts = (out.stdout or "").split()
+        return (parts[0] if parts else "unknown"), (parts[1] if len(parts) > 1 else "")
+
+    def records_relay(self) -> None:
+        """The node's reverse forward to the records relay as a systemd unit
+        (``Restart=always``): the key and ssh config under :attr:`relay_dir` (0700), never
+        in ``/work``; checked by the unit staying active with no restart for ``settle_s``."""
+        r = self.setup.relay
+        if r is None:
+            return
+        d = self.relay_dir
+        out = self.node.sh(f"sudo mkdir -p {shlex.quote(d)} && sudo chmod 700 {shlex.quote(d)}", timeout=60)
+        if out.returncode != 0:
+            raise self._fail("records_relay", f"creating {d}: {(out.stderr or '').strip()[-300:]}")
+        changed = self.node.put(r.key.read(self.environ), f"{d}/key")
+        changed |= self.node.put(relay_ssh_config(r, d), f"{d}/config", mode="644")
+        if r.known_hosts:
+            changed |= self.node.put(r.known_hosts.read(self.environ), f"{d}/known_hosts", mode="644")
+        changed |= self.node.put(relay_unit(r, d), RELAY_UNIT_PATH, mode="644")
+        state, _ = self._relay_state()
+        if changed or state != "active":
+            out = self.node.sh(f"sudo systemctl daemon-reload && sudo systemctl enable {RELAY_UNIT} >/dev/null 2>&1 "
+                               f"&& sudo systemctl restart {RELAY_UNIT}", timeout=120)
+            if out.returncode != 0:
+                raise self._fail("records_relay", f"starting {RELAY_UNIT}: {(out.stderr or '').strip()[-300:]}")
+        deadline = self.clock() + max(r.ready_timeout_s, r.settle_s)
+        before = self._relay_state()
+        while True:
+            self.sleep(r.settle_s)
+            now = self._relay_state()
+            if before[0] == now[0] == "active" and before[1] == now[1]:
+                return self._done("records_relay", "changed" if changed or state != "active" else "ok",
+                                  f"-R {r.forward} via {r.user}@{r.host}:{r.port}; public base {r.public_base}")
+            if self.clock() >= deadline:
+                log = self.node.sh(f"sudo journalctl -u {RELAY_UNIT} -n 30 --no-pager 2>&1", timeout=60)
+                fpr, _ = key_identity(r.key, environ=self.environ, run=self.local_run)
+                raise self._fail("records_relay", classify_relay_failure(
+                    log.stdout or "", who=f"{r.user}@{r.host}:{r.port}", fingerprint=fpr,
+                    listen=f"{r.bind}:{r.listen_port}") + f" ({RELAY_UNIT} {now[0]}, restarts {now[1] or '?'})")
+            before = now
 
     def agentenv_key(self) -> None:
         """The AgentENV API key file in ``<root>/home`` (0600): the sampler reads it through

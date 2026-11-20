@@ -231,6 +231,9 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     setup = agentic_setup.parse(spec, base_dir=spec_dir)
     if setup is not None and (problems := agentic_setup.local_problems(setup)):
         raise ValueError("agentic setup: " + "; ".join(problems))
+    if setup is not None and (warning := direct_records_warning(setup, spec, lease)):
+        (emit or _print_event)({"event": agentic_setup.SETUP_EVENT, "step": "records_proxy", "status": "warning",
+                                "node": host_alias(lease.ticket), "detail": warning})
     alias, node = host_alias(lease.ticket), node_of(lease, image=image)
     # a restarted NC sampler starts on the newest release, not a round on the base
     # weights (engine_sampler_entry ``start_on_latest``; a spec may say false)
@@ -267,6 +270,16 @@ def start_sampler(lease: NodeLease, *, spec: Mapping[str, Any], shard: str, run_
     if out.returncode != 0:
         raise RuntimeError(f"docker run {name}: {(out.stderr or '')[-400:]}")
     return name
+
+
+def direct_records_warning(setup: agentic_setup.AgenticSetup, spec: Mapping[str, Any],
+                           lease: NodeLease) -> str | None:
+    """An AgentENV sampler whose records public base is this node's own address (no
+    ``records_relay``): NC nodes pass port 22 only, so the microVMs cannot reach it."""
+    if setup.agentenv is None or setup.relay is not None:
+        return None
+    port = ((spec.get("agentic") or {}).get("proxy") or {}).get("port")
+    return agentic_setup.direct_node_warning(setup.agentenv.records_public_base, port, node_ip=lease.ip)
 
 
 def _print_event(record: dict[str, Any]) -> None:

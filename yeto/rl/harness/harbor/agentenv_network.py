@@ -59,6 +59,16 @@ _UNREACHABLE_CURL_EXITS = frozenset({6, 7, 28, 35, 52, 56})
 # A health check counts as healthy on any 2xx/3xx; a 4xx/5xx still proves the
 # microVM reached the service (reachable) but not that it is serving.
 _HEALTHY_CODES = range(200, 400)
+RECORDS_PROXY = "records-proxy"
+# A records proxy on a sampler node that passes port 22 only (a National Compute
+# node behind a 1:1 NAT) times out here; without this check every trial would end
+# with no recorded model call and a zero reward.
+RECORDS_RELAY_HINT = (
+    " The records proxy is unreachable: a sampler node whose cloud firewall passes "
+    "port 22 only never sees the microVM's SYN; serve it through "
+    "agentic.setup.records_relay (a reverse forward to a relay the microVMs reach) "
+    "and check the relay's firewall allows this sandbox's egress address."
+)
 
 
 class NetworkError(RuntimeError):
@@ -360,10 +370,11 @@ async def self_check(
     hard = [r for r in report.failures if _required(endpoints, r.name)]
     if hard:
         lines = "; ".join(f"{r.name} @ {r.url}: {r.error or 'unhealthy'}" for r in hard)
+        hint = RECORDS_RELAY_HINT if any(r.name == RECORDS_PROXY and not r.reachable for r in hard) else ""
         raise NetworkError(
             f"microVM cannot reach {len(hard)} required sidecar(s): {lines}. "
             "Check the egress allow-list (egress_allow_cidrs) and that the "
-            "sidecar is up on a microVM-routable address."
+            f"sidecar is up on a microVM-routable address.{hint}"
         )
     return report
 

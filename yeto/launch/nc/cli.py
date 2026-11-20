@@ -1206,6 +1206,18 @@ def main(argv: list[str] | None = None) -> int:
     ag.add_argument("--ticket")
     ag.add_argument("--image", default=ssh_sampler.IMAGE)
     ag.add_argument("--tunnel-events", action="store_true", help="print the node's tunnel up/down events")
+    rr = sub.add_parser("records-relay", help="prepare the relay host of the spec's agentic.setup.records_relay",
+                        description="One idempotent run on the relay host the AgentENV microVMs reach: sshd "
+                        "GatewayPorts clientspecified, one restricted authorized_keys line per sampler node key "
+                        "(permitlisten of its shard's port only) and, with allow_cidrs, a firewall chain on the "
+                        "listen ports. No sampler node is touched (agentic.setup does that side).")
+    rr.add_argument("--spec", required=True, help="the sampler spec (its agentic.setup.records_relay)")
+    rr.add_argument("--shards", type=int, help="shards to grant (default: one per listen port)")
+    rr.add_argument("--label", default="default", help="the managed authorized_keys block's name (one per run)")
+    rr.add_argument("--ssh", dest="ssh_target", help="admin login of the relay (default: records_relay user@host)")
+    rr.add_argument("--identity-file", help="ssh key of the admin login (default: the operator's own keys)")
+    rr.add_argument("--persist-firewall", action="store_true", help="netfilter-persistent save after a change")
+    rr.add_argument("--dry-run", action="store_true", help="print the plan; no SSH")
     a = sub.add_parser("attach", help="sky route: host bootstrap and sky SSH node pool on a node")
     a.add_argument("--ticket", required=True)
     h = sub.add_parser("hello", help="sky route: a hello task on the node's pool")
@@ -1403,6 +1415,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "agentic-setup":
         return agentic_setup_cmd(args)
+    if args.cmd == "records-relay":
+        from . import records_relay  # noqa: PLC0415
+
+        return records_relay.main_cmd(args.spec, shards=args.shards, label=args.label, ssh_target=args.ssh_target,
+                                      identity_file=args.identity_file, dry_run=args.dry_run,
+                                      persist_firewall=args.persist_firewall)
     if args.cmd == "attach":
         print(attach(load_lease(args.ticket)))
         return 0
