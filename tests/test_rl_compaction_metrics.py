@@ -536,3 +536,25 @@ def test_a_summary_cut_at_its_length_limit_ends_a_completed_segment():
     assert [s["status"] for s in samples] == ["completed", "completed", "truncated"]
     assert [m["finish_reason"] for m in meta] == ["stop", "stop", "length"]
     assert [m.get("summary_finish_reason") for m in meta] == ["length", "stop", None]
+
+
+def test_the_segments_carry_the_engine_context_length_when_known():
+    from yeto.rl.contracts import validate_compaction_group
+
+    import dataclasses
+
+    finished = _compacted_finished([(4, True, 2, None), (3, None, 0, None)])
+    parts = (finished.parts[0], dataclasses.replace(finished.parts[1], kept_steps=0))
+    finished = dataclasses.replace(finished, parts=parts)
+    with_len = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0,
+                                             max_model_len=8192)
+    assert {s["metadata"]["compaction"]["max_model_len"] for s in with_len} == {8192}
+    validate_compaction_group(with_len)
+    with_len[0]["metadata"]["compaction"]["max_model_len"] = "8192"
+    with pytest.raises(ValueError, match="max_model_len must be a non-negative integer or null"):
+        validate_compaction_group(with_len)
+    without = agentic_round.agentic_samples(ITEM, finished, version=0, provenance={}, group_index=0, index=0)
+    assert all("max_model_len" not in s["metadata"]["compaction"] for s in without)
+    assert agentic_round.engine_max_model_len(SimpleNamespace(max_model_len=8192)) == 8192
+    assert agentic_round.engine_max_model_len(SimpleNamespace()) is None
+    assert agentic_round.engine_max_model_len(None) is None

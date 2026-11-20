@@ -346,8 +346,26 @@ def test_the_reader_round_pads_missing_trials_one_rollout_each(monkeypatch, caps
         reader(SimpleNamespace(evaluation=False, rollout_id=3, weight_version=6))
     # a trainer whose --seq-length does not hold a segment of the sampler's budget stops
     reader.args.indep_dp, reader.args.seq_length = False, 32
-    with pytest.raises(br.SampleBufferRolloutError, match="context budget 64"):
+    with pytest.raises(br.SampleBufferRolloutError, match=r"can reach 64 tokens \(context budget\)"):
         reader(SimpleNamespace(evaluation=False, rollout_id=3, weight_version=6))
+    # segments that carry the sampler's max_model_len are checked against it (a segment can grow
+    # past context_budget to the engine context): a row of the budget is no longer enough
+    for _, g in groups:
+        for d in g:
+            if "compaction" in d["metadata"]:
+                d["metadata"]["compaction"]["max_model_len"] = 96
+    reader.args.seq_length = 64
+    with pytest.raises(br.SampleBufferRolloutError, match=r"can reach 96 tokens \(the sampler's max_model_len\)"):
+        reader(SimpleNamespace(evaluation=False, rollout_id=3, weight_version=6))
+    reader.args.seq_length = 96
+    reader(SimpleNamespace(evaluation=False, rollout_id=3, weight_version=6))
+
+
+def test_segment_row_width_prefers_max_model_len():
+    assert br.segment_row_width({"context_budget": 64, "max_model_len": 96}) == (96, "the sampler's max_model_len")
+    assert br.segment_row_width({"context_budget": 64}) == (64, "context budget")
+    assert br.segment_row_width({"context_budget": 64, "max_model_len": None}) == (64, "context budget")
+    assert br.segment_row_width({}) is None
 
 
 def test_an_uncompacted_round_reports_no_compaction_keys(monkeypatch, capsys):

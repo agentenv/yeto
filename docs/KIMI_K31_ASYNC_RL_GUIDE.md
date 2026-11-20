@@ -921,8 +921,10 @@ evaluation: with compaction on, scores are not comparable to an uncompacted run.
   records (`counters`).
 - Every segment sample carries `metadata.compaction`: `trajectory_id`,
   `segment_index`, `num_segments`, `context_budget`, `summary_ok` (false when the
-  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens` and
-  `tokens_after`. Without `agentic.compaction` no sample has this key. Every
+  policy did not close a `<summary>` tag), `kept_steps`, `segment_tokens`,
+  `tokens_after` and, when the engine reports it, `max_model_len` (the trainer
+  stops on a round whose segments can be wider than its `--seq-len`: this
+  `max_model_len`, else `context_budget`). Without `agentic.compaction` no sample has this key. Every
   segment but the last ends with its summary: `status: completed` and
   `metadata.finish_reason: stop`, with the engine's finish reason of the summary
   turn in `metadata.summary_finish_reason` (`length`: the summary hit its

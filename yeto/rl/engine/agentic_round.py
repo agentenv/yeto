@@ -239,14 +239,16 @@ COMPACTION_NO_ROOM = "compaction_no_room"  # records.COMPACTION_NO_ROOM (not imp
 def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance: Mapping[str, str],
                     group_index: int, index: int, versions: tuple[int, int] | None = None,
                     engine_meta: Mapping[str, Any] | None = None,
-                    start_version: int | None = None) -> list[dict[str, Any]]:
+                    start_version: int | None = None, max_model_len: int | None = None) -> list[dict[str, Any]]:
     """One kept trial as its buffer samples (module doc): :func:`agentic_sample`
     for a trial with one stream; one sample per compaction segment for a
     compacted one (``finished.parts``: its segments with a trained token). ``version`` / ``versions``: the trial's
     (drain: every segment's; live: the fallback of a segment no turn version
     is known for). Live (``versions`` given), each segment's versions are its
     own turns' (the first segment's also the version served when the trial
-    started, ``start_version``)."""
+    started, ``start_version``). ``max_model_len``: the engine context length, written
+    into every segment's ``metadata.compaction`` when known (a segment can grow past
+    ``context_budget`` up to it; the trainer checks its rows against it)."""
     parts = tuple(getattr(finished, "parts", ()) or ())
     if not parts:
         sample = agentic_sample(item, finished, version=version, provenance=provenance, group_index=group_index,
@@ -283,6 +285,8 @@ def agentic_samples(item: PromptItem, finished: Any, *, version: int, provenance
                               "kept_steps": part.kept_steps, "segment_tokens": trained[number],
                               "tokens_after": sum(trained[number + 1:]),
                               "summary_tokens": int(part.summary_tokens), "retry_replays": part.retry_replays}
+        if max_model_len is not None:
+            meta["compaction"]["max_model_len"] = int(max_model_len)
         samples.append(sample)
     return samples
 
@@ -1011,7 +1015,8 @@ class AgenticRound(EngineRound):
                 trial = agentic_samples(group.item, finished, version=version, provenance=record,
                                         group_index=group.position, index=group.position * n + j,
                                         versions=(version, top) if self.live else None,
-                                        engine_meta=self.engine_meta, start_version=start)
+                                        engine_meta=self.engine_meta, start_version=start,
+                                        max_model_len=engine_max_model_len(self.engine))
                 for sample in trial:
                     tally.finish[sample["metadata"]["finish_reason"]] += 1
                     tally.tokens += sample["response_length"]
@@ -1271,6 +1276,15 @@ def drain_timeout_warning(spec: Mapping[str, Any], *, live_engine: bool | None =
             f"agentic.drain_timeout_s is {shown}, above reload_max_defer_s {cap:g} s: a drain-mode weight switch "
             f"waits at most {cap:g} s on running trials, then cancels them (lost as drain_timeout); set "
             f"drain_timeout_s <= reload_max_defer_s to make that explicit")
+
+
+def engine_max_model_len(engine: Any) -> int | None:
+    """The engine's own ``max_model_len`` (None: it gives none, or cannot tell yet)."""
+    try:
+        limit = getattr(engine, "max_model_len", None) if engine is not None else None
+    except Exception:  # noqa: BLE001 - an engine that cannot tell yet
+        return None
+    return int(limit) if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else None
 
 
 def spec_compaction(spec: Mapping[str, Any], engine: Any = None) -> Any:
