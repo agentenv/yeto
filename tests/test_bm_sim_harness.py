@@ -54,6 +54,9 @@ def test_the_launcher_builds_the_island_the_harness_patches(tmp_path, store_env,
     the setup, and the island env carries the staged s3 store for every node.
     (No code pack: the unit test has no bucket to store it in.)"""
     monkeypatch.setattr(scenario, "git_checkout", lambda path: False)
+    # the stub scoped to this test (build_args leaves an installed sky alone): a
+    # process-wide one breaks later tests that import the real SkyPilot
+    monkeypatch.setitem(sys.modules, "sky", scenario.sky_stub())
     args = scenario.build_args(scenario.launcher_argv(inventory=_inventory(tmp_path, 3, runtime),
                                                       store_uri="s3://bm-sim/r", nodes=3, cards=cluster.CARDS,
                                                       run_id="bmsim-unit"))
