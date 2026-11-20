@@ -2486,18 +2486,18 @@ listed, `pool-stop` again.
 Use this image for the full-parameter recipe:
 
 ```
-docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b
+docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325
 ```
 
 It is the default `--rl-image` for `--rl-model-recipe kimi_k31 --tuning full`
 (`MILES_K31_FULL_IMAGE` in `yeto/rl/adapters/miles/pins.py`). It is also the
 image the trainer ran in the validated Modal end-to-end run. It carries Miles
-`k31/integ-trainer` `1f29e43043`. Recommended practice: pin this digest
+`k31/integ-trainer` `aa6b6ff5f7`. Recommended practice: pin this digest
 explicitly in `trainer.argv`
-(`--rl-image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796...`, the
+(`--rl-image docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28...`, the
 full value above) so the run does not depend on a default.
 
-The image `yeto-miles-k31@sha256:63ad0d2a...` (`MILES_K31_IMAGE`) is for the
+The image `yeto-miles-k31@sha256:028e505d...` (`MILES_K31_IMAGE`) is for the
 LoRA recipe.
 
 **Registry.** The default registry is `ghcr.io/agentenv`, and no setting is

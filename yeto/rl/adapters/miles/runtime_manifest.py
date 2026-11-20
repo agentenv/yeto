@@ -130,7 +130,7 @@ INTERFACES: Mapping[str, tuple[str, str]] = {
         "InferenceController._start_member_update_weights",
     ),
     "fork_m6_rebuild_trainer": ("miles.ray.trainer_rebuild", "rebuild_training_models"),
-    # pins.K31_FEATURES "workers_lost" (Miles k31/b4-lost efc83590, on k31/b8): the
+    # pins.K31_FEATURES "workers_lost" (Miles k31/b4-lost 6c7046e6, on k31/b8): the
     # cell state property that makes describe_cells report "workers_lost" with
     # "lost_workers". No capability needs it: without it the watchdog journals a
     # cell whose engine died as no_workers (elastic_wiring._lost_workers_of)

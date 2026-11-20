@@ -2,7 +2,7 @@
 
 * runtime statistics are read by Miles' own kinds through rollout_runtime_stats.take;
 * the agent suspend/resume/abort hooks take Miles' immutable custom-function view;
-* the k31 B4 96437f37 describe_cells shape (no workers_lost state) classifies as no_workers;
+* the k31 B4 b2265585 describe_cells shape (no workers_lost state) classifies as no_workers;
 * the over-sampling tally Miles publishes reaches the rollout handle;
 * --rl-host-sync-free / --no-rl-host-sync-free reaches the Miles argv.
 """
@@ -164,9 +164,9 @@ def test_suspend_capable_agent_hooks_take_the_immutable_view(monkeypatch):
 
 
 def test_k31_b4_describe_cells_has_no_workers_lost_state():
-    """Miles k31/b4 96437f37 (before k31/b4-lost efc83590) RayWorkerManager.describe_cells
+    """Miles k31/b4 b2265585 (before k31/b4-lost 6c7046e6) RayWorkerManager.describe_cells
     reports unbound / stopped / running and no lost_workers: on such a pin the watchdog
-    keeps its no_workers classification instead of failing. The efc83590 shape is
+    keeps its no_workers classification instead of failing. The 6c7046e6 shape is
     covered in test_rl_k31_workers_lost."""
     from yeto.rl.adapters.miles.elastic_wiring import _lost_workers_of
 

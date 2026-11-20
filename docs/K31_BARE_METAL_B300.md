@@ -214,10 +214,11 @@ ghcr.io/agentenv/yeto-miles-k31@sha256:2abbbb0086dcbe83b87d15771539422a57f9be19b
 ```
 
 Put it in `--rl-image docker:<ref>` of the run config. It holds the same
-files and the same Miles commit (`1f29e43043`) as the Modal default
+files and the same Miles commit (`1f29e43043`) as the former Modal default
 `2de5d796...`; only one layer is packed differently. An SSH trainer island
 given `2de5d796...` (by `--rl-image` or by the inventory) runs this repack
-instead and says so on stderr.
+instead and says so on stderr. The overlay-safe repack of the current full
+image (`fa70fe28...`, Miles `aa6b6ff5`) follows the trainer image rebuild.
 
 Why: the earlier build of the image
 (`ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796...`) has one layer that

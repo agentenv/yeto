@@ -6,7 +6,7 @@ loss masks concatenated): advantages and per-token loss weights must agree
 under every aggregation Miles offers, and the filters / shapers must decide
 per trial.
 
-Reference implementations follow Miles ``MILES_NEXT_COMMIT`` c351a33c line by
+Reference implementations follow Miles ``MILES_NEXT_COMMIT`` 9fa600b9 line by
 line (CPU, ``cp_size == 1``, one optimizer step, DP 1):
 
 * ``_compute_rollout_mask_sums``: ``miles/ray/rollout/train_data_conversion.py:365-372``;

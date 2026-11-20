@@ -23,21 +23,21 @@ from yeto.rl.adapters.miles import runtime_manifest as rm
 
 from test_rl_miles_adapter_config import make_config
 
-F1 = "4a839d8a663eead89ac4815b03304098321157f4"
-B2 = "f9454517e81f6b41087bcc85a605258d80fb6b9c"
-B3B7 = "a07553f0a4f361b1618a707b416b690c5666e03d"
-B4 = "96437f3732a1232bb8a99c8a6d18f6fd2a37dc24"
-B8 = "efc83590dcb8daf9b230c71b45ffb4f1e6b54cb3"
-GPUA = "fc15023cb346d5205984c9e68957b673b00e4b9a"  # k31/gpu-a-b8: B300 bring-up fixes on B8
-FULL = "63834eaa53b94f449a0e75ed86d6b597528817a9"  # k31/full: GPUA + routed-expert QAT
-STUB = "ecb33cbaa2b8eac25de24f443e3861113cbbd2ff"  # k31/full-stub: FULL + stub-optimizer skip
-FULL_B = "83d5db6b60677e9c8372ee505bdd6bb5713047e7"
-FULL_C = "690ebe4910337cf0a96542e9d057c1baaee5ae16"
-FULL_D = "c351a33c643326c478a9edaf9bae6c43299508fb"
-FULL_E = "1f29e43043e4c9aace8287a445eca3851e8b52c7"  # k31/integ-trainer: the full-form image's Miles
-NEXT9 = "f61eb35dd2d9e63323aea2f5bac7ef6ee5c3e912"  # k31/integ-next9: the next9 overlay-safe image's Miles
+F1 = "20eb98b40fdd99e20293b54d59c4b44c2933b740"
+B2 = "b3e19b4943215cd66a5f412e4f54885aafe011d5"
+B3B7 = "65c31aa61dd66c98c784fbd6590f85ca1cab3c32"
+B4 = "b2265585cd655ece0d4d3f7f480c42f37da56939"
+B8 = "6c7046e6a2d7d32a7ee98bb2ddb5102f7512c995"
+GPUA = "7aafc0e548dedd9d4f1287694ef86af9800de7e2"  # k31/gpu-a-b8: B300 bring-up fixes on B8
+FULL = "3af424694b14fab26d59d650aec738e8c8eca643"  # k31/full: GPUA + routed-expert QAT
+STUB = "e3a0010e81b95a8d282bdd349f12920ea1f0377b"  # k31/full-stub: FULL + stub-optimizer skip
+FULL_B = "d9dfcc46e5105fb93a823e4820f81021e80e0b90"
+FULL_C = "f1afc740e002b93914a521fc567e8cbe3b00b07a"
+FULL_D = "9fa600b9ae9d8c4024f3c2e4cd23a8ed433b2b54"
+FULL_E = "aa6b6ff5f7e4195e85a370724e3ba2b85725dc9a"  # k31/integ-trainer: the full-form image's Miles
+NEXT9 = "f61eb35dd2d9e63323aea2f5bac7ef6ee5c3e912"  # k31/integ-next9: the next9 overlay-safe image's Miles (pre-rewrite)
 # branch heads the rebase replaced; nothing may pin them any more
-REPLACED = ("a019deded8cbb9bc10ad5ef55ea8ad3088123c61", "640de460", "fa1a4607", "daf21371", "033f97e7")
+REPLACED = ("aca2484357ad519f8f30a3c03b8f655e2d08a948", "640de460", "fa1a4607", "daf21371", "033f97e7")
 B4_FEATURES = ("placement_map", "membership_epoch", "router_cordon", "member_publish", "trainer_rebuild")
 B8_FEATURES = ("loss_variants", "gae_variants", "critic_family")
 

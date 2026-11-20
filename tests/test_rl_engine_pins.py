@@ -204,8 +204,11 @@ def test_every_lineage_is_consistent():
     assert set(later) <= set(pins.IMAGE_MILES_COMMITS.values())
     assert pins.image_miles_commit("docker:x@sha256:" + pins.MILES_K31_FULL_IMAGE.rpartition("@sha256:")[2]) \
         == pins.MILES_K31_FULL_E_COMMIT
-    # the overlay-safe repack of the full image carries the same Miles commit
-    assert pins.image_miles_commit(pins.MILES_K31_FULL_OVERLAYFIX_IMAGE) == pins.MILES_K31_FULL_E_COMMIT
+    # the overlay-safe repack packs the former full image (2de5d796, pre-rewrite .git):
+    # it carries the pre-rewrite FULL_E; the repack of the current full image follows
+    # the trainer image rebuild
+    assert pins.image_miles_commit(pins.MILES_K31_FULL_OVERLAYFIX_IMAGE) == \
+        "1f29e43043e4c9aace8287a445eca3851e8b52c7"
     assert pins.MILES_NEXT_UPSTREAM_COMMIT == current.upstream_base
     assert pins.MILES_NEXT_PINS.commit == pins.MILES_NEXT_COMMIT
     assert pins.MILES_PORTS_V1_PINS.commit == pins.MILES_PORTS_V1_COMMIT
@@ -296,10 +299,14 @@ def test_overlay_safe_digests_map_a_rejected_image_to_its_repack_of_the_same_com
     for broken, fixed in pins.OVERLAY_SAFE_DIGESTS.items():
         assert len(broken) == len(fixed) == 64 and broken != fixed
         assert pins.IMAGE_MILES_COMMITS[fixed] == pins.IMAGE_MILES_COMMITS[broken]
-    full, safe = pins.MILES_K31_FULL_IMAGE, pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
-    assert pins.overlay_safe_image(full) == safe
+    # the mapping holds the legacy pair (the former full image and its repack); the
+    # current full image's overlay-safe repack follows the trainer image rebuild
+    legacy, safe = "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b", \
+        pins.MILES_K31_FULL_OVERLAYFIX_IMAGE
+    assert pins.OVERLAY_SAFE_DIGESTS == {legacy: safe.rpartition("@sha256:")[2]}
+    assert pins.overlay_safe_image(pins.MILES_K31_FULL_IMAGE) is None  # repack pending
     # the registry part of the reference is kept; a docker: prefix too
-    mirror = "registry.example/org/yeto-miles-k31@sha256:" + full.rpartition("@sha256:")[2]
+    mirror = "registry.example/org/yeto-miles-k31@sha256:" + legacy
     assert pins.overlay_safe_image(mirror) == "registry.example/org/yeto-miles-k31@sha256:" \
         + safe.rpartition("@sha256:")[2]
     for ref in (safe, pins.MILES_K31_IMAGE, "ghcr.io/o/x:tag", "", None):

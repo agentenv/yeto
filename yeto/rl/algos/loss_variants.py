@@ -69,7 +69,7 @@ FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 
 # Miles commits (full SHA) whose parser/loss implement --policy-loss-variant:
 # ports-v1 yeto/ports 5c1b49eb (the 2b loss variants) and every later commit of
-# that lineage, and the k31 lineage from k31/b8 on (4ff093a8 ported the variants
+# that lineage, and the k31 lineage from k31/b8 on (250a63e3 ported the variants
 # onto the loss/hub layout). Derived from the lineage feature tables in
 # adapters/miles/pins.py (feature ``loss_variants``).
 FORK_COMMITS: frozenset[str] = commits_with("loss_variants")

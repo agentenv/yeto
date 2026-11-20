@@ -27,7 +27,7 @@
       "--cluster-prefix",
       "<run>",
       "--rl-image",
-      "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b",
+      "docker:ghcr.io/agentenv/yeto-miles-k31@sha256:fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325",
       "--model",
       "moonshotai/Kimi-K3.1-Pro",
       "--model-revision",

@@ -124,22 +124,22 @@ MILES_PORTS_V1_COMMIT = "28bc6cc245e6a45c8ca2d36b632efa479f4f7a14"
 # k31 lineage head: the F1 fork branch k31/f1 (upstream main 778794a8 + the
 # yeto_ext trait, run_plugin, --worker-dynamic-port-start, light megatron_utils
 # imports, rollout_runtime_stats and the Kimi-K3.1 model).
-# k31/integ 4a839d8a = k31/f1 0eeb816b + F2 (128 trainable experts per layer);
+# k31/integ 20eb98b4 = k31/f1 de31840e + F2 (128 trainable experts per layer);
 # the commit the k31 image ships at /root/miles (docker/miles-k31/build.sh).
-MILES_K31_F1_COMMIT = "4a839d8a663eead89ac4815b03304098321157f4"
+MILES_K31_F1_COMMIT = "20eb98b40fdd99e20293b54d59c4b44c2933b740"
 # k31/b2: the B2 batch on top of k31/f1: the full-parameter shard state and
 # transport ported from ports-v1 (miles.ray.full_parameter_transport,
 # miles.backends.megatron_utils.full_parameter_{state,plugin,replicas,
 # sharded_masters,chunk_reader}, the TrainerController proxies) plus the
 # per-rank state helpers yeto reads (full_parameter_rank_state,
 # set_model_weight_version) and apply_full_parameter_chunked_cut(weight_version=).
-# k31/b2 f9454517 = feature head 3fb93880 + a019dede (the in-image test fix) +
-# f9454517 (CPU test fakes that hold on every image host; tests only). The four
-# k31 batch heads below are one linear history: f9454517 < a07553f0 < 96437f37 <
-# ca31b08f < efc83590 (the commits the branches were rebased onto; earlier SHAs of
+# k31/b2 b3e19b49 = feature head 605d3bd8 + aca24843 (the in-image test fix) +
+# b3e19b49 (CPU test fakes that hold on every image host; tests only). The four
+# k31 batch heads below are one linear history: b3e19b49 < 65c31aa6 < b2265585 <
+# 58a61f66 < 6c7046e6 (the commits the branches were rebased onto; earlier SHAs of
 # the same branches are gone).
-MILES_K31_B2_COMMIT = "f9454517e81f6b41087bcc85a605258d80fb6b9c"
-# k31/b3-b7 a07553f0 = k31/b2 f9454517 + the B3/B5/B6/B7 batches ported from
+MILES_K31_B2_COMMIT = "b3e19b4943215cd66a5f412e4f54885aafe011d5"
+# k31/b3-b7 65c31aa6 = k31/b2 b3e19b49 + the B3/B5/B6/B7 batches ported from
 # ports-v1: B3 an engine that dies or fails to join the weight-update group is
 # an ExternalFailureError (RolloutEngineJoinError), not a trainer loss; B5 abort
 # tallies / over-sampling metrics / --agentic-suspend-between-turns
@@ -152,8 +152,8 @@ MILES_K31_B2_COMMIT = "f9454517e81f6b41087bcc85a605258d80fb6b9c"
 # bridge of the Nemotron-H VL checkpoint (NemotronH_Omni_Reasoning_V3) and the
 # R3 replay stream mapping by router layer numbers for hybrid models (bridge
 # copies --mamba-training-ssm-states-dtype).
-MILES_K31_B3B7_COMMIT = "a07553f0a4f361b1618a707b416b690c5666e03d"
-# k31/b4 96437f37 = k31/b3-b7 a07553f0 + the B4 elastic batch ported from
+MILES_K31_B3B7_COMMIT = "65c31aa61dd66c98c784fbd6590f85ca1cab3c32"
+# k31/b4 b2265585 = k31/b3-b7 65c31aa6 + the B4 elastic batch ported from
 # ports-v1 M1-M6 onto the upstream structure: the explicit role -> bundle
 # placement map (--yeto-placement-map, ClusterConfig; miles.ray.placement_map,
 # re-exported by placement_group with the public slice_pg_info), deferred and
@@ -171,22 +171,22 @@ MILES_K31_B3B7_COMMIT = "a07553f0a4f361b1618a707b416b690c5666e03d"
 # start_cells(wait_tracked_timeout_seconds=) (start_cells, then
 # wait_cells_tracked), placement_group.update_weights(members=)
 # (update_member_weights), placement_group._slice_pg_info (slice_pg_info).
-MILES_K31_B4_COMMIT = "96437f3732a1232bb8a99c8a6d18f6fd2a37dc24"
-# k31/b8 = k31/b4 96437f37 + the B8 loss / critic batch: 4ff093a8
+MILES_K31_B4_COMMIT = "b2265585cd655ece0d4d3f7f480c42f37da56939"
+# k31/b8 = k31/b4 b2265585 + the B8 loss / critic batch: 250a63e3
 # --policy-loss-variant {policy_loss,cispo,sapo,gmpo} with --sapo-tau-{pos,neg}
-# and --gmpo-log-clip-{low,high}; cfafdaec --gae-variant / --gae-lambd-mode /
+# and --gmpo-log-clip-{low,high}; 3a359c09 --gae-variant / --gae-lambd-mode /
 # --gae-length-alpha / --gae-critic-lambd and the VAPO positive-example LM loss
-# (--positive-example-*); 6442e19e --policy-objective sao_dis, the categorical
+# (--positive-example-*); 54e766b1 --policy-objective sao_dis, the categorical
 # value head (--value-loss-type classification, --value-*, --hl-gauss-sigma-ratio),
 # --num-critic-epochs (alias --critic-updates-per-step), --critic-freeze-attention
 # and the value head on language_model of multimodal bridge wrappers. The options
 # live in the YetoAlgoConfig trait; the CLI names are the ports-v1 fork's, so
 # yeto's argv does not change. The fork's dual_clipfrac metric (2be012421) is not
 # ported: yeto reports yeto/dual_clipfrac itself (state_plugin).
-# k31/b8 ca31b08f = 6442e19e + a test-only fix (tests/fast/ray/train/test_group.py
+# k31/b8 58a61f66 = 54e766b1 + a test-only fix (tests/fast/ray/train/test_group.py
 # matches the engine-side failure across the Ray traceback lines).
-# k31/b8 efc83590 = ca31b08f + the workers_lost cell state, from Miles k31/b4-lost
-# efc83590 (fast-forwarded onto k31/b8): when the liveness scan finds workers of a
+# k31/b8 6c7046e6 = 58a61f66 + the workers_lost cell state, from Miles k31/b4-lost
+# 6c7046e6 (fast-forwarded onto k31/b8): when the liveness scan finds workers of a
 # cell dead and tears the cell down, RayWorkerManager.describe_cells reports it
 # "workers_lost" with the dead workers in "lost_workers" (None in every other
 # state) instead of "stopped"; stop_cells acknowledges it, start_cells clears it,
@@ -195,42 +195,43 @@ MILES_K31_B4_COMMIT = "96437f3732a1232bb8a99c8a6d18f6fd2a37dc24"
 # registered on the branch head, which carries every commit above.
 # MILES_K31_IMAGE ships this commit (the lineage head, MILES_NEXT_COMMIT), so
 # every k31 batch above is in the pinned image.
-MILES_K31_B8_COMMIT = "efc83590dcb8daf9b230c71b45ffb4f1e6b54cb3"
-# k31/gpu-a-b8 fc15023c = efc83590 + the four fixes the first B300 runs needed:
+MILES_K31_B8_COMMIT = "6c7046e6a2d7d32a7ee98bb2ddb5102f7512c995"
+# k31/gpu-a-b8 7aafc0e5 = 6c7046e6 + the four fixes the first B300 runs needed:
 # split_moe without moe_use_legacy_grouped_gemm, the mbridge linear_attn mixin
 # forwarding keyword options, the optional q_lora atomic group for Kimi K3, and
 # the DSA layer check against the model's own layer count. No new features.
-MILES_K31_GPUA_COMMIT = "fc15023cb346d5205984c9e68957b673b00e4b9a"
-# k31/full = MILES_K31_GPUA_COMMIT merged with k31/qat f3be3dc0 (--routed-expert-qat
+MILES_K31_GPUA_COMMIT = "7aafc0e548dedd9d4f1287694ef86af9800de7e2"
+# k31/full = MILES_K31_GPUA_COMMIT merged with k31/qat f8264429 (--routed-expert-qat
 # mxfp4: straight-through MXFP4 fake-quant of the trainable routed experts).
-MILES_K31_FULL_COMMIT = "63834eaa53b94f449a0e75ed86d6b597528817a9"
-# k31/full-stub ecb33cba = 63834eaa + the full-parameter traversals skip Megatron's
+MILES_K31_FULL_COMMIT = "3af424694b14fab26d59d650aec738e8c8eca643"
+# k31/full-stub e3a0010e = 3af42469 + the full-parameter traversals skip Megatron's
 # is_stub_optimizer ChainedOptimizer children (SC2 EP2 distributed optimizer) and
 # log the chained child layout once. No new features.
-MILES_K31_FULL_STUB_COMMIT = "ecb33cbaa2b8eac25de24f443e3861113cbbd2ff"
-# k31/full-b 83d5db6b = k31/full-offload 8b75ab19 (63834eaa + --optimizer-cpu-offload on
+MILES_K31_FULL_STUB_COMMIT = "e3a0010e81b95a8d282bdd349f12920ea1f0377b"
+# k31/full-b d9dfcc46 = k31/full-offload 863377cc (3af42469 + --optimizer-cpu-offload on
 # the reset-optimizer reload path: the reset clears the HybridDeviceOptimizer's
-# sub-optimizers too) merged with k31/full-stub ecb33cba. No new features.
-MILES_K31_FULL_B_COMMIT = "83d5db6b60677e9c8372ee505bdd6bb5713047e7"
-# k31/full-c 690ebe49 = k31/full-b + the trainable experts' masters dequantize on the
-# experts' device at load (d9ab0957) + the CPU-offload reset reload test fix (d976b958).
+# sub-optimizers too) merged with k31/full-stub e3a0010e. No new features.
+MILES_K31_FULL_B_COMMIT = "d9dfcc46e5105fb93a823e4820f81021e80e0b90"
+# k31/full-c f1afc740 = k31/full-b + the trainable experts' masters dequantize on the
+# experts' device at load (979952d3) + the CPU-offload reset reload test fix (3cf73ec5).
 # No new features.
-MILES_K31_FULL_C_COMMIT = "690ebe4910337cf0a96542e9d057c1baaee5ae16"
-# k31/full-d-clipfrac c351a33c = k31/full-c + the score-centering loss logs
+MILES_K31_FULL_C_COMMIT = "f1afc740e002b93914a521fc567e8cbe3b00b07a"
+# k31/full-d-clipfrac 9fa600b9 = k31/full-c + the score-centering loss logs
 # sc_is_clipped (tokens whose TIS/MIS weight truncates pi_train / pi_rollout).
-MILES_K31_FULL_D_COMMIT = "c351a33c643326c478a9edaf9bae6c43299508fb"
-# k31/integ-trainer 1f29e430 = c351a33c + the DSA indexer scored in query blocks
-# (c5393bbe), the attention-residual rows mixed in checkpointed blocks (a0cef1d4), the
-# first-stage expert grads under full recompute (2fc2b14a) and the finite score-centering
-# loss at head mass >= 1 (0cb40f2f). It is the Miles of MILES_K31_FULL_IMAGE (2de5d796,
+MILES_K31_FULL_D_COMMIT = "9fa600b9ae9d8c4024f3c2e4cd23a8ed433b2b54"
+# k31/integ-trainer aa6b6ff5 = 9fa600b9 + the DSA indexer scored in query blocks
+# (d55ab6b9), the attention-residual rows mixed in checkpointed blocks (507a8505), the
+# first-stage expert grads under full recompute (7c005639) and the finite score-centering
+# loss at head mass >= 1 (2c2a3db0). It is the Miles of MILES_K31_FULL_IMAGE (fa70fe28,
 # read back from the image: git -C ~/miles rev-parse HEAD). No new features.
-MILES_K31_FULL_E_COMMIT = "1f29e43043e4c9aace8287a445eca3851e8b52c7"
+MILES_K31_FULL_E_COMMIT = "aa6b6ff5f7e4195e85a370724e3ba2b85725dc9a"
 # k31/integ-next9 f61eb35d = FULL_E + the trainer MFU work behind env switches that
 # default off (indexer TP split, KDA / MLA CP relayout, MXFP4 LUT and Triton dequant,
 # attention-residual fusion, router fp32 GEMM, DSA query split, EP all-to-all overlap,
 # KDA SP relayout fusion, ...). Every switch off is FULL_E's math. It is the Miles of
 # the next9 overlay-safe image 3a0c5445 (tag k31-f61eb35-35708f7-a1-overlayfix). No new
-# features.
+# features. Pre-rewrite: the fork's author-metadata normalization postdates the next9
+# commits; the rewritten counterpart and its image follow the trainer image rebuild.
 MILES_K31_NEXT9_COMMIT = "f61eb35dd2d9e63323aea2f5bac7ef6ee5c3e912"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
@@ -515,20 +516,20 @@ K31_FEATURES: Mapping[str, str] = {
     "full_parameter_transport": MILES_K31_B2_COMMIT,
     "full_parameter_rank_state": MILES_K31_B2_COMMIT,
     # The same batch ports the ports-v1 full-parameter commits after 56068bd56
-    # (B2 bb31ae18 / cf5d6eac / 0be83bfa / a05d0f01; full_parameter_state.py,
+    # (B2 28c3b110 / 1f3d09ca / 8164eb70 / 300000e7; full_parameter_state.py,
     # full_parameter_replicas.py and full_parameter_sharded_masters.py differ
     # from the ports-v1 head 28bc6cc24 only by FullParameterRankState and the
     # typed config reads, and the fork's tests pass unchanged but for the fakes'
     # typed args): DP=1 distributed-optimizer masters incl. the
     # HybridDeviceOptimizer's offloaded copies (fork 56190a5a8, cc693c693; B2
-    # bb31ae18, test_full_parameter_state.py::test_distributed_optimizer_*);
-    # data-parallel replicas, EP spanning DP (fork 921cde8c7; B2 cf5d6eac,
+    # 28c3b110, test_full_parameter_state.py::test_distributed_optimizer_*);
+    # data-parallel replicas, EP spanning DP (fork 921cde8c7; B2 1f3d09ca,
     # test_full_parameter_dp_replicas.py); sharded FP32 masters on the
     # distributed optimizer at DP>1, several instances refused (fork d50fb04dd,
-    # acb798c7b; B2 0be83bfa, test_full_parameter_dp_sharded_masters.py); an apply
+    # acb798c7b; B2 8164eb70, test_full_parameter_dp_sharded_masters.py); an apply
     # skipping the prepare checks of fragments verified ahead (fork 102672760;
-    # B2 0be83bfa, test_full_parameter_verified_apply.py); the shape-free layout
-    # (fork 8d03f386a, 3f6760f2b; B2 a05d0f01, test_full_parameter_free_order.py).
+    # B2 8164eb70, test_full_parameter_verified_apply.py); the shape-free layout
+    # (fork 8d03f386a, 3f6760f2b; B2 300000e7, test_full_parameter_free_order.py).
     # Every k31 commit from B2 on carries them; B2 is the first lineage entry.
     "distopt_full_parameter": MILES_K31_B2_COMMIT,
     "dp_replica_full_parameter": MILES_K31_B2_COMMIT,
@@ -577,7 +578,7 @@ K31_FEATURES: Mapping[str, str] = {
     # --policy-objective sao_dis, the categorical value head, --num-critic-epochs,
     # --critic-freeze-attention (algos/critic_fork.py).
     "critic_family": MILES_K31_B8_COMMIT,
-    # k31/b4-lost efc83590 (on k31/b8): describe_cells state "workers_lost" with
+    # k31/b4-lost 6c7046e6 (on k31/b8): describe_cells state "workers_lost" with
     # "lost_workers" (the watchdog journals such a cell workers_lost, not no_workers).
     "workers_lost": MILES_K31_B8_COMMIT,
 }
@@ -594,7 +595,7 @@ MILES_LINEAGES: Mapping[str, MilesLineage] = {
                         K31_FEATURES),
 }
 CURRENT_LINEAGE = "k31"
-# MILES_K31_IMAGE (63ad0d2a) carries FULL_D; the full-form image names its own commit
+# MILES_K31_IMAGE (028e505d) carries FULL_D; the full-form image names its own commit
 # (IMAGE_MILES_COMMITS, forwarded as --miles-commit)
 MILES_NEXT_COMMIT = MILES_K31_FULL_D_COMMIT
 SGLANG_NEXT_REPOSITORY = SGLANG_K31_REPOSITORY
@@ -685,47 +686,61 @@ MILES_NEXT_BASE_IMAGE = (
 MILES_PORTS_V1_IMAGE = pinned_image(
     "yeto-miles-ports", "7a52de2e783c462961daa3e92af76da31154dee81668d5fd1e4bc8555cf8eab2")
 # The k31 image: radixark/miles:kimi-k31 (CUDA 13.0.3, SGLang 35708f76) plus the
-# yeto overlay layer with Miles k31/b8 efc83590 = MILES_NEXT_COMMIT
+# yeto overlay layer with Miles k31/b8 6c7046e6 = MILES_NEXT_COMMIT
 # (docker/miles-k31/build.sh). Registry: yeto.rl.image_registry (YETO_IMAGE_REGISTRY); tag
 # k31-efc8359-35708f7-ybfa703b, built 2026-11-09 from yeto k31/integ bfa703bc
 # (docker/ and this file; the commit that pins the digest is not in the image,
 # as before). A last layer records the yeto commit in
 # /opt/yeto/image/yeto-source.json and the label ai.yeto.yeto.commit.
-# Previous: k31-4a839d8-35708f7 sha256:2447eaf6... (Miles F1 4a839d8a).
+# Previous: k31-4a839d8-35708f7 sha256:2447eaf6... (Miles F1 20eb98b4).
 # Current: k31-83d5db6-35708f7-full-b-83d5db6, built 2026-11-10 from Miles k31/full-b
-# 83d5db6b (MILES_NEXT_COMMIT; read back from the pushed image).
-# Previous: k31/full-stub ecb33cba sha256:8863a8a7...; FULL k31/full 63834eaa
-# sha256:5c91e1f5...; total efc83590 sha256:6a9512b8...
+# d9dfcc46 (MILES_NEXT_COMMIT; read back from the pushed image).
+# Previous: k31/full-stub e3a0010e sha256:8863a8a7...; FULL k31/full 3af42469
+# sha256:5c91e1f5...; total 6c7046e6 sha256:6a9512b8...
+# Current: k31-9fa600b-35708f7-full-d-9fa600b (Miles FULL_D): the FULL_D image sha256:63ad0d2a...
+# plus one layer that only swaps /root/miles/.git (and the commit records: image-manifest.json,
+# commits.json, yeto-source.json, labels) for the same tree at the Miles commit after the
+# fork's author-metadata normalization.
 MILES_K31_IMAGE = pinned_image(
-    "yeto-miles-k31", "63ad0d2a9e70a139221050f51214f073a5bc53f66c0c57090ae926012e439c04")
+    "yeto-miles-k31", "028e505de58552e6ede8926c8bf8ab8451e8e749cfc35afc1eb70e8d362c65b3")
 # The Kimi-K3.1 full-parameter (partial-experts) trainer image: the default
 # --rl-image of --rl-model-recipe kimi_k31 --tuning full (the LoRA form and every
-# other recipe keep MILES_K31_IMAGE). Same registry rule; the digest is fixed.
+# other recipe keep MILES_K31_IMAGE). Same registry rule; the digest is fixed. Tag
+# k31-aa6b6ff-35708f7: the FULL_E image sha256:2de5d796... plus the same .git-only layer.
 MILES_K31_FULL_IMAGE = pinned_image(
-    "yeto-miles-k31", "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b")
-# MILES_K31_FULL_IMAGE with only its yeto overlay layer (layer 115) repacked for overlay
-# appliers: that layer whites out the sglang dist-info directory and writes the same
-# directory again, which the containerd overlayfs snapshotter (Docker 29's default store)
-# and docker's overlay2 graphdriver with native diff (overlay redirect_dir off) reject
-# ("not a directory"; Modal's builder accepts it). The repack drops
-# the whiteout and marks the directory opaque instead (what
+    "yeto-miles-k31", "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325")
+# The former full image 2de5d796 (pre-rewrite .git, FULL_E 1f29e430) with only its yeto
+# overlay layer (layer 115) repacked for overlay appliers: that layer whites out the
+# sglang dist-info directory and writes the same directory again, which the containerd
+# overlayfs snapshotter (Docker 29's default store) and docker's overlay2 graphdriver
+# with native diff (overlay redirect_dir off) reject ("not a directory"; Modal's builder
+# accepts it). The repack drops the whiteout and marks the directory opaque instead (what
 # docker/miles-ports/make_layer.py resolve_same_layer_whiteouts now writes): the same
-# files, the same Miles FULL_E; every other layer, the labels and the entrypoint are
-# unchanged. Tag k31-1f29e43-35708f7-overlayfix. The image for hosts whose docker keeps
-# images on overlay (bare-metal ssh trainer islands); the Modal default stays as above.
+# files, the same Miles; every other layer, the labels and the entrypoint are unchanged.
+# Tag k31-1f29e43-35708f7-overlayfix. Kept for runs still pinned to the former full
+# image; the overlay-safe repack of the current full image fa70fe28 follows the trainer
+# image rebuild.
 MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
     "yeto-miles-k31", "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14")
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
 # image digest -> the Miles commit inside it, when it is not MILES_NEXT_COMMIT: the island
 # checks its checkout against this commit (--miles-commit) instead of the default pin
 IMAGE_MILES_COMMITS: dict[str, str] = {
-    "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b": MILES_K31_FULL_E_COMMIT,
-    "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14": MILES_K31_FULL_E_COMMIT,
+    "fa70fe28c05d0c0933f740d0ba712b8e08e9ed9062acb44a1b5a9266200ba325": MILES_K31_FULL_E_COMMIT,
+    # the former full image and its overlay-safe repack carry the pre-rewrite FULL_E
+    # 1f29e430 at /root/miles: the fork's author-metadata normalization did not move the
+    # commits inside the pushed images
+    "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
+        "1f29e43043e4c9aace8287a445eca3851e8b52c7",
+    "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14":
+        "1f29e43043e4c9aace8287a445eca3851e8b52c7",
     # next9 on the overlay-safe base (tag k31-f61eb35-35708f7-a1-overlayfix)
     "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225": MILES_K31_NEXT9_COMMIT,
 }
 # digest of an image an overlay applier rejects -> the digest of the same image with the
-# offending layer repacked (same files, same Miles commit)
+# offending layer repacked (same files, same Miles commit). The legacy pair of the former
+# full image; the repack of the current full image fa70fe28 follows the trainer image
+# rebuild, so the full-image default has no overlay-safe variant until then.
 OVERLAY_SAFE_DIGESTS: dict[str, str] = {
     "2de5d796de19d38f4e3165efce2a9528a7f7d3e60e3cb32fe29fd00c6abf9b5b":
         "2abbbb0086dcbe83b87d15771539422a57f9be19bb69849ebc6357084fc56d14",
