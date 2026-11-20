@@ -240,6 +240,41 @@ K31_PRESETS: dict[str, dict[str, Any]] = {
         "env": {}, "hf_overrides": {}},
 }
 
+# Presets of other models (VllmOptions.model_preset; exclusive with k31_preset), same shape as
+# K31_PRESETS plus "tool_call_parser" / "reasoning_parser" / "tokenizer_mode" defaults:
+#
+# * ``ds41-mi355x`` (rocm): DeepSeek-V4.1-Flash-1017 (FP8 dense + MXFP4 experts) on 8 x MI355X
+#   TP8, from vLLM's DeepSeek-V4.1-Flash recipe (AMD and MI355X overrides; image of the
+#   recipe's AgentX MI355X row, vllm/vllm-openai-rocm:nightly-e68efc685...): the paged MXFP4
+#   sparse indexer with sparse logits at block size 128, AITER MoE (CK a8w4 experts),
+#   breakable CUDA graphs (the ROCm sparse SWA backend only captures uniform batches, so
+#   FULL_AND_PIECEWISE dies at capture without them), the Gluon sparse MLA kernel and the
+#   deepseek_v41 tokenizer / tool / reasoning parsers. Left out for a sampler: DSpark and the
+#   mono decode kernels (both draft/latency paths), INT4 quick-reduce (BF16 all-reduce, as the
+#   K3.1 rl-precision preset) and the Engram CPU offload (TP8 keeps the tables resident: about
+#   24 GiB per rank). None of the K3.1 overrides (DCP, KDA, the indexer fp8 hf override).
+#   Measured on 8 x MI355X (image nightly-e68efc685, vLLM 0.32.1rc1.dev36+ge68efc685, max_model_len
+#   65536): cold start about 3 min (weights 30 s, profile + graphs + warmup 100 s), 71.3 GiB of
+#   weights and about 248 of 288 GiB per GPU in use, an 11.86M-token KV cache; tool calls, top-128
+#   log-probs and R3 (uint16 [prompt + output - 1, 40, 6], every layer MoE) come back. In-place
+#   reload does NOT work: /collective_rpc reload_weights of the served checkpoint returns 200 but
+#   its rotary embedding and Engram hash state are not reloaded ("Failed to load weights") and the
+#   server then answers with NaN log-probs and degenerate text, so the preset refuses
+#   in_place_reload (a release is served by restart).
+DS41_MI355X_GPU_MEMORY_UTILIZATION = "0.85"
+MODEL_PRESETS: dict[str, dict[str, Any]] = {
+    "ds41-mi355x": {
+        "platform": "rocm", "dcp": False,
+        "args": ("--language-model-only", "--block-size", "128", "--moe-backend", "aiter",
+                 "--attention-config", '{"indexer_kv_dtype":"mxfp4","indexer_sparse_logits":true}',
+                 "--engram-config", '{"cpu_offload":false}', "--enable-prefix-caching",
+                 "--gpu-memory-utilization", DS41_MI355X_GPU_MEMORY_UTILIZATION),
+        "env": {"VLLM_ROCM_USE_AITER_MOE": "1", "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+                "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA": "1", "AITER_TRITON_LOG_LEVEL": "ERROR"},
+        "hf_overrides": {}, "in_place_reload": False,
+        "tokenizer_mode": "deepseek_v41", "tool_call_parser": "deepseek_v41", "reasoning_parser": "deepseek_v41"},
+}
+
 
 def flag_values(args: Sequence[str], flags: Sequence[str]) -> list[tuple[int, int, str, str]]:
     """``(start, length, flag, value)`` of every ``flag value`` / ``flag=value`` of
@@ -337,6 +372,11 @@ class VllmOptions:
     # a Kimi-K3.1-Pro serving preset (K31_PRESETS; its platform must match): flags and
     # environment ahead of ServerConfig.extra_args / extra_env, which come later and win
     k31_preset: str | None = None
+    # a serving preset of another model (MODEL_PRESETS, e.g. "ds41-mi355x"; exclusive with
+    # k31_preset, same platform rule). Its parsers / tokenizer mode apply unless set here
+    model_preset: str | None = None
+    # --tokenizer-mode (upstream line; None: the model preset's, else no flag)
+    tokenizer_mode: str | None = None
     # the ``GET /version`` the pinned image reports (sampler_pins.sampler_vllm_version of the
     # platform; the spec carries it, adapters do not import each other). A server that
     # reports another version is recorded (server_info.vllm_pin_match), not refused
@@ -505,6 +545,24 @@ class VllmServerEngine(ServerEngine):
             if preset["platform"] != options.platform:
                 raise SamplerEngineError(f"vllm k31_preset {options.k31_preset!r} is a {preset['platform']} preset; "
                                          f"the server runs on {options.platform!r}")
+        if options.model_preset is not None:
+            if options.k31_preset is not None:
+                raise SamplerEngineError("vllm: set k31_preset or model_preset, not both")
+            preset = MODEL_PRESETS.get(options.model_preset)
+            if preset is None:
+                raise SamplerEngineError(f"vllm model_preset must be one of {sorted(MODEL_PRESETS)}, "
+                                         f"got {options.model_preset!r}")
+            if preset["platform"] != options.platform:
+                raise SamplerEngineError(f"vllm model_preset {options.model_preset!r} is a {preset['platform']} "
+                                         f"preset; the server runs on {options.platform!r}")
+        if options.model_preset is not None and config.in_place_reload \
+                and MODEL_PRESETS[options.model_preset].get("in_place_reload") is False:
+            raise SamplerEngineError(f"vllm model_preset {options.model_preset!r}: in-place reload is refused "
+                                     "(measured: reload_weights leaves the server answering NaN log-probs); "
+                                     "set server.in_place_reload false (restart per release)")
+        if (options.model_preset or options.tokenizer_mode) and not upstream:
+            raise SamplerEngineError("vllm-server model_preset / tokenizer_mode need upstream vLLM "
+                                     f"(platform cuda or rocm), not platform {options.platform!r}")
         self._run = run
         self._card_memory = card_memory
         self._served_dir: Path | None = None  # the directory the running server loaded
@@ -519,7 +577,7 @@ class VllmServerEngine(ServerEngine):
         if upstream and "--hf-overrides" in config.extra_args:
             raise SamplerEngineError("vllm-server: give --hf-overrides as VllmOptions.hf_overrides (merged with "
                                      "the fp32 head into one flag), not in extra_args")
-        if self.preset.get("platform") == "rocm" and not options.allow_high_gpu_memory:
+        if options.k31_preset and self.preset.get("platform") == "rocm" and not options.allow_high_gpu_memory:
             gmu = gpu_memory_utilization([*(self.preset.get("args") or ()), *config.extra_args])
             if gmu is not None and gmu > K31_ROCM_MAX_GPU_MEMORY_UTILIZATION:
                 raise SamplerEngineError(
@@ -553,8 +611,22 @@ class VllmServerEngine(ServerEngine):
 
     @property
     def preset(self) -> dict[str, Any]:
-        """The K3.1 preset's flags / environment / overrides (empty without one)."""
-        return K31_PRESETS[self.options.k31_preset] if self.options.k31_preset else {}
+        """The K3.1 or model preset's flags / environment / overrides (empty without one)."""
+        if self.options.k31_preset:
+            return K31_PRESETS[self.options.k31_preset]
+        return MODEL_PRESETS[self.options.model_preset] if self.options.model_preset else {}
+
+    @property
+    def preset_name(self) -> str:
+        """``k31_preset <name>`` / ``model_preset <name>`` (the source named in records)."""
+        if self.options.model_preset:
+            return f"model_preset {self.options.model_preset}"
+        return f"k31_preset {self.options.k31_preset}"
+
+    def _preset_default(self, key: str) -> str | None:
+        """An option of the model preset's (parsers, tokenizer mode) unless the options set it."""
+        own = getattr(self.options, key)
+        return own if own else self.preset.get(key)
 
     def _r3_cp_overrides(self) -> list[dict[str, Any]]:
         """The DCP / PCP sizes an R3 server drops (module doc): the preset's DCP
@@ -565,8 +637,8 @@ class VllmServerEngine(ServerEngine):
         out = []
         if self.preset.get("dcp") and int(self.options.tp) > 1:
             out.append({"flag": "--decode-context-parallel-size", "size": int(self.options.tp), "axis": "DCP",
-                        "source": f"k31_preset {self.options.k31_preset}"})
-        for source, args in ((f"k31_preset {self.options.k31_preset}", self.preset.get("args") or ()),
+                        "source": self.preset_name})
+        for source, args in ((self.preset_name, self.preset.get("args") or ()),
                              ("extra_args", self.config.extra_args)):
             out += [{**d, "source": source} for d in drop_cp_sizes(list(args))[1]]
         return [{**d, "now": 1} for d in out]
@@ -602,7 +674,7 @@ class VllmServerEngine(ServerEngine):
             return (int(interval), "options.prefix_cache_retention_interval") if interval > 0 else None
         default = self.preset.get("r3_prefix_retention_interval")
         if self.options.return_routed_experts and default:
-            return int(default), f"k31_preset {self.options.k31_preset} (R3)"
+            return int(default), f"{self.preset_name} (R3)"
         return None
 
     def r3_layout_note(self) -> str | None:
@@ -684,10 +756,15 @@ class VllmServerEngine(ServerEngine):
         overrides = self.hf_overrides()
         if overrides:
             argv += ["--hf-overrides", json.dumps(overrides, sort_keys=True, separators=(",", ":"))]
-        if o.tool_call_parser:
-            argv += ["--enable-auto-tool-choice", "--tool-call-parser", o.tool_call_parser]
-        if o.reasoning_parser:
-            argv += ["--reasoning-parser", o.reasoning_parser]
+        tokenizer_mode = self._preset_default("tokenizer_mode")
+        if tokenizer_mode and "--tokenizer-mode" not in c.extra_args:
+            argv += ["--tokenizer-mode", tokenizer_mode]
+        tool_call_parser = self._preset_default("tool_call_parser")
+        if tool_call_parser:
+            argv += ["--enable-auto-tool-choice", "--tool-call-parser", tool_call_parser]
+        reasoning_parser = self._preset_default("reasoning_parser")
+        if reasoning_parser:
+            argv += ["--reasoning-parser", reasoning_parser]
         return argv + (drop_cp_sizes(list(c.extra_args))[0] if r3 else list(c.extra_args))
 
     def env(self) -> dict[str, str]:

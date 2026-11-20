@@ -152,7 +152,8 @@ factory = e._import(spec["engine"]["factory"])
 stores = e.build_stores(spec, environ={})
 reward = e.build_reward(spec)
 print("YETO_NC_PREFLIGHT_OK", json.dumps({"sampler_id": spec["sampler_id"], "adapter": spec["engine"].get("adapter"),
-      "preset": (spec["engine"].get("options") or {}).get("k31_preset"), "factory": spec["engine"]["factory"],
+      "preset": ((spec["engine"].get("options") or {}).get("k31_preset")
+                 or (spec["engine"].get("options") or {}).get("model_preset")), "factory": spec["engine"]["factory"],
       "config": type(cfg).__name__, "stores": [type(s).__name__ for s in stores]}))
 """
 
