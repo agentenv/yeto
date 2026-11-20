@@ -47,6 +47,11 @@ SDK_SANDBOX_URL_ENV = "E2B_SANDBOX_URL"
 # REST (the SDK has no cold-start method); default is prebuilt templates.
 COLD_START_ENV = "YETO_AGENTENV_COLD_START"
 REQUEST_TIMEOUT_ENV = "YETO_AGENTENV_REQUEST_TIMEOUT_S"
+# Cold-start root disk (sparse). Task images converted to overlaybd can report a
+# base virtual size of 64 GiB; the gateway's default diskSizeMB (8 GiB) is then
+# refused ("smaller than base virtual size; shrinking is disabled").
+DISK_SIZE_MB_ENV = "YETO_AGENTENV_DISK_SIZE_MB"
+DEFAULT_DISK_SIZE_MB = 131072
 
 # Account caps.  AgentENV has no published fixed cap (TODO(verify on hardware):
 # confirm the cluster's real concurrency/rate limits and tune these defaults;
@@ -248,7 +253,10 @@ class SdkAgentenvClient:
         base = self._api_url
         if not base:
             raise AgentenvError("cold start needs AGENTENV_API_URL (the control-plane base URL)")
-        body: dict[str, object] = {"image": image, "timeout": ttl_seconds}
+        body: dict[str, object] = {"image": image, "timeout": ttl_seconds,
+                                   "cpuCount": int(os.environ.get("YETO_AGENTENV_CPU_COUNT", "2")),
+                                   "memoryMB": int(os.environ.get("YETO_AGENTENV_MEMORY_MB", "4096")),
+                                   "diskSizeMB": int(os.environ.get(DISK_SIZE_MB_ENV, DEFAULT_DISK_SIZE_MB))}
         if metadata:
             body["metadata"] = metadata
         if env:
@@ -343,8 +351,12 @@ class SdkAgentenvClient:
 
     def start_command(self, sandbox_id: str, command: str, *, cwd: str | None,
                       env: dict[str, str] | None, user: str | int | None) -> int:
+        # timeout=0: the e2b background stream defaults to 60s total; the sandbox
+        # layer enforces timeouts/cancel itself (it kills the command), so the
+        # stream must not cap long agent (2400s) / verifier (300s) runs.
         handle = self._box(sandbox_id).commands.run(
-            command, background=True, cwd=cwd, envs=env or None, user=_sdk_user(user))
+            command, background=True, cwd=cwd, envs=env or None, user=_sdk_user(user),
+            timeout=0)
         pid = int(handle.pid)
         self._handles[(sandbox_id, pid)] = handle
         return pid
