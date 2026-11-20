@@ -902,6 +902,8 @@ def test_close_cancels_detached_trials_and_takes_their_errors(tmp_path, recwarn,
     rnd, engine, events = _round(tmp_path, harness, Prompts({0: ["a"], 1: ["b"]}), drain_timeout_s=0.05,
                                  abandon_grace_s=0.05)
     rnd.release_pending = lambda: pending["seq"]
+    gc.collect()  # tasks an earlier test in this process leaked are not this round's
+    caplog.clear()
     with caplog.at_level(logging.ERROR, logger="asyncio"):
         try:
             rnd(0)
