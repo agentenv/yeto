@@ -19,6 +19,7 @@ This page covers:
 - [The pool config](#the-pool-config-pooljson) and every field's default
 - [Commands](#commands): `--dry-run`, `pool`, `pool-status`, `pool-stop`
 - [What the pool does](#what-the-pool-does)
+- [AgentENV sandboxes: the records relay](#agentenv-sandboxes-the-records-relay)
 - [Known limitations](#known-limitations)
 - [Billing](#billing)
 
@@ -727,6 +728,101 @@ and `~/.ssh/config` includes it, so you can copy the tapes with plain `scp`:
 scp 'yeto-nc-<ticket>:/mnt/nvme/work/sampler/events*.jsonl' <tapes-dir>/
 yeto dashboard export --tapes <tapes-dir>
 ```
+
+## AgentENV sandboxes: the records relay
+
+An agentic sampler whose trials run in AgentENV microVMs
+(`agentic.setup.provider: "agentenv"`) needs the microVMs to reach its records
+proxy: every model call of a trial is posted there, and a trial without any
+ends in `TokenAlignmentError: no model calls were recorded` with reward 0.
+A National Compute node cannot serve that proxy directly. Its address is
+private, its public address is a 1:1 NAT on the cloud side, and the cloud
+firewall passes port 22 only, so a base such as `http://<node ip>:18080`
+never sees a SYN from a microVM. Nothing fails loudly on the sampler side;
+every reward is a silent zero.
+
+`agentic.setup.records_relay` (in place of `records_proxy.public_base`) puts
+the proxy behind a relay host the microVMs can reach: any host with a public
+address whose firewall passes the listen ports from the sandbox workers'
+egress addresses. Each sampler node holds a reverse forward to it.
+
+```json
+"records_relay": {
+  "host": "relay.example.org",
+  "user": "root",
+  "key": {"path": "keys/relay-{shard}.key"},
+  "known_hosts": {"path": "keys/relay.known_hosts"},
+  "listen_port": "18281-18288",
+  "allow_cidrs": ["198.51.100.7/32", "198.51.100.8/32"]
+}
+```
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `host` | ssh host of the relay (required) | |
+| `user`, `port` | ssh login of the forwards | `root`, `22` |
+| `key` | the node's forward key, `{"path"}` or `{"env"}`; `{shard}` in a path gives every shard its own key (recommended) | required |
+| `known_hosts` | the relay's pinned host key | accept-new |
+| `listen_port` | `<port>`, or `<lo>-<hi>`: shard `k` (sampler id `<run>-<k>`) listens on `lo + k` | required |
+| `public_host` | the address the microVMs dial, when it is not `host` | `host` |
+| `bind` | the relay address the forward binds | `0.0.0.0` |
+| `allow_cidrs` | sandbox egress addresses the relay firewall accepts on the listen ports | none (open) |
+| `settle_s`, `ready_timeout_s` | the node step's health check | `5`, `60` |
+
+`agentic.proxy.port` must be set (the forward's target). The sampler's
+`YETO_RECORDS_PROXY_PUBLIC_BASE` becomes `http://<public_host>:<listen port>`.
+The records secret in the URL path still gates every request; the base is
+plain http, so keep `allow_cidrs` to the sandbox egress addresses.
+
+**The relay side, once per run.** From the launcher, with the same spec:
+
+```
+python -m yeto.launch.nc records-relay --spec sampler.json --dry-run
+python -m yeto.launch.nc records-relay --spec sampler.json --label k31 [--shards 3]
+```
+
+It logs in as `records_relay.user@host` (or `--ssh`, `--identity-file`) and,
+changing only what differs, sets:
+
+- sshd: a drop-in `/etc/ssh/sshd_config.d/60-yeto-records-relay.conf` with
+  `GatewayPorts clientspecified` and `ClientAliveInterval 15`, then a reload
+  (open sessions stay). It fails when `sshd -T` does not show the setting
+  (an sshd_config without the `Include` of the drop-in directory).
+- keys: a managed block in the user's `authorized_keys` with one line per node
+  key, `restrict,port-forwarding,permitlisten="<bind>:<port>"`: a key can bind
+  its shard's port and do nothing else. Only public keys leave the launcher.
+  A node key that also has a line outside the block is reported (sshd uses the
+  first line of a key).
+- firewall (with `allow_cidrs`): an iptables chain `YETO-RECORDS-RELAY` jumped
+  to from `INPUT` for the listen ports; accept from `allow_cidrs`, drop the
+  rest. `--persist-firewall` saves it with `netfilter-persistent` when present.
+
+The relay host's own cloud firewall must pass the listen ports; set that where
+the host is ordered.
+
+**The node side, at every sampler start.** The `records_relay` setup step
+writes the key, ssh config and known_hosts under `/mnt/nvme/records-relay`
+(0700, outside the sampler's `/work`) and a systemd unit
+`yeto-records-relay.service` (`Restart=always`, no start limit) that runs
+`ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -R
+<bind>:<port>:127.0.0.1:<proxy port>`. The step passes when the unit stays
+active without a restart for `settle_s`; otherwise it fails with the unit's
+journal classified (key refused: add the key with `records-relay`; forward
+refused: permitlisten, GatewayPorts, or another tunnel already holds the port,
+such as a relay service set up by hand earlier on the node: stop that one).
+A rerun with unchanged settings leaves the unit running.
+
+**Checks.**
+
+- A dry run (`pool --dry-run`, `agentic-setup --dry-run`) warns when
+  `records_proxy.public_base` is a public IP on `agentic.proxy.port` (the
+  node's own address, most likely); `ssh-sampler start` warns when it is the
+  node's address on any port.
+- Each microVM probes `YETO_RECORDS_PROXY_PUBLIC_BASE` before its trial runs
+  (`yeto.rl.harness.harbor.agentenv_network.self_check`); an unreachable
+  records proxy fails the trial with a hint to the relay instead of a zero
+  reward. By hand, from a sandbox: `curl http://<relay>:<port>/` must give an
+  HTTP status.
 
 ## Known limitations
 
