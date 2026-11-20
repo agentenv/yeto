@@ -104,10 +104,41 @@ class AgentenvClient(Protocol):
     # def list_sandboxes(self, metadata: dict[str, str]) -> list[str]
 
 
+API_KEY_FILE_ENV = "AGENTENV_API_KEY_FILE"  # a 0600 file: AGENTENV_API_KEY=... (env-file) or the bare key
+
+
+def key_from_text(text: str) -> str | None:
+    """The key in an env-file (``AGENTENV_API_KEY=`` / ``E2B_API_KEY=``, ``export`` and quotes
+    allowed) or a file holding only the key; None when there is none. Never logged."""
+    bare: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, sep, value = line.partition("=")
+        if sep:
+            if name.strip() in (API_KEY_ENV, SDK_API_KEY_ENV):
+                value = value.strip().strip("'\"")
+                if value:
+                    return value
+            continue
+        bare.append(line)
+    return bare[0] if len(bare) == 1 and " " not in bare[0] else None
+
+
 def load_token() -> str:
     token = os.environ.get(API_KEY_ENV) or os.environ.get(SDK_API_KEY_ENV)
+    if not token and (path := os.environ.get(API_KEY_FILE_ENV, "").strip()):
+        try:
+            token = key_from_text(open(path).read())
+        except OSError as error:
+            raise AgentenvError(f"{API_KEY_FILE_ENV}={path}: {type(error).__name__}") from None
+        if not token:
+            raise AgentenvError(f"{API_KEY_FILE_ENV}={path} holds no {API_KEY_ENV}= line or bare key")
     if not token:
-        raise AgentenvError(f"no {API_KEY_ENV} (or {SDK_API_KEY_ENV}) in the environment")
+        raise AgentenvError(f"no {API_KEY_ENV} (or {SDK_API_KEY_ENV}, {API_KEY_FILE_ENV}) in the environment")
     return token
 
 
