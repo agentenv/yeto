@@ -167,13 +167,25 @@ def test_trainer_argv_passes_the_launch_dry_run(run, tmp_path, monkeypatch, caps
     monkeypatch.setattr(cli.runs, "create_run", lambda *a, **k: calls.append("create"))
     args = cli.parse_args([*_filled_argv(run, tmp_path), "--dry-run", "--preflight-model", "off"])
     assert cli.cmd_launch(args) == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
+    assert ("kimi_k31 next9 trainer MFU switches: 27 of 27 set in the trainer environment by default"
+            in captured.err) and "--rl-recipe-env-defaults off" in captured.err
     plan = json.loads(out[:out.rindex("}") + 1])
     assert plan["dry_run"] and plan["total_gpus"] == 48 and calls == []
     (island,) = plan["island_requests"]
     cloud = "ssh" if run == RUN else "modal"
     assert (island["cloud"], island["gpu"], island["num_nodes"], island["gpus_per_node"]) == (cloud, "B300", 6, 8)
     assert "--rl-sample-role trainer" in island["learner_command"]
+    # the next9 trainer MFU switches are on by default: one launch line, the plan record
+    from yeto.rl.adapters.miles.models.kimi_k31.mfu_switches import MFU_SWITCHES
+
+    record = plan["recipe_env_defaults"]
+    assert (record["applies"], record["declared"], record["injected"]) == (True, 27, 27)
+    assert record["env"] == dict(MFU_SWITCHES)
+    if cloud == "ssh":  # every node's container environment carries them
+        for node in island["ssh_island"]["nodes"]:
+            assert set(record["env"]) <= set(node["env"]), node.get("name")
 
 
 def test_both_262k_kits_split_31_31_31_and_the_modal_kit_keeps_a_45_min_idle_window():
@@ -196,3 +208,32 @@ def test_the_weights_copy_lands_under_an_inventory_mount():
     for node in load_inventory(INVENTORY):
         assert any(path == c or path.startswith(c.rstrip("/") + "/") for c in node.mounts.values()), node.name
     assert _flag(argv, "--model-store-source").startswith("s3://")
+
+
+@pytest.mark.parametrize("run", [RUN, K31 / "run.agentic-262k.json"], ids=lambda p: p.name)
+def test_the_dry_run_without_recipe_env_defaults_sets_no_switch(run, tmp_path, monkeypatch, capsys):
+    import yeto.cli as cli
+    import yeto.launcher as launcher
+    import yeto.modal_runner as modal_runner
+    from yeto.cloud import s3_store
+
+    for key, value in (("YETO_RL_STORE_S3_ACCESS_KEY_ID", "test"), ("YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "test"),
+                       ("HF_HUB_OFFLINE", "1")):
+        monkeypatch.setenv(key, value)
+    for key in (s3_store.ENDPOINT_ENV, s3_store.REGION_ENV, s3_store.PROFILE_ENV, "AWS_ENDPOINT_URL"):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
+    monkeypatch.setattr(modal_runner, "modal_available", lambda: True)
+    monkeypatch.setattr(launcher, "run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_spawn_worker", lambda *a, **k: None)
+    monkeypatch.setattr(cli.runs, "create_run", lambda *a, **k: None)
+    args = cli.parse_args([*_filled_argv(run, tmp_path), "--dry-run", "--preflight-model", "off",
+                           "--rl-recipe-env-defaults", "off"])
+    assert cli.cmd_launch(args) == 0
+    captured = capsys.readouterr()
+    assert "kimi_k31 next9 trainer MFU switches: not set (--rl-recipe-env-defaults off)" in captured.err
+    plan = json.loads(captured.out[:captured.out.rindex("}") + 1])
+    assert (plan["recipe_env_defaults"]["applies"], plan["recipe_env_defaults"]["injected"]) == (False, 0)
+    (island,) = plan["island_requests"]
+    for node in (island.get("ssh_island") or {}).get("nodes", []):
+        assert not any(name.startswith("MILES_K31_INDEXER_TP") for name in node["env"])

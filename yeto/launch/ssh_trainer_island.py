@@ -461,12 +461,18 @@ def docker_argv(spec: SshTrainerSpec, rank: int, name: str, env_names: Sequence[
 def node_env(spec: SshTrainerSpec, rank: int, env: Mapping[str, str]) -> dict[str, str]:
     """The environment of node ``rank``'s job: its family, the fabric defaults
     (``topology.island_comm_env``), the inventory's ``env`` (e.g. NCCL_IB_HCA refines
-    the defaults), the spec's environment, ``env`` and the sky task variables."""
+    the defaults), the spec's environment, ``env`` and the sky task variables. A name the
+    launcher only defaulted (``recipe_env.DEFAULTED_ENV``) keeps the inventory's value."""
+    from .recipe_env import DEFAULTED_ENV
+
     node = spec.nodes[rank]
     comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
     # The learner reads the family to pick its card type and collective backend (accel).
     full = {DEVICE_FAMILY_ENV: node.device_family, **comm, **node.env, **spec.env, **env,
             **(skypilot_env(spec, rank) if spec.run_script else {})}
+    for name in filter(None, str(full.get(DEFAULTED_ENV, "")).split(",")):
+        if name in node.env:
+            full[name] = node.env[name]
     # node-local data (store stage, release staging, temp files) under the node's scratch
     full.update(ssh_node_storage.scratch_env(node, spec.run_id, full))
     full.update(ssh_node_storage.transfer_env(node, full))  # a release goes up in processes

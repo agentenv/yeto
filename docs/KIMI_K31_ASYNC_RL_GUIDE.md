@@ -2507,8 +2507,9 @@ It is the default `--rl-image` for `--rl-model-recipe kimi_k31 --tuning full`
 (`MILES_K31_NEXT9_IMAGE` in `yeto/rl/adapters/miles/pins.py`, tag
 `k31-f61eb35-35708f7-a1-overlayfix`). It carries Miles `k31/integ-next9`
 `f61eb35d`: the `k31/integ-trainer` changes plus the trainer MFU work, each
-behind an environment switch that defaults off (section 9.1.1). With no switch
-set it trains the same math as the previous full image. Its layers are
+behind an environment switch that defaults off in Miles. yeto turns the
+switches on by default for this image (section 9.1.1); with every switch off
+it trains the same math as the previous full image. Its layers are
 overlay-safe, so the same image runs on Modal and on bare-metal ssh nodes
 (overlay2 and the containerd snapshotter). Recommended practice: pin this
 digest explicitly in `trainer.argv`
@@ -2537,11 +2538,35 @@ pin. For a private registry, add `--rl-image-private` with
 The island checks its Miles checkout against the commit recorded for the
 image digest (`IMAGE_MILES_COMMITS` in `pins.py`).
 
-#### 9.1.1 Trainer MFU switches (next9)
+#### 9.1.1 Trainer MFU switches (next9, on by default)
 
-yeto does not set these switches; each one defaults off in Miles. To turn
-them on, pass each `KEY=VALUE` to the trainer island with `--modal-env`
-(Modal) or `--island-env` (ssh). A value you pass wins over anything else.
+yeto sets these switches in the trainer environment by default. The list
+lives in one place, `MFU_SWITCHES` in
+`yeto/rl/adapters/miles/models/kimi_k31/mfu_switches.py`; this table shows it
+(a test keeps the two equal).
+
+**When.** `--rl-model-recipe kimi_k31 --tuning full`, and the trainer image
+digest is next9 (`3a0c5445...`, from any registry). It applies on every
+trainer island: `ssh:` bare metal, Modal, and sky clouds. Any other image gets
+none of them, because older images have no code behind these names. LoRA,
+other recipes and sampler islands are unaffected.
+
+**Your values win.** A variable you set yourself keeps your value:
+`--island-env KEY=VALUE`, `--modal-env KEY=VALUE`, or an `ssh:` inventory
+node's `env`. For example, `--island-env MILES_K31_KDA_SAVE_INTERMEDIATES=0`
+turns off that one switch.
+
+**Turning them off.** `--rl-recipe-env-defaults off` sets none of them.
+
+**What you see.** `yeto launch` (and `--dry-run`, so also the preflight of
+`yeto run up`) prints one line on stderr, for example:
+
+```
+[launcher] kimi_k31 next9 trainer MFU switches: 27 of 27 set in the trainer environment by default (docs/KIMI_K31_ASYNC_RL_GUIDE.md section 9.1.1); turn them off with --rl-recipe-env-defaults off
+```
+
+The dry-run plan carries the same record under `recipe_env_defaults`. The
+island environment lists the defaulted names in `YETO_ISLAND_ENV_DEFAULTS`.
 
 | Variable | Value | What it does |
 |---|---|---|
@@ -2571,6 +2596,7 @@ them on, pass each `KEY=VALUE` to the trainer island with `--modal-env`
 | `MILES_SC_TOPK_PREP` | `1` | Score-centering top-k candidates prepared once per step |
 | `MILES_SC_LOGPROB_LEAN` | `1` | Leaner score-centering selected log-probs |
 | `MILES_CP_RESPONSE_VIEW` | `1` | CP response view in the logit processors |
+| `MILES_K3_ATTN_RES_BANK_PAD_ROWS` | `0` | Attention-residual bank padding off (the Miles default, written out as in the measured and formal configurations) |
 
 What was measured with all of them on: two 16-layer and 33-layer slices of
 K3.1-Pro (PP1 x TP8 x CP2, 262k, 2 x 8 B300 on Modal, 6 steps). Miles
@@ -2580,10 +2606,19 @@ EP16. Loss, policy loss, KL and log-probs were bit-identical to the run
 without the newest switches; the gradient norm differed by at most 5e-6
 (summation order).
 
-Why they are not on by default: no full 93-layer PP3 run has used them yet,
-and stage 0 of the 262k layout has only a few GiB of memory headroom
-([K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md)). Turn them on after a
-short run on your own layout shows stage-0 memory within the limit.
+**Memory.** `INDEXER_RECOMPUTE_CACHE` and `KDA_SAVE_INTERMEDIATES` use more
+memory to save compute. `SITU_TRITON` and `MXFP4_REDEQUANT_BACKWARD` use less.
+On the 16-layer slice, the peak allocated memory with every switch on was
+73.7 GiB, against 98.9 GiB without them (same layout). The launch-time memory
+estimate of the full form (`yeto.launch.k31_checks`) counts these four
+switches when the trainer runs with them. For the 262k layout of
+[K31_FULL_262K_LAYOUT.md](K31_FULL_262K_LAYOUT.md) (31/31/31), it puts the
+busiest stage at about 143 GiB with the switches, against 158 GiB without
+them, under the 166 GiB that ran without expandable segments [estimate]. No
+full 93-layer PP3 run has used the switches yet. Check stage-0 memory on the
+first steps of your own layout (K31_FULL_262K_LAYOUT.md section 9). If a stage
+runs short, set `MILES_K31_KDA_SAVE_INTERMEDIATES=0` first (about 3.6 GiB at
+262k), then `MILES_K31_INDEXER_RECOMPUTE_CACHE=0` (about 2.6 GiB on stage 0).
 
 ### 9.2 Sampler image (vLLM ROCm)
 

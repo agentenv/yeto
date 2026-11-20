@@ -725,10 +725,11 @@ MILES_K31_FULL_OVERLAYFIX_IMAGE = pinned_image(
 # --rl-model-recipe kimi_k31 --tuning full (the LoRA form and every other recipe keep
 # MILES_K31_IMAGE: next9 was measured on the full-parameter form only). Miles
 # MILES_K31_NEXT9_COMMIT (FULL_E + the trainer MFU work behind env switches that default
-# off, so with no switch set it trains FULL_E's math) on the overlay-safe base: pulls and
-# runs on Modal and on overlay2 / containerd-snapshotter bare-metal nodes as it is. Tag
-# k31-f61eb35-35708f7-a1-overlayfix; same registry rule, the digest is fixed. The MFU
-# switches are not injected by yeto: docs/KIMI_K31_ASYNC_RL_GUIDE.md lists them.
+# off in Miles, so with no switch set it trains FULL_E's math) on the overlay-safe base:
+# pulls and runs on Modal and on overlay2 / containerd-snapshotter bare-metal nodes as it
+# is. Tag k31-f61eb35-35708f7-a1-overlayfix; same registry rule, the digest is fixed. The
+# kimi_k31 recipe declares the MFU switches as trainer environment defaults on this digest
+# only (models/kimi_k31/mfu_switches.py; --rl-recipe-env-defaults off turns them off).
 MILES_K31_NEXT9_IMAGE = pinned_image(
     "yeto-miles-k31", "3a0c544558b67c587f460d1ab87c0c19fa1d578d5d77a9346a1729113a3b0225")
 MILES_NEXT_IMAGE = MILES_K31_IMAGE
